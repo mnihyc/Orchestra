@@ -27,7 +27,7 @@ import { FileOverlay } from '@/features/files/FileOverlay';
 import { documentSource, sourceDownload } from '@/features/files/source';
 import { useChipPresentation } from '@/features/people/chipSizes';
 
-export function FilesDialog({ doc, open, fileId, line, onOpenChange }: { doc: Document; open: boolean; fileId?: string | undefined; line?: number | undefined; onOpenChange: (open: boolean) => void }) {
+export function FilesDialog({ doc, open, fileId, line, endLine, onOpenChange }: { doc: Document; open: boolean; fileId?: string | undefined; line?: number | undefined; endLine?: number | undefined; onOpenChange: (open: boolean) => void }) {
   const { t } = useTranslation();
   const picker = useRef<HTMLInputElement>(null);
   const shown = doc.files.find((file) => file.id === fileId) ?? null;
@@ -88,7 +88,7 @@ export function FilesDialog({ doc, open, fileId, line, onOpenChange }: { doc: Do
         )}
       </div>
     </Dialog>
-    {open && shown !== null && <FileOverlay source={{ ...documentSource(doc.id, shown, inspection), line }} onClose={() => onOpenChange(false)} />}
+    {open && shown !== null && <FileOverlay source={{ ...documentSource(doc.id, shown, inspection), line, endLine }} onClose={() => onOpenChange(false)} />}
     </>
   );
 }

@@ -201,13 +201,16 @@ function Connected({ browser, list, connection, sink, driving, setDriving, mayDr
   );
 }
 
+// A native page prompt can exceed a short picture; keep its controls above the browser chrome.
+const PAGE_PROMPT_FRAME = 'absolute inset-0 z-10 flex items-center justify-center bg-bg/70 p-4';
+
 function PageDialogOverlay({ state, onAnswer }: { state: BrowserSocketState; onAnswer: (accept: boolean, text?: string) => void }) {
   const { t } = useTranslation();
   const dialog = state.dialog;
   const [text, setText] = useState(dialog?.default ?? '');
   if (dialog === null) return null;
   return (
-    <div className="absolute inset-0 flex items-center justify-center bg-bg/70 p-4" data-page-dialog={dialog.kind}>
+    <div className={PAGE_PROMPT_FRAME} data-page-dialog={dialog.kind}>
       <div role="alertdialog" aria-label={t('browser.dialog.label')} className="flex w-full max-w-sm flex-col gap-3 rounded-lg border border-border bg-surface p-4 shadow-lg">
         <p className="text-sm whitespace-pre-wrap wrap-anywhere">{dialog.message}</p>
         {dialog.kind === 'prompt' && <Input label={t('browser.dialog.answer')} value={text} onChange={(event) => setText(event.target.value)} />}
@@ -227,7 +230,7 @@ function ChooserOverlay({ mayReadFiles, environmentName, multiple, onAnswer }: {
   const [text, setText] = useState('');
   const paths = text.split('\n').map((line) => line.trim()).filter((line) => line !== '');
   return (
-    <div className="absolute inset-0 flex items-center justify-center bg-bg/70 p-4" data-page-chooser>
+    <div className={PAGE_PROMPT_FRAME} data-page-chooser>
       <div role="dialog" aria-label={t('browser.chooser.label')} className="flex w-full max-w-md flex-col gap-3 rounded-lg border border-border bg-surface p-4 shadow-lg">
         {mayReadFiles ? (
           <>

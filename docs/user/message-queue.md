@@ -1,7 +1,9 @@
 ---
+group: work
 title: The message queue
 screens: /thread/$threadId
 keywords: queue, pending, held, edit, send now, steer, interrupt, reorder, drag, Alt+Up, Alt+Down, 消息队列, 排队, 编辑, 立即发送, 引导, 中断, 重排
+summary: Edit and reorder waiting messages, then choose when they reach the agent.
 ---
 
 # The message queue

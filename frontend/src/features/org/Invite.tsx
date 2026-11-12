@@ -16,12 +16,11 @@ import { metaQuery } from '@/api/auth';
 import { targetSettingsQuery } from '@/api/settings';
 import { createInvitation } from '@/api/users';
 import { useIdentityRules } from '@/features/auth/identityRules';
-import type { InvitationCreateReply, Org, ResolvedSetting, Role } from '@/generated/api-types';
+import type { InvitationCreateResponse, Org, ResolvedSetting, Role } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { useActKey, useForm } from '@/lib/forms';
 import { formatDateTime } from '@/lib/time';
 import { Button } from '@/ui/Button';
-import { CopyButton } from '@/ui/CopyButton';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
@@ -29,6 +28,7 @@ import { Input } from '@/ui/Input';
 import { SegmentedControl } from '@/ui/SegmentedControl';
 import { Select } from '@/ui/Select';
 import { SkeletonRows } from '@/ui/Skeleton';
+import { InvitationResult, invitationWasCreated } from './InvitationResult';
 
 /** The roles a person can be invited as, from the one that changes nothing to the one that runs the place. */
 export const INVITED_ROLES: readonly Role[] = ['viewer', 'interactor', 'developer', 'admin'];
@@ -92,7 +92,7 @@ export function InviteDialog({ target, open, onClose }: InviteDialogProps) {
   const [kind, setKind] = useState<'email' | 'link' | null>(null);
   const [role, setRole] = useState<Role>('viewer');
   const [hours, setHours] = useState<number | null>(null);
-  const [made, setMade] = useState<InvitationCreateReply | null>(null);
+  const [made, setMade] = useState<InvitationCreateResponse | null>(null);
 
   // What is asked for begins as what the org gives by default, and is what the person changes from there.
   const chosenKind = kind !== null && rules.forms.includes(kind) ? kind : initialInvitationKind(rules.forms, meta.data?.mail === true);
@@ -133,6 +133,7 @@ export function InviteDialog({ target, open, onClose }: InviteDialogProps) {
 
   const reset = () => {
     setMade(null);
+    actKey.reset();
     form.set('email', '');
     make.reset();
   };
@@ -155,7 +156,7 @@ export function InviteDialog({ target, open, onClose }: InviteDialogProps) {
           </>
         ) : (
           <>
-            <Button onClick={reset}>{t('places.invite.another')}</Button>
+            {!invitationWasCreated(made) && <Button onClick={reset}>{t('places.invite.another')}</Button>}
             <Button variant="primary" onClick={onClose}>
               {t('places.invite.done')}
             </Button>
@@ -165,7 +166,7 @@ export function InviteDialog({ target, open, onClose }: InviteDialogProps) {
     >
       {made === null && settings.isError ? <ErrorState compact error={settings.error} onRetry={() => void settings.refetch()} />
         : made === null && meta.isError ? <ErrorState compact error={meta.error} onRetry={() => void meta.refetch()} />
-        : made === null && !ready ? rules.forms.length === 0 && settings.isSuccess ? <InlineAlert tone="info">{t('errors.invitation.not_allowed')}</InlineAlert> : <SkeletonRows rows={3} />
+        : made === null && !ready ? rules.forms.length === 0 && settings.isSuccess ? <InlineAlert tone="info">{t('errors.invitation.not_allowed')}</InlineAlert> : <SkeletonRows read={meta} rows={3} />
         : made === null ? (
         <form
           id="invite-form"
@@ -232,28 +233,20 @@ export function InviteDialog({ target, open, onClose }: InviteDialogProps) {
         </form>
       ) : (
         <div className="flex flex-col gap-4 py-2">
-          <InlineAlert tone={made.invitation.form === 'email' && !made.sent ? 'warning' : 'success'}>
-            {made.invitation.form === 'link'
-              ? t(org === null ? 'places.invite.madeRegistration' : 'places.invite.madeShared', {
-                  count: made.invitation.max_uses,
-                  time: formatDateTime(made.invitation.expires_at, format),
-                })
-              : made.sent
-                ? t('places.invite.sent', { email: made.invitation.email ?? '' })
-                : t('places.invite.notSent', { org: root, email: made.invitation.email ?? '' })}
-          </InlineAlert>
-          <div className="flex items-end gap-2">
-            <Input
-              label={t('places.invite.link')}
-              hint={t('places.invite.linkOnce')}
-              value={made.url}
-              readOnly
-              mono
-              fieldClassName="flex-1"
-              onFocus={(event) => event.currentTarget.select()}
-            />
-            <CopyButton value={made.url} label={t('places.invite.copy')} className="mb-6" />
-          </div>
+          <InvitationResult reply={made} onAnother={reset} linkLabel={t('places.invite.link')} copyLabel={t('places.invite.copy')} hint={t('places.invite.linkOnce')}>
+            {'invitation' in made ? (
+              <InlineAlert tone={made.invitation.form === 'email' && !made.sent ? 'warning' : 'success'}>
+                {made.invitation.form === 'link'
+                  ? t(org === null ? 'places.invite.madeRegistration' : 'places.invite.madeShared', {
+                      count: made.invitation.max_uses,
+                      time: formatDateTime(made.invitation.expires_at, format),
+                    })
+                  : made.sent
+                    ? t('places.invite.sent', { email: made.invitation.email ?? '' })
+                    : t('places.invite.notSent', { org: root, email: made.invitation.email ?? '' })}
+              </InlineAlert>
+            ) : null}
+          </InvitationResult>
         </div>
       )}
     </Dialog>

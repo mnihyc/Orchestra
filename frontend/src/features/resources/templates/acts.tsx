@@ -1,3 +1,5 @@
+import { homeMoveEntries } from '@/features/duplicate/move';
+import { resourceDuplicateEntries } from '@/features/duplicate/target';
 /** What can be done with a template, from its row in the list and from its own page: enable or disable, open, edit, rename, copy its link and delete, each only where the reader may.
  *
  * The same acts serve the button and the menu at the end of a row, the menu under the right mouse button, the
@@ -14,7 +16,7 @@ import { useTranslation } from 'react-i18next';
 
 import { ApiError } from '@/api/client';
 import { deleteTemplate, updateTemplate } from '@/api/resources';
-import { type Act, type BulkAct, BulkNames, entriesOf, keysOf, type ListActs, type RowActs, useBusy, useCopyLink, shareAct } from '@/features/resources/acts';
+import { type Act, type BulkAct, BulkNames, entriesOf, managedAct, keysOf, type ListActs, type RowActs, useBusy, useCopyLink, shareAct } from '@/features/resources/acts';
 import { EditTemplate } from '@/features/resources/templates/Edit';
 import type { TemplateTab } from '@/features/resources/templates/Template';
 import type { Template } from '@/generated/api-types';
@@ -75,11 +77,11 @@ export function useTemplateActs(options: { onTab?: (template: Template, tab: Tem
 
   const actsOf = (template: Template, where: 'row' | 'page'): RowActs & { edit: Act | null } => {
     const manage = holds(template.access, 'template.manage');
+    const guarded = (act: Act | null) => managedAct(act, manage, t('resources.act.manageRequired'));
     const open: Act | null =
       where === 'row' ? { id: 'open', label: t('resources.act.open'), icon: <ArrowRight aria-hidden />, run: () => void navigate({ to: '/resources/templates/$id', params: { id: template.id } }) } : null;
     const enable: Act | null =
-      manage && !template.enabled
-        ? {
+      guarded(!template.enabled ? {
             id: 'enable',
             label: t('resources.act.enable'),
             icon: <CirclePlay aria-hidden />,
@@ -88,20 +90,17 @@ export function useTemplateActs(options: { onTab?: (template: Template, tab: Tem
                 const updated = await setEnabled(template, true);
                 toast({ tone: 'success', title: t('templates.danger.enabled', { name: updated.name }) });
               }),
-          }
-        : null;
-    const disable: Act | null = manage && template.enabled ? { id: 'disable', label: t('resources.act.disable'), icon: <Ban aria-hidden />, run: () => setAsked({ what: 'disable', template }) } : null;
-    const edit: Act | null = manage ? { id: 'edit', label: t('resources.act.edit'), icon: <Pencil aria-hidden />, run: () => setAsked({ what: 'edit', template }) } : null;
-    const rename: Act | null = manage ? { id: 'rename', label: t('resources.act.rename'), icon: <TextCursorInput aria-hidden />, shortcut: 'F2', run: () => setAsked({ what: 'rename', template }) } : null;
+          } : null);
+    const disable: Act | null = guarded(template.enabled ? { id: 'disable', label: t('resources.act.disable'), icon: <Ban aria-hidden />, run: () => setAsked({ what: 'disable', template }) } : null);
+    const edit: Act | null = guarded({ id: 'edit', label: t('resources.act.edit'), icon: <Pencil aria-hidden />, run: () => setAsked({ what: 'edit', template }) });
+    const rename: Act | null = guarded({ id: 'rename', label: t('resources.act.rename'), icon: <TextCursorInput aria-hidden />, shortcut: 'F2', run: () => setAsked({ what: 'rename', template }) });
     const share = shareAct(t, { kind: 'template', id: template.id, name: template.name }, template.access);
-    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink(`/resources/templates/${template.id}`) };
-    const del: Act | null = manage
-      ? { id: 'delete', label: t('resources.act.delete'), icon: <Trash2 aria-hidden />, danger: true, disabled: template.units > 0 ? t('templates.danger.deleteUsed', { count: template.units }) : false, run: () => setAsked({ what: 'delete', template }) }
-      : null;
+    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink({ kind: 'template', id: template.id }) };
+    const del: Act | null = guarded({ id: 'delete', label: t('resources.act.delete'), icon: <Trash2 aria-hidden />, danger: true, disabled: template.units > 0 ? t('templates.danger.deleteUsed', { count: template.units }) : false, run: () => setAsked({ what: 'delete', template }) });
     return {
-      primary: enable ?? open,
+      primary: manage ? (enable ?? open) : open,
       edit,
-      entries: entriesOf([open], [enable, disable], [edit, rename], [share, copy], [del], [cleanup.act({kind:'template',id:template.id}, manage)]),
+      entries: [...homeMoveEntries(t, 'template', template), ...resourceDuplicateEntries(t, 'template', template), ...entriesOf([open], [enable, disable], [edit, rename], [share, copy], [del], [cleanup.act({kind:'template',id:template.id}, manage)])],
       keys: keysOf(rename),
       busy: busy(template.id),
     };

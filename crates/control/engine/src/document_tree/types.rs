@@ -70,7 +70,7 @@ pub enum Actor<'a> {
     },
 }
 
-/// Organization operations. Only Delete consumes a separately obtained complete deletion plan.
+/// Organization operations. Delete and MoveOut consume a complete native deletion plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Command {
@@ -80,6 +80,8 @@ pub enum Command {
     Copy,
     /// Move an item or a complete tree, optionally changing its basename.
     Move,
+    /// Copy into another root and delete the source under the same complete native plan.
+    MoveOut,
     /// Rename one text document under its ordinary Edit authority.
     Rename,
     /// Soft-delete the complete selected trees.
@@ -216,6 +218,58 @@ pub struct MembershipStamp {
     pub authority_fingerprint: String,
     /// Earliest grant expiry; crossing it requires a new preview even without an epoch write.
     pub authority_until: Option<DateTime<Utc>>,
+}
+
+/// Equality with the complete native deletion membership, without its descriptive rows.
+/// A digest supplies no authority and must be protected before crossing a restricted transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletionDigest {
+    /// Every native membership/material/authority field contributes to this value.
+    pub fingerprint: orch_types::Hash,
+    /// The same earliest authority expiry used by the complete confirmation.
+    pub authority_until: Option<DateTime<Utc>>,
+}
+
+impl MembershipStamp {
+    /// Produce the equality witness of this exact complete native stamp.
+    pub fn deletion_digest(&self) -> Result<DeletionDigest, super::Error> {
+        let mut digest = orch_types::Hash::hasher();
+        digest.update(b"orch.document-tree.deletion-membership.v1\0");
+        digest.update(&serde_json::to_vec(self)?);
+        Ok(DeletionDigest {
+            fingerprint: orch_types::Hash::finish(&digest),
+            authority_until: self.authority_until,
+        })
+    }
+}
+
+/// Two factual representations of the same native complete deletion confirmation.
+#[derive(Debug, Clone, Copy)]
+pub enum DeletionConfirmation<'a> {
+    /// The ordinary full preview, with the original exact equality semantics.
+    Membership(&'a MembershipStamp),
+    /// A transport-protected complete-stamp digest, with no omitted membership tail.
+    Digest(&'a DeletionDigest),
+}
+
+impl DeletionConfirmation<'_> {
+    pub(super) fn matches(
+        self,
+        actual: &MembershipStamp,
+        now: orch_types::Time,
+    ) -> Result<bool, super::Error> {
+        let until = match self {
+            Self::Membership(stamp) => stamp.authority_until,
+            Self::Digest(digest) => digest.authority_until,
+        };
+        if until.is_some_and(|until| until <= now.get()) {
+            return Ok(false);
+        }
+        Ok(match self {
+            Self::Membership(expected) => expected == actual,
+            Self::Digest(expected) => *expected == actual.deletion_digest()?,
+        })
+    }
 }
 
 /// A complete authorized deletion plan; no confirmation capability is stored by the domain.

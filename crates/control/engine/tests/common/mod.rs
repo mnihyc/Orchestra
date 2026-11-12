@@ -12,10 +12,14 @@
 )]
 #![allow(dead_code, reason = "each test file uses some of what is here")]
 
+pub mod background;
+mod paid_commands;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use orch_access_contract::decisions::MissingAccess;
 use orch_access_contract::pages as contract_pages;
+use orch_agent_contract::descriptor::ArrangementType;
 use orch_api_contract::threads::{ContentPart, Delivery, ItemPayload};
 use orch_authz::Caller;
 use orch_db::audit::{Actor, Origin};
@@ -25,7 +29,7 @@ use orch_db::queries::identity::testing::insert_user;
 use orch_db::queries::link as link_queries;
 use orch_db::queries::resources::testing::insert_machine;
 use orch_db::{Conn, Db};
-use orch_engine::access::{AccessFault, Answer, Limit, ProviderUse, ResourceAccess};
+use orch_engine::access::{AccessFault, Answer, Limit, ProviderUse, ResourceAccess, RunsIn};
 use orch_engine::commands::{Commands, CommandsError, Info, Outcome, Outgoing, Stage};
 use orch_engine::config::EngineConfig;
 use orch_engine::inputs::InputRequest;
@@ -112,6 +116,7 @@ pub async fn meanwhile(how_long: Duration) {
 pub struct TestAccess {
     denied: Mutex<HashSet<Id>>,
     denied_models: Mutex<HashSet<(Id, String)>>,
+    entries: Mutex<HashMap<Id, Vec<orch_access_contract::permissions::ProviderUse>>>,
     no_bypass: Mutex<HashSet<Id>>,
     unreachable: AtomicBool,
 }
@@ -135,6 +140,50 @@ impl TestAccess {
     /// Restores one person's use of one model.
     pub fn allow_model(&self, person: Id, model: &str) {
         lock(&self.denied_models).remove(&(person, model.to_owned()));
+    }
+
+    /// From now on `person` uses the provider through entries with these options, and the double
+    /// decides as the access engine does: one single entry has to allow the model, the effort and
+    /// the place of what is asked together, and what is offered as types is theirs. A site that
+    /// asks without the place it works in is not held to it, and a case that depends on the place
+    /// fails there.
+    pub fn use_through(&self, person: Id, entries: Vec<Json>) {
+        let entries = entries
+            .iter()
+            .map(|options| {
+                match orch_access_contract::permissions::Options::parse(
+                    orch_access_contract::permissions::Permission::ProviderUse,
+                    options,
+                )
+                .expect("options that read")
+                {
+                    orch_access_contract::permissions::Options::ProviderUse(options) => options,
+                    other => panic!("the use of a provider takes options: {other:?}"),
+                }
+            })
+            .collect();
+        lock(&self.entries).insert(person, entries);
+    }
+
+    /// From now on `person` uses the provider through one entry that allows only these arrangement
+    /// types, as an entry that names them (or none, and so the types in which the credential stays)
+    /// does.
+    pub fn limit_types(&self, person: Id, types: &[ArrangementType]) {
+        self.use_through(person, vec![json!({ "arrangements": types })]);
+    }
+
+    /// From now on `person` uses the provider through one entry that names only these environments.
+    pub fn use_only_in(&self, person: Id, environments: &[Id]) {
+        let places: Vec<Json> = environments
+            .iter()
+            .map(|id| json!({ "kind": "environment", "id": id }))
+            .collect();
+        self.use_through(person, vec![json!({ "where": places })]);
+    }
+
+    /// Back to the double's own answer: nothing is narrowed.
+    pub fn use_through_nothing(&self, person: Id) {
+        lock(&self.entries).remove(&person);
     }
 
     /// From now on `person` may not let a turn past a limit.
@@ -168,17 +217,102 @@ impl TestAccess {
 impl ResourceAccess for TestAccess {
     async fn provider_use(
         &self,
-        _: &mut Conn,
+        conn: &mut Conn,
         ask: &ProviderUse<'_>,
     ) -> Result<Answer, AccessFault> {
         let answer = self.answer(ask.person)?;
         if ask.model.is_some_and(|model| {
             lock(&self.denied_models).contains(&(ask.person, model.to_owned()))
         }) {
-            Ok(Answer::Refused(Vec::new()))
-        } else {
-            Ok(answer)
+            return Ok(Answer::Refused(Vec::new()));
         }
+        let Some(entries) = lock(&self.entries).get(&ask.person).cloned() else {
+            return Ok(answer);
+        };
+        if !matches!(answer, Answer::Allowed { .. }) {
+            return Ok(answer);
+        }
+        let place = match ask.runs_in {
+            Some(RunsIn::Environment(environment)) => Some(
+                orch_authz::usable::place_of(conn, environment)
+                    .await
+                    .expect("a place"),
+            ),
+            Some(RunsIn::NewOnHost(host)) => Some(
+                orch_authz::usable::place_of_host(conn, host)
+                    .await
+                    .expect("a place"),
+            ),
+            Some(RunsIn::NewOnMachine(machine)) => Some(
+                orch_authz::usable::place_of_machine(conn, machine)
+                    .await
+                    .expect("a place"),
+            ),
+            None => None,
+        };
+        let wanted = orch_authz::options::Wanted {
+            model: ask.model.map(|model| (model, &[][..])),
+            effort: ask.effort,
+            at: place.as_ref(),
+            ..orch_authz::options::Wanted::default()
+        };
+        let allowing: Vec<&orch_access_contract::permissions::ProviderUse> = entries
+            .iter()
+            .filter(|entry| orch_authz::options::entry_allows(entry, &wanted))
+            .collect();
+        if allowing.is_empty() {
+            // As the access engine refuses: the place is what is lacking when an entry would allow the
+            // rest without it.
+            let without_place = orch_authz::options::Wanted { at: None, ..wanted };
+            let outside = place
+                .as_ref()
+                .filter(|_| {
+                    entries
+                        .iter()
+                        .any(|entry| orch_authz::options::entry_allows(entry, &without_place))
+                })
+                .and_then(orch_access_contract::whereabouts::Whereabouts::name);
+            return Ok(Answer::Refused(outside.map_or_else(Vec::new, |name| {
+                vec![MissingAccess {
+                    // As the access engine refuses, it names the provider's owner and the people who
+                    // could give the entry, to the person it was asked about.
+                    object: orch_access_contract::decisions::MissingObject {
+                        kind: orch_access_contract::permissions::ObjectKind::Provider,
+                        id: ask.provider,
+                        name: Some("A provider".to_owned()),
+                        owner: Some(new_id()),
+                    },
+                    permissions: vec![orch_access_contract::permissions::Permission::ProviderUse],
+                    options: Some(orch_access_contract::decisions::MissingOptions {
+                        r#where: Some(vec![name]),
+                        ..Default::default()
+                    }),
+                    ask: vec![new_id()],
+                    ask_more: 2,
+                    r#override: true,
+                    closed: None,
+                    locked_by: None,
+                }]
+            })));
+        }
+        // A question that names no model is answered with the types that every model chosen later
+        // will find allowed.
+        let offered = if ask.model.is_none() {
+            orch_authz::options::arrangements_whatever_the_model(&allowing)
+        } else {
+            orch_authz::options::arrangements_of(&allowing)
+        };
+        let offered = offered
+            .into_iter()
+            .filter_map(|arrangement| {
+                ArrangementType::ALL
+                    .into_iter()
+                    .find(|kind| kind.as_str() == arrangement.as_str())
+            })
+            .collect();
+        Ok(Answer::Allowed {
+            arrangements: Some(offered),
+        })
     }
 
     async fn agent_use(
@@ -302,6 +436,7 @@ struct Issued {
 /// twice under one identifier is made once, and when the API "restarts" the ones that did not end are
 /// handed to the new link, as the API's rows would be.
 pub struct ScriptedCommands {
+    db: Db,
     primary: Id,
     link: Mutex<ControllerLink>,
     others: Mutex<HashMap<Id, ControllerLink>>,
@@ -316,8 +451,9 @@ pub struct ScriptedCommands {
 }
 
 impl ScriptedCommands {
-    fn new(primary: Id, link: ControllerLink, clock: Arc<dyn Clock>) -> Self {
+    fn new(db: Db, primary: Id, link: ControllerLink, clock: Arc<dyn Clock>) -> Self {
         Self {
+            db,
             primary,
             link: Mutex::new(link),
             others: Mutex::new(HashMap::new()),
@@ -448,6 +584,52 @@ impl ScriptedCommands {
             .get(&id)
             .map(|entry| entry.handle.clone())
     }
+
+    /// A wait observes the same durable terminal receipt as the production dispatcher.
+    /// Commands without an admitted row remain solely in the scripted link.
+    async fn complete_admitted(&self, id: Id, outcome: Outcome) -> Result<Outcome, CommandsError> {
+        let error = match &outcome {
+            Outcome::Failed(error) => Some(
+                serde_json::to_value(error)
+                    .map_err(|error| CommandsError::Body(error.to_string()))?,
+            ),
+            _ => None,
+        };
+        let ending = match &outcome {
+            Outcome::Succeeded(value) => link_queries::Ending::Succeeded(value),
+            Outcome::Failed(_) => link_queries::Ending::Failed(error.as_ref().unwrap()),
+            Outcome::Expired => link_queries::Ending::Expired,
+            Outcome::Cancelled => link_queries::Ending::Cancelled,
+        };
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+        link_queries::finish_command(&mut tx, id, &ending, self.clock.now())
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+        let retained = link_queries::command(&mut tx, id)
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+        let Some(retained) = retained else {
+            return Ok(outcome);
+        };
+        match retained.state.as_str() {
+            "succeeded" => Ok(Outcome::Succeeded(retained.result.unwrap_or(Json::Null))),
+            "failed" => serde_json::from_value(retained.error.unwrap_or(Json::Null))
+                .map(Outcome::Failed)
+                .map_err(|error| CommandsError::Body(error.to_string())),
+            "expired" => Ok(Outcome::Expired),
+            "cancelled" => Ok(Outcome::Cancelled),
+            _ => Err(CommandsError::Other(
+                "the scripted command has no durable terminal receipt".into(),
+            )),
+        }
+    }
 }
 
 /// The commands of one process of the API: once the API has restarted, the ones before it reach nothing.
@@ -516,6 +698,8 @@ impl Commands for Process {
         Ok(lock(&self.commands.issued).get(&id).map(|issued| {
             orch_engine::commands::RetainedCommand {
                 machine: issued.machine,
+                kind: issued.cmd.kind.clone(),
+                key: issued.cmd.key.clone(),
                 body: issued.cmd.body.clone(),
             }
         }))
@@ -536,10 +720,17 @@ impl Commands for Process {
         self.wait_handle(handle).await
     }
 
-    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
+    async fn issue_prepared(
+        &self,
+        command: Outgoing,
+        before: Option<orch_engine::commands::BeforeCommand<'_>>,
+    ) -> Result<(), CommandsError> {
         self.alive()?;
         let mut issued = lock(&self.commands.issued);
         if issued.contains_key(&command.id) {
+            if let Some(check) = before {
+                check().map_err(CommandsError::BeforeEffect)?;
+            }
             return Ok(());
         }
         let now = self.commands.clock.now();
@@ -553,6 +744,9 @@ impl Commands for Process {
             deadline,
             body: command.body,
         };
+        if let Some(check) = before {
+            check().map_err(CommandsError::BeforeEffect)?;
+        }
         let handle = self
             .commands
             .link_of(command.machine)
@@ -587,7 +781,8 @@ impl Commands for Process {
         let Some(handle) = self.commands.handle(id) else {
             return Err(CommandsError::Other("there is no such command".to_owned()));
         };
-        self.wait_handle(handle).await
+        let outcome = self.wait_handle(handle).await?;
+        self.commands.complete_admitted(id, outcome).await
     }
 
     async fn cancel(&self, id: Id) -> Result<bool, CommandsError> {
@@ -976,6 +1171,22 @@ impl World {
         .await
     }
 
+    /// The existing observed fixture with an actual controlled domain clock, before
+    /// background provider facts can start a harness with an older declaration.
+    pub async fn observed_with_clock(clock: Arc<dyn Clock>) -> Self {
+        Self::build(Setup {
+            clock: Some(clock),
+            observed: true,
+            ..Setup::default()
+        })
+        .await
+    }
+
+    /// A world made of exactly this.
+    pub async fn from_setup(setup: Setup) -> Self {
+        Self::build(setup).await
+    }
+
     async fn build(setup: Setup) -> Self {
         Self::build_profile(setup, json!({})).await
     }
@@ -1147,6 +1358,7 @@ impl World {
             },
         ));
         let commands = Arc::new(ScriptedCommands::new(
+            pool.clone(),
             machine_id,
             link.clone(),
             Arc::clone(&clock),
@@ -1353,10 +1565,18 @@ impl World {
             db: self.pool.clone(),
             clock: self.clock.clone(),
             config: lock(&self.config).clone(),
-            commands: wrap(self.commands.current()),
+            commands: wrap(paid_commands::wrap(
+                self.commands.current(),
+                self.pool.clone(),
+                self.clock.clone(),
+                self.access.clone(),
+            )),
             access: self.access.clone(),
             live: self.live.clone(),
         });
+        engine.attach_capability_services(Arc::new(
+            orch_provider_contract::builtins::BuiltinSources::default(),
+        ));
         engine.start();
         *lock(&self.engine) = Some(engine);
         self.spawn_applier(link, notices);
@@ -1781,12 +2001,21 @@ impl World {
 
     /// Writes a setting at a node, as the person who made the tree.
     pub async fn set(&self, node: Id, key: &str, value: Json) {
+        self.set_at(Target::Node(node), key, value).await;
+    }
+
+    /// Writes a system setting without silently changing a node setting's scope.
+    pub async fn set_system(&self, key: &str, value: Json) {
+        self.set_at(Target::System, key, value).await;
+    }
+
+    async fn set_at(&self, target: Target, key: &str, value: Json) {
         let mut conn = self.pool.acquire().await.unwrap();
         settings_write::write(
             &mut conn,
             &settings_write::Write {
                 actor: Actor::User(self.ada),
-                target: Target::Node(node),
+                target,
                 key,
                 value,
                 locked: None,
@@ -2085,8 +2314,10 @@ impl World {
     pub async fn wait_turn(&self, turn: Id, state: &str) {
         let observed = Mutex::new(None);
         let config = self.engine().config().clone();
-        // Observe once per supervisor pass. The test's failure guard also
-        // covers database reads, and its diagnostic shows the product's bound.
+        // Observe at a short interval of its own, whatever the world's supervisor interval is: a case may set that long
+        // (so that a sweep does not run what it holds back), and a helper that slept for it would sleep through the
+        // state it waits for. The test's failure guard also covers database reads, and its diagnostic shows the
+        // product's bound.
         let observing = async {
             loop {
                 let found: (String, Option<Json>, Option<Json>) =
@@ -2100,7 +2331,7 @@ impl World {
                 if arrived {
                     return;
                 }
-                tokio::time::sleep(config.sweep_every).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
         };
         assert!(
@@ -2181,8 +2412,42 @@ impl World {
                 return found;
             }
             if started.elapsed() >= PATIENCE {
+                // Keep diagnostics to recent phase names and states, with no command bodies.
+                // A failed fixture must not wait indefinitely for its diagnostic read either.
+                let command_states = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    sqlx::query_as::<_, (String, String)>(
+                        "SELECT kind,state FROM commands WHERE body->>'thread_id'=$1
+                        OR body#>>'{session,thread_id}'=$1 ORDER BY created_at DESC,id DESC LIMIT 32",
+                    )
+                    .bind(thread.to_string())
+                    .fetch_all(self.pool.pool()),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok);
+                let recovery_state = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    sqlx::query_scalar::<_, Json>(
+                        "SELECT jsonb_build_object(
+                            'segments',(SELECT jsonb_agg(info) FROM (
+                                SELECT ordinal,ended_at IS NOT NULL AS ended,end_reason,
+                                    agent_history_recovery IS NOT NULL AS has_recovery
+                                FROM segments WHERE thread_id=$1 ORDER BY ordinal DESC LIMIT 4
+                            ) info),
+                            'recovery_cuts',(SELECT count(*) FROM thread_history_cuts WHERE owner_thread_id=$1),
+                            'current_turn',(SELECT jsonb_build_object('ordinal',ordinal,'state',state,
+                                'segment_ordinal',(SELECT ordinal FROM segments WHERE id=turns.segment_id))
+                                FROM turns WHERE id=(SELECT current_turn_id FROM threads WHERE node_id=$1)))",
+                    )
+                    .bind(thread)
+                    .fetch_one(self.pool.pool()),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok);
                 panic!(
-                    "gave up waiting for: turn.start number {nth}; thread {:?}; commands {:?}",
+                    "gave up waiting for: turn.start number {nth}; thread {:?}; commands {:?}; latest admitted command kinds/states {command_states:?}; recovery metadata {recovery_state:?}",
                     self.state(thread).await,
                     self.commands.kinds()
                 );
@@ -2520,12 +2785,21 @@ fn build_engine(
     access: &Arc<TestAccess>,
     live: &Arc<Recorder>,
 ) -> Engine {
-    Engine::new(EngineParts {
+    let engine = Engine::new(EngineParts {
         db: pool.clone(),
         clock: Arc::clone(clock),
         config: config.clone(),
-        commands: commands.current(),
+        commands: paid_commands::wrap(
+            commands.current(),
+            pool.clone(),
+            clock.clone(),
+            access.clone(),
+        ),
         access: access.clone(),
         live: live.clone(),
-    })
+    });
+    engine.attach_capability_services(Arc::new(
+        orch_provider_contract::builtins::BuiltinSources::default(),
+    ));
+    engine
 }

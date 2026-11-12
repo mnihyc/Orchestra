@@ -13,7 +13,7 @@ import { useTranslation } from 'react-i18next';
 import { defaultLevelName, levelOptions } from '@/features/notifications/levelWords';
 
 import { setChatState } from '@/api/chats';
-import { failed } from '@/features/chat/acts';
+import { acknowledgeReceipt, failed } from '@/features/chat/acts';
 import { BellTrigger } from '@/features/notifications/BellTrigger';
 import type { Chat, ChatLevel, ChatState } from '@/generated/api-types';
 import { statesWriter } from '@/realtime/stores/chat';
@@ -35,7 +35,7 @@ export function Bell({ chat, state }: { chat: Chat; state: ChatState | null }) {
 
   const change = useMutation({ mutationFn: (level: ChatLevel | null) => setChatState(chat.id, { level }),
     onSuccess: (next) => statesWriter.put(next),
-    onError: (error) => failed(i18n.t('chat.failed.bell'), error) });
+    onError: (error) => { if (!acknowledgeReceipt(error)) failed(i18n.t('chat.failed.bell'), error); } });
   const choose = (level: ChatLevel | null) => {
     if (change.isPending || level === chosen) return;
     setOpen(false);

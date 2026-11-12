@@ -31,6 +31,7 @@ import type {
   UserRef,
 } from '../../src/generated/api-types.ts';
 import type { IncomingMessage } from 'node:http';
+import { nativeTiming } from '../fixtures/native-counts.ts';
 import { ACME, id as fixtureId, userRef } from './fixtures.ts';
 import { maybeHarnessName } from './harness-names.ts';
 import { type Answer, type Person, Refusal, type Subscriber, type World } from './world.ts';
@@ -46,6 +47,12 @@ const HISTORY_DAYS = 120;
 
 /** What one use of the ledger is: the same fields a row of the real ledger has, in the shapes the fake keeps them. */
 interface Row {
+  purpose?:string;
+  scope?: UsageEvent['scope'];
+  requestRef?: string;
+  tool_calls?: number;
+  tool_ms?: number;
+  thread_owner?: string;
   timing?: RequestTiming;
   running?: boolean;
   program: string | null;
@@ -392,6 +399,8 @@ export class Usage {
     switch (dimension) {
       case 'person':
         return { person: this.person(row.user) };
+      case 'offering':return {offering:{kind:row.timing?.service_usage===undefined || row.timing.service_usage===null?'model':'service',name:row.timing?.service_usage?.offering??row.model}};
+      case 'purpose':return {purpose:row.purpose??'turn'};
       case 'model':
         return { model: row.model, model_display: this.modelDisplay(row) };
       case 'provider': {
@@ -423,6 +432,8 @@ export class Usage {
     switch (dimension) {
       case 'person':
         return row.user ?? '';
+      case 'offering':return JSON.stringify([row.timing?.service_usage===undefined || row.timing.service_usage===null?'model':'service',row.timing?.service_usage?.offering??row.model]);
+      case 'purpose':return row.purpose??'turn';
       case 'model':
         return row.model;
       case 'provider':
@@ -449,6 +460,14 @@ export class Usage {
   }
 
   private figures(rows: readonly Row[]): UsageFigures {
+    const units:NonNullable<UsageFigures['service_units']>={};
+    for(const row of rows) {
+      const service=row.timing?.service_usage;if(!row.counted || service===undefined || service===null) continue;
+      const unit=units[service.unit]??{quantity:0,known_requests:0,unknown_requests:0};
+      if(service.quantity.state==='told') {unit.quantity+=service.quantity.value;unit.known_requests+=1;}else unit.unknown_requests+=1;
+      units[service.unit]=unit;
+    }
+    const unpriced=rows.filter((row)=>row.counted && row.timing?.service_usage!==undefined && row.timing.service_usage!==null && row.credits===null).length;
     const sum = (pick: (row: Row) => number) => rows.reduce((total, row) => total + (row.counted ? pick(row) : 0), 0);
     return {
       turns: new Set(rows.flatMap((row)=>row.turn===null ? [] : [row.turn])).size,
@@ -463,6 +482,7 @@ export class Usage {
       credits: decimalText(sum((row) => row.credits ?? 0)),
       estimated_credits: decimalText(sum((row) => (row.source === 'catalogue' ? (row.credits ?? 0) : 0))),
       unrated_tokens: sum((row) => (row.credits === null ? totalOf(row) : 0)),
+      ...(Object.keys(units).length===0?{}:{service_units:units}),...(unpriced===0?{}:{unrated_services:unpriced}),
     };
   }
 
@@ -549,6 +569,9 @@ export class Usage {
     const thread = query.get('thread_id');
     return rows.filter((row) => {
       const outcome = row.running ? 'running' : row.timing?.outcome.state === 'told' ? row.timing.outcome.value : 'not_measured';
+      const service=query.get('service');const purpose=query.get('purpose');
+      if(service!==null && row.timing?.service_usage?.offering!==service) return false;
+      if(purpose!==null && (row.purpose??'turn')!==purpose) return false;
       const askedOutcome = query.get('outcome');
       if (askedOutcome === 'errors' ? ['done', 'forced', 'running', 'not_measured'].includes(outcome) : askedOutcome !== null && askedOutcome !== outcome) return false;
       if (query.get('turn_id') !== null && row.turn !== query.get('turn_id')) return false;
@@ -683,12 +706,15 @@ export class Usage {
     return {
       id: row.id,
       access_program: row.program,
+      ...(row.tool_calls===undefined?{}:{tool_calls:row.tool_calls}),
+      ...(row.tool_ms===undefined?{}:{tool_ms:row.tool_ms}),
+      ...(row.thread_owner===undefined?{}:{thread_owner:this.person(row.thread_owner)}),
       ...(row.timing === undefined ? {} : { timing: row.timing }),
       ...(row.running ? { running: true } : {}),
       at: row.at,
       origin: row.origin,
-      purpose: 'turn',
-      scope: row.timing === undefined ? 'turn' : 'request',
+      purpose: (row.purpose??'turn') as UsageEvent['purpose'],
+      scope: row.scope ?? (row.timing === undefined ? 'turn' : 'request'),
       counted: row.counted,
       project: this.place(caller, row.project),
       topic: this.place(caller, row.topic),
@@ -708,7 +734,7 @@ export class Usage {
       effort: row.effort,
       tier: row.tier,
       tokens: { input_tokens: row.tokens.input, cached_input_tokens: row.tokens.cached, output_tokens: row.tokens.output, reasoning_tokens: row.tokens.reasoning, total_tokens: totalOf(row) },
-      request_ref: null,
+      request_ref: row.requestRef ?? null,
       context_tokens: row.context,
       rate: row.rate,
       rate_source: row.source,
@@ -749,14 +775,17 @@ export class Usage {
     const page = rows.slice(start, start + limit);
     const next = start + limit < rows.length && page.length > 0 ? `${Date.parse(page.at(-1)!.at)}.${page.at(-1)!.id}` : null;
     if (accept.includes('text/csv')) {
-      const lines = ['id,at,user,thread,model,provider,tokens,credits,input_tokens,output_tokens,first_output_ms,speed_tokens_per_second,request_ms,outcome,outcome_message,vendor_words,running,access_program'];
+      const lines = ['id,at,user,thread,model,provider,tokens,credits,input_tokens,output_tokens,first_output_ms,speed_tokens_per_second,request_ms,outcome,outcome_message,vendor_words,running,access_program,cached_input_tokens,uncached_input_tokens,cache_write_tokens,error_reason,upstream_status,attempt,provider_request_id,thread_owner_id,web_searches,requested_service_tier,reported_service_tier,tool_calls,tool_ms'];
       const cell = (value: string | number) => /[",\n]/.test(String(value)) ? `"${String(value).replaceAll('"','""')}"` : String(value);
       for (const row of page) {
         const timing=row.timing;
         const first=timing?.first_token_ms.state === 'told' ? timing.first_token_ms.value : '';
         const speed=timing?.speed_milli.state === 'told' ? timing.speed_milli.value / 1000 : '';
         const whole=timing?.request_ms.state === 'told' ? timing.request_ms.value : '';
-        lines.push([row.id,row.at,row.user ?? '',row.thread ?? '',row.model,row.provider,totalOf(row),row.credits === null ? '' : decimalText(row.credits),timing === undefined ? row.tokens.input : timing.reported_tokens?.input_tokens ?? '',timing === undefined ? row.tokens.output : timing.reported_tokens?.output_tokens ?? '',first,speed,whole,timing?.outcome.state === 'told' ? timing.outcome.value : '',timing?.error_message ?? '',timing?.vendor_words ?? '',row.running ? 'true' : 'false',row.program ?? ''].map(cell).join(','));
+        const input=timing===undefined?row.tokens.input:timing.reported_tokens?.input_tokens??null;
+        const cached=timing===undefined?row.tokens.cached:timing.reported_tokens?.cached_input_tokens??null;
+        const written=timing===undefined?0:timing.reported_tokens?.cache_write_tokens??null;
+        lines.push([row.id,row.at,row.user ?? '',row.thread ?? '',row.model,row.provider,totalOf(row),row.credits === null ? '' : decimalText(row.credits),timing === undefined ? row.tokens.input : timing.reported_tokens?.input_tokens ?? '',timing === undefined ? row.tokens.output : timing.reported_tokens?.output_tokens ?? '',first,speed,whole,timing?.outcome.state === 'told' ? timing.outcome.value : '',timing?.error_message ?? '',timing?.vendor_words ?? '',row.running ? 'true' : 'false',row.program ?? '',cached??'',input===null||cached===null||written===null?'':Math.max(0,input-cached-written),written??'',timing?.error_reason??'',timing?.upstream_status??'',timing?.attempt??'',timing?.provider_request_id??'',row.thread_owner===undefined?'':this.person(row.thread_owner)?.id??'',timing?.web_searches.state==='told'?timing.web_searches.value:'',timing?.requested_service_tier??'',timing?.reported_service_tier.state==='told'?timing.reported_service_tier.value:'',row.tool_calls??'',row.tool_ms??''].map(cell).join(','));
       }
       return { status: 200, text: `${lines.join('\n')}\n`, headers: next === null ? {} : { 'x-next-cursor': next } };
     }
@@ -823,9 +852,16 @@ export class Usage {
   private covered(cap: CapRecord, row: Row, person: string | null): boolean {
     if (cap.node !== null && !this.under(row, cap.node.id)) return false;
     if (cap.provider !== null && row.provider !== cap.provider.id) return false;
-    if (cap.models.length > 0) {
-      const groups = this.world.resources.modelsOf(row.provider).find((candidate) => candidate.model_name === row.model)?.groups ?? [];
-      if (!cap.models.some((pattern) => modelMatches(pattern, row.model, groups))) return false;
+    if((cap.purposes??[]).length>0 && !(cap.purposes??[]).some((purpose)=>modelMatches(purpose,row.purpose??'turn',[]))) return false;
+    const service=row.timing?.service_usage;
+    if(service!==undefined && service!==null) {
+      if((cap.models.length>0 || (cap.services??[]).length>0) && !(cap.services??[]).some((pattern)=>modelMatches(pattern,service.offering,[]))) return false;
+    } else {
+      if(cap.models.length===0 && (cap.services??[]).length>0) return false;
+      if(cap.models.length>0) {
+        const groups=this.world.resources.modelsOf(row.provider).find((candidate)=>candidate.model_name===row.model)?.groups??[];
+        if(!cap.models.some((pattern)=>modelMatches(pattern,row.model,groups))) return false;
+      }
     }
     if (cap.tiers.length > 0 && (row.tier === null || !cap.tiers.includes(row.tier))) return false;
     if (cap.harness_kinds.length > 0 && (row.harness === null || !cap.harness_kinds.includes(row.harness))) return false;
@@ -985,6 +1021,8 @@ export class Usage {
       subjectId: subject.kind === 'user' || subject.kind === 'group' ? subject.id : null,
       split: input.split,
       models,
+      ...((input.services??[]).length===0?{}:{services:[...new Set(input.services??[])].map((name)=>name.trim().toLowerCase()).sort()}),
+      ...((input.purposes??[]).length===0?{}:{purposes:[...new Set(input.purposes??[])].map((name)=>name.trim().toLowerCase()).sort()}),
       tiers: [...new Set(input.tiers ?? [])].sort(),
       harness_kinds: [...new Set(input.harness_kinds ?? [])].sort(),
       meter: input.meter,
@@ -1013,6 +1051,7 @@ export class Usage {
       (one.subject.kind !== 'role' || (other.subject.kind === 'role' && one.subject.role === other.subject.role)) &&
       one.split === other.split &&
       one.models.join() === other.models.join() &&
+      (one.services??[]).join()===(other.services??[]).join() && (one.purposes??[]).join()===(other.purposes??[]).join() &&
       one.tiers.join() === other.tiers.join() &&
       one.harness_kinds.join() === other.harness_kinds.join() &&
       one.meter === other.meter &&
@@ -1231,6 +1270,8 @@ export class Usage {
         cap.amount = amount === null ? null : decimalText(Number(amount));
       }
       if (Array.isArray(body.models)) cap.models = [...new Set(stringsOf(body.models).map((one) => one.trim().toLowerCase()))].sort();
+      if(Array.isArray(body.services)) cap.services=[...new Set(stringsOf(body.services).map((one)=>one.trim().toLowerCase()))].sort();
+      if(Array.isArray(body.purposes)) cap.purposes=[...new Set(stringsOf(body.purposes).map((one)=>one.trim().toLowerCase()))].sort();
       if (Array.isArray(body.tiers)) cap.tiers = [...new Set(stringsOf(body.tiers))].sort();
       if (Array.isArray(body.harness_kinds)) cap.harness_kinds = [...new Set(stringsOf(body.harness_kinds))].sort();
       if (body.at_limit === 'stop' || body.at_limit === 'finish_turn') cap.at_limit = body.at_limit;
@@ -1262,6 +1303,32 @@ export class Usage {
   /** What only a test can do: write more history, add a use, say what runs and what waits, and say that a turn was let past a cap. */
   control(path: string, body: Record<string, unknown>): Answer | null {
     switch (path) {
+      case '/native-counts': {
+        const source = this.rows.find((row) => row.user === 'ada' && row.thread === ACME.mainThread && row.turn !== null);
+        if (source === undefined) return { status: 400, body: { detail: 'Native counts need a readable recorded turn.' } };
+        const at = new Date().toISOString();
+        const late = body.late === true;
+        const aggregate: Row = {
+          ...source, at, day: at.slice(0, 10), scope: 'turn', origin: 'harness',
+          tokens: { input: 0, cached: 0, output: 0, reasoning: 0 },
+          timing: late ? {
+            ...nativeTiming, declared_counters: { web_search: { state: 'told', value: 3 } },
+            web_searches: { state: 'told', value: 3 },
+          } : nativeTiming,
+          credits: late ? 0.03 : 0.02,
+        };
+        this.rows = [aggregate];
+        if (late) this.rows.push({
+          ...aggregate, id: fixtureId(0x31, ++this.sequence), scope: 'request', counted: false,
+          requestRef: 'late-native-request', credits: 0,
+          timing: {
+            ...nativeTiming, declared_counters: { web_search: { state: 'told', value: 1 } },
+            web_searches: { state: 'told', value: 1 }, outcome: { state: 'told', value: 'done' }, attempt: 1,
+          },
+        });
+        this.tellRequests();
+        return { status: 204 };
+      }
       case '/history':
         this.history(typeof body.days === 'number' ? body.days : HISTORY_DAYS, Date.now());
         return { status: 204 };
@@ -1274,6 +1341,16 @@ export class Usage {
         row.program = typeof body.program === 'string' ? body.program : row.program;
         if (body.performance === true) { row.timing = timingFixture(); row.tokens = {input:100,cached:20,output:64,reasoning:0}; row.credits = row.rate === null ? null : this.creditsOf(row.tokens,row.rate,row.tier,row.context); }
         if (body.running === true) { row.running = true; row.tokens = {input:0,cached:0,output:0,reasoning:0}; row.credits = null; row.timing = timingFixture({ outcome: { state: 'unread' }, speed_milli: { state: 'unread' }, streamed_tokens: {state:'unread'}, first_token_ms: { state: 'unread' }, request_ms: { state: 'unread' }, generation_ms: { state: 'unread' }, reported_tokens: null }); }
+        if(body.service===true) {
+          row.model='';row.purpose=typeof body.purpose==='string'?body.purpose:'image_generation';row.turn=null;row.origin='orch';
+          row.tokens={input:0,cached:0,output:0,reasoning:0};row.rate=null;row.source='provider';
+          const unit=typeof body.unit==='string'?body.unit:'image';const unknown=body.unknown===true;const unpriced=body.unpriced===true;
+          row.credits=unknown || unpriced?null:0.02;
+          row.timing=timingFixture({asked:null,end:null,first_output:null,first_token_ms:{state:'unsupported'},generation_ms:{state:'unsupported'},request_ms:{state:'unsupported'},
+            speed_milli:{state:'unsupported'},streamed_tokens:{state:'unsupported'},reported_tokens:null,outcome:{state:'told',value:'done'},
+            service_usage:{offering:typeof body.offering==='string'?body.offering:'studio-images',unit,quantity:unknown?{state:'empty'}:{state:'told',value:2},
+              ...(unpriced?{}:{price:{amount:'0.01',currency:'credits',unit},credits_per_unit:'0.01'})}});
+        }
         this.tellRequests();
         return { status: 200, body: { id: row.id } };
       }

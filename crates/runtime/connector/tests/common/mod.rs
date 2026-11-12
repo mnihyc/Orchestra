@@ -114,6 +114,29 @@ fn owners_values(mut config: ConnectorConfig) -> ConnectorConfig {
     config
 }
 
+/// Assert the declared existing-directory platform fact without skipping the other connector roles.
+/// Linux keeps the successful native premise; other platforms must return its exact declared refusal.
+pub fn existing_directory_result(reply: Progress) -> Option<Json> {
+    if cfg!(target_os = "linux") {
+        match reply {
+            Progress::Succeeded(value) => Some(value),
+            other => panic!("the Linux existing-directory premise failed: {other:?}"),
+        }
+    } else {
+        let Progress::Failed(error) = reply else {
+            panic!(
+                "this platform must report its unsupported existing-directory premise: {reply:?}"
+            );
+        };
+        assert_eq!(error.code, "unsupported");
+        assert_eq!(
+            error.detail,
+            "this platform cannot verify an existing directory beneath environment.roots"
+        );
+        None
+    }
+}
+
 impl Rig {
     /// A system with a machine in it that plays the agent role, and a connector that is not started.
     pub fn new() -> Self {
@@ -136,6 +159,13 @@ impl Rig {
         let controller =
             ScriptedController::attach(&hub, Arc::clone(&clock), machine_id, roles.clone());
         let blobs = BlobServer::new();
+        // The scripted endpoint uses command admission; producing roles also have the standing upload account.
+        if roles
+            .iter()
+            .any(|role| matches!(role, Role::Agent | Role::Environment))
+        {
+            blobs.open_command(Id::nil());
+        }
         Self {
             manual,
             clock,
@@ -237,7 +267,11 @@ impl Rig {
 
     /// Sends a command and waits until it ended.
     pub async fn send<B: CommandBody>(&self, key: &SerialKey, body: &B) -> Progress {
-        let id = self.controller.issue(key, self.deadline(), body);
+        let id = new_id();
+        // The fixture's content server admits only this actual open command, as the API does.
+        self.blobs.open_command(id);
+        self.controller
+            .issue_with_id(id, key, self.deadline(), body);
         tokio::time::timeout(self.patience, self.controller.wait_command(id))
             .await
             .expect("the command never ended")

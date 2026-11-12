@@ -2,7 +2,7 @@
 import { expect, test } from '@playwright/test';
 import { asAdmin } from './admin-mode-support.ts';
 import { secondReader } from './chat-support.ts';
-import { ACME, PEOPLE, scenario, signIn } from './support.ts';
+import { ACME, PEOPLE, scenario, signIn, screenAddress } from './support.ts';
 
 const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
 async function privateDocument(): Promise<string> {
@@ -176,5 +176,5 @@ test('the finder’s ordinary focus is keyboard-operated without activating its 
   await focus.focus();
   await page.keyboard.press('Alt+Enter');
   await expect(finder).toBeVisible();
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(screenAddress('/org/acme'));
 });

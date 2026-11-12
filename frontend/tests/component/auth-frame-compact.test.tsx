@@ -2,7 +2,7 @@
 import { cleanup, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
-import type * as Auth from '@/api/auth';
+import type * as Admission from '@/shell/admission';
 import { AuthCard, AuthFrame } from '@/features/auth/Frame';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
@@ -12,8 +12,8 @@ import { show } from './support';
 
 const calls = vi.hoisted(() => ({ title: vi.fn<(title: string) => void>(), preferences: vi.fn<ReturnType<typeof useAppearance.getState>['set']>() }));
 vi.mock('@/lib/title', () => ({ usePageTitle: calls.title }));
-vi.mock('@/api/auth', async (original) => ({ ...await original<typeof Auth>(),
-  metaQuery: { queryKey: ['compact-auth-meta'], queryFn: () => Promise.resolve(meta({ name: 'Workshop' })) },
+vi.mock('@/shell/admission', async (original) => ({ ...await original<typeof Admission>(),
+  admissionMetaQuery: { queryKey: ['compact-auth-meta'], queryFn: () => Promise.resolve(meta({ name: 'Workshop' })) },
 }));
 
 const initial = useAppearance.getState();

@@ -44,6 +44,26 @@ vi.mock('@/api/links', async (original) => {
 });
 
 const all: DocumentLinks = { shown: ['referenced_by', 'references', 'related', 'graph'], own: null, inherited: ['referenced_by', 'references', 'related', 'graph'], locked: false, writable: true };
+
+it.each(['en', 'zh-CN'] as const)('explains an explicitly opened off Links view and reaches its existing chooser in %s', async (locale) => {
+  await setLocale(locale); calls.tabs.mockResolvedValue({ ...all, shown: [], own: [] });
+  const user = userEvent.setup();
+  show(<LinksPanel documentId="document" seq={1} explainHidden />);
+  expect(await screen.findByText(i18n.t('implicitAvailability.linksOff'))).toBeVisible();
+  await user.click(screen.getByRole('button', { name: i18n.t('links.dialog.title') }));
+  const dialog = screen.getByRole('dialog', { name: i18n.t('links.dialog.title') });
+  expect(within(dialog).getAllByRole('checkbox')).toHaveLength(4);
+  expect(calls.references).not.toHaveBeenCalled();
+});
+
+it.each(['en', 'zh-CN'] as const)('keeps the locked off-view control disabled with its native reason in %s', async (locale) => {
+  await setLocale(locale); calls.tabs.mockResolvedValue({ ...all, shown: [], own: [], locked: true, writable: false });
+  show(<LinksPanel documentId="document" seq={1} explainHidden />);
+  await screen.findByText(i18n.t('implicitAvailability.linksOff'));
+  const configure = screen.getByRole('button', { name: i18n.t('links.dialog.title') });
+  expect(configure).toHaveAttribute('aria-disabled', 'true');
+  expect(configure).toHaveAttribute('aria-description', i18n.t('links.dialog.locked'));
+});
 const source = (over: Partial<LinkedThing> = {}): LinkedThing => ({
   kind: 'document', id: '019a0000-0000-7000-8000-000000000001', name: 'Notes', label: null, readable: true, context: [], mentions: 2, mentions_more: false, next_mentions: null,
   occurrences: [

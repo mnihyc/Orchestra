@@ -4,6 +4,7 @@
  */
 import { FLOATING_EDGE as EDGE, FLOATING_GAP as GAP, floatingClasses, floatingRoom } from '@/ui/floating';
 import { onPromptOpened } from '@/ui/PromptScope';
+import { AUTOMATIC_FOCUS } from '@/ui/focus';
 
 export const OVERFLOW_REST_MS = 400;
 /** Enough time to cross the same six-pixel gap used by the ordinary tooltip. */
@@ -13,6 +14,7 @@ const EXCLUDED = 'script,style,[hidden],[inert],[aria-hidden="true"],[role="tool
 
 /** The value stays text, never HTML. Manual previews retain their original in one explicit member. */
 function renderedText(element: { innerText?: string; textContent: string | null }): string {
+  if (element instanceof HTMLInputElement && element.type === 'text' && element.getAttribute('role') === 'combobox') return element.value;
   // DOM implementations without layout (including the unit harness) have no innerText.
   return element.innerText ?? element.textContent ?? '';
 }
@@ -22,8 +24,10 @@ export function overflowText(element: HTMLElement): string {
   return (element.getAttribute('data-overflow-text') ?? (shown.includes('…') && title !== null && title.length > shown.length ? title : shown)).trim();
 }
 
+const ELLIPSIS_WORD = /(?:^|\s)ellipsis(?:\s|$)/;
+
 function clipsText(style: CSSStyleDeclaration): boolean {
-  return style.textOverflow.split(/\s+/).includes('ellipsis') ||
+  return ELLIPSIS_WORD.test(style.textOverflow) ||
     Number.parseInt(style.getPropertyValue('-webkit-line-clamp') || style.getPropertyValue('line-clamp'), 10) > 0;
 }
 
@@ -77,6 +81,7 @@ export function installOverflowTooltips(doc: Document): () => void {
   const candidates = new Set<HTMLElement>();
   const tabStops = new Set<HTMLElement>();
   const dirty = new Set<HTMLElement>();
+  const removed = new Set<Element>();
   let frame: number | null = null;
   let opening: number | undefined;
   let leaving: number | undefined;
@@ -106,13 +111,17 @@ export function installOverflowTooltips(doc: Document): () => void {
     const unique = [...new Set(values)];
     return unique.filter((value) => !unique.some((other) => other !== value && other.includes(value))).join('\n');
   }
-  function show(source: HTMLElement, keyboard: boolean) {
+  function show(source: HTMLElement, keyboard: boolean, immediate = false) {
     view.clearTimeout(leaving);
     leaving = undefined;
     const focusTarget = keyboard && doc.activeElement instanceof HTMLElement ? doc.activeElement : undefined;
     const ownerNow = focusTarget?.contains(source) ? focusTarget : keyboardOwner(source) ?? source;
     const whole = completeValue(source, focusTarget);
-    if (source === dismissed || (active?.source === source && textOverflows(source) && active.tooltip.textContent === whole && active.owner === ownerNow)) return;
+    if (source === dismissed) return;
+    if (active?.source === source && textOverflows(source) && active.tooltip.textContent === whole && active.owner === ownerNow) {
+      active.keyboard = keyboard;
+      return;
+    }
     hide();
     if (!textOverflows(source) || hasOwnTooltip(source, focusTarget)) return;
     // Browsers already show a complete native title on hover, but not on keyboard focus.
@@ -146,14 +155,15 @@ export function installOverflowTooltips(doc: Document): () => void {
       owner.setAttribute('aria-describedby', [...ids, tooltip.id].join(' '));
       active = { source, owner, tooltip, keyboard };
     };
-    if (keyboard) open();
+    if (keyboard || immediate) open();
     else opening = view.setTimeout(open, OVERFLOW_REST_MS);
   }
 
   function candidate(eventTarget: EventTarget | null, keyboard: boolean): HTMLElement | null {
     let hit = eventTarget instanceof Element ? eventTarget : null;
     while (hit !== null && !(hit instanceof HTMLElement)) hit = hit.parentElement;
-    if (!(hit instanceof HTMLElement) || hit.closest('[role="tooltip"],[data-tooltip-content]') !== null) return null;
+    if (!(hit instanceof HTMLElement) || hit.closest('[role="tooltip"],[data-tooltip-content]') !== null
+      || keyboard && hit.closest(`[${AUTOMATIC_FOCUS}]`) !== null) return null;
     const target = hit;
     for (let element: HTMLElement | null = target; element !== null && element !== doc.body; element = element.parentElement) {
       if (textOverflows(element) && !hasOwnTooltip(element, keyboard ? target : undefined)) return element;
@@ -205,9 +215,38 @@ export function installOverflowTooltips(doc: Document): () => void {
     // before that underlying layer handles the same key.
     if (top) { event.preventDefault(); event.stopPropagation(); }
   }
+  function anchorVisible(source: HTMLElement): boolean {
+    const box = source.getBoundingClientRect();
+    let left = Math.max(0, box.left), right = Math.min(doc.documentElement.clientWidth || view.innerWidth, box.right);
+    let top = Math.max(0, box.top), bottom = Math.min(doc.documentElement.clientHeight || view.innerHeight, box.bottom);
+    for (let parent = source.parentElement; parent !== null && right > left && bottom > top; parent = parent.parentElement) {
+      const style = view.getComputedStyle(parent);
+      const clipX = /^(auto|scroll|hidden|clip|overlay)$/.test(style.overflowX);
+      const clipY = /^(auto|scroll|hidden|clip|overlay)$/.test(style.overflowY);
+      if (!clipX && !clipY) continue;
+      const bounds = parent.getBoundingClientRect();
+      if (clipX) { left = Math.max(left, bounds.left); right = Math.min(right, bounds.right); }
+      if (clipY) { top = Math.max(top, bounds.top); bottom = Math.min(bottom, bounds.bottom); }
+    }
+    return right > left && bottom > top;
+  }
+  function layoutChanged() {
+    const reading = active, hovered = pointer;
+    let source: HTMLElement | null = null;
+    let keyboard = false;
+    if (reading?.keyboard === true && doc.activeElement === reading.owner && focus === reading.source) {
+      source = reading.source; keyboard = true;
+    } else if (hovered?.matches(':hover')) source = hovered;
+    // A pending hover already measures this same stationary pointer. Its callback reads
+    // fresh geometry, so layout updates must not restart its elapsed rest time.
+    if (source === null || !anchorVisible(source)) { hide(); return; }
+    if (reading === null && opening !== undefined && !keyboard) return;
+    hide();
+    show(source, keyboard, reading?.source === source);
+  }
   function scrolled(event: Event) {
     if (event.target instanceof Node && active?.tooltip.contains(event.target) === true) return;
-    hide();
+    layoutChanged();
   }
   function restoreTab(element: HTMLElement) {
     if (!tabStops.delete(element)) return;
@@ -226,12 +265,35 @@ export function installOverflowTooltips(doc: Document): () => void {
     for (const entry of entries) if (entry.target instanceof HTMLElement) measure(entry.target);
     if (active !== null && !textOverflows(active.source)) hide();
   });
+  function retire(element: HTMLElement) {
+    if (!candidates.delete(element)) return;
+    sizes?.unobserve(element);
+    restoreTab(element);
+  }
   function scan(root: HTMLElement) {
-    for (const element of [root, ...Array.from(root.querySelectorAll('*'))]) {
+    const elements = [root, ...Array.from(root.querySelectorAll('*'))];
+    // Text-free icons cannot supply a full-text hint. Find potential values without asking
+    // layout styles or walking each ancestor's complete text repeatedly.
+    const withText = new Set<Element>();
+    const mark = (start: Element | null) => {
+      for (let at = start; at !== null && !withText.has(at); at = at.parentElement) {
+        withText.add(at);
+        if (at === root) break;
+      }
+    };
+    const texts = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let text = texts.nextNode(); text !== null; text = texts.nextNode()) mark(text.parentElement);
+    for (const element of elements) {
+      // Native input previews and shadow hosts can render values without light-DOM text.
+      if (element instanceof HTMLElement && (element.shadowRoot !== null ||
+        element instanceof HTMLInputElement && element.type === 'text' && element.getAttribute('role') === 'combobox')) mark(element);
+    }
+    for (const element of elements) {
       if (!(element instanceof HTMLElement)) continue;
+      if (!withText.has(element) && !candidates.has(element) && !element.hasAttribute('data-overflow-text') && !element.hasAttribute('title')) continue;
       const wanted = clipsText(getComputedStyle(element)) || element.hasAttribute('data-overflow-text') || (element.hasAttribute('title') && renderedText(element).includes('…'));
       if (!wanted && !candidates.has(element)) continue;
-      if (element.closest(EXCLUDED) !== null || element.textContent.trim() === '') continue;
+      if (element.closest(EXCLUDED) !== null || renderedText(element).trim() === '') continue;
       if (wanted) {
         if (!candidates.has(element)) { candidates.add(element); sizes?.observe(element); }
         measure(element);
@@ -245,7 +307,23 @@ export function installOverflowTooltips(doc: Document): () => void {
       frame = null;
       const roots = [...dirty];
       dirty.clear();
-      for (const element of candidates) if (!element.isConnected) { candidates.delete(element); sizes?.unobserve(element); restoreTab(element); }
+      if (roots.includes(doc.body)) {
+        // Full document/layout scans also reconcile values moved outside the observed subtree.
+        for (const element of candidates) if (!element.isConnected) retire(element);
+        removed.clear();
+      } else if (removed.size > 0) {
+        const pending = [...removed];
+        const seen = new Set<Element>();
+        removed.clear();
+        for (let element = pending.pop(); element !== undefined; element = pending.pop()) {
+          if (seen.has(element)) continue;
+          seen.add(element);
+          // A node moved within the document keeps its observation and keyboard stop.
+          if (element.isConnected) continue;
+          if (element instanceof HTMLElement) retire(element);
+          for (const child of element.children) pending.push(child);
+        }
+      }
       for (const root of roots) if (root.isConnected && !roots.some((other) => other !== root && other.contains(root))) scan(root);
       if (active !== null && (!active.source.isConnected || !textOverflows(active.source))) hide();
       else if (active !== null) show(active.source, active.keyboard);
@@ -257,10 +335,11 @@ export function installOverflowTooltips(doc: Document): () => void {
       if (root?.closest('[role="tooltip"],[data-tooltip-content]') !== null) continue;
       // The fallback's own portal must not trigger a scan of the application.
       if (record.type === 'childList' && [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)].every((node) => node instanceof HTMLElement && node.hasAttribute('data-overflow-tooltip'))) continue;
+      if (record.type === 'childList') for (const node of record.removedNodes) if (node instanceof Element) removed.add(node);
       schedule(root);
     }
   });
-  function resized() { hide(); schedule(doc.body); }
+  function resized() { layoutChanged(); schedule(doc.body); }
   const forgetCovered = onPromptOpened(() => { pointer = null; focus = null; hide(); });
   const fontOwner: { fonts?: FontFaceSet } = doc;
   const fonts = fontOwner.fonts;

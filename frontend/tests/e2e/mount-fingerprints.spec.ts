@@ -1,5 +1,5 @@
 /** A requested mount comparison keeps its server time, never scans on ordinary plans, and fits the existing row. */
-import { expect, test } from '@playwright/test';
+import { expect, type Locator, test } from '@playwright/test';
 import type { EnvironmentMovePlan, ForkPlan, PlanMount } from '../../src/generated/api-types';
 import { id as fixtureId, KIND, RUNS_ON } from '../doubles/fixtures.ts';
 import { BUILD_HOST, change, conversation, openHistory, shot, wizard } from './change-support.ts';
@@ -25,7 +25,7 @@ test('a delayed check cannot recreate a plan after its destination changes', asy
   await signIn(page);
   await page.goto(`/resources/environments/${RUNS_ON.sandbox}`);
   await page.getByRole('button', { name: 'Actions for Sandbox' }).click();
-  await page.getByRole('menuitem', { name: 'Move…', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Move to another machine…', exact: true }).click();
   const dialog = wizard(page, 'Move Sandbox');
   const row = dialog.getByRole('row').filter({ has: page.locator('[data-mount-fate="datasets"]') });
   await expect(row.getByRole('button', { name: 'Check', exact: true })).toBeEnabled();
@@ -41,7 +41,7 @@ test('a delayed check cannot recreate a plan after its destination changes', asy
     await dialog.getByRole('combobox', { name: 'Place', exact: true }).click();
     await page.getByRole('option', { name: 'build-host', exact: true }).click();
     await destinationRead;
-    await expect(dialog.getByRole('region', { name: 'Changes', exact: true })).toContainText('/mnt/checked-destination');
+    await expect(dialog.getByRole('region', { name: 'Stays as it is', exact: true })).toContainText('/mnt/checked-destination');
   } finally { release(); }
   await expect(row.getByRole('button', { name: 'Check', exact: true })).toBeEnabled();
   await expect(row.getByRole('status')).toHaveCount(0);
@@ -89,7 +89,7 @@ for (const width of [1280, 390]) for (const kind of ['move', 'fork'] as const) {
       await signIn(page);
       await page.goto(`/resources/environments/${RUNS_ON.sandbox}`);
       await page.getByRole('button', { name: 'Actions for Sandbox' }).click();
-      await page.getByRole('menuitem', { name: 'Move…', exact: true }).click();
+      await page.getByRole('menuitem', { name: 'Move to another machine…', exact: true }).click();
     } else {
       await openHistory(page);
       await conversation(page).getByText('The handler reads').first().click({ button: 'right' });
@@ -151,6 +151,74 @@ for (const width of [1280, 390]) for (const kind of ['move', 'fork'] as const) {
   });
 }
 
+/**
+ * Leaves the button as a person leaves it who has scrolled the dialog's body until what they are asking stands at its foot:
+ * its lower edge a few pixels above the lower edge of the part that scrolls.
+ */
+async function standAtFoot(button: Locator): Promise<void> {
+  const gap = await button.evaluate((element) => {
+    let scroller: HTMLElement | null = element.parentElement;
+    while (scroller !== null && !(scroller.scrollHeight > scroller.clientHeight + 1 && ['auto', 'scroll'].includes(getComputedStyle(scroller).overflowY))) scroller = scroller.parentElement;
+    if (scroller === null) return null;
+    scroller.scrollTop += element.getBoundingClientRect().bottom - scroller.getBoundingClientRect().bottom + 4;
+    return scroller.getBoundingClientRect().bottom - element.getBoundingClientRect().bottom;
+  });
+  expect(gap, 'the dialog body scrolls, and its Check stands at its foot').toBeGreaterThanOrEqual(0);
+  expect(gap).toBeLessThanOrEqual(12);
+}
+
+for (const width of [1280, 390]) for (const kind of ['move', 'fork'] as const) {
+  test(`${kind} brings the outcome of a check into view when the Check stands at the foot of the dialog (${width}px)`, async ({ page }) => {
+    await scenario();
+    // Low enough that the body of the dialog scrolls at both widths.
+    await page.setViewportSize({ width, height: 520 });
+    await change.host({ id: BUILD_HOST, schedulable: true });
+    let fail = false;
+    await page.route(kind === 'move' ? '**/moves/preflight' : '**/forks/preflight', async (route) => {
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      if (body.check_fingerprints === true && fail) {
+        await route.fulfill({ status: 409, json: { type: 'orch:error:plan.blocked', code: 'plan.blocked', title: 'Blocked', status: 409, detail: 'The check failed', request_id: 'content-check', blockers: [{ code: 'mount_fingerprint_unavailable', message: 'The data host cannot read this location' }] } });
+        return;
+      }
+      const response = await route.fetch();
+      const plan = await response.json() as ForkPlan | EnvironmentMovePlan;
+      plan.mounts = [{
+        mount: { id: 'synced-data', name: 'datasets', address: 'team.datasets' }, action: 'keep', path: '/mnt/datasets', mode: 'read_only',
+        detached_because: null, fate: 'as_is', default_fate: 'as_is', fates: kind === 'move' ? ['detach', 'as_is', 'copy'] : ['as_is'], copy_unavailable: kind === 'move' ? null : 'unchanged', copy: null,
+        data_kind: 'own', fingerprints_available: true, fingerprints: body.check_fingerprints === true ? { checked_at: new Date().toISOString(), matches: true } : null,
+      }];
+      await route.fulfill({ response, json: plan });
+    });
+    if (kind === 'move') {
+      await signIn(page);
+      await page.goto(`/resources/environments/${RUNS_ON.sandbox}`);
+      await page.getByRole('button', { name: 'Actions for Sandbox' }).click();
+      await page.getByRole('menuitem', { name: 'Move to another machine…', exact: true }).click();
+    } else {
+      await openHistory(page);
+      await conversation(page).getByText('The handler reads').first().click({ button: 'right' });
+      await page.getByRole('menuitem', { name: 'Fork from here…' }).click();
+    }
+    const dialog = wizard(page, kind === 'move' ? 'Move Sandbox' : 'Fork “Main thread”');
+    const row = dialog.getByRole('row').filter({ has: page.locator('[data-mount-fate="datasets"]') });
+    const check = row.getByRole('button', { name: 'Check', exact: true });
+    await expect(check).toBeEnabled();
+    // The result is a line below the button, and it stands in view whole.
+    await standAtFoot(check);
+    await check.click();
+    await expect(row.getByRole('status')).toContainText('Same content · checked');
+    await expect(row.getByRole('status')).toBeInViewport({ ratio: 1 });
+    await expect(check).toBeInViewport({ ratio: 1 });
+    // The failure is the taller one, with its own Check at its foot.
+    await standAtFoot(check);
+    fail = true;
+    await check.click();
+    await expect(row.getByRole('alert')).toContainText('Could not check · The data host cannot read this location');
+    await expect(row.getByRole('alert')).toBeInViewport({ ratio: 1 });
+    await expect(check).toBeInViewport({ ratio: 1 });
+  });
+}
+
 for (const width of [1280, 390]) for (const kind of ['move', 'fork'] as const) {
   test(`${kind} keeps live copy counts and a cancellable content check in its mount rows (${width}px)`, async ({ page }) => {
     await scenario();
@@ -197,7 +265,7 @@ for (const width of [1280, 390]) for (const kind of ['move', 'fork'] as const) {
       await signIn(page);
       await page.goto(`/resources/environments/${RUNS_ON.sandbox}`);
       await page.getByRole('button', { name: 'Actions for Sandbox' }).click();
-      await page.getByRole('menuitem', { name: 'Move…', exact: true }).click();
+      await page.getByRole('menuitem', { name: 'Move to another machine…', exact: true }).click();
     } else {
       await openHistory(page);
       await conversation(page).getByText('The handler reads').first().click({ button: 'right' });

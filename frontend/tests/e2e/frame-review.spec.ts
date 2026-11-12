@@ -1,6 +1,6 @@
 /** The frame says each name once, exposes parents and actions, and keeps its keyboard paths at phone and desktop widths. */
 import { expect, type Locator, type Page, test } from '@playwright/test';
-import { ACME, changeTree, scenario, signIn } from './support.ts';
+import { ACME, changeTree, scenario, signIn, screenAddress } from './support.ts';
 import { showWorkbenchView } from './workbench-support.ts';
 import { RUNS_ON } from '../doubles/fixtures.ts';
 
@@ -57,13 +57,14 @@ for (const width of [400, 1440]) for (const locale of ['en', 'zh-CN'] as const) 
       await page.goto('/settings/profile');
       await page.getByRole('button', { name: words.navigation, exact: true }).click();
       await page.getByRole('dialog', { name: words.navigation, exact: true }).getByRole('link', { name: words.home, exact: true }).click();
-      await expect(page).toHaveURL(/\/org\/acme\/?$/);
+      await expect(page).toHaveURL(screenAddress('/org/acme'));
     }
 
     await page.goto(`/topic/${ACME.fixLogin}?tab=documents`);
     await expect(page.getByRole('tab', { name: words.documents, exact: true })).toHaveCount(1);
-    // Kept sections retain their compact header, while their body is closed beside the full page.
-    if (width === 1440) await expect(page.locator('[data-workbench-bar="right"] [data-section-view="documents"]').getByRole('button', { name: words.documents, exact: true })).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.getByRole('tab', { name: words.documents, exact: true })).toHaveAttribute('aria-selected', 'true');
+    // A kept header may remain beside the full page; its duplicate body is closed.
+    if (width === 1440) await expect(page.locator('[data-workbench-bar="right"] [data-section-view="documents"] [id^="section-body-"]')).toBeHidden();
 
     await changeTree([{ id: ACME.fixLogin, name: 'Payment routing and sign-in' }]);
     await page.goto(`/thread/${ACME.mainThread}`);
@@ -83,9 +84,13 @@ for (const width of [400, 1440]) for (const locale of ['en', 'zh-CN'] as const) 
       for (const link of await selected.locator('a[aria-current="page"]').all()) {
         expect(await link.evaluate((element) => getComputedStyle(element).boxShadow)).toBe('none');
       }
-      // Moving the divider left gives the right bar more room; its other end collapses that bar.
-      await page.getByRole('separator', { name: /^(Width of the right bar|右栏的宽度)$/ }).press('Home');
-      await expect(page.locator('[data-workbench-bar="right"]').getByRole('tab', { name: words.team, exact: true })).toHaveAttribute('aria-selected', 'true');
+      // An arrow resizes the bar; Home now collapses it at its minimum.
+      const right = page.locator('[data-workbench-bar="right"]');
+      const before = await right.boundingBox();
+      expect(before).not.toBeNull();
+      await page.getByRole('separator', { name: /^(Width of the right bar|右栏的宽度)$/ }).press('ArrowLeft');
+      await expect.poll(async () => (await right.boundingBox())?.width ?? 0).toBeGreaterThan(before!.width);
+      await expect(right.getByRole('tab', { name: words.team, exact: true })).toHaveAttribute('aria-selected', 'true');
     }
     await parent.click();
     await expect(page).toHaveURL(new RegExp(`/topic/${ACME.fixLogin}`));
@@ -145,6 +150,15 @@ for (const width of [400, 1100, 1440]) {
     }));
     await page.setViewportSize({ width, height: 1000 });
     await signIn(page);
+    if (width === 400) {
+      // Main tabs persist across navigation. Close the landing org so this
+      // phone case measures one conversation rather than its retained org page.
+      const landing = page.getByRole('tab', { name: 'Acme', exact: true });
+      await landing.click({ button: 'right' });
+      await page.getByRole('menuitem', { name: 'Close', exact: true }).click();
+      await expect(landing).toHaveCount(0);
+      await page.waitForLoadState('networkidle');
+    }
     frames.length = 0;
     await page.goto(`/thread/${ACME.mainThread}`);
     await expect(page.getByRole('heading', { name: 'Main thread', exact: true })).toBeVisible();
@@ -169,10 +183,12 @@ for (const width of [400, 1100, 1440]) {
     const subscription = frames.findLast((frame) => frame.op === 'sub' && frame.feed?.endsWith(':procs') === true);
     expect(subscription?.id).toBeDefined();
     const right = page.locator('[data-workbench-bar="right"]');
-    const section = right.getByRole('button', { name: 'Processes', exact: true });
+    const section = right.getByRole('button', { name: 'Processes', exact: true }).and(right.locator('[aria-controls^="section-body-"]'));
     // A single view closes with its container; kept sections retain their own collapse control.
     if (await section.isVisible()) await section.click();
     else await right.getByRole('button', { name: /^(Close|Hide the right bar)$/, exact: true }).click();
+    // Leave the edge so the intentionally hover-revealed floating bar closes too.
+    await page.mouse.move(0, 0);
     await expect(page.getByTestId('processes-panel')).toBeHidden();
     await expect.poll(() => frames.some((frame) => frame.op === 'unsub' && frame.id === subscription?.id)).toBe(true);
     if (width === 400) {

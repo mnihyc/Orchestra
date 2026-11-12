@@ -2,7 +2,7 @@
  *
  * Loaded on first use (`index.ts`), as a part of the build of its own.
  */
-import { makeGuide } from '@/help/guide';
+import { makeGuide } from './guide';
 
 const sources = import.meta.glob<string>('../../../docs/user/*.md', { query: '?raw', import: 'default', eager: true });
 const chinese = import.meta.glob<string>('../../../docs/user/zh-CN/*.md', { query: '?raw', import: 'default', eager: true });

@@ -258,6 +258,9 @@ export function applyRows(state: EditorState, rows: readonly DocumentBlock[], ct
     if (held !== undefined && (held.parent_id !== row.parent_id || held.position !== row.position)) {
       const again = findContainer(tr.doc, row.id);
       if (again === null) continue;
+      // A local move may already show the confirmed order. Removing and reinserting it would remap its caret.
+      const wanted = slotFor(tr, ctx, row.id, row.parent_id);
+      if (wanted !== null && !wanted.wrap && wanted.pos === again.pos && (parentIdOf(tr.doc, again) ?? null) === row.parent_id) continue;
       const node = again.node;
       takeAway(tr, again, false);
       const slot = slotFor(tr, ctx, row.id, row.parent_id);

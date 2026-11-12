@@ -18,6 +18,7 @@ run, with the commands that were typed; the scripts that run them again are in
 - [Agent programs](agent-programs.md): manifests, where builds come from and how each is verified and checked, and adding a program
 - [Programs of the Agent Client Protocol](acp-programs.md): DeepSeek Harness, how a session of such a program runs, its privacy rules, and adding another
 - [Upgrades and recovery](upgrades.md): releases, agent program versions, going back, and finishing what an interruption left
+- [Publishing releases](releases.md): CI, verified assets, repackaging and approved images
 - [Storage cleanup](storage-cleanup.md): cache retention, restore dependencies, unused releases and dumps
 - [Incident diagnosis](incidents.md): readiness, link/provider failures, host recovery and scoped cleanup
 - [Model call recovery](model-call-recovery.md): inherited rules, candidate eligibility, repeat guards, deadlines and authority

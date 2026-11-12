@@ -1,15 +1,16 @@
-/** What the API says of a program's name beside its kind, as the registry of the shipped programs gives it: the name in English and in the other languages. A kind nobody described is called by its kind. */
+/** The names declared by shipped and registered fixture programs. A kind nobody described is called by its kind. */
 import type { AgentDescriptor, HarnessKindName } from '../../src/generated/api-types.ts';
 
-const SHIPPED: Record<string, { name: string; names: Record<string, string> }> = {
+const DECLARED: Record<string, { name: string; names: Record<string, string> }> = {
   codex: { name: 'Codex', names: { 'zh-CN': 'Codex' } },
   'claude-code': { name: 'Claude Code', names: { 'zh-CN': 'Claude Code' } },
   fake: { name: 'Example agent', names: { 'zh-CN': '示例代理' } },
+  'acme-agent': { name: 'Acme agent', names: {} },
 };
 
 /** The named kind a payload carries beside `harness_kind`. */
 export function harnessName(kind: string): HarnessKindName {
-  const known = SHIPPED[kind];
+  const known = DECLARED[kind];
   return { kind, name: known?.name ?? kind, names: known?.names ?? {} };
 }
 

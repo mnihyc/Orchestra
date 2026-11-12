@@ -43,6 +43,7 @@ orch-pki.workspace = true
 orch-plugin.workspace = true
 orch-plugin-contract.workspace = true
 orch-provider-contract.workspace = true
+orch-provider-builtins.workspace = true
 orch-realtime-contract.workspace = true
 orch-types.workspace = true
 orch-worker-core.workspace = true
@@ -63,6 +64,7 @@ webpki-roots.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 orch-access-contract.workspace = true
+orch-blob-contract.workspace = true
 orch-engine.workspace = true
 orch-link.workspace = true
 orch-settings.workspace = true
