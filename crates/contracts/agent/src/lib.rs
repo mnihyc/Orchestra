@@ -37,11 +37,15 @@ pub mod history;
 pub mod login;
 pub mod loopback;
 pub mod native;
+pub mod observations;
 pub mod parameters;
+pub mod profile_parameters;
+pub mod read_tools;
 pub mod requests;
 pub mod review;
 pub mod session;
 pub mod tool_answers;
+pub mod turn_end_delays;
 
 /// Registers the schemas that the API document refers to by name and the API's own contract cannot supply, since
 /// this contract is above it: the descriptor of an agent program. The generators of the document call it with

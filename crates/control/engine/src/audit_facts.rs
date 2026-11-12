@@ -1,4 +1,4 @@
-//! A person's committed thread operations leave one factual audit row.
+//! Committed thread operations and native runtime changes leave factual audit rows.
 
 use crate::error::EngineError;
 use chrono::{DateTime, Utc};
@@ -57,5 +57,39 @@ pub(crate) async fn system(
     entry.node_id = Some(thread);
     entry.details = details;
     audit::append(conn, &entry, &Origin::default(), now).await?;
+    Ok(())
+}
+
+/// A process-scoped native status has no thread to borrow; retain it under its actual provider runtime.
+pub(crate) async fn harness_status(
+    unit: &mut crate::unit::Unit<'_>,
+    provider: Id,
+    agent: Id,
+    machine: Id,
+    before: Option<&str>,
+    state: &str,
+    detail_changed: bool,
+) -> Result<(), EngineError> {
+    let program: Option<String> = sqlx::query_scalar(
+        "SELECT COALESCE(NULLIF(descriptor->>'name',''),harness_kind) FROM agents WHERE id=$1",
+    )
+    .bind(agent)
+    .fetch_optional(&mut *unit.conn)
+    .await
+    .map_err(orch_db::DbError::from)?;
+    let Some(program) = program else {
+        return Ok(());
+    };
+    let action = orch_db::audit::action!(orch_access_contract::audit::AuditAction::HarnessChanged);
+    let mut entry = Entry::new(
+        Actor::System,
+        action.as_str(),
+        "provider",
+        Some(provider),
+        action.as_str(),
+    );
+    entry.details = serde_json::json!({"program":program,"change":"program_status","thread_id":null,"turn_id":null,"provider_id":provider,"agent_id":agent,"machine_id":machine,"before_status":before,"state":state,"detail_changed":detail_changed});
+    let now = unit.now();
+    audit::append(unit.conn, &entry, &Origin::default(), now).await?;
     Ok(())
 }

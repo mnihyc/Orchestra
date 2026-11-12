@@ -41,9 +41,9 @@ export interface MachinePlugin {
 }
 
 export interface MachineLink {
-  upBps: number;
-  downBps: number;
-  roundTripMs: number;
+  upBps: number | null;
+  downBps: number | null;
+  roundTripMs: number | null;
 }
 
 export interface MachineFactsView {
@@ -53,6 +53,9 @@ export interface MachineFactsView {
   cpus: number | null;
   memoryBytes: number | null;
   harnesses: FoundHarness[];
+  /** Null means this connector has not reported discovery; an empty list is a report. */
+  discoveredHarnesses: FoundHarness[] | null;
+  searchedHarnessKinds: string[] | null;
   adapters: MachineAdapter[];
   plugins: MachinePlugin[];
   link: MachineLink | null;
@@ -65,6 +68,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 const text = (value: unknown): string | null => (typeof value === 'string' ? value : null);
 const count = (value: unknown): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+
+function harness(entry: Record<string, unknown>): FoundHarness | null {
+  const kind = text(entry.kind);
+  return kind === null ? null : { kind, path: text(entry.path) ?? '', version: text(entry.version) ?? '', daemon: entry.daemon === true };
+}
 
 function list<Item>(value: unknown, read: (entry: Record<string, unknown>) => Item | null): Item[] {
   if (!Array.isArray(value)) return [];
@@ -89,10 +97,9 @@ export function readMachineFacts(facts: unknown): MachineFactsView {
     osVersion: text(source.os_version),
     cpus: count(source.cpus),
     memoryBytes: count(source.memory_bytes),
-    harnesses: list(source.harnesses, (entry) => {
-      const kind = text(entry.kind);
-      return kind === null ? null : { kind, path: text(entry.path) ?? '', version: text(entry.version) ?? '', daemon: entry.daemon === true };
-    }),
+    harnesses: list(source.harnesses, harness),
+    discoveredHarnesses: Array.isArray(source.discovered_harnesses) ? list(source.discovered_harnesses, harness) : null,
+    searchedHarnessKinds: Array.isArray(source.searched_harness_kinds) ? source.searched_harness_kinds.filter((kind): kind is string => typeof kind === 'string') : null,
     adapters: list(source.adapters, (entry) => {
       const kind = text(entry.kind);
       return kind === null ? null : { kind, builtin: entry.builtin === true,needsBinary:entry.needs_binary!==false,title:reportedAdapterName(source,kind) ?? undefined };
@@ -102,10 +109,20 @@ export function readMachineFacts(facts: unknown): MachineFactsView {
       const name = text(entry.name);
       return kind === null || name === null ? null : { kind, name, version: text(entry.version) ?? '', state: text(entry.state) ?? '' };
     }),
-    link: up === null || down === null || trip === null ? null : { upBps: up, downBps: down, roundTripMs: trip },
+    link: up === null && down === null && trip === null ? null : { upBps: up, downBps: down, roundTripMs: trip },
     clockOffsetMs: count(source.clock_offset_ms),
     policy: isRecord(source.policy) ? source.policy : null,
   };
+}
+
+/** The reported local policy has the same explicit-kept veto and agent-section handover as the connector. */
+export function harnessPolicyDelegated(facts: MachineFactsView): boolean {
+  const policy = facts.policy;
+  if (policy === null) return false;
+  const local = policy['policy.local'];
+  if (isRecord(local) && Object.hasOwn(local, 'agent.harnesses')) return false;
+  const delegated = policy['policy.delegated'];
+  return Array.isArray(delegated) && ['*', 'agent.*', 'agent.harnesses'].some((key) => delegated.includes(key));
 }
 
 /** A rate in bits per second written as people read it: "80 bit/s", "12 kbit/s", "0.7 Mbit/s". */
@@ -119,6 +136,20 @@ export function formatRate(bitsPerSecond: number, locale: string): string {
   }
   const digits = unit === 0 || value >= 10 ? 0 : 1;
   return `${formatNumber(value, locale, { maximumFractionDigits: digits })} ${units[unit] ?? 'bit/s'}`;
+}
+
+/** Missing observations stay unknown; a measured zero remains a real value. */
+export function machineLinkWords(link: MachineLink | null, t: TFunction, locale: string): string {
+  const missing = '–';
+  if (link === null) return missing;
+  if (link.roundTripMs !== null && link.upBps !== null && link.downBps !== null) return t('machines.overview.linkValue', {
+    trip: formatNumber(link.roundTripMs, locale), up: formatRate(link.upBps, locale), down: formatRate(link.downBps, locale),
+  });
+  return t('machines.overview.linkPartial', {
+    trip: link.roundTripMs === null ? missing : t('machines.overview.linkTrip', { value: formatNumber(link.roundTripMs, locale) }),
+    up: link.upBps === null ? missing : formatRate(link.upBps, locale),
+    down: link.downBps === null ? missing : formatRate(link.downBps, locale),
+  });
 }
 
 /** The harnesses a machine can run profiles for: those found there whose kind its connector has an adapter for. */

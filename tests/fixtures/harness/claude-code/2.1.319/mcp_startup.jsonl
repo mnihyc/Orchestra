@@ -1,0 +1,2 @@
+{"direction":"from_harness","frame":{"type":"system","subtype":"init","model":"mock-large","mcp_servers":[{"name":"fixture","status":"pending"}]}}
+{"direction":"from_harness","frame":{"type":"system","subtype":"mcp_status","uuid":"mcp-ready","name":"fixture","status":"connected"}}

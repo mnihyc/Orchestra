@@ -127,7 +127,7 @@
 //! Each request to the model interface is recorded when it arrives and completed as it ends:
 //! [`RecordedRequest`] has its method, path, query, headers, body, format, model, whether it streams, the check
 //! of its credential, which script answered (`directive`, `queue`, `default`, `echo`, and its round), the status,
-//! and how the answer ended (`pending` while it is sent, then `completed`, `error`, `cut`, `truncated` or
+//! the use the answer states (`usage`, [`Answered`], where it was answered with a response), and how the answer ended (`pending` while it is sent, then `completed`, `error`, `cut`, `truncated` or
 //! `client_gone`). Header names are lower case. A header is secret when its name
 //! has `auth`, `key`, `token`, `secret`, `password`, `cookie` or `credential` in it, or when the server was told
 //! so; a secret, and the credential wherever it occurs, is written as `[secret:` and eight hexadecimal digits of
@@ -165,7 +165,8 @@ use serde::{Deserialize, Serialize};
 
 pub use client::{ClientError, ClientReply, ClientRequest, ModelClient, OpenReply};
 pub use record::{
-    CredentialCheck, Outcome, Presentation, RecordedRequest, ScriptSource, Verdict, fingerprint,
+    Answered, CredentialCheck, Outcome, Presentation, RecordedRequest, ScriptSource, Verdict,
+    fingerprint,
 };
 pub use request::Format;
 pub use script::{
@@ -440,6 +441,18 @@ impl MockLlm {
         control::enqueue(&self.shared, script, filter, times).map(|_| ())
     }
 
+    /// Queue fixture responses selected by actual request structure, not model identity alone.
+    pub fn queue_matching(
+        &self,
+        script: &str,
+        filter: &QueueFilter,
+        times: u64,
+        matches: impl Fn(&serde_json::Value) -> bool + Send + Sync + 'static,
+    ) -> Result<(), ScriptError> {
+        control::enqueue_matching(&self.shared, script, filter, times, Some(Arc::new(matches)))
+            .map(|_| ())
+    }
+
     /// Sets the script that answers any request nothing else answers.
     pub fn set_default(&self, script: &str) -> Result<(), ScriptError> {
         control::set_default(&self.shared, Some(script))
@@ -481,5 +494,42 @@ impl MockLlm {
 impl Drop for MockLlm {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+#[cfg(test)]
+mod structural_queue_tests {
+    use super::*;
+    #[tokio::test]
+    async fn same_model_main_request_cannot_consume_a_classifier_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let model = MockLlm::start(MockConfig::default()).await?;
+        model.queue_matching(
+            "say <severity>0</severity>",
+            &QueueFilter::default(),
+            1,
+            |body| {
+                body.pointer("/probe_role")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("classifier")
+            },
+        )?;
+        model.set_default("error permission unmatched-request")?;
+        let client = reqwest::Client::new();
+        let request = |role: &str| {
+            serde_json::json!({"model":"same-model","max_tokens":64,"probe_role":role,
+            "messages":[{"role":"user","content":"bounded fixture request"}]})
+        };
+        let url = format!("http://{}/v1/messages", model.addr());
+        let main = client.post(&url).json(&request("main")).send().await?;
+        assert_eq!(main.status().as_u16(), 403);
+        let classifier = client
+            .post(&url)
+            .json(&request("classifier"))
+            .send()
+            .await?;
+        assert_eq!(classifier.status().as_u16(), 200);
+        assert!(classifier.text().await?.contains("<severity>0</severity>"));
+        Ok(())
     }
 }

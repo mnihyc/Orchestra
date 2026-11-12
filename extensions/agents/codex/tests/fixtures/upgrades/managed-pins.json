@@ -1,0 +1,152 @@
+[
+  {
+    "name": "features.daemon_auto_start",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.wake_on_agent_messages",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.multi_agent_v2",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.goals",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.hooks",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.codex_hooks",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.shell_snapshot",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.skill_mcp_dependency_install",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.memories",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.memory_tool",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.external_agent_memory_import",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.async_compaction",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.sleep_tool",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.send_async_message",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.send_message_to_user_async",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.apps",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.plugins",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.plugin_hooks",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.plugin_discovery_prefetch",
+    "value": false,
+    "since": "0.167.0"
+  },
+  {
+    "name": "features.recommended_plugins",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.remote_plugin",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.remote_control",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.in_app_updates",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "features.tool_suggest",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "memories.generate_memories",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "memories.use_memories",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "memories.dual_write",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "check_for_update_on_startup",
+    "value": false,
+    "since": "0.165.0"
+  },
+  {
+    "name": "model_post_turn_compact_threshold_percent",
+    "value": 0,
+    "since": "0.165.0"
+  },
+  {
+    "name": "notify",
+    "value": [],
+    "since": "0.165.0"
+  }
+]

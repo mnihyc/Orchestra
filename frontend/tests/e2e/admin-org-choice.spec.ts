@@ -72,7 +72,9 @@ async function edit(page: Page, provider: IdentityProvider) {
   return { dialog, field: dialog.getByRole('combobox', { name: words.admin.idp.defaultOrg, exact: true }), area: dialog.locator('[data-admin-org-choice]') };
 }
 function answer(page: Page, path: string, method = 'GET', match: (query: URLSearchParams) => boolean = () => true) {
-  return page.waitForResponse((response) => { const url = new URL(response.url()); return response.request().method() === method && url.pathname === path && match(url.searchParams); });
+  // The body is read as the answer arrives: the browser no longer holds it once the page has moved on or the buffer is full.
+  return page.waitForResponse((response) => { const url = new URL(response.url()); return response.request().method() === method && url.pathname === path && match(url.searchParams); })
+    .then(async (response) => { const body: unknown = await response.json().catch(() => null); return { status: () => response.status(), json: () => Promise.resolve(body) }; });
 }
 async function capture(page: Page, info: TestInfo, name: string, input: Locator) {
   await input.scrollIntoViewIfNeeded(); await page.mouse.move(0, 0);

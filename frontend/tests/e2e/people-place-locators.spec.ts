@@ -288,7 +288,7 @@ for (const mode of modes) {
     const words = mode.locale === 'en' ? english : chinese, observed = observe(page);
     const releases: (() => void)[] = [];
     try {
-      await page.locator('[data-thread-header]').getByRole('button', { name: words.actions.share.label, exact: true }).click();
+      await page.locator('[data-thread-header]').getByRole('button', { name: words.thread.header.shareThread, exact: true }).click();
       // Share uses the addressed view's current authorized name. Its parent
       // qualifier can arrive after the native conversation becomes usable.
       const dialog = page.getByRole('dialog', { name: words.access.title.replace('{{name}}', 'Main thread'), exact: true })

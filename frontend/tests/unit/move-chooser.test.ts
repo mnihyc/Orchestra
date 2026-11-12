@@ -1,3 +1,4 @@
+import { treeNode } from '../doubles/tree-node';
 /** The places a thing can be moved to, as the tree they lie in: each choice after the places above it that are no choice, each of those named once. */
 import { describe, expect, it } from 'vitest';
 
@@ -5,23 +6,7 @@ import type { PlaceRef } from '@/features/navigation/places';
 import { chooserRows, destinationsFor } from '@/features/org/Move';
 import type { TreeNode } from '@/generated/api-types';
 
-const node = (id: string, kind: TreeNode['kind'], parent: string | null): TreeNode => ({
-  participating: true,
-  id,
-  address: null,
-  kind,
-  name: id,
-  parent_id: parent,
-  color: null,
-  docs: 0,
-  archived: false,
-  deleted: false,
-  restricted: false,
-  chat: { id: `chat-${id}`, seq: 0 },
-  thread: null,
-  topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
-  tree_seq: 1,
-});
+const node = (id: string, kind: TreeNode['kind'], parent: string | null): TreeNode => treeNode({ id, kind, parent_id: parent, tree_seq: 1, topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null });
 
 const nodes = new Map(
   [node('acme', 'org', null), node('research', 'org', 'acme'), node('web', 'project', 'research'), node('fix', 'topic', 'web'), node('infra', 'project', 'acme')].map((entry) => [entry.id, entry]),

@@ -692,6 +692,17 @@ pub mod access {
         Ok(())
     }
 
+    /// The same old group-join requests expired by the ordinary join-request producer.
+    pub async fn expired_join_requests(
+        conn: &mut Conn,
+        chat: Id,
+        requester: Id,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Id>, DbError> {
+        Ok(sqlx::query_scalar("SELECT id FROM approvals WHERE kind='access' AND object_kind='chat' AND object_id=$1 AND requester_user_id=$2 AND state='pending' AND expires_at<=$3")
+            .bind(chat).bind(requester).bind(now).fetch_all(conn).await?)
+    }
+
     /// Open requests on one known thing, before checking the current reader's deciding authority.
     pub async fn pending_on(
         conn: &mut Conn,

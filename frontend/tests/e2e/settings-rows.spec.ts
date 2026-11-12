@@ -3,7 +3,7 @@ import { expect, type Locator, type Page, test } from '@playwright/test';
 import type { NotificationPrefs, ResolvedSetting, SettingDef, SettingReach } from '../../src/generated/api-types.ts';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chineseWords from '../../src/i18n/zh-CN.json' with { type: 'json' };
-import { ACME, scenario, signIn } from './support.ts';
+import { ACME, scenario, signIn, supplyDefaults } from './support.ts';
 
 const definition = (index: number): SettingDef => ({ key: `review.feature${index}`, title: `Feature ${index}`, description: `Keep feature ${index} available.`,
   class: 'parameter', scopes: ['org'], group: index % 2 === 0 ? 'agent' : 'confinement', merge: 'replace', schema: { type: 'boolean' },
@@ -113,7 +113,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     });
     await page.goto('/settings/notifications');
     const content = page.locator('[data-settings-content]');
-    await expect(content.locator(':scope > section')).toHaveCount(5);
+    await expect(content.locator(':scope > section')).toHaveCount(6);
     for (const width of [1440, 400]) {
       await page.setViewportSize({ width, height: 900 });
       const geometry = await content.evaluate((element) => {
@@ -125,7 +125,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       expect(geometry.display).toBe('flex'); expect(geometry.direction).toBe('column');
       // Step six is 1.5rem. Compare actual geometry, allowing one CSS pixel for box rounding.
       expect(geometry.gap).toBeCloseTo(geometry.rootFont * 1.5, 1);
-      expect(geometry.distances).toHaveLength(4);
+      expect(geometry.distances).toHaveLength(5);
       for (const distance of geometry.distances) expect(distance).toBeGreaterThanOrEqual(geometry.gap - 1);
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     }
@@ -152,6 +152,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const writes: { method: string; body: unknown; guard: string | null }[] = [];
     await page.route('**/api/v1/settings/registry', (route) => route.fulfill({ json: definitions }));
     await page.route(`**/api/v1/nodes/${ACME.research}/settings`, (route) => { listReads += 1; return route.fulfill({ json: [...readOnly, current] }); });
+    await supplyDefaults(page, ACME.research, { registry: () => definitions, settings: () => { listReads += 1; return [...readOnly, current]; } });
     const settingPath = `/api/v1/nodes/${ACME.research}/settings/${delay.key}`;
     // Match the native child endpoint as a path; a single glob star does not cross its slash.
     await page.route((url) => url.pathname === settingPath || url.pathname === `${settingPath}/reach`, async (route) => {
@@ -171,7 +172,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       } else throw new Error('The setting write has no numeric value');
       await route.fulfill({ json: current });
     });
-    await page.goto('/org/acme.research/settings/policies');
+    await page.goto('/org/acme.research/settings/defaults');
     const rows = page.locator('[data-setting-row]');
     await expect(rows).toHaveCount(146);
     await expect(page.locator('[data-read-only-settings]')).toHaveCount(1);
@@ -183,13 +184,14 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     // Extension definitions keep their words; the known approval key uses its existing locale catalogue.
     const expectedDescriptions = definitions.filter((def) => def.key !== delay.key).map((def) => ({ key: def.key,
       text: def.key === modes.key ? words.settingRegistry.approval.allowed_modes.description : def.description,
-      fullText: def.key === modes.key ? words.settingRegistry.approval.allowed_modes.description : def.description,
     })).sort((one, other) => one.key.localeCompare(other.key));
     const suppliedDescriptions = await readonly.evaluateAll((elements) => elements.map((element) => {
       const description = element.querySelector('[data-setting-description]');
-      return { key: element.getAttribute('data-setting'), text: description?.textContent, fullText: description?.getAttribute('data-overflow-text') };
+      return { key: element.getAttribute('data-setting'), text: description?.textContent };
     }));
     expect(suppliedDescriptions.sort((one, other) => (one.key ?? '').localeCompare(other.key ?? ''))).toEqual(expectedDescriptions);
+    // Descriptions now own a keyboard-readable tooltip rather than an overflow-text implementation attribute.
+    await expect(readonly.locator('[data-setting-description][tabindex="0"]')).toHaveCount(readOnly.length);
     await expect(readonly.locator('input,textarea,select,[contenteditable="true"],[role="switch"],[role="checkbox"],[role="radio"],[role="combobox"],[data-setting-editor-trigger]')).toHaveCount(0);
     const approval = page.locator('[data-setting="approval.allowed_modes"]');
     await expect(approval).not.toContainText('on_request');
@@ -206,6 +208,14 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       await expect(page.locator('html')).toHaveAttribute('lang', locale);
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       await settled(page);
+      const description = approval.locator('[data-setting-description]');
+      // Scrolling a newly focused row dismisses its tooltip; settle the row first.
+      await description.scrollIntoViewIfNeeded();
+      await description.focus();
+      await expect(page.getByRole('tooltip')).toHaveText(words.settingRegistry.approval.allowed_modes.description);
+      await description.press('Escape');
+      await expect(page.getByRole('tooltip')).toHaveCount(0);
+      await description.press('Tab');
       const geometry = await readonlyGeometry(readonly);
       expect(geometry).toHaveLength(readOnly.length);
       for (const measured of geometry) {
@@ -262,10 +272,11 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       { method: 'DELETE', body: null, guard: '1' },
     ]);
     expect(listReads).toBe(1);
-    await row.getByRole('button', { name: chinese ? '适用位置' : 'Where it applies', exact: true }).click();
-    const details = page.getByRole('region', { name: chinese ? '此值适用的位置' : 'Where this value applies' });
+    const reachLabel = words.settings.reach.openFor.replace('{{name}}', words.settingRegistry.env.idle_stop_minutes.title);
+    await row.getByRole('button', { name: reachLabel, exact: true }).click();
+    const details = page.getByRole('region', { name: reachLabel, exact: true });
     await expect(details).toContainText(chinese ? '7 个线程' : '7 threads');
-    await expect(details.getByRole('link', { name: 'login', exact: true })).toHaveAttribute('href', `/topic/${ACME.fixLogin}?tab=settings&section=policies&setting=${delay.key}`);
+    await expect(details.getByRole('link', { name: 'login', exact: true })).toHaveAttribute('href', `/topic/${ACME.fixLogin}?tab=settings&section=defaults&setting=${delay.key}`);
     expect(reachReads).toBe(1);
     expect(listReads).toBe(1);
   });

@@ -1,7 +1,7 @@
 /** Provider and thread ledger reads, native reset consumption and declared sign-in requests. */
 import { queryOptions } from '@tanstack/react-query';
 import { api, ok } from '@/api/client';
-import type { CapStatus, LoginState, Provider, ProviderResetConsumeBody, ProviderResetConsumeReply } from '@/generated/api-types';
+import type { CapStatus, LoginState, Provider, ProviderResetConsumeBody, ProviderResetConsumeResponse } from '@/generated/api-types';
 import type { PlanAnalytics } from '@/features/resources/providers/plan';
 import { ledgerPeriods } from '@/features/resources/providers/plan';
 
@@ -44,8 +44,11 @@ export function cancelProviderLogin(id: string): Promise<LoginState> {
   return ok(api.POST('/providers/{id}/login/cancel', { params: { path: { id } } }));
 }
 
-export function consumeReset(id: string, body: ProviderResetConsumeBody): Promise<ProviderResetConsumeReply> {
-  return ok(api.POST('/providers/{id}/resets/consume', { params: { path: { id } }, body }));
+export async function consumeReset(id: string, body: ProviderResetConsumeBody): Promise<ProviderResetConsumeResponse> {
+  const answer = await api.POST('/providers/{id}/resets/consume', { params: { path: { id } }, body });
+  // Both real success projections supply the outcome; a restricted receipt supplies no provider facts.
+  if (answer.response.ok && answer.data !== undefined) return answer.data;
+  return ok(Promise.resolve(answer));
 }
 
 export function retryProvider(id: string): Promise<Provider> {

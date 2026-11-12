@@ -90,13 +90,14 @@ export function creditsState(figures: UsageFigures): CreditsState {
   const sum = decimal(figures.credits);
   const estimated = decimal(figures.estimated_credits);
   const unrated = figures.unrated_tokens;
-  const used = figures.tokens.total_tokens > 0 || figures.turns > 0;
+  const serviceWork=Object.values(figures.service_units??{}).some((unit)=>unit.known_requests+unit.unknown_requests>0);
+  const used = figures.tokens.total_tokens > 0 || figures.turns > 0 || serviceWork;
   return {
     sum,
     estimated,
     unrated,
     allEstimated: sum > 0 && estimated >= sum,
-    none: used && sum === 0 && unrated > 0,
+    none: used && sum === 0 && (unrated > 0 || (figures.unrated_services??0)>0),
   };
 }
 
@@ -139,7 +140,7 @@ export function tokenParts(tokens: TokenUsage): TokenParts {
 
 /** Whether a span used anything at all: a span that did not is said to be empty and draws no chart. */
 export function isEmpty(figures: UsageFigures): boolean {
-  return figures.turns === 0 && figures.tokens.total_tokens === 0 && decimal(figures.credits) === 0 && (figures.performance?.requests ?? 0) === 0;
+  return Object.values(figures.service_units??{}).every((unit)=>unit.known_requests+unit.unknown_requests===0) && (figures.unrated_services??0)===0 && figures.turns === 0 && figures.tokens.total_tokens === 0 && decimal(figures.credits) === 0 && (figures.performance?.requests ?? 0) === 0;
 }
 
 /** An empty metric is not an empty span: unmetered turns and unpriced tokens still happened. */

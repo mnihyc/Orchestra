@@ -71,6 +71,7 @@ export interface KindLook {
     | 'inbox.kinds.job_finished'
     | 'inbox.kinds.schedule_cannot_start'
     | 'inbox.kinds.invitation'
+    | 'inbox.kinds.admin_message'
     | 'inbox.kinds.member_moved'
     | 'inbox.kinds.sign_in_attention'
     | 'inbox.kinds.route_attention';
@@ -105,13 +106,50 @@ export const KIND_LOOK = {
   'job.finished': { icon: ListChecks, tone: 'neutral', label: 'inbox.kinds.job_finished' },
   'schedule.cannot_start': { icon: OctagonAlert, tone: 'warning', label: 'inbox.kinds.schedule_cannot_start' },
   invitation: { icon: Mail, tone: 'accent', label: 'inbox.kinds.invitation' },
+  admin_message: { icon: Megaphone, tone: 'accent', label: 'inbox.kinds.admin_message' },
   'member.moved': { icon: ArrowRightLeft, tone: 'neutral', label: 'inbox.kinds.member_moved' },
   'sign_in.attention': { icon: ShieldAlert, tone: 'warning', label: 'inbox.kinds.sign_in_attention' },
   'notification.route_attention': { icon: BellOff, tone: 'warning', label: 'inbox.kinds.route_attention' },
 } satisfies Record<NotificationKind, KindLook> & Record<'person.notify', KindLook>;
 
 /** The kinds in that order. */
-export const ALL_KINDS = Object.keys(KIND_LOOK) as NotificationKind[];
+export const ALL_KINDS = Object.keys(KIND_LOOK) as (keyof typeof KIND_LOOK)[];
+
+/** Areas organize the same choices wherever a person selects notification kinds. */
+export const KIND_AREAS = ['work', 'access', 'resources', 'account'] as const;
+export const KIND_AREA = {
+  'approval.requested': 'access',
+  'capability.requested': 'access',
+  'access.requested': 'access',
+  'access.decided': 'access',
+  mention: 'work',
+  'doc.mention': 'work',
+  'person.notify': 'work',
+  'doc.comment': 'work',
+  'chat.message': 'work',
+  'turn.completed': 'work',
+  'turn.failed': 'work',
+  'subagent.ended': 'work',
+  'goal.ended': 'work',
+  'thread.blocked': 'work',
+  milestone: 'work',
+  announcement: 'work',
+  'provider.exhausted': 'resources',
+  'provider.attention': 'resources',
+  'machine.offline': 'resources',
+  'environment.idle_stop': 'resources',
+  'environment.update': 'resources',
+  'environment.attention': 'resources',
+  'cap.warning': 'resources',
+  'cap.reached': 'resources',
+  'job.finished': 'work',
+  'schedule.cannot_start': 'work',
+  invitation: 'account',
+  admin_message: 'account',
+  'member.moved': 'account',
+  'sign_in.attention': 'account',
+  'notification.route_attention': 'account',
+} satisfies Record<NotificationKind, (typeof KIND_AREAS)[number]>;
 
 /** What the Mentions filter holds: somebody named the person where they can read it. */
 export const MENTION_KINDS: readonly string[] = ['mention', 'doc.mention', 'person.notify'];
