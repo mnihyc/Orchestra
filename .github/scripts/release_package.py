@@ -15,6 +15,8 @@ def main():
     parser.add_argument("--inputs", type=Path, required=True)
     parser.add_argument("--frontend", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    # The command-line program, built for this release on a runner of its own (`cargo xtask package --cli-only`).
+    parser.add_argument("--cli", type=Path)
     args = parser.parse_args()
     root = Path.cwd()
     commit = subprocess.run(["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
@@ -33,8 +35,10 @@ def main():
         raise ValueError("no native connector manifests downloaded")
     for directory in dirs:
         command.extend(["--connectors", str(directory.resolve())])
+    if args.cli is not None:
+        command.extend(["--cli", str(args.cli.resolve())])
     subprocess.run(command, check=True)
-    subprocess.run(["cargo", "xtask", "package", "--out", str(args.out.resolve()), "--check", "--require-all-connectors"], check=True)
+    subprocess.run(["cargo", "xtask", "package", "--out", str(args.out.resolve()), "--check", "--check-source", "--require-all-connectors"], check=True)
 
 
 if __name__ == "__main__":

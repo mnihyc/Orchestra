@@ -8,11 +8,14 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { ApiTokenInfo, AuditEntry, Destination, Holdings, Me, Member, MemberMovePlan, NodeRef, NotificationChannel, Notifier, ResolvedSetting, Role, SecretInfo, ServiceAccount, SessionInfo, SettingDef, Suspension, UserRef, ResolvedSetting as SettingWithParts } from '../../src/generated/api-types.ts';
-import { resolvedParts } from './day100-settings.ts';
+import { narrowingMerge, resolvedParts } from './day100-settings.ts';
 import { SETTINGS_REGISTRY } from '../../src/generated/settings-registry.ts';
 import type { RecoveryCodeBatch, RecoveryCodeStatus } from '../../src/generated/api-types.ts';
 import { ACME, id, RUNS_ON, USUAL_MODEL, userRef } from './fixtures.ts';
 import { type Answer, type Part, type Person, Refusal, type World } from './world.ts';
+import { tokenScope } from './token-rules.ts';
+import { TOKEN_OPERATIONS } from './token-operations.ts';
+import { TokenActivity } from './token-activity.ts';
 
 // ---------------------------------------------------------------- the registry, as far as the double plays it
 
@@ -42,7 +45,10 @@ function key(
   example: unknown = fallback,
 ): Key {
   // The server names every key it ships under the application's catalogue, as the registry does.
-  return { def: { key: name, title, description, group, schema, class: kind, scopes: [...at], merge, default: fallback, example, ...(display === undefined ? {} : { display }), text_key: `day100.builtin.${name}`, keywords: [] }, at };
+  const declared = SETTINGS_REGISTRY.find((def) => def.key === name);
+  const rule = declared?.merge ?? merge;
+  const shown = declared?.display ?? display;
+  return { def: { key: name, title, description, group, schema: rule === 'stricter' ? declared?.schema ?? schema : schema, class: kind, scopes: [...at], merge: rule, default: fallback, example, ...(shown === undefined ? {} : { display: shown }), text_key: `day100.builtin.${name}`, keywords: [] }, at };
 }
 
 const CHOICE = (...values: string[]) => ({ type: 'string', enum: values });
@@ -50,11 +56,12 @@ const SET_OF = (...values: string[]) => ({ type: 'array', items: CHOICE(...value
 
 /** A selection of the real registry that holds every shape of value the editor draws. */
 const REGISTRY: readonly Key[] = [
+  key('threads.let_viewers_in', 'Let thread viewers in', 'The initial confirmed choice to let thread viewers use its environment.', 'agent', 'parameter', ['system', 'org', 'project', 'topic'], { type: 'boolean' }, false),
   key('switch.batch_threads', 'Threads per batch', 'Threads in one reviewed switch batch.', 'switching', 'policy', ['system'], {type:'integer',minimum:1}, 200, 'replace', {unit:'raw',zero:null}, 500),
   key('cleanup.unused_keep_days', 'Clean unused caches', 'Remove unused images and tool versions after this many days. Zero switches automatic cleanup off.', 'retention', 'policy', ['system', 'host'], {type:'integer',minimum:0,'x-unit':'days'}, 7, 'replace', {unit:'days',zero:'off'}, 14),
   key('cleanup.release_keep_count', 'Keep unused releases', 'Unused releases kept in addition to current and previous. Zero switches pruning off and keeps all.', 'retention', 'policy', ['system'], {type:'integer',minimum:0}, 3, 'replace', {unit:'raw',zero:'off'}, 5),
-  ...SETTINGS_REGISTRY.filter((def) => def.key.startsWith('calls.')).map((def): Key => {
-    if (typeof def.group !== 'string') throw new Error('A call policy has its declared settings group');
+  ...SETTINGS_REGISTRY.filter((def) => def.key.startsWith('calls.') || def.key.startsWith('agents.') && def.key.endsWith('_backend') || def.key === 'sharing.agent_messages' || def.key === 'sharing.on_link' || def.key === 'env.host_id' || def.key === 'org.terms' || def.key === 'collab.attribution' || def.key === 'thread.side_max' || def.key === 'summary.targets').map((def): Key => {
+    if (typeof def.group !== 'string') throw new Error('A served policy has its declared settings group');
     return { def: { ...def, group: def.group, ...(def.key === 'calls.repeat_limit' ? { display: { unit: 'raw', zero: 'off' } as const } : {}) }, at: def.scopes };
   }),
   ...SETTINGS_REGISTRY.filter((def) => def.key.startsWith('search.semantic.') || def.key === 'search.word_tuning').map((def): Key => {
@@ -209,7 +216,6 @@ const ADDRESS = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 interface TokenHeld {
   info: ApiTokenInfo;
-  secret: string;
 }
 
 /** Somebody held out of an org, with why and by whom. */
@@ -230,8 +236,10 @@ const ROLES: readonly Role[] = ['viewer', 'interactor', 'developer', 'admin'];
 /** The part of the fake API about settings. */
 export class Settings implements Part {
   readonly world: World;
+  readonly tokenActivity: TokenActivity;
   private sessions = new Map<string, SessionInfo[]>();
   private tokens = new Map<string, TokenHeld[]>();
+  private mintedTokens = new Map<string, { at: number; info: ApiTokenInfo; asked: string }>();
   private state = new Map<string, Record<string, unknown>>();
   /** Who has asked for the secret of an authenticator app and not switched it on yet. */
   private pendingSecret = new Set<string>();
@@ -242,6 +250,7 @@ export class Settings implements Part {
 
   constructor(world: World) {
     this.world = world;
+    this.tokenActivity = new TokenActivity(world);
   }
 
   private invalid(path: string, message: string): never {
@@ -596,7 +605,7 @@ export class Settings implements Part {
     held.domain = plan.to.id;
     held.role = plan.role;
     held.revision += 1;
-    const member: Member = {
+    const member: Member = { terms_hash: null, terms_accepted_at: null,
       user: userRef(target.me),
       domain: plan.to,
       address: `${(plan.to.name ?? '').toLowerCase()}.${target.me.username}`,
@@ -681,7 +690,7 @@ export class Settings implements Part {
   private whereSet(nodeId: string, entry: Key) {
     const chain = this.world.places.pathTo(nodeId);
     const name = entry.def.key;
-    const honours = entry.def.merge !== 'intersect' && entry.def.merge !== 'min';
+    const honours = !narrowingMerge(entry.def.merge);
     const locking = chain.find((row) => honours && this.rows.get(row.id)?.get(name)?.locked === true);
     const above = locking !== undefined && locking.id !== nodeId ? locking : undefined;
     const deepest = [...chain].reverse().find((row) => this.rows.get(row.id)?.has(name) === true);
@@ -707,7 +716,7 @@ export class Settings implements Part {
       key: name,
       value: entry.def.merge === 'replace' ? row?.value ?? entry.def.default : joined.value,
       parts: joined.parts,
-      source: from === undefined ? { scope: 'default', node: null } : { scope: from.kind, node: this.ref(from.id) },
+      source: entry.def.merge === 'replace' ? from === undefined ? { scope: 'default', node: null } : { scope: from.kind, node: this.ref(from.id) } : joined.source,
       own: own === null ? null : { value: own.value, locked: own.locked, revision: own.revision },
       locked_by: locking === undefined ? null : { scope: locking.kind, node: this.ref(locking.id) },
       writable: above === undefined && this.mayWrite(person, nodeId, entry),
@@ -719,7 +728,21 @@ export class Settings implements Part {
   valueAt(nodeId: string, key: string): { value: unknown; lockedBy: string | null } {
     const entry = this.entryOf(key);
     const { locking, row } = this.whereSet(nodeId, entry);
-    return { value: row?.value ?? entry.def.default, lockedBy: locking?.id ?? null };
+    const value = entry.def.merge === 'replace' ? row?.value ?? entry.def.default : resolvedParts(entry.def, [
+      { source: { scope: 'default', node: null }, value: entry.def.default, locked: false, ignored: false },
+      ...this.world.places.pathTo(nodeId).flatMap((place) => {
+        const part = this.rows.get(place.id)?.get(key);
+        return part === undefined ? [] : [{ source: { scope: place.kind, node: this.ref(place.id) }, value: part.value, locked: part.locked, ignored: false }];
+      }),
+    ]).value;
+    return { value, lockedBy: locking?.id ?? null };
+  }
+
+  /** The binding preview carries the same actual creation value and its setting provenance. */
+  viewerDefault(person: Person, nodeId: string): { value: boolean; source: ResolvedSetting['source'] } {
+    const setting = this.resolve(person,nodeId,this.entryOf('threads.let_viewers_in'));
+    if(typeof setting.value !== 'boolean') throw new Error('The viewer default must be a boolean');
+    return {value:setting.value,source:setting.source};
   }
 
   /** Whether the registry has the key. */
@@ -1083,23 +1106,31 @@ export class Settings implements Part {
     return { id: row.id, kind: row.kind, name: row.name, redacted: false };
   }
 
-  private makeToken(person: Person, body: Record<string, unknown>): Answer {
+  private makeToken(person: Person, body: Record<string, unknown>, actKey?: string): Answer {
+    const identity = actKey === undefined ? null : `${person.me.id}:personal:${actKey}`;
+    const asked = JSON.stringify({ name: body.name, rules: body.rules, scopes: body.scopes, node_id: body.node_id, expires_at: body.expires_at });
+    const replay = identity === null ? undefined : this.mintedTokens.get(identity);
+    if (replay !== undefined && Date.now() - replay.at < 86_400_000) {
+      if (replay.asked !== asked) throw new Refusal(409, 'conflict.idempotency_mismatch', 'the creation key names different input');
+      return { status: 200, body: { token: null, info: structuredClone(replay.info), already_created: true } };
+    }
     const name = asText(body.name).trim();
     if (name === '') this.invalid('name', 'must not be empty');
-    const scopes = Array.isArray(body.scopes) ? body.scopes.filter((scope): scope is string => typeof scope === 'string') : ['*'];
-    if (scopes.length === 0) this.invalid('scopes', 'must name at least one permission');
+    const scope = tokenScope(body);
     const info: ApiTokenInfo = {
       id: randomUUID(),
       name,
-      scopes,
+      ...scope,
       node: typeof body.node_id === 'string' ? this.nodeRef(body.node_id) : null,
       created_at: new Date().toISOString(),
       expires_at: typeof body.expires_at === 'string' ? body.expires_at : null,
       last_used_at: null,
     };
     const secret = `opat_${randomUUID().replaceAll('-', '')}`;
-    this.tokensOf(person).push({ info, secret });
-    return { status: 200, body: { token: secret, info } };
+    this.tokensOf(person).push({ info });
+    if (identity !== null) this.mintedTokens.set(identity, { at: Date.now(), info: structuredClone(info), asked });
+    this.tokenActivity.remember(info.id, person.me.id);
+    return { status: 200, body: { token: secret, info, already_created: false } };
   }
 
   // ---------------------------------------------------------------- what the interface keeps
@@ -1156,9 +1187,11 @@ export class Settings implements Part {
   // ---------------------------------------------------------------- the requests
 
   /** Answers a request about settings, or `null` when it is not one. */
-  handle(person: Person, method: string, path: string, _query: URLSearchParams, body: Record<string, unknown>): Answer | null {
+  handle(person: Person, method: string, path: string, _query: URLSearchParams, body: Record<string, unknown>, actKey?: string): Answer | null {
     const route = `${method} ${path}`;
     let found: RegExpExecArray | null;
+    if ((found = /^GET \/me\/tokens\/([^/]+)\/activity$/.exec(route))) return { status: 200, body: this.tokenActivity.page(person, found[1] ?? '', undefined, _query) };
+    if ((found = /^GET \/orgs\/([^/]+)\/tokens\/([^/]+)\/activity$/.exec(route))) return { status: 200, body: this.tokenActivity.page(person, found[2] ?? '', found[1], _query) };
 
     switch (route) {
       case 'POST /me/password':
@@ -1191,8 +1224,10 @@ export class Settings implements Part {
       }
       case 'GET /me/tokens':
         return { status: 200, body: this.tokensOf(person).map((held) => held.info) };
+      case 'GET /me/token-operations':
+        return { status: 200, body: structuredClone(TOKEN_OPERATIONS) };
       case 'POST /me/tokens':
-        return this.makeToken(person, body);
+        return this.makeToken(person, body, actKey);
       case 'GET /me/state':
         return { status: 200, body: this.stateOf(person) };
       default:
@@ -1244,12 +1279,21 @@ export class Settings implements Part {
       this.world.places.need(person, orgId, 'members.manage');
       const held = this.accountTokens.get(account.user.id) ?? [];
       if (found[1] === 'GET') return { status: 200, body: held.map((entry) => entry.info) };
+      const identity = actKey === undefined ? null : `${person.me.id}:service:${account.user.id}:${actKey}`;
+      const asked = JSON.stringify({ name: body.name, rules: body.rules, scopes: body.scopes, node_id: body.node_id, expires_at: body.expires_at });
+      const replay = identity === null ? undefined : this.mintedTokens.get(identity);
+      if (replay !== undefined && Date.now() - replay.at < 86_400_000) {
+        if (replay.asked !== asked) throw new Refusal(409, 'conflict.idempotency_mismatch', 'the creation key names different input');
+        return { status: 200, body: { token: null, info: structuredClone(replay.info), already_created: true } };
+      }
       const name = asText(body.name).trim();
       if (name === '') this.invalid('name', 'must not be empty');
-      const info: ApiTokenInfo = { id: randomUUID(), name, scopes: ['*'], node: null, created_at: new Date().toISOString(), expires_at: null, last_used_at: null };
+      const info: ApiTokenInfo = { id: randomUUID(), name, ...tokenScope(body), node: typeof body.node_id === 'string' ? this.nodeRef(body.node_id) : null, created_at: new Date().toISOString(), expires_at: typeof body.expires_at === 'string' ? body.expires_at : null, last_used_at: null };
       const secret = `opat_${randomUUID().replaceAll('-', '')}`;
-      this.accountTokens.set(account.user.id, [...held, { info, secret }]);
-      return { status: 200, body: { token: secret, info } };
+      this.accountTokens.set(account.user.id, [...held, { info }]);
+      if (identity !== null) this.mintedTokens.set(identity, { at: Date.now(), info: structuredClone(info), asked });
+      this.tokenActivity.remember(info.id, account.user.id);
+      return { status: 200, body: { token: secret, info, already_created: false } };
     }
     if ((found = /^DELETE \/service-accounts\/([^/]+)\/tokens\/([^/]+)$/.exec(route))) {
       const { account, orgId } = this.accountOf(found[1] ?? '');

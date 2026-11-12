@@ -20,6 +20,7 @@ import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
 import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
 
 export interface TutorialPlace { kind: 'thread' | 'environment'; id: string; name: string; label: string }
 export type TutorialEnvironment = Pick<Environment, 'id' | 'name' | 'address' | 'owner' | 'access' | 'threads'> & Partial<Pick<Environment, 'home' | 'org_id'>>;
@@ -59,6 +60,7 @@ export function TutorialPlaces({ destination }: { destination: TutorialDestinati
   const shape = useShape();
   const rows = useQuery({ ...environmentsQuery(null), enabled: user !== null, retry: false });
   const threads = destination.startsWith('thread-');
+  const Picker = threads ? Select : ResourcePicker;
   const choices = user === null ? [] : tutorialPlaces(rows.data ?? [], user, threads);
   const choice = choices.find((one) => one.id === picked?.id);
   const go = (place: TutorialPlace) => {
@@ -75,8 +77,8 @@ export function TutorialPlaces({ destination }: { destination: TutorialDestinati
     {rows.isPending ? <p className="text-sm text-text-muted">{t('helpScreenReview.loading')}</p>
       : rows.isError ? <ErrorState compact error={rows.error} onRetry={() => void rows.refetch()} />
       : choices.length === 0 ? <EmptyState compact title={t('helpScreenReview.empty')} />
-      : <><Select label={t(threads ? 'helpScreenReview.chooseThread' : 'helpScreenReview.chooseEnvironment')}
-        value={choice?.id ?? ''} options={choices.map((one) => ({ value: one.id, ...choiceOption(t, 'dynamic.place', { name: one.label }) }))}
+      : <><Picker label={t(threads ? 'helpScreenReview.chooseThread' : 'helpScreenReview.chooseEnvironment')}
+        value={choice?.id ?? ''} options={choices.map((one) => ({ value: one.id, ...choiceOption(t, 'dynamic.place', { name: one.label }), ...(threads?{}:{resource:{kind:'environment',id:one.id,data:rows.data.find((row)=>row.id===one.id)}}) }))}
         placeholder={t('helpScreenReview.choose')} onValueChange={(id) => { const place = choices.find((one) => one.id === id); if (place !== undefined) go(place); }} />
         {choice !== undefined && <Button size="sm" onClick={() => go(choice)}>{t('helpScreenReview.openChosen')}</Button>}</>}
   </div>;

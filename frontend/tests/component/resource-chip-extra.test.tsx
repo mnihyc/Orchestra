@@ -1,3 +1,5 @@
+import { unjudgedProvenance } from '../doubles/resource-grouping';
+import { resourceCardRead } from './resource-card-readers';
 /** All resource kinds share the name card, one detail read and keyboard/tap behavior in lists and choices. */
 import { act, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -18,7 +20,14 @@ import { show } from './support';
 const server = vi.hoisted(() => ({ row: {}, reads: vi.fn() }));
 vi.mock('@/api/client', async (load) => {
   const original = await load<object>();
-  return { ...original, api: { GET: (path: string, options: { params: { path: { id: string } } }) => { server.reads(path); return Promise.resolve({ data: { ...server.row, id: options.params.path.id }, error: undefined, response: new Response(null, { status: 200 }) }); } } };
+  return { ...original, api: { GET: (path: string, options: { params: { path: { id: string; object?: string } } }) => {
+    const auxiliary = resourceCardRead(path, options);
+    if (auxiliary !== null) return Promise.resolve(auxiliary);
+    const detailReads = ['/mounts/{id}', '/mcp-servers/{id}', '/templates/{id}', '/agents/{id}', '/skills/{id}'];
+    if (!detailReads.includes(path)) return Promise.reject(new Error(`Unexpected resource-card read ${path}`));
+    server.reads(path);
+    return Promise.resolve({ data: { ...server.row, id: options.params.path.id }, error: undefined, response: new Response(null, { status: 200 }) });
+  } } };
 });
 beforeEach(() => server.reads.mockClear());
 
@@ -27,7 +36,7 @@ function display(content: ReactNode) {
   return show(<QueryClientProvider client={cache}>{content}</QueryClientProvider>);
 }
 
-const skill: Skill = { id: 'skill', name: 'Review changes', address: 'team.review', description: '', home: detailHome, org_id: 'team', owner: null,
+const skill: Skill = { ...unjudgedProvenance(), id: 'skill', name: 'Review changes', address: 'team.review', description: '', home: detailHome, org_id: 'team', owner: null,
   access: { ...detailAccess, permissions: ['skill.view'] }, enabled: true, versions: 1, draft: null, origin: { kind: 'upload', name: 'review.zip', folder: null }, revision: 1,
   latest: { id: 'version', number: 3, name: 'Review changes', description: '', file_count: 1, size: 20, archive: { blob: 'synthetic-archive', size: 20 }, created_by: null, created_at: '2026-10-25T12:00:00Z', origin: { kind: 'upload', name: 'review.zip', folder: null } } };
 const cases: { subject: ResourceSubject; row: Record<string, unknown>; expected: string; path: string }[] = [

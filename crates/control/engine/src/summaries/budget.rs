@@ -9,6 +9,41 @@ use orch_settings::Place;
 use orch_settings_contract::registry::keys;
 use orch_types::Id;
 
+/// Current declared model context for ordinary summary activity, retaining its configured output.
+pub(super) async fn context_tokens(
+    conn: &mut orch_db::Conn,
+    config: &orch_summarizer_model::descriptor::Config,
+) -> Result<u32, EngineError> {
+    let model = orch_db::queries::resources::thread_engine::model(
+        conn,
+        config.provider_id,
+        &config.model_name,
+    )
+    .await?
+    .ok_or_else(|| EngineError::unreadable("the summary model is unavailable"))?;
+    let provider = orch_db::queries::resources::thread_engine::provider(conn, config.provider_id)
+        .await?
+        .ok_or_else(|| EngineError::unreadable("the summary provider is unavailable"))?;
+    let protocol = super::resource::completion_protocol(&provider.protocols)?.ok_or_else(|| {
+        EngineError::unreadable("the summary provider offers no generation interface")
+    })?;
+    let parameters = orch_provider_contract::models::composed_model_parameters(
+        &model.parameters,
+        &model.groups,
+        &model.option_layers,
+        Some(&protocol),
+    )
+    .map_err(EngineError::unreadable)?;
+    orch_summarizer_model::context::fit_window(
+        config.context_tokens,
+        config.max_output_tokens,
+        parameters
+            .context_open()
+            .or(parameters.context_window.filter(|window| *window > 0)),
+    )
+    .map_err(|error| EngineError::unreadable(super::safe_reason(&error)))
+}
+
 /// The window taken for a model whose entry does not say: what every model that does this work has.
 pub(crate) const UNKNOWN_WINDOW_TOKENS: i64 = 32_000;
 

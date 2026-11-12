@@ -27,8 +27,9 @@ for (const width of [400, 1440]) for (const locale of ['en', 'zh-CN'] as const) 
     const landing = page.locator('[data-resource-landing]');
     await expect(page.getByRole('heading', { level: 1, name: words.screens.sections.resources, exact: true })).toBeVisible();
     await expect(landing).toBeVisible();
-    await expect(landing.getByRole('listitem')).toHaveCount(8);
-    await expect(landing.getByRole('button')).toHaveCount(8);
+    // Every registered kind, including Skills, has its own landing entry and creation action.
+    await expect(landing.getByRole('listitem')).toHaveCount(9);
+    await expect(landing.getByRole('button')).toHaveCount(9);
     for (const add of await landing.getByRole('button').all()) await expect(add).toHaveText(words.common.add);
     await expect(landing.getByText('common.add', { exact: true })).toHaveCount(0);
     await expect(landing.locator('[data-resource-count][aria-busy="true"]')).toHaveCount(0);
@@ -55,12 +56,12 @@ for (const width of [400, 1440]) for (const locale of ['en', 'zh-CN'] as const) 
       await creation.getByRole('button', { name: words.common.cancel, exact: true }).click();
       await left.getByRole('button', { name: words.workbench.bars.close.left, exact: true }).click();
       const strip = page.locator('[data-resource-navigation]');
-      await expect(strip).toBeVisible(); await expect(strip.getByRole('link')).toHaveCount(8);
+      await expect(strip).toBeVisible(); await expect(strip.getByRole('link')).toHaveCount(9);
       await resources.click();
       await expect(page.locator('[data-resource-navigation]')).toHaveCount(0);
     } else {
       await expect(page.locator('[data-resource-navigation]')).toBeVisible();
-      await expect(page.locator('[data-resource-navigation]').getByRole('link')).toHaveCount(8);
+      await expect(page.locator('[data-resource-navigation]').getByRole('link')).toHaveCount(9);
     }
     const breadcrumb = page.locator('[data-screen-path]');
     await breadcrumb.getByRole('link', { name: locale === 'en' ? 'Resources' : '资源', exact: true }).click();

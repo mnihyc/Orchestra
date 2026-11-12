@@ -19,8 +19,9 @@ leave certificate verification enabled.
 ## Addresses
 
 `[system] public_url` is the address people open; `[edge] ports_domain` is the separate suffix for
-published environment ports. The default machine list, `[[gateway.endpoints]]`, advertises only
-`wss://gateway.example.com:9443` with `trust = "pinned"`. Replace the example with a reachable name or IP.
+published environment ports. The default machine list, `[[gateway.endpoints]]`, holds only
+`wss://gateway.example.com:9443` with `trust = "pinned"`, and an example address is told to no machine:
+replace it with a reachable name or IP, or "Add machine" makes no command and environments cannot connect.
 `ORCH_GATEWAY_PUBLISH` publishes that direct door. If its host port differs from 9443, set the same port in
 the bundled `[gateway] managed_endpoint` so its Docker runtimes can reach it; keep `[node] gateway_url` on
 the internal Compose port 9443. Add `wss://<people's-name>/link` with
@@ -30,8 +31,11 @@ controls advertising and preference, not listener availability.
 A machine's `[[endpoints]]` list overrides the system list. With no local list it receives a fresh
 system list at every connection. Clear an existing local list to follow the system instead. A node's `[node] gateway_url` is its local scalar address override;
 leave it empty to follow the system. An explicit connector list takes precedence over that scalar. Its units follow the node by default. `[gateway] managed_endpoint`
-in that node's configuration can select another unit address. The bundled node explicitly uses
-`gateway.orch.internal` and its Docker `gateway_host` mapping; keep those local settings.
+in that node's configuration can select another unit address. The bundled node dials `[node] gateway_url`,
+`wss://gateway:9443`, the gateway's Compose service name; keep it. `gateway.orch.internal` and the Docker
+`gateway_host` mapping are what the units it makes are told, by `[gateway] managed_endpoint`; keep those too.
+The first time, the node asks its `gateway_url` for the system's list and enrolls through an advertised entrance
+that answers, or at that address when none is advertised.
 Connector programs and Orch-served builds are downloaded through the machine's verified connection,
 so a node need not reach the people's address to provision environments.
 
@@ -61,9 +65,15 @@ the stack, put company authority PEMs in `config/ca-certificates/`, run `openssl
 restart the callers. This supplements the bundled public roots without changing Compose or disabling
 verification. Standalone processes use the host's certificate store.
 
+Forward `/api/v1/` for browser sessions and `/openapi/v1/` for API keys unchanged,
+including `/api/v1/ws` and `/openapi/v1/ws`. A proxy must preserve the path prefix
+and support WebSocket upgrades on both roots. The updater retains an existing
+`deploy/nginx.conf`; merge the shipped key-route blocks when upgrading an older
+installation. Installer downloads stay at `/api/v1/downloads/`.
+
 For Cloudflare, keep WebSockets enabled. Its [WebSocket documentation](https://developers.cloudflare.com/network/websockets/)
-explains that a CDN deployment may drop established sockets; Orch reconnects. Exclude `/api/` and
-`/link/` from caching, browser challenges and script rewriting: machines cannot answer a browser
+explains that a CDN deployment may drop established sockets; Orch reconnects. Exclude `/api/`,
+`/openapi/` and `/link/` from caching, browser challenges and script rewriting: machines cannot answer a browser
 challenge, and the page's content policy rejects injected scripts. Name the actual proxies in
 `trusted_proxy_cidrs`, using [Cloudflare's current published ranges](https://www.cloudflare.com/ips/)
 where applicable. The direct 9443 door needs a DNS-only record or IP because it is outside
@@ -90,12 +100,13 @@ Example addresses block enrollment commands until `public_url` and `[[gateway.en
 ## What the front must do
 
 - Proxy everything to the web edge's address.
-- Pass WebSocket upgrades for `/api/v1/ws` (the realtime socket, and the terminals under it) and for
+- Pass WebSocket upgrades for `/api/v1/ws` (browser sessions), `/openapi/v1/ws` (account keys),
+  their existing ticket continuations, and for
   `/link/v1/session` (the machines that come in through this front).
 - Allow request bodies of 8 MiB. Nothing the product sends is larger: the browser and the connectors send bigger
   content in pieces of at most 4 MiB. (apache2 puts no limit on a proxied body unless you set one; nginx
   limits to 1 MiB unless `client_max_body_size` says more.)
-- Not buffer or cache `/api/` and `/link/`.
+- Not buffer or cache `/api/`, `/openapi/` and `/link/`. Route both API prefixes to the same API service.
 - Keep idle connections for at least 60 s. The realtime socket is silent between a person's actions, and a front
   that cuts it earlier makes the page reconnect all the time.
 - Forward the client's address in `X-Forwarded-For`, and say that the page was reached over HTTPS

@@ -10,6 +10,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { choiceOption } from '@/i18n/choices';
+import type { TFunction } from 'i18next';
 
 import { type AccessTarget, defaultsQuery, permissionsQuery } from '@/api/access';
 import type { AccessSummary } from '@/generated/api-types';
@@ -24,6 +25,18 @@ import { type GeneralAccessPreset, indexCatalogue, linesOf } from './model';
 /** How a new thread starts, short of a change: what the form of the dialog says. */
 export type NewPagePreset = GeneralAccessPreset;
 
+function audienceText(summary: Pick<AccessSummary, 'manage' | 'interact' | 'view'>, place: string, t: TFunction): string {
+  const lines = (['manage', 'interact', 'view'] as const).flatMap((line) => summary[line]
+    .map((holder) => t('access.roles.does', { who: holderName(t, holder, place), what: t(`access.roles.verb.thread.${line}`) })));
+  return lines.length === 0 ? t('access.newPage.ownerOnly') : lines.join('; ');
+}
+
+/** The inline starter already has its audience; detailed edits remain in its existing Change form. */
+export function NewAudienceSummary({ summary, place }: { summary: AccessSummary; place: string }) {
+  const { t } = useTranslation();
+  return <p className="text-sm text-text-muted">{t('access.newPage.audienceSummary', { summary: audienceText(summary, place, t) })}</p>;
+}
+
 export interface NewPageProps {
   /** The topic the thread is made in: the place whose defaults its page follows. */
   place: AccessTarget;
@@ -32,6 +45,7 @@ export interface NewPageProps {
   preset: NewPagePreset;
   onPresetChange: (preset: NewPagePreset) => void;
   letIntoEnvironment: boolean;
+  letIntoEnvironmentTooltip?: string;
   onLetIntoEnvironmentChange: (checked: boolean) => void;
   /** A project creates a new topic first; its audience is that new topic, rather than the project. */
   audienceName?: string;
@@ -41,7 +55,7 @@ export interface NewPageProps {
   fork?: { source: string; value: 'original' | 'place'; onChange: (value: 'original' | 'place') => void } | undefined;
 }
 
-export function NewPage({ place, placement, preset, onPresetChange, letIntoEnvironment, onLetIntoEnvironmentChange, audienceName, summary, fork }: NewPageProps) {
+export function NewPage({ place, placement, preset, onPresetChange, letIntoEnvironment, letIntoEnvironmentTooltip, onLetIntoEnvironmentChange, audienceName, summary, fork }: NewPageProps) {
   const { t } = useTranslation();
   const defaults = useQuery({ ...defaultsQuery(place.id), enabled: summary === undefined });
   const catalogue = useQuery(permissionsQuery);
@@ -53,12 +67,11 @@ export function NewPage({ place, placement, preset, onPresetChange, letIntoEnvir
   // The page of a thread made here: the rows of a thread, for work where it will run.
   const rows = defaults.data?.rows.filter((row) => index.defs.get(row.permission)?.on.includes('thread') === true && (row.profile === 'any' || row.profile === placement)) ?? [];
   const lines = defaults.data === undefined ? null : linesOf({ ...defaults.data, rows }, index, 'thread');
-  const said = (['manage', 'interact', 'view'] as const).flatMap((line) =>
-    (summary?.[line] ?? lines?.[line].map((holder) => holder.holder) ?? [])
-      .map((holder) =>
-        t('access.roles.does', { who: holderName(t, holder, audienceName ?? place.name), what: t(`access.roles.verb.thread.${line}`) }),
-      ),
-  );
+  const said = audienceText({
+    manage: summary?.manage ?? lines?.manage.map((row) => row.holder) ?? [],
+    interact: summary?.interact ?? lines?.interact.map((row) => row.holder) ?? [],
+    view: summary?.view ?? lines?.view.map((row) => row.holder) ?? [],
+  }, audienceName ?? place.name, t);
 
   const forkOptions = [
     { value: 'original' as const, ...choiceOption(t, 'newPage.original', { source: fork?.source ?? '' }) },
@@ -67,8 +80,8 @@ export function NewPage({ place, placement, preset, onPresetChange, letIntoEnvir
   return (
     <div className="flex flex-col gap-3">
       <GeneralAccessControl catalogue={index} kind="thread" place={audienceName ?? place.name} value={preset} onChange={onPresetChange}
-        summary={said.length === 0 ? t('access.newPage.ownerOnly') : said.join('; ')}
-        environment={{ checked: letIntoEnvironment, onChange: onLetIntoEnvironmentChange }} />
+        summary={said}
+        environment={{ checked: letIntoEnvironment, onChange: onLetIntoEnvironmentChange, tooltip:letIntoEnvironmentTooltip }} />
       {fork !== undefined && (
         <ChoiceField label={t('access.newPage.forkLabel')} options={forkOptions}>
         <RadioGroup<'original' | 'place'>

@@ -1,5 +1,5 @@
 /** The list a conversation is drawn in, when it is opened at its end: it holds on to the end while the rows that come into view are measured, and lets go when the list has stopped moving. */
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { VirtualList } from '@/ui/VirtualList';
@@ -11,18 +11,21 @@ const WINDOW_PX = 600;
  * The list as the page sees it, without a browser: a content that grows as its rows are measured, a position that cannot be further
  * than the end of it, and frames that come when the test says, each after the time that a machine takes for one.
  */
-function machine() {
+function machine(owner?: HTMLElement) {
   const content = { height: 2_000 };
+  const observers = new Set<() => void>();
+  let viewport = WINDOW_PX;
   let top = 0;
   let now = 0;
   let waiting: { id: number; callback: FrameRequestCallback }[] = [];
   let ids = 0;
-  const furthest = () => Math.max(0, content.height - WINDOW_PX);
+  const furthest = () => Math.max(0, content.height - viewport);
   vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockImplementation(() => content.height);
-  vi.spyOn(Element.prototype, 'clientHeight', 'get').mockImplementation(() => WINDOW_PX);
-  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(() => WINDOW_PX);
-  vi.spyOn(Element.prototype, 'scrollTop', 'get').mockImplementation(() => top);
-  vi.spyOn(Element.prototype, 'scrollTop', 'set').mockImplementation((value: number) => {
+  vi.spyOn(Element.prototype, 'clientHeight', 'get').mockImplementation(() => viewport);
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(() => viewport);
+  vi.spyOn(Element.prototype, 'scrollTop', 'get').mockImplementation(function (this: Element) { return owner === undefined || this === owner ? top : 0; });
+  vi.spyOn(Element.prototype, 'scrollTop', 'set').mockImplementation(function (this: Element, value: number) {
+    if (owner !== undefined && this !== owner) return;
     top = Math.max(0, Math.min(value, furthest()));
   });
   vi.spyOn(performance, 'now').mockImplementation(() => now);
@@ -34,7 +37,18 @@ function machine() {
   vi.stubGlobal('cancelAnimationFrame', (id: number) => {
     waiting = waiting.filter((entry) => entry.id !== id);
   });
+  vi.stubGlobal('ResizeObserver', class implements ResizeObserver {
+    private readonly report: () => void;
+    constructor(callback: ResizeObserverCallback) { this.report = () => callback([], this); }
+    observe() { observers.add(this.report); }
+    unobserve() { observers.delete(this.report); }
+    disconnect() { observers.delete(this.report); }
+  });
   return {
+    resize: (height: number) => {
+      viewport = height;
+      for (const report of observers) report();
+    },
     /** The rows measured so far make the content this much taller. */
     grow: (pixels: number) => {
       content.height += pixels;
@@ -51,10 +65,21 @@ function machine() {
   };
 }
 
-function drawn() {
-  render(<VirtualList count={40} keyOf={(index) => `row-${index}`} estimate={() => 50} render={(index) => <p>Row {index}</p>} label="Conversation" />);
+function drawn(startAtEnd = true) {
+  render(<VirtualList count={40} keyOf={(index) => `row-${index}`} estimate={() => 50} render={(index) => <p>Row {index}</p>} label="Conversation" startAtEnd={startAtEnd} />);
   return screen.getByRole('log', { name: 'Conversation' });
 }
+
+it('keeps the first row in view when the list resizes before a scroll event', () => {
+  const layout = machine();
+  const log = drawn(false);
+  expect(log.scrollTop).toBe(0);
+  act(() => {
+    layout.resize(WINDOW_PX - 50);
+    layout.frame(16);
+  });
+  expect(log.scrollTop).toBe(0);
+});
 
 describe('a list opened at its end', () => {
   beforeEach(() => {
@@ -89,4 +114,24 @@ describe('a list opened at its end', () => {
     }
     expect(log).not.toHaveAttribute('aria-busy');
   });
+});
+
+
+it('follows measured growth in the containing view and lets its reader stop the follow from that same viewport', () => {
+  const viewport = document.createElement('div'); document.body.appendChild(viewport);
+  const slow = machine(viewport);
+  const view = render(<VirtualList viewport={viewport} count={40} keyOf={(index) => `row-${index}`} estimate={() => 50}
+    render={(index) => <p>Row {index}</p>} label="Shared conversation" />, { container: viewport });
+  try {
+    const log = screen.getByRole('log', { name: 'Shared conversation' });
+    expect(slow.distanceFromEnd()).toBe(0); expect(log.scrollTop).toBe(0);
+    expect(viewport).toHaveAttribute('aria-busy', 'true');
+    for (let frame = 0; frame < 3; frame += 1) {
+      slow.grow(300); slow.frame(500); expect(slow.distanceFromEnd()).toBe(0);
+    }
+    viewport.dispatchEvent(new Event('wheel'));
+    expect(viewport).not.toHaveAttribute('aria-busy');
+    slow.grow(300); slow.frame(500); expect(slow.distanceFromEnd()).toBe(300);
+    expect(log.scrollTop).toBe(0);
+  } finally { view.unmount(); viewport.remove(); }
 });

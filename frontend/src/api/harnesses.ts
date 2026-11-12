@@ -3,9 +3,10 @@ import { queryOptions } from '@tanstack/react-query';
 import { api, ok } from '@/api/client';
 import { ADMIN_QUERY } from '@/api/queryAuthority';
 import type { HarnessVersionFetchBody } from '@/generated/api-types';
+import { DEFAULT_PROGRAM_BUILD_POLL_MS } from '@/lib/pollingDefaults';
 
 /** A check is followed only while a visible build is being checked. */
-export const BUILD_CHECK_FOLLOW_MS = 5_000;
+export const BUILD_CHECK_FOLLOW_MS = DEFAULT_PROGRAM_BUILD_POLL_MS;
 export const programBuildsQuery = queryOptions({
   queryKey: ['program-builds'],
   queryFn: ({ signal }) => ok(api.GET('/harnesses/builds', { signal })),

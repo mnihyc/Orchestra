@@ -1,10 +1,11 @@
 /** A resource's giving and reported use share one shape on its row and page. */
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { type ReactNode, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api, ok } from '@/api/client';
+import { libraryQuery } from '@/api/resourceLibrary';
 import { RESOURCE_PAGE_SIZE } from '@/api/resources';
-import type { ResourceFacts, ResourceUseKind, LibraryTarget, LibraryEntry } from '@/generated/api-types';
+import type { ResourceFacts, ResourceUseKind, LibraryTarget } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { formatNumber } from '@/lib/format';
 import { DetailCard } from '@/ui/DetailCard';
@@ -23,10 +24,7 @@ export type LibraryObject=LibraryTarget['object'];
 type LibraryKind='provider'|'agent'|'environment'|'host'|'template'|'mcp_server'|'mount'|'skill';
 const applicable = new Set<string>(['provider','agent','environment','host','template','mcp_server','mount','skill']);
 export const hasLibrary = (kind: string): kind is LibraryKind => applicable.has(kind);
-export const libraryQuery = (targets: readonly LibraryTarget[]) => ({
-  queryKey: ['resource-library', targets] as const,
-  queryFn: ({ signal }: {signal: AbortSignal}): Promise<LibraryEntry[]> => ok(api.POST('/resources/library', {body: {targets: [...targets]}, signal})),
-});
+export { libraryQuery } from '@/api/resourceLibrary';
 
 function Names({ group }: { group: ResourceFacts['dependents'][number] }) {
   const { t }=useTranslation();
@@ -49,7 +47,7 @@ function givenUnit(kind:string,relation:string,use:ResourceUseKind|undefined) {
   return use==='provider_made'?'providers':'environments';
 }
 
-export function LibraryCounts({facts,threads,full=false,version=null,given=true}:{facts:ResourceFacts;threads?:number|null;full?:boolean;version?:string|null;given?:boolean}) {
+export function LibraryCounts({facts,threads,full=false,version=null,given=true,hint}:{facts:ResourceFacts;threads?:number|null;full?:boolean;version?:string|null;given?:boolean;hint?:ReactNode}) {
   const {t}=useTranslation(); const {locale}=useFormatContext();
   const figure=(n:number|null|undefined)=>n===null||n===undefined?'–':formatNumber(n,locale,full?undefined:{notation:'compact',maximumFractionDigits:1});
   const uses=facts.uses;
@@ -57,7 +55,8 @@ export function LibraryCounts({facts,threads,full=false,version=null,given=true}
   if (!hasLibrary(kind)) return null;
   const giving=facts.dependents.filter((group)=>['binding','explicit_giving','attachment'].includes(group.relation));
   const relations=kind==='skill'||kind==='mcp_server'?['explicit_giving','attachment']:kind==='provider'||kind==='agent'||kind==='environment'?['binding']:['attachment'];
-  return <div data-library-counts className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-text-muted tabular-nums">
+  return <div data-library-counts className="flex min-w-0 flex-col gap-1 text-sm text-text-muted tabular-nums">
+    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
     {given&&relations.map((relation)=>{
       const group=giving.find((g)=>g.relation===relation);
       const unitKey=givenUnit(kind,relation,uses?.kind);
@@ -65,6 +64,8 @@ export function LibraryCounts({facts,threads,full=false,version=null,given=true}
       return group===undefined||!facts.dependents_complete?<span key={relation}>{label}</span>:<DetailCard key={relation} label={label} content={()=><Names group={group}/>}><span className="underline decoration-dotted underline-offset-4">{label}</span></DetailCard>;
     })}
     {uses!==null && <DetailCard label={t('library.usedTitle')} content={()=><div className="flex w-72 max-w-full flex-col gap-2 p-3"><LibraryUse facts={facts} threads={threads} version={version}/></div>}><span className="underline decoration-dotted underline-offset-4">{t('library.used',{number:figure(uses.all_time),unit:t(`library.units.${unit(uses.kind)}`,{count:uses.all_time??0})})}</span></DetailCard>}
+    {hint}
+    </div>
     {full && uses!==null && <LibraryUse facts={facts} threads={threads} version={version}/>}
   </div>;
 }
@@ -74,7 +75,7 @@ function LibraryUse({facts,threads,version}:{facts:ResourceFacts;threads?:number
   const n=(value:number|null)=>value===null?'–':formatNumber(value,locale);
   if(uses===null)return null;
   return <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-text-muted">
-    <span>{t('library.allTime',{number:n(uses.all_time)})}</span><span>{t('library.recent',{number:n(uses.last_30_days)})}</span>
+    <span>{t('library.allTime',{number:n(uses.all_time),unit:t(`library.units.${unit(uses.kind)}`,{count:uses.all_time??0})})}</span><span>{t('library.recent',{number:n(uses.last_30_days),unit:t(`library.units.${unit(uses.kind)}`,{count:uses.last_30_days??0})})}</span>
     {facts.subject.kind==='resource' && facts.subject.object.kind==='provider'&&<span>{t('library.threadCount',{number:n(threads??null),count:threads??0})}</span>}
     <UsePeople facts={facts} count={uses.people} version={version} label={t('library.people',{number:n(uses.people),count:uses.people??0})}/>
     <UsePeople facts={facts} count={uses.people_30_days} version={version} recent label={t('library.recentPeople',{number:n(uses.people_30_days),count:uses.people_30_days??0})}/>
@@ -94,7 +95,7 @@ function UsePeopleList({object,recent,version}:{object:LibraryObject;recent:bool
   const query=useQuery({queryKey:['resource-library-people',object,recent,version,cursor],
     // Hover-to-pin shares the same admitted read; a cursor replaces its page rather than appending history.
     queryFn:()=>ok(api.POST('/resources/library/people',{body:{target:{object,version_id:version},cursor,recent}}))});
-  if(query.isPending)return <div className="w-72 p-3"><SkeletonRows rows={3}/></div>;
+  if(query.isPending)return <div className="w-72 p-3"><SkeletonRows read={query} rows={3}/></div>;
   if(query.isError)return <ErrorState compact error={query.error} onRetry={()=>void query.refetch()}/>;
   if(query.data.items.length===0&&query.data.hidden===0)return <EmptyState compact title={t('library.noPeople')}/>;
   return <div className="p-3"><PeopleList users={query.data.items} hidden={query.data.hidden}>
@@ -104,8 +105,8 @@ function UsePeopleList({object,recent,version}:{object:LibraryObject;recent:bool
 
 export function ResourceLibrary({object,version=null}:{object:LibraryObject;version?:string|null}) {
   const query=useQuery({...libraryQuery([{object,version_id:version}]),retry:false});
-  if(query.isPending)return <SkeletonRows rows={1}/>;
+  if(query.isPending)return <SkeletonRows read={query} rows={1}/>;
   if(query.isError)return <ErrorState compact error={query.error} onRetry={()=>void query.refetch()}/>;
   const entry=query.data[0];
-  return entry===undefined?null:<div className="flex min-w-0 items-start gap-2"><LibraryCounts facts={entry.facts} threads={entry.threads} version={version} given={version===null} full/><Hint id="resource-library" popover/></div>;
+  return entry===undefined?null:<LibraryCounts facts={entry.facts} threads={entry.threads} version={version} given={version===null} full hint={<Hint id="resource-library" popover/>}/>;
 }

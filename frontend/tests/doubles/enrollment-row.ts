@@ -1,9 +1,10 @@
+import { unjudgedProvenance, unplacedGrouping } from './resource-grouping.ts';
 /** Complete, readable native rows used by enrollment's cache and screen proofs. */
 import type { Host, Machine } from '../../src/generated/api-types';
 
 export function enrollmentMachine(id: string, online: boolean): Machine {
-  return {
-    id, name: 'build-vm', online, platform_os: 'linux', placement: 'connected',
+  return { ...unplacedGrouping(),
+    revision: 1, id, name: 'build-vm', online, platform_os: 'linux', placement: 'connected',
     access: { permissions: ['machine.view', 'machine.manage'], administers: false, through: [{ kind: 'owner' }], admin_only: [], participating: true },
     owner: null, platform_arch: 'x86_64', connector_version: '1.0.0', protocol_version: 1,
     roles: ['environment', 'agent'], status: 'active', last_seen_at: null, last_ip: null,
@@ -12,7 +13,7 @@ export function enrollmentMachine(id: string, online: boolean): Machine {
 }
 
 export function enrollmentHost(id: string, online: boolean): Host {
-  return {
+  return { ...unjudgedProvenance(),
     id, name: 'build-node', address: 'build-node', owner: null, org_id: null, home: null,
     machine: { id: 'node-machine-id', name: 'build-node', online, platform_os: 'linux', placement: 'connected' },
     labels: [], drivers: [], ports: null, ports_revision: 1, ports_proposal: null,

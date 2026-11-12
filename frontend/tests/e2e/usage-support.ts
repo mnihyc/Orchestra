@@ -41,6 +41,11 @@ export async function writeHistory(days: number): Promise<void> {
   await control('/history', { days });
 }
 
+/** Seeds the native measurement shared by history and live request reads. */
+export async function seedNativeCounts(late = false): Promise<void> {
+  await control('/native-counts', { late });
+}
+
 /** One more use, now, of one of the six kinds (A to F), `scale` times as large as that kind is: the caps count it at once. */
 export async function useNow(pattern: 'A' | 'B' | 'C' | 'D' | 'E' | 'F' = 'A', scale = 1): Promise<void> {
   await control('/use', { pattern, scale });
@@ -94,4 +99,10 @@ export function sum(per: { turns: number; tokens: number; credits: number; estim
     credits: Math.round(per.credits * days * 1e6) / 1e6,
     estimated: Math.round(per.estimated * days * 1e6) / 1e6,
   };
+}
+
+
+/** One normalized service observation for a UI click path; native admission/billing is covered in Rust. */
+export async function useService(given:{offering:string;purpose?:string;unit?:string;unknown?:boolean;unpriced?:boolean}):Promise<void> {
+  await control('/use',{pattern:'A',service:true,...given});
 }

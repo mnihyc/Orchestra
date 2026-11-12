@@ -121,12 +121,21 @@ async fn made(world: &World, host: &ScriptedHost, provider: Id) -> (Id, Unit) {
     let runtime = host.started().unwrap();
     let unit = runtimes::enrol(world, runtime).await;
     // The harness declaration exists from its first launch, including the immediate provider read.
-    listen(&unit, "ready", json!({}));
+    let initial = listen(&unit, "ready", json!({}));
     let (state, _, error) = wait_over(world, job).await;
     assert_eq!(state, "succeeded", "{error:?}");
     eventually("the initial provider read to complete", || async {
-        sqlx::query_scalar::<_, bool>("SELECT facts_at IS NOT NULL FROM providers WHERE id = $1")
+        // A scheduled read can publish facts before the provisioning callback's forced read starts.
+        // Wait for that actual command and its complete observation lifetime before replacing its listener.
+        if !asked(&initial, K::ProviderRefresh)
+            .iter()
+            .any(|body| body["retry"] == true)
+        {
+            return false;
+        }
+        sqlx::query_scalar::<_, bool>("SELECT facts_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM job_leases WHERE name=$2) FROM providers WHERE id = $1")
             .bind(provider)
+            .bind(format!("provider.facts:{provider}"))
             .fetch_one(world.pool.pool())
             .await
             .unwrap()
@@ -493,6 +502,14 @@ async fn a_sign_in_that_completed_is_looked_at_by_the_schedule_and_the_provider_
     let host = ScriptedHost::on(&world, "host-1", 16_384).await;
     let _template = provider_template(&world).await;
     let provider = managed_subscription(&world, "Team Claude").await;
+    // Count the completed sign-in's forced observation, independently of an idle read
+    // made due when this previously unobserved provider's runtime comes online.
+    sqlx::query("UPDATE providers SET facts_requested_at=$2 WHERE id=$1")
+        .bind(provider)
+        .bind(world.clock.now())
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
     let (_runtime, unit) = made(&world, &host, provider).await;
     let heard = listen(
         &unit,

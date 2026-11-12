@@ -22,6 +22,8 @@ use crate::paths::{Locate, RelPath};
 use crate::platform;
 use crate::state_store::{EXECUTABLE_BITS, RecordPolicy, atomic_write, read_bounded};
 use crate::walk::{Flow, walk};
+mod touched;
+use touched::{scan_selected, touched_plan};
 
 /// Ordinary file creation bits, before the process's umask, matching workspace writes.
 const NEW_FILE_BITS: u32 = 0o666;
@@ -381,9 +383,14 @@ fn apply_with_checkpoints(
         }
         journal
     } else {
+        if request.recovery_only == Some(true) {
+            return Err(HostError::NotFound(
+                "the original restore journal is unavailable".to_owned(),
+            ));
+        }
         recheck(files, states, &plan, generation, now)?;
-        let observed = scan(files, &files.parse(&plan.directory)?, plan.record_policy)?;
-        let undo = states.capture_explicit(
+        let observed = observe_plan(files, &plan, plan.record_policy)?;
+        let mut undo = states.capture_explicit(
             files,
             &observed.indexed,
             &orch_link_contract::source::FsRecord {
@@ -397,6 +404,9 @@ fn apply_with_checkpoints(
             generation,
             now,
         )?;
+        // Keep the same explicit coverage with the undo root, including paths absent now.
+        undo.selected_paths = plan.touched_paths.clone();
+        states.store().keep_root_metadata(&undo)?;
         let undo_entries = states.store().load(undo.snapshot_id, now)?.1.entries;
         if namespace_fingerprint(&undo_entries)? != plan.namespace_fingerprint {
             return Err(HostError::Changed(
@@ -425,7 +435,9 @@ fn apply_with_checkpoints(
         return Ok(result);
     }
     let directory = files.parse(&journal.directory)?;
-    let (target, target_entries) = states.store().load_for_recovery(journal.snapshot_id)?;
+    let (target, target_entries) = states
+        .store()
+        .load_for_recovery(plan.target_root.unwrap_or(journal.snapshot_id))?;
     let undo = states
         .store()
         .load_for_recovery(journal.undo_snapshot_id)?
@@ -604,7 +616,7 @@ fn apply_with_checkpoints(
             max_bytes: plan.record_policy.max_bytes.max(target_bytes),
             ..plan.record_policy
         };
-        let verified = scan(files, &directory, verify).and_then(|applied| {
+        let verified = observe_plan(files, &plan, verify).and_then(|applied| {
             if namespace_fingerprint(&plan.target)? == applied.fingerprint {
                 Ok(())
             } else {
@@ -670,6 +682,18 @@ impl PathVersion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredPlan {
+    #[serde(default)]
+    pub overwrite: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_root: Option<Id>,
+    #[serde(default)]
+    pub form: orch_api_contract::source::RestoreForm,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touched_paths: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touched_fingerprint: Option<Hash>,
+    #[serde(default)]
+    pub blockers: Vec<String>,
     /// The recorded target, never a selection of newer live files.
     pub snapshot_id: Id,
     /// Its original immutable manifest commitment.
@@ -926,22 +950,9 @@ pub fn plan(
 ) -> Result<(StoredPlan, FsRestorePlanResult)> {
     files.gates().require_remote_write()?;
     let directory = files.parse(&request.directory)?;
-    let policy = match (request.record_days, request.max_bytes) {
-        (Some(record_days), Some(max_bytes)) => Some(RecordPolicy {
-            record_days,
-            max_bytes,
-        }),
-        (None, None) => states.store().policy(&directory)?,
-        _ => {
-            return Err(HostError::Unsupported(
-                "a restore needs both frozen recording limits".to_owned(),
-            ));
-        }
+    if let Some(touched) = &request.touched {
+        return touched_plan(files, states, request, touched, generation, now);
     }
-    .filter(|policy| policy.record_days > 0 && policy.max_bytes > 0)
-    .ok_or_else(|| {
-        HostError::Unsupported("complete undo recording is disabled or not configured".to_owned())
-    })?;
     let read = states.read_recorded(
         files,
         &crate::index::Index::new(orch_link_contract::commands::IndexMode::Live, 0),
@@ -959,7 +970,48 @@ pub fn plan(
             "a recorded state is restored only into its own directory".to_owned(),
         ));
     }
-    let current = scan(files, &directory, policy)?;
+    let configured = match (request.record_days, request.max_bytes) {
+        (Some(record_days), Some(max_bytes)) => Some(RecordPolicy {
+            record_days,
+            max_bytes,
+        }),
+        (None, None) => states.store().policy(&directory)?,
+        _ => {
+            return Err(HostError::Unsupported(
+                "a restore needs both frozen recording limits".to_owned(),
+            ));
+        }
+    };
+    let selected = read.root.selected_paths.clone();
+    let policy = if selected.is_some() {
+        RecordPolicy {
+            record_days: configured
+                .filter(|policy| policy.record_days > 0)
+                .map_or(crate::file_states::DEFAULT_RECORD_DAYS, |policy| {
+                    policy.record_days
+                }),
+            max_bytes: i64::MAX,
+        }
+    } else {
+        configured
+            .filter(|policy| policy.record_days > 0 && policy.max_bytes > 0)
+            .ok_or_else(|| {
+                HostError::Unsupported(
+                    "complete undo recording is disabled or not configured".into(),
+                )
+            })?
+    };
+    let current = match &selected {
+        Some(paths) => scan_selected(files, &directory, paths)?,
+        None => scan(files, &directory, policy)?,
+    };
+    let form = match &selected {
+        Some(paths) => orch_api_contract::source::RestoreForm::TouchedFiles {
+            count: paths.len() as u64,
+            whole_unavailable: "touched_restore".into(),
+        },
+        None => orch_api_contract::source::RestoreForm::WholeDirectory,
+    };
     // Validate every target object before presenting a whole-state plan.
     for entry in read
         .entries
@@ -970,6 +1022,12 @@ pub fn plan(
     }
     let paths = effects(&current.entries, &read.entries)?;
     let plan = StoredPlan {
+        overwrite: Vec::new(),
+        target_root: None,
+        form: form.clone(),
+        touched_paths: selected,
+        touched_fingerprint: None,
+        blockers: Vec::new(),
         snapshot_id: request.snapshot_id,
         target_manifest: read.root.manifest_blob,
         directory: request.directory.clone(),
@@ -993,6 +1051,8 @@ pub fn plan(
     Ok((
         plan,
         FsRestorePlanResult {
+            form,
+            blockers: Vec::new(),
             plan_blob: hash,
             paths,
             writers_active: false,
@@ -1014,11 +1074,26 @@ pub fn read_plan(states: &FileStates, hash: Hash) -> Result<StoredPlan> {
     }
     let plan: StoredPlan = serde_json::from_slice(&bytes)
         .map_err(|_| HostError::Unsupported("the stored restore plan is invalid".to_owned()))?;
-    if namespace_fingerprint(&plan.current)? != plan.namespace_fingerprint
-        || effects(&plan.current, &plan.target)? != plan.paths
+    let mut actual = plan.paths.clone();
+    for path in &mut actual {
+        path.later_change = None;
+        path.later_writers.clear();
+    }
+    let outside = plan.touched_paths.as_ref().is_some_and(|paths| {
+        plan.current.iter().chain(&plan.target).any(|entry| {
+            !paths.contains(&entry.p)
+                && !(entry.t == EntryKind::Dir
+                    && paths
+                        .iter()
+                        .any(|path| path.starts_with(&format!("{}/", entry.p))))
+        }) || plan.overwrite.iter().any(|path| !paths.contains(path))
+    });
+    if outside
+        || namespace_fingerprint(&plan.current)? != plan.namespace_fingerprint
+        || effects(&plan.current, &plan.target)? != actual
     {
         return Err(HostError::Changed(
-            "the stored restore plan's namespace or effects do not match".to_owned(),
+            "the stored restore plan's namespace or effects do not match".into(),
         ));
     }
     Ok(plan)
@@ -1049,13 +1124,38 @@ pub fn recheck(
     now: Time,
 ) -> Result<()> {
     files.gates().require_remote_write()?;
-    let target = states.store().load(plan.snapshot_id, now)?;
+    if !plan.blockers.is_empty() {
+        return Err(HostError::Unsupported(
+            "the touched pre-images are incomplete".into(),
+        ));
+    }
+    if plan.touched_fingerprint.is_some()
+        && plan
+            .paths
+            .iter()
+            .any(|path| path.later_change != Some(false) && !plan.overwrite.contains(&path.path))
+    {
+        return Err(HostError::Changed(
+            "a touched file changed since the agent wrote it; choose overwrite explicitly".into(),
+        ));
+    }
+    let target = states
+        .store()
+        .load(plan.target_root.unwrap_or(plan.snapshot_id), now)?;
     if target.0.manifest_blob != plan.target_manifest || target.1.entries != plan.target {
         return Err(HostError::Changed(
             "the recorded target changed after this plan".to_owned(),
         ));
     }
     recheck_namespace(files, plan, generation)
+}
+
+fn observe_plan(files: &Files, plan: &StoredPlan, policy: RecordPolicy) -> Result<Observed> {
+    let directory = files.parse(&plan.directory)?;
+    match &plan.touched_paths {
+        Some(paths) => scan_selected(files, &directory, paths),
+        None => scan(files, &directory, policy),
+    }
 }
 
 fn recheck_namespace(files: &Files, plan: &StoredPlan, generation: i64) -> Result<()> {
@@ -1065,14 +1165,40 @@ fn recheck_namespace(files: &Files, plan: &StoredPlan, generation: i64) -> Resul
             "the environment generation changed after this plan".to_owned(),
         ));
     }
-    let observed = scan(files, &files.parse(&plan.directory)?, plan.record_policy)?;
+    let observed = observe_plan(files, plan, plan.record_policy)?;
+    let same_place = |left: &PathVersion, right: &PathVersion| {
+        left.device == right.device && left.inode == right.inode
+    };
+    let selected = plan.touched_paths.is_some();
+    let versions_match = if selected {
+        observed.versions.len() == plan.versions.len()
+            && plan.versions.iter().all(|(path, old)| {
+                observed.versions.get(path).is_some_and(|new| {
+                    if plan
+                        .current
+                        .iter()
+                        .any(|entry| entry.p == *path && entry.t == EntryKind::Dir)
+                    {
+                        same_place(old, new)
+                    } else {
+                        old == new
+                    }
+                })
+            })
+    } else {
+        observed.versions == plan.versions
+    };
     if observed.fingerprint != plan.namespace_fingerprint
         || observed.ignore_fingerprint != plan.ignore_fingerprint
-        || observed.directory_version != plan.directory_version
-        || observed.versions != plan.versions
+        || !versions_match
+        || if selected {
+            !same_place(&observed.directory_version, &plan.directory_version)
+        } else {
+            observed.directory_version != plan.directory_version
+        }
     {
         return Err(HostError::Changed(
-            "the complete included namespace changed; make a new restore plan".to_owned(),
+            "the included restore paths changed; make a new restore plan".to_owned(),
         ));
     }
     Ok(())
@@ -1136,6 +1262,7 @@ mod tests {
             files,
             states,
             FsRestorePlan {
+                touched: None,
                 environment_id: environment,
                 snapshot_id: snapshot,
                 directory: String::new(),
@@ -1144,6 +1271,213 @@ mod tests {
                 max_bytes: None,
             },
         )
+    }
+
+    #[test]
+    fn live_touched_restore_refuses_changed_since_then_keeps_only_selected_undo_even_when_recording_is_off()
+     {
+        use orch_api_contract::source::{
+            FileChangeImage as Image, RestoreForm, TouchedRestore, TouchedRestorePath,
+        };
+        let (_dir, files, states, original) = fixture();
+        let workspace = files.root().root_path();
+        std::fs::write(workspace.join("code"), "changed since").unwrap();
+        std::fs::write(workspace.join("new"), "added").unwrap();
+        std::fs::write(workspace.join("unrelated"), "outside file tools").unwrap();
+        let live = Index::new(IndexMode::Live, 1);
+        states.refresh(&files, &live, None, true).unwrap();
+        let snapshot = new_id();
+        let unavailable = states
+            .record(
+                &files,
+                &FsRecord {
+                    environment_id: original.environment_id,
+                    snapshot_id: snapshot,
+                    directory: String::new(),
+                    kind: RecordKind::Turn,
+                    record_days: 7,
+                    max_bytes: 1,
+                },
+                1,
+                at(),
+            )
+            .unwrap();
+        assert_eq!(
+            unavailable.state,
+            orch_link_contract::source::RecordState::Unavailable
+        );
+        assert_eq!(unavailable.reason.as_deref(), Some("live_tree"));
+        let text = |value: &str| Some(Image::Text { text: value.into() });
+        let mut request = FsRestorePlan {
+            snapshot_id: snapshot,
+            record_days: Some(0),
+            max_bytes: Some(1),
+            touched: Some(TouchedRestore {
+                thread_id: new_id(),
+                turn_id: new_id(),
+                whole_unavailable: "live_tree".into(),
+                overwrite: Vec::new(),
+                paths: vec![
+                    TouchedRestorePath {
+                        path: "code".into(),
+                        before: text("zero"),
+                        after: text("two"),
+                    },
+                    TouchedRestorePath {
+                        path: "new".into(),
+                        before: Some(Image::Absent),
+                        after: text("added"),
+                    },
+                    TouchedRestorePath {
+                        path: "gone".into(),
+                        before: text("deleted contents"),
+                        after: Some(Image::Absent),
+                    },
+                ],
+            }),
+            ..original
+        };
+        let (_, measured) = super::plan(&files, &states, &request, 1, at()).unwrap();
+        assert!(matches!(
+            measured.form,
+            RestoreForm::TouchedFiles { count: 3, .. }
+        ));
+        assert!(measured.undo_available);
+        assert_eq!(
+            measured
+                .paths
+                .iter()
+                .filter(|path| path.later_change == Some(true))
+                .map(|path| path.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["code"]
+        );
+        let refused = confirmation(&request, &measured);
+        assert!(matches!(
+            super::apply(&files, &states, &refused, 1, at()),
+            Err(HostError::Changed(_))
+        ));
+        assert!(!journal_path(&states, refused.job_id).exists());
+        assert!(states.store().load(refused.undo_snapshot_id, at()).is_err());
+        assert_eq!(
+            std::fs::read(workspace.join("code")).unwrap(),
+            b"changed since"
+        );
+        request
+            .touched
+            .as_mut()
+            .unwrap()
+            .overwrite
+            .push("code".into());
+        let (_, measured) = super::plan(&files, &states, &request, 1, at()).unwrap();
+        std::fs::write(workspace.join("unrelated"), "a later unrelated write").unwrap();
+        std::fs::write(workspace.join("also-unrelated"), "a new sibling").unwrap();
+        let apply = confirmation(&request, &measured);
+        let result = super::apply(&files, &states, &apply, 1, at()).unwrap();
+        assert!(!result.undone);
+        assert_eq!(std::fs::read(workspace.join("code")).unwrap(), b"zero");
+        assert_eq!(
+            std::fs::read(workspace.join("gone")).unwrap(),
+            b"deleted contents"
+        );
+        assert!(!workspace.join("new").exists());
+        let (undo_root, undo_entries) = states.store().load(result.undo_snapshot_id, at()).unwrap();
+        assert_eq!(undo_root.selected_paths.as_ref().unwrap().len(), 3);
+        assert!(
+            undo_entries
+                .entries
+                .iter()
+                .all(|entry| ["code", "new"].contains(&entry.p.as_str()))
+        );
+        assert_eq!(
+            super::apply(&files, &states, &apply, 1, at()).unwrap(),
+            result
+        );
+        let undo_request = FsRestorePlan {
+            snapshot_id: result.undo_snapshot_id,
+            touched: None,
+            ..request
+        };
+        let (_, undo_plan) = super::plan(&files, &states, &undo_request, 1, at()).unwrap();
+        let undone = super::apply(
+            &files,
+            &states,
+            &confirmation(&undo_request, &undo_plan),
+            1,
+            at(),
+        )
+        .unwrap();
+        assert!(!undone.undone);
+        assert_eq!(
+            std::fs::read(workspace.join("code")).unwrap(),
+            b"changed since"
+        );
+        assert_eq!(std::fs::read(workspace.join("new")).unwrap(), b"added");
+        assert!(!workspace.join("gone").exists());
+        assert_eq!(
+            std::fs::read(workspace.join("unrelated")).unwrap(),
+            b"a later unrelated write"
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("also-unrelated")).unwrap(),
+            b"a new sibling"
+        );
+    }
+
+    #[test]
+    fn touched_overwrite_never_accepts_a_write_after_the_plan_or_an_unknown_preimage() {
+        use orch_api_contract::source::{
+            FileChangeImage as Image, TouchedRestore, TouchedRestorePath,
+        };
+        let (_dir, files, states, mut request) = fixture();
+        std::fs::write(files.root().root_path().join("code"), "final").unwrap();
+        request.touched = Some(TouchedRestore {
+            thread_id: new_id(),
+            turn_id: new_id(),
+            whole_unavailable: "off".into(),
+            overwrite: vec!["code".into()],
+            paths: vec![TouchedRestorePath {
+                path: "code".into(),
+                before: Some(Image::Text {
+                    text: "before".into(),
+                }),
+                after: Some(Image::Text {
+                    text: "final".into(),
+                }),
+            }],
+        });
+        let (_, plan) = super::plan(&files, &states, &request, 1, at()).unwrap();
+        std::fs::write(files.root().root_path().join("code"), "after the plan").unwrap();
+        assert!(matches!(
+            super::apply(&files, &states, &confirmation(&request, &plan), 1, at()),
+            Err(HostError::Changed(_))
+        ));
+        assert_eq!(
+            std::fs::read(files.root().root_path().join("code")).unwrap(),
+            b"after the plan"
+        );
+        for unavailable in [
+            None,
+            Some(Image::Blob {
+                blob: Hash::of(b"unretained pre-image"),
+                size: 20,
+                executable: false,
+            }),
+        ] {
+            request.touched.as_mut().unwrap().paths[0].before = unavailable;
+            let (saved, plan) = super::plan(&files, &states, &request, 1, at()).unwrap();
+            assert!(!plan.undo_available);
+            assert_eq!(plan.blockers, vec!["preimage_unavailable:code"]);
+            assert!(saved.target_root.is_none());
+            let apply = confirmation(&request, &plan);
+            assert!(super::apply(&files, &states, &apply, 1, at()).is_err());
+            assert!(!journal_path(&states, apply.job_id).exists());
+            assert!(!states.store().has_root(apply.undo_snapshot_id));
+            assert_eq!(
+                std::fs::read(files.root().root_path().join("code")).unwrap(),
+                b"after the plan"
+            );
+        }
     }
 
     #[test]
@@ -1227,6 +1561,7 @@ mod tests {
     ) -> orch_link_contract::source::FsRestore {
         orch_link_contract::source::FsRestore {
             work: None,
+            recovery_only: None,
             environment_id: request.environment_id,
             job_id: new_id(),
             snapshot_id: request.snapshot_id,
@@ -1413,6 +1748,7 @@ mod tests {
         .unwrap();
         let undo = orch_link_contract::source::FsRestore {
             work: None,
+            recovery_only: None,
             snapshot_id: restored.undo_snapshot_id,
             ..confirmation(&request, &undo_plan)
         };
@@ -1427,6 +1763,107 @@ mod tests {
                 "restore/Undo altered {path}"
             );
         }
+    }
+
+    #[test]
+    fn recovery_only_requires_the_original_journal_and_never_captures_a_fresh_undo() {
+        let (_dir, files, states, request) = fixture();
+        std::fs::write(files.root().root_path().join("code"), "current").unwrap();
+        let (_, plan) = super::plan(&files, &states, &request, 1, at()).unwrap();
+        let mut apply = confirmation(&request, &plan);
+        let normal = serde_json::to_value(&apply).unwrap();
+        assert!(
+            normal.get("recovery_only").is_none(),
+            "ordinary wire bodies stay unchanged"
+        );
+        assert_eq!(
+            serde_json::from_value::<orch_link_contract::source::FsRestore>(normal).unwrap(),
+            apply
+        );
+        apply.recovery_only = Some(true);
+        assert!(matches!(
+            super::apply(&files, &states, &apply, 1, at()),
+            Err(HostError::NotFound(_))
+        ));
+        assert_eq!(
+            std::fs::read(files.root().root_path().join("code")).unwrap(),
+            b"current"
+        );
+        assert!(!journal_path(&states, apply.job_id).exists());
+        assert!(!states.store().has_root(apply.undo_snapshot_id));
+        apply.recovery_only = None;
+        let ordinary = super::apply(&files, &states, &apply, 1, at()).unwrap();
+        assert!(!ordinary.undone);
+        assert_eq!(
+            std::fs::read(files.root().root_path().join("code")).unwrap(),
+            b"before"
+        );
+    }
+
+    #[test]
+    fn recovery_only_reconciles_the_exact_native_journal_after_restart_and_rejects_another_identity()
+     {
+        let (_dir, files, states, request) = fixture();
+        std::fs::write(files.root().root_path().join("code"), "current").unwrap();
+        let (_, plan) = super::plan(&files, &states, &request, 1, at()).unwrap();
+        let mut apply = confirmation(&request, &plan);
+        let outcome = apply_with_checkpoints(&files, &states, &apply, 1, at(), &mut |phase, _| {
+            if phase == "after_effect" {
+                return Err(HostError::Internal("simulated native restart".into()));
+            }
+            Ok(())
+        });
+        assert!(outcome.is_err());
+        assert!(journal_path(&states, apply.job_id).exists());
+        let path = states.store().root().to_owned();
+        drop(states);
+        let states = FileStates::new(ObjectStore::open(&path, files.root().root_path()).unwrap());
+        apply.recovery_only = Some(true);
+        let mut other = apply.clone();
+        other.undo_snapshot_id = new_id();
+        let before = std::fs::read(files.root().root_path().join("code")).unwrap();
+        assert!(matches!(
+            super::apply(&files, &states, &other, 1, at()),
+            Err(HostError::Changed(_))
+        ));
+        assert_eq!(
+            std::fs::read(files.root().root_path().join("code")).unwrap(),
+            before
+        );
+        let result = super::apply(&files, &states, &apply, 1, at()).unwrap();
+        assert!(!result.undone);
+        assert_eq!(result.undo_snapshot_id, apply.undo_snapshot_id);
+        assert_eq!(
+            std::fs::read(files.root().root_path().join("code")).unwrap(),
+            b"before"
+        );
+        assert_eq!(
+            super::apply(&files, &states, &apply, 1, at()).unwrap(),
+            result
+        );
+    }
+
+    #[test]
+    fn restore_undo_metadata_never_falls_back_to_recording_an_unrelated_current_baseline() {
+        let (_dir, files, states, request) = fixture();
+        let undo = orch_link_contract::source::FsRecord {
+            environment_id: request.environment_id,
+            snapshot_id: new_id(),
+            directory: request.directory,
+            kind: orch_link_contract::source::RecordKind::Restore,
+            record_days: crate::file_states::DEFAULT_RECORD_DAYS,
+            max_bytes: crate::file_states::DEFAULT_RECORD_MAX_BYTES,
+        };
+        assert!(!states.store().has_root(undo.snapshot_id));
+        assert!(matches!(
+            states.record(&files, &undo, 1, at()),
+            Err(HostError::NotFound(_))
+        ));
+        assert!(!states.store().has_root(undo.snapshot_id));
+        assert_eq!(
+            std::fs::read(files.root().root_path().join("code")).unwrap(),
+            b"before"
+        );
     }
 
     #[test]

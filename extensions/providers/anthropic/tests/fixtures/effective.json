@@ -1,0 +1,1 @@
+{"data":[{"spend_limit_id":"spl_fixture","actor":{"type":"user_actor","user_id":"user-fixture"},"amount":"50000","period_to_date_spend":"12050.5","currency":"USD","period":"monthly","scope":{"type":"organization"},"source":{"type":"organization"}}],"next_page":null}

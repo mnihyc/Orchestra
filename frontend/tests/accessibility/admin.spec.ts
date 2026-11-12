@@ -1,7 +1,8 @@
 /** Every section of Management, asked in both themes whether anything on it is a serious barrier: each section as it is drawn, with what opens above it open, for a system admin, and the refusal that somebody who is none reads. */
 import { expect, type Page, test } from '@playwright/test';
 
-import { expectAccessibleInBothThemes, PEOPLE, scenario, signIn } from '../e2e/support.ts';
+import { signInForManagement } from '../e2e/admin-mode-support.ts';
+import { expectAccessibleInBothThemes, PEOPLE, scenario } from '../e2e/support.ts';
 
 test.beforeEach(async () => {
   await scenario();
@@ -14,13 +15,13 @@ const SECTIONS = {
     ['/admin/users', 'Grace Hopper'],
     ['/admin/orgs', 'Orphans Inc'],
     ['/admin/sign-in', 'Acme single sign-on'],
-    ['/admin/email', 'This section opens when that part is joined'],
+    ['/admin/email', 'System mail'],
   ],
   machines: [
     ['/admin/hosts', 'build-box'],
     ['/admin/runtimes', 'Claude Max runtime'],
     ['/admin/capabilities', 'Debugger access'],
-    ['/admin/harnesses', 'Native fork'],
+    ['/admin/harnesses', 'Newest checked'],
   ],
   system: [
     ['/admin/agents', 'Claude Code'],
@@ -28,19 +29,19 @@ const SECTIONS = {
     ['/admin/settings', 'Search the settings'],
     ['/admin/storage', 'Environments that take the most'],
     ['/admin/pki', 'The authority'],
-    ['/admin/audit', 'Audit trail · System'],
+    ['/admin/audit', 'Everything done on the system, newest first'],
   ],
 } as const;
 
 async function open(page: Page, path: string, person: { login: string; password: string } = PEOPLE.ada): Promise<void> {
-  await signIn(page, person);
+  await signInForManagement(page, person);
   await page.goto(path);
 }
 
 for (const [group, sections] of Object.entries(SECTIONS)) {
   test(`the sections of ${group}, each drawn with what it holds`, async ({ page }) => {
     test.setTimeout(360_000);
-    await signIn(page);
+    await signInForManagement(page);
     for (const [path, sign] of sections) {
       await page.goto(path);
       await expect(page.getByText(sign).first()).toBeVisible();
@@ -95,7 +96,7 @@ test('what opens above the users: making a person, the link of a new password, a
 
 test('what opens above the rest: an owner named, a provider added, a capability and a build', async ({ page }) => {
   test.setTimeout(300_000);
-  await signIn(page);
+  await signInForManagement(page);
 
   await page.goto('/admin/orgs');
   await page.getByRole('button', { name: 'Name an owner…' }).click();
@@ -133,7 +134,7 @@ test('the refusal that somebody who is no system admin reads at the address of M
   await page.getByRole('button', { name: 'Your account' }).click();
   await page.getByRole('menuitem', { name: 'Sign out' }).click();
   await page.waitForURL(/\/login/);
-  await signIn(page);
+  await signInForManagement(page);
   await page.getByRole('button', { name: 'Your account' }).click();
   await expect(page.getByRole('menuitem', { name: 'Management' })).toBeVisible();
   await expectAccessibleInBothThemes(page, '[role="menu"]');

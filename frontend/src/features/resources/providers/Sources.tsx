@@ -23,7 +23,7 @@ import { Section } from '@/shell/Page';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { linkClasses } from '@/ui/link';
 import { emptySourceDraft, secretSourceField, SourceFields, sourceFault, sourceValues, type SourceDraft, type SourceFieldsProps, type SourceProgram } from './SourceFields';
-import { defaultOffer, programOffers, selectedProgram, sourceChoiceSet } from './sourceOptions';
+import { defaultOffer, programOffers, selectedProgram, sourceChoiceSet, localizedSourceFields, localizedSourceSummary } from './sourceOptions';
 
 /** A saved read failure keeps its human explanation and observation time in the common status line. */
 function SourceFailure({ failure }: { failure: { code: string; message: string; at: string } }) {
@@ -34,7 +34,7 @@ function SourceFailure({ failure }: { failure: { code: string; message: string; 
 }
 
 /** The setup response projected for one editor, not a second source-selection wire type. */
-export interface SourceOffers { defaultTitle:string; defaultSummary:string; programs:readonly SourceProgram[] }
+export interface SourceOffers { defaultTitle:string; defaultSummary:string; programs:readonly SourceProgram[]; defaultFields?:readonly Field[] }
 export interface SourcesChange { facts:SourceDraft | null; models:SourceDraft | null }
 export interface SourcesFormProps {
   provider:Provider;
@@ -56,13 +56,15 @@ export function sourceDraft(choice:SourceChoice | null | undefined):SourceDraft 
   const secrets=new Set(fields.filter(secretSourceField).map((field) => field.name));
   const config:FormValues={};
   for (const [name,value] of Object.entries(choice.config)) if (!secrets.has(name) && formValue(value)) config[name]=value;
-  return { by:choice.by === 'builtin' ? 'default' : choice.by,program:choice.name ?? '',url:choice.address?.url ?? '',auth:choice.address?.auth ?? 'none',header:choice.address?.header ?? '',authorization:'',sendCredential:choice.address?.send_credential ?? false,fields:sourceValues(fields,config) };
+  return { by:choice.by,program:choice.name ?? '',url:choice.address?.url ?? '',auth:choice.address?.auth ?? 'none',header:choice.address?.header ?? '',authorization:'',sendCredential:choice.address?.send_credential ?? false,fields:sourceValues(fields,config) };
 }
 export function savedSourceAddress(choice:SourceChoice | null | undefined):SourceFieldsProps['savedAddress'] {
   const address=choice?.address;
   return address === null || address === undefined ? null : {url:address.url,auth:address.auth,header:address.header ?? ''};
 }
 export function sourceFieldsFor(value:SourceDraft,choice:SourceChoice | null | undefined,offers:SourceOffers):readonly Field[] {
+  if (value.by === 'default') return offers.defaultFields ?? choice?.descriptor?.fields ?? [];
+  if (value.by === 'builtin') return choice?.name === value.program ? choice.descriptor?.fields ?? [] : [];
   if (value.by === 'program') return selectedProgram(value,offers.programs)?.fields ?? [];
   return value.by === 'address' && choice?.address?.url === value.url.trim() ? choice.descriptor?.fields ?? [] : [];
 }
@@ -82,7 +84,7 @@ export function sourceHostAllowed(host:string,allowed:readonly string[]):boolean
 
 /** The existing-provider editor uses the served setup, current template and keeping machine, never all machines' programs. */
 export function ProviderSources({provider}:{provider:Provider}) {
-  const {t}=useTranslation();
+  const {t,i18n}=useTranslation();
   const setup=useQuery({...providerSetupQuery(provider.home.id,provider.id),retry:false});
   const homeSettings=useQuery({...settingsQuery(provider.home.id),retry:false});
   const keeper=provider.credential_keeper ?? null;
@@ -102,8 +104,8 @@ export function ProviderSources({provider}:{provider:Provider}) {
     const current=provider.sources[element];
     const offered=defaultOffer(offers,element,provider.upstreams,provider.agent !== null);
     const descriptor=current.by === 'default' ? current.descriptor : offered?.descriptor;
-    const programs=programOffers(offers,element,keeper?.id ?? null,template).map((program) => current.by === 'program' && current.name === program.name && current.descriptor !== null ? {...program,title:current.descriptor.title,summary:current.descriptor.summary,fields:current.descriptor.fields,reports:element === 'facts' ? current.descriptor.facts?.reports ?? [] : []} : program);
-    return {defaultTitle:descriptor?.title ?? t(element === 'facts' ? 'providerSources.nothing' : 'providerDetails.defaultSource'),defaultSummary:descriptor?.summary ?? t(element === 'facts' ? 'providerSources.nothingAbout' : 'providerSources.defaultModels'),programs};
+    const programs=programOffers(offers,element,keeper?.id ?? null,template,false,i18n.resolvedLanguage ?? i18n.language).map((program) => current.by === 'program' && current.name === program.name && current.descriptor !== null ? {...program,title:current.descriptor.title,summary:localizedSourceSummary(current.descriptor,current.descriptor.summary,i18n.resolvedLanguage ?? i18n.language),fields:localizedSourceFields(current.descriptor,current.descriptor.fields,i18n.resolvedLanguage ?? i18n.language),reports:element === 'facts' ? current.descriptor.facts?.reports ?? [] : []} : program);
+    return {defaultTitle:descriptor?.title ?? t(element === 'facts' ? 'providerSources.nothing' : 'providerDetails.defaultSource'),defaultSummary:localizedSourceSummary(descriptor,descriptor?.summary ?? t(element === 'facts' ? 'providerSources.nothingAbout' : 'providerSources.defaultModels'),i18n.resolvedLanguage ?? i18n.language),programs,defaultFields:localizedSourceFields(descriptor,descriptor?.fields ?? [],i18n.resolvedLanguage ?? i18n.language)};
   };
   const facts=forElement('facts'),models=forElement('models');
   const httpPolicy=homeSettings.data?.find((setting) => setting.key === 'providers.allow_http_upstreams');
@@ -123,7 +125,7 @@ export function ProviderSources({provider}:{provider:Provider}) {
     return result;
   };
   const save=(change:SourcesChange,reviewed:Provider) => setProviderSources(provider.id,providerSourcesBody(change,reviewed,facts,models));
-  if (setup.isPending) return <SkeletonRows rows={3} />;
+  if (setup.isPending) return <SkeletonRows read={setup} rows={3} />;
   return <div className="flex min-w-0 flex-col gap-3">
     {setup.isError && <ErrorState compact error={setup.error} retrying={setup.isRefetching} onRetry={() => void setup.refetch()} />}
     <SourcesForm key={provider.id} provider={provider} facts={facts} models={models} httpAllowed={setup.data?.http_allowed ?? null} onSave={save} warnings={warnings} />
@@ -132,7 +134,7 @@ export function ProviderSources({provider}:{provider:Provider}) {
 }
 
 export function SourcesForm({provider,facts,models,httpAllowed,onSave,warnings,unavailable=false}:SourcesFormProps) {
-  const {t}=useTranslation();
+  const {t,i18n}=useTranslation();
   const [reviewed,setReviewed]=useState(provider);
   const [details,setDetails]=useState(() => sourceDraft(provider.sources.facts));
   const [listing,setListing]=useState(() => sourceDraft(provider.sources.models));
@@ -146,8 +148,9 @@ export function SourcesForm({provider,facts,models,httpAllowed,onSave,warnings,u
   const context=(element:'facts' | 'models',offers:SourceOffers) => {
     const draft=element === 'facts' ? details : listing;
     const choice=reviewed.sources[element];
-    const same=draft.by === choice.by && (draft.by !== 'program' || draft.program === choice.name) && (draft.by !== 'address' || draft.url.trim() === choice.address?.url);
-    return {programs:offers.programs,httpAllowed,canSendCredential:provider.kind === 'api',savedAddress:savedSourceAddress(choice),authorizationSet:reviewed.secrets_set.includes('source:' + element + ':authorization'),secretFieldsSet:same ? choice.secrets : [],addressFields:sourceFieldsFor(draft,choice,offers)};
+    const same=draft.by === choice.by && (draft.by !== 'program' && draft.by !== 'builtin' || draft.program === choice.name) && (draft.by !== 'address' || draft.url.trim() === choice.address?.url);
+    const builtin=choice.by==='builtin' && choice.name!==null ? {name:choice.name,title:choice.descriptor?.title ?? choice.name,fields:localizedSourceFields(choice.descriptor,choice.descriptor?.fields ?? [],i18n.resolvedLanguage ?? i18n.language)} : undefined;
+    return {programs:offers.programs,httpAllowed,canSendCredential:provider.kind === 'api',savedAddress:savedSourceAddress(choice),authorizationSet:reviewed.secrets_set.includes('source:' + element + ':authorization'),secretFieldsSet:same ? choice.secrets : [],addressFields:sourceFieldsFor(draft,choice,offers),defaultFields:offers.defaultFields ?? choice.descriptor?.fields ?? [],...(builtin===undefined?{}:{builtin})};
   };
   const factsContext=context('facts',facts),modelsContext=context('models',models);
   const blocked=unavailable || !allowed || changed || !dirty.facts && !dirty.models || dirty.facts && sourceFault(details,factsContext) !== null || dirty.models && sourceFault(listing,modelsContext) !== null;
@@ -162,6 +165,7 @@ export function SourcesForm({provider,facts,models,httpAllowed,onSave,warnings,u
   const metadata=(element:'facts' | 'models') => {
     const source=provider.sources[element];
     const descriptor=source.descriptor;
+    const summary=localizedSourceSummary(descriptor,descriptor?.summary ?? '',i18n.resolvedLanguage ?? i18n.language);
     const draft=element === 'facts' ? details : listing;
     const offered=element === 'facts' ? facts : models;
     const namedProgram=source.by === 'program' && draft.by === 'program'
@@ -171,7 +175,7 @@ export function SourcesForm({provider,facts,models,httpAllowed,onSave,warnings,u
     const title=descriptor === null || descriptor.title === namedTitle ? null : descriptor.title;
     const members=descriptor?.facts?.reports.map((member)=>t('providerDetails.members.' + member,{defaultValue:member})).join(', ') ?? '';
     return <div className="flex min-w-0 flex-col gap-2 text-sm text-text-muted">
-      {descriptor !== null && <>{title !== null && <p className="font-medium">{title}</p>}{descriptor.summary !== '' && <p>{descriptor.summary}</p>}{namedProgram === undefined && element === 'facts' && descriptor.facts !== null && <p>{t('providerSources.reports',{members})}</p>}{namedProgram === undefined && element === 'models' && descriptor.models !== null && <p>{t('providerSources.listsModels')}</p>}</>}
+      {descriptor !== null && <>{title !== null && <p className="font-medium">{title}</p>}{summary !== '' && <p>{summary}</p>}{namedProgram === undefined && element === 'facts' && descriptor.facts !== null && <p>{t('providerSources.reports',{members})}</p>}{namedProgram === undefined && element === 'models' && descriptor.models !== null && <p>{t('providerSources.listsModels')}</p>}</>}
       {source.described_at !== null && <p>{t('providerSources.described')}{' '}<RelativeTime at={source.described_at} /></p>}
       {source.last_error !== null && <SourceFailure failure={source.last_error} />}
     </div>;

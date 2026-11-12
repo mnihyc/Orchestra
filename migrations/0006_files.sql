@@ -29,15 +29,21 @@ CREATE TABLE blobs (
 ALTER TABLE agent_shares ADD CONSTRAINT agent_shares_manifest_blob_fkey FOREIGN KEY (manifest_blob) REFERENCES blobs(hash);
 
 CREATE TABLE completed_uploads (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name text,
+    media_type text,
     user_id uuid NOT NULL,
     hash bytea NOT NULL,
     created_at timestamp with time zone NOT NULL,
     CONSTRAINT completed_uploads_pkey PRIMARY KEY (user_id, hash),
+    CONSTRAINT completed_uploads_id_key UNIQUE (id),
     CONSTRAINT completed_uploads_hash_fkey FOREIGN KEY (hash) REFERENCES blobs(hash) ON DELETE CASCADE,
     CONSTRAINT completed_uploads_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 CREATE INDEX completed_uploads_hash_idx ON completed_uploads USING btree (hash);
+
+CREATE INDEX completed_uploads_owner_recent_idx ON completed_uploads USING btree (user_id, created_at DESC, id DESC);
 
 CREATE TABLE file_cache (
     environment_id uuid NOT NULL,
@@ -83,6 +89,8 @@ CREATE TABLE snapshots (
     CONSTRAINT snapshots_manifest_blob_fkey FOREIGN KEY (manifest_blob) REFERENCES blobs(hash)
 );
 
+CREATE INDEX snapshots_environment_exports_idx ON snapshots (environment_id, created_at DESC, id DESC) WHERE thread_id IS NULL;
+
 CREATE TABLE upload_sessions (
     id uuid NOT NULL,
     user_id uuid NOT NULL,
@@ -91,6 +99,7 @@ CREATE TABLE upload_sessions (
     size bigint NOT NULL,
     received bigint DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     cancelled_at timestamp with time zone,
     completed_at timestamp with time zone,
