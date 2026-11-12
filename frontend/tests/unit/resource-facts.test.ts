@@ -38,6 +38,14 @@ describe('provider hints', () => {
     provider.status = 'offline';
     expect(providerHint(provider, context())).toEqual({ text: 'Unavailable', warning: true });
   });
+  it('keeps configured caps ahead of advisory exhausted status and does not reveal private facts', () => {
+    const provider = planProvider({ status: 'exhausted' });
+    provider.facts.limit_reached = { type: 'window', resets_at: '2026-10-25T14:30:00Z' };
+    provider.choice_usage = usage([choiceCap({ state: 'reached', period_ends_at: '2026-10-25T16:30:00Z' })]);
+    expect(providerHint(provider, context())).toEqual({ text: 'At limit until 16:30', warning: true });
+    provider.access.permissions = ['provider.use'];
+    expect(providerHint(provider, context())).toEqual({ text: 'Room not visible', warning: false });
+  });
   it('uses balances and a binding running cap without inventing usage for private facts', () => {
     const provider = planProvider();
     provider.facts.windows = []; provider.facts_state.windows = 'empty';

@@ -17,7 +17,7 @@
 //!
 //! A server that dies is started again after a short pause, at most as often as its definition's budget in
 //! the registry allows within its window; the one that exceeds it is reported failed and its address is
-//! closed. A server that cannot be started at all is failed the same way, with the reason.
+//! closed. A missing startup requirement is unavailable; other startup failures keep their reason as failed.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::convert::Infallible;
@@ -406,7 +406,97 @@ struct HttpLink {
     target: String,
     client: reqwest::Client,
     authorization: Option<reqwest::header::HeaderValue>,
+    headers: reqwest::header::HeaderMap,
     session: Mutex<Option<String>>,
+}
+
+fn http_template(
+    value: &str,
+    credentials: &orch_agent_contract::discovery::McpHttpCredentials,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> String {
+    if !credentials.interpolate {
+        return value.to_owned();
+    }
+    let mut rendered = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        rendered.push_str(&rest[..start]);
+        let tail = &rest[start + 2..];
+        let Some(end) = tail.find('}') else {
+            rendered.push_str(&rest[start..]);
+            return rendered;
+        };
+        let expression = &tail[..end];
+        let (name, fallback) = expression
+            .split_once(":-")
+            .map_or((expression, None), |(name, fallback)| {
+                (name, Some(fallback))
+            });
+        let blocked = credentials.blocked_env.iter().any(|blocked| {
+            if cfg!(windows) {
+                blocked.eq_ignore_ascii_case(name)
+            } else {
+                blocked == name
+            }
+        });
+        if !blocked {
+            if let Some(value) = lookup(name) {
+                rendered.push_str(&value);
+            } else if let Some(value) = fallback {
+                rendered.push_str(value);
+            } else {
+                rendered.push_str(&rest[start..start + 2 + end + 1]);
+            }
+        }
+        rest = &tail[end + 1..];
+    }
+    rendered.push_str(rest);
+    rendered
+}
+
+/// Resolve only explicitly configured names, retaining values in sensitive native headers.
+fn private_http_headers(
+    definition: &McpDefinition,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<reqwest::header::HeaderMap> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let Some(credentials) = &definition.http_credentials else {
+        return Ok(headers);
+    };
+    let mut insert = |name: &str, value: &str| -> Result<()> {
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            HostError::Unsupported("the imported HTTP header name is invalid".to_owned())
+        })?;
+        let mut value =
+            reqwest::header::HeaderValue::from_bytes(value.as_bytes()).map_err(|_| {
+                HostError::Unsupported(
+                    "the imported HTTP header must be a single-line value".to_owned(),
+                )
+            })?;
+        value.set_sensitive(true);
+        headers.insert(name, value);
+        Ok(())
+    };
+    for (name, value) in &credentials.headers {
+        insert(name, &http_template(value.expose(), credentials, lookup))?;
+    }
+    for (name, variable) in &credentials.env_headers {
+        if let Some(value) = lookup(variable).filter(|value| !value.trim().is_empty()) {
+            insert(name, &value)?;
+        }
+    }
+    if let Some(variable) = &credentials.bearer_token_env_var {
+        let value = lookup(variable)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                HostError::NotFound(format!(
+                    "the imported HTTP credential variable {variable} is not set"
+                ))
+            })?;
+        insert("authorization", &format!("Bearer {value}"))?;
+    }
+    Ok(headers)
 }
 
 /// Authentication never comes from public variables, and invalid values never appear in a failure reason.
@@ -453,6 +543,7 @@ impl HttpLink {
         let mut request = self
             .client
             .post(&self.target)
+            .headers(self.headers.clone())
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream");
         if let Some(value) = &self.authorization {
@@ -753,11 +844,7 @@ impl McpHost {
                 self.hosted.lock().await.insert(name.to_owned(), hosted);
                 Ok(endpoint)
             }
-            Err(error) => {
-                let reason = mask_values(error.to_string(), &masks);
-                self.registry.failed(name, &reason);
-                Err(HostError::Unsupported(reason))
-            }
+            Err(error) => Err(self.start_error(name, error, &masks)),
         }
     }
 
@@ -765,6 +852,17 @@ impl McpHost {
         let pid = hosted.shared.pid.load(Ordering::SeqCst);
         if pid != 0 {
             let _ = self.processes.stop_tree(pid, STOP_GRACE).await;
+        }
+    }
+
+    fn start_error(&self, name: &str, error: HostError, masks: &[String]) -> HostError {
+        let reason = mask_values(error.to_string(), masks);
+        if matches!(&error, HostError::NotFound(_)) {
+            self.registry.unavailable(name, &reason);
+            HostError::NotFound(reason)
+        } else {
+            self.registry.failed(name, &reason);
+            HostError::Unsupported(reason)
         }
     }
 
@@ -792,11 +890,7 @@ impl McpHost {
                 self.hosted.lock().await.insert(name.to_owned(), hosted);
                 Ok(Some(endpoint))
             }
-            Err(error) => {
-                let reason = mask_values(error.to_string(), &masks);
-                self.registry.failed(name, &reason);
-                Err(HostError::Unsupported(reason))
-            }
+            Err(error) => Err(self.start_error(name, error, &masks)),
         }
     }
 
@@ -818,7 +912,7 @@ impl McpHost {
             .iter()
             .find(|command| !command_exists(command))
         {
-            return Err(HostError::Unsupported(format!(
+            return Err(HostError::NotFound(format!(
                 "{missing} is missing from this environment"
             )));
         }
@@ -844,7 +938,25 @@ impl McpHost {
                 Some((spawned.link, spawned.child))
             }
             McpTransport::Http => {
-                let target = spec.url.clone().unwrap_or_default();
+                let lookup = |name: &str| {
+                    secrets
+                        .get(name)
+                        .or_else(|| spec.env.get(name))
+                        .cloned()
+                        .or_else(|| {
+                            if CONNECTOR_PRIVATE_VARIABLES.contains(&name) {
+                                None
+                            } else {
+                                std::env::var(name).ok()
+                            }
+                        })
+                };
+                let target = spec.url.as_deref().unwrap_or_default();
+                let target = definition.http_credentials.as_ref().map_or_else(
+                    || target.to_owned(),
+                    |http| http_template(target, http, &lookup),
+                );
+                let headers = private_http_headers(&definition, &lookup)?;
                 let uri = reqwest::Url::parse(&target).map_err(|_| {
                     HostError::Unsupported(
                         "the tool server needs an HTTP or HTTPS address".to_owned(),
@@ -872,6 +984,7 @@ impl McpHost {
                     target,
                     client,
                     authorization: upstream_authorization(&spec, &secrets)?,
+                    headers,
                     session: Mutex::new(None),
                 });
                 let reason =
@@ -1033,9 +1146,14 @@ async fn spawn_stdio(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     platform::prepare_group(command.as_std_mut());
-    let mut child = command
-        .spawn()
-        .map_err(|e| HostError::Unsupported(format!("{program} could not be started: {e}")))?;
+    let mut child = command.spawn().map_err(|error| {
+        let reason = format!("{program} could not be started: {error}");
+        if error.kind() == std::io::ErrorKind::NotFound {
+            HostError::NotFound(reason)
+        } else {
+            HostError::Unsupported(reason)
+        }
+    })?;
     if let Some(pid) = child.id() {
         shared.pid.store(pid, Ordering::SeqCst);
         if let Err(error) = processes.register_root(pid, RootKind::Server) {
@@ -1189,6 +1307,22 @@ async fn supervise(context: SuperviseContext, mut link: Arc<StdioLink>, mut chil
                     break;
                 }
                 Err(error) => {
+                    if matches!(&error, HostError::NotFound(_)) {
+                        let reason = mask_values(
+                            error.to_string(),
+                            &masked_values(&context.spec, &context.secrets),
+                        );
+                        context.registry.unavailable(&name, &reason);
+                        context
+                            .reports
+                            .say(
+                                context.environment_id,
+                                Report::McpUnavailable { name, reason },
+                            )
+                            .await;
+                        context.stop.cancel();
+                        return;
+                    }
                     reason = format!("it could not be started again: {error}");
                 }
             }
@@ -1557,6 +1691,10 @@ fn stream_call(shared: &Arc<Shared>, id: Json, params: Json) -> mpsc::Receiver<B
 }
 
 #[cfg(test)]
+#[path = "mcp_host/http_credentials_tests.rs"]
+mod http_credentials_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::environment::Reports;
@@ -1625,6 +1763,7 @@ mod tests {
                 .build()
                 .unwrap(),
             authorization,
+            headers: reqwest::header::HeaderMap::new(),
             session: Mutex::new(None),
         };
         link.post(&initialize_message(1), Some(1)).await.unwrap();
@@ -1717,6 +1856,7 @@ mod tests {
             target: target.clone(),
             client,
             authorization: None,
+            headers: reqwest::header::HeaderMap::new(),
             session: Mutex::new(None),
         };
         let answer = trusted
@@ -1728,6 +1868,7 @@ mod tests {
         let untrusted = HttpLink {
             target,
             authorization: None,
+            headers: reqwest::header::HeaderMap::new(),
             client: reqwest::Client::builder()
                 .no_proxy()
                 .timeout(Duration::from_secs(3))
@@ -2130,9 +2271,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_program_that_cannot_be_started_is_a_failed_server_with_the_reason() {
-        let (_dir, host, registry, launch, mut definition) = stand_in(3);
-        definition.spec.command = Some(vec!["/nonexistent/orch-test-tool-server".to_owned()]);
+    async fn a_missing_program_is_unavailable_with_the_reason_and_no_endpoint() {
+        let (dir, host, registry, launch, mut definition) = stand_in(3);
+        definition.spec.command = Some(vec![
+            dir.path().join("missing-tool-server").display().to_string(),
+        ]);
         let error = host
             .start("absent", Origin::Preset, definition, &launch)
             .await
@@ -2143,13 +2286,35 @@ mod tests {
         );
         assert!(matches!(
             registry.get("absent").unwrap().state,
+            crate::mcp::ServerState::Unavailable { .. }
+        ));
+        assert!(matches!(error, HostError::NotFound(_)));
+        assert!(host.endpoint("absent").await.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_present_program_that_cannot_be_executed_remains_a_failed_server() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, host, registry, launch, mut definition) = stand_in(3);
+        let path = dir.path().join("not-executable");
+        std::fs::write(&path, b"this file cannot be executed").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        definition.spec.command = Some(vec![path.display().to_string()]);
+        let error = host
+            .start("refused", Origin::Preset, definition, &launch)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, HostError::Unsupported(_)));
+        assert!(matches!(
+            registry.get("refused").unwrap().state,
             crate::mcp::ServerState::Failed { .. }
         ));
     }
 
     #[tokio::test]
     async fn a_command_the_definition_requires_and_the_environment_lacks_is_said() {
-        let (_dir, host, _registry, launch, mut definition) = stand_in(3);
+        let (_dir, host, registry, launch, mut definition) = stand_in(3);
         definition.spec.requires.commands = vec!["orch-test-command-that-is-nowhere".to_owned()];
         let error = host
             .start("needs", Origin::Preset, definition, &launch)
@@ -2161,5 +2326,10 @@ mod tests {
                 .contains("is missing from this environment"),
             "{error}"
         );
+        assert!(matches!(
+            registry.get("needs").unwrap().state,
+            crate::mcp::ServerState::Unavailable { .. }
+        ));
+        assert!(host.endpoint("needs").await.is_none());
     }
 }

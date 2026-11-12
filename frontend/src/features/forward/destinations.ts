@@ -40,7 +40,7 @@ export function threadDestinations(
   return [...nodes]
     .filter((node) => node.kind === 'thread' && !node.deleted && !node.archived && node.id !== except && (query.trim() === '' || matches(node.name, query)))
     .sort((one, other) => (other.thread?.activity_seq ?? 0) - (one.thread?.activity_seq ?? 0) || one.name.localeCompare(other.name))
-    .map((node) => ({ key: `thread:${node.id}`, kind: 'thread' as const, threadId: node.id, label: node.name, detail: pathOf(node), state: node.thread?.state ?? 'idle', ...(node.thread?.display === undefined ? {} : { display: node.thread.display }) }));
+    .map((node) => ({ key: `thread:${node.id}`, kind: 'thread' as const, threadId: node.id, label: node.name, detail: pathOf(node), ...(node.thread?.state === undefined ? {} : { state: node.thread.state }), ...(node.thread?.display === undefined ? {} : { display: node.thread.display }) }));
 }
 
 /** The groups the person is in, narrowed by name or by the names of their people. */

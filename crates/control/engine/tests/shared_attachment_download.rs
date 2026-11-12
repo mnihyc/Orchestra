@@ -207,7 +207,7 @@ impl Library {
             .bind(people_chat).bind(people_org).bind(world.ada)
             .execute(&mut *conn).await.unwrap();
         sqlx::query(
-            "INSERT INTO chat_members (chat_id,user_id,added_by,seq_updated) VALUES ($1,$2,$2,1)",
+            "INSERT INTO chat_members (chat_id,user_id,added_by,manager,seq_updated) VALUES ($1,$2,$2,true,1)",
         )
         .bind(people_chat)
         .bind(world.ada)
@@ -347,6 +347,8 @@ impl Library {
                 r#type: ForwardedType::Forwarded,
                 from: ForwardedFrom::Chat {
                     chat: ChatRef {
+                        visibility: orch_api_contract::chats::ChatVisibility::Private,
+                        home: None,
                         id: new_id(),
                         kind: ChatKind::Group,
                         org_id: self.world.root,

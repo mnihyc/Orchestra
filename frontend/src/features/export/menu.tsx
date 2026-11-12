@@ -1,4 +1,4 @@
-/** The Export… of a menu: offered to whoever may take the thing away, left out of a row's menu otherwise, and on the thing's own screen switched off with one line and the way to ask.
+/** Export… stays in the menu of a visible object, with its current decision and the way to ask.
  *
  * Every menu that has Export… builds its entries here, so that a thread's header, the "⋯" of a place, a chat's
  * menu and a document's say the same: "Export…" where it can be done, and where somebody reads a thing and may not
@@ -6,31 +6,43 @@
  * and under it Request access.
  */
 import type { TFunction } from 'i18next';
-import { Download, KeyRound } from 'lucide-react';
+import { Download, KeyRound, RefreshCw } from 'lucide-react';
 
 import type { UserRef } from '@/generated/api-types';
 import type { MenuEntry } from '@/ui/Menu';
+
+export interface ExportCheckFailure {
+  /** The shared error reader's safe, localized explanation. */
+  reason: string;
+  /** Only a failed read is repeated, never an export or access request. */
+  retry?: () => void;
+}
 
 export interface ExportEntryOptions {
   /** Whether the caller may take it away: `null` while that is not known yet. */
   allowed: boolean | null;
   /** The first owner of the thing, whom to ask; `null` when the thing does not say. */
   owner: Pick<UserRef, 'display_name'> | null | undefined;
-  /** In a row of a list what the caller may not do is left out; on the thing's own screen it stays, switched off, with the reason. */
+  /** Rows and screens share the same Export decision and explanation. */
   where: 'row' | 'screen';
   /** Other words for why it is switched off, where nobody could give the right: then there is no way to ask. */
   reason?: string;
+  checkFailure?: ExportCheckFailure;
   onExport: () => void;
   /** Opens the form that asks for the Export row of the thing. */
   onRequest: () => void;
   t: TFunction;
 }
 
-/** The entries of Export… for one thing: none, the entry, or the entry switched off with Request access under it. */
-export function exportEntries({ allowed, owner, where, reason, onExport, onRequest, t }: ExportEntryOptions): MenuEntry[] {
-  if (allowed === null) return [];
+/** Checking never becomes a denial; only a known, requestable refusal offers Request access. */
+export function exportEntries({ allowed, owner, reason, checkFailure, onExport, onRequest, t }: ExportEntryOptions): MenuEntry[] {
+  if (allowed === null) {
+    const checking: MenuEntry = { id: 'export', label: t('export.menu.export'), icon: <Download aria-hidden />,
+      disabled: checkFailure?.reason ?? t('export.menu.checking'), onSelect: onExport };
+    const retry = checkFailure?.retry;
+    return retry === undefined ? [checking] : [checking, { id: 'export-retry', label: t('common.tryAgain'), icon: <RefreshCw aria-hidden />, onSelect: retry }];
+  }
   if (allowed) return [{ id: 'export', label: t('export.menu.export'), icon: <Download aria-hidden />, onSelect: onExport }];
-  if (where === 'row') return [];
   const off: MenuEntry = {
     id: 'export',
     label: t('export.menu.export'),

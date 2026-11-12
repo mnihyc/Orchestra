@@ -24,3 +24,15 @@ it('an explicit repeated line request preserves the mounted editor and dirty dra
   expect(screen.getByRole('textbox', { name: 'Own code' })).toBe(body);
   expect(dirty).toHaveBeenLastCalledWith(true);
 });
+
+it.each(['Own code', '代码'])('opens an inclusive line selection in %s without replacing unsaved text', (label) => {
+  vi.stubGlobal('requestAnimationFrame', vi.fn(() => 0));
+  const editor = createRef<CodeViewHandle>();
+  const text = 'first\nsecond\nthird\nfourth';
+  const pane = show(<CodeView ref={editor} text={text} version="original" label={label} line={2} endLine={3} />);
+  expect(editor.current?.getSelection()).toMatchObject({ fromLine: 2, toLine: 3, text: 'second\nthird' });
+  act(() => { editor.current?.setText(`${text}\nunsaved fifth`); });
+  pane.rerender(<CodeView ref={editor} text={text} version="original" label={label} line={3} endLine={100} />);
+  expect(editor.current?.getSelection()).toMatchObject({ fromLine: 3, toLine: 5, text: 'third\nfourth\nunsaved fifth' });
+  expect(editor.current?.getText()).toBe(`${text}\nunsaved fifth`);
+});

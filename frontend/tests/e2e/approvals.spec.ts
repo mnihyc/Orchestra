@@ -17,6 +17,14 @@ const card = (page: Page, title: string | RegExp) => page.getByRole('region', { 
 const capabilityCard = (page: Page, id: string) => page.locator(`[data-approval="${id}"]`);
 const waiting = (count: number) => (count === 0 ? 'Approvals' : `Approvals, ${count} ${count === 1 ? 'approval waits' : 'approvals wait'}`);
 
+/** The outcome disclosure and deciding person's chip are separate controls. */
+async function settled(page: Page, region: Locator, outcome: string, by: string): Promise<void> {
+  await expect(region.getByRole('button', { name: new RegExp(`${outcome}$`) })).toBeVisible();
+  const status = region.getByRole('status').filter({ has: page.getByRole('button', { name: by, exact: true }) });
+  await expect(status).toContainText('by');
+  await expect(status.getByRole('button', { name: by, exact: true })).toBeVisible();
+}
+
 async function open(page: Page, path = '/approvals'): Promise<void> {
   await signIn(page);
   await page.goto(path);
@@ -67,12 +75,12 @@ test('an agent’s request is decided from the list with the choices the harness
   await agent.getByRole('button', { name: 'Allow once' }).click();
   // The card collapses to one line, under the person's name; the count follows.
   const line = card(page, 'Run npm install left-pad');
-  await expect(line.getByRole('button', { name: /Allowed once by Ada Lovelace/ })).toBeVisible();
+  await settled(page, line, 'Allowed once', 'Ada Lovelace');
   await expect(line.getByRole('button', { name: 'Allow once' })).toHaveCount(0);
   await expect(rail(page).getByRole('link', { name: waiting(0), exact: true })).toBeVisible();
 
   // It opens to the request again.
-  await line.getByRole('button', { name: /Allowed once by Ada Lovelace/ }).click();
+  await line.getByRole('button', { name: /Allowed once$/ }).click();
   await expect(line.getByText('npm install left-pad', { exact: true })).toBeVisible();
 
   // The same approval, in its conversation.
@@ -84,7 +92,7 @@ test('a request that is refused is decided as refused, with the danger option th
   await playScene(REPRO, 'waiting');
   await open(page);
   await card(page, 'Run npm install left-pad').getByRole('button', { name: /^Deny /, exact: true }).click();
-  await expect(card(page, 'Run npm install left-pad').getByRole('button', { name: /Denied by Ada Lovelace/ })).toBeVisible();
+  await settled(page, card(page, 'Run npm install left-pad'), 'Denied', 'Ada Lovelace');
 });
 
 test('questions are answered, and what an MCP server asks for is filled in, from the list', async ({ page }) => {
@@ -98,13 +106,13 @@ test('questions are answered, and what an MCP server asks for is filled in, from
   await questions.getByRole('checkbox', { name: /Types/ }).click();
   await questions.getByLabel('Is there anything it should know?').fill('Keep the old tests.');
   await questions.getByRole('button', { name: 'Send answers' }).click();
-  await expect(card(page, 'The agent asks you').getByRole('button', { name: /Answered by Ada Lovelace/ })).toBeVisible();
+  await settled(page, card(page, 'The agent asks you'), 'Answered', 'Ada Lovelace');
 
   const form = card(page, 'The tracker asks for details');
   await expect(form.getByRole('button', { name: 'Accept' })).toBeDisabled();
   await form.getByLabel('Title').fill('Login redirect loses the path');
   await form.getByRole('button', { name: 'Accept' }).click();
-  await expect(card(page, 'The tracker asks for details').getByRole('button', { name: /by Ada Lovelace/ })).toBeVisible();
+  await settled(page, card(page, 'The tracker asks for details'), 'Answered', 'Ada Lovelace');
 
   // What the others ask is still there, to be decided.
   await expect(card(page, 'Run rm -rf build && npm run build').getByRole('button', { name: 'Allow once' })).toBeVisible();
@@ -122,12 +130,12 @@ test('a capability is approved with a note for whoever asked, and another is den
   await expect(gpu.getByRole('heading', { name: 'GPU', exact: true })).toBeVisible();
   await gpu.getByLabel('A note for whoever asked (optional)').fill('Only until Friday.');
   await gpu.getByRole('button', { name: /^Approve /, exact: true }).click();
-  await expect(gpu.getByRole('button', { name: /Approved by Ada Lovelace/ })).toBeVisible();
+  await settled(page, gpu, 'Approved', 'Ada Lovelace');
 
   const other = capabilityCard(page, second.id);
   await expect(other.getByRole('heading', { name: 'GPU', exact: true })).toBeVisible();
   await other.getByRole('button', { name: /^Deny /, exact: true }).click();
-  await expect(other.getByRole('button', { name: /Denied by Ada Lovelace/ })).toBeVisible();
+  await settled(page, other, 'Denied', 'Ada Lovelace');
   await expect(rail(page).getByRole('link', { name: waiting(0), exact: true })).toBeVisible();
 
   const made = await approvalsMade();
@@ -171,6 +179,9 @@ test('requests sent together are one card with a row for each thing, decided one
 
   // A terminal is named in words before it is given, and the words go when the tick does.
   const first = row(together, thread.id);
+  // The quick grant keeps narrower permissions, expiry and notes behind Other….
+  await first.getByRole('button', { name: 'Other…', exact: true }).click();
+  await row(together, provider.id).getByRole('button', { name: 'Other…', exact: true }).click();
   await expect(first.getByText("Open a shell in the environment where the thread runs, as that environment's user.")).toBeVisible();
   for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const) {
     await page.setViewportSize({ width, height: 900 });
@@ -190,7 +201,7 @@ test('requests sent together are one card with a row for each thing, decided one
   await first.getByRole('button', { name: /^Approve /, exact: true }).click();
 
   // The first row is decided; the second still waits, and so the card still does.
-  await expect(row(together, thread.id)).toContainText('Approved');
+  await expect(row(together, thread.id).getByRole('status')).toContainText('Given');
   await expect(row(together, provider.id).getByRole('button', { name: /^Approve /, exact: true })).toBeVisible();
   await expect(rail(page).getByRole('link', { name: waiting(1) })).toBeVisible();
 
@@ -218,6 +229,7 @@ test('an access request is denied, with a note, and nothing is given', async ({ 
   const asked = await askAccess({ requester: 'dora', title: 'Access to Fix login', object: { kind: 'thread', id: MAIN, name: 'Main thread' }, permissions: ['thread.view'] });
   await open(page);
   const one = card(page, 'Access to Fix login');
+  await one.getByRole('button', { name: 'Other…', exact: true }).click();
   await one.getByLabel('A note for whoever asked (optional)').fill('Ask Grace first.');
   await one.getByRole('button', { name: 'Deny' }).click();
   await expect(rail(page).getByRole('link', { name: waiting(0), exact: true })).toBeVisible();
@@ -232,8 +244,8 @@ test('a request that somebody else decides while the list is open turns into its
 
   await settleAs(asked.id, 'grace', 'approved');
   const line = capabilityCard(page, asked.id);
-  await expect(line.getByRole('button', { name: /Approved by Grace Hopper/ })).toBeVisible();
-  await expect(line.getByText('Already answered by Grace Hopper')).toBeVisible();
+  await settled(page, line, 'Approved', 'Grace Hopper');
+  await expect(line.getByText('Already decided', { exact: true })).toBeVisible();
   await expect(line.getByRole('button', { name: /^Approve /, exact: true })).toHaveCount(0);
   await expect(rail(page).getByRole('link', { name: waiting(0), exact: true })).toBeVisible();
 });
@@ -244,8 +256,8 @@ test('an agent’s request decided by somebody else meanwhile is shown as such t
   await expect(card(page, 'Run npm install left-pad').getByRole('button', { name: 'Allow once' })).toBeVisible();
   await settleAs('ap-1', 'grace', 'denied');
   const line = card(page, 'Run npm install left-pad');
-  await expect(line.getByText('Already answered by Grace Hopper')).toBeVisible();
-  await expect(line.getByRole('button', { name: /Denied by Grace Hopper/ })).toBeVisible();
+  await expect(line.getByText('Already decided', { exact: true })).toBeVisible();
+  await settled(page, line, 'Denied', 'Grace Hopper');
 });
 
 test('a decision that comes too late says who got there first, and takes the card as it now stands', async ({ page }) => {
@@ -259,8 +271,8 @@ test('a decision that comes too late says who got there first, and takes the car
   await settleAs(asked.id, 'grace', 'denied', true);
   await capabilityCard(page, asked.id).getByRole('button', { name: /^Approve /, exact: true }).click();
   const line = capabilityCard(page, asked.id);
-  await expect(line.getByText('Already answered by Grace Hopper')).toBeVisible();
-  await expect(line.getByRole('button', { name: /Denied by Grace Hopper/ })).toBeVisible();
+  await expect(line.getByText('Already decided', { exact: true })).toBeVisible();
+  await settled(page, line, 'Denied', 'Grace Hopper');
 });
 
 test('what the person asked for is listed with its answer, and an access request is taken back', async ({ page }) => {
@@ -273,7 +285,7 @@ test('what the person asked for is listed with its answer, and an access request
   const asked = card(page, 'Access to Fix login');
   await expect(asked.getByText('View Thread, Interact Thread')).toBeVisible();
   await expect(asked.getByRole('button', { name: 'Approve' })).toHaveCount(0);
-  await expect(card(page, 'Access to Repro').getByRole('button', { name: /Approved by Ada Lovelace/ })).toBeVisible();
+  await settled(page, card(page, 'Access to Repro'), 'Approved', 'Ada Lovelace');
 
   await asked.getByRole('button', { name: 'Take the request back' }).click();
   await expect(card(page, 'Access to Fix login').getByRole('button', { name: /Cancelled/ })).toBeVisible();
@@ -285,22 +297,21 @@ test('History lists what was decided, and each line opens to the request', async
   await settleAs(asked.id, 'grace', 'approved');
   await open(page, '/approvals?tab=history');
   const line = capabilityCard(page, asked.id);
-  await expect(line.getByRole('button', { name: /Approved by Grace Hopper/ })).toBeVisible();
-  await line.getByRole('button', { name: /Approved by Grace Hopper/ }).click();
+  await settled(page, line, 'Approved', 'Grace Hopper');
+  await line.getByRole('button', { name: /Approved$/ }).click();
   await expect(line.getByText('Training needs it.')).toBeVisible();
 });
 
-test('the kind, and everything the person could decide, are kept in the address, and the list follows them', async ({ page }) => {
+test('the kind stays in the address and filters both pending decision groups', async ({ page }) => {
   await playScene(REPRO, 'waiting');
   const mine = await askCapability({ requester: 'dora', title: 'GPU for Training box' });
   const nearer = await askCapability({ requester: 'dora', title: 'Debugger meant for Grace', deciders: ['grace'], also: ['ada'] });
   await open(page);
   await expect(capabilityCard(page, mine.id)).toBeVisible();
-  await expect(capabilityCard(page, nearer.id)).toHaveCount(0);
-
-  await page.getByRole('switch', { name: 'Everything I could decide' }).click();
-  await expect(page).toHaveURL(/all=true/);
-  await expect(capabilityCard(page, nearer.id)).toBeVisible();
+  // The old all switch is replaced by an always-visible, separate group for other pending requests.
+  const others = page.getByRole('region', { name: 'Others you may decide', exact: true });
+  await expect(others.locator(`[data-approval="${nearer.id}"]`)).toBeVisible();
+  await expect(others.locator(`[data-approval="${mine.id}"]`)).toHaveCount(0);
   // It was sent to somebody nearer: the person sees it and is told they cannot answer it.
   await expect(capabilityCard(page, nearer.id).getByText("You can't answer this.")).toBeVisible();
 
@@ -309,10 +320,12 @@ test('the kind, and everything the person could decide, are kept in the address,
   await expect(page).toHaveURL(/kind=harness/);
   await expect(card(page, 'Run npm install left-pad')).toBeVisible();
   await expect(capabilityCard(page, mine.id)).toHaveCount(0);
+  await expect(capabilityCard(page, nearer.id)).toHaveCount(0);
 
   // A link reproduces it.
   await page.reload();
-  await expect(page.getByRole('switch', { name: 'Everything I could decide' })).toBeChecked();
+  await expect(page.getByRole('combobox', { name: 'Kind', exact: true })).toContainText('Agent action');
+  await expect(page).toHaveURL(/kind=harness/);
   await expect(card(page, 'Run npm install left-pad')).toBeVisible();
 });
 

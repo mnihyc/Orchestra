@@ -24,7 +24,7 @@ vi.mock('@/api/approvals', async (original) => ({
 
 vi.mock('@/features/change/target', () => ({ openChange: vi.fn() }));
 vi.mock('@/features/composer/ModelEffort', () => ({ ModelEffort: () => <button>Model and effort</button> }));
-vi.mock('@/features/composer/ApprovalMode', () => ({ ApprovalModePicker: () => <button>Approval mode</button> }));
+vi.mock('@/features/composer/ApprovalMode', () => ({ ApprovalModePicker: () => <button>Approval mode</button>, ConfinementPicker: () => <button>Sandbox</button> }));
 vi.mock('@/features/usage/context/ContextRing', () => ({ ContextRing: () => <button>Context breakdown</button> }));
 
 const thread = { id: 'thread-plan', name: 'Plan the fix', archived: false, state: 'idle', side_of: null, lock: null,
@@ -43,7 +43,8 @@ for (const locale of ['en', 'zh-CN'] as const) {
       plan={<PlanSwitch on={false} onChange={changed} />} />);
     const controls = within(screen.getByRole('group', { name: i18n.t('composer.row.label') }));
     const names = controls.getAllByRole('button').map((button) => button.textContent);
-    expect(names.indexOf(i18n.t('composer.plan.label'))).toBe(names.indexOf('Approval mode') + 1);
+    expect(names.indexOf(i18n.t('composer.plan.label'))).toBe(names.indexOf('Sandbox') + 1);
+    expect(names.indexOf('Sandbox')).toBe(names.indexOf('Approval mode') + 1);
     const plan = controls.getByRole('button', { name: i18n.t('composer.plan.label') });
     expect(plan).toHaveAttribute('aria-pressed', 'false');
     await userEvent.click(plan);

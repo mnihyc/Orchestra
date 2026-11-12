@@ -34,7 +34,7 @@ vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeo
     <a href={search?.redirect === undefined ? to : `${to}?${new URLSearchParams({ redirect: search.redirect })}`} className={className}>{children}</a>,
 }));
 const previous = useAppearance.getState();
-const invitation: InvitationPreview = { kind: 'system', org: null, what: null, role: null, permissions: [], inviter: ADA, email_bound: false, expires_at: '2027-01-01T00:00:00Z' };
+const invitation: InvitationPreview = { terms: null, kind: 'system', org: null, what: null, role: null, permissions: [], inviter: ADA, email_bound: false, expires_at: '2027-01-01T00:00:00Z' };
 beforeEach(() => {
   vi.clearAllMocks();
   calls.meta.mockResolvedValue(meta({ registration_mode: 'invite', identity_providers: [] }));

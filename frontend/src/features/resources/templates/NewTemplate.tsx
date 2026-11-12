@@ -132,7 +132,7 @@ export function NewTemplateDialog({ onClose }: { onClose: () => void }) {
           setAttempt((value) => value + 1); setValidDraft(true); make.reset();
         }} />
         {drivers.isPending ? (
-          <SkeletonRows rows={1} />
+          <SkeletonRows read={drivers} rows={1} />
         ) : drivers.isError ? (
           <ErrorState compact error={drivers.error} retrying={drivers.isRefetching} onRetry={() => void drivers.refetch()} />
         ) : driver === null ? null : (

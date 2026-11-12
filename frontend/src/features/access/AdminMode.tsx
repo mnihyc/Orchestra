@@ -14,6 +14,8 @@ import { useErrorText } from '@/ui/errorText';
 import { toast } from '@/ui/Toast';
 import { Switch } from '@/ui/Switch';
 import { useFrameReady } from '@/shell/FrameReadiness';
+import { requestViewAction } from '@/features/workbench/CloseViews';
+import { useWorkbench } from '@/features/workbench/store';
 
 export function useAdminMode() {
   const ready = useFrameReady();
@@ -38,9 +40,14 @@ export function useAdminModeWrite() {
   const changing = useIsMutating({ mutationKey: ['admin-mode'] }) > 0;
   const mutate = change.mutate;
   const setMode = useCallback((enabled: boolean) => {
-    const current = cache.getQueryData<AdminMode>(adminModeKey);
-    if (current?.available !== true || current.as_admin === enabled || cache.isMutating({ mutationKey: ['admin-mode'] }) > 0) return;
-    mutate(enabled);
+    const current = () => {
+      const mode = cache.getQueryData<AdminMode>(adminModeKey);
+      return mode?.available === true && mode.as_admin !== enabled && cache.isMutating({ mutationKey: ['admin-mode'] }) === 0;
+    };
+    if (!current()) return;
+    const write = () => { if (current()) mutate(enabled); };
+    if (enabled) write();
+    else requestViewAction([...useWorkbench.getState().unsaved], write, current);
   }, [cache, mutate]);
   return { change, changing, setMode };
 }
@@ -51,7 +58,7 @@ export function AdminModeEnableAction() {
   const mode = useAdminMode();
   const { changing, setMode } = useAdminModeWrite();
   if (mode.data?.available !== true || mode.data.as_admin) return null;
-  return <Button size="sm" icon={<ShieldUser aria-hidden />} pending={changing} onClick={() => setMode(true)}>{t('adminReach.mode.enable')}</Button>;
+  return <Button size="sm" icon={<ShieldUser aria-hidden />} pending={changing} reason={changing ? t('ui.unavailable.modeChanging') : undefined} onClick={() => setMode(true)}>{t('adminReach.mode.enable')}</Button>;
 }
 
 /** This is a recorded fact too: historical audit rows keep it when the live session is off. */
@@ -75,6 +82,6 @@ export function AdminModeControl() {
     </span>}
     aria-label={label} aria-busy={changing || undefined} aria-disabled={changing || undefined} data-as-admin={enabled}
     checked={enabled} onCheckedChange={setMode} className="shrink-0"
-    tooltip={change.error === null ? t('adminReach.mode.description') : sayError(change.error).message}
+    tooltip={changing ? t('ui.unavailable.modeChanging') : change.error === null ? t('adminReach.mode.description') : sayError(change.error).message}
   />;
 }

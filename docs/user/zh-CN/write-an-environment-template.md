@@ -9,6 +9,7 @@ heading_id.阅读各节: read-the-sections
 heading_id.按需使用-json: use-json-when-useful
 heading_id.为位置选择模板: choose-a-template-for-a-place
 heading_id.修改已使用的模板: change-a-template-already-in-use
+summary: 在可复用模板中描述受管环境的镜像、工具和初始设置。
 ---
 
 # 编写环境模板

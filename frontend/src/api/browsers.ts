@@ -6,8 +6,8 @@
  */
 import { queryOptions } from '@tanstack/react-query';
 
-import { api, done, ok } from '@/api/client';
-import type { Browser, BrowserProfile, BrowserTicketCreateReply, EnvironmentBrowserCreateBody, EnvironmentBrowsers } from '@/generated/api-types';
+import { accepted, api, done, ok } from '@/api/client';
+import type { Browser, BrowserProfile, BrowserProfileCreateResponse, BrowserTicketCreateReply, EnvironmentBrowserCreateBody, EnvironmentBrowsers } from '@/generated/api-types';
 
 export const browserKeys = {
   list: (environmentId: string) => ['environment-browsers', environmentId] as const,
@@ -50,13 +50,13 @@ export function quitBrowser(browserId: string): Promise<Browser> {
 }
 
 /** A single-use ticket for the browser's socket: to watch, or with `control` to drive. */
-export function browserTicket(browserId: string, control: boolean): Promise<BrowserTicketCreateReply> {
-  return ok(api.POST('/browsers/{browser_id}/ticket', { params: { path: { browser_id: browserId } }, body: { control } }));
+export function browserTicket(browserId: string, control: boolean, clientKey: string = crypto.randomUUID()): Promise<BrowserTicketCreateReply> {
+  return ok(api.POST('/browsers/{browser_id}/ticket', { params: { path: { browser_id: browserId } }, headers: { 'Idempotency-Key': clientKey }, body: { control } }));
 }
 
 /** Makes an empty profile. */
-export function createProfile(environmentId: string, name: string): Promise<BrowserProfile> {
-  return ok(api.POST('/environments/{id}/browser-profiles', { params: { path: { id: environmentId } }, body: { name } }));
+export function createProfile(environmentId: string, name: string, clientKey: string = crypto.randomUUID()): Promise<BrowserProfileCreateResponse> {
+  return accepted(api.POST('/environments/{id}/browser-profiles', { params: { path: { id: environmentId } }, headers: { 'Idempotency-Key': clientKey }, body: { name } }));
 }
 
 /** Gives a profile that no browser runs on another name. */

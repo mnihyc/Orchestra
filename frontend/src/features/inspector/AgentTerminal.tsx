@@ -12,7 +12,7 @@ import { InlineAlert } from '@/ui/InlineAlert';
 
 /** Match the ordinary terminal's retained screen without keeping unlimited harness output. */
 const SCROLLBACK_LINES = 5_000;
-const ticket = (id: string, control: boolean): Promise<TerminalTicket> => ok(api.POST('/threads/{id}/agent-terminal/ticket', { params: { path: { id } }, body: { control } }));
+const ticket = (id: string, control: boolean): Promise<TerminalTicket> => ok(api.POST('/threads/{id}/agent-terminal/ticket', { params: { path: { id } }, headers: { 'Idempotency-Key': crypto.randomUUID() }, body: { control } }));
 
 function Screen({ threadId, control }: { threadId: string; control: boolean }) {
   const { t } = useTranslation();

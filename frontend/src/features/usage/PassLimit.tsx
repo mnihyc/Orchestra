@@ -9,7 +9,7 @@
  * a provider's own limit says how long ago its vendor reported it and that the vendor decides.
  */
 import { Link } from '@tanstack/react-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CapTitle,CapSetter } from './CapPeople';
 
@@ -38,12 +38,10 @@ export interface LimitPromptProps {
   threadId?: string | undefined;
 }
 
-/** What the person lets past: the caps and the provider's limit they hold the bypass row for. */
+/** What the person lets past: configured Orch caps they hold the bypass row for. */
 export function bypassOf(limits: ThreadLimits): LimitBypassRequest | undefined {
   const caps = limits.reached.flatMap((limit) => (limit.can_bypass && limit.cap !== null && limit.passed_by === null ? [limit.cap.cap.id] : []));
-  const provider = limits.reached.some((limit) => limit.can_bypass && limit.provider_limit !== null && limit.passed_by === null);
-  if (caps.length === 0 && !provider) return undefined;
-  return { ...(caps.length > 0 ? { caps } : {}), ...(provider ? { provider_limit: true } : {}) };
+  return caps.length === 0 ? undefined : { caps };
 }
 
 /** Whether every limit in the way is one on turns at once, or the provider's own: the words of the buttons and of the line under the title follow. */
@@ -130,13 +128,19 @@ function ChangeLimit({ threadId, name }: { threadId: string; name?: string }) {
 /** The prompt a person meets when a limit stands in the way of the turn they would start. */
 export function LimitPrompt({ open, onOpenChange, limits, onSend, pending, error, threadId }: LimitPromptProps) {
   const { t } = useTranslation();
-  const bypass = bypassOf(limits);
-  const all = limits.bypass_all;
-  const kind = kindOf(limits);
-  const mayChange = limits.reached.some((limit) => limit.cap?.cap.can_edit === true);
+  // Cached vendor observations are advisory; configured caps and opaque limits still apply.
+  const reached = limits.reached.filter((limit) => !(limit.cap === null && limit.provider_limit !== null));
+  const bypass = bypassOf({ ...limits, reached });
+  const all = reached.length === limits.reached.length ? limits.bypass_all : reached.every((limit) => limit.can_bypass || limit.passed_by !== null);
+  useEffect(() => {
+    if (open && reached.length === 0 && !pending) onOpenChange(false);
+  }, [open, reached.length, pending, onOpenChange]);
+  const kind = kindOf({ ...limits, reached });
+  const mayChange = reached.some((limit) => limit.cap?.cap.can_edit === true);
   const proceed = kind === 'running' ? t('caps.prompt.startNow') : kind === 'provider' ? t('caps.prompt.tryAnyway') : all ? t('caps.prompt.proceed') : t('caps.prompt.passMine');
   const wait = kind === 'running' ? t('caps.prompt.wait') : t('caps.prompt.sendAndWait');
   const description = bypass === undefined ? (kind === 'running' ? t('caps.prompt.aboutRunning') : t('caps.prompt.aboutWait')) : all ? t('caps.prompt.aboutYouCan') : t('caps.prompt.aboutSome');
+  if (reached.length === 0) return null;
   return (
     <Dialog
       open={open}
@@ -165,7 +169,7 @@ export function LimitPrompt({ open, onOpenChange, limits, onSend, pending, error
     >
       <div className="flex flex-col gap-3">
         <ul className="flex flex-col gap-2">
-          {limits.reached.map((limit, index) => (
+          {reached.map((limit, index) => (
             <LimitLine key={limit.cap?.cap.id ?? `provider-${index}`} limit={limit} />
           ))}
         </ul>
