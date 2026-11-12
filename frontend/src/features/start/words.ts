@@ -30,6 +30,7 @@ export function arrangementWhy(entry: Arrangement, t: TFunction): string {
 
 /** A closed profile names the same native reason as its unavailable arrangement. */
 export function agentWhy(row: AgentRow, t: TFunction): string {
+  if (row.entry.reason === 'harness_error' || row.entry.reason === 'harness_unreported' && row.entry.program_report?.status === 'error') return t('start.agent.programFailed');
   if (row.unreported) return t('start.agent.unreported');
   if (row.entry.reason === 'no_host') return t('startPreflight.noHost');
   const closed = row.entry.arrangements.find((entry) => !entry.available || !entry.permitted);

@@ -193,6 +193,14 @@ async fn the_whole_home_and_private_layer_keep_owners_modes_xattrs_whiteouts_and
     std::fs::write(&seed, bytes).unwrap();
     lab.driver.import_volume(&source_home, &seed).await.unwrap();
     let source_unit = lab.run(&source).await;
+    // The final write follows both deletions; a missing file alone is not completion proof.
+    assert_eq!(
+        lab.wait_read(&source_unit, "/data/kept/change.txt", |text| text
+            == "changed")
+            .await
+            .as_deref(),
+        Some("changed")
+    );
     assert!(
         lab.read(&source_unit, "/data/kept/removed.txt")
             .await
@@ -255,31 +263,36 @@ async fn the_whole_home_and_private_layer_keep_owners_modes_xattrs_whiteouts_and
     // Both imports precede create, so no mounted overlay has its upper changed underneath it.
     let target_unit = lab.run(&target).await;
     assert_eq!(
-        lab.read(&target_unit, "/var/lib/orch/carried-home")
+        lab.wait_read(&target_unit, "/var/lib/orch/carried-home", |text| text
+            == "signed")
             .await
             .as_deref(),
         Some("signed")
     );
     assert_eq!(
-        lab.read(&target_unit, "/var/lib/orch/home-mode")
+        lab.wait_read(&target_unit, "/var/lib/orch/home-mode", |text| text
+            == "1000:1000 640\n")
             .await
             .as_deref(),
         Some("1000:1000 640\n")
     );
     assert_eq!(
-        lab.read(&target_unit, "/var/lib/orch/home-root-mode")
+        lab.wait_read(&target_unit, "/var/lib/orch/home-root-mode", |text| text
+            == "1000:1000 750\n")
             .await
             .as_deref(),
         Some("1000:1000 750\n")
     );
     assert_eq!(
-        lab.read(&target_unit, "/var/lib/orch/private-change")
+        lab.wait_read(&target_unit, "/var/lib/orch/private-change", |text| text
+            == "changed")
             .await
             .as_deref(),
         Some("changed")
     );
     assert_eq!(
-        lab.read(&target_unit, "/var/lib/orch/deletions")
+        lab.wait_read(&target_unit, "/var/lib/orch/deletions", |text| text
+            == "deletions-kept\n")
             .await
             .as_deref(),
         Some("deletions-kept\n")

@@ -1,6 +1,7 @@
 /** Cold saved layouts resolve their addressed resource even when Screen has never been visible. */
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { QueryClientProvider } from '@tanstack/react-query';
+import { Boxes } from 'lucide-react';
 import { afterEach, expect, it, vi } from 'vitest';
 import type * as Router from '@tanstack/react-router';
 import type * as Live from '@/realtime/live';
@@ -12,7 +13,9 @@ import type * as Nodes from '@/api/nodes';
 import type { Org } from '@/generated/api-types';
 import { parsePageAddress } from '@/features/workbench/PageView';
 import { i18n, setLocale } from '@/i18n';
-import { clearScreenHeading, currentHeading, useCurrentHeading } from '@/shell/screen';
+import { clearScreenHeading, currentHeading, useCurrentHeading, useRouteHeading, type ScreenHeading } from '@/shell/screen';
+import { useResourceHeading } from '@/features/resources/trail';
+import { Breadcrumbs } from '@/features/navigation/Breadcrumbs';
 import { allTabs, makeGroup, makeTab } from '@/features/workbench/layout';
 import { useWorkbench } from '@/features/workbench/store';
 import { threadWriter } from '@/realtime/stores/thread';
@@ -34,6 +37,33 @@ vi.mock('@/features/navigation/placeLabels', () => ({ useNodeLabel: (_id: string
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), useParams: () => ({ threadId: ACME.mainThread }), useRouterState: () => ({ pathname: `/thread/${ACME.mainThread}`, search: {} }) }));
 function Caption() { return <output aria-label="Frame title">{useCurrentHeading()?.title}</output>; }
 afterEach(() => { cleanup(); clearScreenHeading(); threadWriter.evict(ACME.mainThread); useWorkbench.getState().leave(); vi.clearAllMocks(); });
+
+function ResourceFrame({ route }: { route: ScreenHeading }) {
+  useResourceHeading('environments', Boxes, 'Workspace', 'environment-one');
+  useRouteHeading(route);
+  return <><Caption /><Breadcrumbs /></>;
+}
+it.each(['en', 'zh-CN'] as const)('keeps the resource path under matching native route identity in %s', async (locale) => {
+  await setLocale(locale);
+  try {
+    show(<ResourceFrame route={{ title: 'Native workspace', target: { kind: 'environment', id: 'environment-one' }, views: { ready: true } }} />);
+    expect(await screen.findByRole('link', { name: i18n.t('screens.sections.resources') })).toHaveAttribute('href', '/resources');
+    expect(screen.getByRole('link', { name: i18n.t('screens.environments.title') })).toHaveAttribute('href', '/resources/environments');
+    expect(screen.getByLabelText('Frame title')).toHaveTextContent('Native workspace');
+    expect(currentHeading()?.trail).toHaveLength(2);
+  } finally { cleanup(); await setLocale('en'); }
+});
+it.each([
+  { title: 'Unavailable workspace', target: { kind: 'environment' as const, id: 'environment-one' }, views: { ready: false } },
+  { title: 'Another workspace', target: { kind: 'environment' as const, id: 'environment-two' }, views: { ready: true } },
+  { title: 'Same identifier for another kind', target: { kind: 'provider' as const, id: 'environment-one' }, views: { ready: true } },
+  { title: 'Explicitly empty ancestry', target: { kind: 'environment' as const, id: 'environment-one' }, views: { ready: true }, trail: [] },
+])('does not borrow a body trail for $title', async (route) => {
+  show(<ResourceFrame route={route} />);
+  await waitFor(() => expect(screen.getByLabelText('Frame title')).toHaveTextContent(route.title));
+  expect(screen.queryByRole('navigation', { name: i18n.t('ui.breadcrumbs.label') })).toBeNull();
+  expect(currentHeading()?.trail ?? []).toEqual([]);
+});
 
 it('resolves the cold thread title, chat context and inactive first-tab icon without mounting Screen or marking the conversation visible', () => {
   const world = new World(), person = world.people.get('ada'), row = world.places.rowOf(ACME.mainThread);

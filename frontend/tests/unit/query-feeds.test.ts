@@ -14,8 +14,103 @@ function wire() {
   const subscribe = vi.fn((feed: string, listener: FeedListener) => { listeners.set(feed, listener); return { unsubscribe }; });
   return { listeners, subscribe, unsubscribe, socket: { subscribe } as unknown as RealtimeSocket };
 }
-const event = (data: Record<string, unknown>): FeedFrame => ({ op: 'event', id: 1, feed: 'env:e1:procs', data });
-const sync = (seq: number, data: Record<string, unknown>): FeedFrame => ({ op: 'sync', id: 1, feed: 'env:e1:procs', prev: seq - 1, seq, data });
+const event = (data: Record<string, unknown>): Extract<FeedFrame, { op: 'event' }> => ({ op: 'event', id: 1, feed: 'env:e1:procs', data });
+const sync = (seq: number, data: Record<string, unknown>): Extract<FeedFrame, { op: 'sync' }> => ({ op: 'sync', id: 1, feed: 'env:e1:procs', prev: seq - 1, seq, data });
+
+it('reports an unavailable Ports read and clears the old snapshot', () => {
+  const cache = new QueryClient(), live = wire();
+  const key = ['environment-ports', 'ports-unavailable'];
+  const feed = 'env:ports-unavailable:ports';
+  const snapshot = { ports: [{ port: 3000 }] };
+  cache.setQueryData(key, snapshot);
+  const read = vi.fn(() => Promise.resolve(snapshot));
+  const observer = new QueryObserver(cache, { queryKey: key, queryFn: read, staleTime: Infinity });
+  const off = observer.subscribe(() => undefined), stop = installQueryFeeds(live.socket, cache);
+  try {
+    expect(live.listeners.has(feed)).toBe(true);
+    live.listeners.get(feed)?.onFrame({ op: 'error', id: 1, code: 'read_unavailable', detail: feed });
+    expect(cache.getQueryState(key)?.error).toMatchObject({ status: 503, problem: { code: 'ports.unavailable' } });
+    expect(cache.getQueryData(key)).toBeUndefined();
+    expect(read).not.toHaveBeenCalled();
+  } finally {
+    off();
+    stop();
+    cache.clear();
+  }
+});
+
+it('rereads schedule content on native topic changes without resubscribing in a loop or accepting a frame as a schedule', async () => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } }), live = wire();
+  const key = ['topic-schedules', 'schedule-topic', ['reader', 1]], feed = 'topic:schedule-topic';
+  const first = [{ id: 'schedule', revision: 1 }], next = [{ id: 'schedule', revision: 2 }];
+  cache.setQueryData(key, first);
+  const read = vi.fn(() => Promise.resolve(next));
+  const observer = new QueryObserver(cache, { queryKey: key, queryFn: read, staleTime: Infinity });
+  const off = observer.subscribe(() => undefined), stop = installQueryFeeds(live.socket, cache);
+  expect(queryFeed(key)).toEqual({ feed, invalidate: true }); expect(live.subscribe).toHaveBeenCalledOnce();
+  live.listeners.get(feed)?.onFrame({ ...sync(2, { input_schedules: [{ id: 'forged-frame-content' }] }), feed });
+  expect(cache.getQueryData(key)).toEqual(first);
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  expect(read).toHaveBeenCalledOnce(); expect(cache.getQueryData(key)).toEqual(next);
+  expect(live.subscribe).toHaveBeenCalledOnce(); expect(live.listeners.get(feed)?.since()).toBe(2);
+  live.listeners.get(feed)?.onFrame({ ...sync(2, {}), feed });
+  expect(read).toHaveBeenCalledOnce();
+  live.listeners.get(feed)?.onFrame({ ...sync(3, {}), feed });
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  expect(read).toHaveBeenCalledTimes(2); expect(live.subscribe).toHaveBeenCalledOnce();
+  off(); await Promise.resolve(); stop(); cache.clear(); feedSequences.delete(feed);
+});
+
+it('uses an opening schedule cut as the subscription baseline and rereads only newer native content', async () => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } }), live = wire();
+  const key = ['thread-pending-agent-schedules', 'thread', 'pending-topic', ['reader', 1]], feed = 'topic:pending-topic';
+  const first = { seq: 4, items: [{ id: 'pending' }] }, next = { seq: 5, items: [] };
+  cache.setQueryData(key, first); feedSequences.set(feed, 4);
+  const read = vi.fn(() => Promise.resolve(next));
+  const observer = new QueryObserver(cache, { queryKey: key, queryFn: read, staleTime: Infinity });
+  const off = observer.subscribe(() => undefined), stop = installQueryFeeds(live.socket, cache);
+  expect(live.listeners.get(feed)?.since()).toBe(4);
+  live.listeners.get(feed)?.onFrame({ ...sync(4, { input_schedules: [] }), feed });
+  expect(read).not.toHaveBeenCalled(); expect(cache.getQueryData(key)).toEqual(first);
+  live.listeners.get(feed)?.onFrame({ ...sync(5, { input_schedules: [{ id: 'unadmitted-content' }] }), feed });
+  expect(cache.getQueryData(key)).toEqual(first);
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve();
+  expect(read).toHaveBeenCalledOnce(); expect(cache.getQueryData(key)).toEqual(next);
+  expect(live.subscribe).toHaveBeenCalledOnce();
+  off(); stop(); cache.clear(); feedSequences.delete(feed);
+});
+
+it('repairs a pending subset behind an already advanced topic once per cut without retrying stale answers forever', async () => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } }), live = wire();
+  const key = ['thread-pending-agent-schedules', 'thread', 'lagging-topic', ['reader', 1]], feed = 'topic:lagging-topic';
+  const older = { seq: 3, items: [] }; cache.setQueryData(key, older); feedSequences.set(feed, 6);
+  const read = vi.fn(() => Promise.resolve(older));
+  const observer = new QueryObserver(cache, { queryKey: key, queryFn: read, staleTime: Infinity });
+  const off = observer.subscribe(() => undefined), stop = installQueryFeeds(live.socket, cache);
+  for (let turn = 0; turn < 30; turn += 1) await Promise.resolve();
+  expect(read).toHaveBeenCalledOnce(); expect(cache.getQueryState(key)?.fetchStatus).toBe('idle');
+  expect(cache.getQueryData(key)).toEqual(older);
+  off(); stop(); cache.clear(); feedSequences.delete(feed);
+});
+
+it('compares a newly visible pending subset with a newer HTTP cut even when a held socket cursor is older', async () => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } }), live = wire();
+  const feed = 'topic:http-ahead-topic';
+  const first = ['thread-pending-agent-schedules', 'first', 'http-ahead-topic', ['reader', 1]];
+  const second = ['thread-pending-agent-schedules', 'second', 'http-ahead-topic', ['reader', 1]];
+  let seq = 4; cache.setQueryData(first, { seq, items: [] }); feedSequences.set(feed, seq);
+  const one = new QueryObserver(cache, { queryKey: first, queryFn: () => Promise.resolve({ seq, items: [] }), staleTime: Infinity });
+  const offOne = one.subscribe(() => undefined), stop = installQueryFeeds(live.socket, cache);
+  seq = 5; live.listeners.get(feed)?.onFrame({ ...sync(seq, {}), feed });
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve();
+  seq = 8; feedSequences.set(feed, seq); cache.setQueryData(second, { seq: 6, items: [] });
+  const read = vi.fn(() => Promise.resolve({ seq, items: [] }));
+  const two = new QueryObserver(cache, { queryKey: second, queryFn: read, staleTime: Infinity });
+  const offTwo = two.subscribe(() => undefined);
+  for (let turn = 0; turn < 18; turn += 1) await Promise.resolve();
+  expect(read).toHaveBeenCalledOnce(); expect(cache.getQueryData(second)).toEqual({ seq: 8, items: [] });
+  offOne(); offTwo(); stop(); cache.clear(); feedSequences.delete(feed);
+});
 
 describe('visible subscriptions', () => {
   it('shares one canonical environment feed across two panes and rejects late HTTP and older native rows', async () => {

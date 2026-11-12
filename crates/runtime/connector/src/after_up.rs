@@ -336,6 +336,50 @@ fn first_lines(bytes: &[u8], secrets: &[String]) -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
+    /// The process id a test's background command wrote to `descendant`, once it has written it whole.
+    fn descendant_of(dir: &std::path::Path) -> Option<i32> {
+        std::fs::read_to_string(dir.join("descendant"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    /// Whether a process still runs. A killed one that waits to be reaped has ended: under an init that reaps nothing,
+    /// as in the release builder's container, it stays a zombie, which a signal of 0 still finds.
+    fn running(pid: rustix::process::Pid) -> bool {
+        if rustix::process::test_kill_process(pid).is_err() {
+            return false;
+        }
+        #[cfg(target_os = "linux")]
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero())) {
+            // The state follows the command's name, which is in parentheses and may itself hold spaces.
+            return stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                != Some("Z");
+        }
+        true
+    }
+
+    /// Waits until that descendant no longer exists: killed with its group, it cannot go on to write `escaped`
+    /// later, however slow the machine. A timed wait for the file could not tell a slow kill from none.
+    async fn descendant_gone(dir: &std::path::Path) {
+        let Some(pid) = descendant_of(dir).and_then(rustix::process::Pid::from_raw) else {
+            panic!("the background command did not start");
+        };
+        let ended = tokio::time::timeout(Duration::from_secs(10), async {
+            while running(pid) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            ended.is_ok(),
+            "the descendant outlived the end of its command"
+        );
+    }
+
     use super::*;
     use crate::roles::Keys;
     use orch_pki::certificates::LeafKey;
@@ -427,14 +471,18 @@ mod tests {
         assert_eq!(result.exit, Some(7));
         assert!(result.first_lines.chars().count() <= 1000);
         assert!(!result.first_lines.contains("private-value-927"));
-        let body = command(&["/bin/sh", "-c", "(sleep 2; echo escaped > escaped) & wait"]);
+        let body = command(&[
+            "/bin/sh",
+            "-c",
+            "sh -c 'echo $$ > descendant; sleep 30; echo escaped > escaped' & wait",
+        ]);
         let result = runner(dir.path(), &keys)
             .unwrap()
             .run(&body, dir.path(), &BTreeMap::new())
             .await
             .unwrap();
         assert!(result.timed_out);
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        descendant_gone(dir.path()).await;
         assert!(!dir.path().join("escaped").exists());
     }
     #[tokio::test]
@@ -470,14 +518,14 @@ mod tests {
         let body = command(&[
             "/bin/sh",
             "-c",
-            "echo began > began; (sleep 2; echo escaped > escaped) & wait",
+            "echo began > began; sh -c 'echo $$ > descendant; sleep 30; echo escaped > escaped' & wait",
         ]);
         let running = Arc::clone(&runner);
         let request = body.clone();
         let cwd = dir.path().to_path_buf();
         let task = tokio::spawn(async move { running.run(&request, &cwd, &BTreeMap::new()).await });
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !dir.path().join("began").exists() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while descendant_of(dir.path()).is_none() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -485,6 +533,7 @@ mod tests {
         .unwrap();
         task.abort();
         let _ = task.await;
+        descendant_gone(dir.path()).await;
         let result = runner
             .run(&body, dir.path(), &BTreeMap::new())
             .await
@@ -495,7 +544,6 @@ mod tests {
                 .first_lines
                 .contains("before this command's result was saved")
         );
-        tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(!dir.path().join("escaped").exists());
     }
     #[tokio::test]

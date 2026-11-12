@@ -8,6 +8,7 @@ heading_id.可用功能: what-works
 heading_id.插件增加的功能: what-the-plugin-adds
 heading_id.隐私默认设置: privacy-defaults
 heading_id.限制: limits
+summary: 结合 Orch 的提供方、工具、审批和环境边界使用 DeepSeek Harness。
 ---
 
 # DeepSeek Harness

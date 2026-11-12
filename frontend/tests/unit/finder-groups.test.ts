@@ -30,7 +30,7 @@ const WORDS: Record<string, string> = {
 const t = ((key: string, values?: Record<string, string>) => (WORDS[key] ?? key).replace('{{kind}}', values?.kind ?? '')) as unknown as TFunction;
 
 const ref = (id: string, kind: NodeRef['kind'], name: string | null, redacted = false): NodeRef => ({ id, kind, name, redacted });
-const hit = (more: Partial<NameHit> & Pick<NameHit, 'kind' | 'id' | 'name'>): NameHit => ({ href: null, tag: null, thread_attention: null, color: null, custom_color: null, address: null, username: null, avatar: null, path: [], owner: null, archived: false, recent: false, ...more });
+const hit = (more: Partial<NameHit> & Pick<NameHit, 'kind' | 'id' | 'name'>): NameHit => ({ home_path: [], href: null, tag: null, thread_attention: null, color: null, custom_color: null, address: null, username: null, avatar: null, path: [], owner: null, archived: false, recent: false, ...more });
 
 const env = (more: Partial<Env> = {}): Env => ({ t, go: vi.fn(), orgSlug: 'acme', exists: () => true, showCard: vi.fn(), ...more });
 

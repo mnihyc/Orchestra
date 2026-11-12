@@ -39,6 +39,268 @@ async fn machine_of(world: &World, provider: Id) -> Option<Id> {
         .unwrap()
 }
 
+async fn age_provider_runtime(world: &World, runtime: Id) {
+    let old = world.clock.now() - Duration::minutes(2);
+    sqlx::query("UPDATE runtimes SET created_at=$2,last_active_at=$2 WHERE id=$1")
+        .bind(runtime)
+        .bind(old)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE harnesses SET last_active_at=$2 WHERE provider_id=$1")
+        .bind(world.provider)
+        .bind(old)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+}
+
+async fn wait_provider_runtime_job(world: &World) {
+    let mut conn = world.pool.acquire().await.unwrap();
+    let job = orch_db::queries::jobs::provider_jobs::latest_of_provider(&mut conn, world.provider)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(conn);
+    let (state, _, error) = wait_over(world, job.id).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+}
+
+#[tokio::test]
+async fn scheduled_reads_preserve_deliberate_stops_and_refresh_restarts_them() {
+    use orch_db::queries::provider_facts;
+    for idle in [true, false] {
+        let world = World::observed().await;
+        serve(&world);
+        let host = ScriptedHost::on(&world, "observation-host", 16_384).await;
+        let template = provider_template(&world).await;
+        let runtime = managed_world_provider(&world, &host, template).await;
+        if idle {
+            world
+                .set(world.root, "runtime.idle_stop_minutes", json!(1))
+                .await;
+            age_provider_runtime(&world, runtime).await;
+            eventually("the configured idle stop", || async {
+                runtime_state(&world, runtime).await == "stopped"
+            })
+            .await;
+        } else {
+            world
+                .engine()
+                .stop_provider_runtime(world.provider, false, StopWhy::Person(world.ada))
+                .await
+                .unwrap();
+        }
+        host.tell(runtime, "stopped", None).await;
+        let detail: Option<String> =
+            sqlx::query_scalar("SELECT state_detail FROM runtimes WHERE id=$1")
+                .bind(runtime)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            detail.as_deref(),
+            Some(if idle {
+                rows::STOPPED_IDLE
+            } else {
+                rows::STOPPED_PERSON
+            })
+        );
+        let old = world.clock.now() - Duration::hours(2);
+        let saved = json!({"plan":"saved observation"});
+        sqlx::query("UPDATE providers SET facts=$2,facts_at=$3,facts_requested_at=$3 WHERE id=$1")
+            .bind(world.provider)
+            .bind(&saved)
+            .bind(old)
+            .execute(world.pool.pool())
+            .await
+            .unwrap();
+        let old: chrono::DateTime<Utc> =
+            sqlx::query_scalar("SELECT facts_requested_at FROM providers WHERE id=$1")
+                .bind(world.provider)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap();
+        let starts = host.count(K::NodeRuntimeStart);
+        let mut conn = world.pool.acquire().await.unwrap();
+        assert!(
+            !world
+                .engine()
+                .due_provider_fact_reads(&mut conn, world.clock.now(), 100)
+                .await
+                .unwrap()
+                .contains(&world.provider)
+        );
+        drop(conn);
+        let mut tx = world.pool.begin().await.unwrap();
+        assert!(
+            !provider_facts::claim_scheduled_read(
+                &mut tx,
+                world.provider,
+                world.clock.now(),
+                Duration::minutes(1)
+            )
+            .await
+            .unwrap(),
+            "a stale queued read must not spend an observation interval after a stop"
+        );
+        tx.commit().await.unwrap();
+        world.engine().refresh_due_provider_facts().await.unwrap();
+        world
+            .engine()
+            .refresh_scheduled_provider(world.provider)
+            .await
+            .unwrap();
+        // Four fixture reaper intervals expose an incorrectly reopened runtime or model source.
+        meanwhile(std::time::Duration::from_millis(600)).await;
+        assert_eq!(host.count(K::NodeRuntimeStart), starts);
+        assert_eq!(runtime_state(&world, runtime).await, "stopped");
+        let retained: (
+            serde_json::Value,
+            Option<chrono::DateTime<Utc>>,
+            Option<chrono::DateTime<Utc>>,
+        ) = sqlx::query_as("SELECT facts,facts_at,facts_requested_at FROM providers WHERE id=$1")
+            .bind(world.provider)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            retained,
+            (saved, Some(old), Some(old)),
+            "the saved facts and both clocks survive scheduled reads"
+        );
+        sqlx::query("UPDATE providers SET facts_requested_at=$2 WHERE id=$1")
+            .bind(world.provider)
+            .bind(world.clock.now())
+            .execute(world.pool.pool())
+            .await
+            .unwrap();
+        world
+            .engine()
+            .refresh_provider(world.provider)
+            .await
+            .unwrap();
+        host.wait_for(K::NodeRuntimeStart, starts + 1).await;
+        wait_provider_runtime_job(&world).await;
+        eventually("the explicitly refreshed runtime to run", || async {
+            runtime_state(&world, runtime).await == "running"
+        })
+        .await;
+        let detail: Option<String> =
+            sqlx::query_scalar("SELECT state_detail FROM runtimes WHERE id=$1")
+                .bind(runtime)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap();
+        assert!(
+            detail.is_none(),
+            "starting the runtime clears the deliberate stop reason"
+        );
+    }
+}
+
+#[tokio::test]
+async fn scheduled_reads_restart_a_runtime_stopped_by_its_host() {
+    let world = World::observed().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "unexpected-stop-host", 16_384).await;
+    let template = provider_template(&world).await;
+    let runtime = managed_world_provider(&world, &host, template).await;
+    let starts = host.count(K::NodeRuntimeStart);
+    host.tell(runtime, "stopped", None).await;
+    eventually(
+        "the real host report to detach the stopped unit",
+        || async {
+            runtime_state(&world, runtime).await == "failed"
+                && machine_of(&world, world.provider).await.is_none()
+        },
+    )
+    .await;
+    sqlx::query("UPDATE providers SET facts_requested_at=$2 WHERE id=$1")
+        .bind(world.provider)
+        .bind(world.clock.now() - Duration::hours(2))
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    world.engine().refresh_due_provider_facts().await.unwrap();
+    host.wait_for(K::NodeRuntimeStart, starts + 1).await;
+    let restarted = host.started().unwrap();
+    if restarted != runtime {
+        let _unit = enrol(&world, restarted).await;
+    }
+    wait_provider_runtime_job(&world).await;
+    eventually("the unexpectedly stopped provider to run again", || async {
+        runtime_state(&world, restarted).await == "running"
+            && machine_of(&world, world.provider).await.is_some()
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn renewal_starts_an_idle_stopped_runtime_and_only_its_idle_setting_stops_it_again() {
+    for idle_minutes in [0, 1] {
+        let world = World::observed().await;
+        serve(&world);
+        let host = ScriptedHost::on(&world, "idle-renewal-host", 16_384).await;
+        let template = provider_template(&world).await;
+        let runtime = managed_world_provider(&world, &host, template).await;
+        world.machine.handler.on(K::ProviderRefresh, |_| {
+            Ok(
+                orch_link_contract::commands::CommandResult::ProviderRefresh(
+                    orch_link_contract::commands::ProviderRefreshResult {
+                        source: None,
+                        status: "ready".into(),
+                        facts: serde_json::from_value(
+                            json!({"credential":{"yields":"login","expires_at":null}}),
+                        )
+                        .unwrap(),
+                    },
+                ),
+            )
+        });
+        world
+            .set(world.root, "runtime.idle_stop_minutes", json!(1))
+            .await;
+        age_provider_runtime(&world, runtime).await;
+        eventually("the provider to stop before renewal", || async {
+            runtime_state(&world, runtime).await == "stopped"
+        })
+        .await;
+        assert_eq!(runtime_state(&world, runtime).await, "stopped");
+        world
+            .set(world.root, "runtime.idle_stop_minutes", json!(idle_minutes))
+            .await;
+        let RuntimeStart::Job(job) = world
+            .engine()
+            .renew_provider_runtime(world.provider)
+            .await
+            .unwrap()
+        else {
+            panic!("renewal starts an idle-stopped runtime by its ordinary job");
+        };
+        let (state, _, error) = wait_over(&world, job.id).await;
+        assert_eq!(state, "succeeded", "{error:?}");
+        assert_eq!(runtime_state(&world, runtime).await, "running");
+        assert_eq!(host.count(K::NodeRuntimeStart), 1);
+        age_provider_runtime(&world, runtime).await;
+        if idle_minutes > 0 {
+            eventually(
+                "renewal's runtime to obey its opted-in idle stop",
+                || async { runtime_state(&world, runtime).await == "stopped" },
+            )
+            .await;
+        } else {
+            meanwhile(std::time::Duration::from_millis(600)).await;
+            assert_eq!(runtime_state(&world, runtime).await, "running");
+            assert_eq!(
+                host.count(K::NodeRuntimeStop),
+                1,
+                "renewal itself never stops the runtime"
+            );
+        }
+    }
+}
+
 async fn remove_from_host(
     world: &World,
     host: Id,
@@ -498,11 +760,25 @@ async fn a_runtime_is_stopped_by_a_person_with_its_volume_kept_and_started_again
     let _template = provider_template(&world).await;
     let provider = managed_subscription(&world, "Team Codex").await;
     let (runtime, unit) = made(&world, &host, provider).await;
-    world
-        .engine()
-        .stop_provider_runtime(provider, false, StopWhy::Person(world.ada))
+    // A harness report's foreign key pins the provider's identity, not its current machine.
+    // Stopping must not wait for that pin while the report can be waiting on a harness row.
+    let mut reference = world.pool.begin().await.unwrap();
+    let pinned: Id = sqlx::query_scalar("SELECT id FROM providers WHERE id=$1 FOR KEY SHARE")
+        .bind(provider)
+        .fetch_one(&mut *reference)
         .await
         .unwrap();
+    assert_eq!(pinned, provider);
+    tokio::time::timeout(
+        common::PATIENCE,
+        world
+            .engine()
+            .stop_provider_runtime(provider, false, StopWhy::Person(world.ada)),
+    )
+    .await
+    .expect("a harness identity pin must not block the acknowledged runtime stop")
+    .unwrap();
+    reference.rollback().await.unwrap();
     assert_eq!(host.count(K::NodeRuntimeStop), 1);
     assert_eq!(host.count(K::NodeRuntimeRemove), 0, "the unit is kept");
     assert_eq!(runtime_state(&world, runtime).await, "stopped");
@@ -688,6 +964,89 @@ async fn a_runtime_that_has_been_idle_for_as_long_as_its_setting_allows_is_stopp
 }
 
 #[tokio::test]
+async fn a_native_background_task_keeps_an_idle_provider_runtime_busy_without_an_open_lease() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "background-runtime", 16_384).await;
+    let template = provider_template(&world).await;
+    let runtime = managed_world_provider(&world, &host, template).await;
+    let idle = managed_subscription(&world, "Idle control").await;
+    let (idle_runtime, _unit) = made(&world, &host, idle).await;
+    let thread = world.thread("Retained native work").await;
+    let (first, _) = world.running_turn(thread, "Begin").await;
+    let mut task = common::background::command(&world, thread, first.turn_id).await;
+    world
+        .say(
+            thread,
+            common::turn_ended(
+                first.turn_id,
+                orch_link_contract::events::TurnOutcome::Completed,
+            ),
+        )
+        .await;
+    world.wait_turn(first.turn_id, "completed").await;
+    world.wait_followed_up(thread).await;
+    let leases: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM leases WHERE provider_id=$1 AND closed_at IS NULL",
+    )
+    .bind(world.provider)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        leases, 0,
+        "this control exercises native task busy state independently of lease retention"
+    );
+    eventually("both provider harnesses to finish startup",||async {
+        sqlx::query_scalar::<_,i64>("SELECT count(DISTINCT provider_id) FROM harnesses WHERE provider_id=ANY($1) AND status='online'")
+            .bind([world.provider,idle]).fetch_one(world.pool.pool()).await.unwrap()==2
+    }).await;
+    let old = Utc::now() - Duration::hours(3);
+    sqlx::query(
+        "UPDATE runtimes SET created_at=$2,last_active_at=$2,updated_at=$2 WHERE id=ANY($1)",
+    )
+    .bind([runtime, idle_runtime])
+    .bind(old)
+    .execute(world.pool.pool())
+    .await
+    .unwrap();
+    sqlx::query("UPDATE turns SET created_at=$2,started_at=$2,completed_at=$2 WHERE thread_id=$1")
+        .bind(thread)
+        .bind(old)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE harnesses SET last_active_at=$2 WHERE provider_id=ANY($1)")
+        .bind([world.provider, idle])
+        .bind(old)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    world
+        .set(world.root, "runtime.idle_stop_minutes", json!(60))
+        .await;
+    eventually("the idle provider control to stop", || async {
+        runtime_state(&world, idle_runtime).await == "stopped"
+    })
+    .await;
+    // Four ordinary 150ms reaper intervals, matching the existing lifecycle controls.
+    meanwhile(std::time::Duration::from_millis(600)).await;
+    assert_eq!(runtime_state(&world, runtime).await, "running");
+    task.state = orch_link_contract::background::BackgroundTaskState::Stopped;
+    common::background::update(&world, thread, task).await;
+    sqlx::query("UPDATE harnesses SET last_active_at=$2 WHERE provider_id=$1")
+        .bind(world.provider)
+        .bind(old)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    eventually("the provider becomes idle after its task ends", || async {
+        runtime_state(&world, runtime).await == "stopped"
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn a_deleted_providers_runtime_is_retired_and_the_reaper_removes_its_unit_and_its_state_volume()
  {
     let world = World::new().await;
@@ -741,6 +1100,13 @@ async fn a_unit_that_its_host_finds_gone_leaves_the_provider_without_a_machine_a
     let _template = provider_template(&world).await;
     let provider = managed_subscription(&world, "Crashes").await;
     let (runtime, _unit) = made(&world, &host, provider).await;
+    // This control exercises an explicit start; the separate scheduled-recovery case makes reads due.
+    sqlx::query("UPDATE providers SET facts_requested_at=$2 WHERE id=$1")
+        .bind(provider)
+        .bind(world.clock.now())
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
     host.tell(runtime, "absent", Some("the unit is gone")).await;
     eventually("the runtime to be marked failed", || async {
         runtime_state(&world, runtime).await == "failed"

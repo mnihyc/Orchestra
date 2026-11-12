@@ -11,7 +11,7 @@ import type { Segment, Thread } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { threadViewOf, threadWriter } from '@/realtime/stores/thread';
 import { ACME } from '../doubles/fixtures';
-import { change, fileChange, LOGIN_DIFF, toolCall } from '../doubles/thread-rows';
+import { change, command, fileChange, LOGIN_DIFF, toolCall } from '../doubles/thread-rows';
 import { World } from '../doubles/world';
 import { show } from './support';
 
@@ -83,4 +83,44 @@ it.each(['en', 'zh-CN'] as const)('names a single edited file once and opens tha
   expect(calls.open).toHaveBeenCalledExactlyOnceWith({ environmentId: native.environment!.id, threadId: native.id, path: 'src/session.rs', line: null, permanent: false });
   expect(row).toHaveAttribute('aria-expanded', 'true');
   expect(screen.getByRole('table', { name: /src\/session.rs/ })).toHaveTextContent('return redirect(next ?? "/");');
+});
+
+// EN: Background command → hover/focus its disclosure → read the complete command, including the prompt mark.
+// 中文：后台命令 → 悬停或聚焦展开控件 → 读取完整命令及提示符。
+function showClippedCommand(words: string) {
+  const item = { ...command('long-background', { command: words, output: '', exit: 0 }), thread_id: native.id, segment_id: ended.id, seq_created: 2, seq_updated: 2 };
+  act(() => threadWriter.apply(native.id, { items: [item] }));
+  show(<TimelineContextValue.Provider value={context}><ToolCallRow threadId={native.id} id={item.id} /></TimelineContextValue.Provider>);
+  const control = screen.getByRole('button', { expanded: false, name: new RegExp(words) });
+  const label = control.querySelector('[data-overflow-text]');
+  if (!(label instanceof HTMLElement)) throw new Error('A command has its full value on its visible label');
+  label.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+  Object.defineProperties(label, {
+    clientWidth: { configurable: true, value: 160 }, scrollWidth: { configurable: true, value: 480 },
+    clientHeight: { configurable: true, value: 20 }, scrollHeight: { configurable: true, value: 20 },
+  });
+  return control;
+}
+
+it.each(['en', 'zh-CN'] as const)('reveals a clipped command through the full-value tooltip (%s)', async (locale) => {
+  await setLocale(locale);
+  const words = 'Build web and check the authentication routes';
+  const control = showClippedCommand(words);
+  await userEvent.hover(control);
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(`$${words}`);
+  expect(control).toHaveAttribute('aria-expanded', 'false');
+});
+
+it.each(['en', 'zh-CN'] as const)('keeps the whole command visible on keyboard focus after the pointer leaves (%s)', async (locale) => {
+  await setLocale(locale);
+  const words = 'Build web and check the authentication routes';
+  const control = showClippedCommand(words);
+  const user = userEvent.setup();
+  await user.hover(control);
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(`$${words}`);
+  act(() => control.focus());
+  await user.unhover(control);
+  expect(control).toHaveFocus();
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(`$${words}`);
+  expect(control).toHaveAttribute('aria-expanded', 'false');
 });

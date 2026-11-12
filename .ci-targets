@@ -1,0 +1,7 @@
+# Where and the type's default, round two: the engine's cases and every engine test program compiled.
+test -p orch-engine --lib -- image_services
+test -p orch-engine --test use_where --test credentials
+test -p orch-engine --test call_recovery -- candidate
+test -p orch-engine --test forks -- use_where
+test -p orch-engine --test forks -- native
+test -p orch-engine --no-run

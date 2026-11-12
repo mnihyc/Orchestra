@@ -197,18 +197,15 @@ async fn only_the_requests_the_format_lets_through_reach_the_upstream_and_the_re
     let mock = open_server().await;
     let endpoint = Endpoint::with_key("sk-real");
     let body = create("hi", false);
-    for (method, path) in [
-        (Method::POST, "/responses"),
-        (Method::POST, "/responses/compact"),
-        (Method::GET, "/models"),
-    ] {
+    for (method, path) in [(Method::POST, "/responses"), (Method::GET, "/models")] {
         let relayed = relay(&mock, method, path, &body, &endpoint).await;
         assert!(relayed.refusal.is_none());
         assert_eq!(relayed.status, Some(StatusCode::OK));
     }
     let reached = mock.requests().len();
-    assert_eq!(reached, 3);
+    assert_eq!(reached, 2);
     for (method, path) in [
+        (Method::POST, "/responses/compact"),
         (Method::GET, "/responses/resp_1"),
         (Method::DELETE, "/responses/resp_1"),
         (Method::POST, "/responses/resp_1/cancel"),
@@ -549,7 +546,7 @@ async fn a_gateways_stream_with_no_event_names_and_a_done_marker_is_read_the_sam
 }
 
 #[tokio::test]
-async fn usage_is_read_from_a_plain_reply_and_from_the_answer_to_a_compaction() {
+async fn usage_is_read_from_a_plain_reply_and_a_v2_compaction_response() {
     let mock = open_server().await;
     let script = "#!mock\nsay Hello\nusage 12 5 cost=0.00021";
     let relayed = relay(
@@ -570,18 +567,47 @@ async fn usage_is_read_from_a_plain_reply_and_from_the_answer_to_a_compaction() 
         Some("0.00021"),
         "what the upstream states it charged"
     );
-    let compact = json!({ "model": "mock-large", "input": [{ "type": "message", "role": "user", "content": "keep" }] });
+    let compact = json!({ "model": "mock-large", "stream":false,"input": [
+        { "type": "message", "role": "user", "content": [{"type":"input_text","text":"keep"}] },
+        { "type":"compaction_trigger" }
+    ] });
+    let response = json!({"id":"fixture-compact-v2","object":"response","model":"mock-large",
+        "output":[{"type":"context_compaction","id":"fixture-context","encrypted_content":"synthetic-opaque-context"}],
+        "usage":{"input_tokens":40,"output_tokens":7,"total_tokens":47}});
+    mock.queue(&format!("body 200 {response}")).unwrap();
     let relayed = relay(
         &mock,
         Method::POST,
-        "/responses/compact",
+        "/responses",
         &compact,
         &Endpoint::default(),
     )
     .await;
+    let reply: Vec<u8> = relayed
+        .chunks
+        .iter()
+        .flat_map(|chunk| chunk.iter().copied())
+        .collect();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reply).unwrap(),
+        response,
+        "the compaction response remains opaque to the relay"
+    );
     let usage = relayed.usage.unwrap();
-    assert!(usage.tokens.total_tokens > 0);
-    assert_eq!(usage.model, None, "a compaction names no model");
+    assert_eq!(
+        (
+            usage.tokens.input_tokens,
+            usage.tokens.output_tokens,
+            usage.tokens.total_tokens
+        ),
+        (40, 7, 47)
+    );
+    assert_eq!(usage.model.as_deref(), Some("mock-large"));
+    assert_eq!(
+        mock.requests().last().unwrap().body,
+        compact,
+        "the v2 trigger is relayed without rewriting its input"
+    );
 }
 
 #[tokio::test]

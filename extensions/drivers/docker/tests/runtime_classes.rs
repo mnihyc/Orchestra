@@ -345,16 +345,12 @@ async fn a_restricted_unit_under_a_guest_runtime_reaches_its_proxy_and_nothing_e
             });
         });
         let unit = lab.run(&spec).await;
-        let written = |file: &'static str| {
-            let lab = &lab;
-            let unit = &unit;
-            async move {
-                lab.read(unit, &format!("/var/lib/orch/{file}"))
-                    .await
-                    .unwrap_or_default()
-            }
-        };
-        let through = written("gateway.txt").await;
+        let through = lab
+            .wait_read(&unit, "/var/lib/orch/gateway.txt", |text| {
+                text.contains("200 Connection established") && text.contains("gateway-hello from ")
+            })
+            .await
+            .unwrap();
         assert!(
             through.contains("200 Connection established"),
             "{name}: {through:?}"
@@ -363,13 +359,32 @@ async fn a_restricted_unit_under_a_guest_runtime_reaches_its_proxy_and_nothing_e
             through.contains("gateway-hello from "),
             "{name}: {through:?}"
         );
-        let outside = written("outside.txt").await;
+        let outside = lab
+            .wait_read(&unit, "/var/lib/orch/outside.txt", |text| {
+                text.ends_with('\n')
+                    && text
+                        .lines()
+                        .last()
+                        .is_some_and(|line| line.starts_with("rc="))
+            })
+            .await
+            .unwrap();
         assert!(
             !outside.contains("rc=0"),
             "{name}: nothing outside answers: {outside:?}"
         );
-        let proxy = written("proxy.txt").await;
-        let resolver = written("resolv.txt").await;
+        let proxy = lab
+            .wait_read(&unit, "/var/lib/orch/proxy.txt", |text| {
+                !text.trim().is_empty() && text.ends_with('\n')
+            })
+            .await
+            .unwrap();
+        let resolver = lab
+            .wait_read(&unit, "/var/lib/orch/resolv.txt", |text| {
+                text.contains(&format!("nameserver {}", proxy.trim())) && text.ends_with('\n')
+            })
+            .await
+            .unwrap();
         assert!(
             resolver.contains(&format!("nameserver {}", proxy.trim())),
             "{name}: the proxy filters the names: {resolver:?} / {proxy:?}"

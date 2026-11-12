@@ -13,7 +13,9 @@ heading_id.谁可以创建项目话题和线程: who-may-make-projects-topics-an
 heading_id.指定正确的持有者: name-the-holder-you-mean
 heading_id.在自己的权限内共享: share-within-your-authority
 heading_id.理解越权: understand-an-override
+heading_id.限定提供方的工作在哪里运行: limit-where-a-providers-work-runs
 heading_keywords.who-may-make-projects-topics-and-threads: create project, make project, new project, create topic, open topic, new topic, create thread, start thread, new thread, permission, 创建项目, 创建话题, 开始线程, 权限
+summary: 了解访问申请、权限持有者、共享限制和管理员覆盖。
 ---
 
 # 谁能看和做什么
@@ -125,6 +127,17 @@ heading_keywords.who-may-make-projects-topics-and-threads: create project, make 
 
 共享位置要说明只给位置本身还是连同内容；预览显示哪些跟随、哪些保持私有。
 开放线程不会开放模型、文件或终端。这些入口属于整个环境，需要隔离的工作应分环境。
+
+## 限定提供方的工作在哪里运行
+
+提供方的使用条目除了模型和强度，还可以收窄运行位置：打开条目的选项，设置**位置**。不设置时显示**任何位置**。
+指定环境、主机或机器，即可把工作限定在这些位置；主机或机器涵盖其上的每个环境，包括之后在那里创建的环境。
+**位置**只会收窄，不会授予使用权。没有指定**部署方式**的条目只允许登录凭据留在保管位置的方式；副本或移交需要明确指定才被允许。
+一个条目就是一份授权：多个条目让同一个人进入时，必须有同一个条目同时允许模型、强度、部署方式和环境；对话框提供的选项，
+是允许其余各项的那些条目共同给出的。没有指定位置的条目允许所有位置，但只带它自己的模型和部署方式。
+线程在列表之外的环境中启动、切换、分叉或接管会被拒绝，并说明是哪个条目和哪个环境；线程移到其他环境，
+或条目被收窄，在下一轮会被拒绝；线程不会被悄悄移到别的环境或提供方。智能体在线程中发起的工具调用属于该线程的环境。
+不属于任何线程环境的工作（问答、摘要、嵌入和语义索引）不受**位置**限制，仍由服务决定。
 
 ## 理解越权
 

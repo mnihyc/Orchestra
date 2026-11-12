@@ -1,6 +1,7 @@
 //! Batched typed document entries and redacted ancestry for person and agent navigation.
 
 use super::{Actor, Ancestor, Directory, Error, Item, Listed, TreeRead, access};
+use futures::future::BoxFuture;
 use orch_db::{Conn, queries::documents::containers};
 use orch_types::{Id, Time};
 
@@ -30,13 +31,38 @@ pub async fn load_entries_in(
     project_read(conn, actor, rows, now, true).await
 }
 
-async fn project_read(
+/// Native readable entry operands. A consumer may discard entries for its own
+/// existing output window, but cannot change their native content or standing.
+#[derive(Debug)]
+pub struct EntrySelection {
+    entries: Vec<Listed>,
+    rows: Vec<containers::EntryRow>,
+}
+impl EntrySelection {
+    /// The actual rows and native standings selected on this read connection.
+    #[must_use]
+    pub fn entries(&self) -> &[Listed] {
+        &self.entries
+    }
+
+    /// Restricts this native selection without manufacturing an entry or authority flag.
+    pub fn retain(&mut self, keep: impl FnMut(&Listed) -> bool) {
+        self.entries.retain(keep);
+        let items: std::collections::HashSet<_> =
+            self.entries.iter().map(|row| row.entry.item).collect();
+        self.rows.retain(|row| items.contains(&access::item(row)));
+    }
+}
+
+/// The native row/standing selector without ancestry or any response projection.
+/// Callers may apply their existing output window before completing selected ancestry.
+pub async fn select_entries_in(
     conn: &mut Conn,
     actor: Actor<'_>,
     rows: Vec<containers::EntryRow>,
     now: Time,
     retained: bool,
-) -> Result<TreeRead, Error> {
+) -> Result<EntrySelection, Error> {
     let held = access::standings(conn, actor, &rows, now, retained).await?;
     let entries: Vec<_> = rows
         .iter()
@@ -48,6 +74,58 @@ async fn project_read(
             })
         })
         .collect();
+    let items: std::collections::HashSet<_> = entries.iter().map(|row| row.entry.item).collect();
+    let rows = rows
+        .into_iter()
+        .filter(|row| items.contains(&access::item(row)))
+        .collect();
+    Ok(EntrySelection { entries, rows })
+}
+
+fn project_read<'a>(
+    conn: &'a mut Conn,
+    actor: Actor<'a>,
+    rows: Vec<containers::EntryRow>,
+    now: Time,
+    retained: bool,
+) -> BoxFuture<'a, Result<TreeRead, Error>> {
+    // All document-reader facades retain only a handle to this projection.
+    Box::pin(prepare_projection(conn, actor, rows, now, retained))
+}
+
+async fn prepare_projection(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    rows: Vec<containers::EntryRow>,
+    now: Time,
+    retained: bool,
+) -> Result<TreeRead, Error> {
+    let entries = select_entries_in(conn, actor, rows, now, retained).await?;
+    project_selected(conn, actor, entries.entries, now, retained).await
+}
+
+/// Completes redacted structural ancestry for a native readable selection after its window is chosen.
+pub async fn project_selected_in(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    entries: EntrySelection,
+    now: Time,
+    retained: bool,
+) -> Result<TreeRead, Error> {
+    // A retained selection is factual data, never a loan of its producer's authority.
+    let current = select_entries_in(conn, actor, entries.rows, now, retained).await?;
+    let mut read = project_selected(conn, actor, current.entries, now, retained).await?;
+    redact_retained_ancestors(conn, actor, &mut read, retained).await?;
+    Ok(read)
+}
+
+async fn project_selected(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    entries: Vec<Listed>,
+    now: Time,
+    retained: bool,
+) -> Result<TreeRead, Error> {
     let ids: Vec<_> = entries.iter().map(|entry| entry.entry.item.id()).collect();
     let ancestors = containers::ancestors_many(conn, &ids).await?;
     let ancestor_rows: Vec<_> = ancestors
@@ -69,7 +147,7 @@ async fn project_read(
         })
         .collect();
     let held = access::standings(conn, actor, &ancestor_rows, now, retained).await?;
-    Ok(TreeRead {
+    let read = TreeRead {
         entries,
         ancestors: ancestor_rows
             .into_iter()
@@ -91,7 +169,8 @@ async fn project_read(
                 }
             })
             .collect(),
-    })
+    };
+    Ok(read)
 }
 
 /// Projects a bounded caller-selected metadata batch using the existing authority rules.
@@ -104,6 +183,16 @@ pub async fn project_entries_in(
     retained: bool,
 ) -> Result<TreeRead, Error> {
     let mut read = project_read(conn, actor, rows, now, retained).await?;
+    redact_retained_ancestors(conn, actor, &mut read, retained).await?;
+    Ok(read)
+}
+
+async fn redact_retained_ancestors(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    read: &mut TreeRead,
+    retained: bool,
+) -> Result<(), Error> {
     if retained && matches!(actor, Actor::Person(_)) {
         let ids: Vec<_> = read.ancestors.iter().map(|row| row.id).collect();
         let deleted: std::collections::HashSet<_> = containers::get_many(conn, &ids)
@@ -120,7 +209,7 @@ pub async fn project_entries_in(
             }
         }
     }
-    Ok(read)
+    Ok(())
 }
 
 /// Exact typed metadata, with an explicit retained mode separate from normal navigation.
