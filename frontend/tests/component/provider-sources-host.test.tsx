@@ -23,7 +23,7 @@ vi.mock('@/api/resources', async (load) => ({...await load<typeof ResourcesApi>(
 }));
 
 const keeper={id:'foreign-keeper',name:'Provider keeper',online:true,placement:'connected' as const,platform_os:'linux' as const};
-const setup:ProviderSetup={subscriptions:[],subscriptions_withheld:[],subscriptions_unshared:[],protocols:[],presets:[],api_arrangements:[],key_machines:[keeper],http_allowed:false,runtime_templates:[],sources:[
+const setup:ProviderSetup={ grouping: [],subscriptions:[],subscriptions_withheld:[],subscriptions_unshared:[],protocols:[],presets:[],api_arrangements:[],key_machines:[keeper],http_allowed:false,runtime_templates:[],sources:[
   {by:'program',name:'keeper-reports',descriptor:{...SOURCE_DESCRIPTOR,name:'keeper-reports',title:'Keeper reports'},default_for:[],machine:keeper,template:null,command:null},
   {by:'program',name:'another',descriptor:{...SOURCE_DESCRIPTOR,name:'another',title:'Another machine reports'},default_for:[],machine:{...keeper,id:'different'},template:null,command:null},
 ]};

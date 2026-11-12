@@ -1,7 +1,9 @@
 ---
+group: getting-started
 title: Getting started
 screens: /, /setup, /login, /register, /invite/$token, /org/$slug, /project/$projectId, /topic/$topicId, /thread/$threadId
 keywords: first thread, team, solo, invitation, provider, key, sign in, scripted example, start here
+summary: Set up your place, model and environment, then start shared work with an agent.
 ---
 
 # Getting started

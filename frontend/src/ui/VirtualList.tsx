@@ -13,8 +13,8 @@
  * the first thing the reader does. And it is not led astray by a window that is taller than all the
  * rows: there is nothing to scroll then, and every row is drawn.
  */
-import { useVirtualizer } from '@tanstack/react-virtual';
-import { type ReactNode, type Ref, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react';
+import { useVirtualizer, type VirtualItem, type Virtualizer } from '@tanstack/react-virtual';
+import { type ReactNode, type Ref, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 export interface VirtualListHandle {
   /** Brings the end into view. */
@@ -31,6 +31,8 @@ export interface VirtualListHandle {
 export interface VirtualListPosition { key: string | null; offset: number; atEnd: boolean }
 
 export interface VirtualListProps {
+  /** A view can own the viewport shared by its controls and this virtual content. */
+  viewport?: HTMLDivElement | null;
   count: number;
   /** A key for the row, which is the same for the same row whatever its place. */
   keyOf: (index: number) => string;
@@ -76,7 +78,28 @@ const SETTLE_AT_MOST_MS = 30_000;
 /** What the reader does, with their own hand or by moving the focus, and so what ends the hold on the end. */
 const LET_GO_BY = ['wheel', 'touchstart', 'keydown', 'pointerdown', 'focusin'] as const;
 
+/**
+ * Whether a row that was measured, and so changed how tall the list is, is made good by writing a new place to the element.
+ *
+ * The library's own rule: a row measured for the first time that starts above the fold, and a row measured again that lies wholly
+ * above it unless the reader is moving backward. Added here: the reader's own movement reaches the virtualizer by scroll events,
+ * and they are late when frames are (a Home key's smooth scroll is reported at a place it has already left). Until the event that
+ * says where the element is has come, the fold is a place the reader has left, and making rows good against it writes that place
+ * plus their growth to the element, which takes a reader who is at the top back down. So while the element and the belief are in
+ * different places the measurement waits: the scroll event that agrees with the element comes, and what is measured after it counts.
+ */
+export function compensatesMeasurement(
+  row: { start: number; end: number; first: boolean },
+  belief: { offset: number; adjustments: number; backward: boolean },
+  elementTop: number | null,
+): boolean {
+  if (elementTop !== null && Math.abs(elementTop - belief.offset) > 1) return false;
+  const fold = belief.offset + belief.adjustments;
+  return row.first ? row.start < fold : row.end <= fold && !belief.backward;
+}
+
 export function VirtualList({
+  viewport,
   count,
   keyOf,
   estimate,
@@ -95,7 +118,29 @@ export function VirtualList({
   className,
   ref,
 }: VirtualListProps) {
-  const scroller = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const scroller = useMemo(() => viewport === undefined ? content : { current: viewport }, [viewport]);
+  const [margin, setMargin] = useState(0);
+  const scrollMargin = viewport === undefined ? 0 : margin;
+  // A shared viewport includes the controls before this list. Their measured offset belongs
+  // to the virtualizer, while the row transforms remain relative to the list's own content.
+  useLayoutEffect(() => {
+    if (viewport === undefined || viewport === null || content.current === null) return;
+    const measure = () => {
+      const element = content.current;
+      if (element !== null) setMargin(element.getBoundingClientRect().top - viewport.getBoundingClientRect().top
+        - viewport.clientTop + viewport.scrollTop);
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    for (let at: HTMLElement | null = content.current; at !== null && at !== viewport; at = at.parentElement) {
+      observer.observe(at);
+      for (let before = at.previousElementSibling; before !== null; before = before.previousElementSibling) observer.observe(before);
+    }
+    return () => observer.disconnect();
+  }, [viewport]);
   const atEnd = useRef(true);
   const positioned = useRef(false);
   const lastRange = useRef('');
@@ -107,6 +152,7 @@ export function VirtualList({
   const virtualizer = useVirtualizer({
     count,
     getScrollElement: () => scroller.current,
+    scrollMargin,
     estimateSize: estimate,
     getItemKey: keyOf,
     overscan,
@@ -117,6 +163,24 @@ export function VirtualList({
     scrollEndThreshold: endSlackPx,
   });
   const total = virtualizer.getTotalSize();
+  // See `compensatesMeasurement`: a measurement waits while the element and the virtualizer's belief are in different places.
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item: VirtualItem, _delta: number, instance: Virtualizer<HTMLDivElement, Element>): boolean =>
+    compensatesMeasurement(
+      { start: item.start, end: item.end, first: !instance.itemSizeCache.has(item.key) },
+      { offset: instance.scrollOffset ?? 0, adjustments: instance.scrollAdjustments, backward: instance.scrollDirection === 'backward' },
+      scroller.current?.scrollTop ?? null,
+    );
+
+  const endOffset = useCallback((element: HTMLDivElement) => {
+    const maximum = Math.max(0, element.scrollHeight - element.clientHeight);
+    if (viewport === undefined) return maximum;
+    const tail = Math.min(element.scrollHeight, scrollMargin + virtualizer.getTotalSize());
+    // Keep the conversation's existing CSS minimum visible when controls exceed the view.
+    // Remaining controls stay reachable by scrolling the same owner.
+    const minimum = content.current === null ? 0 : Number.parseFloat(getComputedStyle(content.current).minHeight) || 0;
+    const footer = Math.max(0, element.scrollHeight - tail);
+    return Math.max(0, Math.min(maximum, tail + Math.min(footer, Math.max(0, element.clientHeight - minimum)) - element.clientHeight));
+  }, [viewport, scrollMargin, virtualizer]);
 
   /**
    * Goes to the end, and stays there while the rows that come into view are measured and change how far the end is.
@@ -142,9 +206,9 @@ export function VirtualList({
     for (const kind of LET_GO_BY) element.addEventListener(kind, release, { once: true, passive: true });
     element.setAttribute('aria-busy', 'true');
     const step = () => {
-      const gap = element.scrollHeight - element.scrollTop - element.clientHeight;
-      if (gap > 1) {
-        element.scrollTop = element.scrollHeight;
+      const target = endOffset(element);
+      if (Math.abs(target - element.scrollTop) > 1) {
+        element.scrollTop = target;
         quiet = 0;
       } else quiet += 1;
       frames += 1;
@@ -152,21 +216,24 @@ export function VirtualList({
       else release();
     };
     // The first step is now: the rows that stand at the end are drawn from this position.
-    element.scrollTop = element.scrollHeight;
+    element.scrollTop = endOffset(element);
     frame = requestAnimationFrame(step);
-  }, []);
+  }, [scroller, endOffset]);
 
   useImperativeHandle(
     ref,
     () => ({
       scrollToEnd: toEnd,
       scrollToKey: (key, align = 'center') => {
+        if (scroller.current === null) return false;
         for (let index = 0; index < count; index += 1) {
           if (keyOf(index) === key) {
             // Somebody asked for this row: what holds the end gives way.
             holding.current?.();
             positioned.current = true;
-            virtualizer.scrollToIndex(index, { align });
+            if (viewport !== undefined && align === 'end' && index === count - 1) {
+              virtualizer.scrollToOffset(Math.max(0, scrollMargin + virtualizer.getTotalSize() - scroller.current.clientHeight));
+            } else virtualizer.scrollToIndex(index, { align });
             return true;
           }
         }
@@ -176,7 +243,7 @@ export function VirtualList({
       element: () => scroller.current,
     }),
     // The handle reads the latest rows through the closures below.
-    [count, keyOf, virtualizer, toEnd],
+    [count, keyOf, virtualizer, toEnd, scroller, viewport, scrollMargin],
   );
 
   const restorePosition = useCallback((index: number, offset: number) => {
@@ -211,7 +278,7 @@ export function VirtualList({
       else release();
     };
     frame = requestAnimationFrame(step);
-  }, [virtualizer]);
+  }, [virtualizer, scroller]);
 
   // The first rows: begin at the end, which is where a conversation is read from. The virtualizer puts
   // its own idea of the offset back when its effects run again (a development build runs them twice),
@@ -221,6 +288,7 @@ export function VirtualList({
       positioned.current = false;
       return;
     }
+    if (scroller.current === null) return;
     if (!positioned.current && initialPosition !== undefined && initialPosition !== null && !initialPosition.atEnd && initialPosition.key !== null) {
       for (let index = 0; index < count; index += 1) if (keyOf(index) === initialPosition.key) {
         restorePosition(index, initialPosition.offset);
@@ -251,9 +319,10 @@ export function VirtualList({
     const element = scroller.current;
     const believed = virtualizer.scrollOffset;
     if (element === null || believed === null) return false;
-    const furthest = Math.max(0, virtualizer.getTotalSize() - (virtualizer.scrollRect?.height ?? 0));
+    const furthest = viewport === undefined ? Math.max(0, virtualizer.getTotalSize() - (virtualizer.scrollRect?.height ?? 0))
+      : Math.max(0, element.scrollHeight - element.clientHeight);
     return believed > furthest + 1 && believed > element.scrollTop + 1;
-  }, [virtualizer]);
+  }, [virtualizer, scroller, viewport]);
   const resyncing = useRef(false);
   useLayoutEffect(() => {
     if (resyncing.current || !resync()) return;
@@ -264,78 +333,102 @@ export function VirtualList({
     });
   });
 
-  // The list itself gets smaller or larger (the composer under it grows, a banner comes): a reader who
-  // was at the end stays at it.
-  useEffect(() => {
-    const element = scroller.current;
-    if (!follow || element === null || typeof ResizeObserver === 'undefined') return;
-    let height = element.clientHeight;
-    let frame = 0;
-    const observer = new ResizeObserver(() => {
-      if (element.clientHeight === height) return;
-      height = element.clientHeight;
-      // Not inside the observer's own turn: a scroll made there is reported as a loop it did not finish.
-      // And asked again when the frame comes, for the reader may have gone elsewhere by then. The rows are measured
-      // by now: this is one step to the end, not a hold on it.
-      frame = requestAnimationFrame(() => {
-        if (atEnd.current) element.scrollTop = element.scrollHeight;
-      });
-    });
-    observer.observe(element);
-    return () => {
-      cancelAnimationFrame(frame);
-      observer.disconnect();
-    };
-  }, [follow]);
-
-  const check = useCallback(() => {
-    const element = scroller.current;
-    if (element === null) return;
-    const near = element.scrollHeight - element.scrollTop - element.clientHeight <= endSlackPx;
+  const checkEnd = useCallback((element: HTMLDivElement) => {
+    const tail = viewport === undefined ? element.scrollHeight : Math.min(element.scrollHeight, scrollMargin + virtualizer.getTotalSize());
+    const near = tail - element.scrollTop - element.clientHeight <= endSlackPx
+      && (viewport === undefined || tail > element.scrollTop);
     if (near !== atEnd.current) {
       atEnd.current = near;
       onAtEnd?.(near);
     }
+    return near;
+  }, [endSlackPx, onAtEnd, viewport, scrollMargin, virtualizer]);
+
+  // The list itself gets smaller or larger (the composer under it grows, a banner comes): a reader who
+  // was at the end stays at it.
+  useEffect(() => {
+    const element = scroller.current;
+    if (element === null) return;
+    // A link to the first row may already be in position and never emit a scroll event.
+    checkEnd(element);
+    if (!follow || typeof ResizeObserver === 'undefined') return;
+    let height = element.clientHeight, extent = element.scrollHeight;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (element.clientHeight === height && (viewport === undefined || element.scrollHeight === extent)) return;
+      height = element.clientHeight; extent = element.scrollHeight;
+      // Not inside the observer's own turn: a scroll made there is reported as a loop it did not finish.
+      // And asked again when the frame comes, for the reader may have gone elsewhere by then. The rows are measured
+      // by now: this is one step to the end, not a hold on it.
+      frame = requestAnimationFrame(() => {
+        if (atEnd.current) element.scrollTop = endOffset(element);
+      });
+    });
+    observer.observe(element);
+    if (viewport !== undefined) for (const child of element.children) observer.observe(child);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [checkEnd, follow, scroller, viewport, endOffset]);
+
+  const check = useCallback(() => {
+    const element = scroller.current;
+    if (element === null) return;
+    const near = checkEnd(element);
     if (positioned.current && onPosition !== undefined) {
       const first = virtualizer.getVirtualItems().find((row) => row.end > element.scrollTop);
       onPosition({ key: near || first === undefined ? null : keyOf(first.index), offset: first === undefined ? 0 : Math.max(0, element.scrollTop - first.start), atEnd: near });
     }
     if (element.scrollTop < nearStartPx) onNearStart?.();
-  }, [endSlackPx, nearStartPx, onAtEnd, onNearStart, onPosition, keyOf, virtualizer]);
+  }, [checkEnd, nearStartPx, onNearStart, onPosition, keyOf, virtualizer, scroller]);
+
+  useEffect(() => {
+    if (viewport === undefined || viewport === null) return;
+    viewport.addEventListener('scroll', check, { passive: true });
+    return () => viewport.removeEventListener('scroll', check);
+  }, [viewport, check]);
 
   // Which rows are in view, for whoever asked.
   const range = virtualizer.range;
   useLayoutEffect(() => {
     if (range === null || onRange === undefined) return;
-    const said = `${range.startIndex}.${range.endIndex}`;
+    const owner = scroller.current;
+    const visible = viewport === undefined || owner === null ? null : virtualizer.getVirtualItems()
+      .filter((row) => row.end > owner.scrollTop && row.start < owner.scrollTop + owner.clientHeight);
+    const first = visible === null ? range.startIndex : visible[0]?.index ?? 0;
+    const last = visible === null ? range.endIndex : visible.at(-1)?.index ?? -1;
+    const said = `${first}.${last}`;
     if (said === lastRange.current) return;
     lastRange.current = said;
-    onRange(range.startIndex, range.endIndex);
+    onRange(first, last);
   });
 
   return (
     <div
-      ref={scroller}
+      ref={content}
       role="log"
       aria-label={label}
       aria-relevant="additions"
       aria-atomic="false"
       tabIndex={0}
-      onScroll={check}
+      onScroll={viewport === undefined ? check : undefined}
       className={className}
     >
-      <div style={{ height: total, position: 'relative', width: '100%' }}>
+      <ol role="list" className="m-0 list-none p-0" style={{ height: total, position: 'relative', width: '100%' }}>
         {virtualizer.getVirtualItems().map((row) => (
-          <div
+          <li
             key={row.key}
             data-index={row.index}
+            aria-posinset={row.index + 1}
+            aria-setsize={count}
             ref={virtualizer.measureElement}
-            style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${row.start}px)` }}
+            style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${row.start - scrollMargin}px)` }}
           >
             {render(row.index)}
-          </div>
+          </li>
         ))}
-      </div>
+      </ol>
     </div>
   );
 }

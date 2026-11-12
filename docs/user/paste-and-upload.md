@@ -1,7 +1,9 @@
 ---
+group: work
 title: Paste and upload
 screens: /thread/$threadId, /chat/$chatId, /place-chat/$nodeId, /topic/$topicId, /project/$projectId, /org/$slug, /doc/$documentId, /workbench, /resources/environments/$id
 keywords: paste, drop, upload, attachments, pasted text, files, folder, draft, context, cancel, conflict, 粘贴, 拖放, 上传, 附件, 草稿
+summary: Choose the destination for pasted text, uploaded files, attachments and references.
 ---
 
 # Paste and upload

@@ -10,32 +10,49 @@ async function ports(path: string, body: unknown = {}) {
 }
 test.beforeEach(async () => { await scenario(); });
 
-test('a thread trail keeps its thread ancestor and its own linked leaf in the same title bar at both widths', async ({ page }) => {
+test('a thread trail keeps its thread ancestor beside its selected Audit tab at both widths', async ({ page }) => {
   await signIn(page);
-  await page.goto(`/trace/${ACME.mainThread}`);
+  const tracePath = `/trace/${ACME.mainThread}`;
+  const atTrace = (url: URL) => url.pathname === tracePath && (url.search === ''
+    || url.searchParams.size === 2 && url.searchParams.get('_list') === 'true' && url.searchParams.has('list'));
+  await page.goto(tracePath);
   const path = page.locator('[data-screen-path]');
   await expect(path).toHaveCount(1);
   await expect(path.getByRole('link', { name: 'Main thread', exact: true })).toHaveAttribute('href', `/thread/${ACME.mainThread}`);
-  await expect(path.locator('a[aria-current="page"]')).toHaveAttribute('href', `/trace/${ACME.mainThread}`);
+  // The current page is named by its tab; the shared title bar contains only ancestors.
+  const tab = page.getByRole('tablist', { name: 'Main area', exact: true }).getByRole('tab', { name: 'Audit', exact: true });
+  await expect(tab).toHaveAttribute('aria-selected', 'true');
+  await expect(page).toHaveURL(atTrace);
+  await expect(path.locator('[aria-current="page"]')).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(path).toHaveCount(1);
-  await expect(path.locator('a[aria-current="page"]')).toBeVisible();
-  await expect(path.locator('a[aria-current="page"]')).toHaveAttribute('href', `/trace/${ACME.mainThread}`);
+  await expect(path.getByRole('link', { name: 'Main thread', exact: true })).toBeVisible();
+  await expect(path.getByRole('link', { name: 'Main thread', exact: true })).toHaveAttribute('href', `/thread/${ACME.mainThread}`);
+  await expect(tab).toBeVisible();
+  await expect(tab).toHaveAttribute('aria-selected', 'true');
+  await expect(page).toHaveURL(atTrace);
 });
 
-test('a trace grouping and closed filters survive another place and a reload without changing the choice', async ({ page }) => {
+test('a trace grouping and closed filters stay with their tab across another place, return and reload', async ({ page }) => {
   await signIn(page);
   await page.goto('/org/acme/settings/audit');
   await page.getByRole('combobox', { name: 'Group by', exact: true }).click();
-  await page.getByRole('option', { name: 'Kind of act', exact: true }).click();
-  const filters = page.locator('details').filter({ has: page.locator('summary').filter({ hasText: /^Filters/ }) }).first();
+  await page.getByRole('option', { name: 'Kind', exact: true }).click();
+  const filters = page.getByTestId('main').locator('details:visible').filter({ has: page.locator('summary').filter({ hasText: /^Filters/ }) }).first();
   if (await filters.getAttribute('open') !== null) await filters.locator(':scope > summary').click();
   await expect(filters).not.toHaveAttribute('open');
+  const mainTabs = page.getByRole('tablist', { name: 'Main area', exact: true });
+  const chosen = await mainTabs.getByRole('tab', { selected: true }).getAttribute('id');
+  if (chosen === null) throw new Error('The chosen audit tab must retain its identity');
   await page.goto(`/project/${ACME.web}/settings?section=audit`);
-  await expect(page.getByRole('combobox', { name: 'Group by', exact: true })).toContainText('Kind of act');
+  // Audit list choices now belong to their addressed page, so another place starts from its own defaults.
+  await expect(page.getByRole('combobox', { name: 'Group by', exact: true })).toHaveText('Day');
+  await expect(filters).toHaveAttribute('open');
+  await mainTabs.locator(`[id="${chosen}"]`).click();
+  await expect(page.getByRole('combobox', { name: 'Group by', exact: true })).toHaveText('Kind');
   await expect(filters).not.toHaveAttribute('open');
   await page.reload();
-  await expect(page.getByRole('combobox', { name: 'Group by', exact: true })).toContainText('Kind of act');
+  await expect(page.getByRole('combobox', { name: 'Group by', exact: true })).toHaveText('Kind');
   await expect(filters).not.toHaveAttribute('open');
 });
 

@@ -113,6 +113,7 @@ interface Kept {
 }
 
 interface Place {
+  lookedAt: string;
   off: BrowsersOff | null;
   programs: { name: string; path: string; version: string | null }[];
   sandbox: boolean | null;
@@ -137,15 +138,16 @@ export class BrowsersWorld implements Part {
     this.places.clear();
     this.browsers.clear();
     this.tickets.clear();
+    const lookedAt = new Date().toISOString();
     const at = new Date(Date.now() - 20 * 60_000).toISOString();
     const chromium = [{ name: 'chromium', path: '/usr/bin/chromium', version: '131.0.6778.85' }];
-    this.places.set(RUNS_ON.workspace, { off: null, programs: chromium, sandbox: true, window: false, profiles: new Map([
+    this.places.set(RUNS_ON.workspace, { lookedAt, off: null, programs: chromium, sandbox: true, window: false, profiles: new Map([
       ['notion', { name: 'notion', size_bytes: 48_000_000, used_at: at, browser: null }],
       ['twitter', { name: 'twitter', size_bytes: 12_000_000, used_at: at, browser: null }],
       ['thread-9c1f', { name: 'thread-9c1f', size_bytes: 3_000_000, used_at: at, browser: null }],
     ]) });
-    this.places.set(RUNS_ON.docsCheckout, { off: 'environment_offline', programs: chromium, sandbox: null, window: false, profiles: new Map() });
-    this.places.set(RUNS_ON.sandbox, { off: null, programs: [], sandbox: null, window: false, profiles: new Map() });
+    this.places.set(RUNS_ON.docsCheckout, { lookedAt, off: 'environment_offline', programs: chromium, sandbox: null, window: false, profiles: new Map() });
+    this.places.set(RUNS_ON.sandbox, { lookedAt, off: null, programs: [], sandbox: null, window: false, profiles: new Map() });
     const ada = this.world.people.get('ada');
     this.start(RUNS_ON.workspace, 'notion', ada === undefined ? null : userRef(ada.me), null, 'https://www.notion.so/acme/Roadmap', 'Roadmap');
     this.start(RUNS_ON.workspace, 'thread-9c1f', null, { id: ACME.mainThread, kind: 'thread', name: 'Main thread', redacted: false }, 'https://github.com/acme/web/pull/7', 'Fix login · Pull request #7');
@@ -161,7 +163,7 @@ export class BrowsersWorld implements Part {
   support(environmentId: string): { looked_at: string | null; browser: EnvironmentBrowsers['support']; vnc: { servers: { name: string; path: string; version: string | null }[]; window_manager: string | null } } {
     const place = this.places.get(environmentId);
     return {
-      looked_at: new Date().toISOString(),
+      looked_at: place?.lookedAt ?? null,
       browser: { programs: place?.programs ?? [], window: place?.window ?? false, playwright_cli: place === undefined || place.programs.length === 0 ? null : '0.1.1', sandbox: place?.sandbox ?? null },
       vnc: this.world.displays.supportOf(environmentId),
     };
@@ -305,6 +307,7 @@ export class BrowsersWorld implements Part {
         const environmentId = typeof body.environment === 'string' ? body.environment : RUNS_ON.workspace;
         const place = this.places.get(environmentId);
         if (place === undefined) return { status: 404, body: { detail: 'no such environment' } };
+        place.lookedAt = new Date().toISOString();
         if ('off' in body) place.off = (body.off ?? null) as BrowsersOff | null;
         if (Array.isArray(body.programs)) place.programs = body.programs as Place['programs'];
         if (typeof body.sandbox === 'boolean') place.sandbox = body.sandbox;

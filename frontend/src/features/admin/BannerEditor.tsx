@@ -154,7 +154,7 @@ function Form({ setting }: { setting: ResolvedSetting | undefined }) {
 export function BannerEditor() {
   const settings = useQuery(systemSettingsQuery);
   const setting = settings.data?.find((one) => one.key === KEY);
-  if (settings.isPending) return <SkeletonRows rows={3} />;
+  if (settings.isPending) return <SkeletonRows read={settings} rows={3} />;
   if (settings.isError) return <ErrorState compact error={settings.error} retrying={settings.isRefetching} onRetry={() => void settings.refetch()} />;
   return (
     <div className={cx(boxClasses, 'p-4')}>

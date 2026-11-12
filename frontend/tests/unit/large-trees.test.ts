@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 
 import { liveIndexReasonKey } from '@/features/inspector/Files';
 import { gitReadTooSlow } from '@/features/inspector/Git';
-import { i18n } from '@/i18n';
+import { liveIndexReason } from '@/features/files/indexWords';
+import { wholeUnavailableReason } from '@/features/source/words';
+import { i18n, setLocale } from '@/i18n';
 
 describe('a large workspace', () => {
   it('says the reported reason for live listing and explains explicit selections', () => {
@@ -23,4 +25,22 @@ describe('a large workspace', () => {
     expect(i18n.t('largeTree.gitCut')).toContain('cut at its output limit');
     expect(i18n.t('largeTree.openShell')).toBe('Open shell');
   });
+});
+
+it.each(['en', 'zh-CN'] as const)('explains every Live cause, its reported limit and restore cost in %s', async (locale) => {
+  await setLocale(locale);
+  try {
+    for (const reason of ['chosen', 'entries', 'watches', 'scan_time'] as const) {
+      const words = liveIndexReason(i18n.t, reason, { index_entry_limit: 12345 });
+      expect(words).not.toBe(`largeTree.reasons.${reason}`);
+      if (reason === 'entries') expect(words).toContain('12345');
+      if (locale === 'zh-CN') expect(words).toMatch(/\p{Script=Han}/u);
+    }
+    expect(liveIndexReason(i18n.t, 'entries', {})).toBe(i18n.t('largeTree.reasons.entries'));
+    expect(liveIndexReason(i18n.t, null, {})).toBe(i18n.t('largeTree.reasons.unknown'));
+    expect(wholeUnavailableReason(i18n.t, 'entries:12345')).toContain('12345');
+    expect(i18n.t('largeTree.liveCost')).not.toBe('largeTree.liveCost');
+    if (locale === 'en') expect(i18n.t('largeTree.liveCost')).toMatch(/disk.*requested.*Whole-directory restore/);
+    else expect(i18n.t('largeTree.liveCost')).toMatch(/磁盘.*无法还原整个目录/u);
+  } finally { await setLocale('en'); }
 });

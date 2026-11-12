@@ -287,6 +287,14 @@ mod tests {
             1
         );
         assert!(listed_at(Scope::Provider).contains(&keys::RUNTIME_RENEW_DAYS));
+        for key in [
+            keys::PROVIDERS_FACTS_IDLE_MINUTES,
+            keys::PROVIDERS_FACTS_ACTIVE_MINUTES,
+            keys::PROVIDERS_FACTS_RECENT_MINUTES,
+            keys::PROVIDERS_FACTS_REFUSED_MINUTES,
+        ] {
+            assert!(listed_at(Scope::Provider).contains(&key));
+        }
     }
 
     #[test]

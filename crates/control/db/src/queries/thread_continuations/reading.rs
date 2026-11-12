@@ -49,25 +49,168 @@ pub async fn items(
     stream: Option<&str>,
     limit: i64,
 ) -> Result<Vec<ItemRow>, DbError> {
+    items_with_bytes(
+        conn,
+        ItemPage {
+            thread,
+            view,
+            boundary,
+            forward,
+            stream,
+            limit,
+            bytes: None,
+            before_only: false,
+            messages_only: false,
+        },
+    )
+    .await
+}
+/// The same selected/frozen page with a decoded-byte buffer target, always admitting its first item.
+pub async fn items_bounded(
+    conn: &mut Conn,
+    thread: Id,
+    view: Id,
+    boundary: Option<Seq>,
+    forward: bool,
+    stream: Option<&str>,
+    limit: i64,
+) -> Result<Vec<ItemRow>, DbError> {
+    items_with_bytes(
+        conn,
+        ItemPage {
+            thread,
+            view,
+            boundary,
+            forward,
+            stream,
+            limit,
+            bytes: Some(crate::queries::thread_history::PAGE_BYTES),
+            before_only: false,
+            messages_only: false,
+        },
+    )
+    .await
+}
+pub(crate) async fn before_items_page(
+    conn: &mut Conn,
+    thread: Id,
+    view: Id,
+    after: Seq,
+) -> Result<Vec<ItemRow>, DbError> {
+    items_with_bytes(
+        conn,
+        ItemPage {
+            thread,
+            view,
+            boundary: Some(after),
+            forward: true,
+            stream: Some("main"),
+            limit: crate::queries::thread_history::PAGE,
+            bytes: Some(crate::queries::thread_history::PAGE_BYTES),
+            before_only: true,
+            messages_only: false,
+        },
+    )
+    .await
+}
+struct ItemPage<'a> {
+    thread: Id,
+    view: Id,
+    boundary: Option<Seq>,
+    forward: bool,
+    stream: Option<&'a str>,
+    limit: i64,
+    bytes: Option<i64>,
+    before_only: bool,
+    messages_only: bool,
+}
+
+/// Native selected/frozen message pages; tool/marker rows never consume the message cursor.
+pub(crate) async fn messages_bounded(
+    conn: &mut Conn,
+    thread: Id,
+    view: Id,
+    boundary: Option<Seq>,
+    limit: i64,
+) -> Result<Vec<ItemRow>, DbError> {
+    items_with_bytes(
+        conn,
+        ItemPage {
+            thread,
+            view,
+            boundary,
+            forward: false,
+            stream: Some("main"),
+            limit,
+            bytes: Some(crate::queries::thread_history::PAGE_BYTES),
+            before_only: false,
+            messages_only: true,
+        },
+    )
+    .await
+}
+async fn items_with_bytes(conn: &mut Conn, page: ItemPage<'_>) -> Result<Vec<ItemRow>, DbError> {
+    let ItemPage {
+        thread,
+        view,
+        boundary,
+        forward,
+        stream,
+        limit,
+        bytes,
+        before_only,
+        messages_only,
+    } = page;
     let order = if forward { "ASC" } else { "DESC" };
     let comparison = if forward { ">" } else { "<" };
-    let sql=format!("{OWNERS},candidates AS (
+    let name = if bytes.is_some() {
+        "candidate_ids"
+    } else {
+        "candidates"
+    };
+    let before_filter = if before_only {
+        "AND i.before_orch AND i.turn_id IS NULL"
+    } else {
+        ""
+    };
+    let kind_filter = if messages_only {
+        "AND i.stream='main' AND i.kind IN ('user_message','agent_message')"
+    } else {
+        ""
+    };
+    let bounded = if bytes.is_some() {
+        format!(",candidates AS (
+      SELECT sized.id,sized.frozen_at,sized.seq_created FROM (
+        SELECT c.*,COALESCE(n.size,0) AS size,sum(COALESCE(n.size,0)) OVER(ORDER BY c.seq_created {order} ROWS UNBOUNDED PRECEDING) AS used
+        FROM candidate_ids c JOIN items i ON i.id=c.id
+        LEFT JOIN LATERAL(SELECT CASE WHEN c.frozen_at IS NULL OR i.seq_updated<=c.frozen_at THEN i.payload_bytes
+          ELSE (SELECT COALESCE((r.body->>'payload_bytes')::bigint,octet_length((r.body->'payload')::text)) FROM thread_item_revisions r
+            WHERE r.item_id=i.id AND r.seq_updated<=c.frozen_at ORDER BY r.seq_updated DESC LIMIT 1) END AS size) n ON true
+      ) sized WHERE sized.used-sized.size<$6::bigint)")
+    } else {
+        String::new()
+    };
+    let sql=format!("{OWNERS},{name} AS (
       SELECT selected.id,o.frozen_at,selected.seq_created FROM owners o JOIN LATERAL (
         SELECT i.id,i.seq_created FROM items i WHERE i.thread_id=$1 AND i.continuation_id=o.owner
-          AND i.seq_created BETWEEN o.first_seq AND o.last_seq
+          AND i.seq_created BETWEEN o.first_seq AND o.last_seq {before_filter} {kind_filter}
           AND ($3::bigint IS NULL OR i.seq_created {comparison} $3) AND ($4::text IS NULL OR i.stream=$4)
           AND (i.turn_id IS NULL OR (SELECT t.ordinal BETWEEN o.first_turn AND o.last_turn
             FROM turns t WHERE t.id=i.turn_id))
         ORDER BY i.seq_created {order} LIMIT $5) selected ON true
-      ORDER BY selected.seq_created {order} LIMIT $5) {DECODE}");
-    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+      ORDER BY selected.seq_created {order} LIMIT $5){bounded} {DECODE}");
+    let query = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(thread)
         .bind(view)
         .bind(boundary)
         .bind(stream)
-        .bind(limit)
-        .fetch_all(conn)
-        .await?)
+        .bind(limit);
+    let query = if let Some(bytes) = bytes {
+        query.bind(bytes)
+    } else {
+        query
+    };
+    Ok(query.fetch_all(conn).await?)
 }
 
 /// Membership is checked before accepting a page anchor or returning its frozen body.

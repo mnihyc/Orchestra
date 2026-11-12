@@ -14,7 +14,7 @@
 //! not change when something is shared; the cost is that such a suffix tells that an older entry of that name exists.
 //!
 //! **What is there.** A directory is in the tree when the agent may read something in it or under it (or it is on
-//! the agent's own way, or a thread of its own topic, which is always listed); the places on the way to a thing
+//! the agent's own way); the places on the way to a thing
 //! appear as directories with nothing else in them. What cannot be read is not listed, and is answered, when
 //! asked for, as what is not there. One thing is listed that cannot be read: a document that was deleted, to an agent
 //! that may bring it back (it may manage it), marked as deleted, beside the ones that are there and under a name of
@@ -29,7 +29,7 @@ use crate::written::{FILES_SUFFIX, HISTORY_SUFFIX};
 use globset::{Glob, GlobMatcher};
 use orch_api_contract::share::{SharedEntryKind, SharedEntryUnit, SharedEntryVia};
 use orch_authz::documents::Document;
-use orch_authz::reach::{self, Agent, AgentReach, Reach, Standing, Things, Via};
+use orch_authz::reach::{self, Agent, Reach, Standing, Things, Via};
 use orch_db::Conn;
 use orch_db::queries::documents as document_rows;
 use orch_db::queries::shares::{self as rows, PlaceRow};
@@ -47,6 +47,14 @@ pub const ENTRIES_MAX: usize = 500;
 
 /// The most nodes read in one database page of the agent's selected reach; every continuation is followed.
 pub const NODES_MAX: i64 = 20_000;
+
+fn read_phase(started: std::time::Instant, stage: &'static str) {
+    tracing::debug!(
+        stage,
+        elapsed_ms = %started.elapsed().as_millis(),
+        "shared tree read checkpoint"
+    );
+}
 
 /// The most characters of the opening of a description.
 pub const DESCRIPTION_CHARS: usize = 200;
@@ -394,7 +402,6 @@ impl Entry {
 
 fn via_of(via: Via) -> SharedEntryVia {
     match via {
-        Via::Policy => SharedEntryVia::Policy,
         Via::Share => SharedEntryVia::Share,
         Via::Topic => SharedEntryVia::Topic,
     }
@@ -467,7 +474,7 @@ struct Dir {
     name: String,
     parent: Option<usize>,
     children: Vec<usize>,
-    /// On the agent's own way, or a thread of its own topic: always listed.
+    /// On the agent's own way: always listed as permitted location metadata.
     on_way: bool,
     conversation: Option<Conversation>,
     chat: Option<ChatNode>,
@@ -916,48 +923,36 @@ fn path_of(prefix: &str, name: &str, directory: bool) -> String {
 
 impl Tree {
     /// Reads the tree for `scope`: the agent's reach, a few statements for any number of things.
-    pub async fn load(
+    pub fn load(
         conn: &mut Conn,
         agent: Agent,
-        policy: AgentReach,
-        documents_policy: reach::DocumentPolicy,
         now: Time,
         scope: Scope,
-    ) -> Result<Self, EngineError> {
-        Self::load_selected(conn, agent, policy, documents_policy, now, scope, None).await
+    ) -> impl std::future::Future<Output = Result<Self, EngineError>> {
+        // Construct the heap boundary before a tool or turn captures this reader.
+        Box::pin(Self::load_selected(conn, agent, now, scope, None))
     }
 
     /// Reads indexed source candidates and file directories, preserving ordinary reach and canonical names.
-    pub async fn load_search(
+    pub fn load_search(
         conn: &mut Conn,
         agent: Agent,
-        policy: AgentReach,
-        documents_policy: reach::DocumentPolicy,
         now: Time,
         scope: Scope,
         selected: &orch_db::queries::search::CandidateSet,
-    ) -> Result<Self, EngineError> {
-        Self::load_selected(
-            conn,
-            agent,
-            policy,
-            documents_policy,
-            now,
-            scope,
-            Some(selected),
-        )
-        .await
+    ) -> impl std::future::Future<Output = Result<Self, EngineError>> {
+        Box::pin(Self::load_selected(conn, agent, now, scope, Some(selected)))
     }
 
     async fn load_selected(
         conn: &mut Conn,
         agent: Agent,
-        policy: AgentReach,
-        documents_policy: reach::DocumentPolicy,
         now: Time,
         scope: Scope,
         search_parts: Option<&orch_db::queries::search::CandidateSet>,
     ) -> Result<Self, EngineError> {
+        let started = std::time::Instant::now();
+        read_phase(started, "entered");
         let selected_documents = search_parts.map(|parts| parts.documents.as_slice());
         let headers_only = search_parts.is_some_and(|parts| parts.headers_only);
         let grants = if headers_only {
@@ -965,11 +960,13 @@ impl Tree {
         } else {
             reach::grants(conn, &agent, now).await?
         };
+        read_phase(started, "grants ready");
         let loaded = if let Some(parts) = search_parts.filter(|_| headers_only) {
             loading::headers(conn, &agent, parts, scope).await?
         } else {
-            loading::load(conn, &agent, policy, scope, &grants).await?
+            loading::load(conn, &agent, scope, &grants).await?
         };
+        read_phase(started, "raw pages ready");
         let places = loaded.places;
         let capped = loaded.capped;
         let content_nodes: HashSet<_> = loaded.content.iter().copied().collect();
@@ -1018,6 +1015,7 @@ impl Tree {
         )
         .await
         .map_err(folders::read_error)?;
+        read_phase(started, "document entries ready");
         let folder_ancestors: HashMap<_, _> = organized
             .ancestors
             .into_iter()
@@ -1125,7 +1123,7 @@ impl Tree {
             Vec::new()
         } else {
             if headers_only {
-                sqlx::query_as("SELECT id chat_id,org_id,kind,name,created_at,last_message_at,0::bigint messages FROM chats WHERE id=ANY($1) AND kind<>'node' ORDER BY created_at,id")
+                sqlx::query_as("SELECT id chat_id,org_id,COALESCE(home_id,org_id) home_id,kind,name,created_at,last_message_at,0::bigint messages FROM chats WHERE id=ANY($1) AND kind<>'node' ORDER BY created_at,id")
                     .bind(&people_ids).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?
             } else {
                 rows::people_chats(conn, &people_ids).await?
@@ -1168,10 +1166,10 @@ impl Tree {
             .iter()
             .find(|place| place.id == agent.thread)
             .and_then(|place| place.environment_id);
-        let reach = Reach::load(
+        read_phase(started, "metadata ready");
+        let reach = Reach::load_current(
             conn,
             agent.clone(),
-            policy,
             now,
             &Things {
                 nodes: ids.clone(),
@@ -1183,8 +1181,8 @@ impl Tree {
                 people_chats: people_ids.clone(),
             },
         )
-        .await?
-        .with_document_policy(documents_policy);
+        .await?;
+        read_phase(started, "current reach ready");
         let member_names = if headers_only {
             HashMap::new()
         } else {
@@ -1310,15 +1308,10 @@ impl Tree {
         for (at, row) in deleted_rows.iter().enumerate() {
             deleted_by_node.entry(row.node_id).or_default().push(at);
         }
-        let own_topic_threads: HashSet<Id> = dirs
-            .iter()
-            .filter(|dir| dir.place.kind == "thread" && dir.place.path.contains(&agent.topic))
-            .map(|dir| dir.place.id)
-            .collect();
         let way: HashSet<Id> = agent.path.iter().copied().collect();
         for dir in &mut dirs {
             let id = dir.place.id;
-            dir.on_way = way.contains(&id) || own_topic_threads.contains(&id);
+            dir.on_way = way.contains(&id);
             if dir.place.kind == "thread" {
                 let standing = reach.conversation(id, dir.place.side_of.is_some());
                 let total = totals.get(&id).copied().unwrap_or((0, None));
@@ -1426,7 +1419,7 @@ impl Tree {
                         .unwrap_or_else(|| "chat".to_owned())
                 });
             let label: String = label.chars().take(CHAT_NAME_CHARS).collect();
-            messages.entry(chat.org_id).or_default().push(PeopleEntry {
+            messages.entry(chat.home_id).or_default().push(PeopleEntry {
                 chat: chat.chat_id,
                 label: label.clone(),
                 name: label,
@@ -1492,6 +1485,7 @@ impl Tree {
             scope_at,
         };
         tree.work_out_presence();
+        read_phase(started, "tree ready");
         Ok(tree)
     }
 
@@ -1508,6 +1502,10 @@ impl Tree {
                 dir.on_way
                     // A search window can omit history counts while the thread's name remains readable.
                     || (dir.place.kind == "thread" && dir.standing.reads())
+                    || (dir.place.kind == "thread" && [
+                        orch_access_contract::permissions::Permission::ThreadFork,
+                        orch_access_contract::permissions::Permission::ThreadArchive,
+                    ].iter().any(|permission| self.reach.thread_act_giver(dir.place.id, dir.place.side_of.is_some(), *permission).is_some()))
                     || dir.chat.as_ref().is_some_and(|chat| chat.standing.any())
                     || !dir.docs.is_empty()
                     || !dir.deleted.is_empty()
@@ -1647,6 +1645,7 @@ impl Tree {
             let sendable = !place.archived && standing.write.is_some() && !entry.is_self;
             entry.readable = standing.reads();
             entry.writable = sendable;
+            entry.manageable = standing.manages();
             entry.via = standing
                 .read
                 .or(standing.write)
@@ -1691,6 +1690,7 @@ impl Tree {
             entry.writable = !dir.place.archived
                 && conversation.standing.write.is_some()
                 && dir.place.id != self.agent.thread;
+            entry.manageable = conversation.standing.manages();
             entry.via = conversation
                 .standing
                 .read
@@ -1802,6 +1802,7 @@ impl Tree {
         entry.updated_at = updated.map(Time::new);
         entry.readable = standing.reads();
         entry.writable = standing.writes() && !archived;
+        entry.manageable = standing.manages() && !archived;
         entry.via = standing
             .read
             .or(standing.write)

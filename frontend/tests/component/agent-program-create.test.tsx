@@ -1,3 +1,4 @@
+import { unjudgedProvenance } from '../doubles/resource-grouping';
 /** A custom adapter is registered and used without leaving Add agent. */
 import { screen,waitFor,within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -27,7 +28,7 @@ vi.mock('@/api/machinePrograms',()=>({machineProgramsKey:(id:string)=>['programs
     capabilities:[{kind:'agent',supported:true,remote:true,delegated:true,enabled:true,policy_key:'agent.programs',reason:null}]})})}));
 const program:MachineProgram={kind:'agent',name:'research',command:['python','/opt/agent.py'],origin:'orch',ready:true,version:'1',
   descriptor:{kind:'research-agent',harness:{name:'Research agent'}},models:null,detail:null};
-const agent:Agent={id:'profile',name:'My research agent',address:'research',harness_kind:'research-agent', harness: harnessName('research-agent'),machine:{id:'gpu',name:machine.name,online:true,placement:'connected',platform_os:'linux'},
+const agent:Agent={ ...unjudgedProvenance(),id:'profile',name:'My research agent',address:'research',harness_kind:'research-agent', harness: harnessName('research-agent'),machine:{id:'gpu',name:machine.name,online:true,placement:'connected',platform_os:'linux'},
   profile:{},descriptor:program.descriptor,descriptor_overridden:[],home:null,org_id:null,owner:null,disabled:false,revision:1,
   access:{permissions:['agent.view','agent.manage'],admin_only:[],participating:true,administers:false,through:[]},created_at:'2026-10-15T17:00:00Z',updated_at:'2026-10-15T17:00:00Z'};
 beforeEach(()=>{machine.facts={adapters:[],harnesses:[]};vi.clearAllMocks();vi.mocked(registerAgent).mockResolvedValue(agent);vi.mocked(changeMachinePrograms).mockResolvedValue({entries:[program],can_manage:true,capabilities:[],config_file:null});});

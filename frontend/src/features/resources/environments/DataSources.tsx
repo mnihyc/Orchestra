@@ -38,7 +38,7 @@ export function DataSourcesEditor({ machine, driver, value, onChange, disabled =
     which={machine === undefined ? t('environmentData.chooseMachine') : undefined} />;
   return <div className="flex flex-col gap-3">
     {machine === undefined ? null : read.isError ? <ErrorState compact error={read.error} onRetry={() => void read.refetch()} />
-        : read.isPending ? <SkeletonRows rows={2} /> : null}
+        : read.isPending ? <SkeletonRows read={read} rows={2} /> : null}
     {roles.map((role) => { const source = value[role]; return <div key={role} className="flex flex-col gap-2">
       <Select<'made_by_orch' | 'existing_directory'> label={t(`environmentData.${role}`)} value={value[role].kind}
         help={role === roles[0] ? explanation : undefined}
@@ -79,7 +79,7 @@ export function EnvironmentDirectoriesHere({ machine }: { machine: string }) {
   const { t } = useTranslation();
   const read = useQuery(machineEnvironmentDataQuery(machine));
   return <Section id="machine-environment-directories" title={t('environmentData.roots')} lead={t('environmentData.policy', { setting: t('machines.policy.keys.environment_roots.title') })}>
-    {read.isError ? <ErrorState compact error={read.error} onRetry={() => void read.refetch()} /> : read.isPending ? <SkeletonRows rows={2} /> : <>
+    {read.isError ? <ErrorState compact error={read.error} onRetry={() => void read.refetch()} /> : read.isPending ? <SkeletonRows read={read} rows={2} /> : <>
       {read.data.roots.length === 0 ? <EmptyState compact title={t('environmentData.noRoots')} /> : <ul className="flex flex-col gap-3">
         {read.data.roots.map((root) => <li key={root.path}><code>{root.path}</code>
           <ul>{root.uses.map((use) => <li key={`${use.environment.id}:${use.role}`} className="flex flex-wrap gap-x-3 gap-y-1">

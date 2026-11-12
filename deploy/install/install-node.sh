@@ -21,6 +21,7 @@ FROM=""
 URL=""
 TOKEN=""
 NAME=""
+GATEWAY=""
 DRIVERS="docker"
 DELEGATE_POLICY=0
 SERVICE=1
@@ -68,6 +69,7 @@ usage() {
   --data-dir         此节点已有的数据目录（默认 /var/lib/orch-node）
   --drivers          节点加载的驱动，以逗号分隔；默认 docker
   --name             主机在系统中的名称；省略时使用机器名
+  --gateway          automatic 或网关 ID；可交互时显示标签、区域和延迟；手选主网关保持固定
   --delegate-policy  将节点设置交给 Orch；本机保留值仍然优先
   --no-service       仅安装和注册；不创建服务，随后自行前台运行
   -h, --help         显示说明；无需 root 或令牌，不下载或安装
@@ -104,6 +106,7 @@ Use --plan to preview or --yes to skip typing. Other systems and supplied config
   --data-dir this node's existing identity directory (/var/lib/orch-node)
   --drivers  the drivers the node loads, separated by commas (docker)
   --name     what the host is called in the system (the machine's name if left out)
+  --gateway  automatic or a gateway ID; setup shows labels, regions and RTT; selected primaries stay fixed
   --delegate-policy  hand over the node's settings to Orch, while explicit local values still win
   --no-service       install and enroll without a service; start it yourself in the foreground
   -h, --help         show this help without root, a token, a download or an installation
@@ -189,6 +192,8 @@ while [ $# -gt 0 ]; do
     --drivers=*) DRIVERS=${1#--drivers=}; shift ;;
     --name) needs_value "$1" $#; NAME=$2; shift 2 ;;
     --name=*) NAME=${1#--name=}; shift ;;
+    --gateway) needs_value "$1" $#; GATEWAY=$2; [ -n "$GATEWAY" ] || die "--gateway needs automatic or a gateway ID"; shift 2 ;;
+    --gateway=*) GATEWAY=${1#--gateway=}; [ -n "$GATEWAY" ] || die "--gateway needs automatic or a gateway ID"; shift ;;
     --delegate-policy) DELEGATE_POLICY=1; shift ;;
     --no-service) SERVICE=0; shift ;;
     -h | --help) usage; exit 0 ;;
@@ -380,6 +385,7 @@ run_node() {
 }
 # A supplied token is checked against an existing identity too.
 set -- enroll --url "$URL"
+[ -z "$GATEWAY" ] || set -- "$@" --gateway "$GATEWAY"
 [ -z "$NAME" ] || set -- "$@" --name "$NAME"
 [ "$DELEGATE_POLICY" = 0 ] || set -- "$@" --delegate-policy
 ORCH_NODE_TOKEN=$TOKEN run_node "$@" ||

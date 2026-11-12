@@ -1,7 +1,9 @@
 ---
+group: getting-started
 title: Connect a machine
-screens: /resources/machines, /resources/machines/$id, /resources/hosts
-keywords: connect, computer, install, connector, node, service, foreground, another instance, data directory, root, 连接机器, 安装, 连接器, 节点, 前台, 多实例
+screens: /resources/machines, /resources/machines/$id, /resources/hosts, /resources/hosts/$id, /resources/environments/$id, /thread/$threadId, /admin/$section
+keywords: connect, computer, install, connector, node, service, foreground, another instance, data directory, root, gateway, region, Automatic, latency, tunnel.gateway_unreachable, 连接机器, 安装, 连接器, 节点, 前台, 多实例
+summary: Connect a machine with the roles, folders and gateway you intend to use.
 ---
 
 # Connect a machine
@@ -14,6 +16,65 @@ one connector. **Node** is separate: it makes managed environments on a Linux ho
 Choose the home where you may add it. Connecting a machine does not share all its folders.
 Directory environments are available on Linux. macOS and Windows connectors can still connect
 for their other roles.
+
+## Choose a gateway
+
+The Add machine and Add host forms offer **Gateway**: **Automatic** or one of the
+advertised labels. The command passes that choice to the installer. Automatic
+measures from the machine being installed and chooses the lowest measured round
+trip, measuring again when its primary connection reconnects. The browser does
+not measure the machine's route. Automatic also rechecks while connected, and moves
+when a strictly better measured gateway is available. It waits for active channels
+on the primary and target attachment to finish; a selected primary never moves
+on its own.
+
+A selected gateway stays selected when it is unavailable or removed from the
+catalogue. Change that choice in the machine's local console or installer when
+you mean to replace it. Re-enrollment without a gateway flag retains the saved
+choice. The machine or Host overview's **Connector** card shows the reported
+primary and selection. Automatic also shows the gateway measurements and when
+they were taken; **Not measured** is not a zero-latency result. **Refresh** reads
+the latest report with its original measurement time.
+
+## Gateway catalogue
+
+System administrators use **Management → Gateways** to edit labels, regions and
+verified endpoints. One stable ID names one gateway; several endpoint addresses
+are aliases for it. A region is an operator's description. Renaming a label or
+changing an address preserves selections by ID. Editing the catalogue advertises
+choices; it does not install a gateway or move an already connected machine.
+
+The editor keeps the revision opened for review. If another administrator changes
+the catalogue first, the refused draft stays in the form. Cancel, refresh and
+review the current catalogue before saving again. Removing a selected gateway
+does not change that machine to Automatic.
+
+## Tunnel gateway
+
+A tool tunnel can use a different gateway from the connector's primary. The
+thread shows the confirmed attached gateway when it differs; an environment's
+Threads rows offer each thread's own gateway details. A shared environment does
+not imply one gateway for every thread. **Connecting** names a pending attachment;
+**Not reported** never means the preferred candidate has already attached. Open
+**Tunnel gateway** to inspect the current report; **Refresh** reads it again.
+
+When no common gateway can connect the machines, the screen says that the work
+is kept and lists the attempted gateways with the safe refusal detail. Check the
+machines' access to those gateways, then use the ordinary recovery action. A
+fallback can resume a tool connection through another shared gateway while both
+machines retain its original socket and bytes, within the existing one-minute
+grace. It continues the same work; it does not run the tool again. Missing state,
+an expired ticket, a lost port permission or an unreachable common gateway ends
+that connection and uses the normal interrupted-work recovery. People's terminal,
+browser and display attachments still attach afresh. Neither saved primary
+choice changes; a selected primary may stay offline while a tunnel-only connection
+continues elsewhere. New gateway admission still needs the API.
+
+### Pairing measurements
+
+New machine-to-machine tunnels use the gateway with the lowest combined measured round trip from both machines. Both sets of samples must be within the live-link freshness bound, normally 60 seconds; missing or stale measurements use the executor’s primary gateway. The **Tunnel gateway** line shows the choice, its rule, the measured sum when known, each measurement time and the sample limit. A missing measurement stays missing.
+
+The inherited **Tunnel gateway** setting (`gateways.tunnel_strategy`) can pin new tunnels to **Executor’s gateway** for a place. It does not move a machine’s selected primary, change an existing tunnel’s frozen plan or send bytes through another gateway or the API. A common fallback still attaches both ends directly to one reachable gateway.
 
 ## 2. Choose its account and lifetime
 

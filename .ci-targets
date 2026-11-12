@@ -1,0 +1,2 @@
+# The engine's settling round: the engine's unit-test program whole.
+test -p orch-engine --lib

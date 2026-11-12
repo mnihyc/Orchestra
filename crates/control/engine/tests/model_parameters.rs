@@ -103,6 +103,220 @@ fn sent(start: &TurnStart) -> Json {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn installed_endpoint_features_reach_the_same_captured_turn_session_and_forwarded_lease() {
+    use orch_link_contract::commands::{Command, CommandKind};
+    use std::sync::Arc;
+    let world = Box::pin(World::on_a_key("synthetic-native-feature-key")).await;
+    let mut descriptor = common::descriptor();
+    let kind = descriptor["kind"].as_str().unwrap().to_owned();
+    descriptor["parameters"] = declared();
+    descriptor["x_capability_program"] = json!({
+        "native_switches":{"fixture_native_feature":{"capability":"generation","value":false,
+            "values":{"yes":true,"no":false},"provider_overrides":true}},
+        "access":{"forwarded":{"interfaces":["openai-responses"],"native":{"generation":{
+            "enabled":true,"modes":["native"],"default_mode":"native"
+        }}}}
+    });
+    world.declares(descriptor).await;
+    entry(&world, MODEL, json!({})).await;
+    let mut sources = orch_provider_contract::builtins::BuiltinSources::default();
+    let refinement = json!({
+        "capability":"generation","value":true,
+        "when":{"required":["access","route_kind"],"properties":{
+            "access":{"const":"forwarded"},"route_kind":{"const":"native-model"}
+        }}
+    });
+    let declaration = json!({"endpoint_rules":[{
+        "when":{"required":["protocol"],"properties":{"protocol":{"const":"openai-responses"}}},
+        "native_switches":{(kind):{"fixture_native_feature":refinement}}
+    }]});
+    sources
+        .register_capabilities(
+            "fixture-native-feature",
+            serde_json::from_value(declaration).unwrap(),
+        )
+        .unwrap();
+    world.engine().attach_capability_services(Arc::new(sources));
+    let thread = world.thread("Installed native feature").await;
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Go"))
+        .await
+        .unwrap();
+    let start = world.turn_start(thread, 0).await;
+    let captured = start.native_model.as_deref().unwrap();
+    assert_eq!(
+        captured.native_configuration()["fixture_native_feature"],
+        true
+    );
+    let session = world
+        .seen
+        .of_kind(CommandKind::SessionOpen)
+        .into_iter()
+        .find_map(|command| match command {
+            Command::SessionOpen(open) if open.thread_id == thread => Some(open),
+            _ => None,
+        })
+        .unwrap();
+    let lease = world
+        .seen
+        .of_kind(CommandKind::LeaseOpen)
+        .into_iter()
+        .find_map(|command| match command {
+            Command::LeaseOpen(open) if open.thread_id == thread => Some(open),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(session.native_model, start.native_model);
+    assert_eq!(lease.native_model, start.native_model);
+    assert!(!start.params.contains_key("native_model"));
+    assert!(!start.params.contains_key("fixture_native_feature"));
+    finish(&world, thread, &start, 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forwarded_leases_keep_the_same_managed_program_as_their_recorded_turn() {
+    use orch_link_contract::commands::{Command, CommandKind};
+    let world = World::on_a_key("synthetic-lease-program-key").await;
+    declare(&world).await;
+    let model = json!({"access_programs":["blue","red"],"request_options":{
+        "openai-responses":{"type":"object","properties":{"vendor_mode":{"enum":["one","two"]}}}
+    }});
+    entry(&world, MODEL, model.clone()).await;
+    let thread = world.thread("Managed program").await;
+    world
+        .set(thread, keys::AGENT_PARAMS, json!({"access_program":"blue","provider_options:openai-responses":{"vendor_mode":"one"}}))
+        .await;
+    let first = turn(&world, thread, 0).await;
+    assert_eq!(sent(&first)["access_program"], "blue");
+    assert!(
+        !first
+            .params
+            .contains_key("provider_options:openai-responses"),
+        "wire options do not become native adapter parameters"
+    );
+    let leases = || {
+        world
+            .seen
+            .of_kind(CommandKind::LeaseOpen)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::LeaseOpen(body) if body.thread_id == thread => Some(body),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(leases().len(), 1);
+    assert_eq!(
+        leases()[0].request_options.get("openai-responses"),
+        Some(&json!({"vendor_mode":"one"})),
+        "the startup snapshot retains wire choices that native turn.params intentionally excludes"
+    );
+    assert_eq!(
+        leases()[0]
+            .access_program
+            .as_ref()
+            .and_then(|choice| choice.program.as_deref()),
+        Some("blue")
+    );
+    assert_eq!(
+        leases()[0].model_parameters[MODEL].default_access_program,
+        None,
+        "the selected scalar is not written as a provider default"
+    );
+    world
+        .set(thread, keys::AGENT_PARAMS, json!({"access_program":"red","provider_options:openai-responses":{"vendor_mode":"two"}}))
+        .await;
+    assert_eq!(
+        leases()[0]
+            .access_program
+            .as_ref()
+            .and_then(|choice| choice.program.as_deref()),
+        Some("blue"),
+        "an active turn's lease is immutable"
+    );
+    finish(&world, thread, &first, 0).await;
+    let second = turn(&world, thread, 1).await;
+    assert_eq!(sent(&second)["access_program"], "red");
+    assert_eq!(
+        leases()
+            .iter()
+            .map(|lease| lease
+                .access_program
+                .as_ref()
+                .and_then(|choice| choice.program.as_deref()))
+            .collect::<Vec<_>>(),
+        [Some("blue"), Some("red")]
+    );
+    finish(&world, thread, &second, 1).await;
+    let mut model = model;
+    model["default_access_program"] = json!("blue");
+    entry(&world, MODEL, model).await;
+    world
+        .set(thread, keys::AGENT_PARAMS, json!({"access_program":null}))
+        .await;
+    let ordinary = turn(&world, thread, 2).await;
+    assert!(!ordinary.params.contains_key("access_program"));
+    let lease = leases().pop().unwrap();
+    assert!(
+        lease.access_program.unwrap().program.is_none(),
+        "known ordinary is distinct from an unaware issuer"
+    );
+    assert_eq!(
+        lease.model_parameters[MODEL]
+            .default_access_program
+            .as_deref(),
+        Some("blue"),
+        "ordinary does not mutate provider policy"
+    );
+    finish(&world, thread, &ordinary, 2).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_native_profile_default_cannot_bypass_the_models_context_limit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let world = world_with(json!({"context_window":32000, "context_max":64000,
+        "request_options":{"native":{"type":"object", "properties":{"context":{"type":"integer", "maximum":64000}}}}})).await;
+    let mut descriptor = common::descriptor();
+    descriptor["parameters"] = declared();
+    descriptor["x_profile_parameters"] = json!({"version":1,"bindings":[{
+        "pointer":"/native_window", "parameter":declared()[2]}]});
+    world.declares(descriptor).await;
+    sqlx::query("UPDATE agents SET profile=$2 WHERE id=$1")
+        .bind(world.agent)
+        .bind(json!({"config":{"native_window":128000,"unrelated_option":"kept"}}))
+        .execute(world.pool.pool())
+        .await?;
+    let thread = world.thread("Profile limits").await;
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Go"))
+        .await?;
+    world.wait_blocked(thread, "binding_invalid").await;
+    assert_eq!(
+        world
+            .count("SELECT count(*) FROM turns WHERE thread_id=$1", thread)
+            .await,
+        0,
+        "no turn starts under an out-of-policy native default"
+    );
+    sqlx::query("UPDATE agents SET profile=$2 WHERE id=$1")
+        .bind(world.agent)
+        .bind(json!({"config":{"native_window":32000,"unrelated_option":"kept"}}))
+        .execute(world.pool.pool())
+        .await?;
+    world.engine().wake(thread);
+    let start = world.turn_start(thread, 0).await;
+    assert_eq!(
+        sent(&start)["context"],
+        64000,
+        "the managed choice still wins over a startup default"
+    );
+    finish(&world, thread, &start, 0).await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_thread_that_chose_nothing_starts_with_all_that_is_open_and_the_model_s_own_window_is_given()
  {
     let world = world_with(json!({
@@ -132,6 +346,29 @@ async fn a_thread_that_chose_nothing_starts_with_all_that_is_open_and_the_model_
         })
         .expect("a session was opened");
     assert_eq!(Json::Object(open.params), sent(&start));
+    let captured = start.native_model.as_ref().expect("current model metadata");
+    assert_eq!(captured.model, MODEL);
+    assert_eq!(
+        serde_json::to_value(&captured.parameters).unwrap()["context_window"],
+        272_000
+    );
+    assert_eq!(
+        serde_json::to_value(&captured.parameters).unwrap()["context_max"],
+        1_000_000
+    );
+    assert!(captured.capabilities.as_array().is_some_and(|routes| {
+        routes
+            .iter()
+            .any(|route| route["capability"] == "generation")
+    }));
+    assert_eq!(
+        open.native_model, start.native_model,
+        "session and first turn carry the same captured core result"
+    );
+    assert!(
+        sent(&start).get("native_model").is_none(),
+        "private metadata is not a public parameter"
+    );
     let recorded: Json = world
         .scalar("SELECT params FROM turns WHERE id = $1", start.turn_id)
         .await;
@@ -318,6 +555,22 @@ async fn a_change_of_model_resolves_all_three_again_for_the_new_one() {
     world.set(thread, keys::AGENT_MODEL, json!("fake-2")).await;
     let second = turn(&world, thread, 1).await;
     assert_eq!(second.model, "fake-2");
+    let original = first.native_model.as_ref().expect("first model metadata");
+    let current = second.native_model.as_ref().expect("second model metadata");
+    assert_eq!(original.model, MODEL);
+    assert_eq!(current.model, "fake-2");
+    assert_eq!(
+        serde_json::to_value(&original.parameters).unwrap()["context_window"],
+        200_000
+    );
+    assert_eq!(
+        serde_json::to_value(&current.parameters).unwrap()["context_window"],
+        100_000
+    );
+    assert_ne!(
+        current.parameters, original.parameters,
+        "a reused session cannot retain the previous offering's native facts"
+    );
     assert_eq!(
         sent(&second),
         json!({ "access_program": "blue", "context": 100_000, "context_window": 100_000 }),

@@ -19,7 +19,7 @@ export function RelatedTab({ documentId, seq, enabled }: { documentId: string; s
   const meaning = query.data?.pages[0]?.meaning ?? 'ready';
   const labels = usePlaceLabels(items.map((item) => ({ id: item.id, name: item.name || t(`related.kinds.${item.kind}`), above: item.context })));
   if (!enabled) return null;
-  if (query.isPending) return <SkeletonRows rows={LOADING_ROWS} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={LOADING_ROWS} />;
   if (query.isError && items.length === 0) return <ErrorAlert error={query.error} action={<Button size="sm" onClick={() => void query.refetch()}>{t('common.tryAgain')}</Button>} />;
   return <div className="flex min-w-0 flex-col" data-links-list="related">
     {meaning !== 'ready' && <p className="px-2 pb-1 text-sm text-text-muted" role="status">{t(`related.meaning.${meaning}`)}</p>}
