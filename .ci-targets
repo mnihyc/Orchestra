@@ -1,0 +1,5 @@
+# The engine's settling round, tenth pass: the test kit, the contract, the adapter and neighbouring engine programs.
+test -p orch-testkit --lib
+test -p orch-agent-contract --lib
+test -p orch-adapter-claude-code --lib --test child_usage --test performance --test recorded_transitions --test turns --test background_wake
+test -p orch-engine --test agent_history --test background_wake --test native_capability_counts --test ingest --test context_fill

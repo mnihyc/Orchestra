@@ -1,6 +1,6 @@
 //! Hello, authentication, readiness and machine facts.
 //!
-//! Every machine holds one session to a gateway: a WebSocket that the
+//! Every machine holds one primary session to a gateway: a WebSocket that the
 //! machine opens. The gateway speaks first and says which protocol
 //! versions it has and how it knows the machine: by the client
 //! certificate of the connection, or, where the connection came through
@@ -10,8 +10,9 @@
 //! declares the session ready, with its limits and with how far each of
 //! the machine's streams was taken in, or refuses it and closes.
 //!
-//! A session is kept alive by whoever has been silent, and a machine has
-//! one session: a new one takes the place of the old.
+//! A session is kept alive by whoever has been silent. A machine has at most
+//! one transport per gateway; a tunnel-only attachment elsewhere leaves its
+//! primary in place and carries no business control traffic.
 
 use crate::policy::LocalPolicy;
 use crate::version::{ByeCode, ConnectorVersions, Limits, ProtocolRange, RejectCode};
@@ -118,6 +119,9 @@ pub enum TlsMode {
 /// The gateway's first word on a new connection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Hello {
+    /// Features negotiated before machine authentication.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
     /// The protocol versions the gateway speaks.
     pub protocol: ProtocolRange,
     /// Random bytes of this connection alone, as unpadded base64url.
@@ -142,6 +146,15 @@ pub struct AuthProof {
 /// A machine's answer to [`Hello`]: who it is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Auth {
+    /// A tunnel-only proof cannot be promoted to primary by changing JSON.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::gateways::SessionPurpose::is_primary"
+    )]
+    pub purpose: crate::gateways::SessionPurpose,
+    /// Client protocol features, not grants of machine roles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
     /// The machine owner's override; absent means the authenticated server preference list is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoints: Option<Vec<crate::enrollment::Endpoint>>,
@@ -169,6 +182,21 @@ pub struct Auth {
 /// The gateway's word that the session stands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Ready {
+    /// Explicitly admitted transport purpose.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::gateways::SessionPurpose::is_primary"
+    )]
+    pub purpose: crate::gateways::SessionPurpose,
+    /// Operator's close interval after references become idle.
+    #[serde(
+        default = "default_tunnel_idle_secs",
+        skip_serializing_if = "is_default_tunnel_idle_secs"
+    )]
+    pub tunnel_session_idle_secs: u64,
+    /// Current labelled gateway catalogue, independent of a local entrance override.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gateways: Vec<crate::gateways::GatewayInstance>,
     /// Current system addresses; a machine's own configured list takes precedence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoints: Option<Vec<crate::enrollment::Endpoint>>,
@@ -177,6 +205,7 @@ pub struct Ready {
     /// What the machine presents, for the life of this session, where it
     /// moves content beside it through an edge that sees no client
     /// certificate.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub session_token: String,
     /// How long a side stays silent before it sends a ping.
     pub heartbeat_secs: u32,
@@ -249,6 +278,29 @@ pub fn encode_nonce(bytes: &[u8; NONCE_BYTES]) -> String {
 #[must_use]
 pub fn auth_signing_input(nonce: &str, machine_id: Id, host: &str, sent_at: Time) -> String {
     format!("{AUTH_CONTEXT}\n{nonce}\n{machine_id}\n{host}\n{sent_at}")
+}
+
+/// Domain-separated auxiliary proof; primary proofs remain byte-identical.
+#[must_use]
+pub fn auth_signing_input_for(
+    purpose: crate::gateways::SessionPurpose,
+    nonce: &str,
+    machine_id: Id,
+    host: &str,
+    sent_at: Time,
+) -> String {
+    if purpose.is_primary() {
+        auth_signing_input(nonce, machine_id, host, sent_at)
+    } else {
+        format!("orch-link-tunnel-auth-v1\n{nonce}\n{machine_id}\n{host}\n{sent_at}")
+    }
+}
+
+fn default_tunnel_idle_secs() -> u64 {
+    crate::gateways::TUNNEL_IDLE_SECS
+}
+fn is_default_tunnel_idle_secs(value: &u64) -> bool {
+    *value == default_tunnel_idle_secs()
 }
 
 /// Whether a proof signed at `sent_at` is fresh enough at `now`, by the
@@ -361,19 +413,28 @@ pub struct MachineFactsPlugin {
 }
 
 /// A machine's link to its gateway, as the connector measures it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MachineFactsRates {
-    /// The rate at which it sends.
-    pub up_bps: i64,
-    /// The rate at which it receives.
-    pub down_bps: i64,
-    /// The round trip, in milliseconds.
-    pub round_trip_ms: i64,
+    /// The measured rate at which it sends; absent until a sample exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up_bps: Option<i64>,
+    /// The measured rate at which it receives; absent until a sample exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub down_bps: Option<i64>,
+    /// The measured round trip, in milliseconds; a measured zero remains present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round_trip_ms: Option<i64>,
 }
 
 /// What a machine is and has, as its connector reports it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MachineFacts {
+    /// The connector's metadata-only directory observation, before any scan it is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_directory: Option<orch_api_contract::storage::MachineDataInventory>,
+    /// Latest local primary choice and verified entrance samples; absent on older connectors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<crate::gateways::GatewayStatusReport>,
     /// Whether the physical program can apply delegated role changes while running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_management: Option<orch_api_contract::resources::MachineRoleCapability>,
@@ -403,8 +464,14 @@ pub struct MachineFacts {
     pub cpus: u32,
     /// How much memory it has.
     pub memory_bytes: i64,
-    /// The harnesses found on it.
+    /// The programs confirmed by the machine's local policy and present on disk.
     pub harnesses: Vec<MachineFactsHarness>,
+    /// Programs found without local confirmation; absent before the connector searched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovered_harnesses: Option<Vec<MachineFactsHarness>>,
+    /// The searched kinds, including those with no program found; absent before a search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub searched_harness_kinds: Option<Vec<String>>,
     /// The harness kinds its connector can drive.
     pub adapters: Vec<MachineFactsAdapter>,
     /// The implementations from outside registered on it.
@@ -426,6 +493,26 @@ mod tests {
 
     const MACHINE: &str = "0199c1a0-0000-7000-8000-00000000000a";
     const SESSION: &str = "0199c1a0-0000-7000-8000-00000000000b";
+
+    #[test]
+    fn fact_rates_distinguish_missing_samples_from_measured_zero_and_legacy_numbers() {
+        let missing: MachineFactsRates = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(missing, MachineFactsRates::default());
+        assert_eq!(serde_json::to_value(missing).unwrap(), json!({}));
+        let partial: MachineFactsRates =
+            serde_json::from_value(json!({"round_trip_ms":16,"up_bps":0})).unwrap();
+        assert_eq!(partial.round_trip_ms, Some(16));
+        assert_eq!(partial.up_bps, Some(0));
+        assert_eq!(partial.down_bps, None);
+        assert_eq!(
+            serde_json::to_value(partial).unwrap(),
+            json!({"round_trip_ms":16,"up_bps":0})
+        );
+        let legacy: MachineFactsRates =
+            round_trip(json!({"up_bps":8000,"down_bps":0,"round_trip_ms":0}));
+        assert_eq!(legacy.down_bps, Some(0));
+        assert_eq!(legacy.round_trip_ms, Some(0));
+    }
 
     fn time(text: &str) -> Time {
         text.parse().unwrap()

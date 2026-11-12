@@ -10,6 +10,7 @@ pub mod clock;
 pub mod database;
 pub mod doubles;
 pub mod fixtures;
+pub mod harness_corpus;
 pub mod native_configuration;
 pub mod oidc;
 pub mod prefix_history;

@@ -1,6 +1,6 @@
 //! The Agent Client Protocol, as far as Orch speaks it: method names, the shapes the adapter reads and writes, small readers of the rest.
 //!
-//! The protocol is version 1 of the Agent Client Protocol (schema release 1.27). Only what the adapter needs is typed
+//! The protocol is major version 1 of the Agent Client Protocol, with negotiated compatible additions. Only what the adapter needs is typed
 //! here: what an agent says of itself in `initialize`, and the session's configuration options. Everything else
 //! (updates, tool calls, requests) is read from the JSON as it arrives with the small readers below, so that a member
 //! an agent adds, or leaves out where the schema allows it, never fails a conversation.
@@ -343,7 +343,7 @@ impl Modes {
     }
 }
 
-/// The text of a content block, where it is text; a link as Markdown; an image or audio as a bracketed word.
+/// Text and links retain their native text. Binary image results are handled separately.
 #[must_use]
 pub fn content_text(block: &Json) -> Option<String> {
     match block.get("type").and_then(Json::as_str)? {
@@ -357,6 +357,37 @@ pub fn content_text(block: &Json) -> Option<String> {
             .pointer("/resource/text")
             .and_then(Json::as_str)
             .map(str::to_owned),
+        _ => None,
+    }
+}
+
+/// An actual inline image, including an embedded binary resource, without opening a URI or file.
+#[must_use]
+pub fn is_image_content(block: &Json) -> bool {
+    block.get("type").and_then(Json::as_str) == Some("image")
+        || (block.get("type").and_then(Json::as_str) == Some("resource")
+            && block
+                .pointer("/resource/mimeType")
+                .and_then(Json::as_str)
+                .is_some_and(|mime| mime.starts_with("image/")))
+}
+
+/// The encoded bytes and reported media type of an inline image.
+#[must_use]
+pub fn image_content(block: &Json) -> Option<(&str, &str)> {
+    match block.get("type").and_then(Json::as_str)? {
+        "image" => Some((
+            block.get("data")?.as_str()?,
+            block.get("mimeType")?.as_str()?,
+        )),
+        "resource" => {
+            let resource = block.get("resource")?;
+            let mime = resource.get("mimeType")?.as_str()?;
+            if !mime.starts_with("image/") {
+                return None;
+            }
+            Some((resource.get("blob")?.as_str()?, mime))
+        }
         _ => None,
     }
 }

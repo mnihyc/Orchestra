@@ -82,6 +82,8 @@ fn documents(level: ShareDocumentsLevel) -> Option<ShareParts> {
 
 fn ask(what: ShareWhat, parts: Option<ShareParts>, to: ShareTo, client: &str) -> ShareWithAgents {
     ShareWithAgents {
+        link_origin: None,
+        viewers_read: None,
         read_first: None,
         what,
         inside: None,
@@ -346,15 +348,32 @@ async fn a_share_to_manage_is_given_by_somebody_who_holds_doc_manage_and_refused
         managing.is_ok(),
         "{managing:?}: a Developer manages documents as shipped"
     );
-    assert_eq!(
-        rows(&p.world, doc).await.len(),
-        4,
-        "View, Edit and Manage, and the Export row that travels with them"
-    );
+    for (giver, expected) in [
+        (tom, vec!["doc.edit", "doc.export", "doc.view"]),
+        (
+            dan,
+            vec!["doc.edit", "doc.export", "doc.manage", "doc.view"],
+        ),
+    ] {
+        let permissions: Vec<String> = sqlx::query_scalar(
+            "SELECT permission FROM permission_entries
+             WHERE object_id=$1 AND holder_kind='agents' AND created_by=$2
+               AND removed_at IS NULL ORDER BY permission",
+        )
+        .bind(doc)
+        .bind(giver)
+        .fetch_all(p.world.pool.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            permissions, expected,
+            "each giver keeps an independent contribution"
+        );
+    }
 }
 
 #[tokio::test]
-async fn a_copy_holds_no_manage_and_the_thread_is_told_what_it_was_given() {
+async fn a_copy_holds_no_manage_and_a_live_manage_gift_adds_only_passive_history() {
     let p = a_reader_and_documents().await;
     let doc = p
         .world
@@ -383,11 +402,32 @@ async fn a_copy_holds_no_manage_and_the_thread_is_told_what_it_was_given() {
             p.reader,
         )
         .await;
-    let body = notices[0]["body"].as_str().unwrap();
-    assert!(
-        body.contains("also for writing") && body.contains("manage_shared"),
-        "{body}"
+    assert_eq!(
+        notices,
+        json!([]),
+        "a pure gift supplies no agent instruction"
     );
+    assert_eq!(
+        p.world
+            .count(
+                "SELECT count(*) FROM thread_inputs WHERE thread_id=$1",
+                p.reader,
+            )
+            .await,
+        0
+    );
+    assert!(p.world.turn_starts(p.reader).is_empty());
+    let markers: Vec<Value> = sqlx::query_scalar(
+        "SELECT payload FROM items WHERE thread_id=$1 AND kind='marker'
+           AND payload->>'marker'='shared'",
+    )
+    .bind(p.reader)
+    .fetch_all(p.world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0]["data"]["what"]["document"]["id"], json!(doc));
+    assert_eq!(markers[0]["data"]["parts"]["documents"], "manage");
 }
 
 #[tokio::test]

@@ -9,7 +9,8 @@
 //! and changed on the environment's page, and asked again only when the files change; a directory the harness
 //! made for itself and left empty is not asked about.
 
-use orch_types::Time;
+use crate::operations::OperationSpec as Op;
+use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -51,7 +52,41 @@ pub struct ConfigTrustBody {
     pub answer: ConfigTrustAnswer,
 }
 
+/// The accepted answer without the workspace's stored configuration or question details.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConfigTrustReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual Environment that remembers the answer.
+    pub environment_id: Id,
+    /// The harness named by the request.
+    pub harness: String,
+    /// The answer accepted by the native writer.
+    pub answer: ConfigTrustAnswer,
+}
+
+/// The ordinary Environment projection or the accepted answer's safe acknowledgement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ConfigTrustResponse {
+    /// Native stored content admitted by this operation's Read.
+    Full(Box<crate::environment::Environment>),
+    /// The effect remains successful when stored response content cannot be disclosed.
+    Receipt(ConfigTrustReceipt),
+}
+
+impl ConfigTrustResponse {
+    /// Extract the ordinary projection, preserving a receipt as a distinct outcome.
+    pub fn into_full(self) -> Result<crate::environment::Environment, ConfigTrustReceipt> {
+        match self {
+            Self::Full(environment) => Ok(*environment),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
 crate::endpoints! {
     /// Answers, or changes the answer, for the workspace's own configuration of a harness: remembered until it is changed here or the files change; the threads that waited go on.
-    EnvironmentConfigTrustSet: PUT "/environments/{id}/config-trust/{harness}", Rule("environment.manage; never an agent's token"), none, json ConfigTrustBody, json crate::environment::Environment, 200;
+    EnvironmentConfigTrustSet: PUT "/environments/{id}/config-trust/{harness}", Rule("environment.manage; never an agent's token"), none, json ConfigTrustBody, json ConfigTrustResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::environment_sources::TRUST_SET_FACETS));
 }

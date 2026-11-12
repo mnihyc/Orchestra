@@ -169,6 +169,8 @@ fn check_directory_bindings(bindings: &[String]) -> anyhow::Result<()> {
     for expected in bindings {
         let expected: orch_driver_contract::runtime::DirectoryBinding =
             serde_json::from_str(expected)?;
+        #[cfg(not(unix))]
+        let _ = expected;
         #[cfg(unix)]
         {
             orch_connector_core::policy::writable_environment_directory(std::path::Path::new(
@@ -183,6 +185,8 @@ fn check_directory_identities(bindings: &[String]) -> anyhow::Result<()> {
     for expected in bindings {
         let expected: orch_driver_contract::runtime::DirectoryBinding =
             serde_json::from_str(expected)?;
+        #[cfg(not(unix))]
+        let _ = expected;
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;

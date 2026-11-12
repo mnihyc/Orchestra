@@ -24,12 +24,13 @@ for(const width of [400,1440])for(const theme of ['light','dark'] as const){
   await scenario();await profile(request,theme);await page.setViewportSize({width,height:1000});
   const pending=await askAccess({requester:'grace',title:'Shared rollout plan',thread_id:ACME.mainThread,
    node:{id:ACME.mainThread,kind:'thread',name:'Main thread',redacted:false},
-   object:{id:ACME.mainThread,kind:'thread',name:'Main thread'},permissions:['thread.view'],reason:'Review the plan together'});
+   object:{id:ACME.mainThread,kind:'thread',name:'Main thread'},permissions:['thread.view'],reason:'Review the plan together',quick_grant_durations:['1d','7d','30d','always']});
   await notify({kind:'access.requested',title:'Shared rollout plan',thread_id:ACME.mainThread,node:ACME.mainThread,approval_id:pending.id,url:'/approvals'});
   await signIn(page);await page.goto('/inbox');await expect(page.locator('html')).toHaveAttribute('data-theme',theme);
   const notice=page.locator('li[data-kind="access.requested"]');await expect(notice).toBeVisible();
   await page.screenshot({path:test.info().outputPath(`inbox-pending-${width}-${theme}.png`),animations:'disabled'});
-  await notice.locator('a[href*="/approvals"]').first().click();
+  // The stretched notification link shares its area with separately interactive identities.
+  const opening=notice.locator('a[href*="/approvals"]').first();await expect(opening).toBeVisible();await opening.press('Enter');
   const card=page.locator(`[data-focused-approval="${pending.id}"]`);await expect(card).toBeVisible();
   const always=card.getByRole('button',{name:'Always',exact:true});await expect(always).toBeEnabled();
   await page.screenshot({path:test.info().outputPath(`inbox-grant-${width}-${theme}.png`),animations:'disabled'});

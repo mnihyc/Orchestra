@@ -24,6 +24,7 @@ vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
 vi.mock('@/features/thread/Header', () => ({ ThreadHeader: ({ thread }: { thread: Thread }) => <header><h1>{thread.name}</h1></header> }));
 vi.mock('@/features/composer/Composer', () => ({ Composer: () => <textarea aria-label="Thread draft" /> }));
 vi.mock('@/features/composer/QueueTray', () => ({ QueueTray: () => null }));
+vi.mock('@/features/schedules/Schedules', () => ({ PendingAgentSchedules: () => null }));
 vi.mock('@/features/thread/ConnectionBanner', () => ({ ConnectionBanner: () => null }));
 vi.mock('@/features/thread/BlockedBanner', () => ({ BlockedBanner: () => null }));
 vi.mock('@/features/thread/LockBanner', () => ({ LockBanner: () => null }));

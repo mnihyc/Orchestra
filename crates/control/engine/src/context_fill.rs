@@ -57,6 +57,33 @@ fn read<T: DeserializeOwned>(value: Option<&Json>) -> Option<T> {
     value.and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
+/// The member of `turns.usage_detail` that holds what a turn's use is left with once the rows its adapter stated
+/// to carry a part of it are taken out ([`TurnUsageReport::carried_by_rows`](orch_api_contract::context::TurnUsageReport)):
+/// the use as it was reported, less that figure, part by part. It is kept apart from the typed detail, which the API
+/// shows, and it is the figure the turn is closed with: the rows are counted whenever they come, and which of them
+/// arrived is not read. Absent, nothing was stated, and the turn is closed as its use less the rows it has then.
+pub(crate) const UNCARRIED: &str = "uncarried";
+
+/// What the turn's use is left with after the rows that carry a part of it, as the adapter stated; `None` where it
+/// stated nothing.
+pub(crate) fn uncarried_of(detail: Option<&Json>) -> Option<orch_db::usage::ledger::Tokens> {
+    detail
+        .and_then(|detail| detail.get(UNCARRIED))
+        .filter(|figure| figure.is_object())
+        .map(crate::providers::tokens_of)
+}
+
+/// `detail`, as it is written to the turn, with the stated remainder `uncarried` (`Null` for none) in it.
+pub(crate) fn with_uncarried(detail: Json, uncarried: Option<&Json>) -> Json {
+    let mut detail = detail;
+    if let (Some(object), Some(figure)) = (detail.as_object_mut(), uncarried)
+        && figure.is_object()
+    {
+        object.insert(UNCARRIED.to_owned(), figure.clone());
+    }
+    detail
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // The estimate
 
@@ -557,9 +584,45 @@ impl Engine {
         turn: &TurnRow,
         usage: &UsageUpdated,
     ) -> Result<(), EngineError> {
-        let report = usage.report.clone().unwrap_or_default();
+        let mut report = usage.report.clone().unwrap_or_default();
+        if report.counters_only {
+            report.api_time_ms = None;
+            report.subagents = None;
+            report.by_subagent.clear();
+            report.compact_at = None;
+            report.shortened = None;
+            report.context = None;
+            for model in &mut report.models {
+                model.tokens = TokenUsage::default();
+                model.tokens_reported = false;
+            }
+        }
         let mut detail: TurnUsageDetail = read(turn.usage_detail.as_ref()).unwrap_or_default();
         let before = detail.clone();
+        // What the use is left with after the rows the adapter stated to carry part of it, from the use as it is
+        // reported (the use that is shown may be larger, by the rows counted). A report that comes without a
+        // use of its own (counters only) leaves what was stated; a use said without the statement takes it back,
+        // since the statement belongs to the use it came with.
+        let kept_uncarried = turn
+            .usage_detail
+            .as_ref()
+            .and_then(|detail| detail.get(UNCARRIED))
+            .filter(|figure| figure.is_object())
+            .cloned();
+        let uncarried = match usage.report.as_ref() {
+            Some(whole) if !whole.counters_only => whole.carried_by_rows.map(|carried| {
+                let figure = |tokens: TokenUsage| {
+                    serde_json::to_value(tokens)
+                        .map(|json| crate::providers::tokens_of(&json))
+                        .unwrap_or_default()
+                };
+                crate::providers::usage_json(&crate::providers::shortfall(
+                    &figure(usage.turn),
+                    &figure(carried),
+                ))
+            }),
+            _ => kept_uncarried.clone(),
+        };
         if report.api_time_ms.is_some() {
             detail.api_time_ms = report.api_time_ms;
         }
@@ -570,7 +633,33 @@ impl Engine {
             detail.by_subagent = report.by_subagent;
         }
         if !report.models.is_empty() {
-            detail.models = report.models;
+            let mut models = report.models;
+            for model in &mut models {
+                model.counts.retain(|_, count| *count >= 0);
+            }
+            // A later token-only observation cannot erase independently reported capability quantities.
+            for known in &detail.models {
+                if known.counts.is_empty() {
+                    continue;
+                }
+                if let Some(model) = models.iter_mut().find(|model| model.model == known.model) {
+                    if !model.tokens_reported && known.tokens_reported {
+                        model.tokens = known.tokens;
+                        model.tokens_reported = true;
+                    }
+                    for (capability, count) in &known.counts {
+                        model.counts.entry(capability.clone()).or_insert(*count);
+                    }
+                } else {
+                    models.push(orch_api_contract::context::ModelTokens {
+                        model: known.model.clone(),
+                        tokens: known.tokens,
+                        tokens_reported: known.tokens_reported,
+                        counts: known.counts.clone(),
+                    });
+                }
+            }
+            detail.models = models;
         }
         if usage.context_window.is_some() {
             detail.context_window = usage.context_window;
@@ -589,12 +678,14 @@ impl Engine {
         {
             detail.shortenings.push(shortened);
         }
-        if usage.report.is_some() {
+        if usage.report.is_some() && !report.counters_only {
             detail.breakdown = report.breakdown;
         }
         let fill = match report.context {
             Some(fill) => {
-                let family = crate::token_density::of(&turn.model);
+                let family = crate::token_density::of(
+                    detail.effective_model.as_deref().unwrap_or(&turn.model),
+                );
                 // Orch's share is an addition: where what it sent cannot be read, the harness's breakdown stands alone.
                 match seen_safely(&mut *unit.conn, turn.segment_id, family).await? {
                     Some(seen) => Some(with_orch_share(fill, &seen, family)),
@@ -603,7 +694,7 @@ impl Engine {
             }
             None => None,
         };
-        if detail == before && fill.is_none() {
+        if detail == before && fill.is_none() && uncarried == kept_uncarried {
             return Ok(());
         }
         let seq = unit.stamp(thread).await?;
@@ -612,7 +703,7 @@ impl Engine {
             "UPDATE turns SET usage_detail = $2, context = COALESCE($3, context), seq_updated = $4 WHERE id = $1",
         )
         .bind(turn.id)
-        .bind(serde_json::to_value(&detail)?)
+        .bind(with_uncarried(serde_json::to_value(&detail)?, uncarried.as_ref()))
         .bind(fill)
         .bind(seq)
         .execute(&mut *unit.conn)
@@ -645,7 +736,8 @@ impl Engine {
         let mut savepoint = sqlx::Connection::begin(&mut *unit.conn)
             .await
             .map_err(orch_db::DbError::from)?;
-        let family = crate::token_density::of(&row.model);
+        let family =
+            crate::token_density::of(detail.effective_model.as_deref().unwrap_or(&row.model));
         let estimated = async {
             let seen = seen_of(&mut savepoint, row.segment_id, family).await?;
             let fill = compose(
@@ -737,7 +829,9 @@ impl Engine {
         let Some(turn) = latest else {
             return Ok(Some(fill));
         };
-        let family = crate::token_density::of(&turn.model);
+        let detail: TurnUsageDetail = read(turn.usage_detail.as_ref()).unwrap_or_default();
+        let family =
+            crate::token_density::of(detail.effective_model.as_deref().unwrap_or(&turn.model));
         let fill = match seen_safely(&mut tx, segment, family).await? {
             Some(seen) => with_orch_share(fill, &seen, family),
             None => fill,
@@ -935,11 +1029,14 @@ pub async fn turn_cost(
         return Ok(None);
     }
     let mut observations = ledger::events_of_turn(conn, turn).await?;
-    let per_request = observations
-        .iter()
-        .any(|row| row.origin == ledger::origin::HARNESS && row.scope == ledger::scope::REQUEST);
+    let per_request = observations.iter().any(|row| {
+        (row.origin == ledger::origin::HARNESS
+            || row.measurement_states.get("_adapter_request_ref").is_some())
+            && row.scope == ledger::scope::REQUEST
+    });
     observations.retain(|row| {
-        row.origin != ledger::origin::FORWARDER
+        (row.origin != ledger::origin::FORWARDER
+            || row.measurement_states.get("_adapter_request_ref").is_some())
             && row.purpose == ledger::purpose::TURN
             && (!per_request || row.scope == ledger::scope::REQUEST)
     });

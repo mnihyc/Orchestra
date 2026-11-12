@@ -264,13 +264,17 @@ impl Relay {
     /// The body of an answer, watched by `watcher`, given up on after `idle` without a piece.
     #[must_use]
     pub fn new(body: Incoming, watcher: Box<dyn Watcher>, idle: Duration) -> Self {
-        Self {
+        let mut relay = Self {
             inner: Box::pin(body),
             watcher: Mutex::new(Some(watcher)),
             idle,
             timer: Box::pin(tokio::time::sleep(idle)),
             done: false,
+        };
+        if relay.inner.is_end_stream() {
+            relay.finish(End::Whole);
         }
+        relay
     }
 
     fn finish(&mut self, end: End) {
@@ -317,6 +321,11 @@ impl Body for Relay {
                 {
                     watcher.piece(piece);
                 }
+                // A fixed-length body's last frame can advertise its end immediately.
+                // The downstream HTTP writer need not poll once more for None.
+                if this.inner.is_end_stream() {
+                    this.finish(End::Whole);
+                }
                 let next = tokio::time::Instant::now() + this.idle;
                 this.timer.as_mut().reset(next);
                 Poll::Ready(Some(Ok(frame)))
@@ -354,7 +363,7 @@ impl Body for Relay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
@@ -362,6 +371,7 @@ mod tests {
     struct Seen {
         pieces: Mutex<Vec<u8>>,
         ended: Mutex<Option<End>>,
+        ends: AtomicUsize,
     }
 
     struct Recording(Arc<Seen>);
@@ -371,6 +381,7 @@ mod tests {
             self.0.pieces.lock().unwrap().extend_from_slice(piece);
         }
         fn end(&mut self, end: End) {
+            self.0.ends.fetch_add(1, Ordering::SeqCst);
             *self.0.ended.lock().unwrap() = Some(end);
         }
     }
@@ -407,6 +418,50 @@ mod tests {
             url,
             headers: HeaderMap::new(),
             body: Bytes::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn fixed_length_answers_finish_the_watcher_without_an_extra_poll() {
+        for (response, expected) in [
+            (
+                b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\nanswer".as_slice(),
+                b"answer".as_slice(),
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n".as_slice(),
+                b"".as_slice(),
+            ),
+        ] {
+            let (url, _) = serve_once(vec![(Duration::ZERO, response)]).await;
+            let answer = Upstream::new(clock())
+                .unwrap()
+                .send(request(url))
+                .await
+                .unwrap();
+            let seen = Arc::new(Seen::default());
+            let mut relay = Relay::new(
+                answer.body,
+                Box::new(Recording(Arc::clone(&seen))),
+                IDLE_TIMEOUT,
+            );
+            // Match an HTTP writer that stops as soon as the body advertises its end.
+            while !relay.is_end_stream() {
+                let _ = std::future::poll_fn(|cx| Pin::new(&mut relay).poll_frame(cx))
+                    .await
+                    .transpose()
+                    .unwrap();
+            }
+            assert_eq!(&*seen.pieces.lock().unwrap(), expected);
+            assert_eq!(*seen.ended.lock().unwrap(), Some(End::Whole));
+            assert_eq!(seen.ends.load(Ordering::SeqCst), 1);
+            assert!(
+                std::future::poll_fn(|cx| Pin::new(&mut relay).poll_frame(cx))
+                    .await
+                    .is_none()
+            );
+            drop(relay);
+            assert_eq!(seen.ends.load(Ordering::SeqCst), 1);
         }
     }
 

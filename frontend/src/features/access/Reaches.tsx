@@ -96,7 +96,7 @@ export function EnvironmentReachLine({ target }: { target: AccessTarget }) {
       {open && (
         <Dialog open onOpenChange={(next) => !next && setOpen(false)} size="md" title={t('access.reaches.whoTitle', { name: target.name })} description={t('access.reaches.whoLead')}>
           {reach.isPending ? (
-            <SkeletonRows rows={3} />
+            <SkeletonRows read={reach} rows={3} />
           ) : reach.isError ? (
             <ErrorState compact error={reach.error} retrying={reach.isRefetching} onRetry={() => void reach.refetch()} />
           ) : (
