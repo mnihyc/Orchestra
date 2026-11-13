@@ -67,6 +67,7 @@ it.each(['en', 'zh-CN'] as const)('grants only after the selected send act and c
   expect(calls.give).not.toHaveBeenCalled(); expect(calls.agent).not.toHaveBeenCalled();
   await user.click(screen.getByRole('button', { name: 'Send' }));
   await waitFor(() => expect(calls.submit).toHaveBeenCalledOnce());
+  await screen.findByText(i18n.t('linkSharing.shared'));
   expect(calls.give).toHaveBeenCalledWith({ kind: 'document', id: DOC, name: 'Plan' }, BEA.id, 'full_view', false, expect.any(String), context.origin);
   expect(calls.agent.mock.calls[0]?.[0]).toMatchObject({ link_origin: context.origin, viewers_read: false, read_first: false, download: false });
   expect(calls.agent.mock.calls[0]?.[0].link_origin).not.toHaveProperty('by');

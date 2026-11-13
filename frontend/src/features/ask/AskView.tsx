@@ -15,7 +15,7 @@ import { Composer } from '@/features/composer/Composer';
 import { allocatedAskDraft, askCreationIntent, askDraftKey, askSendIntent, completeAskSendIntent, newAskDraft, registerAskDraft } from '@/features/composer/askDrafts';
 import { openHelpReading, useHelpOpener } from '@/features/help/open';
 import { AdminModeEnableAction, useAdminMode } from '@/features/access/AdminMode';
-import { openAskConversation } from './open';
+import { closeAsk, openAskConversation } from './open';
 import { applyAskDraftSeed, askSeed } from './seed';
 import { useAskRoot } from './useAskRoot';
 import { KnownNodeChip, TypedChip } from '@/features/people/NamedChip';
@@ -187,7 +187,7 @@ function AskPanel({ tab }: Pick<ViewProps, 'tab'>) {
   const composer = (available: boolean) => <Composer ask={{ scope, draftKey, root: root ?? '', conversationId: currentId, model, active, disabled: disabled || !available,
     canStop: !inspecting && header !== undefined && header.can.stop && !header.inspecting && !stopping, ensure, send,
     onModel: (model) => setModels((before) => ({ ...before, [draftKey]: model })), stop }} />;
-  return <ViewWindow name="ask" tabId={tab.id} title={title} onClose={() => frame.close({ kind: 'tab', tab: tab.id })}
+  return <ViewWindow name="ask" tabId={tab.id} title={title} onClose={closeAsk}
     status={header === undefined ? undefined : <AskStatus conversation={header} stopped={isStopped} />}
     actions={<><HelpHint term={t('ask.title')} what={t('ask.helpWhat')} which={t('ask.helpChoice')} guide={{ article: 'ask', heading: 'open-ask' }} more={{ label: t('ask.guide'), onOpen: () => {
       if (document.querySelector('[data-view-window="ask"][data-floating="true"]') !== null) openHelpReading('ask', 'open-ask');
