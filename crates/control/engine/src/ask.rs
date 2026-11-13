@@ -54,7 +54,8 @@ pub struct Limits {
     pub tools: u32,
     /// Bytes from any one tool result.
     pub tool_bytes: usize,
-    /// Total tool-result bytes sent during that turn.
+    /// Total tool-result bytes sent during that turn, at most: a model whose window leaves less holds less
+    /// ([`Step::tool_bytes`]).
     pub turn_tool_bytes: usize,
 }
 
@@ -79,6 +80,9 @@ pub struct Step {
     pub machine: Id,
     /// Fully constrained model request, without a credential.
     pub request: ProviderGenerate,
+    /// The most bytes of read-tool results this turn may hold for the model of this step: the reserve its
+    /// request was fitted to, which a turn that holds more would overrun.
+    pub tool_bytes: usize,
 }
 
 /// A completed tool response; its operation/reference witness is retained by
@@ -599,7 +603,7 @@ impl Engine {
                 };
                 bound_tool_result(&mut result.content, limits.tool_bytes);
                 tool_bytes = tool_bytes.saturating_add(result.content.len());
-                if tool_bytes > limits.turn_tool_bytes {
+                if tool_bytes > limits.turn_tool_bytes.min(step.tool_bytes) {
                     return Err(EngineError::unreadable("the Ask source budget ended"));
                 }
                 let witness = host.tool_answer(id, &result).await?;
@@ -670,6 +674,8 @@ impl Engine {
             person: call.person_id,
             machine: call.machine_id,
             request,
+            // This step only counts an answer that came after its turn; it holds no tool results.
+            tool_bytes: 0,
         };
         self.count_ask_step_in(conn, &step, &answer)
             .await

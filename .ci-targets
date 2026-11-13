@@ -1,0 +1,10 @@
+# n41-frame: the link carries a message of any size (parts), nothing dropped in silence; first compile of the lane's seven commits.
+fmt
+clippy
+contracts
+test -p orch-link-contract --lib
+test -p orch-config --lib
+test -p orch-link --lib
+test -p orch-link --test large_messages --test refusals_are_told --test raw_spool_restart
+test -p orch-gateway-core --test large_messages
+test -p orch-connector-core --test provider_role

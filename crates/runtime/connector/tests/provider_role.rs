@@ -670,6 +670,48 @@ async fn discovery_follows_the_second_models_page_and_returns_every_model_once()
 }
 
 #[tokio::test]
+async fn a_models_list_larger_than_a_frame_of_the_link_reaches_the_system_whole() {
+    use orch_testkit::doubles::model::MockModel;
+    // A real account's list ran to some 440 000 bytes, which the link threw away, and the system waited out
+    // the command's thirty seconds and said that the keeping machine could not finish.
+    const MODELS: usize = 1_200;
+    let p = ProviderRig::with(|_, mock| {
+        mock.set_models(
+            (0..MODELS)
+                .map(|number| MockModel::named(&format!("model-{number:05}-{}", "x".repeat(300))))
+                .collect(),
+        );
+    })
+    .await;
+    let started = p
+        .start_provider(&[(MESSAGES, p.mock.messages_base_url(), json!({}))])
+        .await;
+    assert!(matches!(started, Progress::Succeeded(_)), "{started:?}");
+    let listed = p
+        .rig
+        .succeed(
+            &p.provider_key(),
+            &ProviderDiscoverModels {
+                provider_id: p.rig.provider,
+                models: None,
+            },
+        )
+        .await;
+    assert!(
+        serde_json::to_vec(&listed).unwrap().len() > 262_144,
+        "the answer is larger than a frame"
+    );
+    let names: std::collections::BTreeSet<_> = listed["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|suggestion| suggestion["model_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), MODELS, "every model, once");
+    assert!(names.iter().any(|name| name.starts_with("model-01199-")));
+}
+
+#[tokio::test]
 async fn discovery_refuses_cycles_foreign_next_links_and_catalogues_beyond_its_page_or_model_bound()
 {
     use axum::extract::State;

@@ -110,6 +110,8 @@ impl Settings {
             limits: Limits {
                 max_frame_bytes: u32::try_from(config.link.max_frame_bytes)
                     .unwrap_or(defaults.max_frame_bytes),
+                max_message_bytes: u32::try_from(config.link.max_message_bytes)
+                    .unwrap_or(defaults.max_message_bytes),
                 tunnel_window_bytes: u32::try_from(config.link.tunnel_window_bytes)
                     .unwrap_or(defaults.tunnel_window_bytes),
                 max_channels: MAX_CHANNELS,

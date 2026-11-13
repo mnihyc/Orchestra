@@ -22,6 +22,7 @@ use orch_link_contract::streams::{
     Ack, Answer, Eph, Ev, Evb, EvbEntry, Inbox, Nak, Outbox, Reset, ResetReason, Resume, Stream,
     is_diagnostic,
 };
+use orch_link_contract::version::Limits;
 use orch_types::{Json, Seq, Time};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::Path;
@@ -51,12 +52,15 @@ pub enum PublishError {
         /// The stream.
         stream: String,
     },
-    /// One event is larger than a frame may be.
-    #[error("an event of {bytes} bytes is larger than a frame of {max}")]
+    /// One event is larger than a message may be: it travels in parts when it is
+    /// larger than a frame, and not at all beyond what the session carries.
+    #[error(
+        "an event of {bytes} bytes is larger than the {max} bytes a message may have (`max_message_bytes` in the `[link]` section of the settings)"
+    )]
     TooLarge {
         /// Its size as it would be written.
         bytes: usize,
-        /// The most a frame may have.
+        /// The most a message may have.
         max: usize,
     },
     /// The spool failed.
@@ -103,7 +107,9 @@ pub struct StreamSender {
     streams: HashMap<String, StreamState>,
     roles: Vec<Role>,
     connected: bool,
-    max_frame_bytes: usize,
+    /// What the session in hand carries: the largest frame, which events are
+    /// batched to fit, and the largest message, which an event may be.
+    limits: Limits,
 }
 
 fn entry_of(numbered: &Numbered) -> EvbEntry {
@@ -150,7 +156,7 @@ impl StreamSender {
             streams: HashMap::new(),
             roles,
             connected: false,
-            max_frame_bytes: orch_link_contract::version::MAX_FRAME_BYTES as usize,
+            limits: Limits::default(),
         };
         for stream in sender.spool.streams() {
             let state = sender.state_from_spool(&stream, now);
@@ -239,10 +245,10 @@ impl StreamSender {
         })
         .map_or(usize::MAX, |text| text.len());
         let bytes = Evb::frame_bytes(&name, &[framed]);
-        if bytes > self.max_frame_bytes {
+        if bytes > self.limits.message_bytes() {
             return Err(PublishError::TooLarge {
                 bytes,
-                max: self.max_frame_bytes,
+                max: self.limits.message_bytes(),
             });
         }
         self.state(&name, now);
@@ -309,11 +315,11 @@ impl StreamSender {
     pub fn on_ready(
         &mut self,
         cursors: &BTreeMap<String, Seq>,
-        max_frame_bytes: usize,
+        limits: Limits,
         now: Instant,
     ) -> Result<Vec<Frame>, SpoolError> {
         self.connected = true;
-        self.max_frame_bytes = max_frame_bytes;
+        self.limits = limits;
         let mut frames = Vec::new();
         let names: BTreeSet<String> = self
             .streams
@@ -473,7 +479,7 @@ impl StreamSender {
         if !self.connected {
             return Ok(Vec::new());
         }
-        let frame_bytes = frame_bytes.min(self.max_frame_bytes);
+        let frame_bytes = frame_bytes.min(self.limits.frame_bytes());
         let mut frames = Vec::new();
         let names: Vec<String> = self.streams.keys().cloned().collect();
         for name in &names {
@@ -556,9 +562,10 @@ impl StreamSender {
             while placed < entries.len() {
                 let fit = Evb::fitting(name, &sizes[placed..], frame_bytes.max(1));
                 // A single event is always sent, even in a frame larger than
-                // the one a thin link prefers: it cannot be cut.
+                // the one a thin link prefers, or than a frame may be: it is not
+                // cut here, and the link carries it in parts.
                 let fit = if fit == 0 {
-                    Evb::fitting(name, &sizes[placed..], self.max_frame_bytes).max(1)
+                    Evb::fitting(name, &sizes[placed..], self.limits.frame_bytes()).max(1)
                 } else {
                     fit
                 };

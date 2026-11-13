@@ -196,10 +196,14 @@ pub const FIRST_CONNECTOR_VERSION: &str = "0.1.0";
 /// slow link.
 pub const RATE_WEIGHT: f64 = 0.25;
 
-/// The most bytes of one frame of the backplane. A frame of a machine is at
-/// most a session's frame limit, and the wrapper around it is a few hundred
-/// bytes; this is the bound the link's own socket has for a message.
+/// The most bytes of one live frame: the figure that pages and transient messages kept for the browser are
+/// measured against. What the backplane carries between a gateway and the system is not held to it: that is
+/// a machine's largest message whole, and the setting of the link says how large (`Limits::backplane_bytes`).
 pub const MAX_BACKPLANE_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
+/// What the type `"t":"cmd",` adds to a command written as a frame: the machine's session is sent the command
+/// with its type in front of its members.
+const COMMAND_FRAME_TAG_BYTES: usize = 10;
 
 // JSON framing adds a type name, request reference and separators around a local reply.
 // Reserve more than that fixed envelope before accepting a complete canonical DTO.
@@ -389,6 +393,8 @@ impl LinkSettings {
         let limits = Limits {
             max_frame_bytes: u32::try_from(config.link.max_frame_bytes)
                 .unwrap_or(Limits::default().max_frame_bytes),
+            max_message_bytes: u32::try_from(config.link.max_message_bytes)
+                .unwrap_or(Limits::default().max_message_bytes),
             tunnel_window_bytes: u32::try_from(config.link.tunnel_window_bytes)
                 .unwrap_or(Limits::default().tunnel_window_bytes),
             max_channels: MAX_CHANNELS,
@@ -423,7 +429,7 @@ enum Outbound {
 impl Outbound {
     fn observed_bytes(&self) -> Option<usize> {
         match self {
-            Self::Frame(frame) => frames::encode(frame.as_ref(), MAX_BACKPLANE_FRAME_BYTES)
+            Self::Frame(frame) => frames::encode(frame.as_ref(), usize::MAX)
                 .ok()
                 .map(|text| text.len()),
             Self::Data(bytes) => Some(bytes.len()),
@@ -1984,13 +1990,13 @@ impl Link {
         }
         if let UpFrame::PortLocalAsk(request) = frame {
             let handler = lock(&self.inner.machine_requests).clone();
-            // Reserve room for the frame tag/correlation; a whole DTO that does not fit is
-            // refused, never silently truncated or put into a retained command result.
+            // Reserve room for the frame tag/correlation; a whole DTO that does not fit a message of the
+            // link is refused, never silently truncated or put into a retained command result.
             let reply_bytes = self
                 .inner
                 .settings
                 .limits
-                .frame_bytes()
+                .message_bytes()
                 .saturating_sub(PORT_LOCAL_ENVELOPE_BYTES);
             let Ok(permit) = Arc::clone(&self.inner.port_local_slots).try_acquire_owned() else {
                 gateway.send(BackplaneFrame::Down(Down {
@@ -2032,7 +2038,7 @@ impl Link {
                     } else {
                         orch_link_contract::local_ports::PortLocalAnswer::unavailable(
                             id,
-                            "the whole live reply exceeds this link's frame bound",
+                            "the whole live reply exceeds what a message of this link may be",
                         )
                     };
                 if let Some(route) = entry.route() {
@@ -2891,6 +2897,17 @@ impl Link {
                 ));
             }
         }
+        // A command larger than a message may be is failed here, with its size and the setting, and is not
+        // handed to a gateway that would refuse it.
+        if let DownFrame::Cmd(cmd) = &frame
+            && let Ok(written) = serde_json::to_vec(cmd)
+        {
+            let bytes = written.len() + COMMAND_FRAME_TAG_BYTES;
+            let limit = self.inner.settings.limits.message_bytes();
+            if bytes > limit {
+                return Err(orch_link::commands::command_too_large(bytes, limit));
+            }
+        }
         let sent = route.gateway.send(BackplaneFrame::Down(Down {
             machine_id: entry.id,
             frame,
@@ -2900,6 +2917,45 @@ impl Link {
             entry.mirror.notify_one();
         }
         Ok(sent)
+    }
+
+    /// The most bytes of one message of the backplane: a machine's largest message, whole, and what wraps it.
+    #[must_use]
+    pub fn backplane_bytes(&self) -> usize {
+        self.inner.settings.limits.backplane_bytes()
+    }
+
+    /// A gateway could not put a frame of ours into a machine's session. A command it was fails at once, with
+    /// the reason, and is not left to wait for a machine that never had it.
+    fn down_refused(&self, refused: orch_link_contract::backplane::DownRefused) {
+        tracing::error!(
+            machine = %refused.machine_id,
+            frame = %refused.frame,
+            bytes = refused.bytes,
+            limit = refused.limit,
+            "a gateway could not put a frame into a machine's session"
+        );
+        let Some(id) = refused.command else {
+            return;
+        };
+        let entry = lock(&self.inner.machines)
+            .get(&refused.machine_id)
+            .and_then(|cell| cell.get().cloned());
+        let Some(entry) = entry else {
+            return;
+        };
+        let error = if refused.bytes == 0 {
+            CommandError::new(
+                ErrorCode::Internal,
+                "the command could not be written for the machine",
+            )
+        } else {
+            orch_link::commands::command_too_large(
+                usize::try_from(refused.bytes).unwrap_or(usize::MAX),
+                usize::try_from(refused.limit).unwrap_or(usize::MAX),
+            )
+        };
+        self.refuse_unaccepted_publication(&entry, id, &error);
     }
 
     fn refuse_unaccepted_publication(&self, entry: &MachineEntry, id: Id, error: &CommandError) {
@@ -3184,11 +3240,12 @@ impl Link {
 
     /// Serves one connection of a gateway until it ends.
     pub async fn serve_gateway(&self, socket: WebSocket) {
+        let ceiling = self.backplane_bytes();
         let (mut sink, mut source) = socket.split();
         let first = tokio::time::timeout(HELLO_TIMEOUT, source.next()).await;
         let hello = match first {
             Ok(Some(Ok(Message::Text(text)))) => {
-                match frames::decode::<BackplaneFrame>(text.as_str(), MAX_BACKPLANE_FRAME_BYTES) {
+                match frames::decode::<BackplaneFrame>(text.as_str(), ceiling) {
                     Ok(Text::Known(BackplaneFrame::GwHello(hello))) => hello,
                     _ => return,
                 }
@@ -3240,10 +3297,10 @@ impl Link {
                         Some(Outbound::Frame(frame)) => {
                             #[cfg(feature = "test-observers")]
                             {
-                                observed_send = Some(writer_observed.selected(frames::encode(frame.as_ref(), MAX_BACKPLANE_FRAME_BYTES).ok().map(|text| text.len())));
+                                observed_send = Some(writer_observed.selected(frames::encode(frame.as_ref(), usize::MAX).ok().map(|text| text.len())));
                                 orch_link::test_observers::api_sending(frame.as_ref());
                             }
-                            match frames::encode(frame.as_ref(), MAX_BACKPLANE_FRAME_BYTES) {
+                            match frames::encode(frame.as_ref(), ceiling) {
                             Ok(text) => Message::Text(text.into()),
                             Err(error) => {
                                 tracing::error!(%error, "a frame of the backplane cannot be written");
@@ -3297,8 +3354,7 @@ impl Link {
             };
             match message {
                 Message::Text(text) => {
-                    match frames::decode::<BackplaneFrame>(text.as_str(), MAX_BACKPLANE_FRAME_BYTES)
-                    {
+                    match frames::decode::<BackplaneFrame>(text.as_str(), ceiling) {
                         Ok(Text::Known(frame)) => {
                             #[cfg(feature = "test-observers")]
                             orch_link::test_observers::api_received(&frame);
@@ -3374,6 +3430,7 @@ impl Link {
             }
             BackplaneFrame::MachineUp(up) => self.machine_up(gateway, up).await,
             BackplaneFrame::MachineDown(down) => self.machine_down(down).await,
+            BackplaneFrame::DownRefused(refused) => self.down_refused(refused),
             BackplaneFrame::Up(up) => {
                 if !up.purpose.is_primary() {
                     return;
