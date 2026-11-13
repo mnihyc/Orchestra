@@ -14,6 +14,8 @@ use orch_engine::ask::TurnHost;
 
 use orch_engine::ask::model::Chosen;
 
+use orch_engine::error::AskNoRoom;
+
 use orch_engine::error::EngineError;
 
 use orch_link_contract::commands::ProviderGenerate;
@@ -667,7 +669,17 @@ async fn finish(
     let error = result.as_ref().err().map(|error| {
         let (code, model) = match error {
             EngineError::AskContextTooLong(model) => ("ask_context_too_long", Some(model.as_str())),
-            EngineError::AskContextNoRoom => ("ask_context_no_room", None),
+            EngineError::AskContextNoRoom(AskNoRoom::Setting { .. }) => {
+                ("ask_context_no_room", None)
+            }
+            EngineError::AskContextNoRoom(AskNoRoom::Window {
+                model,
+                assumed: false,
+                ..
+            }) => ("ask_window_no_room", Some(model.as_str())),
+            EngineError::AskContextNoRoom(AskNoRoom::Window { model, .. }) => {
+                ("ask_window_unknown", Some(model.as_str()))
+            }
             _ => ("ask_unavailable", None),
         };
         let mut failure = json!({"code":code,"message":error.to_string()});
@@ -1276,6 +1288,7 @@ impl TurnHost for Host {
             person: self.origin.principal.caller().user(),
             machine: chosen.machine,
             request,
+            tool_bytes: budget.tool_bytes,
         })
     }
 

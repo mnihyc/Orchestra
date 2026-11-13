@@ -1,0 +1,12 @@
+# b41b: b41a with the repair of a host policy that names no ways of running (b28c52159): the whole candidate again.
+fmt
+clippy
+contracts
+test -p orch-api-core --test everything_resources
+test -p orch-api-core --test provider_harness
+test -p orch-api-core --test ask
+test -p orch-engine --lib
+test -p orch-engine --test caps --test provider_sign_in
+web typecheck
+web lint
+web test -- tests/component/pane-peek.test.tsx tests/component/ask-states.test.tsx tests/component/ask-stream-lifetime.test.tsx tests/component/connection-status.test.tsx tests/component/machine-enrollment-arrival.test.tsx tests/component/machine-enrollment.test.tsx tests/unit/read-again.test.ts
