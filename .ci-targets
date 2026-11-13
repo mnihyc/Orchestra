@@ -1,0 +1,4 @@
+# b41d: the candidate with tonight's interim web repairs brought over (Ask header and steps, Request options closed, summary fold, context figure, composer kept, re-read while running, /side).
+web typecheck
+web lint
+web test -- tests/component/ask-states.test.tsx tests/component/ask-action-availability.test.tsx tests/component/ask-composer.test.tsx tests/component/ask-model-choice.test.tsx tests/component/model-effort-controlled.test.tsx tests/component/model-picker-rows.test.tsx tests/component/request-options-managed-effort.test.tsx tests/component/goal-command-availability.test.tsx tests/component/composer-keys.test.tsx tests/component/viewer-composer.test.tsx tests/component/thread-consumer-frames.test.tsx tests/component/thread-summary-inspector.test.tsx tests/component/status-model-estimate.test.tsx tests/unit/read-again.test.ts
