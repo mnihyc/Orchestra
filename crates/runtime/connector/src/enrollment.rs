@@ -14,6 +14,15 @@
 //! endpoints and the roles and name it enrolled with (`config.toml`), and a record of the enrollment
 //! with the pin (`identity/enrollment.json`). A refused or distrusted answer leaves nothing behind.
 //!
+//! **A new unit on an old volume.** A managed runtime's data directory is on a volume that outlives the
+//! unit, so that a person's sign-in survives a unit that is made again, and a replacement runs on the
+//! volume of the unit it replaces. The machine is the unit's own: the directories that belong to it
+//! (`identity/`, `secrets/`, `spool/`, `journal/` and `state/`) are marked with the unit's identifier
+//! (`unit`), a unit that finds another's puts them aside in `previous/` and begins with none, which
+//! enrolls it as a new machine, and a unit that finds its own in `previous/` (a replacement that failed
+//! gave the volume back) takes them again ([`DataDir::claim_machine_state`]). What a person signed in
+//! (`harness/`) and what they set up stay where they are.
+//!
 //! **Where the answer comes from** is a [`EnrollTransport`]: the HTTPS requests of the system in a
 //! running connector, and in a test whatever stands for the system.
 
@@ -50,6 +59,16 @@ const SUBDIRECTORIES: [&str; 9] = [
 ];
 /// The file in `identity/` that records the enrollment.
 pub const RECORD_FILE: &str = "enrollment.json";
+/// The file of the data directory that names the unit whose machine the directories of
+/// [`MACHINE_DIRECTORIES`] hold.
+pub const UNIT_FILE: &str = "unit";
+/// The directories of a data directory that belong to the machine enrolled in it: its identity, what its
+/// key sealed, what it told the system and was told, and the harness processes it hosted.
+pub const MACHINE_DIRECTORIES: [&str; 5] = ["identity", "secrets", "spool", "journal", "state"];
+/// Where the machine state of the unit that was here before is kept, so that it comes back with its unit.
+const PREVIOUS_DIR: &str = "previous";
+/// Where a machine state waits for a moment while two are changed over.
+const PARKED_DIR: &str = "parked";
 /// The configuration file of a connector.
 pub const CONFIG_FILE: &str = "config.toml";
 /// The permissions of the data directory and of the directories that hold secrets: the user's alone.
@@ -121,6 +140,32 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> EnrollError + '_ {
         path: path.to_owned(),
         source,
     }
+}
+
+/// What a file that names a unit says, without the line end; `None` where there is no such file or it is empty.
+fn read_marker(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let word = text.trim();
+    (!word.is_empty()).then(|| word.to_owned())
+}
+
+/// Removes a directory and what is in it; nothing is wrong if it is not there.
+fn remove_directory(path: &Path) -> Result<(), EnrollError> {
+    match std::fs::remove_dir_all(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(io(path)(error)),
+        _ => Ok(()),
+    }
+}
+
+/// What a unit found of the machine state in its data directory ([`DataDir::claim_machine_state`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    /// The state is the unit's own, or there is none yet.
+    Own,
+    /// The state was another unit's: it was put aside, and the unit begins with none.
+    Fresh,
+    /// The state was another unit's, and the one the unit had put aside before has been brought back.
+    Restored,
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -223,6 +268,86 @@ impl DataDir {
             Err(std::fs::TryLockError::WouldBlock) => Ok(None),
             Err(std::fs::TryLockError::Error(error)) => Err(io(&path)(error)),
         }
+    }
+
+    /// Whether any directory of [`MACHINE_DIRECTORIES`] holds something.
+    fn holds_machine_state(&self) -> bool {
+        MACHINE_DIRECTORIES.iter().any(|name| {
+            std::fs::read_dir(self.root.join(name))
+                .is_ok_and(|mut entries| entries.next().is_some())
+        })
+    }
+
+    /// Makes the machine state of this directory the state of the unit `unit`, which a managed runtime
+    /// does at its start, before anything of the machine is read.
+    ///
+    /// A directory whose state is another unit's (a new unit made on the volume of a unit that failed or was
+    /// replaced) has it put aside in `previous/`, and the unit begins with none, so that it enrolls as a new
+    /// machine and not as the old one, which the system has revoked. A unit whose own state is the one put
+    /// aside (a replacement that failed has given the volume back) takes it again, and the replacement's is
+    /// put aside in its turn: one state is kept, never more. A directory that holds nothing yet, or that holds
+    /// a state nobody marked while its unit has no token to enroll with (the unit is only started again), is
+    /// the unit's own. What a person signed in, and the configuration, are not touched.
+    pub fn claim_machine_state(&self, unit: &str, can_enroll: bool) -> Result<Claim, EnrollError> {
+        let marker = self.root.join(UNIT_FILE);
+        let owner = read_marker(&marker);
+        if owner.as_deref() == Some(unit) {
+            return Ok(Claim::Own);
+        }
+        let own_in_place = owner.is_none() && (!self.holds_machine_state() || !can_enroll);
+        if own_in_place {
+            std::fs::write(&marker, unit).map_err(io(&marker))?;
+            return Ok(Claim::Own);
+        }
+        let stash = self.root.join(PREVIOUS_DIR);
+        let parked = self.root.join(PARKED_DIR);
+        let stashed_owner = read_marker(&stash.join(UNIT_FILE));
+        // What the directory holds now waits aside.
+        remove_directory(&parked)?;
+        std::fs::create_dir_all(&parked).map_err(io(&parked))?;
+        let mut parked_something = false;
+        for name in MACHINE_DIRECTORIES {
+            let from = self.root.join(name);
+            if from.exists() {
+                let to = parked.join(name);
+                std::fs::rename(&from, &to).map_err(io(&from))?;
+                parked_something = true;
+            }
+        }
+        if marker.exists() {
+            let to = parked.join(UNIT_FILE);
+            std::fs::rename(&marker, &to).map_err(io(&marker))?;
+        }
+        // This unit's own comes back, if it was put aside.
+        let restored = stashed_owner.as_deref() == Some(unit);
+        if restored {
+            for name in MACHINE_DIRECTORIES {
+                let from = stash.join(name);
+                if from.exists() {
+                    let to = self.root.join(name);
+                    std::fs::rename(&from, &to).map_err(io(&from))?;
+                }
+            }
+        }
+        // What waited takes the place of what was put aside before; with nothing to put aside, the
+        // older state stays unless it was just taken back.
+        if parked_something {
+            remove_directory(&stash)?;
+            std::fs::rename(&parked, &stash).map_err(io(&parked))?;
+        } else {
+            remove_directory(&parked)?;
+            if restored {
+                remove_directory(&stash)?;
+            }
+        }
+        std::fs::write(&marker, unit).map_err(io(&marker))?;
+        // The directories that are missing are made, with their permissions.
+        Self::open(&self.root)?;
+        Ok(if restored {
+            Claim::Restored
+        } else {
+            Claim::Fresh
+        })
     }
 
     /// The identity this connector enrolled with.
@@ -1221,6 +1346,14 @@ impl ManagedInputs {
         })
     }
 
+    /// Whether the file the driver made holds an enrollment token: a unit that was stopped has its token
+    /// emptied, so a unit started again finds none.
+    #[must_use]
+    pub fn holds_token(&self) -> bool {
+        std::fs::read_to_string(&self.enroll_file)
+            .is_ok_and(|text| text.trim().parse::<EnrollmentToken>().is_ok())
+    }
+
     /// The enrollment this runtime makes at its first start: with the token in the file the driver made,
     /// at the gateway's pinned address. The certificate authority the driver gave has to be the one the
     /// token pins, or nothing is sent.
@@ -1794,6 +1927,121 @@ mod tests {
             launch.enrollment("x", platform, "0.1.0"),
             Err(EnrollError::Distrusted(TrustFault::WrongPin))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_unit_made_on_the_volume_of_an_earlier_one_enrolls_as_a_new_machine_keeping_what_a_person_signed_in_and_the_earlier_unit_gets_its_own_back()
+     {
+        let clock = clock();
+        let system = System::new(&clock);
+        let dir = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        std::fs::write(
+            files.path().join("ca.pem"),
+            system.authority.certificate_pem(),
+        )
+        .unwrap();
+        let launch = ManagedInputs {
+            roles: vec![Role::Agent, Role::Provider],
+            gateway_url: "wss://gateway.orch.internal:9443".into(),
+            ca_file: files.path().join("ca.pem"),
+            enroll_file: files.path().join("token"),
+            data_dir: dir.path().to_owned(),
+            tools_dir: dir.path().join("tools"),
+            workspace_dir: None,
+            home_dir: None,
+            mounts_file: None,
+        };
+        let platform = Platform {
+            os: Os::Linux,
+            arch: Arch::X86_64,
+        };
+        let data = DataDir::open(dir.path()).unwrap();
+        let state_of = |name: &str| dir.path().join(name);
+
+        // The first unit enrolls with its token on a volume that has nothing yet.
+        std::fs::write(files.path().join("token"), format!("{}\n", system.token())).unwrap();
+        assert!(launch.holds_token());
+        assert_eq!(
+            data.claim_machine_state("unit-a", true).unwrap(),
+            Claim::Own
+        );
+        let inputs = launch
+            .enrollment("orch-provider-a", platform, "0.1.0")
+            .unwrap();
+        enroll(&inputs, &data, &system, &clock).await.unwrap();
+        let first = data.record().unwrap().machine_id;
+        std::fs::write(state_of("harness").join("login.json"), "signed in").unwrap();
+        std::fs::write(state_of("secrets").join("provider-a"), "sealed by a").unwrap();
+        std::fs::write(state_of("spool").join("segment"), "events of a").unwrap();
+        std::fs::write(state_of("state").join("hosted.json"), "{}").unwrap();
+
+        // The same unit started again keeps its machine, with its token or with it emptied by its stop.
+        assert_eq!(
+            data.claim_machine_state("unit-a", true).unwrap(),
+            Claim::Own
+        );
+        std::fs::write(files.path().join("token"), "").unwrap();
+        assert!(!launch.holds_token());
+        assert_eq!(
+            data.claim_machine_state("unit-a", false).unwrap(),
+            Claim::Own
+        );
+        assert!(data.is_enrolled());
+
+        // A new unit on the same volume has a token of its own: the machine of the first is put aside.
+        std::fs::write(files.path().join("token"), format!("{}\n", system.token())).unwrap();
+        assert_eq!(
+            data.claim_machine_state("unit-b", true).unwrap(),
+            Claim::Fresh
+        );
+        assert!(!data.is_enrolled());
+        assert_eq!(
+            std::fs::read_to_string(state_of("harness").join("login.json")).unwrap(),
+            "signed in",
+            "what a person signed in stays on the volume"
+        );
+        for put_aside in ["identity", "secrets", "spool", "state"] {
+            assert_eq!(
+                std::fs::read_dir(state_of(put_aside)).unwrap().count(),
+                0,
+                "{put_aside} of the first unit is not the second's"
+            );
+        }
+        let inputs = launch
+            .enrollment("orch-provider-b", platform, "0.1.0")
+            .unwrap();
+        enroll(&inputs, &data, &system, &clock).await.unwrap();
+        let second = data.record().unwrap().machine_id;
+        assert_ne!(first, second, "the new unit is a new machine");
+        assert_eq!(
+            system.sent.lock().unwrap().last().unwrap().machine_id,
+            None,
+            "and it asks to be enrolled as one, not to replace the first"
+        );
+
+        // The second unit fails and the first is given the volume back: it finds its own machine again.
+        std::fs::write(files.path().join("token"), "").unwrap();
+        assert_eq!(
+            data.claim_machine_state("unit-a", false).unwrap(),
+            Claim::Restored
+        );
+        assert_eq!(data.record().unwrap().machine_id, first);
+        assert_eq!(
+            std::fs::read_to_string(state_of("secrets").join("provider-a")).unwrap(),
+            "sealed by a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(state_of("harness").join("login.json")).unwrap(),
+            "signed in"
+        );
+
+        // And the second finds its own when it is given the volume once more.
+        assert_eq!(
+            data.claim_machine_state("unit-b", false).unwrap(),
+            Claim::Restored
+        );
+        assert_eq!(data.record().unwrap().machine_id, second);
     }
 
     #[test]

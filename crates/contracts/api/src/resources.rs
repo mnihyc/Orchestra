@@ -948,6 +948,9 @@ pub struct ProviderRuntime {
     pub renew_at: Option<Time>,
     /// A job on it now: its provision or its recreation.
     pub job: Option<JobRef>,
+    /// What the system knows of why it stands where it does, in a sentence: why a unit failed, or what its host did
+    /// not confirm. `null` when there is nothing to say.
+    pub detail: Option<String>,
 }
 
 /// How a harness process started for a provider stands.
@@ -2128,6 +2131,11 @@ pub struct ProviderStartStopBody {
     /// Whether to go on although a turn runs on it; a stop is refused otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interrupt: Option<bool>,
+    /// For a stop: whether to settle it although the host does not confirm it. The unit is stopped in the
+    /// system's records, the job that works on it is ended, and the host is told to stop the unit as soon as it
+    /// can be told.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
 }
 
 /// Asks for a plan to update the runtimes of several providers.
@@ -3367,6 +3375,10 @@ pub struct HostMetricsListQuery {
 pub struct HostRuntimeStopBody {
     /// Whether to interrupt what runs in it.
     pub interrupt: bool,
+    /// Whether to settle the stop although the host does not confirm it, ending the job that works on the unit;
+    /// the host is told to stop the unit as soon as it can be told.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
 }
 
 /// Which runtime to remove from a host.
@@ -3378,6 +3390,10 @@ pub struct HostRuntimeDeleteQuery {
     /// Whether to remove its volumes there too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volumes: Option<bool>,
+    /// Whether to remove a provider's unit although a job works on it, which is ended where it stands; the
+    /// unit is taken away from the host when the host can be told, and kept for that as long as it takes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
 }
 
 /// Which host to remove.

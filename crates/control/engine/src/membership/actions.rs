@@ -859,19 +859,44 @@ impl Engine {
         else {
             return Ok(());
         };
-        match outcome {
-            crate::commands::Outcome::Succeeded(_) => {
-                sqlx::query("UPDATE runtimes r SET state='stopped',state_detail=NULL,updated_at=$2
-                    WHERE r.id=$1 AND r.state NOT IN ('retired','removed') AND (r.state='stopping' OR EXISTS(SELECT 1 FROM hosts h
-                        LEFT JOIN environments e ON e.id=r.environment_id LEFT JOIN providers p ON p.id=r.provider_id
-                        WHERE h.id=r.host_id AND (h.disabled OR e.status='disabled' OR p.status='disabled')))")
-                    .bind(runtime).bind(self.inner.clock.now()).execute(&mut *conn).await.map_err(DbError::from)?;
+        // A host that has no such unit has nothing left to stop: the unit is stopped.
+        let stopped = match outcome {
+            crate::commands::Outcome::Succeeded(_) => true,
+            crate::commands::Outcome::Failed(error) => {
+                error.code == orch_link_contract::commands::ErrorCode::NotFound.as_str()
             }
-            _ => {
-                sqlx::query("UPDATE runtimes SET state_detail='Disabled; the host has not confirmed its stop',updated_at=$2
-                    WHERE id=$1 AND state NOT IN ('stopped','retired','removed')")
-                    .bind(runtime).bind(self.inner.clock.now()).execute(&mut *conn).await.map_err(DbError::from)?;
-            }
+            _ => false,
+        };
+        if stopped {
+            sqlx::query("UPDATE runtimes r SET state='stopped',state_detail=NULL,updated_at=$2
+                WHERE r.id=$1 AND r.state NOT IN ('retired','removed') AND (r.state='stopping' OR EXISTS(SELECT 1 FROM hosts h
+                    LEFT JOIN environments e ON e.id=r.environment_id LEFT JOIN providers p ON p.id=r.provider_id
+                    WHERE h.id=r.host_id AND (h.disabled OR e.status='disabled' OR p.status='disabled')))")
+                .bind(runtime).bind(self.inner.clock.now()).execute(&mut *conn).await.map_err(DbError::from)?;
+        } else {
+            let why = match outcome {
+                crate::commands::Outcome::Failed(error) => {
+                    format!(
+                        "Disabled; the host has not confirmed its stop: {}",
+                        error.detail
+                    )
+                }
+                crate::commands::Outcome::Expired => {
+                    "Disabled; the host did not take the command to stop it in time".to_owned()
+                }
+                _ => "Disabled; the host has not confirmed its stop".to_owned(),
+            };
+            tracing::warn!(%runtime, %why, "the host did not confirm the stop of a unit of a resource that was disabled");
+            sqlx::query(
+                "UPDATE runtimes SET state_detail=$3,updated_at=$2
+                WHERE id=$1 AND state NOT IN ('stopped','retired','removed')",
+            )
+            .bind(runtime)
+            .bind(self.inner.clock.now())
+            .bind(why)
+            .execute(&mut *conn)
+            .await
+            .map_err(DbError::from)?;
         }
         Ok(())
     }

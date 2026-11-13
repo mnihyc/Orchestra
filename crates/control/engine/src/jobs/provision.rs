@@ -318,11 +318,14 @@ pub struct SpecInputs<'a> {
     pub volumes: &'a Json,
 }
 
+/// The variable that gives the connector in a unit the identifier of the runtime the unit is of.
+pub const UNIT_VARIABLE: &str = "ORCH_RUNTIME_ID";
+
 /// The body of `node.runtime.create`, in the stored form: the token is the reference to the secret that
 /// holds it, which the link seals to the host's key when the command is written.
 #[must_use]
 pub fn runtime_spec(inputs: &SpecInputs<'_>) -> Json {
-    let env: BTreeMap<String, String> = inputs
+    let mut env: BTreeMap<String, String> = inputs
         .spec
         .get("env")
         .and_then(Json::as_object)
@@ -335,6 +338,9 @@ pub fn runtime_spec(inputs: &SpecInputs<'_>) -> Json {
                 .collect()
         })
         .unwrap_or_default();
+    // The connector in the unit keeps the state of its machine on a volume that outlives the unit: it
+    // tells its own state from that of an earlier unit by this.
+    env.insert(UNIT_VARIABLE.to_owned(), inputs.runtime.to_string());
     // A harness that runs beside the tools needs the connector in the unit to host agents as well.
     let beside = !orch_agent_programs::Programs::colocated_for(inputs.spec).is_empty();
     let roles: &[&str] = if beside {
@@ -2338,7 +2344,11 @@ mod tests {
             json!({ "$secret": enrollment.secret })
         );
         assert_eq!(spec["roles"], json!(["environment"]));
-        assert_eq!(spec["env"], json!({ "A": "b" }), "only text is a variable");
+        assert_eq!(
+            spec["env"],
+            json!({ "A": "b", "ORCH_RUNTIME_ID": runtime }),
+            "only text is a variable, and the unit is told which runtime it is of"
+        );
         assert_eq!(spec["labels"]["orch.system"], "acme");
         assert_eq!(spec["labels"]["orch.kind"], "environment");
         assert!(

@@ -129,6 +129,77 @@ impl Engine {
                 _ => "the unit failed".to_owned(),
             });
         let now = unit.now();
+        // A unit whose stop was begun and that its host finds stopped, failed or gone has been stopped,
+        // whatever became of the command that asked for it: an answer that was lost, or a container that
+        // somebody had removed already, leaves nothing else to wait for. The reason of a person's stop or
+        // of the idle stop stays with the unit, so that nothing starts it again by itself.
+        // A unit that a job works on (a restart or a replacement stops the old unit on its own) leaves it
+        // to the job.
+        let stopped_while_stopping = runtime.state == runtime_state::STOPPING && gone;
+        let in_a_job = match (runtime.environment_id, runtime.provider_id) {
+            (Some(environment), _) if stopped_while_stopping => {
+                !orch_db::queries::jobs::open_of_environment(&mut *unit.conn, environment)
+                    .await?
+                    .is_empty()
+            }
+            (None, Some(provider)) if stopped_while_stopping => {
+                !orch_db::queries::jobs::provider_jobs::open_of_provider(&mut *unit.conn, provider)
+                    .await?
+                    .is_empty()
+            }
+            _ => false,
+        };
+        if stopped_while_stopping && !in_a_job {
+            let deliberate = runtime.state_detail.as_deref().filter(|why| {
+                orch_db::queries::resources::provider_runtime::INTENTIONAL_STOP_DETAILS
+                    .contains(why)
+            });
+            let moved = environments::set_runtime_state(
+                &mut *unit.conn,
+                runtime.id,
+                &[runtime_state::STOPPING],
+                runtime_state::STOPPED,
+                deliberate,
+                now,
+            )
+            .await?;
+            if moved {
+                tracing::info!(
+                    runtime = %runtime.id, provider = ?runtime.provider_id,
+                    environment = ?runtime.environment_id, %host, reported = %report.state,
+                    "a unit that was being stopped is stopped: its host says so ({detail})"
+                );
+            }
+            if moved
+                && runtime.kind == "provider"
+                && let Some(provider) = runtime.provider_id
+            {
+                self.provider_unit_failed(
+                    &mut *unit.conn,
+                    provider,
+                    runtime.id,
+                    runtime.machine_id,
+                    now,
+                )
+                .await?;
+            }
+            if moved
+                && runtime.kind == "environment"
+                && let Some(environment) = runtime.environment_id
+            {
+                environments::set_status(
+                    &mut *unit.conn,
+                    environment,
+                    &[status::RUNNING, status::OFFLINE],
+                    status::STOPPED,
+                    None,
+                    now,
+                )
+                .await?;
+                environments::close_shells(&mut *unit.conn, environment, now).await?;
+            }
+            return Ok(());
+        }
         let fails = match runtime.state.as_str() {
             runtime_state::RUNNING => gone,
             runtime_state::CREATING => report.state == "failed",
@@ -177,6 +248,13 @@ impl Engine {
             now,
         )
         .await?;
+        if moved {
+            tracing::warn!(
+                runtime = %runtime.id, provider = ?runtime.provider_id, environment = ?runtime.environment_id,
+                %host, reported = %report.state, was = %runtime.state, reason = %detail,
+                "a host reports that a unit is not up: its runtime failed"
+            );
+        }
         // A provider's unit that is gone leaves the provider without a machine (the part that keeps
         // providers): the next turn that needs it makes the unit again.
         if moved

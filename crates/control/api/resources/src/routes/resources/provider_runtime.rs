@@ -369,6 +369,11 @@ pub(crate) async fn runtime_views(
                 idle_stop_at: idle_stop_at.map(Time::new),
                 renew_at: renew_at.map(Time::new),
                 job: job.map(job_ref),
+                // What the unit's row says of why it stands where it does; the words that only mark a
+                // stop somebody asked for are not a sentence.
+                detail: runtime
+                    .and_then(|runtime| runtime.state_detail.clone())
+                    .filter(|why| !rows::INTENTIONAL_STOP_DETAILS.contains(&why.as_str())),
             },
         );
     }
@@ -385,7 +390,7 @@ pub(super) fn refused(error: RuntimeError) -> ApiError {
         ),
         RuntimeError::Unavailable(why) => ApiError::new(
             ErrorCode::ProviderUnavailable,
-            format!("its runtime cannot be started or stopped now: {why}"),
+            format!("Its runtime cannot be started or stopped now: {why}."),
         ),
         RuntimeError::Busy(running) => ApiError::new(
             ErrorCode::ThreadNotIdle,
@@ -394,7 +399,7 @@ pub(super) fn refused(error: RuntimeError) -> ApiError {
         .with("running", running),
         RuntimeError::Host(why) => ApiError::new(
             ErrorCode::ProviderUnavailable,
-            format!("the host could not stop its runtime: {why}"),
+            format!("The runtime's host could not do it: {why}"),
         ),
         RuntimeError::Internal(error) => ApiError::engine(error),
     }
@@ -422,12 +427,13 @@ async fn stop(ctx: Ctx, (): (), body: api::ProviderStartStopBody) -> ApiResult<P
     let (ctx, tx, principal) = super::begin_mutation(&ctx).await?;
     ctx.app
         .engine
-        .stop_provider_runtime_in(
+        .stop_provider_runtime_forced_in(
             tx,
             &principal,
             &crate::sign_in::origin(&ctx),
             id,
             body.interrupt.unwrap_or(false),
+            body.force.unwrap_or(false),
         )
         .await
         .map_err(refused)?;

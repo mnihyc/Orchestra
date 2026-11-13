@@ -142,7 +142,7 @@ summary: Orch 显示的每个错误的含义，以及下一步该做什么。
 | `error:internal` | 服务器未能完成这个请求，请重试。 |
 | `error:source.offline` | 运行它的机器处于离线状态。请重新连接，或联系所有者后重试。 |
 | `error:agent.offline` | 暂时无法连接到智能体，请稍后重试。 |
-| `error:provider.unavailable` | 提供方暂时不可用，请稍后重试。 |
+| `error:provider.unavailable` | 提供方现在无法执行这个操作。 |
 | `error:harness.sessions_no_runtime` | 此智能体尚未在此提供方上运行。请先使用该智能体开始一个会话，再查看其已有会话。 |
 | `error:harness.sessions_unavailable` | 此智能体未能列出已有会话。请检查其所在机器后重试。 |
 | `error:harness.channels_unavailable` | 无法读取发布渠道。请检查此服务器的网络访问，或设置镜像。 |

@@ -52,6 +52,22 @@ const STOP_LOOK_EVERY: Duration = Duration::from_millis(100);
 /// interrupt to be answered.
 const INTERRUPT_MARGIN: Duration = Duration::from_secs(5);
 
+/// A job about a provider's runtime in a sentence: what it does and how far it has come.
+pub(crate) fn describe_job(job: &JobRow) -> String {
+    let phase = crate::jobs::runner::read_progress(job).0.phase;
+    let what = match (
+        job.kind.as_str(),
+        job.plan.get("mode").and_then(Json::as_str),
+    ) {
+        (provider_jobs::REMOVE, _) => "taking a unit away".to_owned(),
+        (provider_jobs::PROVISION, Some("start")) => "starting its unit".to_owned(),
+        (provider_jobs::PROVISION, Some("renew")) => "renewing its sign-in".to_owned(),
+        (provider_jobs::PROVISION, _) => "making its unit".to_owned(),
+        (other, _) => format!("working on it ({other})"),
+    };
+    format!("a job is {what}, at its {phase} step")
+}
+
 /// Resolves the environment of a provider's unit, retaining only sealed secret references in plans.
 pub(crate) async fn definition(
     conn: &mut orch_db::Conn,
@@ -531,27 +547,46 @@ impl Engine {
                     }
                 }
                 Some(runtime_state::STOPPED) => {
-                    if renew {
+                    // A unit the host says it does not have cannot be started: it is made again, on the
+                    // same volume.
+                    let missing = match live.as_ref() {
+                        Some(runtime) => env_rows::unit_missing(&mut tx, runtime.id).await?,
+                        None => false,
+                    };
+                    if missing && renew {
+                        return Err(RuntimeError::Unavailable(
+                            "renewal needs a manager to repair or recreate the runtime: its host does not have the unit"
+                                .to_owned(),
+                        ));
+                    }
+                    if missing {
+                        tracing::info!(%provider, runtime = ?live.as_ref().map(|runtime| runtime.id), "the stopped unit is not on its host: a start makes a new one");
+                        Mode::Make
+                    } else if renew {
                         Mode::Renew
                     } else {
                         Mode::Start
                     }
                 }
                 Some(runtime_state::CREATING) => {
-                    return Ok(
-                        match provider_jobs::open_of_provider(&mut tx, provider)
-                            .await?
-                            .into_iter()
-                            .next()
-                        {
-                            Some(job) => RuntimeStart::Job(Box::new(job)),
-                            None => RuntimeStart::Up,
-                        },
-                    );
+                    match provider_jobs::open_of_provider(&mut tx, provider)
+                        .await?
+                        .into_iter()
+                        .next()
+                    {
+                        Some(job) => return Ok(RuntimeStart::Job(Box::new(job))),
+                        // Nothing is making it any more: a unit left half made is replaced, like one that
+                        // failed.
+                        None => {
+                            tracing::warn!(%provider, runtime = ?live.as_ref().map(|runtime| runtime.id), "a unit is shown as being made and no job makes it: a start makes a new one");
+                            Mode::Make
+                        }
+                    }
                 }
                 Some(runtime_state::STOPPING) => {
                     return Err(RuntimeError::Unavailable(
-                        "its runtime is being stopped".to_owned(),
+                        "its runtime is being stopped and its host has not said that it is: stop it again, and force the stop if the host does not answer"
+                            .to_owned(),
                     ));
                 }
                 None | Some(_) => Mode::Make,
@@ -559,10 +594,14 @@ impl Engine {
             match provider_provision::queue(&mut tx, now, provider, mode, by).await? {
                 provider_jobs::Queued::Made(job) => {
                     tx.commit().await.map_err(DbError::from)?;
+                    tracing::info!(%provider, job = %job.id, mode = mode.word(), runtime = ?live.as_ref().map(|runtime| runtime.id), "provider runtime: a job was queued");
                     self.kick();
                     Ok(RuntimeStart::Job(job))
                 }
-                provider_jobs::Queued::Running(job) => Ok(RuntimeStart::Job(job)),
+                provider_jobs::Queued::Running(job) => {
+                    tracing::info!(%provider, job = %job.id, "provider runtime: a job is under way already");
+                    Ok(RuntimeStart::Job(job))
+                }
                 provider_jobs::Queued::NoProvider => Err(RuntimeError::NotFound),
             }
         })
@@ -731,6 +770,10 @@ impl Engine {
 
     /// Accepts removal of the exact provider unit selected by a host manager. The durable job
     /// owns all machine calls; no transaction is held while its stop or removal is awaited.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the request names the host and the unit and carries each choice the manager made"
+    )]
     pub async fn remove_host_provider_unit_in(
         &self,
         mut tx: orch_db::Tx,
@@ -739,6 +782,7 @@ impl Engine {
         host: Id,
         runtime: Id,
         volumes: bool,
+        force: bool,
     ) -> Result<(), RuntimeError> {
         let row = env_rows::runtime(&mut tx, runtime)
             .await?
@@ -750,6 +794,13 @@ impl Engine {
             return Ok(());
         }
         let now = principal.now().get();
+        tracing::info!(%provider, %runtime, %host, volumes, force, state = %row.state, "a host manager asked to remove a provider's unit");
+        // A job that works on the unit gives way to a person who forces its removal: it is ended where it
+        // stands, and the removal takes over what it left. The same removal that is under way stays.
+        if force {
+            self.overrule_provider_jobs(provider, principal.user(), Some((runtime, volumes)))
+                .await?;
+        }
         // queue locks the provider, serializing this acceptance with provisioning/recreation.
         match provider_provision::queue_removal_with_options(
             &mut tx,
@@ -781,20 +832,20 @@ impl Engine {
                 self.kick();
                 return Ok(());
             }
-            provider_jobs::Queued::Running(_) => {
-                return Err(RuntimeError::Unavailable(
-                    "a job works on its provider runtime".to_owned(),
-                ));
+            provider_jobs::Queued::Running(job) => {
+                return Err(RuntimeError::Unavailable(format!(
+                    "{}; force the removal to end that job and remove the unit",
+                    describe_job(&job)
+                )));
             }
             provider_jobs::Queued::NoProvider => return Err(RuntimeError::NotFound),
         }
-        if orch_db::queries::jobs::changes::provider_hold(&mut tx, provider)
-            .await?
-            .is_some()
+        if let Some(job) = orch_db::queries::jobs::changes::provider_hold(&mut tx, provider).await?
         {
-            return Err(RuntimeError::Unavailable(
-                "a job uses its provider runtime".to_owned(),
-            ));
+            return Err(RuntimeError::Unavailable(format!(
+                "{}; wait for it to end, then try again",
+                describe_job(&job)
+            )));
         }
         let current = rows::live_runtime(&mut tx, provider)
             .await?
@@ -839,6 +890,20 @@ impl Engine {
         interrupt: bool,
         why: StopWhy,
     ) -> Result<(), RuntimeError> {
+        self.stop_provider_runtime_with(provider, interrupt, why, false)
+            .await
+    }
+
+    /// As [`Engine::stop_provider_runtime`]. With `force`, a unit whose host does not confirm its stop is
+    /// settled as stopped all the same, the job that works on it is ended, and the host is told to stop
+    /// the unit as soon as it can be told.
+    pub async fn stop_provider_runtime_with(
+        &self,
+        provider: Id,
+        interrupt: bool,
+        why: StopWhy,
+        force: bool,
+    ) -> Result<(), RuntimeError> {
         let state = {
             let mut conn = self.inner.db.acquire().await?;
             rows::state(&mut conn, provider)
@@ -874,7 +939,7 @@ impl Engine {
         let Some(runtime) = runtime else {
             return Ok(());
         };
-        self.stop_provider_unit(provider, runtime.id, interrupt, why)
+        self.stop_provider_unit(provider, runtime.id, interrupt, why, force)
             .await
     }
 
@@ -885,6 +950,7 @@ impl Engine {
         runtime: Id,
         interrupt: bool,
         why: StopWhy,
+        force: bool,
     ) -> Result<(), RuntimeError> {
         let mut conn = self.inner.db.acquire().await?;
         let runtime = env_rows::runtime(&mut conn, runtime)
@@ -935,6 +1001,7 @@ impl Engine {
             ));
         }
         drop(conn);
+        tracing::info!(%provider, runtime = %runtime.id, state = %runtime.state, force, "a stop of a provider's unit was asked");
         match runtime.state.as_str() {
             runtime_state::STOPPED | runtime_state::FAILED => {
                 let mut tx = self.inner.db.begin().await?;
@@ -952,6 +1019,24 @@ impl Engine {
                 return Ok(());
             }
             runtime_state::RUNNING | runtime_state::STOPPING => {}
+            // A unit that a job is making or starting is stopped by ending the job, which a person has to
+            // say they want.
+            runtime_state::CREATING => {
+                if !force {
+                    let open = {
+                        let mut conn = self.inner.db.acquire().await?;
+                        provider_jobs::open_of_provider(&mut conn, provider).await?
+                    };
+                    return Err(RuntimeError::Unavailable(match open.first() {
+                        Some(job) => format!(
+                            "{}; force the stop to end that job and stop the unit",
+                            describe_job(job)
+                        ),
+                        None => "its unit is shown as being made and no job makes it; force the stop to settle it"
+                            .to_owned(),
+                    }));
+                }
+            }
             other => {
                 return Err(RuntimeError::Unavailable(format!("its runtime is {other}")));
             }
@@ -960,6 +1045,12 @@ impl Engine {
             return Ok(());
         }
         self.clear_provider_turns(provider, interrupt, why).await?;
+        if force {
+            if let StopWhy::Person(by) = why {
+                self.overrule_provider_jobs(provider, by, None).await?;
+            }
+            return self.force_provider_stop(provider, runtime.id, why).await;
+        }
         let began = {
             let mut tx = self.inner.db.begin().await?;
             rows::lock(&mut tx, provider).await?;
@@ -1030,8 +1121,16 @@ impl Engine {
         let now = self.inner.clock.now();
         let mut tx = self.inner.db.begin().await?;
         rows::lock(&mut tx, provider).await?;
+        // A host that has no such unit has nothing left to stop: the unit is stopped.
+        let stopped = match &waited {
+            Ok(Ok(Outcome::Succeeded(_))) => true,
+            Ok(Ok(Outcome::Failed(error))) => {
+                error.code == orch_link_contract::commands::ErrorCode::NotFound.as_str()
+            }
+            _ => false,
+        };
         match waited {
-            Ok(Ok(Outcome::Succeeded(_))) => {
+            _ if stopped => {
                 let detail = env_rows::runtime(&mut tx, runtime)
                     .await?
                     .and_then(|runtime| runtime.state_detail);
@@ -1053,6 +1152,7 @@ impl Engine {
                         .await?;
                 }
                 tx.commit().await.map_err(DbError::from)?;
+                tracing::info!(%provider, %runtime, host = %row.host_id, "the unit of a provider's runtime is stopped");
                 Ok(())
             }
             Ok(Ok(Outcome::Failed(error))) => {
@@ -1074,10 +1174,119 @@ impl Engine {
             Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
                 // The host has not said: the unit stands `stopping` and the schedule asks again.
                 Err(RuntimeError::Host(
-                    "the host did not answer in time; the stop is tried again".to_owned(),
+                    "the host did not answer in time; the stop is tried again, and stopping by force settles it without the host"
+                        .to_owned(),
                 ))
             }
         }
+    }
+
+    /// Settles the stop of a unit without its host's word: the unit is stopped at once in the rows, and
+    /// the host is told to stop it as soon as it is there to be told (the command is kept until a node
+    /// can take it). What the host finds in the unit is told again when it speaks of it.
+    pub(crate) async fn force_provider_stop(
+        &self,
+        provider: Id,
+        runtime: Id,
+        why: StopWhy,
+    ) -> Result<(), RuntimeError> {
+        let now = self.inner.clock.now();
+        let mut tx = self.inner.db.begin().await?;
+        rows::lock(&mut tx, provider).await?;
+        let Some(row) = env_rows::runtime(&mut tx, runtime).await? else {
+            return Err(RuntimeError::NotFound);
+        };
+        let moved = env_rows::set_runtime_state(
+            &mut tx,
+            runtime,
+            &[
+                runtime_state::RUNNING,
+                runtime_state::STOPPING,
+                runtime_state::CREATING,
+            ],
+            runtime_state::STOPPED,
+            Some(why.detail()),
+            now,
+        )
+        .await?;
+        if moved {
+            if let Some(host) = host_rows::host(&mut tx, row.host_id).await? {
+                let stamp = row.updated_at.timestamp_micros().to_le_bytes();
+                crate::archive::persist(
+                    &mut tx,
+                    now,
+                    Outgoing::new(
+                        ids::derived(
+                            "node.runtime.stop.forced",
+                            &[runtime.as_bytes().as_slice(), &stamp],
+                        ),
+                        host.machine_id,
+                        SerialKey::Runtime(runtime),
+                        &NodeRuntimeStop {
+                            runtime_id: runtime,
+                            reason: Some(orch_driver_contract::runtime::UnitReason::Stop),
+                        },
+                    )
+                    .map_err(EngineError::from)?,
+                )
+                .await?;
+            }
+            if rows::live_runtime(&mut tx, provider)
+                .await?
+                .is_some_and(|current| current.id == runtime)
+            {
+                self.unit_is_gone(&mut tx, provider, runtime, row.machine_id, now)
+                    .await?;
+            }
+        }
+        tx.commit().await.map_err(DbError::from)?;
+        tracing::warn!(%provider, %runtime, host = %row.host_id, settled = moved, "the stop of a provider's unit was settled without its host's word; the host is told to stop it when it can be told");
+        Ok(())
+    }
+
+    /// Ends the jobs about a provider's runtime, where they stand, for a person who forces what they asked
+    /// instead; the removal of the unit `keep` names (and its choice of volumes) is the one that stays. A
+    /// job that has passed its commit is finishing and is not ended: the person is told.
+    pub(crate) async fn overrule_provider_jobs(
+        &self,
+        provider: Id,
+        by: Id,
+        keep: Option<(Id, bool)>,
+    ) -> Result<(), RuntimeError> {
+        let open = {
+            let mut conn = self.inner.db.acquire().await?;
+            provider_jobs::open_of_provider(&mut conn, provider).await?
+        };
+        for job in open {
+            let same_removal = job.kind == provider_jobs::REMOVE
+                && keep.is_some_and(|(runtime, volumes)| {
+                    job.plan
+                        .get("runtime")
+                        .and_then(Json::as_str)
+                        .and_then(|id| id.parse::<Id>().ok())
+                        == Some(runtime)
+                        && job
+                            .plan
+                            .get("volumes")
+                            .and_then(Json::as_bool)
+                            .unwrap_or(true)
+                            == volumes
+                });
+            if same_removal {
+                continue;
+            }
+            let said = format!(
+                "a person forced the unit's stop or removal: {}",
+                describe_job(&job)
+            );
+            if !self.overrule_job(job.id, by, &said).await? {
+                return Err(RuntimeError::Unavailable(format!(
+                    "{}, and it has passed the point where it can be ended; try again in a moment",
+                    describe_job(&job)
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Detaches a gone current unit and clears its connector's harnesses and sessions.
@@ -1502,6 +1711,7 @@ impl Engine {
                 .and_then(orch_types::Json::as_str)
                 .unwrap_or("it was cancelled")
                 .to_owned();
+            tracing::warn!(%provider, job = %row.id, state = %ended.state, reason = %said, "provider runtime: its job ended without a runtime that is ready");
             if let Err(error) = self
                 .runtime_failed(
                     provider,

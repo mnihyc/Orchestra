@@ -82,6 +82,7 @@
     "noModels": "No API models available here",
     "modelUnavailable": "This model is unavailable here",
     "sources": "Sources",
+    "noAnswer": "No answer was written. Try again.",
     "sourceUnavailable": "Source no longer available",
     "copy": "Copy answer",
     "retry": "Retry answer",
@@ -91,7 +92,6 @@
     "noHistory": "No conversations yet",
     "retention": "Kept for {{days}} days after the last message",
     "expires": "Expires",
-    "adminNotice": "This organization’s admins can inspect and export this conversation",
     "inspection": "Read-only admin inspection",
     "readOnlyTools": "Reads as you · cites sources · makes no changes",
     "paidBy": "Paid by",
@@ -99,7 +99,9 @@
     "privateThread": "Creates a Private permanent thread in this organization",
     "destination": "Destination topic",
     "defaultDestination": "Use the page’s topic or an authorized default",
-    "contextNoRoom": "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves.",
+    "contextNoRoom": "ask.context_tokens leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Increase ask.context_tokens or reduce ask.max_output_tokens.",
+    "windowNoRoom": "The context window of {{model}} leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Use a model with a larger window or reduce ask.max_output_tokens.",
+    "windowUnknown": "The context window of {{model}} is not recorded and is assumed to be small, and the answer’s reserve (ask.max_output_tokens) leaves no room for the conversation. Record the model’s context window or reduce ask.max_output_tokens.",
     "contextTooLong": "This conversation is too long for {{model}}; start a new one or keep it as a thread."
   },
   "viewWindow": {
@@ -5010,6 +5012,7 @@
       "label": "Context {{used}} of {{window}} ({{percent}}); shortens at {{compact}}",
       "labelBare": "Context {{used}} of {{window}} ({{percent}})",
       "open": "Show what fills the context ({{label}})",
+      "labelUsed": "Context {{used}} used; no window reported",
       "modelLabel": "{{model}}: {{context}}"
     },
     "panel": {
@@ -7521,7 +7524,9 @@
     "progress": "Updating provider runtime",
     "start": "Start runtime",
     "stop": "Stop runtime",
-    "stopHelp": "Stops the runtime and interrupts its {{count}} running turns. The sign-in and conversations are kept."
+    "stopHelp": "Stops the runtime and interrupts its {{count}} running turns. The sign-in and conversations are kept.",
+    "stopForce": "Stop by force",
+    "forceHelp": "The unit is settled as stopped without its host, the job that works on it is ended, and the host is told to stop the unit as soon as it can be reached."
   },
   "providerLogin": {
     "method": "Sign-in method",
@@ -8634,7 +8639,7 @@
       "subscription_not_allowed": "The policy here does not allow this agent's subscription. Choose another provider or ask the place's manager.",
       "subscription_not_shared": "This subscription can only be used by its owner. Choose your own provider or ask for a shared provider.",
       "handed_over": "This provider's sign-in is with another environment. Bring it back from that environment before trying again.",
-      "unavailable": "The provider is not ready at the moment. Try again shortly.",
+      "unavailable": "The provider cannot do that right now.",
       "not_allowed": "This provider is not allowed here. Choose an allowed provider or ask the place's manager to review the limit."
     },
     "workspace": {
@@ -9874,7 +9879,11 @@
         "right": "Hide the right bar",
         "bottom": "Hide the bottom"
       },
-      "pin": "Keep open as a bar"
+      "pin": "Keep open as a bar",
+      "peek": {
+        "title": "Bars",
+        "label": "Show hidden bars on hover: {{state}}"
+      }
     },
     "sash": {
       "left": "Width of the left bar",
@@ -9941,9 +9950,10 @@
       "shellsHint": "Your shells in this environment. Open Terminal.",
       "connecting": "Connecting…",
       "connectingHint": "Connecting to live updates.",
-      "reconnectingSince": "Reconnecting… · {{time}}",
       "reconnecting": "Reconnecting…",
       "reconnectingHint": "What is on screen stays and can be read. Approving and steering wait for the connection; typing does not.",
+      "noLive": "No live updates · {{time}}",
+      "noLiveHint": "Live updates cannot connect, so this page reads again every few seconds. If this stays, ask whoever runs this system to check that the HTTPS front passes WebSocket upgrades for /api/v1/ws; orchctl doctor --url shows it as edge-ws.",
       "slow": "Slow connection · {{ms}} ms",
       "slowHint": "Sending, saving and shells take longer. Nothing you type waits."
     },
@@ -15991,7 +16001,26 @@
       "renew": "Started to renew at",
       "updates": "What it is behind in",
       "update": "{{name}}: {{from}} → {{to}}",
-      "lastProgramError": "Last program error"
+      "lastProgramError": "Last program error",
+      "now": "Now",
+      "step": "{{step}} ({{percent}}%)",
+      "reason": "Reason",
+      "phase": {
+        "schedule": "Choosing a host",
+        "image": "Getting the image",
+        "volumes": "Preparing the volumes",
+        "tools": "Preparing the tools",
+        "create": "Making the unit",
+        "start": "Starting the unit",
+        "enroll": "Waiting for its connector",
+        "after_up": "Running the commands after start",
+        "verify": "Checking the unit",
+        "commit": "Finishing",
+        "refresh": "Reading the sign-in",
+        "stop": "Stopping the unit",
+        "unit": "Removing the unit",
+        "forget": "Forgetting the unit"
+      }
     },
     "models": {
       "title": "Models",
@@ -17553,7 +17582,9 @@
       "type": "Type {{name}} to confirm",
       "removeConfirm": "Delete {{name}}",
       "removed": "{{name}} will be deleted",
-      "inUse": "It is refused while something still depends on it."
+      "inUse": "It is refused while something still depends on it.",
+      "stopForce": "Stop {{name}} by force",
+      "force": "Delete even though a job works on it"
     },
     "remove": {
       "menu": "Delete…",
@@ -23396,6 +23427,9 @@
       "moveOut": "Move to another org",
       "moveOutReason": "Moves with its main thread · Keep it to move it alone"
     },
+    "slash": {
+      "about": "Ask a question on the side, without disturbing the turn"
+    },
     "ask": {
       "title": "Side thread",
       "about": "Starts from {{thread}}'s conversation. Replies stay in this aside.",
@@ -24417,6 +24451,9 @@
     "runtimeCount_other": "{{number}} runtimes",
     "offInBuild": "Off in this version: {{feature}}",
     "caseUnavailable": "Unavailable",
+    "checkedPending_one": "Checked · {{number}} check pending",
+    "checkedPending_other": "Checked · {{number}} checks pending",
+    "casesPending": "Not verified yet: {{names}}",
     "notChecked": "This version has not been checked",
     "checkFailed": "Compatibility check failed · review its results",
     "policySummary": "{{name}}: {{choice}}",
@@ -26192,6 +26229,8 @@
     "resultsRootPending": "The results’ organization cannot be opened",
     "model": "Model summarizer",
     "details": "Summary details",
+    "hide": "Hide summary",
+    "show": "Show summary",
     "inputFacts": "Source items: {{included}} included · {{shortened}} shortened · {{omitted}} omitted",
     "baseRates": "Configured model base rates",
     "noRates": "No base rates reported",

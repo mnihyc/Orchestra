@@ -2043,6 +2043,7 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .query(&HostRuntimeDeleteQuery {
             confirm: "another".to_owned(),
             volumes: None,
+            force: None,
         })
         .send()
         .await
@@ -2055,6 +2056,7 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .query(&HostRuntimeDeleteQuery {
             confirm: "orch-environment-0123456789ab".to_owned(),
             volumes: None,
+            force: None,
         })
         .send()
         .await

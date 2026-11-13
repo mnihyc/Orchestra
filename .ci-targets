@@ -1,0 +1,11 @@
+# n41-runtime: a new unit enrols as a new machine, the host's report decides a unit's state, forced stop and removal, visible phases; first compile of the lane's commits.
+fmt
+clippy
+contracts
+test -p orch-connector-core --lib
+test -p orch-engine --lib
+test -p orch-engine --test provider_runtime --test environments --test provider_sign_in
+test -p orch-api-core --test provider_managed --test hosts --test hosted_environments
+web typecheck
+web lint
+web test -- tests/component/host-runtimes-read.test.tsx tests/component/provider-runtime-facts.test.tsx tests/component/runtime-configuration.test.tsx tests/unit/api-error-words.test.ts tests/component/resource-status-agreement.test.tsx tests/component/provider-observation-states.test.tsx

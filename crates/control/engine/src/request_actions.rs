@@ -56,6 +56,10 @@ async fn provider_decision(
 
 impl Engine {
     /// Accepts the exact provider unit a host manager selected, including an older kept unit.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the request names the host and the unit and carries each choice the manager made"
+    )]
     pub async fn stop_host_provider_unit_in(
         &self,
         mut tx: Tx,
@@ -64,19 +68,25 @@ impl Engine {
         host: Id,
         runtime: Id,
         interrupt: bool,
+        force: bool,
     ) -> Result<(), RuntimeError> {
         let row = environments::runtime(&mut tx, runtime)
             .await?
             .filter(|row| row.host_id == host && row.kind == "provider")
             .ok_or(RuntimeError::NotFound)?;
         let provider = row.provider_id.ok_or(RuntimeError::NotFound)?;
-        if orch_db::queries::jobs::changes::provider_hold(&mut tx, provider)
-            .await?
-            .is_some()
+        tracing::info!(%provider, %runtime, %host, interrupt, force, state = %row.state, "a host manager asked to stop a provider's unit");
+        // A job that works on the unit gives way to a person who forces the stop.
+        if force {
+            self.overrule_provider_jobs(provider, principal.user(), None)
+                .await?;
+        }
+        if let Some(job) = orch_db::queries::jobs::changes::provider_hold(&mut tx, provider).await?
         {
-            return Err(RuntimeError::Unavailable(
-                "a job works on its provider runtime".to_owned(),
-            ));
+            return Err(RuntimeError::Unavailable(format!(
+                "{}; force the stop to end that job and stop the unit",
+                crate::provider_runtime::describe_job(&job)
+            )));
         }
         if row.state != orch_db::queries::environments::hosting::runtime_state::RETIRED
             && !interrupt
@@ -109,6 +119,7 @@ impl Engine {
             runtime,
             interrupt,
             StopWhy::Person(principal.user()),
+            force,
         )
         .await
     }
@@ -242,9 +253,36 @@ impl Engine {
         provider: Id,
         interrupt: bool,
     ) -> Result<(), RuntimeError> {
-        provider_decision(tx, principal, origin, provider, "stop").await?;
-        self.stop_provider_runtime(provider, interrupt, StopWhy::Person(principal.user()))
+        self.stop_provider_runtime_forced_in(tx, principal, origin, provider, interrupt, false)
             .await
+    }
+
+    /// As [`Engine::stop_provider_runtime_in`]; with `force`, a unit whose host does not confirm the stop is
+    /// settled as stopped, and the job that works on it is ended.
+    pub async fn stop_provider_runtime_forced_in(
+        &self,
+        tx: Tx,
+        principal: &Principal,
+        origin: &Origin,
+        provider: Id,
+        interrupt: bool,
+        force: bool,
+    ) -> Result<(), RuntimeError> {
+        provider_decision(
+            tx,
+            principal,
+            origin,
+            provider,
+            if force { "force the stop of" } else { "stop" },
+        )
+        .await?;
+        self.stop_provider_runtime_with(
+            provider,
+            interrupt,
+            StopWhy::Person(principal.user()),
+            force,
+        )
+        .await
     }
 
     /// Accepts cancellation in the caller's transaction before forgetting pending values or telling its harness.

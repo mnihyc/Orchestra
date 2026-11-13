@@ -23,7 +23,7 @@ use orch_connector_core::connector::{
     ConnectorBuilder, ConnectorParams, StartError, Supervision, run_until_with_updates,
 };
 use orch_connector_core::enrollment::{
-    DataDir, EnrollInputs, HttpsEnroll, ManagedInputs, default_data_dir, enroll, role_name,
+    Claim, DataDir, EnrollInputs, HttpsEnroll, ManagedInputs, default_data_dir, enroll, role_name,
 };
 use orch_connector_core::facts::Host;
 use orch_connector_core::forwarder::{ProtocolEntry, Protocols};
@@ -510,6 +510,25 @@ pub async fn run(dir: Option<PathBuf>, managed: bool, build: BuildInfo) -> anyho
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let shutdown = stopped().context("registering process stop signals")?;
     let transport = HttpsEnroll::new(Arc::clone(&clock), None);
+    // The machine is the unit's own. A new unit made on the volume of an earlier one finds that unit's
+    // identity there, which the system revoked with its unit: it puts that aside and enrolls as a new
+    // machine, and a unit that is given the volume back finds its own again.
+    if let Some(launch) = &launch
+        && let Some(unit) = var("ORCH_RUNTIME_ID").filter(|unit| !unit.is_empty())
+    {
+        let claimed = data
+            .claim_machine_state(&unit, launch.holds_token())
+            .context("taking the machine state of this unit")?;
+        match claimed {
+            Claim::Own => {}
+            Claim::Fresh => {
+                tracing::info!(%unit, "the data directory held the machine of another unit: it is put aside, and this unit enrolls as a new machine");
+            }
+            Claim::Restored => {
+                tracing::info!(%unit, "the machine of this unit was put aside for another unit and is back");
+            }
+        }
+    }
     if !data.is_enrolled() {
         let Some(launch) = &launch else {
             anyhow::bail!(

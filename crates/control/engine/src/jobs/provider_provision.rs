@@ -25,7 +25,7 @@ use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::hosting::{Enrollment, EnrollmentAsk, HostServices, HostingError, ToolBuild};
 use crate::ids;
-use crate::jobs::provision::{CONNECTOR_TOOL, SpecInputs, image_key, runtime_spec};
+use crate::jobs::provision::{CONNECTOR_TOOL, SpecInputs, UNIT_VARIABLE, image_key, runtime_spec};
 use crate::jobs::runner::{Done, Failure, INTERNAL, Job, Phase, Phased, Stop, Undone};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -233,6 +233,7 @@ pub fn provider_runtime_spec(provider: Id, inputs: &SpecInputs<'_>) -> Json {
     if let Some(env) = inputs.spec.get("env") {
         spec["env"] = env.clone();
     }
+    spec["env"][UNIT_VARIABLE] = json!(inputs.runtime);
     spec["labels"]["orch.kind"] = json!("provider");
     spec["labels"]["orch.provider_id"] = json!(provider);
     spec
@@ -1334,10 +1335,15 @@ impl ProviderProvision {
             }
             let waited = began.elapsed();
             if waited >= allowed {
+                let seen = match online {
+                    None => "it has not enrolled as a machine of this unit",
+                    Some(_) => "it enrolled and is not online",
+                };
                 return Err(failed(
                     "enroll_timeout",
                     format!(
-                        "the connector in the unit did not come online within {} seconds",
+                        "the connector in the unit {} did not come online within {} seconds ({seen}); the log of the unit on its host says why",
+                        placed.runtime.unit_name,
                         allowed.as_secs()
                     ),
                 ));
@@ -1792,7 +1798,15 @@ impl Phased for ProviderProvision {
             Box::pin(crate::provider_recovery::guard(job, &recipe)).await?;
         }
 
-        match phase {
+        let unit = current
+            .plan
+            .get("runtime")
+            .and_then(Json::as_str)
+            .unwrap_or("-")
+            .to_owned();
+        let mode = self.mode.word();
+        tracing::info!(provider = %self.provider, job = %job.id(), %unit, mode, phase, "provider runtime: a step begins");
+        let outcome = match phase {
             "schedule" => Box::pin(self.schedule(job)).await,
             "image" => Box::pin(self.image(job)).await,
             "volumes" => Box::pin(self.volumes(job)).await,
@@ -1808,10 +1822,35 @@ impl Phased for ProviderProvision {
                 INTERNAL,
                 format!("a provider's provisioning has no phase {other}"),
             )),
+        };
+        match &outcome {
+            Ok(Done::Finished) => {
+                tracing::info!(provider = %self.provider, job = %job.id(), %unit, mode, phase, "provider runtime: a step is done");
+            }
+            Ok(Done::Skipped(why)) => {
+                tracing::info!(provider = %self.provider, job = %job.id(), %unit, mode, phase, %why, "provider runtime: a step was skipped");
+            }
+            Err(Stop::Failed(failure)) => {
+                tracing::warn!(provider = %self.provider, job = %job.id(), %unit, mode, phase, code = %failure.code, reason = %failure.message, "provider runtime: a step failed");
+            }
+            Err(Stop::Cancelled) => {
+                tracing::info!(provider = %self.provider, job = %job.id(), %unit, mode, phase, "provider runtime: a step was cancelled");
+            }
+            Err(Stop::Lost) => {}
         }
+        outcome
     }
 
     async fn undo(&self, job: &Job, why: &Stop) -> Undone {
+        match why {
+            Stop::Failed(failure) => {
+                tracing::warn!(provider = %self.provider, job = %job.id(), mode = self.mode.word(), code = %failure.code, reason = %failure.message, "provider runtime: the job failed and is undone");
+            }
+            Stop::Cancelled => {
+                tracing::info!(provider = %self.provider, job = %job.id(), mode = self.mode.word(), "provider runtime: the job was cancelled and is undone");
+            }
+            Stop::Lost => {}
+        }
         if let Err(error) = creator_authority::copy_audit(job).await {
             tracing::warn!(job=%job.id(),?error,"a completed owner credential copy could not be audited before its compensation");
         }
@@ -1915,9 +1954,9 @@ impl ProviderRemoval {
     }
 }
 
-#[async_trait]
-impl Phased for ProviderRemoval {
-    async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
+impl ProviderRemoval {
+    /// One step of the removal; `Phased::run` says what it came to.
+    async fn step(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
         let failure = |error: CommandsError| failed(INTERNAL, error.to_string());
         match phase {
             "stop" => {
@@ -2063,6 +2102,30 @@ impl Phased for ProviderRemoval {
             )),
         }
     }
+}
+
+#[async_trait]
+impl Phased for ProviderRemoval {
+    async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
+        tracing::info!(provider = %self.provider, runtime = %self.runtime, job = %job.id(), volumes = self.volumes, phase, "provider runtime: a step of its removal begins");
+        let outcome = self.step(job, phase).await;
+        match &outcome {
+            Ok(Done::Finished) => {
+                tracing::info!(provider = %self.provider, runtime = %self.runtime, job = %job.id(), phase, "provider runtime: a step of its removal is done");
+            }
+            Ok(Done::Skipped(why)) => {
+                tracing::info!(provider = %self.provider, runtime = %self.runtime, job = %job.id(), phase, %why, "provider runtime: a step of its removal was skipped");
+            }
+            Err(Stop::Failed(failure)) => {
+                tracing::warn!(provider = %self.provider, runtime = %self.runtime, job = %job.id(), phase, code = %failure.code, reason = %failure.message, "provider runtime: a step of its removal failed");
+            }
+            Err(Stop::Cancelled) => {
+                tracing::info!(provider = %self.provider, runtime = %self.runtime, job = %job.id(), phase, "provider runtime: a step of its removal was cancelled");
+            }
+            Err(Stop::Lost) => {}
+        }
+        outcome
+    }
 
     /// A removal is not undone: what it took away stays away. What a failure does is date the next
     /// attempt, after a pause that grows, and say why on the runtime.
@@ -2182,6 +2245,11 @@ mod tests {
         assert_eq!(spec["roles"], json!(["provider", "agent"]));
         assert_eq!(spec["mounts"], json!([]));
         assert_eq!(spec["env"]["REGION"], "east");
+        assert_eq!(
+            spec["env"]["ORCH_RUNTIME_ID"],
+            json!(runtime),
+            "the connector in the unit tells its own machine state from an earlier unit's by this"
+        );
         assert_eq!(
             spec["env"]["SERVICE_TOKEN"],
             json!({"$secret":enrollment.secret})

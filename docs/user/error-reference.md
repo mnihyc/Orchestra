@@ -141,7 +141,7 @@ A failed action keeps its human explanation and available recovery. These stable
 | `error:internal` | The server could not complete this request. Try again. |
 | `error:source.offline` | The machine this runs on is offline. Reconnect it or ask its owner before trying again. |
 | `error:agent.offline` | The agent cannot be reached at the moment. Try again shortly. |
-| `error:provider.unavailable` | The provider is not ready at the moment. Try again shortly. |
+| `error:provider.unavailable` | The provider cannot do that right now. |
 | `error:harness.sessions_no_runtime` | This agent has no runtime for this provider yet. Start a thread with this agent, then check its sessions again. |
 | `error:harness.sessions_unavailable` | This agent could not list its sessions. Check its machine and try again. |
 | `error:harness.channels_unavailable` | The release channels could not be read. Check this server's internet access or name a mirror. |

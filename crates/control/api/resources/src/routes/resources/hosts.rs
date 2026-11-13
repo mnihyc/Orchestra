@@ -1453,6 +1453,7 @@ async fn runtime_stop(ctx: Ctx, (): (), body: api::HostRuntimeStopBody) -> ApiRe
                 host,
                 runtime,
                 body.interrupt,
+                body.force == Some(true),
             )
             .await
             .map_err(super::provider_runtime::refused)?;
@@ -1528,6 +1529,7 @@ async fn runtime_delete(ctx: Ctx, query: api::HostRuntimeDeleteQuery, (): ()) ->
                 host,
                 runtime,
                 query.volumes == Some(true),
+                query.force == Some(true),
             )
             .await
             .map_err(super::provider_runtime::refused);

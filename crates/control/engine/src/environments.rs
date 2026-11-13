@@ -578,13 +578,12 @@ pub async fn start(
     let mode = match state.status.as_str() {
         status::RUNNING => return Ok(Starting::Up),
         status::NONE | status::FAILED => Mode::Make,
-        status::STOPPED => {
-            if rows::live_runtime(conn, environment).await?.is_some() {
-                Mode::Start
-            } else {
-                Mode::Make
-            }
-        }
+        status::STOPPED => match rows::live_runtime(conn, environment).await? {
+            // A unit the host says it does not have cannot be started: it is made again, on the same
+            // volumes.
+            Some(runtime) if !rows::unit_missing(conn, runtime.id).await? => Mode::Start,
+            _ => Mode::Make,
+        },
         status::PROVISIONING => {
             return Ok(
                 match orch_db::queries::jobs::open_of_environment(conn, environment)
@@ -1232,8 +1231,16 @@ impl Engine {
         .await;
         let now = self.inner.clock.now();
         let mut conn = self.inner.db.acquire().await?;
+        // A host that has no such unit has nothing left to stop: the unit is stopped.
+        let stopped = match &waited {
+            Ok(Ok(crate::commands::Outcome::Succeeded(_))) => true,
+            Ok(Ok(crate::commands::Outcome::Failed(error))) => {
+                error.code == orch_link_contract::commands::ErrorCode::NotFound.as_str()
+            }
+            _ => false,
+        };
         match waited {
-            Ok(Ok(crate::commands::Outcome::Succeeded(_))) => {
+            _ if stopped => {
                 rows::set_runtime_state(
                     &mut conn,
                     runtime,

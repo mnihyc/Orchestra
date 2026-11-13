@@ -565,22 +565,29 @@ impl Phased for Quiescing {
                     return Ok(Done::Finished);
                 }
                 for (runtime, machine) in &self.recipe.units {
-                    job.command_to_undo(
-                        Outgoing::new(
-                            ids::derived(
-                                "resource.pause.unit",
-                                &[job.id().as_bytes(), runtime.as_bytes()],
-                            ),
-                            *machine,
-                            SerialKey::Runtime(*runtime),
-                            &NodeRuntimeStop {
-                                runtime_id: *runtime,
-                                reason: None,
-                            },
+                    let stopped = job
+                        .command_to_undo(
+                            Outgoing::new(
+                                ids::derived(
+                                    "resource.pause.unit",
+                                    &[job.id().as_bytes(), runtime.as_bytes()],
+                                ),
+                                *machine,
+                                SerialKey::Runtime(*runtime),
+                                &NodeRuntimeStop {
+                                    runtime_id: *runtime,
+                                    reason: None,
+                                },
+                            )
+                            .map_err(EngineError::from)?,
                         )
-                        .map_err(EngineError::from)?,
-                    )
-                    .await?;
+                        .await;
+                    match stopped {
+                        Ok(_) => {}
+                        // A host that has no such unit has nothing left to stop.
+                        Err(Stop::Failed(failure)) if failure.code == "not_found" => {}
+                        Err(other) => return Err(other),
+                    }
                     sqlx::query("UPDATE runtimes SET state='stopped',updated_at=$2 WHERE id=$1 AND state IN ('running','starting')").bind(runtime).bind(job.now()).execute(&mut *self.engine.db().acquire().await.map_err(EngineError::from)?).await.map_err(DbError::from)?;
                 }
             }

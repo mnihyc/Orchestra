@@ -50,8 +50,11 @@ export function errorText(
     const at = error.retryAt === null ? null : formatTimeOfDay(error.retryAt, context);
     const message = invitationIssuerAuthorityLost(error) ? t('auth.invite.issuerAuthorityLost')
       : error.code === 'rate_limited' && at !== null ? t('errorsAt.rate_limited', { time: at }) : apiErrorSentence(error.code, error.status, t, context.locale);
+    // "The provider cannot do that" is the sentence of a code that many acts answer with: the system's own reason for this one is shown below it.
+    const reason = error.code === 'provider.unavailable' ? error.problem.detail.trim() : '';
     return {
       message,
+      ...(reason === '' ? {} : { diagnostic: reason }),
       code: error.code,
       requestId: error.requestId === '' ? null : error.requestId,
       status: error.status,
