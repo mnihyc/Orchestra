@@ -2136,6 +2136,25 @@ async fn ask_of_turn(
     )))
 }
 
+/// How many times the stop of a reached cap looks at the committed usage before it leaves the turns to the next
+/// report: after the grace, then after twice that, and so on, doubling each time: about three seconds in all with
+/// the grace a deployment ships with, so that a commit slowed by a loaded machine does not leave a turn running
+/// past its cap.
+const STOP_LOOKS: u32 = 7;
+
+/// The shortest wait between two such looks, whatever the grace is.
+const STOP_LOOK_FLOOR: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// What a look at a cap, made after the report that showed it reached, found.
+enum Reached {
+    /// The cap is gone or off: nothing to stop.
+    Gone,
+    /// It has room: the report that showed it reached is not committed yet, or is no longer true.
+    Room,
+    /// It has none: its turns were stopped.
+    NoRoom,
+}
+
 impl Engine {
     /// After usage was reported on a stream: looks again at the caps of the turns it concerns, no more often
     /// for a thread than `[engine] cap_check_secs`. Notices are written in the transaction of the report; a
@@ -2214,46 +2233,66 @@ impl Engine {
                 && each.cap.at_limit == at_limit::STOP
                 && !bypass_names(turn.limit_bypass.as_ref(), each.cap.id)
             {
-                self.stop_later(each.cap.id, each.person);
+                self.stop_later(each.cap.id, each.person, thread);
             }
         }
         Ok(())
     }
 
     /// Has the turns a cap covers stopped, once the transaction that showed it reached has committed.
-    fn stop_later(&self, cap: Id, person: Option<Id>) {
+    ///
+    /// The look that found the cap reached was made inside that transaction, which has not committed when the
+    /// look of its own begins, and may never commit: a conflict rolls it back and the report is applied again.
+    /// That look reads what has been committed. After the grace it may find room (the report is not visible
+    /// yet); then the thread's note that its caps were looked at is taken away, so that the report applied
+    /// again is looked at and not passed over as one looked at a moment ago, and the look is made again after
+    /// twice as long, up to `STOP_LOOKS` times. A stop that found room and gave up would leave the turn running
+    /// until a next report, and the next report may be minutes away.
+    fn stop_later(&self, cap: Id, person: Option<Id>, thread: Id) {
         if !lock(&self.inner.cap_stops).insert((cap, person)) {
             return;
         }
         let engine = self.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(engine.inner.config.post_commit_grace).await;
-            if let Err(error) = engine.stop_covered(cap, person).await {
-                tracing::warn!(%error, %cap, "the turns a cap covers could not be stopped; the next report looks again");
+            let mut wait = engine.inner.config.post_commit_grace;
+            for _ in 0..STOP_LOOKS {
+                tokio::time::sleep(wait).await;
+                match engine.stop_covered_if_reached(cap, person).await {
+                    Ok(Reached::NoRoom | Reached::Gone) => break,
+                    Ok(Reached::Room) => {
+                        engine.forget_cap_check(thread);
+                        wait = wait.saturating_mul(2).max(STOP_LOOK_FLOOR);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, %cap, "the turns a cap covers could not be stopped; it looks again");
+                        wait = wait.saturating_mul(2).max(STOP_LOOK_FLOOR);
+                    }
+                }
             }
             lock(&engine.inner.cap_stops).remove(&(cap, person));
         });
     }
 
     /// Ends every running turn a cap that is reached covers (for a cap counted per person, the person's),
-    /// except those it was let past.
-    pub(crate) async fn stop_covered(
+    /// except those it was let past, and says what it found: the cap gone or off, with room, or without room
+    /// (and its turns stopped).
+    async fn stop_covered_if_reached(
         &self,
         cap: Id,
         person: Option<Id>,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Reached, EngineError> {
         let now = self.inner.clock.now();
         let (message, victims) = {
             let mut conn = self.inner.db.acquire().await?;
             let Some(cap) = rows::get(&mut conn, cap).await? else {
-                return Ok(());
+                return Ok(Reached::Gone);
             };
             if !cap.enabled {
-                return Ok(());
+                return Ok(Reached::Gone);
             }
             let standing = standing(&mut conn, &cap, person, now).await?;
             if standing.has_room() {
-                return Ok(());
+                return Ok(Reached::Room);
             }
             let message = describe(&mut conn, &standing).await?;
             let covered = rows::running(&mut conn, &cap, standing.person, now).await?;
@@ -2268,7 +2307,7 @@ impl Engine {
             self.stop_turn(turn.thread_id, turn.turn_id, &message)
                 .await?;
         }
-        Ok(())
+        Ok(Reached::NoRoom)
     }
 
     /// Ends a running turn because a cap was reached: its lease is closed, the harness is asked to stop, and
