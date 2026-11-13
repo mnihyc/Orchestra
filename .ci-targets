@@ -1,0 +1,9 @@
+# n41-settings: one section layout, drafts with Save, the summarizer and targets editors, pickers in place of raw identifiers, secrets shown as set; first compile of the lane's commits.
+fmt
+clippy
+test -p orch-engine --test summary_targets
+test -p orch-settings --test matrix_inheritance
+test -p orch-api-core --test settings
+web typecheck
+web lint
+web test -- tests/component/settings-drafts.test.tsx tests/component/settings-thing-choices.test.tsx tests/component/semantic-fields.test.tsx tests/component/managed-provider-settings.test.tsx tests/component/program-versions.test.tsx tests/component/agent-access-setting.test.tsx tests/component/resource-setting-choices.test.tsx tests/component/ask-models-setting.test.tsx tests/component/settings-policy-narrowing.test.tsx

@@ -1,7 +1,7 @@
 /** A compact registry setting: direct edits, guarded drafts, and short links to whoever sets a read-only value. */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Copy, Info, RotateCcw, Settings2, X } from 'lucide-react';
-import { type ReactNode, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { ApiError } from '@/api/client';
@@ -14,8 +14,11 @@ import { TellMembers } from '@/features/admin-messages/TellMembers';
 import { SettingHint } from '@/features/help/SettingHint';
 import { ORDERED_KEYS } from '@/features/settings/ValueControl';
 import { SettingValue } from '@/features/settings/SettingValue';
+import { clearsSetting, draftComplete } from '@/features/settings/draftChecks';
+import { DraftFaults, DraftValidity, holdDraft } from '@/features/settings/drafts';
 import { isCapabilityBackendSetting } from '@/features/settings/capabilityBackendValue';
 import { isResourceSetting } from '@/features/settings/ResourceChoice';
+import { isThingSetting } from '@/features/settings/ThingChoice';
 import { SourceSettingLink } from '@/features/settings/SourceSettingLink';
 import { emptySettingText, emptySettingValue, SettingSummary } from '@/features/settings/SettingSummary';
 import { SettingReachLine } from '@/features/settings/Reach';
@@ -70,12 +73,16 @@ export interface SettingRowProps {
   quiet?: boolean;
   /** A resource can state its declared lifecycle/apply constraint in this same row. */
   effectNote?: ReactNode;
+  /** Whether this row holds a structured value as an unsaved draft: the list that shows rows keeps such a row shown and mounted until it is saved or discarded. */
+  onDraft?: (key: string, held: boolean) => void;
 }
+
+const NO_FAULTS: readonly { path: string; message: string }[] = [];
 
 interface SavedSetting { before: ResolvedSetting['own']; revision: number | null }
 interface WriteChange { value: unknown; locked?: boolean; before: ResolvedSetting['own']; guard: number | null }
 
-export function SettingRow({ def, setting: incoming, target, place, onChanged, effectNote }: SettingRowProps) {
+export function SettingRow({ def, setting: incoming, target, place, onChanged, effectNote, onDraft }: SettingRowProps) {
   const { t, i18n: instance } = useTranslation();
   const client = useQueryClient();
   const locale = instance.resolvedLanguage ?? 'en';
@@ -94,7 +101,7 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
   // A discrete choice commits immediately; free input commits on leaving its field/form or Enter.
   const joining = def.merge !== 'replace';
   const backendChoice = isCapabilityBackendSetting(def.key);
-  const instant = (!joining || narrowsOnly(def.merge) && def.merge !== 'intersect') && (shape.type === 'bool' || shape.type === 'choice' || def.key === 'agent.default_provider_id' || def.key === 'calls.rules' || isResourceSetting(def.key) || backendChoice);
+  const instant = (!joining || narrowsOnly(def.merge) && def.merge !== 'intersect') && (shape.type === 'bool' || shape.type === 'choice' || def.key === 'agent.default_provider_id' || isThingSetting(def.key) || def.key === 'calls.rules' || isResourceSetting(def.key) || backendChoice);
   const inForce = editableValue(def, setting, shape);
   // A remote ancestor or own change must not discard what this person is still writing.
   const [draft, setDraft] = useState<unknown>(inForce);
@@ -195,6 +202,18 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
   const locked = honoursLocks(def) && setting.own?.locked === true;
 
   const complex = !backendChoice && (joining || !['bool', 'int', 'choice', 'text', 'id', 'time'].includes(shape.type) || shape.type === 'text' && (shape.maxLength ?? 0) > 200);
+  // An object or a list is written as a whole, once, by its own Save; nothing else on the page saves, closes or hides it.
+  const structured = ['object', 'list', 'map', 'json'].includes(shape.type) || shape.type === 'nullable' && ['object', 'list', 'map'].includes(shape.of.type);
+  const drafted = structured && !instant && !backendChoice && writable;
+  // The first thing an editor learned from the server that stops its draft being saved as it stands: a provider that cannot be used, a model that is not offered.
+  const [blocked, setBlocked] = useState<string | null>(null);
+  const [valid, setValid] = useState(true);
+  useLayoutEffect(() => {
+    const ok = form.current?.checkValidity() !== false;
+    setValid((held) => held === ok ? held : ok);
+  }, [draft, attempt, editorOpen]);
+  const complete = draftComplete(def.key, draft);
+  const mayWrite = !busy && writable && !stale && !ownChanged && valid && complete && blocked === null;
   useLayoutEffect(() => {
     if (busy || !refocus.current) return;
     refocus.current = false;
@@ -204,8 +223,13 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
   }, [attempt, busy, complex]);
   const commit = (keepFocus = true) => {
     if (!dirty || busy || !writable || instant || stale || ownChanged) return;
-    if (form.current?.checkValidity() !== true) { setInvalid(true); return; }
+    if (form.current?.checkValidity() !== true || !complete || blocked !== null) { setInvalid(true); return; }
     if (sameValue(draft, base)) { setTouched(false); setInvalid(false); setAttempt((count) => count + 1); return; }
+    // "None here" takes the value of this place away, so that what is above applies again; where this place has none there is nothing to take away.
+    if (clearsSetting(def.key, draft)) {
+      if (setting.own === null) { discardDraft(); return; }
+      write.reset(); undo.reset(); reset.mutate({ before: baseOwn, guard: baseRevision }); return;
+    }
     writeValue(draft, undefined, keepFocus);
   };
   // An explicit Apply uses the control's new value before the row has rendered that draft.
@@ -216,6 +240,37 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
     if (sameValue(value, base)) { setTouched(false); setAttempt((count) => count + 1); setEditorOpen(false); return; }
     writeValue(value);
   };
+
+  // Putting the saved value back, with its draft: the one thing a draft's Discard does, and what a question to leave the page does for every draft it holds.
+  const discardDraft = () => {
+    setDraft(inForce); setBase(inForce); setBaseRevision(setting.own?.revision ?? null); setBaseOwn(setting.own); setTouched(false); setInvalid(false);
+    setAttempt((count) => count + 1); setEditorOpen(false); write.reset(); reset.reset();
+  };
+  const holder = useRef<{ save: () => Promise<boolean>; discard: () => void }>({ save: () => Promise.resolve(false), discard: () => undefined });
+  useLayoutEffect(() => {
+    holder.current = {
+      save: async () => {
+        if (!dirty) return true;
+        if (!mayWrite) return false;
+        try {
+          if (clearsSetting(def.key, draft)) {
+            if (setting.own === null) discardDraft();
+            else await reset.mutateAsync({ before: baseOwn, guard: baseRevision });
+          }
+          else await write.mutateAsync({ value: draft, before: baseOwn, guard: baseRevision });
+          return true;
+        } catch { return false; }
+      },
+      discard: discardDraft,
+    };
+  });
+  const holding = drafted && dirty;
+  const holdId = JSON.stringify([target, def.key]);
+  useEffect(() => holding ? holdDraft(holdId, { save: () => holder.current.save(), discard: () => { holder.current.discard(); } }) : undefined, [holding, holdId]);
+  useEffect(() => {
+    onDraft?.(def.key, holding);
+    return () => onDraft?.(def.key, false);
+  }, [holding, def.key, onDraft]);
 
   const copyKey = () => copyText(def.key, t('settings.editor.keyCopied', { key: def.key }));
   const resetEntry: MenuEntry | null = setting.own !== null && writable
@@ -242,8 +297,8 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
       : provenance.kind === 'here' ? <span>{t('settings.compact.setOn', { place: place.name })}</span>
       : <SourceSettingLink inherited={provenance.kind === 'inherited'} source={setting.source} def={def} target={target} fallback={place.name} />;
 
-  const controls = <form ref={form} className="flex min-w-0 max-w-full flex-wrap items-center gap-2" aria-busy={busy || undefined}
-    onBlur={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
+  const controls = <form ref={form} className={drafted ? 'flex min-w-0 max-w-full flex-col items-stretch gap-3' : 'flex min-w-0 max-w-full flex-wrap items-center gap-2'} aria-busy={busy || undefined}
+    onBlur={(event) => { if (!drafted && (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget))) {
       commit(event.relatedTarget instanceof Node && event.currentTarget.closest('[data-setting-row]')?.contains(event.relatedTarget) === true);
     } }}
     onKeyDown={(event) => {
@@ -260,12 +315,18 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
     }}
     onSubmit={(event) => { event.preventDefault(); commit(); }}>
     {showsDefault && !emptyDefault && <span className="text-xs text-text-muted">{t('settings.compact.defaultPrefix')}</span>}
-    <SettingValue key={attempt} shape={shape} def={def} setting={setting} target={target} display={def.display} placeholder={emptyDefault ? emptySettingText(def.key, true, t, def.display) : undefined}
-      value={shown} label={def.title} disabled={busy} error={fault} onEdited={() => { setTouched(true); setInvalid(false); }} say={say}
-      ordered={ORDERED_KEYS.has(def.key)} onApply={applyValue} onChange={(next) => { setDraft(next); setTouched(true); setInvalid(false); if (instant && writable) writeValue(next); }} />
-    {dirty && write.isError && !stale && !ownChanged && <Button size="sm" pending={busy} onClick={() => { if (instant) writeValue(draft); else commit(); }}>{t('common.tryAgain')}</Button>}
-    {dirty && !instant && <>
-      <Button size="sm" icon={<X aria-hidden />} disabled={busy} onClick={() => { setDraft(inForce); setBase(inForce); setBaseRevision(setting.own?.revision ?? null); setBaseOwn(setting.own); setTouched(false); setInvalid(false); setAttempt((count) => count + 1); setEditorOpen(false); write.reset(); }}>{t('common.cancel')}</Button></>}
+    <DraftValidity value={setBlocked}><DraftFaults value={drafted ? faults : NO_FAULTS}>
+      <SettingValue key={attempt} shape={shape} def={def} setting={setting} target={target} display={def.display} placeholder={emptyDefault ? emptySettingText(def.key, true, t, def.display) : undefined}
+        value={shown} label={def.title} disabled={busy} error={fault} onEdited={() => { setTouched(true); setInvalid(false); }} say={say}
+        ordered={ORDERED_KEYS.has(def.key)} onApply={applyValue} onChange={(next) => { setDraft(next); setTouched(true); setInvalid(false); if (instant && writable) writeValue(next); }} />
+    </DraftFaults></DraftValidity>
+    {!drafted && dirty && write.isError && !stale && !ownChanged && <Button size="sm" pending={busy} onClick={() => { if (instant) writeValue(draft); else commit(); }}>{t('common.tryAgain')}</Button>}
+    {!drafted && dirty && !instant && <>
+      <Button size="sm" icon={<X aria-hidden />} disabled={busy} onClick={discardDraft}>{t('common.cancel')}</Button></>}
+    {drafted && <div data-draft-foot className="flex flex-wrap items-center gap-2">
+      <Button size="sm" variant="primary" type="submit" pending={write.isPending || reset.isPending} disabled={busy ? false : !dirty || !mayWrite}>{t('common.save')}</Button>
+      <Button size="sm" disabled={busy} onClick={discardDraft}>{t('settingsEditors.draft.discard')}</Button>
+    </div>}
   </form>;
   const showsMemory = (def.key === 'env.resources' || def.key === 'runtime.resources') && (target.kind === 'environment' || target.kind === 'provider');
   const unusedProgram = setting.not_applicable_reason === 'prompt_cache_ttl_unsupported' && 'not_applicable_program' in setting && typeof setting.not_applicable_program === 'string' ? setting.not_applicable_program : null;

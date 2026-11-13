@@ -349,7 +349,7 @@ export function MachinePolicyTab({ machine }: { machine: Pick<Machine, 'id'> }) 
       {keys.length === 0 ? (
         <EmptyState compact title={t('machines.policy.noKeys')} />
       ) : (
-        <DetailSections label={t('resourceDetails.layout.sections')} sections={SECTIONS.flatMap((section) => {
+        <DetailSections stacked label={t('resourceDetails.layout.sections')} sections={SECTIONS.flatMap((section) => {
           // Shared keys (for example directory roots) keep one row and one editor on this page.
           const rows = keys.filter((entry) => SECTIONS.find((candidate)=>entry.definition.sections.includes(candidate))===section);
           if (rows.length === 0) return [];

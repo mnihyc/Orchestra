@@ -1916,6 +1916,14 @@ const WRITTEN_SUMMARY_OPTIONS: Schema = Schema::Object {
     members: &[],
     open: false,
 };
+/// What each generated target does while no scope sets it, written out in full. The settings page draws these as the values a
+/// target starts from, and the engine falls back to the same numbers (it reads them from this default), so the page and the work
+/// can never disagree: nothing is automatic; a thread keeps the shared trigger pacing (two minutes after a turn or a milestone), a topic
+/// follows its children at a quarter of an hour, a document waits for edits to settle for five minutes, chats and their titles collect
+/// messages for five minutes; each reads up to 32,000 tokens and writes up to 600 characters, 80 for the title of a chat.
+const SUMMARY_TARGETS_SHIPPED: DefaultOf = DefaultOf::Value(
+    r#"{"thread":{"automatic":false,"on":["turn_completed","milestone"],"min_interval_secs":120,"context_tokens":32000,"output_chars":600},"topic":{"automatic":false,"on":["child_changed"],"min_interval_secs":900,"context_tokens":32000,"output_chars":600},"document":{"automatic":false,"on":["content_changed"],"min_interval_secs":300,"context_tokens":32000,"output_chars":600},"chat":{"automatic":false,"on":["message_posted"],"min_interval_secs":300,"context_tokens":32000,"output_chars":600},"chat_title":{"automatic":false,"on":["message_posted"],"min_interval_secs":300,"context_tokens":32000,"output_chars":80}}"#,
+);
 const SUMMARY_TARGETS: Schema = Schema::Object {
     members: &[
         optional("thread", SUMMARY_TARGET_OPTIONS),
@@ -2541,7 +2549,7 @@ registry! {
         "Summarizer", "Which summarizer is used, and its configuration.";
     AUTO_TRIGGERS = "auto.triggers", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("{\"on\":[\"turn_completed\",\"milestone\"],\"min_interval_secs\":120}"), TRIGGERS,
         "Triggers", "When automatic titles, tags and summaries are written again: after a turn, at a milestone or at intervals, and how often at most.";
-    SUMMARY_TARGETS = "summary.targets", Automation, Parameter, SYSTEM_TO_THREAD, Map, EMPTY_MAP, SUMMARY_TARGETS,
+    SUMMARY_TARGETS = "summary.targets", Automation, Parameter, SYSTEM_TO_THREAD, Map, SUMMARY_TARGETS_SHIPPED, SUMMARY_TARGETS,
         "Summary targets", "Refresh events and input/output defaults by target, off until enabled under the chosen summarizer and shared usage caps. Help and search results use written or existing summaries.";
     SUMMARY_FOLLOW_INTERVAL_SECS = "summary.follow_interval_secs", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("5"), int_between(1, 4_294_967_295, Unit::Seconds),
         "Summary follow interval", "Free reads while a summary is eligible or running; a scheduled future update is followed at its actual due time instead.";

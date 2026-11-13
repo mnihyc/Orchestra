@@ -1,8 +1,11 @@
 # Personal and hierarchical configuration
 
 Every scope uses `Frame.tsx`: personal, org/department, project, topic and Management. Section links
-stay in a fixed vertical list from a 600px viewport; below that one Select activates the same real
-links. Every scope's sections replace the unrelated Navigation tree. `sidebarPresence.ts` follows
+are one list beside the content from 600px of room (it stays in view and scrolls by itself where it is
+longer than the window) and one strip of the same names above the content where narrower, which scrolls
+sideways; there is never a dropdown. A list inside the content of another list is a strip at every width.
+The groups of a long page of settings, and the sections of a template's settings, are all on one scroll
+under their headings with the same list or strip (`shell/ScrollSections.tsx`), marking the one the page is at. Every scope's sections replace the unrelated Navigation tree. `sidebarPresence.ts` follows
 the existing native visible-view lifetime, so a hidden/closed/moved bar restores the frame's fallback
 without guessing saved layout visibility. A scope heading labels a reused Section of the same name;
 there is one title and no redundant Back link or common repeated subtitle. The legacy settings Usage
@@ -18,7 +21,11 @@ opening. Org destination aliases, flat-org sections, exact setting links and the
 remembered Settings tab select one current item. Settings pages hold no navigation-tree subscription.
 
 Ordinary settings save on change: discrete choices write immediately, text uses the shared typing
-pause or leaving its form. `AutoSave.tsx` retains raw invalid/IME/refused drafts, serializes newer text
+pause or leaving its form. An object or a list is a draft instead: its row opens in place with Save and
+Discard at its foot, and nothing else (another row's switch, the filter, leaving the field) writes,
+closes or hides it; `drafts.ts` holds each open draft so that closing the view, reloading or pressing
+another section asks once. The summarizer and the summary targets have editors of their own
+(`SummarizerEditor.tsx`, `SummaryTargetsEditor.tsx`); the targets' defaults are the registry's. `AutoSave.tsx` retains raw invalid/IME/refused drafts, serializes newer text
 against the accepted answer, and supplies `ui/SaveStatus` with quiet Saved/Undo. Place, notification
 and system edits/Undo retain native revisions (including absence); an explicit conflict recovery alone
 reads again. Personal name/appearance/profile endpoints have no revision member, so their inverses
