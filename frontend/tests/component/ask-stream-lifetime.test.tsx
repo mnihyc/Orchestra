@@ -63,13 +63,13 @@ it('retains ordered unseen notices when a native snapshot overtakes the active e
   render(probe()); await waitFor(() => expect(calls.stream).toHaveBeenCalledOnce());
   const newer = askSnapshot({ conversation: askConversation({ state: 'ready', seq: 9 }) });
   act(() => { queryClient.setQueryData(askKey(ASK_ID), newer); });
-  await deliver({ kind: 'error', code: 'ask_context_no_room', message: 'Server fallback' }, ASK_ID, 7);
-  expect(screen.getByTestId('notice')).toHaveTextContent(i18n.t('ask.contextNoRoom'));
+  await deliver({ kind: 'error', code: 'ask_context_too_long', model: 'Chosen model', message: 'Server fallback' }, ASK_ID, 7);
+  expect(screen.getByTestId('notice')).toHaveTextContent(i18n.t('ask.contextTooLong', { model: 'Chosen model' }));
   expect(queryClient.getQueryData(askKey(ASK_ID))).toEqual(newer);
   await deliver({ kind: 'notice', code: 'old', message: 'A duplicate must not replace the reason' }, ASK_ID, 7);
   await deliver({ kind: 'notice', code: 'foreign', message: 'A foreign notice must not replace the reason' }, 'another-conversation', 8);
   await deliver({ kind: 'tool', call_id: 'settled', name: 'A stale tool must not return', complete: false, citations: [] }, ASK_ID, 8);
-  expect(screen.getByTestId('notice')).toHaveTextContent(i18n.t('ask.contextNoRoom'));
+  expect(screen.getByTestId('notice')).toHaveTextContent(i18n.t('ask.contextTooLong', { model: 'Chosen model' }));
   expect(screen.getByTestId('tools')).toBeEmptyDOMElement();
   expect(queryClient.getQueryData(askKey(ASK_ID))).toEqual(newer);
 });
@@ -101,12 +101,9 @@ it('retires a deleted snapshot and does not immediately fetch it again', async (
   expect(calls.read).toHaveBeenCalledOnce(); expect(calls.deliveries[0]?.signal.aborted).toBe(true);
 });
 
-for (const locale of ['en', 'zh-CN'] as const) it(`keeps both local context refusal reasons readable in ${locale}`, async () => {
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps the local context refusal reason readable in ${locale}`, async () => {
   await setLocale(locale); const t = i18n.getFixedT(locale);
   render(probe()); await waitFor(() => expect(calls.stream).toHaveBeenCalledOnce());
-  const noRoom = { kind: 'error' as const, code: 'ask_context_no_room', message: 'Server fallback' };
-  await deliver(noRoom);
-  expect(screen.getByTestId('notice')).toHaveTextContent(t('ask.contextNoRoom'));
   const tooLong = { kind: 'error' as const, code: 'ask_context_too_long', model: 'Chosen model', message: 'Server fallback' };
   await deliver(tooLong, ASK_ID, 7);
   expect(screen.getByTestId('notice')).toHaveTextContent(t('ask.contextTooLong', { model: 'Chosen model' }));

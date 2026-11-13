@@ -55,6 +55,12 @@ pub(crate) fn denied(message: impl Into<String>) -> ApiError {
     ApiError::new(ErrorCode::AuthzDenied, message)
 }
 
+/// A refusal that says why. The problem's own words are always the catalogue's for its code, so the reason
+/// travels as a stable name beside them, and the interface gives its sentence in the reader's language.
+pub(crate) fn denied_because(reason: &str, message: impl Into<String>) -> ApiError {
+    denied(message).with("reason", reason)
+}
+
 pub(crate) fn mount(registry: &mut Registry) {
     registry
         .creation(api::AskCreate, creation::conversation())
@@ -114,7 +120,8 @@ pub(crate) async fn root_access(conn: &mut Conn, principal: &Principal, root: Id
         })? {
         RootAccess::Allowed => Ok(()),
         RootAccess::Missing => Err(ApiError::not_found()),
-        RootAccess::Refused => Err(denied(
+        RootAccess::Refused => Err(denied_because(
+            "root_refused",
             "You can no longer open this conversation's organization",
         )),
     }
@@ -621,7 +628,14 @@ fn prepare_list<'a>(
             Some(caller.user())
         };
         if let Some(root) = query.root_org_id {
-            root_access(conn, &principal, root).await?;
+            // Ask answers as the person: their own history is read with their ordinary access, whatever the
+            // As admin switch says. Only an explicit inspection reads as the administrator.
+            let reader = if query.inspect {
+                principal.clone()
+            } else {
+                principal.ordinary(conn).await.map_err(ApiError::internal)?
+            };
+            root_access(conn, &reader, root).await?;
         }
         let before = query
             .cursor
@@ -677,6 +691,14 @@ async fn list(ctx: Ctx, mut query: api::AskListQuery, (): ()) -> ApiResult<api::
     }
     let mut conn = ctx.app.db.acquire().await?;
     let principal = ctx.operation_principal(&mut conn).await?;
+    let principal = if query.inspect {
+        principal
+    } else {
+        principal
+            .ordinary(&mut conn)
+            .await
+            .map_err(ApiError::internal)?
+    };
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let rows = ctx.operation_data::<Vec<rows::Conversation>>()?;
     let next_cursor = if rows.len() > limit as usize {

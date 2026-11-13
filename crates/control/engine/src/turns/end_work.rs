@@ -79,7 +79,6 @@ fn failure_class(error: &EngineError) -> (&'static str, Option<String>) {
     match error {
         EngineError::Capability(_) => ("capability", None),
         EngineError::CapabilityPaused(_) => ("capability_paused", None),
-        EngineError::AskContextNoRoom => ("ask_context_no_room", None),
         EngineError::AskContextTooLong(_) => ("ask_context_too_long", None),
         EngineError::BeforeEffect(_) => ("before_effect", None),
         EngineError::BackgroundRunning(_) => ("background_running", None),

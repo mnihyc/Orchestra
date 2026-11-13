@@ -3,6 +3,7 @@ use crate::EngineError;
 use orch_api_contract::ask::{AskModel, AskModelIdentity};
 use orch_authz::Principal;
 use orch_db::{Conn, DbError, queries::resources::thread_engine as resources};
+use orch_provider_contract::models::ModelParameters;
 use orch_settings::Place;
 use orch_types::{Id, Json, Time};
 use serde_json::json;
@@ -15,14 +16,31 @@ pub enum Error {
     Db(#[from] DbError),
     /// The same ordinary refusal shown at interactive admission.
     #[error("{0}")]
-    Denied(String),
+    Denied(Refusal),
     /// The native read failed rather than granting work.
     #[error(transparent)]
     Native(#[from] EngineError),
 }
+/// A refused choice: why, as a stable name a client acts on, and as the sentence a person is given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    /// The stable name of the reason.
+    pub reason: &'static str,
+    /// The sentence for the person.
+    pub message: String,
+}
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 impl Error {
-    fn denied(message: impl std::fmt::Display) -> Self {
-        Self::Denied(message.to_string())
+    fn denied(reason: &'static str, message: impl std::fmt::Display) -> Self {
+        Self::Denied(Refusal {
+            reason,
+            message: message.to_string(),
+        })
     }
     fn native(error: impl Into<EngineError>) -> Self {
         Self::Native(error.into())
@@ -63,12 +81,15 @@ impl Selection {
     pub async fn online(self, conn: &mut Conn) -> Result<Chosen, Error> {
         let machine = self
             .keeper
-            .ok_or_else(|| Error::denied("The provider has no credential keeper"))?;
+            .ok_or_else(|| Error::denied("no_keeper", "The provider has no credential keeper"))?;
         if !orch_db::queries::resources::machine(conn, machine)
             .await?
             .is_some_and(|machine| machine.online)
         {
-            return Err(Error::denied("The provider's credential keeper is offline"));
+            return Err(Error::denied(
+                "keeper_offline",
+                "The provider's credential keeper is offline",
+            ));
         }
         Ok(Chosen {
             selection: self.selection,
@@ -80,6 +101,24 @@ impl Selection {
         })
     }
 }
+/// Ask declares its own read tools, and the machine that keeps the key refuses a request whose options add
+/// another tool. So its request never selects hosted web search, whatever the model or the provider offers or
+/// starts with, or an earlier choice kept: the option is set to disabled wherever the model has one.
+fn without_web_search(protocol: &str, parameters: &ModelParameters, chosen: Option<Json>) -> Json {
+    let mut options = chosen
+        .as_ref()
+        .and_then(Json::as_object)
+        .cloned()
+        .unwrap_or_default();
+    options.remove("web_search");
+    if orch_model_contract::web_search::for_model(protocol, parameters).is_some()
+        && parameters.option_rule(protocol, "web_search") != Some(&Json::Bool(false))
+    {
+        options.insert("web_search".to_owned(), json!({"mode":"disabled"}));
+    }
+    Json::Object(options)
+}
+
 /// Select the exact explicit model through the ordinary Ask policy and Use checks.
 pub async fn select(
     conn: &mut Conn,
@@ -98,6 +137,7 @@ pub async fn select(
         .any(|identity| identity.provider_id == model.provider_id && identity.model == model.model)
     {
         return Err(Error::denied(
+            "not_in_list",
             "Choose an entry from this root organization's ask.models list",
         ));
     }
@@ -105,7 +145,7 @@ pub async fn select(
     let found = resources::model(conn, model.provider_id, &model.model)
         .await?
         .filter(|found| found.enabled)
-        .ok_or_else(|| Error::denied("This model is not enabled"))?;
+        .ok_or_else(|| Error::denied("model_disabled", "This model is not enabled"))?;
     let provider = resources::provider(conn, model.provider_id)
         .await?
         .filter(|provider| {
@@ -116,13 +156,23 @@ pub async fn select(
                     "disabled" | "error" | "needs_setup" | "offline"
                 )
         })
-        .ok_or_else(|| Error::denied("Ask needs an available API provider"))?;
+        .ok_or_else(|| {
+            Error::denied(
+                "provider_unavailable",
+                "Ask needs an available API provider",
+            )
+        })?;
     let protocol = provider
         .protocols
         .iter()
         .find(|protocol| orch_model_contract::generation::supported(protocol))
         .cloned()
-        .ok_or_else(|| Error::denied("This provider offers no declared dialogue interface"))?;
+        .ok_or_else(|| {
+            Error::denied(
+                "no_interface",
+                "This provider offers no declared dialogue interface",
+            )
+        })?;
     let parameters = orch_provider_contract::models::composed_model_parameters(
         &found.parameters,
         &found.groups,
@@ -135,9 +185,9 @@ pub async fn select(
         &protocol,
         &parameters,
         &defaults,
-        &model.params.clone().unwrap_or_else(|| json!({})),
+        &without_web_search(&protocol, &parameters, model.params.clone()),
     )
-    .map_err(Error::denied)?;
+    .map_err(|message| Error::denied("options_refused", message))?;
     let effective = crate::resolved::load(conn, root)
         .await
         .map_err(Error::native)?;
@@ -147,6 +197,7 @@ pub async fn select(
         .is_some_and(|patterns| !crate::models::allowed_by(patterns, &model.model, &found.groups))
     {
         return Err(Error::denied(
+            "model_not_allowed",
             "This model is not allowed in the conversation's organization",
         ));
     }
@@ -156,6 +207,7 @@ pub async fn select(
         .is_some()
     {
         return Err(Error::denied(
+            "provider_not_allowed",
             "This provider is not allowed in the conversation's organization",
         ));
     }
@@ -166,7 +218,9 @@ pub async fn select(
         orch_db::queries::settings::row(conn, paid.resolved.source.node, "ask.paid_by")
             .await?
             .and_then(|row| row.updated_by)
-            .ok_or_else(|| Error::denied("The Ask payer setting has no current writer"))?
+            .ok_or_else(|| {
+                Error::denied("payer_unset", "The Ask payer setting has no current writer")
+            })?
     } else {
         principal.caller().user()
     };
@@ -190,6 +244,7 @@ pub async fn select(
             .map_err(Error::native)?;
     let orch_authz::usable::Usable::Yes(person_use) = person_use else {
         return Err(Error::denied(
+            "no_use",
             "You cannot use this provider in the conversation's organization",
         ));
     };
@@ -205,9 +260,13 @@ pub async fn select(
             })
         })
     }) {
-        return Err(Error::denied("This identity is not usable in ask.models"));
+        return Err(Error::denied(
+            "identity_not_usable",
+            "This identity is not usable in ask.models",
+        ));
     }
-    let effort = orch_provider_contract::calls::requested_effort(&params).map_err(Error::denied)?;
+    let effort = orch_provider_contract::calls::requested_effort(&params)
+        .map_err(|message| Error::denied("options_refused", message))?;
     let wanted = orch_authz::options::Wanted {
         model: Some((&model.model, &found.groups)),
         effort,
@@ -215,6 +274,7 @@ pub async fn select(
     };
     if !person_use.allows(&wanted) {
         return Err(Error::denied(
+            "use_excludes",
             "Your provider Use entry excludes this model or effort",
         ));
     }
@@ -224,11 +284,13 @@ pub async fn select(
             .map_err(Error::native)?;
     let orch_authz::usable::Usable::Yes(granted) = grant else {
         return Err(Error::denied(
+            "payer_no_use",
             "The current payer cannot use this provider here",
         ));
     };
     if !granted.allows(&wanted) {
         return Err(Error::denied(
+            "payer_excludes",
             "The current payer cannot use this model or effort",
         ));
     }

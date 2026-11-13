@@ -1,0 +1,9 @@
+# n41-ask: Ask in tokens only, refusals that carry their reason, no web search option in Ask's call; first compile of the lane's commits.
+fmt
+clippy
+test -p orch-api-core --test ask
+test -p orch-engine --lib
+test -p orch-connector-core --lib
+web typecheck
+web lint
+web test -- tests/unit/ask-refusal-words.test.ts tests/unit/api-error-words.test.ts tests/component/ask-stream-lifetime.test.tsx tests/component/ask-states.test.tsx

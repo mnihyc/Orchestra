@@ -2,14 +2,17 @@
 use super::*;
 use orch_link_contract::commands::ProviderGenerate;
 
-fn recorder(s: &Scene) -> Arc<Mutex<Vec<ProviderGenerate>>> {
+pub(super) fn recorder(s: &Scene) -> Arc<Mutex<Vec<ProviderGenerate>>> {
     recorder_with_summary(
         s,
         "The earlier question asked to retain the original project details.".into(),
     )
 }
 
-fn recorder_with_summary(s: &Scene, summary: String) -> Arc<Mutex<Vec<ProviderGenerate>>> {
+pub(super) fn recorder_with_summary(
+    s: &Scene,
+    summary: String,
+) -> Arc<Mutex<Vec<ProviderGenerate>>> {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let seen = requests.clone();
     s.rig
@@ -50,13 +53,29 @@ fn recorder_with_summary(s: &Scene, summary: String) -> Arc<Mutex<Vec<ProviderGe
     requests
 }
 
-async fn send(s: &Scene, id: Id, client: &str, text: String) -> AskReceipt {
+/// The Ask window that leaves `room` tokens for a request: the answer takes half of a small window, and its
+/// 4096 tokens of a larger one.
+pub(super) fn window_leaving(room: i64) -> i64 {
+    if room <= 4096 { 2 * room } else { room + 4096 }
+}
+
+pub(super) async fn send(s: &Scene, id: Id, client: &str, text: String) -> AskReceipt {
+    send_as(s, &s.cai, id, client, text).await
+}
+
+pub(super) async fn send_as(
+    s: &Scene,
+    who: &places::Who,
+    id: Id,
+    client: &str,
+    text: String,
+) -> AskReceipt {
     let receipt = s
         .rig
         .world
         .app
         .call(AskMessageCreate, &[&id])
-        .token(&s.cai.token)
+        .token(&who.token)
         .body(&AskMessageBody {
             client_id: client.into(),
             content: vec![ContentPart::Text { text }],
@@ -77,7 +96,7 @@ async fn send(s: &Scene, id: Id, client: &str, text: String) -> AskReceipt {
     receipt
 }
 
-fn has_text(request: &ProviderGenerate, wanted: &str) -> bool {
+pub(super) fn has_text(request: &ProviderGenerate, wanted: &str) -> bool {
     request
         .input
         .messages
@@ -111,9 +130,8 @@ async fn a_short_history_is_complete_and_a_smaller_ask_window_compacts_once_then
     );
     // This leaves the first request plus 1000 model-estimated tokens, enough
     // for the tiny summary and a follow-up, but not a second long question.
-    let reserved = 4096 + orch_engine::ask::context::tokens(MODEL, 262144);
     let smaller =
-        reserved + orch_engine::ask::context::estimate(MODEL, &first.input).unwrap() + 1000;
+        window_leaving(orch_engine::ask::context::estimate(MODEL, &first.input).unwrap() + 1000);
     assert!(smaller < first.model_parameters.context_window.unwrap());
     setting(&s, "ask.context_tokens", json!(smaller)).await;
     let second = send(&s, made.conversation_id, "second", original.clone()).await;
@@ -191,12 +209,51 @@ async fn a_short_history_is_complete_and_a_smaller_ask_window_compacts_once_then
 }
 
 #[tokio::test]
+async fn a_model_added_by_name_with_no_window_answers_with_every_setting_as_shipped() {
+    // EN: Providers > add a model by name, without a context window > Ask > send a question; it is answered.
+    // 中文：在提供方中按名称添加不带上下文窗口的模型 > Ask > 提问；得到回答。
+    let s = Scene::new().await;
+    let provider = configured_provider(&s).await;
+    sqlx::query(
+        "UPDATE provider_models SET parameters='{}' WHERE provider_id=$1 AND model_name=$2",
+    )
+    .bind(provider)
+    .bind(MODEL)
+    .execute(s.rig.db.pool())
+    .await
+    .unwrap();
+    let requests = recorder(&s);
+    let made = create_unseeded(&s, &s.cai).await;
+    let receipt = send(
+        &s,
+        made.conversation_id,
+        "no-window",
+        "A first question".into(),
+    )
+    .await;
+    let error: Option<Json> = sqlx::query_scalar("SELECT error FROM turns WHERE id=$1")
+        .bind(receipt.turn_id.unwrap())
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(error, None, "the turn is not refused for room");
+    let calls = requests.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "the model was asked");
+    assert!(has_text(&calls[0], "A first question"));
+    assert_eq!(calls[0].input.max_output_tokens, 4096);
+    assert_eq!(
+        calls[0].model_parameters.context_window, None,
+        "no window is made up for it"
+    );
+}
+
+#[tokio::test]
 async fn ask_output_policy_changes_the_reserve_and_an_impossible_window_refuses_before_generation()
 {
     // EN browser: set Ask output to 1024 > Ask > send a short question > lower
-    // its context window to 1024 > Send; the visible reserve reason replaces Ready.
+    // its context window to 1024 > Send; the visible reason replaces Ready.
     // 中文浏览器：将 Ask 输出上限设为 1024 > 提问 > 发送简短问题 > 将上下文上限降至
-    // 1024 > 发送；显示预留空间不足的原因，不以就绪提示覆盖。
+    // 1024 > 发送；显示无法容纳的原因，不以就绪提示覆盖。
     let s = Scene::new().await;
     configured_provider(&s).await;
     setting(&s, "ask.max_output_tokens", json!(1024)).await;
@@ -222,15 +279,11 @@ async fn ask_output_policy_changes_the_reserve_and_an_impossible_window_refuses_
         .fetch_one(s.rig.db.pool())
         .await
         .unwrap();
-    assert_eq!(error["code"], "ask_context_no_room");
-    let reason = error["message"].as_str().unwrap();
-    for setting in [
-        "ask.context_tokens",
-        "ask.max_output_tokens",
-        "ask.turn_tool_bytes",
-    ] {
-        assert!(reason.contains(setting));
-    }
+    assert_eq!(
+        error["code"], "ask_context_too_long",
+        "a window the answer's most would fill derives the answer from it and refuses only what cannot fit"
+    );
+    assert_eq!(error["model"], MODEL);
     let events: Vec<Json> =
         sqlx::query_scalar("SELECT body FROM ask_events WHERE thread_id=$1 ORDER BY seq")
             .bind(made.conversation_id)
@@ -240,7 +293,7 @@ async fn ask_output_policy_changes_the_reserve_and_an_impossible_window_refuses_
     assert!(
         events
             .iter()
-            .any(|event| event["kind"] == "error" && event["code"] == "ask_context_no_room")
+            .any(|event| event["kind"] == "error" && event["code"] == "ask_context_too_long")
     );
     assert!(
         !events
@@ -264,8 +317,7 @@ async fn a_question_that_cannot_fit_even_without_old_history_is_refused_with_the
     let requests = recorder(&s);
     let made = create_unseeded(&s, &s.cai).await;
     send(&s, made.conversation_id, "first", "A small question".into()).await;
-    let reserved = 4096 + orch_engine::ask::context::tokens(MODEL, 262144);
-    setting(&s, "ask.context_tokens", json!(reserved + 100)).await;
+    setting(&s, "ask.context_tokens", json!(window_leaving(100))).await;
     let refused = send(
         &s,
         made.conversation_id,
@@ -383,11 +435,12 @@ async fn even_a_completed_summary_that_cannot_fit_is_visible_counted_and_refused
     let question = format!("Keep these original details {}", "x".repeat(12_000));
     send(&s, made.conversation_id, "first", question.clone()).await;
     let first = requests.lock().unwrap()[0].clone();
-    let reserved = 4096 + orch_engine::ask::context::tokens(MODEL, 262144);
     setting(
         &s,
         "ask.context_tokens",
-        json!(reserved + orch_engine::ask::context::estimate(MODEL, &first.input).unwrap() + 1000),
+        json!(window_leaving(
+            orch_engine::ask::context::estimate(MODEL, &first.input).unwrap() + 1000
+        )),
     )
     .await;
     let refused = send(&s, made.conversation_id, "second", question).await;
@@ -427,4 +480,288 @@ async fn even_a_completed_summary_that_cannot_fit_is_visible_counted_and_refused
     .await
     .unwrap();
     assert_eq!(charged, 2);
+}
+
+#[tokio::test]
+async fn a_model_that_starts_with_live_web_search_is_asked_without_a_search_option_and_answers() {
+    // EN browser: Providers > a model whose default is live web search > Ask > send a question;
+    // it is answered, and the request names no search of its own.
+    // 中文浏览器：提供方中默认开启实时联网搜索的模型 > Ask > 提问；得到回答，请求不选择联网搜索。
+    let s = Scene::new().await;
+    let provider = configured_provider(&s).await;
+    sqlx::query("UPDATE provider_models SET parameters=$3 WHERE provider_id=$1 AND model_name=$2")
+        .bind(provider)
+        .bind(MODEL)
+        .bind(json!({"context_window":200000,"web_search":["live"],"default_web_search":"live"}))
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let requests = recorder(&s);
+    let made = create_unseeded(&s, &s.cai).await;
+    let receipt = send(
+        &s,
+        made.conversation_id,
+        "search-default",
+        "A first question".into(),
+    )
+    .await;
+    let error: Option<Json> = sqlx::query_scalar("SELECT error FROM turns WHERE id=$1")
+        .bind(receipt.turn_id.unwrap())
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(error, None, "the turn is answered");
+    let calls = requests.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "the model was asked");
+    let params = calls[0].params.clone().unwrap_or(Json::Null);
+    assert_eq!(
+        params["web_search"]["mode"], "disabled",
+        "the model's default search never reaches Ask's own tools: {params}"
+    );
+}
+
+#[tokio::test]
+async fn on_a_model_with_a_256000_window_a_question_is_answered_with_every_setting_as_shipped() {
+    // EN browser: Providers > a model with a 256,000-token window > Ask > send a question; it is answered.
+    // 中文浏览器：提供方中窗口为 256,000 令牌的模型 > Ask > 提问；得到回答。
+    let s = Scene::new().await;
+    let provider = configured_provider(&s).await;
+    sqlx::query("UPDATE provider_models SET parameters=$3 WHERE provider_id=$1 AND model_name=$2")
+        .bind(provider)
+        .bind(MODEL)
+        .bind(json!({"context_window":256000}))
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let requests = recorder(&s);
+    let made = create_unseeded(&s, &s.cai).await;
+    let receipt = send(
+        &s,
+        made.conversation_id,
+        "large-window",
+        "A first question".into(),
+    )
+    .await;
+    let error: Option<Json> = sqlx::query_scalar("SELECT error FROM turns WHERE id=$1")
+        .bind(receipt.turn_id.unwrap())
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(error, None, "the turn is answered");
+    let calls = requests.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "the model was asked once");
+    assert_eq!(calls[0].model_parameters.context_window, Some(256000));
+    assert_eq!(calls[0].input.max_output_tokens, 4096);
+}
+
+/// The model reads the guide first, then answers; every request is kept.
+fn reads_the_guide_then_answers(s: &Scene) -> Arc<Mutex<Vec<ProviderGenerate>>> {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    s.rig
+        .machine
+        .handler
+        .on(CommandKind::ProviderGenerate, move |command| {
+            let Command::ProviderGenerate(request) = command else {
+                panic!("generation")
+            };
+            let read = request
+                .input
+                .messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .any(|part| matches!(part, GenerationPart::ToolResult { .. }));
+            seen.lock().unwrap().push(request.clone());
+            Ok(CommandResult::ProviderGenerate(ProviderGenerateResult {
+                native_result_blob: None,
+                output: GenerationOutput {
+                    native_result: Json::Null,
+                    message: GenerationMessage {
+                        role: GenerationRole::Assistant,
+                        content: vec![if read {
+                            GenerationPart::Text {
+                                text: "The guide says so.".into(),
+                            }
+                        } else {
+                            GenerationPart::ToolCall {
+                                id: "guide".into(),
+                                name: "docs".into(),
+                                arguments: json!({"query":"ask.models"}),
+                            }
+                        }],
+                        continuation: vec![],
+                    },
+                    stop: if read {
+                        GenerationStop::Complete
+                    } else {
+                        GenerationStop::Tools
+                    },
+                },
+                usage: Default::default(),
+                timing: Default::default(),
+                request_ref: None,
+            }))
+        });
+    requests
+}
+
+#[tokio::test]
+async fn a_tool_result_larger_than_the_room_left_is_cut_with_its_line_and_the_answer_still_comes() {
+    // EN browser: Ask > a question whose answer reads the guide, in a window that holds the question and
+    // a little more > the answer comes, and the source it read shows that it was cut and where the whole is.
+    // 中文浏览器：Ask > 提问，回答需要读取指南，窗口只比问题略大 > 回答照常给出，所读来源标明已截短及完整来源所在。
+    let s = Scene::new().await;
+    configured_provider(&s).await;
+    let question = "What does the guide say about the Ask models?";
+    // The same question in an empty conversation, to measure the request it makes.
+    let measured = recorder(&s);
+    let probe = create_unseeded(&s, &s.cai).await;
+    send(&s, probe.conversation_id, "measure", question.into()).await;
+    let used =
+        orch_engine::ask::context::estimate(MODEL, &measured.lock().unwrap()[0].input).unwrap();
+    // The window leaves 400 tokens after that request; the guide's pages come to many times that.
+    let window = window_leaving(used + 400);
+    setting(&s, "ask.context_tokens", json!(window)).await;
+    let requests = reads_the_guide_then_answers(&s);
+    let made = create_unseeded(&s, &s.cai).await;
+    let receipt = send(&s, made.conversation_id, "cut", question.into()).await;
+    let error: Option<Json> = sqlx::query_scalar("SELECT error FROM turns WHERE id=$1")
+        .bind(receipt.turn_id.unwrap())
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(error, None, "the answer comes");
+    let calls = requests.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2, "one step to read, one to answer");
+    let (read, is_error) = calls[1]
+        .input
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|part| match part {
+            GenerationPart::ToolResult {
+                content, is_error, ..
+            } => Some((content.clone(), *is_error)),
+            _ => None,
+        })
+        .expect("the answer step carries what the guide gave");
+    assert!(!is_error);
+    assert!(
+        read.contains("Result shortened to fit the context") && read.contains("/help/"),
+        "the cut says that it is one and where the whole source is: {read}"
+    );
+    let answer = (window / 2).min(4096);
+    assert!(
+        orch_engine::ask::context::estimate(MODEL, &calls[1].input).unwrap() <= window - answer,
+        "the request that carries the cut fits the window less the answer"
+    );
+    assert!(
+        read.len() < 12_000,
+        "what the window left is a few hundred tokens, not the five pages"
+    );
+}
+
+#[tokio::test]
+async fn a_providers_context_too_long_answer_compacts_the_conversation_once_and_the_question_is_answered()
+ {
+    // EN browser: a model whose window is not recorded > a long question, then another > the provider
+    // says the second is too long > earlier messages are summarized and the answer comes.
+    // 中文浏览器：未记录窗口的模型 > 先后发送两个长问题 > 提供方说第二个过长 > 较早消息被归纳，回答照常给出。
+    use orch_link_contract::commands::{CommandError, ErrorCode};
+    let s = Scene::new().await;
+    let provider = configured_provider(&s).await;
+    sqlx::query(
+        "UPDATE provider_models SET parameters='{}' WHERE provider_id=$1 AND model_name=$2",
+    )
+    .bind(provider)
+    .bind(MODEL)
+    .execute(s.rig.db.pool())
+    .await
+    .unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<ProviderGenerate>::new()));
+    let seen = requests.clone();
+    s.rig
+        .machine
+        .handler
+        .on(CommandKind::ProviderGenerate, move |command| {
+            let Command::ProviderGenerate(request) = command else {
+                panic!("generation")
+            };
+            let mut seen = seen.lock().unwrap();
+            seen.push(request.clone());
+            let call = seen.len();
+            if call == 2 {
+                return Err(CommandError::new(
+                    ErrorCode::Internal,
+                    "the generation upstream answered 400",
+                )
+                .with_details(
+                    json!({"failure":{"code":"context_overflow","status":400,"retryable":false}}),
+                ));
+            }
+            Ok(CommandResult::ProviderGenerate(ProviderGenerateResult {
+                native_result_blob: None,
+                output: GenerationOutput {
+                    native_result: Json::Null,
+                    message: GenerationMessage {
+                        role: GenerationRole::Assistant,
+                        content: vec![GenerationPart::Text {
+                            text: if request.input.tools.is_empty() {
+                                "The earlier question asked to retain the original project details."
+                                    .into()
+                            } else {
+                                "A short answer.".into()
+                            },
+                        }],
+                        continuation: vec![],
+                    },
+                    stop: GenerationStop::Complete,
+                },
+                usage: Default::default(),
+                timing: Default::default(),
+                request_ref: None,
+            }))
+        });
+    let made = create_unseeded(&s, &s.cai).await;
+    let long = format!("earliest project detail {}", "x".repeat(40_000));
+    send(&s, made.conversation_id, "first", long.clone()).await;
+    let second = send(&s, made.conversation_id, "second", long.clone()).await;
+    let error: Option<Json> = sqlx::query_scalar("SELECT error FROM turns WHERE id=$1")
+        .bind(second.turn_id.unwrap())
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(error, None, "the second question is answered");
+    let calls = requests.lock().unwrap().clone();
+    assert_eq!(
+        calls.len(),
+        4,
+        "the question, the refusal, the summary, the answer"
+    );
+    assert!(
+        calls[2].input.tools.is_empty(),
+        "the third request summarizes"
+    );
+    assert!(has_text(&calls[2], &long));
+    assert!(has_text(&calls[3], "Earlier messages summarized"));
+    let asked = calls[3]
+        .input
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter(|part| matches!(part, GenerationPart::Text { text } if text.contains("earliest project detail")))
+        .count();
+    assert_eq!(
+        asked, 1,
+        "only the new question is left in full; the first is summarized"
+    );
+    let snapshot = read(&s, &s.cai, made.conversation_id).await;
+    assert_eq!(
+        snapshot
+            .messages
+            .iter()
+            .filter(|message| message.summary.is_some() && message.complete)
+            .count(),
+        1
+    );
 }

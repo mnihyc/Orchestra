@@ -119,7 +119,8 @@ impl Selected for Models {
         value: &'a Self::Value,
     ) -> BoxFuture<'a, ApiResult<Self::Reply>> {
         Box::pin(async move {
-            root_access(conn, principal, value.root_org_id).await?;
+            let ordinary = principal.ordinary(conn).await.map_err(ApiError::internal)?;
+            root_access(conn, &ordinary, value.root_org_id).await?;
             Ok(value.clone())
         })
     }
@@ -132,7 +133,8 @@ impl Selected for Models {
         fresh: &'a Self::Value,
     ) -> BoxFuture<'a, ApiResult<bool>> {
         Box::pin(async move {
-            root_access(conn, principal, query.root_org_id).await?;
+            let ordinary = principal.ordinary(conn).await.map_err(ApiError::internal)?;
+            root_access(conn, &ordinary, query.root_org_id).await?;
             // Eligibility, schemas and edit hints must still describe the producing body.
             Ok(serde_json::to_value(opened).map_err(ApiError::internal)?
                 == serde_json::to_value(fresh).map_err(ApiError::internal)?)

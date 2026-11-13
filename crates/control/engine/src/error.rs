@@ -21,11 +21,6 @@ pub enum EngineError {
     /// A prepared capability follows an existing call-rule pause without an accepted result.
     #[error("The capability is paused under its current call rules.")]
     CapabilityPaused(Box<crate::tools::capability_service::CapabilityPause>),
-    /// Ask's configured window cannot hold its required reserves.
-    #[error(
-        "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves."
-    )]
-    AskContextNoRoom,
     /// Even a summary and the current question cannot fit the selected model.
     #[error("This conversation is too long for {0}; start a new one or keep it as a thread.")]
     AskContextTooLong(String),

@@ -15,6 +15,8 @@ pub struct Source {
     id: Id,
     call: String,
     hash: Hash,
+    /// The length in bytes the result was given to the model at: a refresh of it is cut to the same length.
+    len: usize,
 }
 
 #[derive(Clone)]
@@ -35,27 +37,40 @@ pub struct History {
     per_message: Vec<Vec<Source>>,
 }
 
+/// What bounds this turn's requests: the model's window, lowered by `ask.context_tokens` and by `learned`, a
+/// window below the one a provider's refusal of a request as too long has shown (zero while none has).
 pub(super) async fn budget(
     conn: &mut Conn,
     root: Id,
     parameters: &orch_provider_contract::models::ModelParameters,
     model: &str,
+    learned: i64,
 ) -> Result<Budget, EngineError> {
     let context = setting::<i64>(conn, Place::Node(root), "ask.context_tokens").await?;
     let output = setting::<i64>(conn, Place::Node(root), "ask.max_output_tokens")
         .await?
         .unwrap_or(4096);
-    let tools = setting::<i64>(conn, Place::Node(root), "ask.turn_tool_bytes")
-        .await?
-        .unwrap_or(262144);
+    let context = [context, (learned > 0).then_some(learned)]
+        .into_iter()
+        .flatten()
+        .min();
     // The request's own root is used, including for a kept built-in thread.
-    Budget::new(
-        parameters,
-        model,
-        context,
-        output,
-        usize::try_from(tools).map_err(failed)?,
-    )
+    Ok(Budget::new(parameters, model, context, output))
+}
+
+/// Where the whole source of a tool result is: the first canonical link among its citations.
+pub(super) fn first_link(value: &Json) -> Option<String> {
+    value
+        .get("citations")?
+        .as_array()?
+        .iter()
+        .find_map(|source| {
+            source
+                .get("url")
+                .and_then(Json::as_str)
+                .filter(|url| url.starts_with('/') && !url.starts_with("//"))
+        })
+        .map(str::to_owned)
 }
 
 pub(super) async fn refresh(
@@ -100,12 +115,6 @@ async fn current(host: &Host, sources: &[Source]) -> Result<bool, EngineError> {
             }
         }
     }
-    let limit = usize::try_from(
-        setting::<i64>(&mut conn, Place::Node(host.origin.root), "ask.tool_bytes")
-            .await?
-            .unwrap_or(65536),
-    )
-    .map_err(failed)?;
     drop(conn);
     for source in sources {
         let row = witnesses
@@ -116,12 +125,17 @@ async fn current(host: &Host, sources: &[Source]) -> Result<bool, EngineError> {
             Some(row) => refresh(host, row).await?,
             None => None,
         };
-        let (mut text, error) = match value {
-            Some(value) => (serde_json::to_string(&value)?, false),
+        let (mut text, error) = match &value {
+            Some(value) => (serde_json::to_string(value)?, false),
             None => ("no longer available to you".to_owned(), true),
         };
-        if !error {
-            orch_engine::ask::bound_tool_result(&mut text, limit);
+        if let (false, Some(value)) = (error, &value) {
+            // Cut to the length it was given at, as `prepare` cuts it.
+            orch_engine::ask::bound_tool_result(
+                &mut text,
+                source.len,
+                first_link(value).as_deref(),
+            );
         }
         if hash(&text, error)? != source.hash {
             return Ok(false);
@@ -324,6 +338,7 @@ impl History {
                             id: *id,
                             call: call_id.clone(),
                             hash,
+                            len: content.len(),
                         })),
                         _ => None,
                     })
@@ -378,6 +393,7 @@ impl History {
         request.tools.clear();
         request.messages.clear();
         let mut estimated = budget.estimate(&request)?;
+        let room = budget.room();
         let mut cut = 0;
         for (index, message) in input.messages.iter().take(self.older).enumerate() {
             let mut portable = GenerationInput {
@@ -388,7 +404,7 @@ impl History {
             };
             orch_engine::ask::portable_messages(&mut portable);
             estimated = estimated.saturating_add(budget.material(&portable.messages)?);
-            if estimated > budget.window - budget.output {
+            if room.is_some_and(|room| estimated > room) {
                 break;
             }
             let next = index + 1;
@@ -402,7 +418,7 @@ impl History {
         }
         request.messages = input.messages[..cut].to_vec();
         orch_engine::ask::portable_messages(&mut request);
-        if !budget.fits_summary(&request)? {
+        if !budget.fits(&request)? {
             return Err(refuse());
         }
         let mut sources = self.sources.clone();
