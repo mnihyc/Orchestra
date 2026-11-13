@@ -5,8 +5,7 @@ import type { BackgroundCommand, ThreadBackground } from '../../src/generated/ap
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 import { executionDisplay } from '../doubles/thread-display';
-import { inspectLayout } from '../../e2e/layout-rules-dom';
-import { LAYOUT_INPUT } from '../../e2e/layout-rules-helpers';
+import { inspectSettled, LAYOUT_INPUT } from '../../e2e/layout-rules-helpers';
 import { ACME, deny, scenario, signIn } from './support';
 
 const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
@@ -130,7 +129,7 @@ for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const)
       await expect(control).toBeVisible();
       await expect(control).toHaveText(value.state === 'live' && value.total !== null ? countLabel : words.running.title);
       await openView();
-      const result = await page.evaluate(inspectLayout, LAYOUT_INPUT);
+      const result = await inspectSettled(page, LAYOUT_INPUT);
       expect(result.faults).toEqual([]);
       if (value.state === 'live' && value.total === null) await test.info().attach('background-unknown-view-menu', {
         body: await page.screenshot({ fullPage: true, animations: 'disabled' }), contentType: 'image/png',

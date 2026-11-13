@@ -83,10 +83,10 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await waitFor(() => expect(state.reads).toHaveBeenCalledWith('e1'));
     expect(state.reads).not.toHaveBeenCalledWith('new');
     const selectedAgent = screen.getByRole('combobox', { name: i18n.t('start.agent.title') });
-    expect(selectedAgent).toHaveDisplayValue('Agent a1');
+    await waitFor(() => expect(selectedAgent).toHaveDisplayValue('Agent a1'));
     await userEvent.click(selectedAgent);
     const choice = screen.getByRole('option', { name: 'Agent a1' });
-    expect(choice).not.toHaveAttribute('aria-disabled', 'true');
+    await waitFor(() => expect(choice).not.toHaveAttribute('aria-disabled', 'true'));
     await userEvent.keyboard('{Escape}');
     expect(selectedAgent).toHaveDisplayValue('Agent a1');
     await userEvent.click(screen.getByRole('button', { name: i18n.t('start.create') }));
@@ -277,8 +277,11 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await waitFor(() => expect(state.reads).toHaveBeenCalledWith('new'));
     await userEvent.click(screen.getByRole('combobox', { name: i18n.t('start.agent.title') }));
     const profile = screen.getByRole('option', { name: 'Agent a1' });
-    expect(profile).toHaveAttribute('aria-disabled', 'true');
-    expect(profile).toHaveAccessibleDescription(new RegExp(i18n.t('start.reason.executor_missing')));
+    // The reason is the answer about the template: the choice says it once the answer has been applied.
+    await waitFor(() => {
+      expect(profile).toHaveAttribute('aria-disabled', 'true');
+      expect(profile).toHaveAccessibleDescription(new RegExp(i18n.t('start.reason.executor_missing')));
+    });
     await userEvent.click(profile);
     await userEvent.keyboard('{Escape}');
     expect(screen.getByRole('button', { name: i18n.t('start.create') })).toBeDisabled();
@@ -538,7 +541,10 @@ it('reviews a remembered same-place directory against its own native options bef
   rememberSetup('starter', { place: topic.id, picks: { ...NO_PICKS, provider: 'p1', agent: 'a1', model: 'm1', environment: 'e2' } });
   show(<QuickStart node={topic} />);
   await waitFor(() => expect(state.reads).toHaveBeenCalledWith('e2'));
-  await userEvent.type(screen.getByRole('textbox', { name: i18n.t('start.quick.label.topic') }), 'Same location{Enter}');
+  // Starting waits for the answers about the place: Enter is pressed once the button says they are in.
+  await userEvent.type(screen.getByRole('textbox', { name: i18n.t('start.quick.label.topic') }), 'Same location');
+  await waitFor(() => expect(screen.getByRole('button', { name: i18n.t('start.quick.send') })).not.toHaveAttribute('aria-disabled', 'true'));
+  await userEvent.keyboard('{Enter}');
   expect(submittedPlan()).toMatchObject({ resolved: { fresh: false, environment: { environment: { id: 'e2' } } } });
 });
 
