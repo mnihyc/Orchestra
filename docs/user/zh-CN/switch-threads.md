@@ -4,6 +4,7 @@ screens: /thread/$threadId, /resources/providers/$id, /resources/agents/$id, /re
 keywords: 切换, 批量, 提供方, 配置, 模型, 环境, 历史, 等待消息, switch.batch_threads
 heading_id.批量切换: switch-a-batch
 heading_id.批量大小: batch-size
+summary: 查看提供方范围的批量计划，将符合条件的线程切换到选定目标。
 ---
 
 # 切换对话

@@ -120,7 +120,7 @@ export function OverviewCharts({ span }: { span: Span }) {
 
   if (metrics.isPending) {
     return (
-      <SkeletonGroup className="grid gap-4 md:grid-cols-2">
+      <SkeletonGroup read={metrics} className="grid gap-4 md:grid-cols-2">
         {CHARTS.map((def) => (
           <div key={def.id} className={cx(boxClasses, 'flex flex-col gap-3 p-4')}>
             <Skeleton className="h-4 w-1/3" />

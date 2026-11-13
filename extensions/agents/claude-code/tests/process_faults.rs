@@ -28,7 +28,7 @@ use serde_json::json;
 /// The program that stands in for the harness. It reads one line at a time; the handshake is answered, and
 /// a message of the person is answered as its first word asks. `mode` is the word.
 const STAND_IN: &str = r#"#!/bin/sh
-case "$1" in --version) echo '2.1.296 (Claude Code)'; exit 0;; esac
+case "$1" in --version) echo '2.1.322 (Claude Code)'; exit 0;; esac
 echo started >> "$0.starts"
 while IFS= read -r line; do
   case "$line" in
@@ -55,7 +55,7 @@ echo stopped >> "$0.stops"
 
 /// The same program, for a harness that refuses to start.
 const REFUSING: &str = r#"#!/bin/sh
-case "$1" in --version) echo '2.1.296 (Claude Code)'; exit 0;; esac
+case "$1" in --version) echo '2.1.322 (Claude Code)'; exit 0;; esac
 echo 'Error: the configuration directory is read-only' >&2
 exit 1
 "#;
@@ -172,21 +172,52 @@ async fn a_process_that_ends_by_itself_without_a_result_loses_the_session_with_w
 }
 
 #[tokio::test]
-async fn half_a_line_and_an_end_is_a_lost_session_and_the_half_line_is_not_a_frame() {
+async fn half_a_line_at_exit_is_a_visible_error_and_lost_session_without_an_invented_answer() {
     let mut rig = rig("half", json!({})).await;
     let turn = rig.turn("HALF");
+    let turn_id = turn.turn_id;
     rig.adapter.start_turn(turn).await.unwrap();
     let events = rig
         .until(|event| matches!(event, SessionEvent::SessionLost(_)), 30)
         .await;
-    assert!(
-        events.iter().all(|event| !matches!(
-            event,
-            SessionEvent::ItemStarted(_) | SessionEvent::TurnCompleted(_)
-        )),
-        "nothing is made of half a line: {:?}",
-        kinds(&events)
+    let errors: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::ItemStarted(item) => match &item.content {
+                orch_agent_contract::events::ItemContent::Error(error) => Some((item, error)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "one malformed native line has one visible error"
     );
+    assert_eq!(errors[0].0.turn_id, turn_id);
+    assert_eq!(errors[0].1.code, "harness_error");
+    assert!(
+        errors[0]
+            .1
+            .message
+            .contains("{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"cont")
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event,SessionEvent::ItemCompleted(item)
+        if item.native_ref==errors[0].0.native_ref && item.payload["code"]=="harness_error"))
+            .count(),
+        1
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnCompleted(_)))
+    );
+    assert!(!events.iter().any(|event|matches!(event,SessionEvent::ItemStarted(item)
+        if matches!(&item.content,orch_agent_contract::events::ItemContent::AgentMessage(_) | orch_agent_contract::events::ItemContent::ToolCall(_)))));
     let (_, events) = rig.run("fine").await;
     assert_eq!(outcome(&events), TurnOutcome::Completed);
 }

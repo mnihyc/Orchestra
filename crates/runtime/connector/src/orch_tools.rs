@@ -46,7 +46,8 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 /// How long an ordinary call waits, leaving ten seconds before the harness's deadline.
-pub const RESULT_WAIT: Duration = Duration::from_secs(50);
+pub const RESULT_WAIT: Duration =
+    Duration::from_secs(orch_agent_contract::loopback::ORCH_TOOL_RESULT_WAIT_SECONDS);
 
 /// How much longer than an ordinary call `open_port` waits: 70 s where the ordinary wait is 50, so that the
 /// system's sixty seconds for a person's decision answer within it, ten seconds before the harness's deadline of
@@ -141,7 +142,9 @@ const INVALID_PARAMS: i64 = -32602;
 /// The code of a message that is no JSON.
 const PARSE_ERROR: i64 = -32700;
 
-/// The definitions of the tools, as the system declares them.
+/// The definitions of the tools, as the system declares them. The file holds every tool, the read tools included, as
+/// the engine's definitions give them (the engine's listing test keeps the two equal); adding the read tools again
+/// would offer each of them twice, and a model service refuses a tool list with a name in it twice.
 fn listing() -> &'static [Json] {
     static LISTING: OnceLock<Vec<Json>> = OnceLock::new();
     LISTING
@@ -164,6 +167,17 @@ pub fn definitions_with(
                 .and_then(|name| descriptions.get(name))
             {
                 definition["description"] = Json::String(supplied(own));
+                if definition["name"]
+                    .as_str()
+                    .and_then(orch_agent_contract::events::OrchTool::parse)
+                    .is_some_and(orch_agent_contract::events::OrchTool::is_owner_read)
+                    && let Some(description) = definition["description"].as_str()
+                {
+                    definition["description"] = Json::String(format!(
+                        "{description} {}",
+                        orch_agent_contract::read_tools::OWNER_CONDITION
+                    ));
+                }
             }
             definition
         })
@@ -1031,6 +1045,24 @@ fn bounded_error(code: &str, message: &str, budget: usize) -> String {
 fn result_of_at(tool: &str, arguments: &Json, outcome: Result<Json, ToolError>, now: Time) -> Json {
     match outcome {
         Ok(value) => {
+            if orch_agent_contract::events::OrchTool::parse(tool).is_some_and(|tool| {
+                tool.is_owner_read() || tool == orch_agent_contract::events::OrchTool::OrchDocs
+            }) {
+                return match orch_agent_contract::tool_answers::bounded(tool, arguments, &value) {
+                    Ok(shown) => {
+                        json!({"content":[{"type":"text","text":shown.to_string()}],"isError":false})
+                    }
+                    Err(message) => result_of_at(
+                        tool,
+                        arguments,
+                        Err(ToolError {
+                            code: "too_large".into(),
+                            message: message.into(),
+                        }),
+                        now,
+                    ),
+                };
+            }
             if matches!(tool, "read_shared" | "list_shared" | "search_shared") {
                 let budget = arguments["max_bytes"]
                     .as_u64()
@@ -1046,7 +1078,10 @@ fn result_of_at(tool: &str, arguments: &Json, outcome: Result<Json, ToolError>, 
                 json!({"content":[{"type":"text","text":text}],"isError":false})
             } else {
                 match orch_agent_contract::tool_answers::bounded(tool, arguments, &value) {
-                    Ok(shown) => json!({"content":[],"structuredContent":shown,"isError":false}),
+                    Ok(shown) => {
+                        let failed = orch_agent_contract::tool_answers::reported_failure(&shown);
+                        json!({"content":[],"structuredContent":shown,"isError":failed})
+                    }
                     Err(message) => result_of_at(
                         tool,
                         arguments,
@@ -1242,6 +1277,10 @@ impl OrchEndpoint {
                     segment_id: session.segment_id,
                 },
                 Event::OrchToolCall(OrchToolCall {
+                    deadline: Some(Time::new(
+                        self.hosting.services().clock.now()
+                            + chrono::Duration::from_std(wait).unwrap_or_default(),
+                    )),
                     turn_id: source.turn_id,
                     call_ref: call_ref.clone(),
                     attempt: Some(orch_types::new_id()),
@@ -1268,7 +1307,17 @@ impl OrchEndpoint {
 fn unreachable_error(tool: &str) -> ToolError {
     ToolError {
         code: "unavailable".to_owned(),
-        message: if matches!(tool, "list_shared" | "read_shared" | "search_shared") {
+        message: if matches!(
+            tool,
+            "list_shared"
+                | "read_shared"
+                | "search_shared"
+                | "orch_docs"
+                | "open"
+                | "search"
+                | "find_operation"
+                | "read"
+        ) {
             UNREACHABLE
         } else {
             TIMEOUT_CHANGE
@@ -1349,6 +1398,25 @@ mod tests {
             outcome,
             "2026-10-15T12:00:00Z".parse().unwrap(),
         )
+    }
+
+    #[test]
+    fn an_explicit_capability_failure_keeps_its_reset_and_helper_in_the_error_reply() {
+        let outcome = json!({"state":"failed","isError":true,"failure":{"code":"rate_limited","message":"Native image allowance reached","window":"synthetic-images","resets_at":"2026-10-15T13:00:00Z"},
+            "helper":{"thread_id":"helper","program_label":{"en":"Fixture native program"}}});
+        let answer = result_of("image_generation", &json!({}), Ok(outcome.clone()));
+        assert_eq!(answer["isError"], true);
+        assert_eq!(answer["structuredContent"], outcome);
+        for value in [
+            json!({"state":"failed"}),
+            json!({"isError":true}),
+            json!({"state":"ready","isError":true,"failure":{"code":"x","message":"not a failed outcome"}}),
+        ] {
+            assert_eq!(
+                result_of("image_generation", &json!({}), Ok(value))["isError"],
+                false
+            );
+        }
     }
 
     #[test]
@@ -1727,8 +1795,11 @@ mod tests {
             );
             assert_eq!(
                 tool["annotations"]["openWorldHint"],
-                name == orch_agent_contract::events::OrchTool::UseBrowser.name(),
-                "only the browser tool reaches the open web: {name}"
+                matches!(
+                    name,
+                    "use_browser" | "web_search" | "web_fetch" | "image_generation"
+                ),
+                "browser and external capability services reach outside Orch: {name}"
             );
             assert!(tool["annotations"]["readOnlyHint"].is_boolean(), "{name}");
         }

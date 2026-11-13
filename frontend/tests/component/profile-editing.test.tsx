@@ -35,7 +35,7 @@ vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeo
 
 const PROFILE: UserProfile = { user: ADA, bio: 'Initial biography', pronouns: '', links: [], local_time: null, member_of: [], personal_org: null, pins: [], activity: false, is_me: true, can_message: false, inspected: null, joined_at: MADE_AT, settings: { audience: 'system', show_time: false, show_activity: false } };
 function name(id: string, title: string, root = 'Acme'): NameHit {
-  return { id, kind: 'topic', name: title, path: [{ id: root, name: root, kind: 'org', redacted: false }], address: null, archived: false, avatar: null, color: null, custom_color: null, owner: null, recent: false, tag: null, thread_attention: null, username: null };
+  return { home_path: [], id, kind: 'topic', name: title, path: [{ id: root, name: root, kind: 'org', redacted: false }], address: null, archived: false, avatar: null, color: null, custom_color: null, owner: null, recent: false, tag: null, thread_attention: null, username: null };
 }
 
 beforeEach(() => { vi.clearAllMocks(); calls.read.mockReset().mockResolvedValue(PROFILE); calls.save.mockReset(); calls.pins.mockReset(); calls.search.mockReset().mockResolvedValue([]); calls.favorites.mockReset().mockResolvedValue([]); });
@@ -51,7 +51,8 @@ describe('editing a profile through its own controls', () => {
     show(<ProfileSettingsPage />);
     const bio = await screen.findByRole('textbox', { name: t('profile.page.bio') });
     expect(screen.getByText(t('profile.page.pinHelp'))).toBeVisible();
-    await user.clear(bio); await user.type(bio, '  Written biography  ');
+    // The words are pasted, as one change: keystrokes spaced by a pause of the machine would be saved as several partial drafts, and the case asks for one save.
+    await user.clear(bio); await user.paste('  Written biography  ');
     await waitFor(() => expect(calls.save).toHaveBeenCalledExactlyOnceWith({ bio: '  Written biography  ' }));
     expect(bio).toBeEnabled();
     expect(screen.getByRole('combobox', { name: t('profile.page.audience') })).toBeEnabled();

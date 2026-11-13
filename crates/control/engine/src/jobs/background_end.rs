@@ -119,6 +119,9 @@ impl Ending {
                 item_id: target.item_id,
             }
         } else {
+            // Ingestion takes this same lock before changing a task. A completion racing exact End
+            // is classified only after the native reply and this transaction's factual outcome.
+            orch_db::queries::threads::lock(&mut tx, self.thread).await?;
             let generation: Option<(Option<Id>, Option<String>)> = sqlx::query_as(
                 "SELECT machine_id,native_session_ref FROM segments WHERE id=$1 AND thread_id=$2",
             )
@@ -218,7 +221,16 @@ impl Ending {
             job.now(),
         )
         .await?;
-        tx.commit().await.map_err(DbError::from)?;
+        let finished = {
+            let mut unit = crate::unit::Unit::new(&mut tx, self.engine.inner.clock.now());
+            if outcome.state == BackgroundEndState::Ended {
+                self.engine
+                    .background_ended(&mut unit, self.thread, target.item_id, &target.command_id)
+                    .await?;
+            }
+            unit.finish().await?
+        };
+        self.engine.commit(tx, finished).await?;
         Ok(outcome)
     }
 }

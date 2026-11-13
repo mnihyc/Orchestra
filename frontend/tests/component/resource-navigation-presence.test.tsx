@@ -11,7 +11,9 @@ import { ViewOpeningContext } from '@/features/workbench/viewOpening';
 import { viewOf } from '@/features/workbench/views';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+skipOverflowFallback();
 
 vi.mock('@tanstack/react-router', () => ({
   Link: ({ to, activeProps: _activeProps, children, ...props }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; activeProps?: unknown; children?: ReactNode }) => {

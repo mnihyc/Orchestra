@@ -1,6 +1,6 @@
 [package]
 name = "orch-summarizer-model"
-description = "Model-backed title, description and tag generation selected by configuration."
+description = "Model-backed titles, tags, summary text and handoffs selected by configuration."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,7 @@ publish.workspace = true
 async-trait.workspace = true
 orch-agent-contract.workspace = true
 orch-link-contract.workspace = true
+orch-provider-contract.workspace = true
 orch-summarizer-contract.workspace = true
 orch-types.workspace = true
 schemars.workspace = true

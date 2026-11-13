@@ -116,7 +116,7 @@ impl Drop for LocalExecutor {
 
 enum Executor {
     Container(ExecServer),
-    Local(LocalExecutor),
+    Local(Box<LocalExecutor>),
 }
 impl Executor {
     fn address(&self) -> SocketAddr {
@@ -131,7 +131,7 @@ impl Executor {
                 drop(peer);
                 Ok(())
             }
-            Self::Local(peer) => peer.stop().await,
+            Self::Local(peer) => (*peer).stop().await,
         }
     }
 }
@@ -187,9 +187,9 @@ async fn a_remote_executor_uses_the_changed_cwd_on_the_same_native_conversation_
         .await
         .expect("the pinned native image/container is required; this proof never silently skips");
     let peer = if orch_testkit::native_configuration::container_proof_mode(module_path!()) {
-        Executor::Local(
+        Executor::Local(Box::new(
             LocalExecutor::start(rig.home_path(), rig.workspace_path(), &rig.token).await?,
-        )
+        ))
     } else {
         Executor::Container(
             ExecServer::start("session-configuration", rig.workspace_path(), &rig.token).await,
@@ -197,7 +197,7 @@ async fn a_remote_executor_uses_the_changed_cwd_on_the_same_native_conversation_
     };
     let proxy = SplitProxy::start(rig.mock.addr(), peer.address()).await;
     rig.loopback_port = Some(proxy.port());
-    assert_eq!(rig.boot().await.harness_version, "0.165.0");
+    assert_eq!(rig.boot().await.harness_version, "0.167.2");
     let thread = new_id();
     let child = rig.workspace_path().join("child");
     std::fs::create_dir_all(&child)?;
@@ -302,10 +302,10 @@ async fn native_questions_reach_the_person_and_return_content_in_each_admitted_m
         let peer = if separated {
             Some(
                 if orch_testkit::native_configuration::container_proof_mode(module_path!()) {
-                    Executor::Local(
+                    Executor::Local(Box::new(
                         LocalExecutor::start(rig.home_path(), rig.workspace_path(), &rig.token)
                             .await?,
-                    )
+                    ))
                 } else {
                     Executor::Container(
                         ExecServer::start("native-questions", rig.workspace_path(), &rig.token)
@@ -325,7 +325,7 @@ async fn native_questions_reach_the_person_and_return_content_in_each_admitted_m
             rig.loopback_port = Some(proxy.port());
         }
         let started = rig.boot().await;
-        assert_eq!(started.harness_version, "0.165.0");
+        assert_eq!(started.harness_version, "0.167.2");
         for mode in [
             ApprovalMode::Ask,
             ApprovalMode::OnRequest,

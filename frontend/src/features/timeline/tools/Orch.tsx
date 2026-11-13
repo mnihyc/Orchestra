@@ -7,6 +7,8 @@
 import { useTranslation } from 'react-i18next';
 
 import { OpenFromTool } from '@/features/browser/View';
+import { CapabilityHelper } from '@/features/timeline/tools/CapabilityHelper';
+import { CapabilityFailure } from '@/features/timeline/tools/CapabilityFailure';
 import type { Item } from '@/generated/api-types';
 import { JsonTree } from '@/ui/JsonTree';
 
@@ -22,6 +24,8 @@ export function OrchDisplay({ item }: { item: OrchItem }) {
   return (
     <div className="flex flex-col gap-2">
       <p className="font-mono text-sm text-text-muted">{tool.tool}</p>
+      {tool.tool === 'image_generation' && <CapabilityHelper result={tool.result} />}
+      <CapabilityFailure result={tool.result} />
       <JsonTree value={tool.arguments} label={t('timeline.mcp.arguments')} />
       {tool.result !== null && tool.result !== undefined && <JsonTree value={tool.result} label={t('timeline.mcp.result')} />}
       {SHOWS_A_VIEW.includes(tool.tool) && <div><OpenFromTool tool={tool.tool} result={tool.result} /></div>}

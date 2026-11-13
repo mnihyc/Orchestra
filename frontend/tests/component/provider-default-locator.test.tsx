@@ -1,3 +1,5 @@
+import { resourceCardRead } from './resource-card-readers';
+import { TestRouter } from './TestRouter';
 /** Usable provider search owns its native pages; the surrounding setting owns every write. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -5,6 +7,7 @@ import userEvent from '@testing-library/user-event';
 import { type ReactNode, useState } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { applyRow } from '@/api/cache';
+import { providerDefaultKey } from '@/api/defaultsOpening';
 import type * as Client from '@/api/client';
 import { ApiError, client } from '@/api/client';
 import { ProviderDefaultChoice } from '@/features/settings/ProviderChoice';
@@ -21,7 +24,7 @@ const calls = vi.hoisted(() => ({ read: vi.fn<(path: string, options?: Options) 
   changed: vi.fn(), edited: vi.fn(), submit: vi.fn(), create: vi.fn() }));
 vi.mock('@/api/client', async (load) => {
   const actual = await load<typeof Client>();
-  return { ...actual, api: { ...actual.api, GET: async (path: string, options?: Options) => ({ data: await calls.read(path, options), response: new Response() }) } };
+  return { ...actual, api: { ...actual.api, GET: async (path: string, options?: Options) => resourceCardRead(path, options) ?? ({ data: await calls.read(path, options), response: new Response() }) } };
 });
 vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map([['hidden home', [{ id: home.id, name: 'Private cached home', above: [] }]]]) }));
 vi.mock('@/features/resources/ResourceCreation', () => ({ ResourceCreateButton: ({ onCreated }: { onCreated?: (id: string) => void }) => {
@@ -59,12 +62,18 @@ function Harness({ value = current.id, disabled = false }: { value?: string | nu
   </form>;
 }
 const clients: QueryClient[] = [];
-function draw(ui: ReactNode) {
+function draw(ui: ReactNode, name: Provider | ApiError | null = current) {
   const queries = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } }); clients.push(queries);
-  return { queries, ...render(<QueryClientProvider client={queries}><TooltipProvider>{ui}</TooltipProvider></QueryClientProvider>) };
+  // This is the independent current-name member supplied by the bounded opening.
+  if (name instanceof ApiError) queries.getQueryCache().build(queries, { queryKey: providerDefaultKey(current.id) }).setState({ status: 'error', error: name, data: undefined });
+  else if (name !== null) queries.setQueryData(providerDefaultKey(name.id), name);
+  return { queries, ...render(<QueryClientProvider client={queries}><TestRouter><TooltipProvider overflow={false}>{ui}</TooltipProvider></TestRouter></QueryClientProvider>) };
 }
 const field = () => screen.getByRole('combobox', { name: label });
-const list = () => within(screen.getByRole('listbox', { name: label }));
+const choices = () => within(screen.getByRole(
+  field().getAttribute('aria-haspopup') === 'dialog' ? 'dialog' : 'listbox',
+  { name: label },
+));
 const reads = () => calls.read.mock.calls.filter(([path]) => path === '/everything');
 const names = () => calls.read.mock.calls.filter(([path]) => path === '/providers/{id}');
 const args = () => reads().map(([, options]) => options?.params?.query);
@@ -86,6 +95,16 @@ it.each(['en', 'zh-CN'] as const)('shows a provider label for an inner recovery 
   untouched();
 });
 
+
+it.each(['en', 'zh-CN'] as const)('reads an unreported current provider only after its picker opens (%s)', async (locale) => {
+  await setLocale(locale); const user = userEvent.setup(); draw(<Harness />, null);
+  expect(field()).toHaveValue(i18n.t('places.providerDefault.selected')); expect(calls.read).not.toHaveBeenCalled();
+  await user.click(field());
+  await waitFor(() => expect(choices().getByRole('option', { name: current.name })).toBeVisible());
+  expect(names()).toHaveLength(1); expect(reads()).toHaveLength(1);
+  await user.keyboard('{Escape}'); expect(field()).toHaveValue(current.name); untouched();
+});
+
 it('browses thirteen usable rows, follows an empty native page, deduplicates and restores input focus after the final pager disappears', async () => {
   calls.read.mockImplementation((path, options) => {
     if (path === '/providers/{id}') return Promise.resolve(current);
@@ -94,20 +113,26 @@ it('browses thirteen usable rows, follows an empty native page, deduplicates and
   });
   const user = userEvent.setup(); draw(<Harness />);
   await waitFor(() => expect(field()).toHaveValue(current.name)); expect(reads()).toHaveLength(0);
-  await user.click(field()); await waitFor(() => expect(list().getAllByRole('option')).toHaveLength(14));
-  expect(list().getByRole('option', { name: current.name })).toHaveAttribute('aria-disabled', 'true');
+  await user.click(field()); await waitFor(() => expect(choices().getAllByRole('option')).toHaveLength(14));
+  expect(choices().getByRole('option', { name: current.name })).toHaveAttribute('aria-disabled', 'true');
+  await user.tab(); expect(screen.getByRole('button', { name: i18n.t('resourceGroups.collapse', { name: home.name }) })).toHaveFocus();
+  await user.tab(); expect(screen.getByRole('link', { name: home.name })).toHaveFocus();
+  await user.tab(); expect(screen.getByRole('button', { name: i18n.t('resourceGroups.sharingOf', { name: home.name }) })).toHaveFocus();
   await user.tab(); expect(screen.getByRole('button', { name: i18n.t('ui.pagination.more') })).toHaveFocus();
   await user.keyboard('{Enter}'); await waitFor(() => expect(reads()).toHaveLength(2));
-  await waitFor(() => expect(field()).toHaveFocus()); expect(list().getAllByRole('option')).toHaveLength(14);
+  await waitFor(() => expect(field()).toHaveFocus()); expect(choices().getAllByRole('option')).toHaveLength(14);
+  await user.tab(); expect(screen.getByRole('button', { name: i18n.t('resourceGroups.collapse', { name: home.name }) })).toHaveFocus();
+  await user.tab(); expect(screen.getByRole('link', { name: home.name })).toHaveFocus();
+  await user.tab(); expect(screen.getByRole('button', { name: i18n.t('resourceGroups.sharingOf', { name: home.name }) })).toHaveFocus();
   await user.tab(); expect(screen.getByRole('button', { name: i18n.t('ui.pagination.more') })).toHaveFocus();
-  await user.keyboard('{Enter}'); await waitFor(() => expect(list().getAllByRole('option')).toHaveLength(15));
+  await user.keyboard('{Enter}'); await waitFor(() => expect(choices().getAllByRole('option')).toHaveLength(15));
   expect(screen.queryByRole('button', { name: i18n.t('ui.pagination.more') })).not.toBeInTheDocument();
   await waitFor(() => expect(field()).toHaveFocus()); expect(field()).toHaveAttribute('aria-expanded', 'true');
   const active = field().getAttribute('aria-activedescendant'); await user.keyboard('{ArrowDown}'); expect(field().getAttribute('aria-activedescendant')).not.toBe(active);
   expect(args()).toEqual([request, { ...request, cursor: 'after-first' }, { ...request, cursor: 'after-empty' }]); untouched();
-  await user.click(list().getByRole('option', { name: late.name })); expect(field()).toHaveValue(late.name);
+  await user.click(choices().getByRole('option', { name: late.name })); expect(field()).toHaveValue(late.name);
   expect(calls.changed).toHaveBeenCalledExactlyOnceWith(late.id); expect(calls.edited).toHaveBeenCalledTimes(1); expect(calls.submit).not.toHaveBeenCalled();
-  expect(names()).toHaveLength(1);
+  expect(names()).toHaveLength(0);
 });
 
 it('uses native q and one explicit retry, then clears the query and restores the committed name without editing the setting', async () => {
@@ -124,15 +149,15 @@ it('uses native q and one explicit retry, then clears the query and restores the
   await user.click(field()); await waitFor(() => expect(reads()).toHaveLength(1)); await user.type(field(), 'remote');
   await screen.findByRole('alert'); expect(screen.queryByText('Private diagnostic')).not.toBeInTheDocument(); untouched();
   await user.click(screen.getByRole('button', { name: i18n.t('common.tryAgain') }));
-  await waitFor(() => expect(list().getByRole('option', { name: late.name })).toBeVisible());
+  await waitFor(() => expect(choices().getByRole('option', { name: late.name })).toBeVisible());
   expect(args()).toEqual([request, { ...request, q: 'remote' }, { ...request, q: 'remote' }]);
-  await user.clear(field()); await waitFor(() => expect(list().getAllByRole('option')).toHaveLength(14)); expect(reads()).toHaveLength(3);
+  await user.clear(field()); await waitFor(() => expect(choices().getAllByRole('option')).toHaveLength(14)); expect(reads()).toHaveLength(3);
   await user.keyboard('{Escape}{Enter}'); expect(field()).toHaveValue(current.name); expect(field()).toHaveAttribute('aria-expanded', 'false'); untouched();
 });
 
 it('can select another admitted provider while the independent current-name read is pending, without accepting its later name', async () => {
   const pending = deferred<Provider>(); calls.read.mockImplementation((path) => path === '/providers/{id}' ? pending.promise : Promise.resolve(page([late])));
-  const user = userEvent.setup(); draw(<Harness />); expect(field()).toHaveValue(i18n.t('places.providerDefault.loading'));
+  const user = userEvent.setup(); draw(<Harness />, null); expect(field()).toHaveValue(i18n.t('places.providerDefault.selected')); expect(names()).toHaveLength(0);
   await user.click(field()); await user.click(await screen.findByRole('option', { name: late.name }));
   await act(async () => { pending.resolve(current); await Promise.resolve(); });
   expect(field()).toHaveValue(late.name); expect(calls.changed).toHaveBeenCalledExactlyOnceWith(late.id); expect(names()).toHaveLength(1); expect(calls.submit).not.toHaveBeenCalled();
@@ -141,24 +166,24 @@ it('can select another admitted provider while the independent current-name read
 it.each([403, 404])('keeps a private current provider Managed after %i even when a cached usable page contains it', async (status) => {
   calls.read.mockImplementation((path) => Promise.resolve(path === '/providers/{id}' ? current : page([current, late])));
   const user = userEvent.setup(), view = draw(<Harness />); await waitFor(() => expect(field()).toHaveValue(current.name));
-  await user.click(field()); await waitFor(() => expect(list().getAllByRole('option')).toHaveLength(2)); await user.keyboard('{Escape}');
+  await user.click(field()); await waitFor(() => expect(choices().getAllByRole('option')).toHaveLength(2)); await user.keyboard('{Escape}');
   calls.read.mockImplementation((path) => path === '/providers/{id}' ? Promise.reject(new ApiError({type:'about:blank', title:'Private', status, code:status===403?'authz.denied':'not_found', detail:'Private',request_id:'private-provider'},null)) : Promise.resolve(page([current, late])));
   await act(async () => { await view.queries.refetchQueries({ queryKey: ['provider', current.id] }); });
   expect(view.queries.getQueryCache().find({ queryKey: ['provider', current.id, 'default-choice', `${owner.id}:1`] })?.state.status).toBe('error');
   await waitFor(() => expect(field()).toHaveValue(i18n.t('settings.compact.managed'))); expect(view.container).not.toHaveTextContent(current.id);
-  await user.click(field()); expect(list().queryByRole('option', { name: current.name })).not.toBeInTheDocument();
-  expect(list().getByRole('option', { name: i18n.t('settings.compact.managed') })).toHaveAttribute('aria-disabled', 'true');
+  await user.click(field()); expect(choices().queryByRole('option', { name: current.name })).not.toBeInTheDocument();
+  expect(choices().getByRole('option', { name: i18n.t('settings.compact.managed') })).toHaveAttribute('aria-disabled', 'true');
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   expect(screen.queryByRole('button', {name:i18n.t('common.tryAgain')})).not.toBeInTheDocument();
   expect(screen.queryByText('Private diagnostic')).not.toBeInTheDocument(); untouched();
 });
 
 it('recovers a closed current-name failure with exactly one read and keeps the candidate list closed on restored focus', async () => {
-  calls.read.mockRejectedValueOnce(failure()).mockResolvedValue(current);
-  const user = userEvent.setup(); draw(<Harness />); await screen.findByRole('alert');
+  calls.read.mockResolvedValue(current);
+  const user = userEvent.setup(); draw(<Harness />, failure()); await screen.findByRole('alert');
   await user.click(screen.getByRole('button', { name: i18n.t('common.tryAgain') }));
   await waitFor(() => expect(field()).toHaveValue(current.name)); await waitFor(() => expect(field()).toHaveFocus());
-  expect(field()).toHaveAttribute('aria-expanded', 'false'); expect(names()).toHaveLength(2); expect(reads()).toHaveLength(0); untouched();
+  expect(field()).toHaveAttribute('aria-expanded', 'false'); expect(names()).toHaveLength(1); expect(reads()).toHaveLength(0); untouched();
 });
 
 it('ends the old reader session, drops its names and ignores its in-flight candidates', async () => {
@@ -168,18 +193,18 @@ it('ends the old reader session, drops its names and ignores its in-flight candi
   await user.click(field()); await waitFor(() => expect(reads()).toHaveLength(1));
   calls.read.mockRejectedValue(failure('authz.denied'));
   await act(async () => { client.session.setState({ readerVersion: 2 }); await Promise.resolve(); });
-  await waitFor(() => expect(field()).toHaveValue(i18n.t('settings.compact.managed')));
+  await waitFor(() => expect(field()).toHaveValue(i18n.t('places.providerDefault.selected')));
   await act(async () => { pending.resolve(page([late])); await Promise.resolve(); });
   expect(screen.queryByRole('listbox')).not.toBeInTheDocument(); expect(screen.queryByText(current.name)).not.toBeInTheDocument();
-  expect(screen.queryByText(late.name)).not.toBeInTheDocument(); expect(reads()).toHaveLength(1); expect(names()).toHaveLength(2); untouched();
+  expect(screen.queryByText(late.name)).not.toBeInTheDocument(); expect(reads()).toHaveLength(1); expect(names()).toHaveLength(0); untouched();
 });
 
 it('hides cached rows on a permission failure from the next native page', async () => {
   calls.read.mockImplementation((_path, options) => options?.params?.query?.cursor === 'after-first' ? Promise.reject(failure('authz.denied')) : Promise.resolve(page(first, 'after-first')));
   const user = userEvent.setup(); draw(<Harness value={null} />);
-  await user.click(field()); await waitFor(() => expect(list().getAllByRole('option')).toHaveLength(13));
+  await user.click(field()); await waitFor(() => expect(choices().getAllByRole('option')).toHaveLength(13));
   await user.click(screen.getByRole('button', { name: i18n.t('ui.pagination.more') })); await screen.findByRole('alert');
-  expect(list().queryAllByRole('option')).toHaveLength(0); expect(screen.queryByText(first[0]!.name)).not.toBeInTheDocument();
+  expect(choices().queryAllByRole('option')).toHaveLength(0); expect(screen.queryByText(first[0]!.name)).not.toBeInTheDocument();
   expect(screen.queryByText('Private diagnostic')).not.toBeInTheDocument(); await waitFor(() => expect(field()).toHaveFocus());
   expect(reads()).toHaveLength(2); untouched();
 });
@@ -189,9 +214,9 @@ it('isolates old queries and IME Enter, and retains raw provider identity on del
   calls.read.mockImplementation((_path, options) => options?.params?.query?.q === 'older' ? pending.promise : Promise.resolve(page(options?.params?.query?.q === 'remote' ? [late] : first)));
   const user = userEvent.setup(); draw(<Harness value={null} />);
   await user.click(field()); await user.type(field(), 'older'); await waitFor(() => expect(reads()).toHaveLength(2));
-  await user.clear(field()); await user.type(field(), 'remote'); await waitFor(() => expect(list().getByRole('option', { name: late.name })).toBeVisible());
+  await user.clear(field()); await user.type(field(), 'remote'); await waitFor(() => expect(choices().getByRole('option', { name: late.name })).toBeVisible());
   await act(async () => { pending.resolve(page([current])); await Promise.resolve(); });
-  expect(list().queryByRole('option', { name: current.name })).not.toBeInTheDocument();
+  expect(choices().queryByRole('option', { name: current.name })).not.toBeInTheDocument();
   fireEvent.keyDown(field(), { key: 'Enter', keyCode: 229, isComposing: true }); untouched();
   await user.keyboard('{Enter}'); expect(calls.changed).toHaveBeenCalledExactlyOnceWith(late.id); expect(calls.submit).not.toHaveBeenCalled();
 });
@@ -209,10 +234,10 @@ it('does not invent choices or an empty-inventory claim from path-only rows, and
   const hidden = inventoryRow({ id: current.id, name: null, kind: 'provider', my_access: 'path_only', resource: null });
   calls.read.mockImplementation((_path, options) => Promise.resolve(options?.params?.query?.cursor === 'continue' ? page([late]) : { items: [hidden], next_cursor: 'continue' }));
   const user = userEvent.setup(); draw(<Harness value={null} />); await user.click(field());
-  await screen.findByRole('button', { name: i18n.t('ui.pagination.more') }); expect(list().queryAllByRole('option')).toHaveLength(0);
+  await screen.findByRole('button', { name: i18n.t('ui.pagination.more') }); expect(choices().queryAllByRole('option')).toHaveLength(0);
   expect(screen.queryByText(current.id)).not.toBeInTheDocument(); expect(screen.queryByText(i18n.t('places.providerDefault.empty'))).not.toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: i18n.t('ui.pagination.more') }));
-  await waitFor(() => expect(list().getByRole('option', { name: late.name })).toBeVisible()); untouched();
+  await waitFor(() => expect(choices().getByRole('option', { name: late.name })).toBeVisible()); untouched();
 });
 
 for (const admitted of [false, true]) it(`keeps creation outside the popup and ${admitted ? 'offers' : 'withholds'} its result according to one subsequent native usable answer`, async () => {
@@ -225,7 +250,7 @@ for (const admitted of [false, true]) it(`keeps creation outside the popup and $
   await user.click(field());
   if (admitted) {
     await user.click(await screen.findByRole('option', { name: late.name })); expect(calls.changed).toHaveBeenCalledExactlyOnceWith(late.id);
-  } else { await screen.findByText(i18n.t('places.providerDefault.empty')); expect(list().queryAllByRole('option')).toHaveLength(0); untouched(); }
+  } else { await screen.findByText(i18n.t('places.providerDefault.empty')); expect(choices().queryAllByRole('option')).toHaveLength(0); untouched(); }
   expect(reads()).toHaveLength(2);
 });
 
@@ -242,28 +267,33 @@ it('does not reopen or steal focus when a pending page completes after Escape', 
 it('preserves an admitted current identity while a native disabled update removes its eligibility', async () => {
   calls.read.mockImplementation((path) => Promise.resolve(path === '/providers/{id}' ? current : page([current, late])));
   const user = userEvent.setup(), view = draw(<Harness />); await waitFor(() => expect(field()).toHaveValue(current.name));
-  await user.click(field()); await waitFor(() => expect(list().getAllByRole('option')).toHaveLength(2));
+  await user.click(field()); await waitFor(() => expect(choices().getAllByRole('option')).toHaveLength(2));
   await act(async () => { applyRow(view.queries, { kind: 'provider', id: current.id, value: { ...current, status: 'disabled' } }); await Promise.resolve(); });
   expect(view.queries.getQueryCache().find({ queryKey: ['provider', current.id, 'default-choice', `${owner.id}:1`] })?.state.data).toMatchObject({ status: 'disabled' });
-  await waitFor(() => expect(list().getByRole('option', { name: current.name })).toHaveAttribute('aria-disabled', 'true'));
+  await waitFor(() => expect(choices().getByRole('option', { name: current.name })).toHaveAttribute('aria-disabled', 'true'));
   await user.keyboard('{Enter}'); untouched(); await user.keyboard('{Escape}'); expect(field()).toHaveValue(current.name); expect(reads()).toHaveLength(1);
 });
 
-it('shows Managed after a native withdrawal and rereads it on authority repair', async () => {
+it('holds a withdrawn name closed until the repaired picker explicitly opens', async () => {
+  const user = userEvent.setup();
   const view = draw(<Harness />); await waitFor(() => expect(field()).toHaveValue(current.name));
   await act(async () => { applyRow(view.queries, { kind: 'provider', id: current.id, value: null }); await Promise.resolve(); });
   expect(view.queries.getQueryCache().find({ queryKey: ['provider', current.id, 'default-choice', `${owner.id}:1`] })?.state.data).toBeNull();
   await waitFor(() => expect(field()).toHaveValue(i18n.t('settings.compact.managed')));
   expect(screen.queryByRole('button', { name: i18n.t('common.tryAgain') })).not.toBeInTheDocument();
   await act(async () => { await view.queries.invalidateQueries({queryKey:['provider',current.id]}); });
+  expect(names()).toHaveLength(0);
+  await user.click(field());
+  await waitFor(() => expect(choices().getByRole('option', { name: current.name })).toBeVisible());
+  await user.keyboard('{Escape}');
   await waitFor(() => expect(field()).toHaveValue(current.name));
-  expect(names()).toHaveLength(2); expect(reads()).toHaveLength(0); untouched();
+  expect(names()).toHaveLength(1); expect(reads()).toHaveLength(1); untouched();
 });
 
 it('never fills a redacted provider home from the cached place names used for disambiguation', async () => {
   const concealed = { ...late, name: current.name, home: { ...home, name: null, redacted: true } };
   calls.read.mockImplementation((path) => Promise.resolve(path === '/providers/{id}' ? current : page([current, concealed])));
-  const user = userEvent.setup(); draw(<Harness />); await user.click(field()); await waitFor(() => expect(list().getAllByRole('option')).toHaveLength(2));
-  expect(list().getByRole('option', { name: /Provider home/u })).toBeVisible();
+  const user = userEvent.setup(); draw(<Harness />); await user.click(field()); await waitFor(() => expect(choices().getAllByRole('option')).toHaveLength(2));
+  expect(choices().getByRole('option', { name: /Provider home/u })).toBeVisible();
   expect(screen.queryByText(/Private cached home/u)).not.toBeInTheDocument(); expect(screen.queryByText(home.id)).not.toBeInTheDocument(); untouched();
 });

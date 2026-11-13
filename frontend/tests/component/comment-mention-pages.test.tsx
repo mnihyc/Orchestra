@@ -7,7 +7,9 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as People from '@/api/people';
 import { CommentField } from '@/features/people/CommentField';
 import { DORA, GRACE } from '../doubles/chat-rows';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+skipOverflowFallback();
 
 const pages = vi.hoisted(() => ({ read: vi.fn<(q: string, cursor: string | null) => Promise<People.DocumentMentionPage>>() }));
 vi.mock('@/api/people', async (load) => {
@@ -131,6 +133,8 @@ it('keeps one candidate page after repeated requests in a million-person directo
   await input.type(screen.getByRole('textbox', { name: 'Comment' }), '@');
   await screen.findByRole('option', { name: /Person 000000/ });
   const list = screen.getByRole('listbox', { name: 'People' });
+  // The people of the first page show their names as text, so that a page left behind can be looked for by it below.
+  expect(screen.getAllByText(/Person 000000/).length).toBeGreaterThan(0);
   expect(pages.read).toHaveBeenCalledTimes(1);
   for (let page = 1; page <= 20; page += 1) {
     await input.click(screen.getByRole('option', { name: 'More people' }));
@@ -141,9 +145,11 @@ it('keeps one candidate page after repeated requests in a million-person directo
       expect(first).toBeVisible();
       expect(first).toHaveAccessibleName(new RegExp(name));
     });
-    expect(screen.getAllByRole('option')).toHaveLength(size + 1);
+    // The options are counted, and the first page looked for, as they stand in the page: a query by role works out the name of each of the
+    // fifty-one from the style of every element in it, which over twenty pages was a fifth of the case and shows nothing more here.
+    expect(document.querySelectorAll('[role="option"]')).toHaveLength(size + 1);
     await waitFor(() => expect(cache.getQueryCache().findAll({ queryKey: ['document-readers', 'doc'] })).toHaveLength(1));
-    expect(screen.queryByRole('option', { name: /Person 000000/ })).not.toBeInTheDocument();
+    expect(screen.queryAllByText(/Person 000000/)).toHaveLength(0);
   }
   expect(pages.read).toHaveBeenCalledTimes(21);
   await input.click(screen.getByRole('button', { name: 'First people' }));

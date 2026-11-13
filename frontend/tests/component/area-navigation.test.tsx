@@ -121,10 +121,10 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
   await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
   const user = userEvent.setup();
   for (const [path, search, name] of [
-    ['/org/acme/settings/policies', {}, remembered.name],
+    ['/org/acme/settings/defaults', {}, remembered.name],
     ['/org/acme.research/settings/members', {}, department.name],
     ['/project/project/settings', { section: 'tags' }, project.name],
-    ['/topic/topic', { tab: 'settings', section: 'policies' }, topic.name],
+    ['/topic/topic', { tab: 'settings', section: 'defaults' }, topic.name],
   ] as const) {
     world.path = path; world.search = search;
     const scope = settingsNavigation(path, search);
@@ -153,8 +153,8 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
 it('keeps Settings explicit, preserves exact setting links and org aliases, and lets plain topic links out', () => {
   expect(settingsNavigation('/topic/topic', {})).toBeNull();
   expect(settingsNavigation('/topic/topic', { tab: 'threads' })).toBeNull();
-  expect(settingsNavigation('/topic/topic', { tab: 'settings', setting: 'agent.model' })).toEqual({ kind: 'topic', id: 'topic', current: 'policies' });
-  expect(settingsNavigation('/project/project/settings', { setting: 'agent.model' })).toEqual({ kind: 'project', id: 'project', current: 'policies' });
+  expect(settingsNavigation('/topic/topic', { tab: 'settings', setting: 'agent.model' })).toEqual({ kind: 'topic', id: 'topic', current: 'defaults' });
+  expect(settingsNavigation('/project/project/settings', { setting: 'agent.model' })).toEqual({ kind: 'project', id: 'project', current: 'defaults' });
   expect(settingsNavigation('/org/acme/settings/destinations')).toEqual({ kind: 'org', address: 'acme', current: 'channels' });
   expect(navigationRoot('/topic/topic', [remembered], remembered.id, { node: remembered.id })).toBe(remembered.id);
   expect(navigationRoot('/topic/topic', [remembered], remembered.id, { node: remembered.id })).toBe(remembered.id);

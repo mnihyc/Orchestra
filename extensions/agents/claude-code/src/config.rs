@@ -18,12 +18,44 @@ pub const ADAPTER_VERSION: u32 = 1;
 /// What a subscription of the harness is called where one is added or listed.
 pub const SUBSCRIPTION_TITLE: &str = "Claude subscription";
 
-/// The exact candidate harness pin. A wider range needs real contract/startup evidence for every
-/// advertised version, including the native instruction and quiet-start configuration.
-pub const SUPPORTED_RANGE: &str = "=2.1.312";
+/// The builds the adapter says it supports: the line (the same major and minor version) of the oldest build the whole
+/// suite was proven on, from that build upward. A build of a later line is started and called untested; one older than
+/// [`OLDEST_PROVEN_BUILD`] does not start. This is the status shown to people; the acts below do not follow it.
+pub const SUPPORTED_RANGE: &str = ">=2.1.319, <2.2.0";
 
-/// The candidate whose same-version native transcript is being checked before support is advertised.
-pub(crate) const PORTABLE_ARCHIVE_CANDIDATE: &str = "2.1.312";
+/// The oldest build the whole suite was proven on (2.1.319 and 2.1.322 both had it). Nothing that a new release alone
+/// could switch back on is withheld from this build or any later one.
+pub const OLDEST_PROVEN_BUILD: &str = "2.1.319";
+
+/// The build Orch installs itself and the newest one the suite was proven on.
+pub const SHIPPED_BUILD: &str = "2.1.322";
+
+/// Whether `version` is at or above [`OLDEST_PROVEN_BUILD`], compared as versions, with no upper bound. A number that
+/// cannot be read is not.
+pub(crate) fn at_or_above_oldest_proven(version: &str) -> bool {
+    match (
+        semver::Version::parse(version),
+        semver::Version::parse(OLDEST_PROVEN_BUILD),
+    ) {
+        (Ok(version), Ok(oldest)) => version >= oldest,
+        _ => false,
+    }
+}
+
+/// Whether the native UUID-prefix protocol (exact input checkpoints) is declared for `version`: for every build at or
+/// above the oldest proven one. A later build that has really changed it fails at the use of the act, with the
+/// program's own error, not beforehand.
+pub(crate) fn input_prefix_supported(version: &str) -> bool {
+    at_or_above_oldest_proven(version)
+}
+
+/// The build whose same-version native transcript is the one an archive is imported from.
+pub(crate) const PORTABLE_ARCHIVE_CANDIDATE: &str = SHIPPED_BUILD;
+
+/// The oldest build of which the reader's cases hold a recorded transcript (the session in
+/// `tests/fixtures/adopt`). A transcript written by an older build is read all the same, as the program itself
+/// resumes it; the record of the session says that the build is beyond what the cases cover.
+pub(crate) const OLDEST_RECORDED_TRANSCRIPT: &str = "2.1.296";
 
 /// The program looked up on the search path when no binary is given.
 pub const PROGRAM: &str = "claude";
@@ -68,6 +100,32 @@ pub const DEFAULT_SILENCE_SECS: u64 = 15 * 60;
 /// this is only for a harness that is set to try longer, or for one that does not stop.
 pub const DEFAULT_RETRY_PATIENCE_SECS: u64 = 10 * 60;
 
+/// How long a request whose window is decided waits for its transcript to show it before it is reported as the
+/// stream said it. Measured on the pinned build against runs of a sub-agent with two requests: the transcript held
+/// all the lines of a message 0.10 to 0.25 s after the message ended; a second is four times the longest.
+pub const DEFAULT_CHILD_USAGE_WAIT_MS: u64 = 1_000;
+
+/// The profile options that hold back the end of a turn, as the descriptor declares them. A turn's completion waits
+/// for the reports of its sub-agents for the option `child_usage_wait_ms` at the most and, when the program has been
+/// told to stop, for [`EXIT_GRACE`] besides; the engine ends a turn by itself when an interrupt has gone unanswered
+/// for `[engine] interrupt_force_secs` (30 seconds by default), and a completion held longer than that is the
+/// engine's to give. The adapter keeps no limit of its own: the engine honours a value the profile sets or refuses
+/// the profile, naming both numbers, and an option the profile does not set takes its default, or less where the
+/// engine's time leaves less.
+#[must_use]
+pub fn turn_end_delays() -> Json {
+    use orch_agent_contract::turn_end_delays::{Delay, TurnEndDelays};
+    serde_json::to_value(TurnEndDelays {
+        version: 1,
+        delays: vec![Delay {
+            pointer: "/child_usage_wait_ms".to_owned(),
+            also_ms: u64::try_from(EXIT_GRACE.as_millis()).unwrap_or(u64::MAX),
+            default_ms: DEFAULT_CHILD_USAGE_WAIT_MS,
+        }],
+    })
+    .unwrap_or(Json::Null)
+}
+
 /// How long a process is given to end after its input is closed before it is killed: it has nothing left
 /// to do, so a few seconds are plenty, and a hung one must not hold a session open.
 pub const EXIT_GRACE: Duration = Duration::from_secs(8);
@@ -96,7 +154,7 @@ pub const STDERR_KEPT_LINES: usize = 40;
 pub const FRAME_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// How many failed attempts in a row the harness announces before a turn says so to the people watching:
-/// the first retries are routine, the fifth is not.
+/// the first retries are routine, the fifth is not. Profiles can change this default.
 pub const RETRY_NOTICE_ATTEMPT: u64 = 5;
 
 /// What the harness's `fast_mode_state` says when the vendor's limit for the fast mode was reached and the harness went on at
@@ -114,8 +172,8 @@ pub const RAW_FRAME_MAX_BYTES: usize = 256 * 1024;
 pub struct ProfileConfig {
     /// Seconds an idle process stays alive when the harness works through Orch's executor; `0` keeps it.
     pub idle_exit_secs: u64,
-    /// Whether a personal harness may run agents and commands in the background. Managed sessions always
-    /// disable this: a native wake-up has no Orch input or model lease.
+    /// Legacy profile preference; the resolved thread background-wake setting governs conversations.
+    /// Version and provider probes always keep autonomous background work disabled.
     pub background_tasks: bool,
     /// Whether the harness's own to-do tools are offered, which is what a plan is made of.
     pub todo_tools: bool,
@@ -129,6 +187,16 @@ pub struct ProfileConfig {
     /// Seconds the harness may go on trying again, with nothing else between, before the turn is ended and the
     /// process stopped; `0` never.
     pub retry_patience_secs: u64,
+    /// Native retry number at which an error notice appears; zero means the first reported retry.
+    /// Live retry status is always reported, independently of this threshold.
+    pub retry_notice_attempt: u64,
+    /// Milliseconds a request whose window is decided waits for its transcript to show the model's closing usage of it,
+    /// before it is reported with the figures the stream gave; `0` is no wait at all. A turn's completion waits for
+    /// these reports for this long at the most (see [`turn_end_delays`]). Not set, it is 1 000, or less where
+    /// `[engine] interrupt_force_secs` leaves less after the 8 seconds the program is given to end; a value that is set
+    /// is kept, and the engine refuses a profile that sets it so long that the wait and those 8 seconds do not fit
+    /// under what the engine gives an unanswered interrupt.
+    pub child_usage_wait_ms: u64,
 }
 
 impl Default for ProfileConfig {
@@ -140,6 +208,8 @@ impl Default for ProfileConfig {
             setting_sources: "project".to_owned(),
             silence_secs: DEFAULT_SILENCE_SECS,
             retry_patience_secs: DEFAULT_RETRY_PATIENCE_SECS,
+            retry_notice_attempt: RETRY_NOTICE_ATTEMPT,
+            child_usage_wait_ms: DEFAULT_CHILD_USAGE_WAIT_MS,
         }
     }
 }
@@ -167,6 +237,12 @@ impl ProfileConfig {
         if let Some(secs) = map.get("retry_patience_secs").and_then(Json::as_u64) {
             options.retry_patience_secs = secs;
         }
+        if let Some(attempt) = map.get("retry_notice_attempt").and_then(Json::as_u64) {
+            options.retry_notice_attempt = attempt;
+        }
+        if let Some(wait) = map.get("child_usage_wait_ms").and_then(Json::as_u64) {
+            options.child_usage_wait_ms = wait;
+        }
         if let Some(sources) = map.get("setting_sources").and_then(Json::as_str) {
             let known = ["user", "project", "local"];
             if !sources.is_empty()
@@ -192,6 +268,12 @@ impl ProfileConfig {
         (self.retry_patience_secs > 0).then(|| Duration::from_secs(self.retry_patience_secs))
     }
 
+    /// How long a due sub-agent request waits for its transcript.
+    #[must_use]
+    pub fn child_usage_wait(&self) -> Duration {
+        Duration::from_millis(self.child_usage_wait_ms)
+    }
+
     /// How long an idle process is kept, `None` for always.
     #[must_use]
     pub fn idle_exit(&self) -> Option<Duration> {
@@ -212,6 +294,66 @@ mod tests {
         assert!(!options.background_tasks);
         assert_eq!(options.silence(), Some(Duration::from_secs(900)));
         assert_eq!(options.retry_patience(), Some(Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn retry_notices_have_a_configurable_default_without_delaying_live_status() {
+        assert_eq!(ProfileConfig::default().retry_notice_attempt, 5);
+        for value in [0, 2, 100] {
+            assert_eq!(
+                ProfileConfig::from_json(&json!({"retry_notice_attempt":value}))
+                    .retry_notice_attempt,
+                value
+            );
+        }
+        assert_eq!(
+            ProfileConfig::from_json(&json!({"retry_notice_attempt":"later"})).retry_notice_attempt,
+            5
+        );
+    }
+
+    #[test]
+    fn the_wait_for_a_sub_agents_transcript_has_a_configurable_default() {
+        assert_eq!(
+            ProfileConfig::default().child_usage_wait(),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            ProfileConfig::from_json(&json!({"child_usage_wait_ms":0})).child_usage_wait(),
+            Duration::ZERO
+        );
+        assert_eq!(
+            ProfileConfig::from_json(&json!({"child_usage_wait_ms":"long"})).child_usage_wait(),
+            Duration::from_secs(1)
+        );
+        // Nothing is taken for the option here: what limits it is the engine's bound, which the descriptor lets the
+        // engine fit the profile under.
+        assert_eq!(
+            ProfileConfig::from_json(&json!({"child_usage_wait_ms":60_000})).child_usage_wait(),
+            Duration::from_secs(60)
+        );
+        let declared: orch_agent_contract::turn_end_delays::TurnEndDelays =
+            serde_json::from_value(turn_end_delays()).unwrap();
+        let bound = Duration::from_secs(30);
+        let fits = (bound - EXIT_GRACE).as_millis();
+        assert!(
+            declared
+                .check(
+                    &json!({"child_usage_wait_ms": u64::try_from(fits).unwrap()}),
+                    bound
+                )
+                .is_ok()
+        );
+        let refused = declared
+            .check(
+                &json!({"child_usage_wait_ms": u64::try_from(fits).unwrap() + 1}),
+                bound,
+            )
+            .unwrap_err();
+        assert!(
+            refused.contains("child_usage_wait_ms") && refused.contains("interrupt_force_secs"),
+            "{refused}"
+        );
     }
 
     #[test]

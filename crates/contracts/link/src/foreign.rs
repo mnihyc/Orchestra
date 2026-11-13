@@ -44,7 +44,7 @@ pub enum ItemPayload {
     /// An informational line of native session history.
     Marker(orch_agent_contract::events::MarkerPayload),
     /// A failure in the harness.
-    Error(orch_agent_contract::events::ErrorPayload),
+    Error(orch_api_contract::threads::ErrorPayload),
     /// What the agent said.
     AgentMessage(orch_agent_contract::events::AgentMessagePayload),
 }

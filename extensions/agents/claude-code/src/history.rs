@@ -213,6 +213,7 @@ pub async fn replay_into(
     sink: orch_agent_contract::adapter::EventSink,
     thread: orch_types::Id,
     segment: orch_types::Id,
+    image_outputs: Option<std::path::PathBuf>,
 ) -> Result<u32, HistoryError> {
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let _guard = reader::CancelOnDrop(Arc::clone(&cancel));
@@ -221,10 +222,11 @@ pub async fn replay_into(
         orch_agent_contract::flow::channel(|event: &(SessionEvent, usize)| event.1);
     let runtime = tokio::runtime::Handle::current();
     let work = tokio::task::spawn_blocking(move || {
-        let mut replay = Replay {
-            rows: reader::Rows::new(&path, settings, clock, false, cancel)?,
-            items: 0,
-        };
+        let mut rows = reader::Rows::new(&path, settings, clock, false, cancel)?;
+        if let Some(directory) = image_outputs {
+            rows.set_image_outputs(directory);
+        }
+        let mut replay = Replay { rows, items: 0 };
         for event in replay.by_ref() {
             let event = event?;
             let value = serde_json::to_value(&event).map_err(std::io::Error::other)?;
@@ -290,7 +292,34 @@ pub fn record(
     settings: MapperSettings,
     clock: Arc<dyn Clock>,
 ) -> Result<Record, HistoryError> {
-    Record::build(transcript, Some(settings), clock, Arc::default())
+    Record::build(transcript, Some(settings), clock, Arc::default(), None)
+}
+
+/// What the record of a session says of the build that wrote it, when it is not a build the adapter supports: who
+/// wrote it, and, when it is older than any build whose transcript the reader's cases hold, that it was read all the
+/// same.
+fn writer_note(version: &str) -> Option<String> {
+    use crate::config::OLDEST_RECORDED_TRANSCRIPT;
+    if crate::descriptor::support_of(version)
+        == orch_agent_contract::descriptor::HarnessSupport::Supported
+    {
+        return None;
+    }
+    let older = match (
+        semver::Version::parse(version),
+        semver::Version::parse(OLDEST_RECORDED_TRANSCRIPT),
+    ) {
+        (Ok(written), Ok(oldest)) => written < oldest,
+        // A build whose number cannot be read is no older than anything.
+        _ => false,
+    };
+    Some(if older {
+        format!(
+            "This session was written by Claude Code {version}, older than {OLDEST_RECORDED_TRANSCRIPT}, the oldest build whose transcripts Orch's own cases cover. It was read all the same."
+        )
+    } else {
+        format!("This session was written by Claude Code {version}.")
+    })
 }
 
 /// The first working directory, skipping unrelated JSON fields without materializing their values.
@@ -335,8 +364,9 @@ fn read_record_with_cancel(
     into: &Path,
     clock: Arc<dyn Clock>,
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    image_outputs: Option<std::path::PathBuf>,
 ) -> Result<SessionRecord, HistoryError> {
-    Record::build(transcript, None, clock, cancel)?.finish(session_id, write, into)
+    Record::build(transcript, None, clock, cancel, image_outputs)?.finish(session_id, write, into)
 }
 
 /// Streams the bounded adoption record, leaving its source transcript unchanged.
@@ -347,7 +377,15 @@ pub fn read_record(
     into: &Path,
     clock: Arc<dyn Clock>,
 ) -> Result<SessionRecord, HistoryError> {
-    read_record_with_cancel(transcript, session_id, write, into, clock, Arc::default())
+    read_record_with_cancel(
+        transcript,
+        session_id,
+        write,
+        into,
+        clock,
+        Arc::default(),
+        None,
+    )
 }
 
 /// Runs filesystem reconstruction outside the runtime and cancels it when the caller goes away.
@@ -357,6 +395,7 @@ pub async fn read_record_async(
     write: bool,
     into: &Path,
     clock: Arc<dyn Clock>,
+    image_outputs: Option<std::path::PathBuf>,
 ) -> Result<SessionRecord, HistoryError> {
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let _guard = reader::CancelOnDrop(Arc::clone(&cancel));
@@ -366,7 +405,15 @@ pub async fn read_record_async(
         into.to_path_buf(),
     );
     tokio::task::spawn_blocking(move || {
-        read_record_with_cancel(&transcript, &session, write, &into, clock, cancel)
+        read_record_with_cancel(
+            &transcript,
+            &session,
+            write,
+            &into,
+            clock,
+            cancel,
+            image_outputs,
+        )
     })
     .await
     .map_err(std::io::Error::other)?
@@ -615,9 +662,9 @@ mod tests {
         std::fs::write(path, text).unwrap();
     }
 
-    /// The one build the adapter supports.
+    /// The build Orch installs and the suite was proven on.
     fn pinned() -> &'static str {
-        SUPPORTED_RANGE.trim_start_matches('=')
+        crate::config::SHIPPED_BUILD
     }
 
     fn home_with_session(version: &str) -> tempfile::TempDir {
@@ -768,7 +815,7 @@ mod tests {
     /// A session as Claude Code 2.1.296 keeps it: two turns, a command and an edit, a picture given with
     /// words, and a line of a sub-agent's own conversation.
     const SESSION: &str = include_str!("../tests/fixtures/adopt/session.jsonl");
-    /// The build the session was recorded with, older than the pinned one; the pinned build writes the same lines.
+    /// The build the session was recorded with, older than the pinned one: it is read as it is.
     const RECORDED: &str = "2.1.296";
     const SESSION_ID: &str = "5b0c3e9a-1f2d-4c8b-9a7e-2d4f6b8c0e12";
 
@@ -780,7 +827,7 @@ mod tests {
                 .join("projects")
                 .join("-work-web")
                 .join(format!("{SESSION_ID}.jsonl")),
-            &SESSION.replace(RECORDED, pinned()),
+            SESSION,
         );
         home
     }
@@ -789,6 +836,111 @@ mod tests {
         Arc::new(orch_types::ManualClock::new(
             chrono::DateTime::from_timestamp(1_791_800_000, 0).unwrap(),
         ))
+    }
+
+    #[tokio::test]
+    async fn resync_and_adopted_records_retain_native_tool_images_without_rebilling_or_source_rewrite()
+     {
+        use base64::Engine as _;
+        use futures::StreamExt;
+        use orch_agent_contract::adapter::{AdapterEvent, EventSink};
+        let home = tempfile::tempdir().unwrap();
+        let transcript = home.path().join("image-session.jsonl");
+        let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .unwrap();
+        let hash = orch_types::Hash::of(&bytes);
+        let frames = [
+            serde_json::json!({"type":"user","uuid":"00000000-0000-4000-8000-000000000001","version":PORTABLE_ARCHIVE_CANDIDATE,"cwd":"/work","message":{"content":"Show the camera"}}),
+            serde_json::json!({"type":"assistant","message":{"id":"m1","model":"opaque-model","content":[{"type":"tool_use","id":"camera","name":"mcp__camera__snapshot","input":{}}],"stop_reason":"tool_use"}}),
+            serde_json::json!({"type":"user","uuid":"00000000-0000-4000-8000-000000000002","message":{"content":[{"type":"tool_result","tool_use_id":"camera","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":data}}]}]}}),
+            serde_json::json!({"type":"assistant","message":{"id":"m2","model":"opaque-model","content":[{"type":"text","text":"The image is available"}],"stop_reason":"end_turn","usage":{"input_tokens":42}}}),
+        ];
+        let original = frames
+            .iter()
+            .map(|frame| format!("{frame}\n"))
+            .collect::<String>();
+        std::fs::write(&transcript, &original).unwrap();
+        let outputs = home.path().join("outputs");
+        let (sink, mut stream) = EventSink::channel();
+        replay_into(
+            &transcript,
+            MapperSettings {
+                directory: "/work".into(),
+                cwd: "/work".into(),
+                raw_events: false,
+            },
+            clock(),
+            sink,
+            orch_types::new_id(),
+            orch_types::new_id(),
+            Some(outputs.clone()),
+        )
+        .await
+        .unwrap();
+        let mut images = 0;
+        while let Some(event) = stream.next().await {
+            match event {
+                AdapterEvent::Session {
+                    event: SessionEvent::ItemCompleted(item),
+                    ..
+                } if item
+                    .payload
+                    .pointer("/tool/kind")
+                    .and_then(orch_types::Json::as_str)
+                    == Some("image") =>
+                {
+                    images += 1;
+                    assert_eq!(item.output_blob.unwrap().hash, hash);
+                }
+                AdapterEvent::ModelRequest(_)
+                | AdapterEvent::Session {
+                    event: SessionEvent::UsageUpdated(_),
+                    ..
+                } => panic!("historical images must not bill old model usage"),
+                _ => {}
+            }
+        }
+        assert_eq!(images, 1);
+        assert_eq!(
+            std::fs::read(outputs.join(hash.to_string())).unwrap(),
+            bytes
+        );
+        let archive = home.path().join("record.jsonl");
+        let record = read_record_async(
+            &transcript,
+            "image-session",
+            true,
+            &archive,
+            clock(),
+            Some(outputs.clone()),
+        )
+        .await
+        .unwrap();
+        let file = record.file.expect("the bounded native record is written");
+        let entries: Vec<RecordedEntry> = std::fs::read_to_string(&file.path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let images: Vec<_> = entries.iter().filter_map(|entry| match entry {
+            RecordedEntry::Item(item) if matches!(&item.content, orch_agent_contract::events::ItemContent::ToolCall(call) if matches!(&call.tool, orch_agent_contract::events::ToolPayload::Image { .. })) => Some(item),
+            _ => None,
+        }).collect();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].parent_native_ref.as_deref(), Some("camera"));
+        assert_eq!(images[0].stream, "main");
+        assert_eq!(
+            images[0].status,
+            orch_agent_contract::events::ItemStatus::Completed
+        );
+        assert_eq!(
+            std::fs::read(outputs.join(hash.to_string())).unwrap(),
+            bytes
+        );
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), original);
+        assert_eq!(std::fs::read_dir(outputs).unwrap().count(), 1);
     }
 
     fn kind_of(entry: &RecordedEntry) -> String {
@@ -952,60 +1104,87 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn an_unsupported_transcript_is_refused_before_temporary_storage_is_requested() {
-        const SOURCE: &str = "ORCH_UNSUPPORTED_TRANSCRIPT_SOURCE";
-        if let Some(path) = std::env::var_os(SOURCE) {
-            let error = read_record(
-                Path::new(&path),
-                "unsupported",
-                false,
-                Path::new("."),
-                clock(),
-            )
-            .unwrap_err();
-            assert!(matches!(error, HistoryError::OtherVersion(version) if version == "1.0.0"));
-            return;
-        }
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join("unsupported.jsonl");
-        std::fs::write(&path, "{\"version\":\"1.0.0\"}\n").unwrap();
-        let unavailable = home.path().join("not-a-temporary-directory");
-        std::fs::write(&unavailable, "a regular file").unwrap();
-        // A separate process avoids changing the temporary directory of parallel tests.
-        let output = std::process::Command::new("timeout").arg("30s").arg(std::env::current_exe().unwrap())
-            .args(["--exact", "history::tests::an_unsupported_transcript_is_refused_before_temporary_storage_is_requested", "--test-threads=1"])
-            .env(SOURCE, &path).env("TMPDIR", unavailable).output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            "{\"version\":\"1.0.0\"}\n"
-        );
-    }
-
-    #[test]
-    fn a_transcript_of_a_version_older_than_the_adapter_drives_is_not_read() {
+    fn a_transcript_of_an_older_build_is_read_whichever_build_wrote_it() {
         let home = tempfile::tempdir().unwrap();
         let path = home
             .path()
             .join("projects")
             .join("-w")
             .join(format!("{SESSION_ID}.jsonl"));
-        write(&path, &SESSION.replace(RECORDED, "1.0.0"));
         let settings = MapperSettings {
             directory: "/work/web".to_owned(),
             cwd: "/work/web".to_owned(),
             raw_events: false,
         };
-        assert!(matches!(
-            record(&path, settings, clock()),
-            Err(HistoryError::OtherVersion(version)) if version == "1.0.0"
-        ));
+        for written_by in ["2.1.100", RECORDED, "1.0.0"] {
+            write(&path, &SESSION.replace(RECORDED, written_by));
+            let mut recorded = record(&path, settings.clone(), clock())
+                .unwrap_or_else(|error| panic!("{written_by}: {error}"));
+            assert_eq!(recorded.selected_turns(RECORD_MAX_BYTES).unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn the_record_of_a_session_names_the_build_that_wrote_it_unless_it_is_the_pinned_one() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home
+            .path()
+            .join("projects")
+            .join("-w")
+            .join(format!("{SESSION_ID}.jsonl"));
+        let into = home.path().join("records");
+        for (written_by, expected) in [
+            (pinned(), None),
+            ("2.1.319", None),
+            ("2.1.323", None),
+            (RECORDED, Some("written by Claude Code 2.1.296.")),
+            ("2.2.0", Some("written by Claude Code 2.2.0.")),
+            ("2.1.100", Some("older than 2.1.296")),
+            (
+                "a-build-of-no-number",
+                Some("written by Claude Code a-build-of-no-number."),
+            ),
+        ] {
+            write(&path, &SESSION.replace(RECORDED, written_by));
+            let read = read_record(&path, SESSION_ID, false, &into, clock()).unwrap();
+            match expected {
+                None => assert!(read.report.warnings.is_empty(), "{written_by}"),
+                Some(words) => assert!(
+                    read.report
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.contains(written_by) && warning.contains(words)),
+                    "{written_by}: {:?}",
+                    read.report.warnings
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn rows_that_are_not_json_are_counted_with_the_place_of_the_first_and_blank_lines_are_not_rows()
+    {
+        let home = tempfile::tempdir().unwrap();
+        let path = home
+            .path()
+            .join("projects")
+            .join("-w")
+            .join(format!("{SESSION_ID}.jsonl"));
+        let mut lines: Vec<String> = SESSION
+            .replace(RECORDED, pinned())
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        lines.insert(2, String::new());
+        lines.insert(4, "{\"type\":\"assistant\",\"message\":".to_owned());
+        lines.insert(7, "not json at all".to_owned());
+        write(&path, &(lines.join("\n") + "\n"));
+        let read = read_record(&path, SESSION_ID, false, home.path(), clock()).unwrap();
+        assert_eq!(read.turns, 2, "what can be read is read");
+        assert_eq!(
+            read.report.warnings,
+            ["2 rows of the transcript are not valid JSON and are left out; the first is row 5."]
+        );
     }
 }

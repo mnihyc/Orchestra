@@ -1,9 +1,8 @@
 /** Where the application's own address comes back to: the place the person was last in on any device, while it can still be read. */
 import { expect, type Page, test } from '@playwright/test';
 
-import { ACME, deny, PEOPLE, scenario } from './support.ts';
+import { ACME, deny, DOUBLE, PEOPLE, scenario, screenAddress } from './support.ts';
 
-const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41860'}`;
 async function control(path: string, body: Record<string, unknown> = {}) {
   const response = await fetch(`${DOUBLE}/__double/first-steps${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   expect(response.ok).toBe(true);
@@ -25,41 +24,44 @@ async function signInAnywhere(page: Page): Promise<void> {
 }
 
 const TOPIC = `/topic/${ACME.fixLogin}`;
+const TEAM_HOME = screenAddress('/org/acme');
+const THREADS_VIEW = screenAddress(TOPIC, { tab: 'threads' });
+const KEPT_THREADS_ROUTE = new RegExp(`^${THREADS_VIEW.source}`);
 
 test.beforeEach(async () => { await scenario(); });
 
 test('signing in comes back to the place last in, with the view it had, wherever it was written', async ({ page }) => {
   await control('/landing', { place: { node_id: ACME.fixLogin, route: `${TOPIC}?tab=threads` } });
   await signInAnywhere(page);
-  await page.waitForURL(new RegExp(`${TOPIC}\\?tab=threads$`));
+  await page.waitForURL(THREADS_VIEW);
 });
 
 test('a place that is gone, or can no longer be read, falls back to the org choice', async ({ page }) => {
   await control('/landing', { place: { node_id: '00000000-0000-4000-8000-ffffffffffff', route: '/topic/00000000-0000-4000-8000-ffffffffffff' } });
   await signInAnywhere(page);
-  await page.waitForURL(/\/org\/acme$/);
+  await page.waitForURL(TEAM_HOME);
 
   // The place stays where it is, and the person may no longer read it.
   await control('/landing', { place: { node_id: ACME.fixLogin, route: TOPIC } });
   await deny(PEOPLE.ada.login, ['topic.view']);
   await page.goto('/');
-  await page.waitForURL(/\/org\/acme$/);
+  await page.waitForURL(TEAM_HOME);
 });
 
 test('an address outside the application is never followed', async ({ page }) => {
   await control('/landing', { place: { node_id: ACME.fixLogin, route: 'https://elsewhere.example/topic' } });
   await signInAnywhere(page);
-  await page.waitForURL(/\/org\/acme$/);
+  await page.waitForURL(TEAM_HOME);
 });
 
 test('where the person goes is kept by the server, and the application\'s own address opens it again', async ({ page }) => {
   await signInAnywhere(page);
-  await page.waitForURL(/\/org\/acme$/);
+  await page.waitForURL(TEAM_HOME);
   await page.goto(`${TOPIC}?tab=threads`);
   // A fresh page writes at once; after that, at most once in ten seconds.
-  await expect.poll(keptPlace, { timeout: 15_000 }).toEqual({ node_id: ACME.fixLogin, route: `${TOPIC}?tab=threads` });
+  await expect.poll(keptPlace, { timeout: 15_000 }).toEqual({ node_id: ACME.fixLogin, route: expect.stringMatching(KEPT_THREADS_ROUTE) });
   await page.goto('/');
-  await page.waitForURL(new RegExp(`${TOPIC}\\?tab=threads$`));
+  await page.waitForURL(THREADS_VIEW);
 });
 
 test('an explicit destination after sign-in wins over the place last in', async ({ page }) => {

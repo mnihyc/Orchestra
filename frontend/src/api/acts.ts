@@ -23,22 +23,27 @@ import type { Query, QueryClient, QueryKey } from '@tanstack/react-query';
 import { type Act, client } from '@/api/client';
 import { ENROLLMENT_PROGRESS, enrollmentChanges, enrollmentProgressKey, type EnrollmentChange } from '@/api/enrollment';
 import { answerChanges } from '@/api/actAnswers';
+import { pathOf, type AccessKind } from '@/api/access';
+import { agentSharePatches, type AgentSharesChange } from '@/api/agentShareChanges';
 import { applyAdminUser, repairAdminOrgs, repairMeta, type AdminOrgRestoreChange, type AdminUserChange, type MetaChange } from '@/api/adminState';
 import { AGENT_REACH, agentReachProjections, type AgentReachChange } from '@/api/agentReach';
 import { applyCollection, applyRow, applyThread, missingInventoryProjection, record, type CollectionChange, type RowChange, type ThreadChange, type ValueChange } from '@/api/cache';
 import { applyDocumentTreeChange, repairDocumentDirectories, type DocumentTreeChange, type DocumentDirectoryChange } from '@/api/documentTreeChanges';
 import { repairResource, type ResourceRepair } from '@/api/resourceRepair';
 import { queryClient } from '@/api/query';
+import { devicesKey, outsideStatusKey, routesKey } from '@/api/away';
 import { capturePeopleHint, readAuthority, repairPeople } from '@/api/peopleChanges';
 import type { BindingOptions, TreeNode } from '@/generated/api-types';
 import { queryFeed } from '@/realtime/queryFeeds';
 import { queryAuthorityAllows } from '@/api/queryAuthority';
+import { reachKeys, refreshReach } from '@/api/adminReach';
 
 // ---------------------------------------------------------------- what a change is
 
 /** Data the query cache keeps: the queries whose key begins with `key`, narrowed to those that name `id` anywhere in it. */
 export interface Stale {
-  key: readonly string[];
+  /** A named head with its typed query arguments, or a legacy string-only prefix. */
+  key: readonly [string, ...unknown[]] | readonly string[];
   /** Only the queries that name this identifier. */
   id?: string;
   /** A query argument at a fixed position, for views such as the finder's empty-query recents. */
@@ -57,16 +62,24 @@ export interface Followed {
 
 export interface SessionAuthorityChanged { session: true; mode?: unknown; asAdmin?: boolean; person?: unknown }
 export interface StateChange { state: { key: string; data: unknown; child?: string } }
-/** An answer genuinely omitted its view: choose one exact currently shown projection, never stale a kind. */
+/** An omitted view is repaired at its exact observed key; dependencies may identify several owners. */
 export interface MissingProjection {
   missing: readonly Stale[];
+  /** Each displayed filtered projection needs its own authorized answer. */
+  allObserved?: true;
   /** A bodyless act names a row, while its complete list is keyed by the owning place. */
   containingRow?: string;
   /** Service accounts are identified by their nested user reference. */
   containingAccount?: string;
+  /** A permission page may describe rights granted on another typed object. */
+  dependentOn?: { object: string; id: string };
+  /** The view that names this identifier is the one the answer carries: it is not read again. */
+  except?: string;
   cancelPending?: true;
 }
-export type Change = AdminOrgRestoreChange | AdminUserChange | MetaChange | Stale | Followed | SessionAuthorityChanged | RowChange | ThreadChange | ValueChange | CollectionChange | StateChange | ResourceRepair | MissingProjection | AgentReachChange | EnrollmentChange | DocumentTreeChange | DocumentDirectoryChange | { people: true; authority?: true; cut?: number } | { approvalViews: true } | { relatedViews: true } | { capViews: { id: string; value?: Record<string, unknown> } } | { rateViews: { nodeId: string | null } };
+/** Bodyless administrative revocations repair their existing credential inventory suppliers. */
+export interface AdminCredentialsChanged { adminCredentials: { kind: 'tokens' } | { kind: 'sessions'; person: string } }
+export type Change = AgentSharesChange | AdminCredentialsChanged | AdminOrgRestoreChange | AdminUserChange | MetaChange | Stale | Followed | SessionAuthorityChanged | RowChange | ThreadChange | ValueChange | CollectionChange | StateChange | ResourceRepair | MissingProjection | AgentReachChange | EnrollmentChange | DocumentTreeChange | DocumentDirectoryChange | { people: true; authority?: true; cut?: number; always?: true } | { approvalViews: true } | { relatedViews: true } | { outsideViews: true } | { capViews: { id: string; value?: Record<string, unknown> } } | { rateViews: { nodeId: string | null } };
 
 /** The value of a parameter of the request's path, by its name in the template: `p('id')`. */
 export type PathParam = (name: string) => string;
@@ -79,13 +92,26 @@ const every = (...key: string[]): Stale => ({ key });
 const only = (...key: string[]): Stale => ({ key, exact: true });
 const gone = (id: string, ...key: string[]): Stale => ({ key, id, gone: true });
 const kinds = (...heads: string[]): Stale[] => heads.map((head) => every(head));
+/** Bodyless favorite writes omit both the ordered list and each filtered name page's star state. */
+const favoriteViews = (): Change[] => [
+  { missing: [only('favorites'), every('names')], allObserved: true, cancelPending: true },
+];
 const ones = (id: string, ...heads: string[]): Stale[] => heads.map((head) => one(id, head));
+/** What an act changes in a list or page that its answer does not carry: each one shown is read again, and each one held without being shown is dropped, so that none comes back stale. */
+const shown = (...heads: Stale[]): Change => ({ missing: heads, allObserved: true, cancelPending: true });
+/** What a place sets or gives by default is what every place inside it reads: the views of the places inside, shown or held, but not the one the answer carries. */
+const inherited = (id: string, ...heads: Stale[]): Change => ({ missing: heads, allObserved: true, cancelPending: true, except: id });
 const TREES: Followed = { feed: 'trees' };
 const COUNTERS: Followed = { feed: 'counters' };
 const conversation = (id: string): Followed => ({ feed: 'thread', id });
 const blocks = (id: string): Followed => ({ feed: 'document', id });
 /** A request that changes nothing a screen reads. */
 const NOTHING: readonly Change[] = [];
+/** Ask receipts omit their views; repair each currently shown projection independently. */
+const askConversation = (id: string): Change[] => [
+  { missing: [one(id, 'ask')], cancelPending: true },
+  { missing: [every('ask-history')], cancelPending: true },
+];
 /** The views of one thing that was removed: what was read of it alone is gone; the lists it was a row of are asked again. */
 const ended = (changes: readonly Change[], id: string): Change[] => changes.map((change) => ('key' in change && change.id === id ? { ...change, gone: true } : change));
 
@@ -99,14 +125,20 @@ const placeLists = (): Change[] => [
 ];
 
 /** A place was made, renamed, archived or brought back: it, the lists it is a row of, and the trees. */
-const place = (id: string): Change[] => [...ones(id, 'node', 'children', 'topics', 'activity', 'tags', 'documents'), ...placeLists()];
+const place = (id: string): Change[] => [...ones(id, 'node', 'children', 'topics', 'activity', 'tags', 'documents'), ...placeLists(), ...placeActivity()];
+
+/** The lines of every Activity are what was done to a place or inside it, which no answer carries. */
+const placeActivity = (): Change[] => [shown(every('activity'))];
+
+/** A place made, archived, brought back, moved or deleted changes what the place above it holds: the lists of what it holds (the places in it and the topics of a project, as each list's filter decides) and its overview. */
+const placeContents = (): Change[] => [shown(every('children'), every('topics'), every('org-overview'))];
 
 /** Who may do what with what lies in a place changed: its page, its defaults or its roles, which reach everything inside it. */
 const placeAccess = (): Change[] => [
   { relatedViews: true },
   ...kinds('page', 'page-people', 'page-effective', 'page-history', 'defaults', 'roles', 'preview', 'agent-shares'),
   ...kinds('thread-shared', 'thread-shared-tree', 'environment-reach', AGENT_REACH, 'access-requests', 'holder-search', 'node', 'members'),
-  ...kinds('holdings', 'first-steps', 'usage', 'start-options', 'shared-with-me', 'outside-port-openings'),
+  ...kinds('copy-destinations', 'holdings', 'first-steps', 'usage', 'start-options', 'shared-with-me', 'outside-port-openings'),
   ...kinds('thread-instructions', 'model-inputs', 'model-input-block', 'user-shares'),
   TREES,
 ];
@@ -122,6 +154,7 @@ const THING_VIEWS: Readonly<Record<string, readonly string[]>> = {
   agents: ['agent', 'agents', 'start-options'],
   environments: ['environment', 'environments', 'environment-reach', AGENT_REACH, 'environment-ports', 'start-options', 'mounts', 'machine-environment-data'],
   hosts: ['host', 'host-settings', 'hosts', 'host-runtimes', 'mounts', 'machine-environment-data'],
+  machines: ['machine', 'machines'],
   templates: ['template', 'templates'],
   'mcp-servers': ['mcp-server', 'mcp-servers'],
   mounts: ['mount', 'mounts', 'mount-uses'],
@@ -129,33 +162,59 @@ const THING_VIEWS: Readonly<Record<string, readonly string[]>> = {
 };
 
 /** Who may do what with one thing changed (`object` is how the API addresses its kind); a place's change reaches what is in it. */
-const access = (object: string, id: string): Change[] => {
-  if (object === 'nodes') return [...placeAccess(), one(id, 'node')];
+const access = (object: string, id: string, homed = true): Change[] => {
+  const dependents: MissingProjection = { missing: [{ key: ['page'] }], dependentOn: { object, id }, cancelPending: true };
+  // The page's other views are read beside it, and none comes in its answer: what a person may do on it and its history, always; the people behind
+  // each holder and what it shares with agents only where a change of home moved the thing (a change of who holds what leaves both as they were).
+  const beside = shown(...ones(id, 'page-effective', 'page-history', ...(homed ? ['page-people', 'agent-shares'] : [])));
+  if (object === 'nodes') return [...placeAccess(), one(id, 'node'), dependents, beside];
   const views = THING_VIEWS[object] ?? [];
   return [
     { relatedViews: true },
-    ...ones(id, 'page-people', 'page-effective', 'page-history', 'agent-shares'),
+    dependents,
+    beside,
     ...(object === 'documents' ? [blocks(id)] : []),
     // Another page may say what this one gives: a thread's page says whether the people on it reach its environment.
-    ...kinds('page', 'preview', 'holder-search', 'access-requests', 'shared-with-me', 'user-shares'),
+    ...kinds('copy-destinations', 'page', 'preview', 'holder-search', 'access-requests', 'shared-with-me', 'user-shares'),
     ...views.map((head, index) => (index === 0 ? one(id, head) : every(head))),
   ];
 };
 
 /** Settings resolve down the tree: what a place sets is what every place, thread and resource inside it reads. */
 const settings = (): Change[] =>
-  kinds('settings', 'secrets', 'thread-parameters', 'thread-limits', 'start-options', 'usage', 'usage-caps', 'first-steps', 'page', 'defaults', 'preview', 'provider-settings', 'environment-settings', 'host-settings', AGENT_REACH, 'environment-ports', 'notifiers', 'channels');
+  kinds('copy-destinations', 'settings', 'secrets', 'thread-parameters', 'thread-limits', 'start-options', 'usage', 'usage-caps', 'first-steps', 'page', 'defaults', 'preview', 'provider-settings', 'environment-settings', 'host-settings', AGENT_REACH, 'environment-ports', 'notifiers', 'channels');
 
 const relatedSettings = (key: string): Change[] => key.startsWith('related.') || key.startsWith('search.semantic.') ? [{ relatedViews: true }] : [];
+/** A saved identity list omits each viewer/root's resolved model eligibility and default. Repair shown Ask reads only. */
+const askModelSetting = (key: string): Change[] => key === 'ask.models' ? [{ missing: [every('ask-models')], cancelPending: true }] : [];
+/** A personal-skill policy edit omits each open thread's derived knowledge policy. */
+const personalSkillsSetting = (key: string): Change[] => key === 'agents.personal_skills' ? [{ missing: [every('thread-shared')], cancelPending: true }] : [];
 
 /** Who is in an org changed: its members, what they hold, and every list that names people of it. */
-export const people = (authority = false): Change[] => [{ people: true, ...(authority ? { authority: true } : {}) }];
+export const people = (authority = false, always = false): Change[] => [{ people: true, ...(authority ? { authority: true } : {}), ...(always ? { always: true } : {}) }];
+
+/**
+ * A role given, changed or taken away is what these lists say of its holder, and the role's own answer carries none of them: the members (the role
+ * they hold and how many others), the people from outside (the ways they reach), the readers of a document, and the Activity of the place. Each is
+ * read once where it is shown and dropped where it is held. Not here: the lists of roles (the role's row updates them without a read) and the
+ * pages of access, which a role changes only in the counts of people (`rolePages`): those are read only where one of them can have changed.
+ */
+const roleViews = (): Change[] => [{ relatedViews: true }, shown(every('members'), every('outsiders'), every('document-readers'), every('activity'))];
+
+/** Whether a role may be the reader's own: a person's rights are carried by the rows they read, so a role that is theirs or a group's changes those rows. */
+const READER_ACCESS = ['node', 'org', 'orgs', 'children', 'shared-with-me', 'names'] as const;
 
 /** A group, which is a holder on pages and a set of people behind it. */
 const groups = (): Change[] => kinds('groups', 'org-groups', 'group-members', 'group-holders', 'holder-search', 'page', 'page-people', 'page-effective', 'roles', 'defaults', 'usage', 'preview');
 
+/** Who is in a group is counted in the lists of the groups of its org. */
+const groupPeople = (): Change[] => [...groups(), shown(every('groups'), every('org-groups'))];
+
 /** A tag, which topics carry. */
 const tags = (): Change[] => [...kinds('tags', 'topics', 'node', 'finder-tag-projects'), TREES];
+
+/** A tag renamed, recoloured or deleted is read in every list of topics that shows it and in the finder's lists of tagged projects. */
+const tagged = (): Change[] => [...tags(), shown(every('topics'), every('finder-tag-projects'))];
 
 /** A thread's own views: its conversation by its feed, and what is read of it beside. */
 const thread = (id: string): Change[] => [
@@ -166,9 +225,12 @@ const thread = (id: string): Change[] => [
   ...ones(id, 'thread-context', 'thread-turn-usage', 'turn-cost'),
 ];
 
-/** A fresh thread row carries settings changes even before its first turn, so its independent reads are asked again. */
+/** The settings and parameters omitted by a live thread choice update. */
 export function threadRowChanges(id: string): Change[] {
-  return ones(id, 'node', 'thread', 'thread-parameters', 'settings');
+  return ['settings', 'thread-parameters'].map((kind) => ({
+    missing: [{ key: [kind, id], exact: true }],
+    cancelPending: true,
+  }));
 }
 
 /** Threads were made, moved or changed where they run: the threads, their places and the trees. */
@@ -195,7 +257,7 @@ const provider = (id: string): Change[] => [
 ];
 
 const agent = (id: string): Change[] => [one(id, 'agent'), ...kinds('agents', 'start-options', 'harness-kinds')];
-const host = (id: string): Change[] => [...ones(id, 'host', 'host-settings', 'host-runtimes', 'host-ports'), ...kinds('hosts', 'environments', 'admin', 'mounts')];
+const host = (id: string): Change[] => [...ones(id, 'host', 'host-settings', 'host-runtimes'), ...kinds('hosts', 'environments', 'admin', 'mounts')];
 const template = (id: string): Change[] => [one(id, 'template'), ...kinds('templates', 'start-options', 'provider-setup')];
 const machine = (id: string): Change[] => [...ones(id, 'machine', 'machine-policy'), ...kinds('machines', 'providers', 'agents', 'environments', 'start-options', 'provider-setup', 'mounts', 'machine-environment-data')];
 const mcp = (id: string): Change[] => [one(id, 'mcp-server'), every('mcp-servers')];
@@ -209,10 +271,16 @@ const chat = (id: string): Change[] => [only('chat', id), ...kinds('chats', 'cha
 const inbox = (): Change[] => [...kinds('inbox', 'away', 'notification-prefs'), COUNTERS];
 
 /** Requests that wait for a decision: every list of them and the count. */
-const approvals = (): Change[] => [...kinds('approvals', 'approval', 'access-requests', 'access-request', 'port-requests'), COUNTERS];
+const approvals = (): Change[] => [...kinds('approvals', 'approval', 'access-requests', 'access-request', 'port-requests'), COUNTERS, shown(every('access-requests'), every('access-request'))];
 
 /** How the person is told outside Orch. */
-const routes = (): Change[] => kinds('notification-channels', 'notification-prefs', 'away', 'notifiers', 'channels', 'first-steps');
+const routes = (): Change[] => [...kinds('notification-channels', 'notification-prefs', 'away', 'notifiers', 'channels', 'first-steps'), { outsideViews: true }];
+const pushDevices = (): Change[] => [
+  { missing: [{ key: devicesKey, exact: true }], cancelPending: true },
+  { missing: [{ key: routesKey, exact: true }], cancelPending: true },
+  { missing: [{ key: ['notification-channels'], exact: true }] },
+  { outsideViews: true },
+];
 
 /** Usage: figures, caps, limits and rates, which each screen of usage reads under one head. */
 const usage = (): Change[] => kinds('usage', 'usage-caps', 'provider-caps', 'thread-limits');
@@ -240,6 +308,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /setup': () => [...me(), every('orgs')],
   'POST /auth/login': () => NOTHING,
   'POST /auth/email-code': () => NOTHING,
+  'POST /summaries/batch': () => NOTHING,
   'POST /auth/register': () => NOTHING,
   'POST /auth/recovery': () => NOTHING,
   'POST /auth/recovery/confirm': () => kinds('recovery-token'),
@@ -250,7 +319,8 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'PATCH /me': () => [...me(), ...kinds('members', 'people', 'people-search')],
   'PATCH /me/profile': () => me(),
   'PUT /me/profile/pins': () => me(),
-  'POST /me/password': () => kinds('sessions', 'me'),
+  // The server ends every other session with the old password: the list of them shown is asked again by name, for a loose hint of its kind asks nothing.
+  'POST /me/password': () => [...kinds('me'), { missing: [only('sessions')], cancelPending: true }],
   'POST /me/totp/setup': () => NOTHING,
   'POST /me/totp/enable': () => kinds('me', 'recovery-codes'),
   'POST /me/recovery-codes': () => kinds('recovery-codes'),
@@ -265,10 +335,10 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'DELETE /me/sessions': () => kinds('sessions'),
   'POST /me/tokens': () => kinds('tokens', 'org-tokens'),
   'DELETE /me/tokens/{id}': () => kinds('tokens', 'org-tokens'),
-  'PUT /me/favorites/{node_id}': () => kinds('favorites', 'names'),
-  'DELETE /me/favorites/{node_id}': () => kinds('favorites', 'names'),
-  'PUT /me/favorites/{kind}/{id}': () => kinds('favorites', 'names'),
-  'DELETE /me/favorites/{kind}/{id}': () => kinds('favorites', 'names'),
+  'PUT /me/favorites/{node_id}': favoriteViews,
+  'DELETE /me/favorites/{node_id}': favoriteViews,
+  'PUT /me/favorites/{kind}/{id}': favoriteViews,
+  'DELETE /me/favorites/{kind}/{id}': favoriteViews,
   'POST /me/visits': () => NOTHING,
   'POST /me/recents': () => NOTHING,
   // What the interface keeps is shown as it is set; reading it back while more is being sent could bring back an older
@@ -277,6 +347,49 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'PUT /me/state/help': () => kinds('first-steps'),
   'PUT /me/first-steps': () => kinds('first-steps', 'me-state'),
   'PUT /me/state/project_views/{project_id}': () => NOTHING,
+
+  // -- private Ask conversations; kept threads enter their ordinary live tree separately
+  'POST /ask/conversations': () => [{ missing: [every('ask-history')], cancelPending: true }],
+  'POST /ask/conversations/{id}/messages': (p) => askConversation(p('id')),
+  'POST /ask/conversations/{id}/stop': (p) => askConversation(p('id')),
+  'POST /ask/conversations/{id}/keep': (p) => askConversation(p('id')),
+
+  'PUT /{object}/{id}/home': (p) => [...access(p('object'), p('id')), ...kinds('everything', 'names', 'start-options'), TREES],
+
+  'POST /hosts/{id}/move-out/preview': () => NOTHING,
+  'POST /hosts/{id}/move-out': (p) => [...access('hosts', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /machines/{id}/move-out/preview': () => NOTHING,
+  'POST /machines/{id}/move-out': (p) => [...access('machines', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /agents/{id}/move-out/preview': () => NOTHING,
+  'POST /agents/{id}/move-out': (p) => [...access('agents', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /skills/{id}/move-out/preview': () => NOTHING,
+  'POST /skills/{id}/move-out': (p) => [...access('skills', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /mounts/{id}/move-out/preview': () => NOTHING,
+  'POST /mounts/{id}/move-out': (p) => [...access('mounts', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /templates/{id}/move-out/preview': () => NOTHING,
+  'POST /templates/{id}/move-out': (p) => [...access('templates', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /providers/{id}/move-out/preview': () => NOTHING,
+  'POST /providers/{id}/move-out': (p) => [...access('providers', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /mcp-servers/{id}/move-out/preview': () => NOTHING,
+  'POST /mcp-servers/{id}/move-out': (p) => [...access('mcp-servers', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /chats/{id}/move-out/preview': () => NOTHING,
+  'POST /chats/{id}/move-out': (p) => [...access('chats', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /skills/{id}/draft/move-out/preview': () => NOTHING,
+  'POST /skills/{id}/draft/move-out': (p) => [...access('skills', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+
+  'POST /copy-destinations/judge': () => NOTHING,
+
+  // -- native duplicates create fresh identities; their sources are not updated
+  'POST /providers/{id}/duplicate': () => kinds('providers', 'provider-setup', 'start-options', 'everything', 'names', 'trace'),
+  'POST /agents/{id}/duplicate': () => kinds('agents', 'start-options', 'everything', 'names', 'trace'),
+  'POST /templates/{id}/duplicate': () => kinds('templates', 'everything', 'names', 'trace'),
+  'POST /mounts/{id}/duplicate': () => kinds('mounts', 'everything', 'names', 'trace'),
+  'POST /mcp-servers/{id}/duplicate': () => kinds('mcp-servers', 'environment-mcp', 'everything', 'names', 'trace'),
+  'POST /skills/{id}/duplicate': () => kinds('skills', 'everything', 'names', 'trace'),
+  'POST /skills/{id}/draft/duplicate': () => kinds('skills', 'everything', 'names', 'trace'),
+  'POST /environments/{id}/duplicate': () => [...kinds('environments', 'start-options', 'job', 'everything', 'names', 'trace'), TREES],
+  'POST /chats/{id}/duplicate': () => [...kinds('chats', 'everything', 'names', 'trace'), TREES],
+  'POST /chats/{id}/duplicate/preview': () => NOTHING,
 
   // -- notifications and the ways a person is told
   'POST /notifications/read': () => inbox(),
@@ -288,9 +401,9 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'DELETE /me/notification-routes/by-id/{route_id}': () => routes(),
   'POST /me/notification-routes/{channel_id}/link': () => routes(),
   'POST /me/notification-channels': () => routes(),
-  'POST /me/push-subscriptions': () => routes(),
-  'DELETE /me/push-subscriptions': () => routes(),
-  'DELETE /me/push-subscriptions/{id}': () => routes(),
+  'POST /me/push-subscriptions': () => pushDevices(),
+  'DELETE /me/push-subscriptions': () => pushDevices(),
+  'DELETE /me/push-subscriptions/{id}': () => pushDevices(),
   'POST /notification-channels/{id}/test': () => routes(),
   'PATCH /notification-channels/{id}': () => routes(),
   'DELETE /notification-channels/{id}': () => routes(),
@@ -303,19 +416,19 @@ export const ACTS: Readonly<Record<string, Entry>> = {
 
   // -- places: orgs at every level, projects, folders, topics
   'POST /orgs': () => [...placeLists(), ...me(), every('admin')],
-  'POST /orgs/{id}/orgs': (p) => [...place(p('id')), every('admin')],
-  'POST /orgs/{id}/projects': (p) => place(p('id')),
-  'POST /projects/{id}/projects': (p) => place(p('id')),
-  'POST /projects/{id}/topics': (p) => place(p('id')),
+  'POST /orgs/{id}/orgs': (p) => [...place(p('id')), ...placeContents(), every('admin')],
+  'POST /orgs/{id}/projects': (p) => [...place(p('id')), ...placeContents()],
+  'POST /projects/{id}/projects': (p) => [...place(p('id')), ...placeContents()],
+  'POST /projects/{id}/topics': (p) => [...place(p('id')), ...placeContents()],
   'PATCH /nodes/{id}': (p) => [...place(p('id')), every('page'), every('readme'), every('admin'), conversation(p('id'))],
   'PATCH /topics/{id}': (p) => [...place(p('id')), ...tags()],
   'POST /nodes/{id}/auto': (p) => [...place(p('id')), ...thread(p('id'))],
-  'POST /nodes/{id}/archive': (p) => [...place(p('id')), ...kinds('documents', 'environments')],
+  'POST /nodes/{id}/archive': (p) => [...place(p('id')), ...placeContents(), ...kinds('documents', 'environments')],
   'POST /resources/library': () => NOTHING,
   'POST /resources/library/people': () => NOTHING,
   'POST /nodes/{id}/archive/preview': () => NOTHING,
   'POST /nodes/{id}/unarchive/preview': () => NOTHING,
-  'POST /nodes/{id}/unarchive': (p) => [...place(p('id')), ...kinds('documents', 'environments')],
+  'POST /nodes/{id}/unarchive': (p) => [...place(p('id')), ...placeContents(), ...kinds('documents', 'environments')],
   'POST /nodes/{id}/delete/preview': () => NOTHING,
   // What lies inside the deleted place is gone too, and only the tree knows what that is: every place is asked again
   // once the tree's deleted rows have said which are gone (`treeChanges`), so a screen of one of them is not asked again.
@@ -323,35 +436,41 @@ export const ACTS: Readonly<Record<string, Entry>> = {
     ...ended(ones(p('id'), 'node', 'children', 'topics', 'activity', 'tags', 'documents', 'settings', 'roles', 'page', 'defaults'), p('id')),
     ...placeMoved().filter((change) => !('key' in change && change.key[0] === 'node' && change.id === undefined)),
     every('admin'), every('thread-sides'),
+    ...placeActivity(), ...placeContents(), shown(every('deleted')),
   ],
-  'POST /nodes/{id}/restore': (p) => [...place(p('id')), ...placeMoved(), ...kinds('trace-deleted', 'deleted-inspection', 'admin')],
+  'POST /nodes/{id}/restore': (p) => [...place(p('id')), ...placeContents(), ...placeMoved(), ...kinds('trace-deleted', 'deleted-inspection', 'admin')],
   'POST /projects/{id}/move/preview': () => NOTHING,
   'POST /topics/{id}/move/preview': () => NOTHING,
   'POST /orgs/{id}/move/preview': () => NOTHING,
-  'POST /projects/{id}/move': (p) => [...place(p('id')), ...placeMoved()],
-  'POST /topics/{id}/move': (p) => [...place(p('id')), ...placeMoved()],
-  'POST /orgs/{id}/move': (p) => [...place(p('id')), ...placeMoved(), ...people()],
+  'POST /projects/{id}/move': (p) => [...place(p('id')), ...placeContents(), ...placeMoved()],
+  'POST /topics/{id}/move': (p) => [...place(p('id')), ...placeContents(), ...placeMoved()],
+  // An org's answer is the org, not the lists of who is in the tree it went to: the membership repair is kept with it.
+  'POST /orgs/{id}/move': (p) => [...place(p('id')), ...placeContents(), ...placeMoved(), ...people(false, true)],
   'PUT /nodes/{id}/subscription': (p) => [one(p('id'), 'node'), ...kinds('away')],
   'DELETE /nodes/{id}/subscription': (p) => [one(p('id'), 'node'), ...kinds('away')],
   'POST /nodes/{id}/tags': (p) => [one(p('id'), 'tags'), ...tags()],
   'PUT /nodes/{id}/tags': (p) => [...place(p('id')), ...tags(), ...kinds('everything')],
   'POST /nodes/{id}/announcements': (p) => [...place(p('id')), ...kinds('announcements')],
-  'PATCH /tags/{id}': () => tags(),
-  'DELETE /tags/{id}': () => tags(),
+  'POST /orgs/{id}/messages': (p) => [{ missing: [only('admin-messages', p('id'))] }],
+  // The sent list and the banner's settings are two projections the receipt omits; each is repaired where it is shown.
+  'POST /admin/messages': () => [{ missing: [only('admin-messages', 'system')] }, { missing: [only('admin', 'settings')] }, { meta: true }],
+  'PATCH /tags/{id}': () => tagged(),
+  'DELETE /tags/{id}': () => tagged(),
   'PUT /topics/{id}/default-environment': (p) => [...place(p('id')), ...kinds('start-options', 'environments')],
   'POST /nodes/{id}/transfer': (p) => [...place(p('id')), ...placeAccess(), every('admin')],
 
   // -- access: pages, defaults, roles, requests, agents' shares
-  'PATCH /{object}/{id}/permissions': (p) => access(p('object'), p('id')),
+  'PATCH /{object}/{id}/permissions': (p) => access(p('object'), p('id'), false),
   'POST /{object}/{id}/permissions/preview': () => NOTHING,
   'POST /{object}/{id}/share/preview': () => NOTHING,
-  'PATCH /nodes/{id}/defaults': (p) => [...placeAccess(), one(p('id'), 'defaults')],
+  'PATCH /nodes/{id}/defaults': (p) => [...placeAccess(), one(p('id'), 'defaults'), inherited(p('id'), every('defaults'), every('page'))],
   'POST /nodes/{id}/defaults/preview': () => NOTHING,
   'PATCH /admin/defaults': () => placeAccess(),
   'POST /admin/defaults/preview': () => NOTHING,
-  'POST /nodes/{id}/roles': () => placeAccess(),
-  'PATCH /roles/{id}': () => placeAccess(),
-  'DELETE /roles/{id}': () => placeAccess(),
+  // A role written is its own list's answer (the roles of the place and of the places below, by its row); what it changes besides is `roleViews`.
+  'POST /nodes/{id}/roles': () => roleViews(),
+  'PATCH /roles/{id}': () => roleViews(),
+  'DELETE /roles/{id}': () => roleViews(),
   'POST /access-requests': () => approvals(),
   'POST /chats/{id}/join-requests': () => approvals(),
   'POST /approvals/{id}/cancel': () => approvals(),
@@ -374,25 +493,26 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /orgs/{id}/groups': () => groups(),
   'PATCH /groups/{id}': () => groups(),
   'DELETE /groups/{id}': (p) => [...groups(), gone(p('id'), 'group-members'), gone(p('id'), 'group-holders')],
-  'PUT /groups/{id}/holders': () => groups(),
-  'DELETE /groups/{id}/holders': () => groups(),
-  'PUT /groups/{id}/members/{user_id}': () => groups(),
-  'DELETE /groups/{id}/members/{user_id}': () => groups(),
+  'PUT /groups/{id}/holders': () => groupPeople(),
+  'DELETE /groups/{id}/holders': () => groupPeople(),
+  'PUT /groups/{id}/members/{user_id}': () => groupPeople(),
+  'DELETE /groups/{id}/members/{user_id}': () => groupPeople(),
   'POST /orgs/{id}/service-accounts': () => [...kinds('service-accounts'), ...people()],
-  'DELETE /service-accounts/{id}': (p) => [...kinds('service-accounts'), gone(p('id'), 'service-tokens'), ...people()],
+  'DELETE /service-accounts/{id}': (p) => [...kinds('service-accounts'), gone(p('id'), 'service-tokens'), ...people(false, true)],
   'POST /service-accounts/{id}/tokens': (p) => [one(p('id'), 'service-tokens'), ...kinds('service-accounts', 'org-tokens')],
   'DELETE /service-accounts/{id}/tokens/{token_id}': (p) => [one(p('id'), 'service-tokens'), ...kinds('service-accounts', 'org-tokens')],
   'POST /orgs/{id}/tokens/{token_id}/refuse': (p) => [one(p('id'), 'org-tokens'), ...kinds('tokens', 'service-tokens')],
 
   // -- settings and secrets, at a place, of a resource, of the system
-  'PUT /nodes/{id}/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...thread(p('id')), one(p('id'), 'node')],
-  'DELETE /nodes/{id}/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...thread(p('id')), one(p('id'), 'node')],
+  'PUT /nodes/{id}/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...personalSkillsSetting(p('key')), ...thread(p('id')), one(p('id'), 'node')],
+  'DELETE /nodes/{id}/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...personalSkillsSetting(p('key')), ...thread(p('id')), one(p('id'), 'node')],
   'PUT /nodes/{id}/secrets/{name}': () => kinds('secrets', 'settings'),
   'DELETE /nodes/{id}/secrets/{name}': () => kinds('secrets', 'settings'),
   'PUT /environments/{id}/secrets/{name}': (p) => [one(p('id'), 'secrets'), ...kinds('settings')],
   'DELETE /environments/{id}/secrets/{name}': (p) => [one(p('id'), 'secrets'), ...kinds('settings')],
-  'PUT /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
-  'DELETE /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
+  'PUT /gateways': () => [{ key: ['gateway-catalogue'], exact: true }],
+  'PUT /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...personalSkillsSetting(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
+  'DELETE /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...personalSkillsSetting(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
 
   // -- threads
   'POST /topics/{id}/threads': (p) => [...place(p('id')), ...threads()],
@@ -405,6 +525,10 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /threads/{id}/inputs': (p) => [conversation(p('id')), ...ones(p('id'), 'thread-limits', 'thread-catchup'), ...usage()],
   'PATCH /threads/{id}/inputs/{input_id}': (p) => [conversation(p('id'))],
   'DELETE /threads/{id}/inputs/{input_id}': (p) => [conversation(p('id')), one(p('id'), 'thread-limits')],
+  'POST /topics/{id}/input-schedules': (p) => [one(p('id'), 'topic-schedules')],
+  'PATCH /input-schedules/{id}': (p) => [one(p('id'), 'input-schedule'), one(p('id'), 'input-schedule-runs'), every('topic-schedules')],
+  // Cancellation retains schedule history; the topic list follows its native feed.
+  'DELETE /input-schedules/{id}': (p) => [one(p('id'), 'input-schedule')],
   // A 202 admits work. Its caller selects its own read window; native scoped feeds publish the outcome.
   // Refreshing the default window here would read an unrelated active pane or race that selection.
   'POST /threads/{id}/inputs/{input_id}/versions': () => NOTHING,
@@ -463,7 +587,9 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'PUT /chats/{id}/draft': () => NOTHING,
   'DELETE /chats/{id}/draft': () => NOTHING,
   'POST /orgs/{id}/chats': () => kinds('chats', 'chat-states'),
-  'PATCH /chats/{id}': (p) => chat(p('id')),
+  'PATCH /chats/{id}': (p) => [...chat(p('id')), ...kinds('everything'), { feed: 'trees' }],
+  'POST /chats/{id}/join': (p) => [...chat(p('id')), one(p('id'), 'chat-mentions'), ...kinds('everything'), { feed: 'trees' }],
+  'PUT /chats/{id}/members/{user_id}/manager': (p) => [...chat(p('id')), one(p('id'), 'chat-mentions'), ...approvals(), ...kinds('everything'), { feed: 'trees' }],
   'PUT /chats/{id}/members/{user_id}': (p) => [...chat(p('id')), one(p('id'), 'chat-mentions')],
   'DELETE /chats/{id}/members/{user_id}': (p) => [...chat(p('id')), one(p('id'), 'chat-mentions')],
   'PUT /chats/{id}/agents/{thread_id}/posting': (p) => [...chat(p('id')), ...thread(p('thread_id'))],
@@ -472,7 +598,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /forward': () => [...kinds('chats', 'chat-states', 'thread-item')],
 
   // -- documents
-  'POST /document-tree/operations': () => kinds('document-directory', 'document-tree-entry'),
+  'POST /document-tree/operations': () => [...kinds('document-directory', 'document-tree-entry', 'document', 'documents', 'readme', 'names', 'trace'), TREES],
   'POST /document-tree/delete/preview': () => NOTHING,
   'POST /document-containers/{id}/documents': () => kinds('document-directory', 'document'),
   'POST /nodes/{id}/documents': (p) => [...ones(p('id'), 'documents', 'node'), ...kinds('readme', 'exports'), TREES],
@@ -480,6 +606,13 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /nodes/{id}/documents/import': (p) => [...ones(p('id'), 'documents', 'node'), TREES],
   'PATCH /documents/{id}': (p) => [...doc(p('id')), ...kinds('names', 'recents', 'node', 'user-shares'), TREES],
   'PUT /documents/{id}/links': (p) => [one(p('id'), 'document-links')],
+  'PUT /documents/{id}/summary-options': (p) => [
+    one(p('id'), 'document-summary-options'),
+    { ...one(p('id'), 'resource-summary'), at: { index: 2, value: 'document' } },
+  ],
+  'POST /summaries/{kind}/{id}/refresh': (p) => [
+    { ...one(p('id'), 'resource-summary'), at: { index: 2, value: p('kind') } },
+  ],
   'DELETE /documents/{id}': (p) => [gone(p('id'), 'document'), gone(p('id'), 'document-versions'), ...kinds('documents', 'readme', 'node', 'names', 'trace-deleted', 'trace', 'user-shares'), TREES],
   'POST /documents/{id}/restore': (p) => [...doc(p('id')), ...kinds('node', 'trace-deleted', 'deleted-inspection', 'trace', 'user-shares'), TREES],
   'POST /documents/{id}/move/preview': () => NOTHING,
@@ -512,7 +645,8 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   // -- exports
   'POST /nodes/{id}/exports/preflight': () => NOTHING,
   'POST /nodes/{id}/exports': () => kinds('exports', 'job'),
-  'DELETE /exports/{id}': (p) => [gone(p('id'), 'exports'), every('exports')],
+  // Only archive bytes are deleted; its retained metadata stays in the person's list.
+  'DELETE /exports/{id}': (p) => [{ missing: [only('exports', 'mine'), only('exports', 'one', p('id'))], allObserved: true, cancelPending: true }],
 
   // -- imports: planning and previewing change nothing; the accepted jobs update their own records
   'POST /nodes/{id}/imports/preflight': () => NOTHING,
@@ -536,6 +670,8 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /environments/{id}/keep-awake': (p) => environment(p('id')),
   'POST /environments/{id}/keep': (p) => environment(p('id')),
   'POST /environments/{id}/files/export': () => kinds('job'),
+  'POST /environments/{id}/mcp/imports': (p) => [one(p('id'), 'environment-mcp')],
+  'POST /environments/{id}/mcp/servers': (p) => [one(p('id'), 'environment-mcp')],
   'POST /environments/{id}/mcp/servers/{name}/restart': (p) => [one(p('id'), 'environment-mcp'), ...kinds('job', 'trace')],
   'PUT /environments/{id}/config-trust/{harness}': (p) => [...environment(p('id')), every('thread-parameters')],
   'POST /environments/updates/preflight': () => NOTHING,
@@ -690,6 +826,10 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /admin/releases/check': () => [only('admin', 'installation-records')],
   'POST /admin/users': () => kinds('admin', 'trace-users'),
   'PATCH /admin/users/{id}': () => [...kinds('admin', 'trace-users', 'trace-person'), ...people()],
+  'DELETE /admin/tokens/{id}': () => [{ adminCredentials: { kind: 'tokens' } }],
+  'DELETE /admin/users/{id}/tokens/{token_id}': () => [{ adminCredentials: { kind: 'tokens' } }],
+  'DELETE /admin/users/{id}/sessions': (p) => [{ adminCredentials: { kind: 'sessions', person: p('id') } }],
+  'DELETE /admin/users/{id}/sessions/{session_id}': (p) => [{ adminCredentials: { kind: 'sessions', person: p('id') } }],
   'POST /admin/users/{id}/reset-link': () => NOTHING,
   'POST /admin/users/{id}/org-invitation': () => kinds('admin'),
   'DELETE /admin/users/{id}/org-invitation': () => kinds('admin'),
@@ -795,6 +935,49 @@ export function covers(change: Stale, key: QueryKey): boolean {
   return change.id === undefined || names(key, change.id, 0);
 }
 
+/** What a role written or taken away touches: whom it is given to and which roles it was and is, from its row and from the lists of roles that held it (read before the row is applied). */
+function roleTouched(cache: QueryClient, row: RowChange['row']): { holder: { kind: string; id: string } | undefined; roles: ReadonlySet<string> | null } {
+  const named = (value: unknown): { kind: string; id: string } | undefined => record(value) && typeof value.kind === 'string' && typeof value.id === 'string' ? { kind: value.kind, id: value.id } : undefined;
+  let held: Record<string, unknown> | undefined;
+  for (const [, data] of cache.getQueriesData({ queryKey: ['roles'] })) {
+    if (!record(data)) continue;
+    for (const list of [data.own, data.above]) {
+      if (!Array.isArray(list)) continue;
+      const found: unknown = (list as unknown[]).find((one) => record(one) && one.id === row.id);
+      if (record(found)) held = found;
+    }
+  }
+  const roles = new Set<string>();
+  for (const one of [row.value, held]) if (record(one) && typeof one.role === 'string') roles.add(one.role);
+  return { holder: named(record(row.value) ? row.value.subject : undefined) ?? named(held?.subject), roles: roles.size === 0 ? null : roles };
+}
+
+/** Whether a page of access shows a count of people that a change of these roles can have changed: the admins above it, the people behind a holder that is a role, the people who reach a thread's environment. `null`: the roles are not known, so any may have. */
+function pageDependsOn(data: unknown, roles: ReadonlySet<string> | null): boolean {
+  if (!record(data)) return true;
+  if (roles === null || roles.has('admin') || record(data.reaches)) return true;
+  const rows: unknown = data.rows;
+  return Array.isArray(rows) && rows.some((one: unknown) => record(one) && Array.isArray(one.entries) && one.entries.some((entry: unknown) => record(entry) && record(entry.holder) && entry.holder.kind === 'role' && typeof entry.holder.role === 'string' && roles.has(entry.holder.role)));
+}
+
+/** The pages of access a role written changes in what they count are read again where shown and dropped where held; the rows a role changes are the role's own list's, which the answer carries. */
+async function rolePages(cache: QueryClient, touched: { holder: { kind: string; id: string } | undefined; roles: ReadonlySet<string> | null }, current: () => boolean): Promise<void> {
+  const affected = cache.getQueryCache().getAll().filter((query) => {
+    const [head, , , third] = query.queryKey;
+    if (head === 'page') return pageDependsOn(query.state.data, touched.roles);
+    if (head === 'page-people') return touched.roles === null || typeof third === 'string' && third.startsWith('role:') && [...touched.roles].some((role) => third.endsWith(`:${role}`));
+    if (head === 'page-effective') return touched.holder?.kind !== 'user' || third === touched.holder.id;
+    return false;
+  });
+  for (const query of affected) {
+    if (!query.isActive()) { cache.removeQueries({ queryKey: query.queryKey, exact: true }); continue; }
+    await cache.cancelQueries({ queryKey: query.queryKey, exact: true });
+    if (!current()) return;
+    await cache.refetchQueries({ queryKey: query.queryKey, exact: true });
+    if (!current()) return;
+  }
+}
+
 /** What keeps the data a live feed follows: set by the live connection when it starts. Until then those changes wait for the feed itself. */
 export interface Followers {
   /** Retakes the same human session and drops old-authority live projections before reloading them. */
@@ -833,7 +1016,25 @@ function follow(change: Followed): void {
 
 const startRepairs = new WeakMap<Query, Promise<void>>();
 const approvalRepairs = new WeakMap<Query, Promise<void>>();
+const outsideRepairs = new WeakMap<Query, Promise<void>>();
 const relatedRepairs = new WeakMap<Query, Promise<void>>();
+
+/** A route or preference answer cannot supply independently admitted status for each visible place. */
+async function repairOutsideViews(cache: QueryClient, current: () => boolean): Promise<void> {
+  await Promise.all(cache.getQueryCache().findAll({ queryKey: outsideStatusKey }).map(async (query) => {
+    if (!query.isActive()) { cache.removeQueries({ queryKey: query.queryKey, exact: true }); return; }
+    const pending = outsideRepairs.get(query);
+    if (pending !== undefined) return pending;
+    const repair = (async () => {
+      await cache.cancelQueries({ queryKey: query.queryKey, exact: true });
+      if (!current() || cache.getQueryCache().find({ queryKey: query.queryKey, exact: true }) !== query
+        || !query.isActive() || !queryAuthorityAllows(cache, query.meta)) return;
+      await cache.refetchQueries({ queryKey: query.queryKey, exact: true });
+    })();
+    outsideRepairs.set(query, repair);
+    return repair.finally(() => { if (outsideRepairs.get(query) === repair) outsideRepairs.delete(query); });
+  }));
+}
 
 /** Ranking and authority can change without the source document's body changing. Refresh only displayed lists. */
 async function repairRelatedViews(cache: QueryClient, current: () => boolean): Promise<void> {
@@ -1040,10 +1241,25 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
         }
       }
       const projection=missingInventoryProjection(cache,change.row);
+      const touched = change.row.kind === 'role' ? roleTouched(cache, change.row) : undefined;
       applyRow(cache, change.row);
+      // A role that is the reader's own, or a group's, changes what the reader may do in every row they hold: those rows are read again where shown.
+      const holder = touched?.holder;
+      if (holder !== undefined && (holder.kind !== 'user' || holder.id === client.session.getState().userId)) {
+        await applyChanges([shown(...READER_ACCESS.map((head) => every(head)))], cache);
+        if (client.session.getState().readerVersion !== readerVersion) return;
+      }
+      if (touched !== undefined) {
+        await rolePages(cache, touched, () => client.session.getState().readerVersion === readerVersion);
+        if (client.session.getState().readerVersion !== readerVersion) return;
+      }
       if(projection!==null) await cache.refetchQueries({queryKey:projection,exact:true});
       if (client.session.getState().readerVersion !== readerVersion) return;
       await repairAgentChoices(cache, change.row, () => client.session.getState().readerVersion === readerVersion);
+    }
+    else if ('adminCredentials' in change) {
+      await refreshReach(cache, change.adminCredentials.kind === 'tokens' ? reachKeys.tokens : reachKeys.sessions(change.adminCredentials.person));
+      if (client.session.getState().readerVersion !== readerVersion) return;
     }
     else if ('rateViews' in change) await repairRateViews(cache, change.rateViews.nodeId, () => client.session.getState().readerVersion === readerVersion);
     else if ('capViews' in change) await repairCapViews(cache, change.capViews, () => client.session.getState().readerVersion === readerVersion);
@@ -1059,9 +1275,11 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
         }
         supplied = baseline.supplied;
       }
-      await repairPeople(cache, supplied, directoryCut);
+      // An act's answer that says reach changed: the person's access to an org is read afresh behind a pause (see repairPeople).
+      await repairPeople(cache, supplied, directoryCut, true);
     }
     else if ('relatedViews' in change) await repairRelatedViews(cache, () => client.session.getState().readerVersion === readerVersion);
+    else if ('outsideViews' in change) await repairOutsideViews(cache, () => client.session.getState().readerVersion === readerVersion);
     else if ('documentTree' in change) await applyDocumentTreeChange(cache, change.documentTree);
     else if ('documentDirectories' in change) await repairDocumentDirectories(cache, change.documentDirectories);
     else if ('missing' in change) {
@@ -1071,15 +1289,24 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
         && (change.containingRow===undefined || Array.isArray(query.state.data)
           && (query.state.data as unknown[]).some((row)=>record(row) && row.id===change.containingRow))
         && (change.containingAccount===undefined || Array.isArray(query.state.data)
-          && (query.state.data as unknown[]).some((row)=>record(row) && record(row.user) && row.user.id===change.containingAccount)));
-      const query=candidates.find((query)=>query.isActive()) ?? candidates[0];
-      if (query?.isActive() && change.cancelPending === true) {
-        await cache.cancelQueries({ queryKey: query.queryKey, exact: true });
-        if (client.session.getState().readerVersion !== readerVersion
-          || cache.getQueryCache().find({ queryKey: query.queryKey, exact: true }) !== query) return;
+          && (query.state.data as unknown[]).some((row)=>record(row) && record(row.user) && row.user.id===change.containingAccount))
+        && (change.except === undefined || !names(query.queryKey, change.except, 0))
+        && (change.dependentOn === undefined || record(query.state.data) && Array.isArray(query.state.data.depends)
+          && !(query.queryKey[1] === change.dependentOn.object && query.queryKey[2] === change.dependentOn.id)
+          && query.state.data.depends.some((entry: unknown) => record(entry) && record(entry.object)
+            && entry.object.id === change.dependentOn?.id && typeof entry.object.kind === 'string'
+            && pathOf(entry.object.kind as AccessKind) === change.dependentOn?.object)));
+      const selected = change.allObserved === true || change.dependentOn !== undefined ? candidates : [candidates.find((query)=>query.isActive()) ?? candidates[0]];
+      for (const query of selected) {
+        if (query === undefined) continue;
+        if (query.isActive() && change.cancelPending === true) {
+          await cache.cancelQueries({ queryKey: query.queryKey, exact: true });
+          if (client.session.getState().readerVersion !== readerVersion
+            || cache.getQueryCache().find({ queryKey: query.queryKey, exact: true }) !== query) return;
+        }
+        if(query.isActive()) await cache.refetchQueries({queryKey:query.queryKey,exact:true});
+        else cache.removeQueries({queryKey:query.queryKey,exact:true});
       }
-      if(query?.isActive()) await cache.refetchQueries({queryKey:query.queryKey,exact:true});
-      else if(query!==undefined) cache.removeQueries({queryKey:query.queryKey,exact:true});
     }
     else if ('repair' in change) await repairResource(cache, change.repair);
     else if ('enrollment' in change) {
@@ -1087,6 +1314,7 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
       if (client.session.getState().readerVersion !== readerVersion) return;
       await applyChanges(enrollmentChanges(cache, change.enrollment), cache);
     }
+    else if ('agentShares' in change) await applyChanges(agentSharePatches(cache, change.agentShares), cache);
     else if ('agentReach' in change) {
       // The answer omits this independently authorized overview. Repair only native related
       // views actually shown; unopened views expire without a request or a list invalidation.
@@ -1155,13 +1383,19 @@ client.onAct(actSucceeded);
  */
 export function treeChanges(held: ReadonlyMap<string, TreeNode>, rows: readonly TreeNode[]): Change[] {
   const changes: Change[] = [];
+  let returned = false;
   for (const row of rows) {
     const before = held.get(row.id);
     if (before !== undefined && before.tree_seq >= row.tree_seq) continue;
     // Tree rows are summaries. Overlay only those fields in loaded references; the tree store
     // separately applies the complete row. Do not refetch every descendant's page/settings.
     changes.push({ row: { kind: 'node', id: row.id, value: row.deleted ? null : { ...row }, partial: true } });
+    if (before?.deleted === true && !row.deleted) returned = true;
   }
+  // A place that comes back is in none of the lists that were read, or changed, while it was gone, and a row is only overlaid where it is
+  // held: the lists are read again, so that no order of the frames and the answers (a deletion's frame that comes after the Undo's answer)
+  // leaves it out of the list of its parent.
+  if (returned) changes.push(...placeContents());
   return changes;
 }
 
@@ -1185,12 +1419,16 @@ export function userEventChanges(what: string, data: Readonly<Record<string, unk
     if (member === 'summary' && what !== 'route') continue;
     if (member in data) snapshots.push({ value: { key, data: data[member] } });
   }
-  if (snapshots.length > 0) return snapshots;
+  if (snapshots.length > 0) return what === 'route' || what === 'notification_prefs' ? [...snapshots, { outsideViews: true }] : snapshots;
   switch (what) {
     case 'admin_mode':
       return [{ session: true, ...(typeof data.as_admin==='boolean'?{asAdmin:data.as_admin}:{}) }];
     case 'approvals':
       return record(data.approval) && typeof data.approval.id === 'string' ? [{ row: { kind: 'approval', id: data.approval.id, value: data.approval, insert: true } }] : [{ approvalViews: true }];
+    case 'route':
+      return [{ missing: [{ key: routesKey, exact: true }], cancelPending: true }, { missing: [{ key: ['notification-channels'], exact: true }] }, { outsideViews: true }];
+    case 'notification_prefs':
+      return [{ missing: [{ key: ['notification-prefs'], exact: true }] }, { outsideViews: true }];
     case 'favorites':
       return [];
     case 'recents':
@@ -1237,7 +1475,7 @@ const RESOURCE_LISTS: Readonly<Record<string, readonly string[]>> = {
 };
 
 /** What a resource's own feed, or the person's news of one, says changed: that resource as every view reads it. */
-export function resourceChanges(kind: string, id: string | null, data: Readonly<Record<string, unknown>> = {}, source?: 'news'): Change[] {
+export function resourceChanges(kind: string, id: string | null, data: Readonly<Record<string, unknown>> = {}, source?: 'news' | 'baseline'): Change[] {
   if (!(kind in RESOURCE_LISTS) || id === null) return [];
   const references:Change[]=kind==='environment'?[{key:['reference-preview','environment_file',id]}]:[];
   if (data.deleted === true || data.view_revoked === true) return [{ row: { kind, id, value: null } },...references];
@@ -1247,7 +1485,8 @@ export function resourceChanges(kind: string, id: string | null, data: Readonly<
     if (value.kind !== kind) return [];
     value = value.value;
   }
-  if (record(value) && value.id === id) return [{ row: { kind, id, value, insert: true } },...references];
+  // A newly followed detail's baseline does not announce a new inventory member.
+  if (record(value) && value.id === id) return [{ row: { kind, id, value, insert: source !== 'baseline' } },...references];
   // Older/event-only servers may omit the native row. Read only that visible detail, once.
-  return [{ repair: { kind, id, ...(source === undefined ? {} : { source }) } },...references];
+  return [{ repair: { kind, id, ...(source === 'news' ? { source } : {}) } },...references];
 }

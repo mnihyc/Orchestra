@@ -15,6 +15,7 @@ import type { ReferencePreview } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { Markdown } from '@/ui/Markdown';
 import { show } from './support';
+import { CARD_OPEN_DELAY_MS } from '@/ui/inspection';
 
 const THREAD = '0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5e10';
 const DOC = '0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5e11';
@@ -95,7 +96,7 @@ it('opens a chip written with `#n` at that part: its card names the turn and ask
   answer(`Look at [the fix](id:${THREAD}#3).`);
   const chip = await screen.findByRole('link', { name: 'Main thread' });
   await user.hover(chip);
-  await waitFor(() => expect(document.querySelector('[data-reference-card]')).not.toBeNull(), { timeout: 2_000 });
+  await waitFor(() => expect(document.querySelector('[data-reference-card]')).not.toBeNull(), { timeout: CARD_OPEN_DELAY_MS * 5 });
   const card = document.querySelector<HTMLElement>('[data-reference-card]');
   if (card === null) throw new Error('The chip has no card');
   await waitFor(() => expect(card).toHaveTextContent(i18n.t('people.reference.turn', { number: 3 })));

@@ -446,6 +446,7 @@ impl Rig {
     pub fn agent_start(&self) -> AgentStart {
         AgentStart {
             provider_id: self.provider_id,
+            provider_kind: Some(orch_agent_contract::descriptor::ProviderKind::Api),
             agent_id: self.agent_id,
             harness_kind: "codex".to_owned(),
             profile: AgentProfile::default(),
@@ -460,13 +461,23 @@ impl Rig {
         }
     }
 
-    /// Starts the harness.
+    /// Starts the harness with the API forwarder used by the model double.
     pub async fn boot(&mut self) -> AgentStarted {
-        let start = self.agent_start();
+        self.boot_with(self.agent_start()).await
+    }
+
+    /// Starts the account process with its native sign-in, without an API provider override.
+    pub async fn boot_subscription(&mut self) -> AgentStarted {
+        let mut start = self.agent_start();
+        start.provider_kind = Some(orch_agent_contract::descriptor::ProviderKind::Subscription);
+        self.boot_with(start).await
+    }
+
+    async fn boot_with(&mut self, start: AgentStart) -> AgentStarted {
         let started = self.adapter.start(start, self.sink.clone()).await.unwrap();
         if prefix_container_mode() {
             assert_eq!(
-                started.harness_version, "0.165.0",
+                started.harness_version, "0.167.2",
                 "container prefix proof requires the exact pinned native CLI"
             );
         }
@@ -496,6 +507,8 @@ impl Rig {
     /// A turn that says `text`.
     pub fn turn(&self, thread: ThreadId, text: &str) -> TurnStart {
         TurnStart {
+            native_model: None,
+            native_wake: None,
             plan: false,
             thread_id: thread,
             turn_id: new_id(),
@@ -646,6 +659,12 @@ pub fn session_events(events: &[AdapterEvent]) -> Vec<SessionEvent> {
         .collect()
 }
 
+/// The native pin this build declares, unless an explicit upgrade observation selects another.
+pub fn expected_native_version() -> String {
+    std::env::var("ORCH_EXPECTED_CODEX_VERSION")
+        .unwrap_or_else(|_| orch_adapter_codex::descriptor::SHIPPED_BUILD.to_owned())
+}
+
 /// The kinds of the events, as the wire writes them.
 pub fn kinds(events: &[SessionEvent]) -> Vec<&'static str> {
     events.iter().map(SessionEvent::kind).collect()
@@ -706,6 +725,7 @@ pub fn plain_spec(
 ) -> SessionSpec {
     SessionSpec {
         settings: SessionSettings {
+            native_model: None,
             agent_id,
             thread_id: thread,
             segment_id: new_id(),
@@ -725,6 +745,9 @@ pub fn plain_spec(
             instructions: "You are working inside Orch.".to_owned(),
             available_models: vec![MODEL.to_owned()],
             subagent_limits: Default::default(),
+            prompt_cache_ttl: None,
+            background_wake: true,
+            image_generation: None,
             memory: None,
             arrangement: ArrangementType::KeySeparated,
             orch_tools: Vec::new(),

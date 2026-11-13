@@ -6,7 +6,8 @@
 //! `config` of `thread/start`, `thread/resume` and `thread/fork`:
 //!
 //! * the **model provider** that reaches the connector's forwarder under the session's key
-//!   (`orch_<session key>`, the Responses format, the token found in the variable `ORCH_LLM_TOKEN`), or none
+//!   (a stable `orch_<provider id>` identity, a session-scoped URL, the Responses format and the token in
+//!   `ORCH_LLM_TOKEN`), or none
 //!   where the harness uses its own sign-in;
 //! * the **MCP servers** it is given, each at `/mcp/<session key>/<name>` with the token found in
 //!   `ORCH_MCP_TOKEN`, and the servers of the home's own configuration switched off, so that none is used
@@ -39,7 +40,7 @@ use orch_types::Json;
 
 use crate::descriptor::{EXECUTOR, FORWARDED_PROTOCOL};
 use crate::parameters::{self, TurnSettings};
-use crate::process::{LLM_TOKEN_VARIABLE, MCP_TOKEN_VARIABLE};
+use crate::process::MCP_TOKEN_VARIABLE;
 
 /// The prefix of the name of the model provider a session is given.
 pub const PROVIDER_PREFIX: &str = "orch_";
@@ -83,6 +84,16 @@ pub fn instruction_chain(root: &str, cwd: &str) -> Result<Vec<std::path::PathBuf
 /// other bound (`project_doc_max_bytes`, 32 KiB): what lies beyond is cut, and the sizes the panel shows of it are
 /// derived from this bound.
 pub const PROJECT_DOC_BUDGET: u64 = 32 * 1024;
+
+/// The actual model returned by the native start, resume or fork response.
+/// Missing, malformed or blank metadata is no evidence of a different model.
+#[must_use]
+pub fn reported_model(opened: &Json) -> Option<&str> {
+    opened
+        .get("model")
+        .and_then(Json::as_str)
+        .filter(|model| !model.trim().is_empty())
+}
 
 /// The instruction files a session reads, as the harness reported them in the answer to `thread/start`,
 /// `thread/resume` or `thread/fork` (`instructionSources`), in its order. A file of the harness's home is named, not
@@ -216,8 +227,6 @@ pub fn configuration_found(chain: &[std::path::PathBuf]) -> Vec<String> {
 pub struct WorkspaceLook {
     /// Each `.codex` with something in it, relative to the workspace root.
     pub found: Vec<String>,
-    /// Whether the session uses them, by the answer of the people who manage the environment.
-    pub trusted: bool,
     /// The trust of each directory of the chain, as the `projects` of the session's configuration: said only
     /// where something was found, by the answer for it ([`trust_of_chain`]).
     pub projects: Option<Json>,
@@ -300,11 +309,7 @@ pub fn validate_instruction_files(
         }
     }
     let projects = trust_of_chain(&chain, !found.is_empty(), answer);
-    Ok(WorkspaceLook {
-        found,
-        trusted: answer == Some(ConfigTrust::Trust),
-        projects,
-    })
+    Ok(WorkspaceLook { found, projects })
 }
 
 /// Ordinary Orch calls finish at the connector before this native server deadline.
@@ -320,10 +325,16 @@ pub const ORCH_TOOL_TIMEOUT_OPEN_PORT_SECONDS: u32 = 80;
 /// A byte-bounded answer must reach the model without the native default shortening it.
 pub const ORCH_TOOL_OUTPUT_TOKENS: u32 = 40_000;
 
-/// What the harness calls the model provider of a session.
+/// Constructs a provider identifier from an existing caller-supplied suffix.
 #[must_use]
 pub fn provider_name(session_key: &str) -> String {
     format!("{PROVIDER_PREFIX}{session_key}")
+}
+
+/// A forwarded account keeps one non-vendor identity across its process and independent sessions.
+#[must_use]
+pub fn forwarded_provider_name(provider: orch_types::Id) -> String {
+    format!("{PROVIDER_PREFIX}{}", provider.simple())
 }
 
 /// What the harness calls the environment of a session's tools.
@@ -422,7 +433,21 @@ pub fn thread_config(
     loopback: &Loopback,
     switched_off: &BTreeMap<String, Json>,
 ) -> Result<Json, AdapterError> {
-    let mut config = Map::new();
+    let mut config: Map<String, Json> = crate::process::automation_pins().into_iter().collect();
+    // State the mode even when disabled so the shared home cannot enable paid search.
+    config.insert(
+        "web_search".to_owned(),
+        json!(
+            orch_agent_contract::parameters::WebSearchMode::selected(&spec.settings.params)
+                .ok()
+                .flatten()
+                .map(orch_agent_contract::parameters::WebSearchMode::native_mode)
+                .unwrap_or("disabled")
+        ),
+    );
+    if let Some(enabled) = spec.settings.image_generation {
+        config.insert("features.image_generation".to_owned(), json!(enabled));
+    }
     config.insert(
         "agents.max_concurrent_threads_per_session".to_owned(),
         json!(spec.settings.subagent_limits.at_once),
@@ -434,7 +459,10 @@ pub fn thread_config(
     // The selected backend honours agents.max_depth; the other backend documents that it ignores it.
     config.insert("features.multi_agent_v2".to_owned(), json!(false));
     // Goal mode is Orch's own: the harness's would start turns that Orch did not check.
+    // Future work uses Orch's visible schedule tool, never a native wakeup loop.
     config.insert("features.goals".to_owned(), json!(false));
+    // Completions are admitted by the controller; the harness has no independent wake path.
+    config.insert("features.wake_on_agent_messages".to_owned(), json!(false));
     // Codex's own skills that write skills into its home are off for the thread: the home is shared by the
     // threads of its provider, and the skills a thread is given are Orch's to govern. Verified on 0.162.1 with
     // the model's request recorded: the thread's request no longer lists them, another thread's still does.
@@ -457,23 +485,48 @@ pub fn thread_config(
             json!([PROJECT_ROOT_MARKER]),
         );
     }
+    let resolved = resolved_native_config(&spec.settings);
     match &spec.provider {
-        ProviderAccess::Forwarded { protocol, .. } => {
+        ProviderAccess::Forwarded {
+            provider_id,
+            protocol,
+        } => {
             if protocol != FORWARDED_PROTOCOL {
                 return Err(AdapterError::Unsupported(format!(
                     "the protocol {protocol}: this harness speaks {FORWARDED_PROTOCOL} to the forwarder"
                 )));
             }
+            let mut provider = crate::process::forwarded_provider(&format!(
+                "{}/v1",
+                loopback.llm(&spec.session_key)
+            ));
+            if let Some(value) = resolved
+                .get("supports_standalone_web_search")
+                .and_then(Json::as_bool)
+            {
+                provider.insert(
+                    "supports_standalone_web_search".into(),
+                    toml::Value::Boolean(value),
+                );
+            }
+            if let Some(value) = resolved
+                .get("capabilities.remote_compaction")
+                .and_then(Json::as_str)
+            {
+                let capabilities = provider
+                    .entry("capabilities")
+                    .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+                if let Some(capabilities) = capabilities.as_table_mut() {
+                    capabilities.insert(
+                        "remote_compaction".into(),
+                        toml::Value::String(value.into()),
+                    );
+                }
+            }
             config.insert(
                 "model_providers".to_owned(),
                 json!({
-                    provider_name(&spec.session_key): {
-                        "name": "Orch",
-                        "base_url": format!("{}/v1", loopback.llm(&spec.session_key)),
-                        "wire_api": "responses",
-                        "env_key": LLM_TOKEN_VARIABLE,
-                        "requires_openai_auth": false,
-                    }
+                    forwarded_provider_name(*provider_id): provider
                 }),
             );
         }
@@ -529,7 +582,51 @@ pub fn thread_config(
     config.insert("review_model".to_owned(), json!(spec.settings.model));
     // How large the model's context is and where the conversation is shortened, which this harness holds apart.
     config.extend(parameters::context_members(&spec.settings.params));
+    // The core supplies the final native instruction, including an explicit service-mode disable.
+    config.extend(resolved.into_iter().filter(|(key, _)| {
+        matches!(
+            key.as_str(),
+            "web_search" | "features.image_generation" | "features.view_image"
+        )
+    }));
     Ok(Json::Object(config))
+}
+
+/// Interpret only this program's existing native switches from the core's public result.
+/// Missing metadata keeps the old wire behavior; private routes and endpoint names are never consulted.
+pub(crate) fn resolved_native_config(
+    settings: &orch_agent_contract::session::SessionSettings,
+) -> Map<String, Json> {
+    let mut config = Map::new();
+    let Some(native) = settings
+        .native_model
+        .as_deref()
+        .filter(|native| native.model == settings.model)
+    else {
+        return config;
+    };
+    for resolution in native.capabilities.as_array().into_iter().flatten() {
+        let Some(values) = resolution.get("native_config").and_then(Json::as_object) else {
+            continue;
+        };
+        for (key, value) in values {
+            let known = match key.as_str() {
+                "web_search" => value
+                    .as_str()
+                    .is_some_and(|mode| ["disabled", "cached", "indexed", "live"].contains(&mode)),
+                "features.image_generation" | "features.view_image" => value.is_boolean(),
+                "supports_standalone_web_search" | "model.use_responses_lite" => value.is_boolean(),
+                "capabilities.remote_compaction" => value
+                    .as_str()
+                    .is_some_and(|support| ["unsupported", "v2"].contains(&support)),
+                _ => false,
+            };
+            if known {
+                config.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    config
 }
 
 fn server_entry(url: &str, enabled_tools: Option<Vec<&str>>) -> Json {
@@ -619,7 +716,9 @@ pub fn open_plan(
     params.insert(
         "modelProvider".to_owned(),
         match &spec.provider {
-            ProviderAccess::Forwarded { .. } => json!(provider_name(&spec.session_key)),
+            ProviderAccess::Forwarded { provider_id, .. } => {
+                json!(forwarded_provider_name(*provider_id))
+            }
             _ => json!(
                 context
                     .default_provider
@@ -704,6 +803,193 @@ mod tests {
     use orch_agent_contract::descriptor::{ApprovalMode, ArrangementType, SandboxMode};
 
     #[test]
+    fn resolved_native_switches_are_carried_without_reconstructing_a_route() {
+        use orch_agent_contract::session::NativeModelContext;
+        for mode in [SessionMode::New, SessionMode::Resume, SessionMode::Fork] {
+            let mut session = spec(mode);
+            session.settings.params = json!({"web_search":"live"});
+            session.settings.image_generation = Some(true);
+            session.settings.native_model = Some(Box::new(NativeModelContext {
+                model: session.settings.model.clone(),
+                parameters: Default::default(),
+                capabilities: json!([
+                    {"capability":"web_search", "native_config":{"web_search":"disabled"}},
+                    {"capability":"image_generation", "native_config":{"features.image_generation":false}},
+                    {"capability":"image_input", "native_config":{"features.view_image":false}},
+                    {"native_config":{"model_provider":"unexpected", "env.ORCH_LLM_TOKEN":"synthetic-private-value", "future_switch":{"nested":true}}}
+                ]),
+                extensions: BTreeMap::new(),
+            }));
+            let config = thread_config(&session, &loopback(), &BTreeMap::new()).unwrap();
+            assert_eq!(config["web_search"], "disabled", "{mode:?}");
+            assert_eq!(config["features.image_generation"], false, "{mode:?}");
+            assert_eq!(config["features.view_image"], false, "{mode:?}");
+            assert!(config.get("model_provider").is_none());
+            assert!(config.get("env.ORCH_LLM_TOKEN").is_none());
+            assert!(!config.to_string().contains("synthetic-private-value"));
+            assert!(config.get("future_switch").is_none());
+        }
+    }
+
+    #[test]
+    fn an_absent_unknown_or_other_models_native_result_does_not_invent_switches() {
+        use orch_agent_contract::session::NativeModelContext;
+        let mut session = spec(SessionMode::New);
+        session.settings.params = json!({"web_search":"cached"});
+        assert!(resolved_native_config(&session.settings).is_empty());
+        session.settings.native_model = Some(Box::new(NativeModelContext {
+            model: session.settings.model.clone(),
+            parameters: Default::default(),
+            capabilities: json!([{"route":{"native_value":{"web_search":"live"}},
+                "native_config":{"web_search":true,"features.image_generation":"false"}}]),
+            extensions: BTreeMap::new(),
+        }));
+        assert!(
+            resolved_native_config(&session.settings).is_empty(),
+            "a private route is not a public native instruction"
+        );
+        assert_eq!(
+            thread_config(&session, &loopback(), &BTreeMap::new()).unwrap()["web_search"],
+            "cached"
+        );
+        let native = session.settings.native_model.as_mut().unwrap();
+        native.model = "a-different-current-offering".into();
+        native.capabilities = json!([{"native_config":{"web_search":"live"}}]);
+        assert!(resolved_native_config(&session.settings).is_empty());
+    }
+
+    #[test]
+    fn resolved_provider_flags_apply_only_to_the_actual_forwarded_provider_on_every_open_mode() {
+        use orch_agent_contract::session::NativeModelContext;
+        let name = forwarded_provider_name(id(4));
+        for mode in [
+            SessionMode::New,
+            SessionMode::Resume,
+            SessionMode::Fork,
+            SessionMode::Adopt,
+        ] {
+            let mut session = spec(mode);
+            session.settings.native_model = Some(Box::new(NativeModelContext {
+                model: session.settings.model.clone(),
+                parameters: Default::default(),
+                extensions: BTreeMap::new(),
+                capabilities: json!([{"capability":"generation","native_config":{
+                    "supports_standalone_web_search":true,"capabilities.remote_compaction":"v2",
+                    "model_provider":"openai","base_url":"https://unselected.invalid/","future_provider_flag":true
+                }}]),
+            }));
+            let config = thread_config(&session, &loopback(), &BTreeMap::new()).unwrap();
+            let provider = &config["model_providers"][&name];
+            assert_eq!(provider["supports_standalone_web_search"], true, "{mode:?}");
+            assert_eq!(
+                provider["capabilities"]["remote_compaction"], "v2",
+                "{mode:?}"
+            );
+            assert_eq!(provider["requires_openai_auth"], false);
+            assert!(provider["base_url"].as_str().unwrap().contains(KEY));
+            assert_eq!(config["model_providers"].as_object().unwrap().len(), 1);
+            for key in [
+                "supports_standalone_web_search",
+                "capabilities.remote_compaction",
+                "model_provider",
+                "future_provider_flag",
+            ] {
+                assert!(
+                    config.get(key).is_none(),
+                    "a provider setting cannot become a top-level or arbitrary native override"
+                );
+            }
+            session.provider = ProviderAccess::Native { provider_id: id(4) };
+            let native = thread_config(&session, &loopback(), &BTreeMap::new()).unwrap();
+            assert!(
+                native.get("model_providers").is_none(),
+                "native sign-ins keep their own provider identity"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_flags_do_not_come_from_private_routes_model_spelling_or_another_sessions_result() {
+        use orch_agent_contract::session::NativeModelContext;
+        let mut first = spec(SessionMode::New);
+        first.settings.native_model = Some(Box::new(NativeModelContext {
+            model: first.settings.model.clone(),
+            parameters: Default::default(),
+            extensions: BTreeMap::new(),
+            capabilities: json!([{"native_config":{"supports_standalone_web_search":true,"capabilities.remote_compaction":"v2"}}]),
+        }));
+        let mut second = first.clone();
+        second.session_key = "fedcba9876543210fedcba9876543210".into();
+        second.settings.native_model.as_mut().unwrap().capabilities = json!([{"native_config":{
+            "supports_standalone_web_search":false,"capabilities.remote_compaction":"unsupported"}}]);
+        let name = forwarded_provider_name(id(4));
+        let a = thread_config(&first, &loopback(), &BTreeMap::new()).unwrap();
+        let b = thread_config(&second, &loopback(), &BTreeMap::new()).unwrap();
+        assert_eq!(
+            a["model_providers"][&name]["supports_standalone_web_search"],
+            true
+        );
+        assert_eq!(
+            b["model_providers"][&name]["supports_standalone_web_search"],
+            false
+        );
+        assert_eq!(
+            b["model_providers"][&name]["capabilities"]["remote_compaction"],
+            "unsupported"
+        );
+        assert_ne!(
+            a["model_providers"][&name]["base_url"],
+            b["model_providers"][&name]["base_url"]
+        );
+        for capabilities in [
+            json!([{"route":{"native_value":{"supports_standalone_web_search":true,"capabilities.remote_compaction":"v2"}}}]),
+            json!([{"native_config":{"supports_standalone_web_search":"true","capabilities.remote_compaction":true}}]),
+            json!([{"native_config":{"capabilities.remote_compaction":"future-protocol"}}]),
+        ] {
+            second.settings.native_model.as_mut().unwrap().capabilities = capabilities;
+            let unknown = thread_config(&second, &loopback(), &BTreeMap::new()).unwrap();
+            assert!(
+                unknown["model_providers"][&name]
+                    .get("supports_standalone_web_search")
+                    .is_none()
+            );
+            assert!(
+                unknown["model_providers"][&name]
+                    .get("capabilities")
+                    .is_none()
+            );
+        }
+        second.settings.native_model.as_mut().unwrap().model = "another-offering".into();
+        second.settings.native_model.as_mut().unwrap().capabilities = first
+            .settings
+            .native_model
+            .as_ref()
+            .unwrap()
+            .capabilities
+            .clone();
+        assert!(resolved_native_config(&second.settings).is_empty());
+    }
+
+    #[test]
+    fn only_a_concrete_native_open_answer_names_the_effective_model() {
+        assert_eq!(
+            reported_model(&json!({"model":"gpt-6-sol-safe"})),
+            Some("gpt-6-sol-safe")
+        );
+        for opened in [
+            json!({}),
+            json!({"model":null}),
+            json!({"model":false}),
+            json!({"model":{}}),
+            json!({"model":""}),
+            json!({"model":"  "}),
+            json!({"thread":{"model":"stale-history-model"}}),
+        ] {
+            assert_eq!(reported_model(&opened), None, "{opened}");
+        }
+    }
+
+    #[test]
     fn reported_sources_name_a_home_file_and_measure_the_projects_against_their_budget() {
         let root =
             std::env::temp_dir().join(format!("orch-codex-sources-{}", orch_types::new_id()));
@@ -761,6 +1047,7 @@ mod tests {
     fn spec(mode: SessionMode) -> SessionSpec {
         SessionSpec {
             settings: SessionSettings {
+                native_model: None,
                 agent_id: id(1),
                 thread_id: id(2),
                 segment_id: id(3),
@@ -784,6 +1071,9 @@ mod tests {
                 instructions: "You are working inside Orch.".into(),
                 available_models: vec!["gpt-6-sol".to_owned()],
                 subagent_limits: Default::default(),
+                prompt_cache_ttl: None,
+                background_wake: true,
+                image_generation: None,
                 memory: None,
                 arrangement: ArrangementType::KeySeparated,
                 orch_tools: OrchTool::ALL.to_vec(),
@@ -859,7 +1149,7 @@ mod tests {
     }
 
     #[test]
-    fn a_forwarded_session_gets_a_provider_of_its_own_at_the_connectors_listener() {
+    fn a_forwarded_session_uses_its_accounts_identity_and_its_own_loopback_url() {
         let plan = open_plan(
             &spec(SessionMode::New),
             &loopback(),
@@ -867,8 +1157,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.method, "thread/start");
-        assert_eq!(plan.params["modelProvider"], format!("orch_{KEY}"));
-        let provider = &plan.params["config"]["model_providers"][format!("orch_{KEY}")];
+        let name = forwarded_provider_name(id(4));
+        assert_eq!(plan.params["modelProvider"], name);
+        let provider = &plan.params["config"]["model_providers"][name];
         assert_eq!(
             provider["base_url"],
             format!("http://127.0.0.1:41231/llm/{KEY}/v1")
@@ -879,6 +1170,32 @@ mod tests {
             !plan.params.to_string().contains(&"t".repeat(64)),
             "the token is found in the environment of the process and is in no parameter"
         );
+    }
+
+    #[test]
+    fn two_sessions_keep_one_account_identity_and_independent_urls_across_open_modes() {
+        let first = spec(SessionMode::New);
+        let mut second = first.clone();
+        second.session_key = "b".repeat(32);
+        let name = forwarded_provider_name(id(4));
+        for mode in [SessionMode::New, SessionMode::Resume, SessionMode::Fork] {
+            let mut one = first.clone();
+            let mut two = second.clone();
+            one.settings.mode = mode;
+            two.settings.mode = mode;
+            one.settings.native_session_ref = Some("first-native".to_owned());
+            two.settings.native_session_ref = Some("second-native".to_owned());
+            let one = open_plan(&one, &loopback(), &OpenContext::default()).unwrap();
+            let two = open_plan(&two, &loopback(), &OpenContext::default()).unwrap();
+            assert_eq!(one.params["modelProvider"], name);
+            assert_eq!(two.params["modelProvider"], name);
+            let one = &one.params["config"]["model_providers"][&name];
+            let two = &two.params["config"]["model_providers"][&name];
+            assert_ne!(one["base_url"], two["base_url"]);
+            assert_eq!(one["env_key"], two["env_key"]);
+            assert_eq!(one["requires_openai_auth"], false);
+            assert_eq!(two["requires_openai_auth"], false);
+        }
     }
 
     #[test]
@@ -990,6 +1307,39 @@ mod tests {
             format!("http://127.0.0.1:41231/mcp/{KEY}/tmux"),
             "a server Orch gives wins over one of the same name that is switched off"
         );
+    }
+
+    #[test]
+    fn new_resumed_and_forked_threads_restate_the_same_mandatory_automation_pins() {
+        for mode in [SessionMode::New, SessionMode::Resume, SessionMode::Fork] {
+            let mut session = spec(mode);
+            session.settings.background_wake = true;
+            let plan = open_plan(&session, &loopback(), &OpenContext::default()).unwrap();
+            for (key, value) in crate::process::automation_pins() {
+                assert_eq!(plan.params["config"][&key], value, "{mode:?}: {key}");
+            }
+            assert_eq!(plan.params["config"]["memories.generate_memories"], false);
+            assert_eq!(plan.params["config"]["memories.use_memories"], false);
+            assert_eq!(plan.params["config"]["features.hooks"], false);
+            assert_eq!(plan.params["config"]["features.plugins"], false);
+            assert_eq!(
+                plan.params["config"]["model_post_turn_compact_threshold_percent"],
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn native_message_wakes_are_off_for_every_owned_session_preference() {
+        for enabled in [false, true] {
+            let mut session = spec(SessionMode::New);
+            session.settings.background_wake = enabled;
+            let plan = open_plan(&session, &loopback(), &OpenContext::default()).unwrap();
+            assert_eq!(
+                plan.params["config"]["features.wake_on_agent_messages"],
+                false
+            );
+        }
     }
 
     #[test]
@@ -1158,5 +1508,39 @@ mod tests {
         )
         .unwrap();
         assert!(plan.params.get("daybreakEnabled").is_none());
+    }
+    #[test]
+    fn image_generation_is_unset_by_default_and_explicit_choices_reach_native_launch() {
+        let ordinary = spec(SessionMode::New);
+        let plan = open_plan(&ordinary, &loopback(), &OpenContext::default()).unwrap();
+        assert!(
+            plan.params["config"]
+                .get("features.image_generation")
+                .is_none()
+        );
+        for mode in [SessionMode::New, SessionMode::Resume, SessionMode::Fork] {
+            for enabled in [true, false] {
+                let mut session = spec(mode);
+                session.settings.image_generation = Some(enabled);
+                session.settings.native_session_ref = Some("native-image-session".into());
+                let plan = open_plan(&session, &loopback(), &OpenContext::default()).unwrap();
+                assert_eq!(plan.params["config"]["features.image_generation"], enabled);
+            }
+        }
+    }
+
+    #[test]
+    fn native_search_mode_is_explicit_in_every_session_config() {
+        for mode in ["disabled", "cached", "indexed", "live", "service"] {
+            let mut session = spec(SessionMode::New);
+            session.settings.params = json!({"web_search":mode});
+            let config = thread_config(&session, &loopback(), &BTreeMap::new()).unwrap();
+            assert_eq!(
+                config["web_search"],
+                if mode == "service" { "disabled" } else { mode }
+            );
+        }
+        let config = thread_config(&spec(SessionMode::New), &loopback(), &BTreeMap::new()).unwrap();
+        assert_eq!(config["web_search"], "disabled");
     }
 }

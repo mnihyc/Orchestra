@@ -553,20 +553,20 @@ fn claude_first_input_fingerprint(text: &str) -> String {
     // joins them, then hashes their UTF-8 encoding with this public constant.
     let sampled = [4, 7, 20].map(|index| text.encode_utf16().nth(index).unwrap_or(u16::from(b'0')));
     let sampled = String::from_utf16_lossy(&sampled);
-    let preimage = format!("59cf53e54c78{sampled}2.1.296");
+    let preimage = format!("59cf53e54c78{sampled}2.1.322");
     let digest = ring::digest::digest(&ring::digest::SHA256, preimage.as_bytes());
     let bytes = digest.as_ref();
     format!("{:02x}{:x}", bytes[0], bytes[1] >> 4)
 }
 
-/// Only for a proved empty Claude Code 2.1.296 prefix: its first authored input
+/// Only for a proved empty Claude Code 2.1.322 prefix: its first authored input
 /// changes the native billing fingerprint. Validate the exact pinned header
 /// and derived value before replacing only its three checksum bytes. All other
 /// system content/fields stay exact. The caller independently verifies the raw
 /// first native user identity/text; this does not identify a native checkpoint.
 /// Ordinary middle/queued cases must keep using the general strict oracle.
 pub fn claude_first_model_input(body: &Json, authored: &str) -> Result<Json, &'static str> {
-    const PREFIX: &str = "x-anthropic-billing-header: cc_version=2.1.296.";
+    const PREFIX: &str = "x-anthropic-billing-header: cc_version=2.1.322.";
     const SUFFIX: &str = "; cc_entrypoint=sdk-cli;";
     let (mut input, selected) = model_input(body, authored)?;
     if selected != 0 || input.get("messages").is_none() {
@@ -889,34 +889,34 @@ mod tests {
 
     #[test]
     fn claude_first_billing_fingerprint_matches_the_pinned_utf16_sampling() {
-        assert_eq!(claude_first_input_fingerprint("PREFIX-USER-A"), "fe0");
+        assert_eq!(claude_first_input_fingerprint("PREFIX-USER-A"), "6fd");
         assert_eq!(
             claude_first_input_fingerprint("PREFIX-REVISED-INPUT"),
-            "2e9"
+            "e28"
         );
         assert_eq!(
             claude_first_input_fingerprint(""),
-            "406",
+            "aaf",
             "missing indices contribute the string zero"
         );
         assert_eq!(
             claude_first_input_fingerprint("0123😀abc"),
-            "3c3",
+            "eca",
             "a sampled unpaired UTF-16 surrogate is UTF-8 replacement-encoded, not indexed as a Unicode scalar"
         );
         assert_eq!(
             claude_first_input_fingerprint("0123😀a\0c"),
-            "77b",
+            "c55",
             "a present NUL code unit is not an absent index"
         );
     }
 
     fn first_claude_body() -> Json {
         json!({"system":[
-            {"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.296.fe0; cc_entrypoint=sdk-cli;"},
+            {"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.322.6fd; cc_entrypoint=sdk-cli;"},
             {"type":"text","text":"all unrelated native system instructions stay exact"}
         ],"tools":[{"name":"read","input_schema":{"type":"object"},
-            "description":"a literal cc_version=2.1.296.fe0 is ordinary tool content"}],"tool_choice":{"type":"auto"},
+            "description":"a literal cc_version=2.1.322.6fd is ordinary tool content"}],"tool_choice":{"type":"auto"},
             "messages":[{"role":"user","content":[{"type":"text","text":"native context before authored input"},
                 {"type":"text","text":"PREFIX-USER-A"}]},
                 {"role":"system","content":[{"type":"text","text":"<total_tokens>15000000 tokens left</total_tokens>"}]}]})
@@ -930,14 +930,14 @@ mod tests {
         let mut revised = source.clone();
         revised["messages"][0]["content"][1]["text"] = json!("PREFIX-REVISED-INPUT");
         revised["system"][0]["text"] =
-            json!("x-anthropic-billing-header: cc_version=2.1.296.2e9; cc_entrypoint=sdk-cli;");
+            json!("x-anthropic-billing-header: cc_version=2.1.322.e28; cc_entrypoint=sdk-cli;");
         assert_eq!(
             claude_first_model_input(&revised, "PREFIX-REVISED-INPUT")?,
             expected
         );
         assert_eq!(
             expected["system"][0]["text"],
-            "x-anthropic-billing-header: cc_version=2.1.296.<first-input fingerprint>; cc_entrypoint=sdk-cli;"
+            "x-anthropic-billing-header: cc_version=2.1.322.<first-input fingerprint>; cc_entrypoint=sdk-cli;"
         );
         assert_ne!(
             full_model_input(&source, "PREFIX-USER-A")?,
@@ -971,7 +971,7 @@ mod tests {
         );
         let mut changed = revised.clone();
         changed["tools"][0]["description"] =
-            json!("a literal cc_version=2.1.296.2e9 is ordinary tool content");
+            json!("a literal cc_version=2.1.322.e28 is ordinary tool content");
         assert_ne!(
             claude_first_model_input(&changed, "PREFIX-REVISED-INPUT")?,
             expected,
@@ -993,11 +993,13 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let source = first_claude_body();
         for text in [
-            "x-anthropic-billing-header: cc_version=2.1.296.000; cc_entrypoint=sdk-cli;",
-            "x-anthropic-billing-header: cc_version=2.1.296.fe0; cc_entrypoint=cli;",
-            "x-anthropic-billing-header: cc_version=2.1.297.fe0; cc_entrypoint=sdk-cli;",
-            "x-anthropic-billing-header: cc_version=2.1.296.fe0; cc_entrypoint=sdk-cli; new_field=data;",
-            "x-anthropic-billing-header: cc_version=2.1.296.fe0; cc_entrypoint=sdk-cli;\nextra native instructions",
+            "x-anthropic-billing-header: cc_version=2.1.322.000; cc_entrypoint=sdk-cli;",
+            "x-anthropic-billing-header: cc_version=2.1.296.fe0; cc_entrypoint=sdk-cli;",
+            "x-anthropic-billing-header: cc_version=2.1.322.fe0; cc_entrypoint=sdk-cli;",
+            "x-anthropic-billing-header: cc_version=2.1.322.6fd; cc_entrypoint=cli;",
+            "x-anthropic-billing-header: cc_version=2.1.323.6fd; cc_entrypoint=sdk-cli;",
+            "x-anthropic-billing-header: cc_version=2.1.322.6fd; cc_entrypoint=sdk-cli; new_field=data;",
+            "x-anthropic-billing-header: cc_version=2.1.322.6fd; cc_entrypoint=sdk-cli;\nextra native instructions",
             "other system content",
         ] {
             let mut changed = source.clone();
@@ -1038,7 +1040,7 @@ mod tests {
             full_model_input(&changed, "REVISED")?
         );
         changed["system"][0]["text"] =
-            json!("x-anthropic-billing-header: cc_version=2.1.296.2e9; cc_entrypoint=sdk-cli;");
+            json!("x-anthropic-billing-header: cc_version=2.1.322.e28; cc_entrypoint=sdk-cli;");
         assert_ne!(
             full_model_input(&middle, "MIDDLE")?,
             full_model_input(&changed, "REVISED")?

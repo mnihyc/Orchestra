@@ -39,7 +39,7 @@ describe('places in Management and finder acts', () => {
     expect(rename?.about?.(i18n.t)).toContain('Web · Acme');
     const general = commandsNow().find((command) => command.id === 'go.place-settings.general');
     expect(general?.title(i18n.t)).toContain('Web · Acme');
-    expect(general?.path).toBe(`/project/${ACME.web}/settings?section=general`);
+    expect(general?.path).toBe(`/project/${ACME.web}/settings`);
   });
 });
 

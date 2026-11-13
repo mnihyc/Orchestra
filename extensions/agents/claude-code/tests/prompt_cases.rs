@@ -28,6 +28,26 @@ struct Docker {
     names: Mutex<Vec<String>>,
 }
 
+/// Native credential-path coverage still talks only to the controlled model server.
+#[derive(Debug)]
+struct NativeModelDouble {
+    docker: Docker,
+    model_url: String,
+}
+
+impl Launcher for NativeModelDouble {
+    fn command(&self, spec: &LaunchSpec) -> tokio::process::Command {
+        let mut spec = spec.clone();
+        if !spec.env.contains_key("ANTHROPIC_BASE_URL") {
+            spec.env
+                .insert("ANTHROPIC_BASE_URL".into(), self.model_url.clone());
+            spec.env
+                .insert("ANTHROPIC_AUTH_TOKEN".into(), common::TOKEN.into());
+        }
+        self.docker.command(&spec)
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn instructions_sources_claude_reports_imports_and_later_nested_loads_without_an_input() {
     let mut rig = common::Rig::new()
@@ -140,7 +160,7 @@ impl Launcher for Docker {
             }
         }
         command
-            .arg("orch-dev-harness")
+            .arg(common::image())
             .arg(&spec.program)
             .args(&spec.args);
         command
@@ -589,9 +609,12 @@ async fn tools_answer_budget_and_handoff_claude_reach_separated_tools_without_a_
     // controlled MCP endpoint reading the actual fixture workspace, not Claude's local Read tool.
     rig.adapter = ClaudeCodeAdapter::with_launcher(
         Arc::new(orch_types::SystemClock),
-        Arc::new(Docker {
-            mounts: vec![rig.home.path().into()],
-            names: Mutex::new(Vec::new()),
+        Arc::new(NativeModelDouble {
+            docker: Docker {
+                mounts: vec![rig.home.path().into()],
+                names: Mutex::new(Vec::new()),
+            },
+            model_url: rig.model.url(),
         }),
     );
     let server = server(rig.model.url(), true).await;
@@ -623,7 +646,15 @@ async fn tools_answer_budget_and_handoff_claude_reach_separated_tools_without_a_
                     "#!mock\ntool mcp__orch__read_shared {arguments}\nthen\nsay complete\n"
                 ))
                 .await;
-            assert_eq!(common::outcome(&events), TurnOutcome::Completed);
+            assert_eq!(
+                common::outcome(&events),
+                TurnOutcome::Completed,
+                "native={native}, script={script}; outcomes: {:?}",
+                events
+                    .iter()
+                    .filter(|event| matches!(event, SessionEvent::TurnCompleted(_)))
+                    .collect::<Vec<_>>()
+            );
             assert!(
                 has_text(&rig.model.requests().last().unwrap().body, &expected),
                 "both transports deliver the whole 40k-byte result, not a file at the runtime"
@@ -775,7 +806,7 @@ async fn instructions_file_chain_claude_and_file_boundary_keep_both_forms_and_ch
             Default::default(),
         )
         .await;
-    assert_eq!(started.harness_version, "2.1.296");
+    assert_eq!(started.harness_version, "2.1.322");
     for cwd in [api.clone(), api.join("deep/leaf")] {
         rig.new_lane();
         let mut spec = rig.spec(SessionMode::New, None);
@@ -978,9 +1009,10 @@ async fn server(model_url: String, result_form: bool) -> Server {
         body: Bytes,
     ) -> axum::response::Response {
         if uri.path().starts_with("/llm/") {
+            let path = uri.path().splitn(4, '/').nth(3).unwrap();
             let response = reqwest::Client::new()
-                .post(format!("{url}/v1/responses"))
-                .header("authorization", "Bearer prompt-test-token")
+                .post(format!("{url}/{path}"))
+                .header("authorization", format!("Bearer {}", common::TOKEN))
                 .header("content-type", "application/json")
                 .body(body.to_vec())
                 .send()

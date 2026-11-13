@@ -110,6 +110,8 @@ event_kinds! {
     SessionTitle = "session.title", Durable, [Session];
     /// The harness no longer holds the session.
     SessionLost = "session.lost", Durable, [Session];
+    /// Owned task lifecycle and optional native follow-up admission.
+    BackgroundTasks = "session.background_tasks", Durable, [Session];
     /// A turn runs.
     TurnStarted = "turn.started", Durable, [Session];
     /// An item of the conversation began.
@@ -163,6 +165,8 @@ event_kinds! {
     LeaseDenied = "lease.denied", Durable, [Provider];
     /// What one forwarded model request used.
     LeaseUsage = "lease.usage", Durable, [Provider];
+    /// Text from an owned generation command, bound to that exact command identity.
+    ProviderGenerationDelta = "provider.generation.delta", Durable, [Provider];
     /// The state of an environment.
     EnvStatus = "env.status", Durable, [Env];
     /// What an environment is and has.
@@ -268,6 +272,8 @@ payloads! {
         SessionTitle(SessionTitle) = "session.title";
         /// The harness no longer holds the session.
         SessionLost(SessionLost) = "session.lost";
+        /// Owned task lifecycle and optional native follow-up admission.
+        BackgroundTasks(crate::background::BackgroundTasks) = "session.background_tasks";
         /// A turn runs.
         TurnStarted(TurnStarted) = "turn.started";
         /// An item of the conversation began.
@@ -322,6 +328,8 @@ payloads! {
         LeaseDenied(LeaseDenied) = "lease.denied";
         /// What one forwarded model request used.
         LeaseUsage(LeaseUsage) = "lease.usage";
+        /// Text from an owned dialogue request, never a credential or raw wire frame.
+        ProviderGenerationDelta(ProviderGenerationDelta) = "provider.generation.delta";
         /// The state of an environment.
         EnvStatus(EnvStatus) = "env.status";
         /// What an environment is and has.
@@ -350,6 +358,17 @@ payloads! {
         /// One run of an operator's lifecycle hook for a runtime's unit, and how it ended.
         NodeHook(NodeHook) = "node.hook";
     }
+}
+
+/// One ordered text fragment of a control-plane generation command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderGenerationDelta {
+    /// The exact retained provider.generate command.
+    pub command_id: Id,
+    /// Unicode-scalar offset within this command's assistant text.
+    pub offset: i64,
+    /// The next bounded text fragment.
+    pub text: String,
 }
 
 payloads! {
@@ -510,7 +529,17 @@ impl From<orch_agent_contract::events::ItemStarted> for ItemStarted {
             ItemContent::Plan(body) => (EmittedItemKind::Plan, ItemPayload::Plan(body)),
             ItemContent::ToolCall(body) => (EmittedItemKind::ToolCall, ItemPayload::ToolCall(body)),
             ItemContent::Marker(body) => (EmittedItemKind::Marker, ItemPayload::Marker(body)),
-            ItemContent::Error(body) => (EmittedItemKind::Error, ItemPayload::Error(body)),
+            ItemContent::Error(body) => (
+                EmittedItemKind::Error,
+                ItemPayload::Error(orch_api_contract::threads::ErrorPayload {
+                    code: body.code,
+                    message: body.message,
+                    retryable: body.retryable,
+                    details: body.details,
+                    window: body.window,
+                    resets_at: body.resets_at,
+                }),
+            ),
         };
         Self {
             turn_id: started.turn_id,
@@ -603,6 +632,8 @@ pub enum TurnPhaseKind {
     Working,
     /// Shortening its own conversation, to make room.
     Compacting,
+    /// The harness is retrying its model call.
+    Retrying,
 }
 
 /// The body of `turn.phase`.
@@ -612,6 +643,9 @@ pub struct TurnPhase {
     pub turn_id: Id,
     /// What it is doing now.
     pub kind: TurnPhaseKind,
+    /// The native one-based retry number, when reported; absent outside a retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_attempt: Option<i64>,
     /// Since when.
     pub at: Time,
 }
@@ -736,6 +770,12 @@ turn_error_codes! {
     ProviderUnauthorized = "provider_unauthorized";
     /// The vendor is busy or failed, which passes: the provider keeps its state.
     ProviderBusy = "provider_busy";
+    /// The upstream rate limit was reached.
+    RateLimited = "rate_limited";
+    /// The upstream has no capacity.
+    Overloaded = "overloaded";
+    /// A response failed after output began.
+    StreamInterrupted = "stream_interrupted";
     /// The vendor could not be reached, which passes: the provider keeps its state.
     ProviderUnreachable = "provider_unreachable";
     /// The model cannot be used.
@@ -789,6 +829,9 @@ pub struct OrchToolCall {
     /// One transport attempt at the same call_ref; an explicit retry gets a new attempt, not a new effect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<Id>,
+    /// The actual proxy reply deadline; it narrows this transport attempt and grants no authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<Time>,
     /// The tool.
     pub tool: OrchTool,
     /// What it was called with.
@@ -883,6 +926,9 @@ pub struct LeaseUsage {
     pub usage: foreign::TokenUsage,
     /// The model service's own name for the request, where it gave one.
     pub request_ref: Option<String>,
+    /// Actual upstream request/report facts, where the forwarder records them. Absent is legacy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<orch_api_contract::usage::RequestTiming>,
 }
 
 // ---------------------------------------------------------------- environments
@@ -1082,6 +1128,9 @@ pub struct EnvironmentFacts {
     /// Why it is live; omitted when indexed and for older connectors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_reason: Option<IndexReason>,
+    /// The actual exceeded entry limit, reported only for that Live reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_entry_limit: Option<u64>,
     /// What became of the mounts it was to have.
     pub mounts: Vec<EnvironmentFactsMount>,
     /// Whether a mount can be attached with changes of the environment's
@@ -1370,6 +1419,41 @@ mod tests {
 
     fn time() -> Time {
         "2026-10-08T17:04:05.000Z".parse().unwrap()
+    }
+
+    #[test]
+    fn a_native_image_allowance_keeps_its_details_and_reset_at_link_ingress() {
+        let native = orch_agent_contract::events::ItemStarted {
+            turn_id: id(A),
+            native_ref: "image-allowance".into(),
+            stream: "main".into(),
+            parent_native_ref: None,
+            content: orch_agent_contract::events::ItemContent::Error(
+                orch_agent_contract::events::ErrorPayload {
+                    code: orch_agent_contract::events::turn_error::IMAGE_GENERATION_LIMIT.into(),
+                    message: "Image generation reached its usage limit.".into(),
+                    retryable: false,
+                    details: Some(json!({"reported":true})),
+                    window: Some("imagegen_premium".into()),
+                    resets_at: Some(time()),
+                },
+            ),
+        };
+        let decoded: ItemStarted =
+            serde_json::from_value(serde_json::to_value(native).unwrap()).unwrap();
+        assert_eq!(decoded.kind, EmittedItemKind::Error);
+        let foreign::ItemPayload::Error(error) = &decoded.payload else {
+            panic!("an image allowance must remain an error notice");
+        };
+        assert_eq!(error.window.as_deref(), Some("imagegen_premium"));
+        assert_eq!(error.resets_at, Some(time()));
+        assert_eq!(error.details, Some(json!({"reported":true})));
+        let wire = serde_json::to_value(decoded).unwrap();
+        assert_eq!(wire["payload"]["window"], "imagegen_premium");
+        assert_eq!(
+            wire["payload"]["resets_at"],
+            serde_json::to_value(time()).unwrap()
+        );
     }
 
     fn round_trip<T: Serialize + DeserializeOwned>(example: Json) -> T {

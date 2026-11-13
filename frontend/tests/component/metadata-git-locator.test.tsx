@@ -10,7 +10,9 @@ import type { GitStatus, Job } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { ACME, id } from '../doubles/fixtures';
 import { World } from '../doubles/world';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+skipOverflowFallback();
 
 const calls = vi.hoisted(() => ({ push: vi.fn<typeof Source.pushBranch>(), job: vi.fn<() => Promise<Job>>() }));
 vi.mock('@/api/source', async (load) => ({ ...await load<typeof Source>(), pushBranch: calls.push }));
@@ -55,7 +57,7 @@ it('retains an unavailable current remote and pushes a locally found late remote
   await user.keyboard('{Enter}{Escape}'); expect(calls.push).not.toHaveBeenCalled();
   await user.click(picker); await user.type(picker, 'repository-12.git'); await user.keyboard('{Enter}');
   expect(picker).toHaveValue('remote-12'); expect(calls.push).not.toHaveBeenCalled();
-  await user.clear(branch); await user.type(branch, ' release/topic ');
+  await user.clear(branch); await user.paste(' release/topic ');
   await user.click(dialog.getByRole('button', { name: i18n.t('source.git.pushDo') }));
   await waitFor(() => expect(calls.push).toHaveBeenCalledWith(workspace.door, { path: 'repo', remote: 'remote-12', expected_remote_url: 'https://git.example.test/team/repository-12.git',
     branch: 'release/topic', expected_head: status.head, set_upstream: false }, expect.any(String)));

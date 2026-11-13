@@ -19,7 +19,10 @@ use std::time::Duration;
 async fn a_legacy_online_harness_reconciles_its_home_once_without_repeating_setup_on_an_unchanged_process()
  {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    let world = World::new().await;
+    // The provider was looked at just before: its scheduled read starts no harness of its own while this case
+    // counts what a start asks of the machine. A start of that read, under way when the process is reported
+    // to restart, would also show the row as starting without its configuration.
+    let world = World::observed().await;
     let descriptor = orch_driver_contract::descriptor::DriverDescriptor::registered_directories(
         "test",
         orch_driver_contract::descriptor::EnvironmentDataStorage {
@@ -128,8 +131,9 @@ async fn a_legacy_online_harness_reconciles_its_home_once_without_repeating_setu
             )
             .await;
     }
+    // Both reports are applied when the row stands as starting, with no start under way and no configuration kept.
     common::eventually("a supervised restart to invalidate its completed setup",||async {
-        sqlx::query_scalar::<_,bool>("SELECT status='starting' AND NOT(after_up_plan ? 'configuration_hash') FROM harnesses WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3")
+        sqlx::query_scalar::<_,bool>("SELECT status='starting' AND start_command_id IS NULL AND NOT(after_up_plan ? 'configuration_hash') FROM harnesses WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3")
             .bind(world.provider).bind(world.agent).bind(world.machine_id).fetch_one(world.pool.pool()).await.unwrap()
     }).await;
     assert!(matches!(

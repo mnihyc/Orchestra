@@ -69,25 +69,9 @@ impl<R: Read> Read for CancellableRead<'_, R> {
     }
 }
 
-fn capture(path: &Path, cancel: &AtomicBool, record: bool) -> Result<File, HistoryError> {
+fn capture(path: &Path, cancel: &AtomicBool) -> Result<File, HistoryError> {
     let mut source = File::open(path)?;
     let before = source.metadata()?;
-    if record {
-        // Refuse an unsupported source before reserving disk for its potentially huge snapshot.
-        let version = super::version_in_reader(CancellableRead {
-            input: &mut source,
-            cancel,
-            line_bytes: 0,
-        });
-        check_cancel(cancel)?;
-        if let Some(version) = version
-            && crate::descriptor::support_of(&version)
-                == orch_agent_contract::descriptor::HarnessSupport::Unsupported
-        {
-            return Err(HistoryError::OtherVersion(version));
-        }
-        source.seek(SeekFrom::Start(0))?;
-    }
     let mut snapshot = tempfile::tempfile()?;
     let mut left = before.len();
     let mut page = [0; PAGE_BYTES];
@@ -160,9 +144,18 @@ pub(super) struct Rows {
     eof: bool,
     failed: bool,
     pub(super) model: Option<String>,
+    /// How many lines of the source were read, blank ones too: the number of the row last read.
+    row: u64,
+    /// How many rows were not JSON and were left out, and the first of them.
+    pub(super) unreadable: u64,
+    pub(super) first_unreadable: Option<u64>,
 }
 
 impl Rows {
+    pub(super) fn set_image_outputs(&mut self, directory: std::path::PathBuf) {
+        self.mapper.set_image_outputs(directory);
+    }
+
     pub(super) fn new(
         path: &Path,
         settings: MapperSettings,
@@ -170,7 +163,7 @@ impl Rows {
         close_last: bool,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, HistoryError> {
-        let source = capture(path, &cancel, close_last)?;
+        let source = capture(path, &cancel)?;
         Self::from_source(source, settings, clock, close_last, cancel)
     }
 
@@ -179,7 +172,7 @@ impl Rows {
         clock: Arc<dyn Clock>,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, HistoryError> {
-        let mut source = capture(path, &cancel, true)?;
+        let mut source = capture(path, &cancel)?;
         let directory = super::directory_in(CancellableRead {
             input: &mut source,
             cancel: &cancel,
@@ -224,6 +217,9 @@ impl Rows {
             eof: false,
             failed: false,
             model: None,
+            row: 0,
+            unreadable: 0,
+            first_unreadable: None,
         })
     }
 
@@ -266,8 +262,15 @@ impl Rows {
             if line.is_empty() {
                 return Ok(None);
             }
+            self.row += 1;
             if let Ok(entry) = serde_json::from_slice(&line) {
                 return Ok(Some(entry));
+            }
+            // A row that is not JSON is not a row of the conversation, and a blank line is not a row; any other
+            // is left out and counted, so that the record can say that it was.
+            if !line.iter().all(u8::is_ascii_whitespace) {
+                self.unreadable += 1;
+                self.first_unreadable.get_or_insert(self.row);
             }
         }
     }

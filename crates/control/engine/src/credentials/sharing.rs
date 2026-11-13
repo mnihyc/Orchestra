@@ -90,6 +90,12 @@ impl Engine {
             LeaseMode::Shared
         };
         let body = LeaseOpen {
+            request_options: Default::default(),
+            access_program: None,
+            native_model: None,
+            model_parameters: self
+                .lease_model_parameters(lease.provider_id, &lease.allowed_models, None)
+                .await?,
             lease_id: lease.id,
             provider_id: lease.provider_id,
             thread_id: lease.thread_id,
@@ -205,7 +211,9 @@ impl Engine {
             keeper,
             SerialKey::Provider(provider.id),
             &ProviderCredentialIssue {
-                lease_id: lease.id,
+                return_credential: None,
+                lease_id: Some(lease.id),
+                copy: None,
                 provider_id: provider.id,
                 form: form.to_owned(),
                 recipient: recipient.clone(),

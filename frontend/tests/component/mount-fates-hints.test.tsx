@@ -1,3 +1,4 @@
+import { unjudgedProvenance } from '../doubles/resource-grouping';
 /** A mount's managers set what plans preselect for it and say what each location's data is; others only read the hint. */
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -35,7 +36,7 @@ const LOCATION: MountLocation = {
 };
 
 function mount(permissions: string[]): Mount {
-  return {
+  return { ...unjudgedProvenance(),
     id: '0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a6b', name: 'datasets', address: 'acme.datasets', description: '', org_id: null, home: null, owner: null,
     target: '/mnt/datasets', read_only: true, enabled: true, default_fate: 'copy', locations: [LOCATION], locations_hidden: 0, kept: [], revision: 3,
     access: { permissions, administers: false, through: [] },

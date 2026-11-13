@@ -8,7 +8,8 @@
 mod common;
 
 use common::{Rig, kinds, outcome, said};
-use orch_agent_contract::adapter::AgentAdapter;
+use futures::StreamExt;
+use orch_agent_contract::adapter::{AdapterEvent, AgentAdapter};
 use orch_agent_contract::descriptor::HarnessSupport;
 use orch_agent_contract::events::{SessionEvent, TurnOutcome};
 use orch_testkit::doubles::model::QueueFilter;
@@ -33,7 +34,18 @@ async fn a_turn_of_plain_text_streams_into_neutral_events_and_ends() {
 
     assert_eq!(said(&events), "You said: say hi please");
     let order = kinds(&events);
-    assert_eq!(order.first(), Some(&"turn.started"), "{order:?}");
+    let started = events
+        .iter()
+        .position(|event| matches!(event, SessionEvent::TurnStarted(_)))
+        .expect("the actual turn starts");
+    assert!(
+        events[..started].iter().all(|event| matches!(event,
+            SessionEvent::ItemCompleted(item)
+                if item.payload["marker"] == "harness_changed"
+                    && item.payload["data"]["turn_id"].is_null()
+        )),
+        "only passive native observations may precede the turn: {order:?}"
+    );
     assert!(
         order.contains(&"item.delta"),
         "the text streams in pieces: {order:?}"
@@ -65,6 +77,39 @@ async fn a_turn_of_plain_text_streams_into_neutral_events_and_ends() {
     );
     assert_eq!(requests[0].body["model"], "mock-large");
 
+    rig.adapter.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_absent_resolved_effort_omits_the_native_default_and_clears_a_previous_effort() {
+    let mut rig = Rig::new()
+        .await
+        .expect("the pinned harness image is required");
+    rig.start_quick().await;
+    rig.open().await;
+    for effort in [None, Some("high"), None] {
+        let before = rig.model.requests().len();
+        let mut turn = rig.turn("hello");
+        turn.effort = effort.map(str::to_owned);
+        rig.adapter.start_turn(turn).await.unwrap();
+        let events = rig.until_the_turn_ends().await;
+        assert_eq!(outcome(&events), TurnOutcome::Completed, "{events:?}");
+        assert_eq!(said(&events), "You said: hello");
+        let requests = rig.model.requests();
+        let current: Vec<_> = requests[before..]
+            .iter()
+            .filter(|request| request.body.get("messages").is_some())
+            .collect();
+        assert!(!current.is_empty(), "the native turn reached the model");
+        for request in current {
+            assert_eq!(
+                request.body.pointer("/output_config/effort").cloned(),
+                effort.map(serde_json::Value::from),
+                "the request carries exactly the resolved effort: {:?}",
+                request.body
+            );
+        }
+    }
     rig.adapter.stop().await.unwrap();
 }
 
@@ -266,8 +311,8 @@ async fn a_failure_of_the_model_ends_the_turn_with_a_typed_error() {
         ("error not_found", "model_unavailable", false),
         ("error authentication", "provider_unauthorized", false),
         ("error billing", "provider_exhausted", false),
-        ("error server", "provider_busy", true),
-        ("error rate_limit retry-after=none", "provider_busy", true),
+        ("error server", "overloaded", true),
+        ("error rate_limit retry-after=none", "rate_limited", true),
     ];
     for (script, code, retryable) in cases {
         // A failed turn leaves its message unanswered, and the harness joins it to the next one: each case
@@ -320,9 +365,9 @@ async fn a_sub_agent_works_in_a_stream_of_its_own_inside_the_call_that_started_i
     rig.open().await;
     let inner = "#!mock\\nsay Sub-agent speaking.\\ntool Bash {\\\"command\\\":\\\"mkdir -p sub && echo x > sub/x\\\"}\\nthen\\nsay sub done";
     let script = format!(
-        "#!mock\nsay Starting a sub-agent.\ntool Agent {{\"description\":\"Look around\",\"prompt\":\"{inner}\",\"subagent_type\":\"general-purpose\"}}\nthen\nsay The sub-agent said: {{{{result}}}}\n"
+        "#!mock\nsay Starting a sub-agent.\ntool Agent {{\"description\":\"Look around\",\"prompt\":\"{inner}\",\"subagent_type\":\"general-purpose\",\"run_in_background\":false}}\nthen\nsay The sub-agent said: {{{{result}}}}\n"
     );
-    let (_, events) = rig.run_deciding(&script, common::allow).await;
+    let (_, mut events) = rig.run_deciding(&script, common::allow).await;
 
     let agent = events
         .iter()
@@ -362,10 +407,29 @@ async fn a_sub_agent_works_in_a_stream_of_its_own_inside_the_call_that_started_i
             .iter()
             .all(|item| item.parent_native_ref.as_deref() == Some(agent.0.as_str()))
     );
+    let child_completions: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::ItemCompleted(done)
+                if in_sub.iter().any(|item| item.native_ref == done.native_ref) =>
+            {
+                Some(done)
+            }
+            _ => None,
+        })
+        .collect();
     assert!(
         std::fs::metadata(rig.work.path().join("sub/x")).is_ok(),
-        "its command ran"
+        "its command ran; child completions: {child_completions:#?}"
     );
+    if !events.iter().any(
+        |event| matches!(event, SessionEvent::ItemCompleted(done) if done.native_ref == agent.0),
+    ) {
+        // A native task's terminal receipt can follow the main result. Observe its actual
+        // close within the rig's existing event budget, without sending another input.
+        let parent = agent.0.clone();
+        events.extend(rig.until(|event| matches!(event, SessionEvent::ItemCompleted(done) if done.native_ref == parent), 90).await);
+    }
     let finished = events.iter().find_map(|event| match event {
         SessionEvent::ItemCompleted(done) if done.native_ref == agent.0 => Some(done),
         _ => None,
@@ -378,6 +442,143 @@ async fn a_sub_agent_works_in_a_stream_of_its_own_inside_the_call_that_started_i
         "the report of the sub-agent reaches the agent: {}",
         said(&events)
     );
+    rig.adapter.stop().await.unwrap();
+}
+
+/// The transcripts of sub-agents below a harness home.
+fn sub_agent_transcripts(directory: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            sub_agent_transcripts(&path, found);
+        } else if path
+            .parent()
+            .and_then(std::path::Path::file_name)
+            .is_some_and(|name| name == "subagents")
+            && path
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|name| name.starts_with("agent-") && name.ends_with(".jsonl"))
+        {
+            found.push(path);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sub_agent_message_of_text_and_a_call_is_settled_from_the_lines_that_carry_its_stop_reason()
+ {
+    // The case proves the shape of what the pinned program writes: it does not stand in for the image.
+    let mut rig = Rig::new()
+        .await
+        .expect("the pinned harness image is required");
+    rig.start_quick().await;
+    rig.open().await;
+    // The first message of the sub-agent has a text block and a call: the program writes a line for each block.
+    let inner = "#!mock\\nsay Sub-agent speaking.\\ntool Bash {\\\"command\\\":\\\"echo x\\\"}\\nthen\\nsay sub done";
+    let script = format!(
+        "#!mock\nsay Starting a sub-agent.\ntool Agent {{\"description\":\"Look around\",\"prompt\":\"{inner}\",\"subagent_type\":\"general-purpose\",\"run_in_background\":false}}\nthen\nsay The sub-agent said: {{{{result}}}}\n"
+    );
+    let turn = rig.turn(&script);
+    rig.adapter.start_turn(turn).await.unwrap();
+    let mut reports = Vec::new();
+    let mut ended = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
+    while !ended {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, rig.events.next()).await {
+            Ok(Some(AdapterEvent::Session { event, .. })) => {
+                if let SessionEvent::ApprovalRequested(ask) = &event {
+                    rig.adapter
+                        .resolve_approval(rig.thread, &ask.request_ref, common::allow(ask))
+                        .await
+                        .unwrap();
+                }
+                ended = matches!(event, SessionEvent::TurnCompleted(_));
+            }
+            Ok(Some(AdapterEvent::ModelRequest(report))) => reports.push(*report),
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => panic!("the turn did not end; reports so far: {reports:#?}"),
+        }
+    }
+    let mut files = Vec::new();
+    sub_agent_transcripts(rig.home.path(), &mut files);
+    assert_eq!(files.len(), 1, "the sub-agent's transcript: {files:?}");
+    // What the program wrote, message by message: the blocks of each, its stop reason, its output count.
+    type Written = (Vec<String>, serde_json::Value, serde_json::Value);
+    let mut messages: Vec<(String, Vec<Written>)> = Vec::new();
+    for line in std::fs::read_to_string(&files[0]).unwrap().lines() {
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let message = &entry["message"];
+        let (Some(id), "assistant") = (
+            message["id"].as_str(),
+            entry["type"].as_str().unwrap_or_default(),
+        ) else {
+            continue;
+        };
+        let blocks = message["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|block| block["type"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        let written = (
+            blocks,
+            message["stop_reason"].clone(),
+            message["usage"]["output_tokens"].clone(),
+        );
+        match messages.iter_mut().find(|(known, _)| known == id) {
+            Some((_, lines)) => lines.push(written),
+            None => messages.push((id.to_owned(), vec![written])),
+        }
+    }
+    assert!(
+        messages.iter().any(|(_, lines)| lines.len() >= 2),
+        "a message of several blocks is written as a line for each block: {messages:#?}"
+    );
+    // The settler reads the figure of a message from the lines that carry its stop reason, the one with the most
+    // output; a line written before the message ended carries no stop reason, and none may carry more output than
+    // the figure that is read. (The pinned program writes every line of a finished message with the stop reason and
+    // the closing usage, and a line written before that with neither.)
+    for (id, lines) in &messages {
+        let figure = lines
+            .iter()
+            .filter(|line| line.1.is_string())
+            .filter_map(|line| line.2.as_i64())
+            .max();
+        assert!(
+            figure.is_some(),
+            "a line of {id} carries the stop reason and the closing usage: {messages:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .filter_map(|line| line.2.as_i64())
+                .all(|output| Some(output) <= figure),
+            "no line of {id} carries more output than the lines that carry its stop reason: {messages:#?}"
+        );
+        let settled: Vec<_> = reports
+            .iter()
+            .filter(|report| {
+                report.request.subagent
+                    && report.request.provider_request_id.as_deref() == Some(id.as_str())
+            })
+            .collect();
+        assert_eq!(
+            settled.len(),
+            1,
+            "the message {id} is reported once, before the turn ends: {reports:#?}"
+        );
+        assert_eq!(
+            settled[0].request.tokens.output_tokens, figure,
+            "with the figure of its lines that carry the stop reason: {messages:#?}"
+        );
+    }
     rig.adapter.stop().await.unwrap();
 }
 
@@ -468,7 +669,10 @@ async fn a_compaction_is_announced_as_a_phase_when_it_begins_and_when_it_is_over
     assert!(
         !events.iter().any(|event| matches!(
             event,
-            SessionEvent::ItemStarted(item) if matches!(item.content, orch_agent_contract::events::ItemContent::Marker(_))
+            SessionEvent::ItemStarted(item) if matches!(item.content,
+                orch_agent_contract::events::ItemContent::Marker(
+                    orch_agent_contract::events::MarkerPayload::Compacted { .. }
+                ))
         )),
         "the engine writes the marker, with its duration, when the phase ends"
     );
@@ -537,6 +741,7 @@ async fn an_image_of_the_turn_goes_to_the_model_beside_its_text() {
         blob: orch_types::Hash::of(&bytes),
         media_type: "image/png".into(),
         name: "pixel.png".into(),
+        workspace_path: None,
         path: Some(path.display().to_string()),
     }];
     rig.adapter.start_turn(turn).await.unwrap();

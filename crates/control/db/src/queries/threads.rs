@@ -17,6 +17,8 @@ use chrono::{DateTime, Utc};
 use orch_types::{Id, Json, Seq};
 
 pub mod notices;
+/// Native per-turn offline episodes and their retained setting.
+pub mod offline;
 pub mod reading;
 
 /// The words of the `threads.state` column.
@@ -580,6 +582,22 @@ pub async fn blocked_threads_of_provider(
     .await?)
 }
 
+/// The threads bound to `provider` whose turn is starting: those that wait for its unit, and those that are on their way
+/// to wait for it (a sequence that has decided to wait stands at an earlier step until it has said so).
+pub async fn starting_threads_of_provider(
+    conn: &mut Conn,
+    provider: Id,
+) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT t.node_id FROM threads t JOIN nodes n ON n.id = t.node_id
+          WHERE t.state = 'starting' AND t.provider_id = $1
+            AND n.deleted_at IS NULL ORDER BY t.node_id",
+    )
+    .bind(provider)
+    .fetch_all(conn)
+    .await?)
+}
+
 /// The blocked threads that run in `environment`.
 pub async fn blocked_threads_of_environment(
     conn: &mut Conn,
@@ -607,6 +625,26 @@ pub async fn blocked_threads_of_machine(conn: &mut Conn, machine: Id) -> Result<
           ORDER BY t.node_id",
     )
     .bind(machine)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// Bindings waiting for current environment or machine facts, without retrying other held work.
+pub async fn invalid_bindings_of(
+    conn: &mut Conn,
+    machine: Option<Id>,
+    environment: Option<Id>,
+) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id
+         LEFT JOIN environments e ON e.id=t.environment_id
+         LEFT JOIN providers p ON p.id=t.provider_id
+         WHERE t.state='blocked' AND t.blocked_reason='binding_invalid' AND n.deleted_at IS NULL
+           AND (t.environment_id=$2 OR e.machine_id=$1 OR p.machine_id=$1)
+         ORDER BY t.node_id",
+    )
+    .bind(machine)
+    .bind(environment)
     .fetch_all(conn)
     .await?)
 }
@@ -644,7 +682,7 @@ pub async fn offline_threads_with_a_turn(conn: &mut Conn) -> Result<Vec<Id>, DbE
 
 // ---------------------------------------------------------------- segments
 
-pub(crate) const SEGMENT_SELECT: &str = "SELECT id, thread_id, continuation_id, ordinal, agent_id, provider_id, environment_id, env_generation,
+pub(crate) const SEGMENT_SELECT: &str = "SELECT id, thread_id, continuation_id, ordinal, agent_id, provider_id, environment_id, machine_id, env_generation,
         arrangement, executor, tool_set, credential_path, native_session_ref, started_by, started_at, ended_at,
         end_reason, import_fidelity, import_report, seq_updated
    FROM segments";
@@ -666,6 +704,8 @@ pub struct SegmentRow<Binding = Id> {
     pub provider_id: Binding,
     /// The environment.
     pub environment_id: Binding,
+    /// The machine recorded when its native session opens, when known.
+    pub machine_id: Option<Id>,
     /// Which unit of the environment it ran in.
     pub env_generation: i32,
     /// The arrangement type.
@@ -749,7 +789,7 @@ pub async fn insert_segment_in(
                     arrangement, executor, tool_set, credential_path, native_session_ref, started_by, started_at, seq_updated,continuation_id)
                VALUES ($1, $2, (SELECT COALESCE(MAX(ordinal), 0) + 1 FROM segments WHERE thread_id = $2),
                        $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,COALESCE($15,(SELECT active_continuation_id FROM threads WHERE node_id=$2)))
-               RETURNING id, thread_id, continuation_id, ordinal, agent_id, provider_id, environment_id, env_generation,
+               RETURNING id, thread_id, continuation_id, ordinal, agent_id, provider_id, environment_id, machine_id, env_generation,
                     arrangement, executor, tool_set, credential_path, native_session_ref, started_by, started_at,
                     ended_at, end_reason, import_fidelity, import_report, seq_updated";
     Ok(sqlx::query_as(sql)
@@ -995,6 +1035,10 @@ impl InputRow {
                     self.state_detail.as_deref(),
                     Some(
                         HELD_CAP_REACHED
+                            | "background_refresh"
+                            | "background_wake_off"
+                            | "background_stopped"
+                            | "author_lost_access"
                             | HELD_OWNER_LACKS_ACCESS
                             | HELD_ATTACHMENTS
                             | HELD_SECOND_STEP
@@ -1003,8 +1047,8 @@ impl InputRow {
                 ))
     }
 
-    /// Who answers for its turn: whoever it was run on, otherwise its author. Usage, caps and the provider's
-    /// entry are this person's; the author stays the author.
+    /// Who answers for its turn: whoever it was run on, otherwise its author. The provider's entry
+    /// follows this person; shared background-session billing has its own turn attribution.
     #[must_use]
     pub fn answers(&self) -> Option<Id> {
         self.run_as.or(self.author_id)
@@ -1018,7 +1062,14 @@ impl InputRow {
             && (self.queue_held
                 || matches!(
                     self.state_detail.as_deref(),
-                    Some(HELD_ATTACHMENTS | HELD_MODEL_USE)
+                    Some(
+                        HELD_ATTACHMENTS
+                            | HELD_MODEL_USE
+                            | "author_lost_access"
+                            | "background_refresh"
+                            | "background_wake_off"
+                            | "background_stopped"
+                    )
                 )
                 || self
                     .state_detail
@@ -1086,6 +1137,29 @@ pub async fn set_input_submission_authority(
         .bind(id).bind(authority).bind(seq).execute(&mut *conn).await?;
     touch_input_queue(conn, id, seq).await?;
     Ok(())
+}
+
+/// Retains provenance of the actual newly inserted authorless announcement, before immediate
+/// preflight or steer delivery. This private birth metadata does not edit words, attribution,
+/// a model-use approval or the native queue revision, and cannot replace existing evidence.
+pub async fn retain_announcement_input_provenance(
+    conn: &mut Conn,
+    id: Id,
+    authority: &Json,
+    birth_seq: Seq,
+) -> Result<bool, DbError> {
+    let done = sqlx::query(
+        "UPDATE thread_inputs SET submission_authority=$2
+          WHERE id=$1 AND source='announcement' AND author_id IS NULL
+            AND submission_authority IS NULL AND state IN ('pending','delivering')
+            AND seq_created=$3 AND seq_updated=$3",
+    )
+    .bind(id)
+    .bind(authority)
+    .bind(birth_seq)
+    .execute(conn)
+    .await?;
+    Ok(done.rows_affected() == 1)
 }
 
 /// The threads where inputs wait held for a second step: of `author` alone where one is named.
@@ -1763,7 +1837,7 @@ pub async fn count_delivering_authors(conn: &mut Conn, thread: Id) -> Result<i64
 
 pub(crate) const TURN_SELECT: &str = "SELECT id, thread_id, segment_id, ordinal, state, input_id, model, effort, params, lease_id,
         before_snapshot_id, end_manifest_blob, files_end_manifest,
-        native_turn_ref, error, usage, usage_detail, context, limit_bypass, phase, phase_at, interrupted_by, command_cleanup,
+        native_turn_ref, error, usage, usage_detail, context, limit_bypass, phase, phase_at, phase_attempt, interrupted_by, command_cleanup,
         waiting_since, waited_ms, started_at, completed_at, created_at, seq_updated, plan
    FROM turns";
 
@@ -1814,6 +1888,8 @@ pub struct TurnRow {
     pub phase: Option<String>,
     /// Since when.
     pub phase_at: Option<DateTime<Utc>>,
+    /// The native retry number, when reported.
+    pub phase_attempt: Option<i64>,
     /// The beginning of the current human wait, if any.
     pub waiting_since: Option<DateTime<Utc>>,
     /// Completed human waits, with overlapping requests counted once.
@@ -1880,7 +1956,7 @@ pub async fn insert_turn(conn: &mut Conn, new: &NewTurn<'_>, seq: Seq) -> Result
                        COALESCE((SELECT plan FROM thread_inputs WHERE id=$4), false))
                RETURNING id, thread_id, segment_id, ordinal, state, input_id, model, effort, params, lease_id,
                     before_snapshot_id, end_manifest_blob, files_end_manifest,
-                    native_turn_ref, error, usage, limit_bypass, phase, phase_at, interrupted_by, command_cleanup, started_at,
+                    native_turn_ref, error, usage, limit_bypass, phase, phase_at, phase_attempt, interrupted_by, command_cleanup, started_at,
                     completed_at, created_at, seq_updated, waiting_since, waited_ms, plan";
     Ok(sqlx::query_as(sql)
         .bind(new.id)
@@ -2222,9 +2298,9 @@ pub async fn finish_turn(
     seq: Seq,
 ) -> Result<bool, DbError> {
     let done = sqlx::query(
-        "UPDATE turns SET state = $2, error = $3, completed_at = $4, completed_seq = $5, phase = NULL, phase_at = NULL, seq_updated = $5,
+        "UPDATE turns SET state = $2, error = $3, completed_at = $4, completed_seq = $5, phase = NULL, phase_at = NULL, phase_attempt = NULL, seq_updated = $5,
                 waited_ms = waited_ms + COALESCE(floor(GREATEST(0, extract(epoch FROM ($4::timestamptz - waiting_since)) * 1000))::bigint, 0),
-                waiting_since = NULL
+                waiting_since = NULL, offline_since=NULL, offline_machine_id=NULL, offline_after_secs=NULL
           WHERE id = $1 AND state IN ('starting', 'running')",
     )
     .bind(turn)
@@ -2346,23 +2422,26 @@ pub async fn set_turn_usage(
     Ok(())
 }
 
-/// Sets what a running turn is doing (`working` or `compacting`), and since
+/// Sets what a running turn is doing and its native retry number, and since
 /// when. The answer says whether this call changed it.
 pub async fn set_turn_phase(
     conn: &mut Conn,
     turn: Id,
     phase: &str,
+    attempt: Option<i64>,
     at: DateTime<Utc>,
     seq: Seq,
 ) -> Result<bool, DbError> {
     let done = sqlx::query(
-        "UPDATE turns SET phase = $2, phase_at = $3, seq_updated = $4
-          WHERE id = $1 AND state IN ('starting', 'running') AND phase IS DISTINCT FROM $2",
+        "UPDATE turns SET phase = $2, phase_at = $3, seq_updated = $4, phase_attempt = $5
+          WHERE id = $1 AND state IN ('starting', 'running')
+            AND (phase IS DISTINCT FROM $2 OR phase_attempt IS DISTINCT FROM $5)",
     )
     .bind(turn)
     .bind(phase)
     .bind(at)
     .bind(seq)
+    .bind(attempt)
     .execute(conn)
     .await?;
     Ok(done.rows_affected() == 1)
@@ -2391,7 +2470,7 @@ const ITEM_SELECT: &str = "SELECT id, thread_id, continuation_id, segment_id, tu
    FROM items";
 
 /// An entry of a thread's timeline.
-#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
 pub struct ItemRow {
     /// Its identifier.
     pub id: Id,
@@ -2486,7 +2565,7 @@ pub async fn insert_item(
                RETURNING id, thread_id, continuation_id, segment_id, turn_id, model_input_id, stream, parent_item_id, kind, status, author_id,
                     payload, native_ref, before_orch, search_text, pinned_at, pinned_by, chat_refs, seq_created, seq_updated,
                     created_at, updated_at";
-    Ok(sqlx::query_as(sql)
+    let row: Option<ItemRow> = sqlx::query_as(sql)
         .bind(new.id)
         .bind(new.thread_id)
         .bind(new.segment_id)
@@ -2501,8 +2580,15 @@ pub async fn insert_item(
         .bind(new.search_text)
         .bind(seq)
         .bind(new.at)
-        .fetch_optional(conn)
-        .await?)
+        .fetch_optional(&mut *conn)
+        .await?;
+    if let Some(row) = &row
+        && row.kind == "tool_call"
+        && let (Some(turn), Some(reference)) = (row.turn_id, row.native_ref.as_deref())
+    {
+        crate::usage::ledger::tools::item_changed(conn, turn, row.segment_id, reference).await?;
+    }
+    Ok(row)
 }
 
 /// The item `id`.
@@ -2570,10 +2656,10 @@ pub async fn change_item(
     change: &ItemChange<'_>,
     seq: Seq,
 ) -> Result<bool, DbError> {
-    let done = sqlx::query(
+    let changed: Option<(String,Option<Id>,Id,Option<String>)> = sqlx::query_as(
         "UPDATE items SET status = COALESCE($2, status), payload = $3, search_text = COALESCE($4, search_text),
                 seq_updated = $5, updated_at = $6
-          WHERE id = $1",
+          WHERE id = $1 RETURNING kind,turn_id,segment_id,native_ref",
     )
     .bind(id)
     .bind(change.status)
@@ -2581,9 +2667,14 @@ pub async fn change_item(
     .bind(change.search_text)
     .bind(seq)
     .bind(change.at)
-    .execute(conn)
+    .fetch_optional(&mut *conn)
     .await?;
-    Ok(done.rows_affected() == 1)
+    if let Some((kind, Some(turn), segment, Some(reference))) = &changed
+        && kind == "tool_call"
+    {
+        crate::usage::ledger::tools::item_changed(conn, *turn, *segment, reference).await?;
+    }
+    Ok(changed.is_some())
 }
 
 /// Sets the status of an item whose status is one of `from`. The answer says
@@ -3733,7 +3824,8 @@ pub mod binding {
         Ok(sqlx::query_as(
             "SELECT topic.org_id AS org_id, topic.parent_id AS project_id, th.topic_id AS topic_id,
                     t.thread_id AS thread_id, t.segment_id AS segment_id, t.id AS turn_id,
-                    s.provider_id AS provider_id, l.entry_id AS entry_id, i.author_id AS user_id,
+                    s.provider_id AS provider_id, l.entry_id AS entry_id,
+                    CASE WHEN t.background_overlap THEN t.background_charge_to ELSE i.author_id END AS user_id,
                     s.agent_id AS agent_id, a.harness_kind AS harness_kind,
                     s.environment_id AS environment_id, e.placement AS environment_kind,
                     s.arrangement AS arrangement, t.model AS turn_model, t.effort AS effort, t.params AS params
@@ -3802,6 +3894,22 @@ pub mod tools {
         .await?)
     }
 
+    /// Eligible thread/topic pairs for a multi-topic announcement, before authorization.
+    pub async fn announcement_candidates(
+        conn: &mut Conn,
+        topics: &[Id],
+    ) -> Result<Vec<(Id, Id)>, DbError> {
+        Ok(sqlx::query_as(
+            "SELECT t.node_id, t.topic_id FROM threads t JOIN nodes n ON n.id=t.node_id
+              WHERE t.topic_id=ANY($1) AND t.side_of IS NULL
+                AND n.deleted_at IS NULL AND n.archived_at IS NULL
+              ORDER BY t.node_id",
+        )
+        .bind(topics)
+        .fetch_all(conn)
+        .await?)
+    }
+
     /// Takes the rows of these threads, in the order of their identifiers: whoever changes several threads in one
     /// transaction takes them in this order, so that two of them never wait for each other.
     pub async fn lock_threads(conn: &mut Conn, threads: &[Id]) -> Result<(), DbError> {
@@ -3851,10 +3959,12 @@ pub mod tools {
         pub topic_seq: Seq,
         /// When it was sent.
         pub created_at: DateTime<Utc>,
+        /// Private provenance of the admitted posting operation, never a later pickup lease.
+        pub posting_provenance: Option<Json>,
     }
 
     const ANNOUNCEMENT_COLUMNS: &str = "id, topic_id, from_thread_id, from_user_id, category, title, COALESCE(reference_body,body) AS body, files,
-        severity, delivery, fallback, wake_idle, targets, to_thread_id, group_id, topic_seq, created_at";
+        severity, delivery, fallback, wake_idle, targets, to_thread_id, group_id, topic_seq, created_at, posting_provenance";
 
     /// An announcement to make.
     #[derive(Debug, Clone, PartialEq)]
@@ -3908,6 +4018,17 @@ pub mod tools {
         new: &NewAnnouncement<'_>,
         authored: &str,
     ) -> Result<Option<AnnouncementRow>, DbError> {
+        insert_referenced_announcement_with_provenance(conn, new, authored, None).await
+    }
+
+    /// The same native row, recording the actual admitted posting operation atomically.
+    /// Provenance is separate from the public announcement/material payload.
+    pub async fn insert_referenced_announcement_with_provenance(
+        conn: &mut Conn,
+        new: &NewAnnouncement<'_>,
+        authored: &str,
+        posting_provenance: Option<&Json>,
+    ) -> Result<Option<AnnouncementRow>, DbError> {
         if announcement(conn, new.id).await?.is_some() {
             return Ok(None);
         }
@@ -3920,8 +4041,8 @@ pub mod tools {
         let made = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "INSERT INTO announcements (id, topic_id, from_thread_id, from_user_id, category, title, body, files,
                                        severity, delivery, fallback, wake_idle, targets, to_thread_id, group_id,
-                                       topic_seq, created_at, reference_body)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                                       topic_seq, created_at, reference_body, posting_provenance)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
              ON CONFLICT (id) DO NOTHING
              RETURNING {ANNOUNCEMENT_COLUMNS}"
         )))
@@ -3943,6 +4064,7 @@ pub mod tools {
         .bind(seq)
         .bind(new.at)
         .bind((new.body != authored).then_some(new.body))
+        .bind(posting_provenance)
         .fetch_optional(&mut *conn)
         .await?;
         crate::sequences::notify_topic(conn, new.topic_id, seq).await?;
@@ -3958,20 +4080,23 @@ pub mod tools {
             .await?)
     }
 
-    /// When the announcements and messages a thread's agent sent after `since` were sent, one moment for each: a
-    /// project-wide one is one, however many topics it went to, and one that only the followers heard of is none.
+    /// Sends after `since` in one independent bucket. A project-wide announcement counts once,
+    /// however many topics it reached; follower-only milestones count in neither bucket.
     pub async fn sent_since(
         conn: &mut Conn,
         thread: Id,
         since: DateTime<Utc>,
+        thread_messages: bool,
     ) -> Result<Vec<DateTime<Utc>>, DbError> {
         Ok(sqlx::query_scalar(
             "SELECT min(created_at) FROM announcements
               WHERE from_thread_id = $1 AND targets <> 'none' AND created_at > $2
+                AND (targets = 'thread') = $3
               GROUP BY COALESCE(group_id, id) ORDER BY 1",
         )
         .bind(thread)
         .bind(since)
+        .bind(thread_messages)
         .fetch_all(conn)
         .await?)
     }

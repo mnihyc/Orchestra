@@ -62,7 +62,10 @@ export function PauseDialog({ open, onOpenChange, initial, mode }: { open: boole
   const locale = useAppearance((state) => state.locale);
   const [date, setDate] = useState('');
   const [time, setTime] = useState('');
-  const [revision, setRevision] = useState(initial.revision);
+  // What the dialog writes on is the state it shows: a change that reaches the page while the dialog is open (a read answered late) moves the basis with
+  // the text. A choice the person has typed keeps the basis it was typed on, so that a change made elsewhere meanwhile is refused and told, not written over.
+  const [kept, setKept] = useState<number | null>(null);
+  const revision = kept ?? initial.revision;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [fault, setFault] = useState<string | null>(null);
@@ -92,9 +95,9 @@ export function PauseDialog({ open, onOpenChange, initial, mode }: { open: boole
       <form className="flex flex-col gap-3 pb-2" onSubmit={(event) => { event.preventDefault(); if (stale === null) void submit(); }}>
         <p role="status" className="text-sm text-text-muted">{until === null ? t('away.pause.unpaused') : t('away.pause.until', { time: writePause(until, zone, locale) })}</p>
         <p className="text-sm font-medium text-text">{t('away.pause.zone', { zone })}</p>
-        {resume ? <Button size="sm" variant="ghost" icon={<Clock aria-hidden />} onClick={() => setResume(false)}>{t('away.pause.change')}</Button> : <div className="grid grid-cols-1 gap-3 sm:grid-cols-2"><DateField label={t('away.pause.date')} value={date} onValueChange={setDate} disabled={saving} /><Input label={t('away.pause.time')} type="time" value={time} onChange={(event) => setTime(event.target.value)} disabled={saving} /></div>}
+        {resume ? <Button size="sm" variant="ghost" icon={<Clock aria-hidden />} onClick={() => setResume(false)}>{t('away.pause.change')}</Button> : <div className="grid grid-cols-1 gap-3 sm:grid-cols-2"><DateField label={t('away.pause.date')} value={date} onValueChange={(value) => { setKept((held) => held ?? initial.revision); setDate(value); }} disabled={saving} /><Input label={t('away.pause.time')} type="time" value={time} onChange={(event) => { setKept((held) => held ?? initial.revision); setTime(event.target.value); }} disabled={saving} /></div>}
         {fault !== null && <InlineAlert tone="danger">{fault}</InlineAlert>}
-        {stale !== null ? <InlineAlert tone="warning" title={t('away.pause.stale')}><p>{t('away.pause.proposalKept')}</p><Button size="sm" icon={<Check aria-hidden />} onClick={() => { setRevision(stale.revision); setStale(null); setError(null); }}>{t('away.pause.useCurrent')}</Button></InlineAlert> : error !== null && <ErrorAlert error={error} />}
+        {stale !== null ? <InlineAlert tone="warning" title={t('away.pause.stale')}><p>{t('away.pause.proposalKept')}</p><Button size="sm" icon={<Check aria-hidden />} onClick={() => { setKept(stale.revision); setStale(null); setError(null); }}>{t('away.pause.useCurrent')}</Button></InlineAlert> : error !== null && <ErrorAlert error={error} />}
         <p className="text-sm text-text-muted">{t('away.pause.boundary')}</p>
       </form>
     </Dialog>

@@ -6,7 +6,7 @@ import { chatWorthARow, type Env, rowOfName } from '@/features/finder/rows';
 import type { NameHit } from '@/generated/api-types';
 
 const place = { id: 'topic-1', kind: 'topic', name: 'Fix login redirect', redacted: false } as const;
-const hit = (more: Partial<NameHit> = {}): NameHit => ({ id: 'chat-1', kind: 'chat', name: 'Fix login redirect', tag: null, thread_attention: null, color: null, custom_color: null, address: null, archived: false, avatar: null, owner: null, path: [place], recent: false, username: null, ...more });
+const hit = (more: Partial<NameHit> = {}): NameHit => ({ home_path: [], id: 'chat-1', kind: 'chat', name: 'Fix login redirect', tag: null, thread_attention: null, color: null, custom_color: null, address: null, archived: false, avatar: null, owner: null, path: [place], recent: false, username: null, ...more });
 
 describe("a place's chat in the finder", () => {
   it('is left out while nothing was said in it, whatever was typed: the place is listed already and opens it', () => {

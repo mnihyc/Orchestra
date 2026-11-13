@@ -54,10 +54,12 @@ for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'] 
   }
   await page.goto('/settings/notifications');
   const list=page.getByRole('list',{name:words.notificationExceptions.title});await expect(list).toBeVisible();
-  await expect(page.getByRole('switch',{name:words.notifications.approvals.always,exact:true})).toBeChecked();
+  const approvals=page.getByRole('switch',{name:words.notifications.approvals.always,exact:true});
+  await expect(approvals).toBeChecked();
   await expect(page.getByRole('switch',{name:words.notifications.quiet.switch,exact:true})).not.toBeChecked();
   await expect(page.getByText(words.notifications.approvals.always,{exact:true})).toHaveCount(1);
-  await expect(page.getByText(words.notifications.approvals.hint,{exact:true})).toBeVisible();
+  await approvals.hover();
+  await expect(page.locator('[data-tooltip-content]').filter({hasText:words.notifications.approvals.hint})).toBeVisible();
   const actualRow=list.getByRole('listitem').filter({has:page.locator(`a[href*="${ACME.mainThread}"]`)});
   await expect(actualRow).toBeVisible();
   for(const width of [1440,400]){

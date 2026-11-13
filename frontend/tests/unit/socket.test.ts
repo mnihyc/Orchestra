@@ -1,3 +1,4 @@
+import { treeNode } from '../doubles/tree-node';
 // @vitest-environment node
 /** The live connection: who it says it is, what it does when the line goes, and how a feed stays equal to the server's rows whatever frames are lost. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -80,23 +81,7 @@ function harness(options: { token?: () => string | null; renew?: () => Promise<b
   return { socket, sockets, suspended, last };
 }
 
-const node = (id: string, seq: number, name = id): TreeNode => ({
-  participating: true,
-  id,
-  address: null,
-  kind: 'project',
-  name,
-  parent_id: 'org',
-  color: null,
-  docs: 0,
-  archived: false,
-  deleted: false,
-  restricted: false,
-  chat: { id: `chat-${id}`, seq: 0 },
-  thread: null,
-  topic: null,
-  tree_seq: seq,
-});
+const node = (id: string, seq: number, name = id): TreeNode => treeNode({ id, kind: 'project', name, parent_id: 'org', tree_seq: seq });
 
 /** The server's rows of one tree, and the feed that follows them into the store. */
 function tree(orgId: string, rows: TreeNode[], seq: number) {
@@ -209,6 +194,16 @@ describe('the connection', () => {
 
     last().say({ op: 'ready', connection_id: 'c1', user_id: 'u1', server_time: '', access_expires_at: '', heartbeat_secs: 25, build: 'b7' });
     expect(socket.status.getState()).toMatchObject({ phase: 'ready', lostAt: null, build: 'b7' });
+  });
+
+  it('keeps the same ready protocol for a key with no expiry', () => {
+    const { socket, last } = harness();
+    socket.start();
+    last().accept();
+    last().say({ op: 'ready', connection_id: 'key', user_id: 'u1', server_time: '', access_expires_at: null, heartbeat_secs: 25, build: 'b1' });
+    expect(socket.status.getState().phase).toBe('ready');
+    expect(last().sent[0]).toEqual({ op: 'auth', token: 'token-1' });
+    socket.stop();
   });
 
   it('does not connect while nobody is signed in', () => {
@@ -367,6 +362,110 @@ describe('the connection', () => {
     vi.advanceTimersByTime(500);
 
     expect(sockets).toHaveLength(2);
+  });
+
+  /** One heartbeat: the clock goes on to the next ping the page sends, and the server answers it a moment later (or does not). */
+  function beat(last: () => FakeSocket, { answer = true, after = 25_000 }: { answer?: boolean; after?: number } = {}): void {
+    const before = last().of('ping').length;
+    vi.advanceTimersByTime(after);
+    const sent = last().of('ping');
+    if (!answer || sent.length === before) return;
+    vi.advanceTimersByTime(20);
+    last().say({ op: 'pong', n: sent.at(-1)?.n });
+  }
+
+  describe('the silence of the line', () => {
+    it('pings every heartbeat and keeps a connection that answers, however long it goes on', () => {
+      const { socket, sockets, last } = harness();
+      socket.start();
+      last().ready();
+      for (let heartbeat = 1; heartbeat <= 40; heartbeat += 1) {
+        beat(last, { after: heartbeat === 1 ? 25_000 : 24_980 });
+        expect(last().of('ping')).toHaveLength(heartbeat);
+      }
+      expect(sockets).toHaveLength(1);
+      expect(socket.status.getState().phase).toBe('ready');
+      expect(last().closedWith).toBeUndefined();
+    });
+
+    it('counts a line whose pings are not answered as gone at the first tick after a minute of silence, and not before', () => {
+      const { socket, sockets, last } = harness();
+      socket.start();
+      last().ready();
+      // Ticks at 25, 50 and 75 s: the silence is a minute at the third, not at the second.
+      vi.advanceTimersByTime(50_000);
+      expect(socket.status.getState().phase).toBe('ready');
+      expect(last().of('ping')).toHaveLength(2);
+      vi.advanceTimersByTime(25_000);
+      expect(socket.status.getState().phase).toBe('waiting');
+      expect(sockets[0]?.closedWith).toBeUndefined();
+      vi.advanceTimersByTime(500);
+      expect(sockets).toHaveLength(2);
+    });
+
+    it('counts a line gone when the last ping was answered and nothing came after it for a minute', () => {
+      const { socket, sockets, last } = harness();
+      socket.start();
+      last().ready();
+      beat(last);
+      expect(last().of('ping')).toHaveLength(1);
+      // The line dies after the answer: the pings that follow get none.
+      vi.advanceTimersByTime(25_000 + 25_000 + 25_000);
+      expect(socket.status.getState().phase).toBe('waiting');
+      vi.advanceTimersByTime(500);
+      expect(sockets).toHaveLength(2);
+    });
+
+    it('does not count a line gone for a tick that came late after a ping that was answered: the page was held back, not the line', () => {
+      const { socket, sockets, last } = harness();
+      socket.start();
+      last().ready();
+      beat(last);
+      beat(last, { after: 24_980 });
+      expect(last().of('ping')).toHaveLength(2);
+      // The page's timers are held back (a tab hidden for minutes): the next tick comes a minute and more after the last answer.
+      vi.setSystemTime(Date.now() + 70_000);
+      vi.advanceTimersByTime(24_980);
+      expect(socket.status.getState().phase).toBe('ready');
+      expect(sockets).toHaveLength(1);
+      expect(last().closedWith).toBeUndefined();
+      // It asked again, and the line answers.
+      expect(last().of('ping')).toHaveLength(3);
+      vi.advanceTimersByTime(20);
+      last().say({ op: 'pong', n: last().of('ping').at(-1)?.n });
+      vi.advanceTimersByTime(25_000);
+      expect(sockets).toHaveLength(1);
+      expect(last().of('ping')).toHaveLength(4);
+    });
+
+    it('counts a line gone, after such a tick, when the ping that tick sent gets no answer either', () => {
+      const { socket, sockets, last } = harness();
+      socket.start();
+      last().ready();
+      beat(last);
+      vi.setSystemTime(Date.now() + 3_600_000);
+      // A machine that slept for an hour: the tick that wakes asks, and the ask is judged at the next one.
+      vi.advanceTimersByTime(25_000);
+      expect(socket.status.getState().phase).toBe('ready');
+      expect(last().of('ping')).toHaveLength(2);
+      vi.advanceTimersByTime(25_000);
+      expect(socket.status.getState().phase).toBe('waiting');
+      vi.advanceTimersByTime(500);
+      expect(sockets).toHaveLength(2);
+    });
+
+    it('takes anything the line says as proof that it is there, a ping left unanswered or not', () => {
+      const { socket, sockets, last } = harness();
+      socket.start();
+      last().ready();
+      // No pong ever comes, but a frame does at every other heartbeat: a minute never passes in silence.
+      for (let heartbeat = 1; heartbeat <= 10; heartbeat += 1) {
+        vi.advanceTimersByTime(25_000);
+        if (heartbeat % 2 === 0) last().say({ op: 'sub_ack', id: 99 });
+      }
+      expect(sockets).toHaveLength(1);
+      expect(socket.status.getState().phase).toBe('ready');
+    });
   });
 
   it('connects at once when the browser says the line is back', () => {

@@ -11,6 +11,7 @@ import type { ApiTokenInfo, ReferencePreview } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { show } from './support';
+import { CARD_OPEN_DELAY_MS } from '@/ui/inspection';
 
 const rows: ApiTokenInfo[] = [
   { id: 'all', name: 'All work', scopes: ['*'], node: null, created_at: '2026-10-01T12:00:00Z', expires_at: '2030-01-31T12:00:00Z', last_used_at: null },
@@ -58,11 +59,13 @@ for (const opening of ['hover', 'focus', 'tap'] as const) it(`opens the token pl
   if (opening === 'hover') await user.hover(place);
   else if (opening === 'focus') act(() => { place.focus(); });
   else await user.click(place);
-  await waitFor(() => expect(document.querySelector('[data-reference-card]')).toHaveTextContent('Web'), { timeout: 2_000 });
+  await waitFor(() => expect(document.querySelector('[data-reference-card]')).toHaveTextContent('Web'), { timeout: CARD_OPEN_DELAY_MS * 5 });
   expect(screen.getByRole('button', { name: (name) => name === i18n.t('people.reference.open') })).toBeVisible();
   expect(calls.preview).toHaveBeenCalledTimes(1);
   if (opening !== 'hover') {
     if (opening === 'focus') await user.keyboard('{Enter}');
+    expect(document.querySelector('[data-reference-card][role="dialog"]')).toHaveFocus();
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
     await user.keyboard('{Escape}');
     await waitFor(() => expect(document.querySelector('[data-reference-card]')).toBeNull());
   }

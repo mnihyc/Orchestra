@@ -6,8 +6,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 mod checkpoint;
-#[cfg(test)]
-mod tests;
 
 fn unsupported(words: &str) -> AdapterError {
     AdapterError::Unsupported(words.into())
@@ -144,7 +142,7 @@ impl Membership {
 
 impl CodexAdapter {
     async fn native_thread(&self, id: &str) -> Result<Json, AdapterError> {
-        let (shared, _) = self.live()?;
+        let (shared, _) = self.live_native(id)?;
         let answer = shared
             .rpc()
             .call("thread/read", json!({"threadId":id,"includeTurns":false}))
@@ -167,7 +165,7 @@ impl CodexAdapter {
     }
 
     async fn goal_free(&self, id: &str) -> Result<(), AdapterError> {
-        let (shared, running) = self.live()?;
+        let (shared, running) = self.live_native(id)?;
         let answer = shared
             .rpc()
             .call("thread/goal/get", json!({"threadId":id}))
@@ -181,7 +179,7 @@ impl CodexAdapter {
                 "An exact checkpoint names a retained native user input.",
             ));
         }
-        let (shared, _) = self.live()?;
+        let (shared, _) = self.live_native(id)?;
         let mut membership = Membership::default();
         let mut cursor: Option<String> = None;
         let mut cursors = HashSet::new();
@@ -265,17 +263,18 @@ impl CodexAdapter {
         source: NativePrefixSource,
         before: &str,
     ) -> Result<Checkpoint, AdapterError> {
-        let (shared, running) = self.live()?;
-        if running.started.harness_version != "0.165.0" {
-            return Err(unsupported(
-                "Exact input checkpoints require Codex 0.165.0.",
-            ));
+        let (shared, running) = self.live_session(source.thread_id)?;
+        if !crate::descriptor::is_pinned_build(&running.started.harness_version) {
+            return Err(unsupported(&format!(
+                "Exact input checkpoints require Codex {} or later.",
+                crate::descriptor::OLDEST_PROVEN_BUILD
+            )));
         }
         if let Ok((native, segment, busy)) = shared.with_session(source.thread_id, |record| {
             (
                 record.mapper.native_thread().to_owned(),
                 record.mapper.segment_id(),
-                record.mapper.turn_in_progress(),
+                record.mapper.turn_in_progress() || record.mapper.background_running(),
             )
         }) {
             if native != source.native_session_ref || segment != source.segment_id {
@@ -405,7 +404,7 @@ impl CodexAdapter {
                 "An input-prefix open names its exact source and no ordinal cut.",
             ));
         }
-        let (shared, _) = self.live()?;
+        let (shared, _) = self.live_session(spec.settings.thread_id)?;
         if shared.with_session(spec.settings.thread_id, |_| ()).is_ok() {
             return Err(conflict(
                 "The target session lane is occupied. Close it before opening the checkpoint.",
@@ -438,3 +437,6 @@ impl CodexAdapter {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

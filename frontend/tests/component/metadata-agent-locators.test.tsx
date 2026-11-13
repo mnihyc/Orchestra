@@ -68,7 +68,7 @@ function draw(ui: ReactNode, knownKinds?: HarnessKindInfo[]) {
     client.setQueryData(KINDS, knownKinds);
     void client.invalidateQueries({ queryKey: KINDS, refetchType: 'none' });
   }
-  const view = render(<QueryClientProvider client={client}><TooltipProvider><Toaster>{ui}</Toaster></TooltipProvider></QueryClientProvider>);
+  const view = render(<QueryClientProvider client={client}><TooltipProvider overflow={false}><Toaster>{ui}</Toaster></TooltipProvider></QueryClientProvider>);
   return { ...view, client };
 }
 

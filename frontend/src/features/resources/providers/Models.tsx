@@ -45,6 +45,9 @@ import { Switch } from '@/ui/Switch';
 import { type Column, Table } from '@/ui/Table';
 import { toast } from '@/ui/Toast';
 import { accessProgramDisplayName, modelDisplayName } from '@/features/models/names';
+import { ModelSources } from './ModelSources';
+import { ModelGroupProposal } from './ModelGroupProposal';
+import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
 
 const shownName = (model: Pick<ProviderModel, 'display_name' | 'model_name'>,t:TFunction): string => modelDisplayName(model.display_name,t);
 
@@ -83,7 +86,8 @@ export function offeredOnly(parameters: ModelParameters, locale: string, t: TFun
   const programs = [...new Set([...(parameters.offered?.access_programs ?? []), ...(suggestion ? (parameters.access_programs ?? []) : [])])].filter((program) => !switched.includes(program));
   const largest = suggestion ? (parameters.offered?.context_max ?? parameters.context_max) : (parameters.context_max === undefined || parameters.context_max === null ? parameters.offered?.context_max : null);
   const bigger = largest !== undefined && largest !== null ? [t('models.list.contextUpTo', { largest: formatContext(largest, locale) })] : [];
-  return [...speeds, ...programs.map((program) => accessProgramDisplayName(program, t)), ...bigger];
+  const search = (parameters.offered?.web_search ?? []).filter((mode) => !(suggestion ? [] : parameters.web_search ?? []).includes(mode)).map((mode) => t('webSearch.modeNamed', { mode }));
+  return [...search, ...speeds, ...programs.map((program) => accessProgramDisplayName(program, t)), ...bigger];
 }
 
 /** What a model can be run with here, a line for each thing: efforts, context, images, the speeds and programs that are on and what is offered and not yet on, and the rate. */
@@ -91,6 +95,8 @@ export function Summary({ parameters }: { parameters: ModelParameters }) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
   const lines: string[] = [];
+  if ((parameters.web_search ?? []).length > 0) lines.push(t('webSearch.enabledModes', { modes: parameters.web_search?.join(', ') }));
+  if (parameters.rate?.web_search_per_call !== undefined && parameters.rate.web_search_per_call !== null) lines.push(t('webSearch.priceNamed', { price: parameters.rate.web_search_per_call }));
   if ((parameters.efforts ?? []).length > 0) lines.push(t('providers.models.efforts', { list: (parameters.efforts ?? []).join(', ') }));
   const window = parameters.context_window;
   const largest = parameters.context_max;
@@ -248,6 +254,7 @@ function Suggestions({ provider }: { provider: Provider }) {
                     disabled={accept.isPending}
                     onCheckedChange={(on) => setChosen((before) => (on ? [...before, suggestion.model_name] : before.filter((name) => name !== suggestion.model_name)))}
                   />
+                  <ModelSources observed={suggestion} at={provider.facts.field_times.models ?? null} />
                 </li>
               );
             })}
@@ -273,6 +280,8 @@ export function ProviderModels({ provider, manage }: { provider: Provider; manag
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<ProviderModel | null>(null);
   const [removing, setRemoving] = useState<ProviderModel | null>(null);
+  const observedModels = detailState(provider, 'models') === 'told' ? provider.facts.models : null;
+  const observationsByName = new Map((observedModels ?? []).map((observed) => [observed.model_name, observed]));
   const columns: Column<ProviderModel>[] = [
     {
       id: 'display',
@@ -287,6 +296,8 @@ export function ProviderModels({ provider, manage }: { provider: Provider; manag
           <div className="flex min-w-0 flex-col gap-1">
             <DisplayName provider={provider} model={model} manage={manage} />
             <ModelAvailability provider={provider} name={model.model_name} />
+            <ModelSources current={model} observed={observationsByName.get(model.model_name)} at={provider.facts.field_times.models ?? null} />
+            <ModelGroupProposal provider={provider} model={model} observed={observationsByName.get(model.model_name)} manage={manage} />
             {withoutRouting && model.display_name !== model.model_name && <code className="text-sm wrap-anywhere text-text-muted">{model.model_name}</code>}
             {model.groups.length > 0 && (
               <ul aria-label={t('models.groups.of')} className="flex flex-wrap gap-1">
@@ -321,15 +332,15 @@ export function ProviderModels({ provider, manage }: { provider: Provider; manag
         id="provider-models"
         title={t('providerRecovery.savedModels')}
         action={
-          manage ? (
+          <div className="flex flex-wrap items-center gap-2"><ArticleGuideLink article="provider-details" heading="confirmed-values" title={t('providerFill.sourceGuide')} />{manage ? (
             <Button variant="primary" icon={<Plus aria-hidden />} onClick={() => setAdding(true)}>
               {t('providers.models.add')}
             </Button>
-          ) : undefined
+          ) : null}</div>
         }
       >
         <div className="flex flex-col gap-4">
-          <GroupStrip provider={provider} models={provider.models} manage={manage} />
+          <GroupStrip provider={provider} models={provider.models} manage={manage} options={provider.model_group_options} revision={provider.revision} />
           {provider.models.length === 0 ? (
             <EmptyState compact icon={<Plus aria-hidden />} title={t('providers.models.none')} description={manage ? t('providers.models.noneLead') : undefined} />
           ) : (

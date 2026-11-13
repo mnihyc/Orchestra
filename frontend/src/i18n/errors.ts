@@ -31,7 +31,17 @@ export function apiErrorSentence(code: ErrorCode, status: number, t: TFunction =
   return status >= 500 ? t('errors.internal') : t('ui.error.requestRefused');
 }
 
+/** What the server says of a member of an entry that allows more than the entries of whoever gives it, by the sentence it says it in. */
+const ENTRY_BEYOND = {
+  'allows more models than any one entry of yours does': 'access.options.beyond.models',
+  'allows more services than any one entry of yours does': 'access.options.beyond.services',
+  'allows more efforts than any one entry of yours does': 'access.options.beyond.efforts',
+  'allows more arrangement types than any one entry of yours does': 'access.options.beyond.arrangements',
+  'allows more places than any one entry of yours does': 'access.options.beyond.where',
+} as const;
+
 /** Keep a useful field reason and its separate path; never turn a path or code into prose. */
 export function fieldErrorSentence(message: string, t: TFunction = i18n.t): string {
+  if (Object.hasOwn(ENTRY_BEYOND, message)) return t(ENTRY_BEYOND[message as keyof typeof ENTRY_BEYOND]);
   return message.trim() !== '' && !hasErrorCode(message) ? message : t('errors.request.invalid');
 }

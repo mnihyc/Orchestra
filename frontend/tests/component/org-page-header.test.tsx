@@ -12,7 +12,9 @@ import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { actionName } from '@/ui/actions';
 import { me, memberAccess, org, userRef } from '../doubles/fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+skipOverflowFallback();
 
 const calls = vi.hoisted(() => ({ place: null as Org | null, dialog: vi.fn(), star: vi.fn<() => Promise<void>>(),
   unstar: vi.fn<() => Promise<void>>(), tags: vi.fn(), announcements: vi.fn(), notifications: vi.fn(), detail: vi.fn(),

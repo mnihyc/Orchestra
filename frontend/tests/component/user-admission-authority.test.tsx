@@ -25,6 +25,8 @@ vi.mock('@/api/auth', async (original) => ({ ...await original<typeof AuthApi>()
 vi.mock('@/api/adminMode', async (original) => ({ ...await original<typeof AdminModeApi>(), adminModeQuery: { queryKey: ['admin-mode'], queryFn: calls.mode, staleTime: Infinity } }));
 vi.mock('@/api/adminState', async (original) => ({ ...await original<typeof AdminStateApi>(), repairMeta: calls.meta }));
 vi.mock('@/api/notifications', async (original) => ({ ...await original<typeof NotificationsApi>(), fetchSummary: calls.summary, fetchNotifications: calls.page }));
+/** The live feed gathers changes for 400 ms before it reads again; the waits below are five such pauses, so that a pause of the machine does not end them first. */
+const SETTLED = { timeout: 5 * 400 };
 const previous = client.session.getState();
 const mode: AdminMode = { as_admin: true, available: true };
 const summary: NotificationSummaryGetReply = { seq: 7, unread: 0, approvals_pending: 0, outside: { scope: null, pause_until: null, ways: [] } };
@@ -59,13 +61,13 @@ it.each(['initial', 'resumed'] as const)('retakes current standing at %s admissi
     if (kind === 'resumed') {
       // The first admission is unchanged; a later reconnect carries no replayed authority event.
       admit(1);
-      await waitFor(() => expect(calls.person).toHaveBeenCalledOnce());
+      await waitFor(() => expect(calls.person).toHaveBeenCalledOnce(), SETTLED);
       expect(calls.mode).toHaveBeenCalledOnce(); expect(readSettings).not.toHaveBeenCalled();
       calls.person.mockClear(); calls.mode.mockClear(); calls.meta.mockClear();
     }
     calls.person.mockResolvedValue(me(1, 'person', 'Person', { is_system_admin: false }));
     admit(kind === 'initial' ? 1 : 2);
-    await waitFor(() => expect(queryClient.getQueryData<Me>(['me'])?.is_system_admin).toBe(false));
+    await waitFor(() => expect(queryClient.getQueryData<Me>(['me'])?.is_system_admin).toBe(false), SETTLED);
     expect(queryClient.getQueryData(['admin-mode'])).toEqual(mode);
     expect(queryClient.getQueryData(key)).toBeUndefined(); expect(readSettings).not.toHaveBeenCalled();
     expect(calls.person).toHaveBeenCalledOnce(); expect(calls.mode).toHaveBeenCalledOnce();

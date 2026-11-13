@@ -17,14 +17,52 @@ beforeEach(() => {
     // jsdom has no layout. Native detached-anchor handling needs a normal viewport and a
     // visible trigger rectangle for interaction tests; individual geometry spies still win.
     const previousRect = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'getBoundingClientRect');
+    // Whether an element is shown is asked of its style. jsdom answers by running the whole cascade for the element, which for each of the
+    // triggers of a long list (each is asked, once, as it is drawn) is most of what such a list costs a test. Where no style sheet is loaded
+    // (a test has none) only the inline styles can say it is hidden, and they are read as they are; where there is one, the cascade is asked
+    // and its answer is kept only while the page stands as it did: any change (an attribute, a node, a text) drops every answer, whether
+    // the observer has already been told of it or its record still waits, and is taken at the read. The observer is made at the first
+    // such read, so that a test with no style sheet pays nothing for the changes it makes to the page.
+    let changes: MutationObserver | null = null;
+    let shown = new WeakMap<Element, boolean>();
+    geometryRestores.push(() => changes?.disconnect());
+    const hiddenHere = (element: Element): boolean => {
+      const inline = element.getAttribute('style');
+      return element.hasAttribute('hidden') || inline !== null && (inline.includes('display: none') || inline.includes('visibility: hidden'));
+    };
+    const hiddenAbove = (start: Element): boolean => {
+      for (let element: Element | null = start; element !== null; element = element.parentElement) if (hiddenHere(element)) return true;
+      return false;
+    };
+    const hiddenByStyle = (element: HTMLElement): boolean => {
+      if (document.styleSheets.length === 0) {
+        if (element.style.display === 'none') return true;
+        for (let at: HTMLElement | null = element; at !== null; at = at.parentElement) {
+          const visibility = at.style.visibility;
+          if (visibility !== '') return visibility === 'hidden';
+        }
+        return false;
+      }
+      if (changes === null) {
+        changes = new MutationObserver(() => { shown = new WeakMap(); });
+        changes.observe(document, { attributes: true, childList: true, subtree: true, characterData: true });
+        shown = new WeakMap();
+      } else if (changes.takeRecords().length > 0) shown = new WeakMap();
+      let visible = shown.get(element);
+      if (visible === undefined) {
+        const style = getComputedStyle(element);
+        visible = style.display !== 'none' && style.visibility !== 'hidden';
+        shown.set(element, visible);
+      }
+      return !visible;
+    };
+    const GEOMETRY_ATTRIBUTES = ['aria-haspopup', 'data-state', 'data-tooltip-trigger', 'data-floating-anchor', 'data-radix-select-viewport'];
     Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', { configurable: true, writable: true, value(this: HTMLElement): DOMRect {
       // Read the inherited method now so a test's later Element geometry spy still wins.
       const measured = Element.prototype.getBoundingClientRect.call(this);
-      if (measured.width > 0 || measured.height > 0 || !this.matches('[aria-haspopup],[data-state],[data-tooltip-trigger],[data-floating-anchor],[data-radix-select-viewport]')) return measured;
-      if (this.closest('[hidden],[style*="display: none"],[style*="visibility: hidden"]') !== null) return measured;
-      const style = getComputedStyle(this);
-      if (style.display === 'none' || style.visibility === 'hidden') return measured;
-      return this.matches('[data-radix-select-viewport]') ? new DOMRect(8, 48, 320, 320) : new DOMRect(16, 64, 120, 32);
+      if (measured.width > 0 || measured.height > 0 || !GEOMETRY_ATTRIBUTES.some((name) => this.hasAttribute(name))) return measured;
+      if (hiddenAbove(this) || hiddenByStyle(this)) return measured;
+      return this.hasAttribute('data-radix-select-viewport') ? new DOMRect(8, 48, 320, 320) : new DOMRect(16, 64, 120, 32);
     } });
     geometryRestores.push(() => { if (previousRect === undefined) Reflect.deleteProperty(HTMLElement.prototype, 'getBoundingClientRect'); else Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', previousRect); });
     for (const name of ['clientWidth', 'clientHeight'] as const) {

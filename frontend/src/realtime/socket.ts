@@ -13,6 +13,7 @@ import { createStore, type StoreApi } from 'zustand/vanilla';
 
 import type { ClientFrame, ServerFrame } from '@/generated/api-types';
 import { openingId } from '@/lib/opening';
+import { serverClock, type ServerClock } from '@/lib/serverClock';
 
 // ---------------------------------------------------------------- frames, as the protocol names them
 
@@ -43,7 +44,7 @@ function readyOf(frame: RawFrame): ReadyFrame {
     connection_id: typeof frame.connection_id === 'string' ? frame.connection_id : '',
     user_id: typeof frame.user_id === 'string' ? frame.user_id : '',
     server_time: typeof frame.server_time === 'string' ? frame.server_time : '',
-    access_expires_at: typeof frame.access_expires_at === 'string' ? frame.access_expires_at : '',
+    access_expires_at: typeof frame.access_expires_at === 'string' ? frame.access_expires_at : null,
     heartbeat_secs: typeof frame.heartbeat_secs === 'number' ? frame.heartbeat_secs : 0,
     build: typeof frame.build === 'string' ? frame.build : '',
   };
@@ -141,6 +142,8 @@ export interface RealtimeOptions {
   connect?: (url: string, protocol: string) => SocketLike;
   now?: () => number;
   random?: () => number;
+  /** The same clock as the HTTP admission; isolated transports can supply their own. */
+  clock?: ServerClock;
 }
 
 const OPEN = 1;
@@ -257,9 +260,12 @@ export function createRealtimeSocket(options: RealtimeOptions): RealtimeSocket {
   }
 
   function heartbeat(): void {
-    if (now() - lastHeard > SILENCE_LIMIT_MS) {
-      // Nothing for a minute: the connection is gone, whatever the browser believes, and is not
-      // waited for to say so itself.
+    // Nothing for a minute, and a ping of ours that nobody answered. The minute alone is not proof: a tick that comes late (a tab hidden
+    // for minutes has its timers held back to one in a minute, a machine that slept) finds the age of the last answer to be the age of
+    // the page's own delay, and the line may be answering the pings the page has been too slow to send. Such a tick asks again, below,
+    // and the answer, or the lack of one, is judged at the next.
+    if (now() - lastHeard > SILENCE_LIMIT_MS && pings.size > 0) {
+      // The connection is gone, whatever the browser believes, and is not waited for to say so itself.
       const dead = socket;
       socket = null;
       dead?.close();
@@ -280,6 +286,7 @@ export function createRealtimeSocket(options: RealtimeOptions): RealtimeSocket {
 
   function onReady(frame: ReadyFrame, authSentAt: number): void {
     readySince = now();
+    (options.clock ?? serverClock).observe(frame.server_time, authSentAt, readySince);
     heartbeatMs = frame.heartbeat_secs > 0 ? frame.heartbeat_secs * 1_000 : HEARTBEAT_MS;
     measured(authSentAt);
     status.setState({ phase: 'ready', lostAt: null, build: frame.build });
@@ -421,7 +428,7 @@ export function createRealtimeSocket(options: RealtimeOptions): RealtimeSocket {
       socket = null;
       closing?.close(1000);
       roundTrips = [];
-      status.setState({ phase: 'idle', lostAt: null, roundTripMs: null });
+      status.setState({ phase: 'idle', lostAt: null, roundTripMs: null, build: null });
     },
 
     subscribe(feed, listener) {

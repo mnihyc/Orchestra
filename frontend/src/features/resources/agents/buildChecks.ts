@@ -82,6 +82,21 @@ export function disabledFeatures(build: HarnessBuild): string[] {
   return [...new Set([...(build.check?.off ?? []), ...(build.check?.cases ?? []).flatMap((result) => caseUnavailable(result) && result.feature !== null ? [result.feature] : [])])];
 }
 
+/** How far the weakest of several builds is known to work: the one a person is told of when more than one build of a version could be the one held. */
+const WEAKEST_FIRST: readonly HarnessBuild['status'][] = ['failed', 'checking', 'untested', 'checked'];
+
+/**
+ * The stored build of exactly this kind and version, as Orch's check left it. A version has a build for each system and processor; the
+ * machine that reported it names its system and not its processor, so of the builds for its system (any, when none is for it) the one
+ * that is known to work least is shown: a check that failed is not left unsaid because a sibling passed. `null` when no build of it is known.
+ */
+export function storedBuild(builds: readonly HarnessBuild[] | undefined, kind: string, version: string, os?: HarnessBuild['os']): HarnessBuild | null {
+  const same = (builds ?? []).filter((build) => build.kind === kind && build.version === version);
+  const there = same.filter((build) => build.os === os);
+  const candidates = there.length > 0 ? there : same;
+  return [...candidates].sort((one, other) => WEAKEST_FIRST.indexOf(one.status) - WEAKEST_FIRST.indexOf(other.status))[0] ?? null;
+}
+
 /** The server reports the history fallback for this build after its checks. */
 export function featureFallback(build: HarnessBuild, feature: string, t: TFunction): string | null {
   const carry = 'carry' in build ? build.carry : undefined;

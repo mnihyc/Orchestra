@@ -5,10 +5,18 @@ import { useState } from 'react';
 import { expect, it, vi } from 'vitest';
 
 import { DetailCard } from '@/ui/DetailCard';
+import { IntentCard } from '@/ui/IntentCard';
+import { CARD_OPEN_DELAY_MS } from '@/ui/inspection';
 import { Combobox } from '@/ui/Combobox';
+import { Dialog } from '@/ui/Dialog';
 import { Select } from '@/ui/Select';
 import { Menu } from '@/ui/Menu';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+skipOverflowFallback();
+
+/** The wait for a card to open: five of its delays. */
+const CARD_WAIT = { timeout: CARD_OPEN_DELAY_MS * 5 };
 
 it('reads nothing before hover and closes a passing card after leaving', async () => {
   const content = vi.fn(() => <span>Provider details</span>);
@@ -17,9 +25,10 @@ it('reads nothing before hover and closes a passing card after leaving', async (
   expect(content).not.toHaveBeenCalled();
   const trigger = screen.getByRole('button', { name: 'Provider' });
   await user.hover(trigger);
-  expect(await screen.findByText('Provider details')).toBeVisible();
+  // The card opens after its delay of the clock; the wait for it is five delays, so that a pause of the machine does not end it first.
+  expect(await screen.findByText('Provider details', {}, CARD_WAIT)).toBeVisible();
   await user.unhover(trigger);
-  await waitFor(() => expect(screen.queryByText('Provider details')).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByText('Provider details')).not.toBeInTheDocument(), CARD_WAIT);
 });
 
 it('opens on focus, keeps on Enter and Escape dismisses it while returning focus', async () => {
@@ -33,6 +42,28 @@ it('opens on focus, keeps on Enter and Escape dismisses it while returning focus
   await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Environment' })).not.toBeInTheDocument());
   expect(screen.queryByRole('button', { name: 'Open environment' })).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Environment' })).toHaveFocus();
+});
+
+it('keeps an escaped inspection closed until a new pointer entry follows a leave', () => {
+  vi.useFakeTimers();
+  const view = show(<DetailCard label="Provider" content={() => <span>Provider details</span>}>Provider</DetailCard>);
+  try {
+    const trigger = screen.getByRole('button', { name: 'Provider' });
+    act(() => { trigger.focus(); });
+    expect(screen.getByText('Provider details')).toBeVisible();
+    fireEvent.keyDown(trigger, { key: 'Escape' });
+    act(() => { vi.runOnlyPendingTimers(); });
+    expect(screen.queryByText('Provider details')).not.toBeInTheDocument();
+    fireEvent.pointerOver(trigger, { pointerType: 'mouse' });
+    fireEvent.pointerMove(trigger, { pointerType: 'mouse' });
+    act(() => { vi.runOnlyPendingTimers(); });
+    expect(screen.queryByText('Provider details')).not.toBeInTheDocument();
+    fireEvent.pointerOut(trigger, { pointerType: 'mouse', relatedTarget: document.body });
+    fireEvent.pointerOver(trigger, { pointerType: 'mouse', relatedTarget: document.body });
+    fireEvent.pointerMove(trigger, { pointerType: 'mouse' });
+    act(() => { vi.runOnlyPendingTimers(); });
+    expect(screen.getByText('Provider details')).toBeVisible();
+  } finally { view.unmount(); vi.useRealTimers(); }
 });
 
 it('keeps a clicked card when the pointer leaves and closes it on an outside press', async () => {
@@ -56,12 +87,12 @@ it('follows a select highlight without selecting and Right Arrow enters its card
   }
   const user = userEvent.setup(); show(<Choice />);
   await user.click(screen.getByRole('combobox', { name: 'Model' }));
-  expect(await screen.findByRole('button', { name: 'Alpha details' })).toBeVisible();
+  expect(await screen.findByRole('button', { name: 'Alpha details' }, CARD_WAIT)).toBeVisible();
   await user.keyboard('{ArrowDown}');
-  expect(await screen.findByRole('button', { name: 'Bravo details' })).toBeVisible();
+  expect(await screen.findByRole('button', { name: 'Bravo details' }, CARD_WAIT)).toBeVisible();
   expect(changed).not.toHaveBeenCalled();
   await user.keyboard('{ArrowRight}');
-  expect(await screen.findByRole('dialog', { name: 'Bravo' })).toBeVisible();
+  expect(await screen.findByRole('dialog', { name: 'Bravo' }, CARD_WAIT)).toBeVisible();
   await user.keyboard('{Escape}');
   await waitFor(() => expect(screen.getByRole('option', { name: 'Bravo' })).toHaveFocus());
   await user.keyboard('{Enter}');
@@ -87,7 +118,9 @@ it('opens a choice card from its own control without choosing', async () => {
     { value: 'b', name: 'Bravo' },
   ]} />);
   await user.click(screen.getByRole('combobox', { name: 'Provider' }));
-  await user.click(screen.getByRole('button', { name: 'Inspect Alpha' }));
+  // The control is clicked without moving a pointer onto it: a pointer at rest on it opens its name after a delay of the clock, and a pause
+  // of the machine between the click and the Escape below would let the name open first and take the Escape.
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect Alpha' }));
   expect(await screen.findByRole('dialog', { name: 'Alpha' })).toHaveTextContent('Provider details');
   expect(chosen).not.toHaveBeenCalled();
   await user.keyboard('{Escape}');
@@ -99,7 +132,7 @@ it('opens a choice card from its own control without choosing', async () => {
 it('keeps the next option reachable when a phone picker has no room beside it', async () => {
   const previousFont = document.documentElement.style.fontSize;
   const previousWidth = window.innerWidth;
-  const original = Reflect.get(HTMLElement.prototype, 'getBoundingClientRect') as HTMLElement['getBoundingClientRect'];
+  const original = Reflect.get<HTMLElement, 'getBoundingClientRect'>(HTMLElement.prototype, 'getBoundingClientRect');
   const boxes = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect');
   try {
     document.documentElement.style.fontSize = '16px';
@@ -202,4 +235,95 @@ it('keeps touch browsing clear until the option inspection control is used', asy
   await user.click(screen.getByRole('button', { name: 'Inspect Bravo' }));
   expect(await screen.findByRole('dialog', { name: 'Bravo' })).toHaveTextContent('Bravo details');
   expect(choose).not.toHaveBeenCalled();
+});
+
+it('gives the first Escape to the form above a card that opened while the form covered it', () => {
+  vi.useFakeTimers();
+  const closed = vi.fn();
+  const view = show(<>
+    <DetailCard label="Workspace" content={() => <span>Workspace details</span>}>Workspace</DetailCard>
+    <Dialog open title="Find a file" onOpenChange={closed}><input aria-label="Find" /></Dialog>
+  </>);
+  try {
+    const trigger = screen.getByRole('button', { name: 'Workspace', hidden: true });
+    // The pointer moved onto the control under the form, and its card opens hidden behind the form.
+    fireEvent.pointerOver(trigger, { pointerType: 'mouse' });
+    fireEvent.pointerMove(trigger, { pointerType: 'mouse' });
+    act(() => { vi.runOnlyPendingTimers(); });
+    // Without a way to be seen it is not drawn at all, so it cannot hold the key.
+    expect(screen.queryByText('Workspace details')).not.toBeInTheDocument();
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(closed).toHaveBeenCalledWith(false);
+  } finally { view.unmount(); vi.useRealTimers(); }
+});
+
+it('opens no card for a trigger that arrives under a pointer that did not move, and opens it when the pointer then moves on it', () => {
+  vi.useFakeTimers();
+  const view = show(<DetailCard label="Provider" content={() => <span>Provider details</span>}>Provider</DetailCard>);
+  try {
+    const trigger = screen.getByRole('button', { name: 'Provider' });
+    // A dialog closes, a list scrolls or a bar opens under the pointer: the page is told of an entering and of no move.
+    fireEvent.pointerOver(trigger, { pointerType: 'mouse' });
+    act(() => { vi.advanceTimersByTime(CARD_OPEN_DELAY_MS * 4); });
+    expect(screen.queryByText('Provider details')).not.toBeInTheDocument();
+    // The person moves the pointer on it: the card follows after the usual rest, and not before it.
+    fireEvent.pointerMove(trigger, { pointerType: 'mouse' });
+    act(() => { vi.advanceTimersByTime(CARD_OPEN_DELAY_MS - 1); });
+    expect(screen.queryByText('Provider details')).not.toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(screen.getByText('Provider details')).toBeVisible();
+    // Leaving to anything but the card closes it after the short grace.
+    fireEvent.pointerOut(trigger, { pointerType: 'mouse', relatedTarget: document.body });
+    act(() => { vi.advanceTimersByTime(1_000); });
+    expect(screen.queryByText('Provider details')).not.toBeInTheDocument();
+  } finally { view.unmount(); vi.useRealTimers(); }
+});
+
+it('opens a card for a pointer that moves onto the trigger, and not when the pointer leaves before it rests', () => {
+  vi.useFakeTimers();
+  const view = show(<DetailCard label="Provider" content={() => <span>Provider details</span>}>Provider</DetailCard>);
+  try {
+    const trigger = screen.getByRole('button', { name: 'Provider' });
+    fireEvent.pointerOver(trigger, { pointerType: 'mouse' });
+    fireEvent.pointerMove(trigger, { pointerType: 'mouse' });
+    act(() => { vi.advanceTimersByTime(CARD_OPEN_DELAY_MS - 1); });
+    fireEvent.pointerOut(trigger, { pointerType: 'mouse', relatedTarget: document.body });
+    act(() => { vi.advanceTimersByTime(CARD_OPEN_DELAY_MS * 2); });
+    expect(screen.queryByText('Provider details')).not.toBeInTheDocument();
+    fireEvent.pointerOver(trigger, { pointerType: 'mouse', relatedTarget: document.body });
+    fireEvent.pointerMove(trigger, { pointerType: 'mouse' });
+    act(() => { vi.advanceTimersByTime(CARD_OPEN_DELAY_MS); });
+    expect(screen.getByText('Provider details')).toBeVisible();
+  } finally { view.unmount(); vi.useRealTimers(); }
+});
+
+it('keeps a touch from opening a card by pointer, and keyboard focus opens it as before', () => {
+  vi.useFakeTimers();
+  const view = show(<DetailCard label="Provider" content={() => <span>Provider details</span>}>Provider</DetailCard>);
+  try {
+    const trigger = screen.getByRole('button', { name: 'Provider' });
+    fireEvent.pointerOver(trigger, { pointerType: 'touch' });
+    fireEvent.pointerMove(trigger, { pointerType: 'touch' });
+    act(() => { vi.advanceTimersByTime(CARD_OPEN_DELAY_MS * 3); });
+    expect(screen.queryByText('Provider details')).not.toBeInTheDocument();
+    act(() => { trigger.focus(); });
+    expect(screen.getByText('Provider details')).toBeVisible();
+  } finally { view.unmount(); vi.useRealTimers(); }
+});
+
+it('opens a card of a people list by the same rule: a move onto it and a rest, never an arrival under a still pointer', () => {
+  vi.useFakeTimers();
+  const view = show(<IntentCard label="People" trigger={<button type="button">3 people</button>}><span>Ada, Grace and Linus</span></IntentCard>);
+  try {
+    const trigger = screen.getByRole('button', { name: '3 people' });
+    fireEvent.pointerOver(trigger, { pointerType: 'mouse' });
+    act(() => { vi.advanceTimersByTime(CARD_OPEN_DELAY_MS * 4); });
+    expect(screen.queryByText('Ada, Grace and Linus')).not.toBeInTheDocument();
+    fireEvent.pointerMove(trigger, { pointerType: 'mouse' });
+    act(() => { vi.advanceTimersByTime(CARD_OPEN_DELAY_MS); });
+    expect(screen.getByText('Ada, Grace and Linus')).toBeVisible();
+    fireEvent.pointerOut(trigger, { pointerType: 'mouse', relatedTarget: document.body });
+    act(() => { vi.advanceTimersByTime(1_000); });
+    expect(screen.queryByText('Ada, Grace and Linus')).not.toBeInTheDocument();
+  } finally { view.unmount(); vi.useRealTimers(); }
 });

@@ -64,7 +64,7 @@ impl Launcher for Docker {
         }
         command
             .envs(&request.env)
-            .arg("orch-dev-harness")
+            .arg(common::image())
             .arg(&request.program)
             .args(&request.args)
             .stdin(Stdio::piped())
@@ -880,7 +880,7 @@ async fn instructions_file_chain_codex_keeps_ancestors_empty_files_cwd_and_chang
         std::fs::write(root.join(path), text).unwrap();
     }
     let started = rig.boot().await;
-    assert_eq!(started.harness_version, "0.165.0");
+    assert_eq!(started.harness_version, common::expected_native_version());
     for cwd in [api.clone(), api.join("deep/leaf")] {
         let thread = new_id();
         let mut spec = rig.spec(thread, SessionMode::New, None);
@@ -1071,7 +1071,14 @@ async fn instructions_next_turn_codex_reports_retention_and_a_new_session_applie
     assert!(!last.contains("CURRENT-STANDING-RULE"));
     let notices = events.iter().filter(|event| matches!(event, SessionEvent::ItemCompleted(item) if item.native_ref.starts_with("orch-instructions-next-session:"))).count();
     assert_eq!(notices, 1);
-    assert!(events.iter().any(|event| matches!(event, SessionEvent::ItemCompleted(item) if item.payload["message"].as_str().is_some_and(|m|m.contains("next new session")))));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::ItemCompleted(item)
+        if item.native_ref.starts_with("orch-instructions-next-session:")
+            && item.payload["marker"] == "instructions_deferred"
+            && item.payload["data"]["program"] == "Codex"))
+    );
     let again = rig
         .run_turn(thread, "#!mock\nsay another real input\n")
         .await;

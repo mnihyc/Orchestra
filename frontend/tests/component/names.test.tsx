@@ -14,6 +14,7 @@ import { Dialog } from '@/ui/Dialog';
 import { PresenceStack } from '@/ui/PresenceStack';
 
 import { show as showBare } from './support';
+import { CARD_OPEN_DELAY_MS } from '@/ui/inspection';
 
 // What a person's card reads of their page is the profile's own test; here it is still on its way.
 vi.mock('@/api/profile', async (original) => ({ ...await original<object>(), profileQuery: (username: string) => ({ queryKey: ['profile', username], queryFn: () => new Promise(() => undefined) }) }));
@@ -39,7 +40,7 @@ describe('a person’s name', () => {
     await userEvent.tab();
     expect(screen.getByRole('button', { name: 'Build bot' })).toHaveFocus();
     // The passing card waits a moment before it shows, as it does under the pointer.
-    expect(await screen.findByText('@build.bot', {}, { timeout: 2_000 })).toBeVisible();
+    expect(await screen.findByText('@build.bot', {}, { timeout: CARD_OPEN_DELAY_MS * 5 })).toBeVisible();
   });
 
   it('opens nothing of its own inside a button, and keeps its whole name under the pointer', () => {

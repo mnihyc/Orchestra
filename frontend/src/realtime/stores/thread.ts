@@ -736,7 +736,18 @@ export const threadWriter = {
    * put over the row held, whatever its sequence, and the next row from the server replaces it.
    */
   patch(threadId: ThreadReadTarget, change: (thread: Thread) => Thread): void {
-    update(threadId, (view) => (view.thread === null ? view : { ...view, thread: change(view.thread) }));
+    // The row is the thread's own, whichever read of it a screen holds (a tab's scoped read is kept apart from the plain
+    // one): every held read of the thread takes the person's change.
+    const id = threadReadTarget(threadId).threadId;
+    useThreadStore.setState((state) => {
+      let byThread: Map<string, ThreadView> | null = null;
+      for (const [key, view] of state.byThread) {
+        if (view.ref?.threadId !== id || view.thread === null) continue;
+        byThread ??= new Map(state.byThread);
+        byThread.set(key, { ...view, thread: change(view.thread) });
+      }
+      return byThread === null ? state : { byThread };
+    });
   },
 
   /** A piece of growing text; it is added with the next frame. */
@@ -975,6 +986,17 @@ export function runningTurn(view: ThreadView): Turn | null {
   // History can retain a running row while its terminal update is in flight. Only the
   // authoritative current-turn pointer names today's work; an older row cannot revive it.
   return turn !== undefined && (turn.state === 'running' || turn.state === 'starting') ? turn : null;
+}
+
+/**
+ * Whether the page already holds, as over, the turn the thread names as its current one. The answer to a Stop can come before the
+ * frame that moves the thread's own state on: until then the thread still says that it works, and the turn it names says that it
+ * does not, and the later of the two is the turn's. A turn the page does not hold yet is not over.
+ */
+export function currentTurnOver(view: ThreadView): boolean {
+  const id = view.thread?.current_turn_id ?? null;
+  const turn = id === null ? undefined : view.turns.get(id);
+  return turn !== undefined && turn.state !== 'running' && turn.state !== 'starting';
 }
 
 /** The inputs that wait or are being handed over, in delivery order. */

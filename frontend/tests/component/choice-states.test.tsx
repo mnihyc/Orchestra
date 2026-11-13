@@ -1,5 +1,5 @@
 /** Real shared markup and choice stylesheet: the browser companion measures the resulting boxes. */
-import { cleanup, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { readFileSync } from 'node:fs';
@@ -32,6 +32,40 @@ function stylesheet(dark: boolean) {
   expect(style.sheet?.cssRules.length).toBeGreaterThan(0);
 }
 afterEach(async () => { cleanup(); for (const style of styles.splice(0)) style.remove(); await setLocale('en'); });
+
+it('keeps a radio focused and prevents a second choice while a save is pending', async () => {
+  const writes: string[] = [];
+  let finish: () => void = () => undefined;
+  const saved = new Promise<void>((resolve) => { finish = resolve; });
+  function Speed() {
+    const [value, setValue] = useState('standard');
+    const [pending, setPending] = useState(false);
+    return <SegmentedControl label="Speed" value={value} pending={pending}
+      segments={[{ value: 'standard', name: 'Standard' }, { value: 'fast', name: 'Fast' }]}
+      onValueChange={(next) => {
+        writes.push(next);
+        setPending(true);
+        void saved.then(() => { setValue(next); setPending(false); });
+      }} />;
+  }
+  show(<Speed />);
+  const user = userEvent.setup();
+  const standard = screen.getByRole('radio', { name: 'Standard' });
+  const fast = screen.getByRole('radio', { name: 'Fast' });
+  await user.tab();
+  expect(standard).toHaveFocus();
+  await user.keyboard('{ArrowRight}');
+  await waitFor(() => expect(fast).toHaveFocus());
+  expect(fast).toHaveAttribute('aria-disabled', 'true');
+  expect(screen.getByRole('radiogroup', { name: 'Speed' })).toHaveAttribute('aria-busy', 'true');
+  await user.keyboard('{ArrowLeft}');
+  expect(writes).toEqual(['fast']);
+  expect(fast).toHaveFocus();
+  await act(async () => { finish(); await saved; });
+  expect(fast).not.toHaveAttribute('aria-disabled');
+  expect(fast).toBeChecked();
+  expect(fast).toHaveFocus();
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const dark of [false, true]) {
   it(`keeps name-sized flex items and the chosen ground/words in ${locale}/${dark ? 'dark' : 'light'}`, async () => {

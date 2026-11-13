@@ -117,7 +117,7 @@ async fn fresh_native_prefix_case(first: bool) -> Proof {
     let mut rig = Rig::start("input-prefix")
         .await
         .ok_or("the pinned Docker harness is required for prefix acceptance")?;
-    assert_eq!(rig.boot().await.harness_version, "0.165.0");
+    assert_eq!(rig.boot().await.harness_version, "0.167.2");
     let thread = new_id();
     let initial = rig.spec(thread, SessionMode::New, None);
     let segment = initial.settings.segment_id;
@@ -353,7 +353,7 @@ async fn an_actual_native_steer_keeps_its_history_and_refuses_a_coarser_checkpoi
         program: gate,
         sent: sent.clone(),
     }));
-    assert_eq!(rig.boot().await.harness_version, "0.165.0");
+    assert_eq!(rig.boot().await.harness_version, "0.167.2");
     let thread = new_id();
     let initial = rig.spec(thread, SessionMode::New, None);
     let segment = initial.settings.segment_id;
@@ -526,7 +526,7 @@ async fn repeated_edits_keep_native_inherited_ranges_and_refuse_changed_missing_
     let mut rig = Rig::start("input-prefix-inherited")
         .await
         .ok_or("the pinned Docker harness is required")?;
-    assert_eq!(rig.boot().await.harness_version, "0.165.0");
+    assert_eq!(rig.boot().await.harness_version, "0.167.2");
     let thread = new_id();
     let initial = rig.spec(thread, SessionMode::New, None);
     let segment = initial.settings.segment_id;

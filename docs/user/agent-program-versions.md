@@ -1,7 +1,9 @@
 ---
+group: operations
 title: Agent program versions
 screens: /admin/$section, /resources/agents/$id, /resources/environments, /resources/environments/$id, /resources/hosts/$id, /resources/providers, /resources/providers/$id, /project/$projectId/settings, /org/$slug, /thread/$threadId, /inbox
 keywords: Codex, Claude Code, DeepSeek Harness, harness, version, compatibility, check, pin, exact, upgrade, downgrade, newest, shipped, mirror, offline, interrupt, batch
+summary: Choose agent program versions with inherited policies, exact pins and compatibility checks.
 ---
 
 # Agent program versions
@@ -14,7 +16,7 @@ build and current use together. Select a use count to see the environments
 and provider runtimes holding that build. The shipped and newest checked builds
 are separate facts; changing the default leaves the shipped build unchanged.
 
-The shipped builds are Codex 0.165.0 and Claude Code 2.1.312.
+The shipped builds are Codex 0.167.2 and Claude Code 2.1.322.
 Claude Code's Bypass also allows dangerous deletes without asking. See
 [How approvals work](how-approvals-work.md).
 
@@ -62,7 +64,7 @@ behavior does not fail a turn.
 A failed optional feature is unavailable with that build. Other features
 continue to work. An untested or failed target has a warning in its update
 plan. Operators can still choose it. A checksum mismatch is refused.
-Exact input checkpoints are unavailable for Codex 0.165.0 while its native
+Exact input checkpoints are unavailable for Codex 0.167.2 while its native
 goal-state and item-history checks remain unproved.
 
 ## Choose a policy
@@ -98,6 +100,20 @@ build, which can differ from the policy above.
 
 A connected personal machine keeps the program installed by its owner.
 Orch shows the reported version. Its owner upgrades or downgrades it there.
+Orch also reads the release channel of every program such a machine reports and checks the newest build on a check
+host by itself, so that a build the program updates to is checked soon after it is published; it shows as
+**Compatibility not verified** until that check has finished.
+A newer build keeps editing a sent message, continuing from an earlier version
+of one, ending a background command from Orch and the proof of web searches,
+whatever its line; when a later build has changed one of these, the act fails
+with the program's own error. A build of the tested line (Claude Code 2.1.x from
+2.1.319, Codex 0.167.x) is **Supported**; a later line shows **Compatibility not
+verified**. Auto approval with Codex stays offered for a build that is not
+checked; it is off for a build only when a check of that exact build ran Auto's
+trial and the trial failed. Native import with Codex needs a passing check of
+that exact build; without one the conversation is carried as items. A program
+older than the oldest tested build (Claude Code 2.1.319, Codex 0.167.0) does not
+start.
 
 An environment names each reported program even when its build has no catalogue check. An unknown check says
 **Check unavailable**; a program whose name has not been declared says **Program name not reported**.
@@ -142,8 +158,9 @@ the job's progress after confirming; hiding the dialog leaves it running.
 
 Set **Release mirror** when vendor hosts cannot be reached. The mirror
 serves the vendor's host and path under its own address. Exact fetches use
-the same mirror. Scheduled channel reads occur only for policies asking
-for newer builds; a zero release-check interval turns that schedule off.
+the same mirror. Scheduled channel reads occur for policies asking
+for newer builds and for the programs connected machines report; a zero
+release-check interval turns that schedule off.
 
 An administrator can instead copy a build to an internal file server, then
 add it through Agent programs with that URL and its SHA-256. Orch's existing

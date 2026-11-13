@@ -2,11 +2,12 @@
  *
  * Every row has at its end the act most used as a visible button, and a menu with
  * the rest; the same entries open under the right mouse button, with the menu key and with `Shift+F10`.
- * An act the reader may not do is not offered in a row. Rows that are ticked have the acts they all take
+ * An applicable act the reader may not do stays disabled with its reason. Rows that are ticked have the acts they all take
  * above the table, and an act that destroys names what it is about to destroy before it does it.
  */
+import { linkTo, type LinkObject } from '@/lib/links';
 import type { TFunction } from 'i18next';
-import { Ellipsis, LoaderCircle, Pencil, Share2 } from 'lucide-react';
+import { Copy, Ellipsis, LoaderCircle, Pencil, Share2 } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -41,6 +42,12 @@ export interface Act {
   /** The act is under way: where it is a button it shows that, and takes no second press. */
   pending?: boolean;
   run: () => void;
+}
+
+/** A visible object's known management act stays present; neither its button nor its shortcut grants authority. */
+export function managedAct(act: Act | null, allowed: boolean, reason: string): Act | null {
+  if (act === null || allowed) return act;
+  return { ...act, disabled: reason, run: () => undefined };
 }
 
 /** These existing resource acts explicitly require their kind's Manage row; navigation and future acts get no guessed permission. */
@@ -115,9 +122,9 @@ export function shareAct(t: TFunction, target: AccessTarget, access: Pick<Resour
 }
 
 /** Copies the address of a screen, and says that it did, or that the browser would not let it. */
-export function useCopyLink(): (path: string) => void {
+export function useCopyLink(): (thing: LinkObject) => void {
   const { t } = useTranslation();
-  return (path) => void copyText(`${location.origin}${path}`, t('common.linkCopied'));
+  return (thing) => void copyText(linkTo(thing), t('common.linkCopied'));
 }
 
 /** Which rows have an act under way, and the means to carry an act out so that its row says so until the answer comes. */
@@ -236,7 +243,7 @@ export function HeadingActs({
         </Tooltip>
       )}
       {edit !== null && (
-        <Button size="sm" admin={admin} icon={<Pencil aria-hidden />} onClick={edit.run}>
+        <Button size="sm" admin={admin} icon={<Pencil aria-hidden />} blocked={typeof edit.disabled === 'string'} reason={typeof edit.disabled === 'string' ? edit.disabled : undefined} onClick={edit.run}>
           {t('resources.act.editButton')}
         </Button>
       )}
@@ -304,16 +311,18 @@ export function useSelection<Row>(rows: readonly Row[], keyOf: (row: Row) => str
   };
 }
 
+const selectionFrame = 'inline-flex min-h-(--control-sm) items-center [&>div]:self-center [&_.choice-toggle]:mt-0';
+
 /** The box that ticks one row, named by the row. */
 export function RowBox({ name, checked, onChange }: { name: string; checked: boolean; onChange: (on: boolean) => void }) {
   const { t } = useTranslation();
-  return <Checkbox label={<span className="sr-only">{t('resources.bulk.select', { name })}</span>} checked={checked} onCheckedChange={onChange} />;
+  return <div className={selectionFrame}><Checkbox presentation="compact" label={<span className="sr-only">{t('resources.bulk.select', { name })}</span>} checked={checked} onCheckedChange={onChange} /></div>;
 }
 
 /** The box at the head of the column, which ticks every row there is. */
 export function AllBox({ checked, onChange }: { checked: boolean | 'indeterminate'; onChange: (on: boolean) => void }) {
   const { t } = useTranslation();
-  return <Checkbox label={<span className="sr-only">{t('resources.bulk.selectAll')}</span>} checked={checked} onCheckedChange={onChange} />;
+  return <div className={selectionFrame}><Checkbox presentation="compact" label={<span className="sr-only">{t('resources.bulk.selectAll')}</span>} checked={checked} onCheckedChange={onChange} /></div>;
 }
 
 /** The acts the ticked rows share, above the table. */
@@ -420,4 +429,10 @@ export function BulkNames({ names, lead }: { names: readonly string[]; lead: str
       </ul>
     </span>
   );
+}
+
+/** Copying an address needs no permission to change the named resource. */
+export function copyLinkAct(t: TFunction, thing: LinkObject): Act {
+  return { id: 'copy-link', label: t('actions.copyLink.label'), icon: <Copy aria-hidden />,
+    run: () => void copyText(linkTo(thing), t('common.linkCopied')) };
 }

@@ -1,3 +1,4 @@
+import { unjudgedProvenance } from '../doubles/resource-grouping';
 /** Resource lists keep rich columns, owners and admin marks while the shared query pages and filters first. */
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -11,7 +12,9 @@ import { resourceReaders } from '@/features/resources/inventory';
 import type { EverythingRow, Host } from '@/generated/api-types';
 import { inventoryRow } from '../doubles/everything-row';
 import { me, userRef } from '../doubles/fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback, tableDataRows } from './support';
+
+skipOverflowFallback();
 
 const reader = me(1, 'reader', 'Reader');
 const originalSession=client.session.getState();
@@ -21,7 +24,7 @@ const requests: { parent: string | null; filter: EverythingFilter; cursor: strin
 let failNext = false;
 
 function host(id: string, name: string, native = false): Host {
-  return { id, name, address: `team.${id}`, owner, org_id: null, home: null,
+  return { ...unjudgedProvenance(), id, name, address: `team.${id}`, owner, org_id: null, home: null,
     machine: { id: `machine-${id}`, name, online: true, platform_os: 'linux', placement: 'managed' },
     labels: [], drivers: [{ name: 'docker', title: 'Docker', creates: ['environment'], runtime_classes: [] }],
     ports: null, ports_revision: 0, ports_proposal: null, capacity: { cpu_millis: 4000, memory_mb: 8192, disk_gb: 100 },
@@ -80,7 +83,8 @@ it('loads one page on demand and preserves rich columns, the owner and native-on
   expect(await screen.findByRole('link', { name: 'Later host' })).toBeVisible();
   expect(requests.at(-1)?.cursor).toBe('next');
   expect(screen.getByRole('img', { name: 'You see this as an admin of Research' })).toBeVisible();
-  for (const item of screen.getAllByRole('row').slice(1)) expect(item.querySelector('[data-resource-owner]')).toHaveTextContent('Dora');
+  expect(tableDataRows(screen.getByRole('table'))).toHaveLength(2);
+  for (const item of tableDataRows(screen.getByRole('table'))) expect(item.querySelector('[data-resource-owner]')).toHaveTextContent('Dora');
   expect(screen.queryByRole('button', { name: 'Show more' })).not.toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: 'Filter' }));
   await user.click(screen.getByRole('switch', { name: 'Everything I can see' }));

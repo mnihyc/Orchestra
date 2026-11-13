@@ -151,5 +151,8 @@ it('loads parent-document suggestions only for an editor who can browse that par
   await screen.findByRole('textbox', { name: 'Document text' });
   expect(calls.list).not.toHaveBeenCalled();
   drawn.rerender(<Pane mode="visible" />);
+  await waitFor(() => expect(current().editor.isEditable).toBe(true));
+  expect(calls.list).not.toHaveBeenCalled();
+  act(() => { current().editor.commands.insertContentAt(2, '[['); });
   await waitFor(() => expect(calls.list).toHaveBeenCalledTimes(1));
 });

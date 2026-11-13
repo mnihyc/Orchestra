@@ -12,7 +12,9 @@ import { i18n } from '@/i18n';
 import { TYPING_PAUSE_MS } from '@/lib/debounce';
 import { NetworkError } from '@/lib/requests';
 import { me, org, userRef } from '../doubles/fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+skipOverflowFallback();
 
 interface ReadOptions { params?: { path?: { id?: string }; query?: Record<string, unknown> }; signal?: AbortSignal }
 const calls = vi.hoisted(() => ({ read: vi.fn<(path: string, options?: ReadOptions) => Promise<{ data: unknown }>>(), submit: vi.fn() }));

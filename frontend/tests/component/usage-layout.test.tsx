@@ -9,10 +9,12 @@ import type { EventParams, UsageParams } from '@/api/usage';
 import type * as UsageApi from '@/api/usage';
 import { Report } from '@/features/usage/Report';
 import { patchSearch, type UsageSearch } from '@/features/usage/search';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
 import { requestRow } from '../doubles/request-row';
 import { me, org, userRef } from '../doubles/fixtures';
 import { i18n, setLocale } from '@/i18n';
+
+skipOverflowFallback();
 
 const usageScene = vi.hoisted(() => ({ active: false }));
 const usageRead = vi.hoisted(() => vi.fn<(params: UsageParams) => void>());
@@ -40,7 +42,7 @@ vi.mock('@/api/usage', async (importOriginal) => {
     historyRead(params);
     return Promise.resolve({ items: params.filters.model === undefined ? [] : [requestRow({ model: params.filters.model, model_display: 'Swift', at: new Date().toISOString() })], next_cursor: null });
   }, getNextPageParam: () => null }),
-  usageQuery: (params: UsageParams) => ({ ...original.usageQuery(params), queryKey: ['layout-usage', params], queryFn: (): Promise<UsageAnalytics> => { usageRead(params);
+  usageQuery: (params: UsageParams) => ({ ...original.usageQuery(params), queryFn: (): Promise<UsageAnalytics> => { usageRead(params);
     const totals = { turns: usageScene.active ? 1 : 0, tokens: { input_tokens: usageScene.active ? 10 : 0, cached_input_tokens: 0, output_tokens: usageScene.active ? 5 : 0, reasoning_tokens: 0, total_tokens: usageScene.active ? 15 : 0 }, credits: usageScene.active ? '1' : '0', estimated_credits: '0', unrated_tokens: 0 };
     return Promise.resolve({
     scope: params.scope, from: params.from, to: params.to, bucket: params.bucket ?? 'day', depth: 'own', me: null,
@@ -67,7 +69,7 @@ it.each(['usage', 'performance'] as const)('locates every scoped %s split locall
   }
   show(<ControlledReport />);
   const input = await screen.findByRole('combobox', { name: i18n.t('usage.chart.splitBy') });
-  const expected: (UsageDimension | 'none')[] = ['thread', 'person', 'model', 'provider', 'agent', 'environment', 'org', 'project', 'tier', 'effort', 'program',
+  const expected: (UsageDimension | 'none')[] = ['thread', 'person', 'model','offering','purpose', 'provider', 'agent', 'environment', 'org', 'project', 'tier', 'effort', 'program',
     ...(view === 'performance' ? ['topic' as const] : []), 'none'];
   let reads = usageRead.mock.calls.length;
   expect(reads).toBeGreaterThan(0);

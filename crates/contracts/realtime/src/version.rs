@@ -25,8 +25,9 @@ pub const SOCKET_PATH: &str = "/api/v1/ws";
 /// How long a client may take to send its first frame, which says who
 /// it is. Ten seconds are some tens of round trips of a slow link.
 pub const AUTH_TIMEOUT_SECS: u32 = 10;
-/// How often a client pings. Under half a minute, so that proxies that
-/// close idle sockets after thirty seconds leave it alone.
+/// How often a client pings, and the server sends a protocol Ping on the
+/// socket (a browser answers it without its page). Under half a minute, so
+/// that proxies that close idle sockets after thirty seconds leave it alone.
 pub const HEARTBEAT_SECS: u32 = 25;
 /// How long either side hears nothing before it closes: two heartbeats
 /// and some, which is hundreds of round trips even of a slow link.

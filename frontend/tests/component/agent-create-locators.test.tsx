@@ -9,9 +9,11 @@ import type { HarnessKindInfo, Machine } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { id } from '../doubles/fixtures';
 import { detailAgent, detailMachine } from './resource-detail-fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
 
 import { harnessName, partialDescriptor } from '../doubles/harness-names';
+
+skipOverflowFallback();
 const calls = vi.hoisted(() => ({ registry: vi.fn<() => Promise<HarnessKindInfo[]>>(), machines: vi.fn<() => Promise<Machine[]>>(),
   machine: vi.fn<(id: string) => Promise<Machine>>(), create: vi.fn<typeof Resources.createAgent>(), register: vi.fn<typeof Resources.registerAgent>() }));
 vi.mock('@/api/resources', async (load) => ({ ...await load<typeof Resources>(), createAgent: calls.create, registerAgent: calls.register,
@@ -56,7 +58,8 @@ it('searches the full adapter registry and submits the raw selected kind only fr
   await user.click(input); await user.type(input, '__no_adapter__'); await user.keyboard('{Enter}');
   expect(calls.create).not.toHaveBeenCalled(); await user.clear(input); await user.type(input, 'adapter-13'); await user.keyboard('{Enter}');
   expect(input).toHaveValue('Registered adapter 13');
-  await user.type(screen.getByLabelText(i18n.t('agents.add.name')), 'A deliberate profile');
+  // What the name is does not matter here, so it is pasted: a keystroke draws the whole dialog again.
+  await user.click(screen.getByLabelText(i18n.t('agents.add.name'))); await user.paste('A deliberate profile');
   expect(calls.registry).toHaveBeenCalledOnce(); expect(calls.machines).not.toHaveBeenCalled(); expect(calls.create).not.toHaveBeenCalled();
   await user.click(screen.getByRole('button', { name: i18n.t('agents.add.submit') }));
   await waitFor(() => expect(created).toHaveBeenCalledExactlyOnceWith(detailAgent));
@@ -82,7 +85,7 @@ it('searches all eligible physical machines and their reported programs while re
   await user.type(adapter, 'adapter-13'); await user.keyboard('{Enter}'); expect(adapter).toHaveValue('Registered adapter 13');
   expect(calls.machines).toHaveBeenCalledOnce(); expect(calls.machine).toHaveBeenCalledExactlyOnceWith(id(90, 13));
   expect(calls.registry).toHaveBeenCalledOnce(); expect(calls.register).not.toHaveBeenCalled();
-  await user.type(screen.getByLabelText(i18n.t('agents.add.name')), 'Machine profile');
+  await user.click(screen.getByLabelText(i18n.t('agents.add.name'))); await user.paste('Machine profile');
   await user.click(screen.getByRole('button', { name: i18n.t('agents.add.submit') }));
   await waitFor(() => expect(created).toHaveBeenCalledExactlyOnceWith(detailAgent));
   expect(calls.register).toHaveBeenCalledExactlyOnceWith(id(90, 13), { home_id: 'home', name: 'Machine profile', harness_kind: 'adapter-13' }, expect.any(String));

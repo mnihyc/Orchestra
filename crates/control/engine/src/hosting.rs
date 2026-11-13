@@ -23,6 +23,9 @@ pub const STOP_WAIT: Duration = Duration::from_secs(45);
 /// How often a runner looks at its job's row for a request to cancel, and a waiting phase looks at
 /// what it waits for: often enough that a cancel is felt at once, rarely enough to cost nothing.
 pub const WATCH_EVERY: Duration = Duration::from_millis(250);
+/// How long a job's phase waits before it is asked again after a failure of the system under it (the
+/// database, a link that broke). A host's answer to a command is not such a failure.
+pub const PHASE_RETRY_PAUSE: Duration = Duration::from_millis(500);
 /// The shortest pause between two attempts to remove what will not go: the pauses grow from here,
 /// doubling, up to `reaper_retry_max_secs`.
 pub const REMOVAL_FIRST_PAUSE: Duration = Duration::from_secs(30);
@@ -40,6 +43,8 @@ pub const ATTACH_RETRY: Duration = Duration::from_secs(30);
 pub struct HostingConfig {
     /// How long a runner's lease on a job holds.
     pub job_lease: Duration,
+    /// How long a job's phase waits before it is asked again after a failure of the system under it.
+    pub phase_retry_pause: Duration,
     /// How long the connector of a new unit has to enroll (`[node] enroll_timeout_secs`).
     pub enroll_timeout: Duration,
     /// How often the schedule looks for what is due for removal (`[engine] reaper_secs`).
@@ -74,6 +79,7 @@ impl HostingConfig {
     pub fn from_server(config: &ServerConfig) -> Self {
         Self {
             job_lease: JOB_LEASE,
+            phase_retry_pause: PHASE_RETRY_PAUSE,
             enroll_timeout: Duration::from_secs(config.node.enroll_timeout_secs),
             reaper_every: Duration::from_secs(config.engine.reaper_secs),
             removal_first_pause: REMOVAL_FIRST_PAUSE,
@@ -440,21 +446,6 @@ pub async fn build_limits(
                         == Some(version.as_str())
             })
             .collect();
-    // A feature is proven for a build when a case of its check that stands for it passed.
-    let proven: Vec<String> = kept
-        .iter()
-        .flat_map(|(_, build)| {
-            build
-                .pointer("/check/cases")
-                .and_then(orch_types::Json::as_array)
-                .into_iter()
-                .flatten()
-                .filter(|case| case.get("passed").and_then(orch_types::Json::as_bool) == Some(true))
-                .filter_map(|case| case.get("feature").and_then(orch_types::Json::as_str))
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .collect();
     let programs = orch_db::programs::registry(conn).await?;
     let expected: Vec<String> = programs
         .program(&kind)
@@ -476,22 +467,7 @@ pub async fn build_limits(
                     .all(|(_, build)| proves_native_import(build, &expected)),
         );
     }
-    let off: Vec<String> = kept
-        .into_iter()
-        .flat_map(|(_, build)| {
-            build
-                .pointer("/check/off")
-                .and_then(orch_types::Json::as_array)
-                .map(|off| {
-                    off.iter()
-                        .filter_map(|capability| capability.as_str().map(str::to_owned))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        })
-        .collect();
-    switch_off(&mut descriptor, &off);
-    keep_auto_only_where_proven(&mut descriptor, &proven);
+    let off = apply_failed_checks(&mut descriptor, &kept);
     Ok((descriptor, off))
 }
 
@@ -529,21 +505,52 @@ fn proves_native_import(build: &orch_types::Json, expected: &[String]) -> bool {
             })
 }
 
-/// The feature whose passing case proves Auto's reviewer for a build.
+/// The feature whose case proves Auto's reviewer for a build.
 const AUTO_FEATURE: &str = "approval_modes.auto";
 
-/// Auto is a mode of a program only for a build whose check passed the case that proves it: the adapter's claim
-/// alone does not make it one, and no override can.
-fn keep_auto_only_where_proven(descriptor: &mut orch_types::Json, proven: &[String]) {
-    if proven.iter().any(|feature| feature == AUTO_FEATURE) {
-        return;
+/// What the stored checks of a build switch off: what each check lists as off, and Auto where a check ran its case
+/// and the case did not pass. A build with no stored check, or a check that has not ended, switches nothing off: what
+/// is not verified stays as the adapter declares it.
+fn failed_features(kept: &[(String, orch_types::Json)]) -> Vec<String> {
+    let mut off: Vec<String> = kept
+        .iter()
+        .flat_map(|(_, build)| {
+            build
+                .pointer("/check/off")
+                .and_then(orch_types::Json::as_array)
+                .map(|off| {
+                    off.iter()
+                        .filter_map(|capability| capability.as_str().map(str::to_owned))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    let auto_failed = kept.iter().any(|(_, build)| {
+        build
+            .pointer("/check/cases")
+            .and_then(orch_types::Json::as_array)
+            .into_iter()
+            .flatten()
+            .any(|case| {
+                case.get("feature").and_then(orch_types::Json::as_str) == Some(AUTO_FEATURE)
+                    && case.get("passed").and_then(orch_types::Json::as_bool) == Some(false)
+            })
+    });
+    if auto_failed && !off.iter().any(|feature| feature == AUTO_FEATURE) {
+        off.push(AUTO_FEATURE.to_owned());
     }
-    if let Some(modes) = descriptor
-        .get_mut("approval_modes")
-        .and_then(orch_types::Json::as_array_mut)
-    {
-        modes.retain(|mode| mode.as_str() != Some("auto"));
-    }
+    off
+}
+
+/// Switches off in `descriptor` what the stored checks of the build found failed, and returns the names.
+fn apply_failed_checks(
+    descriptor: &mut orch_types::Json,
+    kept: &[(String, orch_types::Json)],
+) -> Vec<String> {
+    let off = failed_features(kept);
+    switch_off(descriptor, &off);
+    off
 }
 
 /// Switches off the named capabilities of a descriptor that are switches; the others stay as declared.
@@ -645,27 +652,100 @@ mod build_limit_tests {
         );
     }
 
+    fn build(check: serde_json::Value) -> (String, serde_json::Value) {
+        (
+            "key".to_owned(),
+            serde_json::json!({ "kind": "codex", "version": "0.170.0", "check": check }),
+        )
+    }
+
+    fn auto_case(passed: bool) -> serde_json::Value {
+        serde_json::json!({
+            "name": "approval.auto", "feature": "approval_modes.auto", "passed": passed,
+            "error": if passed { serde_json::Value::Null } else { serde_json::json!("the reviewer did not answer") },
+            "elapsed_ms": 10
+        })
+    }
+
+    fn claimed() -> serde_json::Value {
+        serde_json::json!({ "approval_modes": ["ask", "on_request", "auto", "bypass"] })
+    }
+
     #[test]
-    fn auto_is_a_mode_of_a_build_only_where_a_passed_case_proves_it_and_no_claim_alone_makes_it_one()
-     {
-        let claimed =
-            serde_json::json!({ "approval_modes": ["ask", "on_request", "auto", "bypass"] });
-        let mut unproven = claimed.clone();
-        super::keep_auto_only_where_proven(&mut unproven, &["steer".to_owned()]);
+    fn auto_stays_as_the_adapter_declares_it_where_nothing_was_verified() {
+        let mut none = claimed();
+        let off = super::apply_failed_checks(&mut none, &[]);
+        assert_eq!(none, claimed(), "a build with no stored check keeps Auto");
+        assert!(off.is_empty());
+        let mut running = claimed();
+        let kept = [build(
+            serde_json::json!({ "stage": "interface", "cases": [], "off": [] }),
+        )];
+        let off = super::apply_failed_checks(&mut running, &kept);
+        assert_eq!(running, claimed(), "a check that has not ended keeps Auto");
+        assert!(off.is_empty());
+        let mut unrelated = claimed();
+        let kept = [build(serde_json::json!({
+            "stage": "complete", "cases": [{ "name": "steer", "feature": "steer", "passed": false, "error": "x", "elapsed_ms": 1 }],
+            "off": ["steer"]
+        }))];
+        let off = super::apply_failed_checks(&mut unrelated, &kept);
         assert_eq!(
-            unproven["approval_modes"],
-            serde_json::json!(["ask", "on_request", "bypass"]),
-            "a build that passed nothing for it has no Auto"
+            unrelated,
+            claimed(),
+            "another case's failure does not remove Auto"
         );
-        let mut proven = claimed.clone();
-        super::keep_auto_only_where_proven(&mut proven, &["approval_modes.auto".to_owned()]);
-        assert_eq!(proven["approval_modes"], claimed["approval_modes"]);
-        let mut none = serde_json::json!({ "capabilities": {} });
-        super::keep_auto_only_where_proven(&mut none, &[]);
+        assert_eq!(off, ["steer".to_owned()]);
+        let mut modes = serde_json::json!({ "capabilities": {} });
+        super::apply_failed_checks(&mut modes, &[]);
         assert_eq!(
-            none,
+            modes,
             serde_json::json!({ "capabilities": {} }),
             "a descriptor with no modes is left as it is"
+        );
+    }
+
+    #[test]
+    fn auto_stays_for_a_build_whose_check_passed_its_case() {
+        let mut descriptor = claimed();
+        let kept = [build(serde_json::json!({
+            "stage": "complete", "cases": [auto_case(true)], "off": []
+        }))];
+        let off = super::apply_failed_checks(&mut descriptor, &kept);
+        assert_eq!(descriptor, claimed());
+        assert!(off.is_empty());
+    }
+
+    #[test]
+    fn auto_is_no_mode_of_a_build_whose_check_ran_its_case_and_it_failed_and_the_reason_is_that_case()
+     {
+        for check in [
+            serde_json::json!({ "stage": "complete", "cases": [auto_case(false)], "off": ["approval_modes.auto"] }),
+            serde_json::json!({ "stage": "complete", "cases": [auto_case(false)], "off": [] }),
+            serde_json::json!({ "stage": "complete", "cases": [], "off": ["approval_modes.auto"] }),
+        ] {
+            let mut descriptor = claimed();
+            let off = super::apply_failed_checks(&mut descriptor, &[build(check)]);
+            assert_eq!(
+                descriptor["approval_modes"],
+                serde_json::json!(["ask", "on_request", "bypass"]),
+                "the other modes stay"
+            );
+            assert_eq!(
+                off,
+                ["approval_modes.auto".to_owned()],
+                "the failed case's feature is the reason"
+            );
+        }
+        let mut other_build = claimed();
+        let kept = [build(
+            serde_json::json!({ "stage": "complete", "cases": [auto_case(true)], "off": [] }),
+        )];
+        super::apply_failed_checks(&mut other_build, &kept);
+        assert_eq!(
+            other_build,
+            claimed(),
+            "only the checks of the exact build are in `kept`"
         );
     }
 

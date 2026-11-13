@@ -190,6 +190,26 @@ pub async fn of_many(
         .collect())
 }
 
+/// The host that is the facade of the physical machine `machine`, if it is one.
+pub async fn machine_host(conn: &mut Conn, machine: Id) -> Result<Option<Id>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT id FROM hosts WHERE machine_id=$1")
+            .bind(machine)
+            .fetch_optional(conn)
+            .await?,
+    )
+}
+
+/// The physical machine that the host `host` is the facade of.
+pub async fn host_machine(conn: &mut Conn, host: Id) -> Result<Option<Id>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT machine_id FROM hosts WHERE id=$1")
+            .bind(host)
+            .fetch_optional(conn)
+            .await?,
+    )
+}
+
 /// One provider runtime's machine facts in a batched resource read.
 pub async fn hosted_resources(conn: &mut Conn, machine: Id) -> Result<Vec<Id>, DbError> {
     Ok(sqlx::query_scalar("SELECT e.id FROM environments e

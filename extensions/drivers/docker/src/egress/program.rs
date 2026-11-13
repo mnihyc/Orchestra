@@ -76,6 +76,17 @@ pub fn in_force(
                 "the host has lost its link to the system; the network is closed until it is back",
             ),
         ),
+        Some(orders)
+            if orders
+                .parent_proxy
+                .as_deref()
+                .is_some_and(|value| super::parent::Parent::parse(value).is_err()) =>
+        {
+            (
+                None,
+                Some("the parent proxy configuration is invalid; the network stays closed"),
+            )
+        }
         Some(orders) => (Some(orders.admission.clone()), None),
     }
 }
@@ -186,6 +197,22 @@ pub async fn run(options: Options, clock: Arc<dyn Clock>) -> io::Result<()> {
         let last_beat = files::last_beat(&options.dir).await;
         let now = clock.now().timestamp();
         let (mut admission, mut reason) = in_force(orders.as_ref(), last_beat, now);
+        let parent = match orders
+            .as_ref()
+            .and_then(|orders| orders.parent_proxy.as_deref())
+        {
+            Some(value) => match super::parent::Parent::parse(value) {
+                Ok(parent) => Some(parent),
+                Err(_) => {
+                    admission = None;
+                    reason =
+                        Some("the parent proxy configuration is invalid; the network stays closed");
+                    None
+                }
+            },
+            None => None,
+        };
+        gate.set_parent(parent);
         if options.host_inventory {
             match host_inventory(&options.dir, now).await {
                 Some(ranges) => {
@@ -299,6 +326,7 @@ mod tests {
                 ..Admission::default()
             },
             open,
+            parent_proxy: None,
         }
     }
 
@@ -330,5 +358,16 @@ mod tests {
         let (admission, reason) = in_force(Some(&orders(true)), Some(now - 3), now);
         assert_eq!(admission.unwrap().revision, "r1");
         assert!(reason.is_none());
+    }
+
+    #[test]
+    fn invalid_parent_never_opens_the_existing_network_gate() {
+        let mut configured = orders(true);
+        configured.parent_proxy = Some("socks5://unsupported.invalid:1080".into());
+        let (admission, reason) = in_force(Some(&configured), Some(100), 100);
+        assert!(admission.is_none());
+        assert!(reason.is_some_and(|reason| reason.contains("parent proxy")));
+        configured.parent_proxy = Some("http://parent.invalid:3128".into());
+        assert!(in_force(Some(&configured), Some(100), 100).0.is_some());
     }
 }

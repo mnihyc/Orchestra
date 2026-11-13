@@ -8,16 +8,24 @@
 
 mod common;
 
+use std::ffi::OsStr;
+use std::future::Future;
+use std::num::NonZeroU64;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use common::Rig;
-use orch_agent_contract::adapter::AgentAdapter;
+use futures::StreamExt;
+use orch_agent_contract::adapter::{AdapterEvent, AgentAdapter};
 use orch_agent_contract::descriptor::ApprovalMode;
 use orch_agent_contract::events::{SessionEvent, TurnOutcome};
 use orch_agent_contract::session::SessionMode;
+
+// The default leaves CI headroom; slower runners can raise it without reducing the load.
+const DEFAULT_SCALE_TIMEOUT_SECS: u64 = 15 * 60;
+const SCALE_TIMEOUT_ENV: &str = "ORCH_CLAUDE_BYPASS_SCALE_TIMEOUT_SECS";
 
 // The stand-in executes no tool. Each permission must be answered before it sends the next one.
 // Only the final counters are written, so the fixture cannot hide a leak by retaining a million frames.
@@ -69,18 +77,89 @@ fn resident_kib() -> u64 {
         .unwrap()
 }
 
+fn scale_timeout(configured: Option<&OsStr>) -> Duration {
+    let seconds = configured.map_or(DEFAULT_SCALE_TIMEOUT_SECS, |value| {
+        value
+            .to_str()
+            .and_then(|value| value.parse::<NonZeroU64>().ok())
+            .unwrap_or_else(|| {
+                panic!("{SCALE_TIMEOUT_ENV} must be a positive integer number of seconds")
+            })
+            .get()
+    });
+    Duration::from_secs(seconds)
+}
+
+#[test]
+fn the_scale_timeout_is_a_default_not_a_ceiling() {
+    assert_eq!(
+        scale_timeout(None),
+        Duration::from_secs(DEFAULT_SCALE_TIMEOUT_SECS)
+    );
+    for seconds in [
+        DEFAULT_SCALE_TIMEOUT_SECS / 2,
+        DEFAULT_SCALE_TIMEOUT_SECS * 2,
+    ] {
+        assert_eq!(
+            scale_timeout(Some(OsStr::new(&seconds.to_string()))),
+            Duration::from_secs(seconds)
+        );
+    }
+}
+
+async fn within_deadline<F: Future>(
+    deadline: tokio::time::Instant,
+    phase: &str,
+    work: F,
+) -> F::Output {
+    tokio::time::timeout_at(deadline, work)
+        .await
+        .unwrap_or_else(|_| panic!("the scale deadline elapsed while {phase}; budget is configurable with {SCALE_TIMEOUT_ENV}"))
+}
+
+async fn turn_events(rig: &mut Rig) -> Vec<SessionEvent> {
+    let mut events = Vec::new();
+    while let Some(event) = rig.events.next().await {
+        let AdapterEvent::Session { event, .. } = event else {
+            continue;
+        };
+        assert!(
+            !matches!(event, SessionEvent::ApprovalRequested(_)),
+            "a residual bypass permission must not wait for an approval card"
+        );
+        let completed = matches!(event, SessionEvent::TurnCompleted(_));
+        events.push(event);
+        // Preserve the existing history bound while failing before the fixture can retain a leak.
+        assert!(
+            events.len() < 32,
+            "a permission must not become retained history; received {} session events",
+            events.len()
+        );
+        if completed {
+            return events;
+        }
+    }
+    panic!("the adapter event stream closed before the scale turn completed");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scale_a_thousand_idle_threads_and_a_million_bypass_requests_keep_one_pending_frame() {
+    let began = tokio::time::Instant::now();
+    let configured_timeout = std::env::var_os(SCALE_TIMEOUT_ENV);
+    let timeout = scale_timeout(configured_timeout.as_deref());
+    // One absolute deadline covers fixture startup, every opening, the turn and teardown.
+    let deadline = began
+        .checked_add(timeout)
+        .unwrap_or_else(|| panic!("{SCALE_TIMEOUT_ENV} exceeds the platform clock range"));
+    eprintln!("scale: time budget is {timeout:?}; override with {SCALE_TIMEOUT_ENV}");
     let temporary = tempfile::tempdir().unwrap();
     let program = temporary.path().join("harness");
-    let source = HARNESS.replace(
-        "VERSION",
-        orch_adapter_claude_code::config::SUPPORTED_RANGE.trim_start_matches('='),
-    );
+    let source = HARNESS.replace("VERSION", orch_adapter_claude_code::config::SHIPPED_BUILD);
     std::fs::write(&program, source).unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut rig = Rig::standing_in(&program).await;
-    rig.start_quick().await;
+    let mut rig =
+        within_deadline(deadline, "creating the fixture", Rig::standing_in(&program)).await;
+    within_deadline(deadline, "starting the adapter", rig.start_quick()).await;
     let before_world = resident_kib();
     for index in 0..1_000 {
         let mut spec = rig.spec(SessionMode::New, None);
@@ -89,8 +168,16 @@ async fn scale_a_thousand_idle_threads_and_a_million_bypass_requests_keep_one_pe
             spec.settings.thread_id = orch_types::new_id();
             spec.settings.segment_id = orch_types::new_id();
         }
-        rig.adapter.open_session(spec).await.unwrap();
+        // Opening reports SessionOpened and status through the bounded host queue.
+        // Consume them per opening; awaiting 1,000 producers before their reader deadlocks.
+        within_deadline(
+            deadline,
+            &format!("opening idle session {}", index + 1),
+            rig.open_with(spec),
+        )
+        .await;
     }
+    eprintln!("scale: 1,000 idle sessions opened in {:?}", began.elapsed());
     let baseline = resident_kib();
     // At most 128 KiB per idle session, including the actor and its mapper/configuration.
     assert!(baseline.saturating_sub(before_world) < 128 * 1024);
@@ -108,13 +195,27 @@ async fn scale_a_thousand_idle_threads_and_a_million_bypass_requests_keep_one_pe
     };
     let mut turn = rig.turn("SCALE");
     turn.approval_mode = ApprovalMode::Bypass;
-    rig.adapter.start_turn(turn).await.unwrap();
-    // This dedicated scale case has its own ten-minute deadline; existing functional deadlines stand.
-    let events = rig
-        .until(|event| matches!(event, SessionEvent::TurnCompleted(_)), 600)
-        .await;
+    within_deadline(
+        deadline,
+        "starting the scale turn",
+        rig.adapter.start_turn(turn),
+    )
+    .await
+    .unwrap();
+    let events = within_deadline(
+        deadline,
+        "answering the million bypass requests",
+        turn_events(&mut rig),
+    )
+    .await;
+    eprintln!(
+        "scale: 1,000,000 bypass requests completed in {:?}",
+        began.elapsed()
+    );
     done.store(true, Ordering::Relaxed);
-    sampler.await.unwrap();
+    within_deadline(deadline, "joining the memory sampler", sampler)
+        .await
+        .unwrap();
     let peak_growth = peak.load(Ordering::Relaxed).saturating_sub(baseline);
     assert!(
         peak_growth < 32 * 1024,
@@ -145,5 +246,7 @@ async fn scale_a_thousand_idle_threads_and_a_million_bypass_requests_keep_one_pe
         .unwrap();
     assert_eq!(usage.turn.input_tokens, 10_000_000_000);
     assert_eq!(usage.turn.total_tokens, 10_000_000_001);
-    rig.adapter.stop().await.unwrap();
+    within_deadline(deadline, "stopping the adapter", rig.adapter.stop())
+        .await
+        .unwrap();
 }

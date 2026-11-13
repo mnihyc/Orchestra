@@ -7,7 +7,7 @@ async fn a_bounded_full_fork_refuses_without_touching_the_original_native_sessio
     let mut rig = Rig::new()
         .await
         .ok_or("the real pinned native harness is required")?;
-    assert_eq!(rig.start_quick().await.harness_version, "2.1.296");
+    assert_eq!(rig.start_quick().await.harness_version, "2.1.322");
     let original = rig.open().await;
     for text in [A, B, C] {
         let (_, events) = rig.run(text).await;

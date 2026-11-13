@@ -21,11 +21,14 @@ import { FilterBar } from '@/ui/FilterBar';
 import { PageHeader } from '@/shell/Page';
 import { failed } from '@/features/chat/acts';
 import { AllChats } from '@/features/chat/AllChats';
+import { KnownNodeChip } from '@/features/people/NamedChip';
+import type { Chat } from '@/api/chat-contract';
+import type { NodeRef } from '@/generated/api-types';
 import { ChatRow } from '@/features/chat/ChatRow';
 import { ChatView } from '@/features/chat/ChatView';
 import { NewChat } from '@/features/chat/NewChat';
 import type { Org } from '@/generated/api-types';
-import { chatWriter } from '@/realtime/stores/chat';
+import { chatWriter, useChatEntry } from '@/realtime/stores/chat';
 import { useOrgTreeFeed } from '@/realtime/live';
 import { selectOrg } from '@/shell/org';
 import { chatPageTitle } from '@/features/chat/ChatView';
@@ -36,7 +39,7 @@ import { cx } from '@/ui/cx';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
 import { IconButton } from '@/ui/IconButton';
-import { Skeleton, SkeletonRows } from '@/ui/Skeleton';
+import { Skeleton, SkeletonRows, type SkeletonReads } from '@/ui/Skeleton';
 
 /** What the address of the screen says: the chat open, the message to go to, the switch and the org it is for. */
 export interface MessagesSearch {
@@ -74,11 +77,11 @@ function MessagesOf({ rootId, org, slug, search, onSearch }: MessagesProps & { r
   const { t } = useTranslation();
   const me = useStore(client.session, (state) => state.userId);
   const [creating, setCreating] = useState(false);
-  const mine = useInfiniteQuery(orgChatsQuery(rootId, { scope: 'mine', of: null }));
+  const mine = useInfiniteQuery(orgChatsQuery(rootId, { scope: 'mine', of: null, participating: search.participating === 'true' }));
   useOrgTreeFeed(org === null ? null : rootId);
 
 
-  const chats = useMemo(
+  const chats = useMemo<Chat[]>(
     () =>
       (mine.data?.pages.flatMap((page) => page.items) ?? []).toSorted((one, other) =>
         (other.last_message_at ?? other.created_at).localeCompare(one.last_message_at ?? one.created_at),
@@ -86,11 +89,22 @@ function MessagesOf({ rootId, org, slug, search, onSearch }: MessagesProps & { r
     [mine.data],
   );
   const open = search.chat ?? null;
-  // A permitted conversation can also be reached from the admin or guest list. Its cached authorized read supplies its name.
-  const selected = useQuery({ ...chatQuery(open ?? ''), enabled: open !== null });
-  const conversation = chats.find((chat) => chat.id === open) ?? selected.data;
+  // The displayed conversation's authorized opening also names chats outside the caller's own list.
+  const selected = useChatEntry(open);
+  const conversation = selected.closed === null ? selected.chat ?? chats.find((chat) => chat.id === open) : undefined;
   const canStartMessage = org !== null && org.org_kind !== 'personal';
   useScreenHeading({ title: conversation === undefined ? t('screens.messages.title') : chatPageTitle(conversation, me, t), icon: MessagesSquare, nodeId: org?.id, leaf: true, trail: conversation === undefined ? undefined : [{ label: t('screens.messages.title'), to: `/org/${slug}/messages` }] });
+  const sections = useMemo(() => {
+    const grouped = new Map<string, { kind: 'direct' | 'group'; home: NodeRef | null; chats: Chat[] }>();
+    for (const chat of chats) {
+      const kind = chat.kind === 'group' ? 'group' : 'direct';
+      const key = kind === 'direct' ? 'people' : `home:${chat.home?.id ?? 'unknown'}`;
+      const held = grouped.get(key);
+      if (held === undefined) grouped.set(key, { kind, home: chat.home ?? null, chats: [chat] });
+      else held.chats.push(chat);
+    }
+    return [...grouped.values()];
+  }, [chats]);
   const readAll = useMutation({
     mutationFn: () => markOrgRead(rootId),
     onError: (error) => failed(t('chat.failed.readAll'), error),
@@ -131,9 +145,10 @@ function MessagesOf({ rootId, org, slug, search, onSearch }: MessagesProps & { r
           listEmpty
         ) : (
           <ul aria-label={t('chat.messages.list')} className="flex flex-col gap-1">
-            {chats.map((chat) => (
-              <ChatRow key={chat.id} chat={chat} slug={slug} selected={chat.id === open} me={me} search={search} />
-            ))}
+            {sections.map((section, index) => <li key={section.kind === 'direct' ? 'people' : section.home?.id ?? `unknown:${index}`} className="min-w-0">
+              <h3 className="flex min-h-(--section-heading-height) min-w-0 items-center gap-1 px-3 py-1 text-sm font-medium text-text-muted">{section.kind === 'direct' ? t('chat.group.directs') : section.home === null ? t('chat.group.homeUnknown') : <KnownNodeChip node={section.home} />}</h3>
+              <ul className="flex min-w-0 flex-col gap-1">{section.chats.map((chat) => <ChatRow key={chat.id} chat={chat} slug={slug} selected={chat.id === open} me={me} search={search} />)}</ul>
+            </li>)}
           </ul>
         )}
         {mine.hasNextPage && (
@@ -175,6 +190,7 @@ function MessagesOf({ rootId, org, slug, search, onSearch }: MessagesProps & { r
         open={creating}
         onOpenChange={setCreating}
         orgId={rootId}
+        defaultHome={org === null ? null : { id: org.id, kind: 'org', color: org.color, folder: false, path: org.name }}
         me={me}
         onOpened={(chat) => {
           chatWriter.apply(chat.id, { chat }, chat.seq);
@@ -202,7 +218,7 @@ export function Messages(props: MessagesProps) {
   }, [org.data, userId]);
 
   if (org.data !== undefined) return <MessagesOf {...props} rootId={org.data.org_id} org={org.data} />;
-  if (named && org.isPending) return <WhileLoading />;
+  if (named && org.isPending) return <WhileLoading read={org} />;
   if (!guestWay) {
     return (
       <>
@@ -213,7 +229,7 @@ export function Messages(props: MessagesProps) {
   }
   const rootId = !named ? props.slug : chat.data?.org_id;
   if (rootId !== undefined) return <MessagesOf {...props} rootId={rootId} org={null} />;
-  if (chat.isPending && props.search.chat !== undefined) return <WhileLoading />;
+  if (chat.isPending && props.search.chat !== undefined) return <WhileLoading read={chat} />;
   return (
     <>
       <ScreenName />
@@ -234,11 +250,11 @@ function ScreenName() {
   return null;
 }
 
-function WhileLoading() {
+function WhileLoading(props: SkeletonReads) {
   return (
     <>
       <ScreenName />
-      <SkeletonRows rows={6} className="p-4" />
+      <SkeletonRows {...props} rows={6} className="p-4" />
     </>
   );
 }

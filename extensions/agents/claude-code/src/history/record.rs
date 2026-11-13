@@ -52,6 +52,11 @@ pub struct Record {
     turn_count: u64,
     slot_count: u64,
     end: u64,
+    /// The build that wrote the session, by the first row that names one.
+    writer: Option<String>,
+    /// How many rows were not JSON and are left out, and the first of them.
+    unreadable: u64,
+    first_unreadable: Option<u64>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -69,17 +74,18 @@ impl Record {
         settings: Option<MapperSettings>,
         clock: Arc<dyn Clock>,
         cancel: Arc<AtomicBool>,
+        image_outputs: Option<std::path::PathBuf>,
     ) -> Result<Self, HistoryError> {
         let mut rows = match settings {
             Some(settings) => Rows::new(path, settings, clock, true, Arc::clone(&cancel))?,
             None => Rows::for_record(path, clock, Arc::clone(&cancel))?,
         };
-        if let Some(version) = rows.version()?
-            && crate::descriptor::support_of(&version)
-                == orch_agent_contract::descriptor::HarnessSupport::Unsupported
-        {
-            return Err(HistoryError::OtherVersion(version));
+        if let Some(directory) = image_outputs {
+            rows.set_image_outputs(directory);
         }
+        // A transcript is read whichever build wrote it: the program resumes what an older build wrote, and the
+        // record says which build that was.
+        let writer = rows.version()?;
         let mut record = Self {
             model: None,
             turns: tempfile::tempfile()?,
@@ -89,6 +95,9 @@ impl Record {
             turn_count: 0,
             slot_count: 0,
             end: 0,
+            writer,
+            unreadable: 0,
+            first_unreadable: None,
             cancel,
         };
         for row in rows.by_ref() {
@@ -144,6 +153,8 @@ impl Record {
             }
         }
         record.model = rows.model;
+        record.unreadable = rows.unreadable;
+        record.first_unreadable = rows.first_unreadable;
         Ok(record)
     }
 
@@ -219,6 +230,19 @@ impl Record {
     ) -> Result<SessionRecord, HistoryError> {
         let selection = self.select(RECORD_MAX_BYTES)?;
         let mut report = RecordReporter::default();
+        if let Some(note) = self.writer.as_deref().and_then(super::writer_note) {
+            report.warn(&note);
+        }
+        if let Some(first) = self.first_unreadable {
+            report.warn(&if self.unreadable == 1 {
+                format!("The transcript's row {first} is not valid JSON and is left out.")
+            } else {
+                format!(
+                    "{} rows of the transcript are not valid JSON and are left out; the first is row {first}.",
+                    self.unreadable
+                )
+            });
+        }
         let mut output = if write && selection.first < selection.end {
             std::fs::create_dir_all(into)?;
             Some(BufWriter::with_capacity(

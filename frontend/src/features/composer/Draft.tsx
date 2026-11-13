@@ -16,10 +16,10 @@ import { create } from 'zustand';
 import { ApiError, client } from '@/api/client';
 import { draftQuery, saveDraft, sendInput } from '@/api/threads';
 import { clearDraftText } from '@/api/source';
-import type { ContentPart, Delivery, LimitBypassRequest } from '@/generated/api-types';
+import type { ContentPart, Delivery, LimitBypassRequest, NativeInvocation } from '@/generated/api-types';
 import { isForwarded } from '@/lib/content';
 import { NetworkError, newActKey } from '@/lib/requests';
-import { threadViewOf, threadWriter } from '@/realtime/stores/thread';
+import { runningTurn, threadViewOf, threadWriter } from '@/realtime/stores/thread';
 import { defaultThreadRead, type ThreadReadTarget } from '@/realtime/threadScope';
 
 /** How long after the last key the draft is saved: a pause in typing, not a rhythm of it. */
@@ -35,16 +35,17 @@ client.onSession((event) => {
   if (event.type !== 'signed_in' && event.type !== 'signed_out') return;
   draftLifetime += 1;
   draftWrites.clear();
+  useComposerStore.setState({ nativeSelection: {} });
 });
 
 /** One visible editor owns the debounce even when its lane and panel are both mounted. */
-function useDraftWriter(threadId: string, enabled: boolean): boolean {
+function useDraftWriter(threadId: string, enabled: boolean, storeKey: string): boolean {
   const [owner] = useState(() => Symbol('draft writer'));
   const subscribe = useCallback((notify: () => void) => {
     if (!enabled) return () => undefined;
     // A confirmed write lives with the locally retained draft. Moving its editor to a panel
     // must not save those same words again from an older query-cache baseline.
-    if (!draftWriters.has(threadId) && useComposerStore.getState().text[threadId] === undefined && draftWrites.get(threadId)?.settled === true) draftWrites.delete(threadId);
+    if (!draftWriters.has(threadId) && useComposerStore.getState().text[storeKey] === undefined && draftWrites.get(threadId)?.settled === true) draftWrites.delete(threadId);
     const writers = draftWriters.get(threadId) ?? new Map<symbol, () => void>();
     draftWriters.set(threadId, writers);
     writers.set(owner, notify);
@@ -55,33 +56,41 @@ function useDraftWriter(threadId: string, enabled: boolean): boolean {
         draftWriters.delete(threadId);
       } else for (const changed of writers.values()) changed();
     };
-  }, [threadId, enabled, owner]);
+  }, [threadId, enabled, owner, storeKey]);
   const snapshot = useCallback(() => enabled && draftWriters.get(threadId)?.keys().next().value === owner, [threadId, enabled, owner]);
   return useSyncExternalStore(subscribe, snapshot);
 }
 
-function writeDraftOnce(threadId: string, content: ContentPart[], delivery: Delivery): Promise<void> {
+function writeDraftOnce(threadId: string, content: ContentPart[], delivery: Delivery, storeKey = threadId, nativeAction?: NativeInvocation | null, stillCurrent?: () => boolean): Promise<void> {
   const clear = content.length === 0;
-  const key = clear ? 'cleared' : JSON.stringify({ content, delivery });
+  const key = clear && nativeAction === undefined ? 'cleared' : JSON.stringify({ content, delivery, nativeAction });
   const previous = draftWrites.get(threadId);
   if (previous?.key === key) return previous.request;
   const lifetime = draftLifetime;
   const write = async () => {
     // A queued write from the previous account must never use the next account's credentials.
-    if (lifetime !== draftLifetime) return;
-    if (clear) await clearDraftText(threadId);
-    else await saveDraft(threadId, content, delivery);
+    if (lifetime !== draftLifetime || stillCurrent?.() === false) return;
+    if (clear && nativeAction === undefined) await clearDraftText(threadId);
+    else if (nativeAction === undefined) await saveDraft(threadId, content, delivery);
+    else await saveDraft(threadId, content, delivery, nativeAction);
   };
   const request = previous === undefined ? write() : previous.request.catch(() => undefined).then(write);
   const pending = { key, request, settled: false };
   draftWrites.set(threadId, pending);
   void request.then(() => {
     pending.settled = true;
-    if (!draftWriters.has(threadId) && useComposerStore.getState().text[threadId] === undefined && draftWrites.get(threadId) === pending) draftWrites.delete(threadId);
+    if (!draftWriters.has(threadId) && useComposerStore.getState().text[storeKey] === undefined && draftWrites.get(threadId) === pending) draftWrites.delete(threadId);
   }, () => {
     if (draftWrites.get(threadId) === pending) draftWrites.delete(threadId);
   });
   return request;
+}
+
+/** Background attachment completion uses the same serialized writer as the visible composer. */
+export function persistComposerDraft(threadId: string, storeKey = threadId, attached?: ContentPart): Promise<void> {
+  const local = useComposerStore.getState(), text = local.text[storeKey] ?? '';
+  const content: ContentPart[] = [...(text === '' ? [] : [{ type: 'text', text } as const]), ...local.parts[storeKey] ?? [], ...(attached === undefined ? [] : [attached])];
+  return writeDraftOnce(threadId, content, 'queue', storeKey);
 }
 
 export interface SendingInput {
@@ -105,16 +114,23 @@ interface ComposerStore {
   passNext: Record<string, LimitBypassRequest>;
   text: Record<string, string>;
   parts: Record<string, ContentPart[]>;
+  /** A known null prevents an accepted native choice returning from an older cached draft. */
+  nativeSelection: Record<string, NativeInvocation | null>;
   /** What the server refused the last send with, per thread, to be read beside the box. */
   refused: Record<string, unknown>;
   sending: Record<string, SendingInput[]>;
-  /** The agents that answered a steer with "cannot": asked once, remembered while the page is open. */
-  cannotSteer: Record<string, true>;
+  /** The turn that refused steering, per thread; a later turn does not inherit the refusal. */
+  cannotSteer: Record<string, string>;
   /** The composer's Plan switch per thread, where the person set it; unset follows `thread.plan_first`. */
   planning: Record<string, boolean>;
 }
 
-export const useComposerStore = create<ComposerStore>(() => ({ passNext: {}, text: {}, parts: {}, refused: {}, sending: {}, cannotSteer: {}, planning: {} }));
+export const useComposerStore = create<ComposerStore>(() => ({ passNext: {}, text: {}, parts: {}, nativeSelection: {}, refused: {}, sending: {}, cannotSteer: {}, planning: {} }));
+
+/** A learned refusal belongs only to the active turn that actually returned it. */
+export function steerRefusedFor(state: Pick<ComposerStore, 'cannotSteer'>, threadId: string, turnId: string | null): boolean {
+  return turnId !== null && state.cannotSteer[threadId] === turnId;
+}
 
 const NOBODY: SendingInput[] = [];
 const NOPARTS: ContentPart[] = [];
@@ -134,6 +150,14 @@ function setSending(threadId: string, change: (list: SendingInput[]) => SendingI
 }
 
 export const composerWriter = {
+  /** A schedule accepts this exact frozen draft, never another edit or a later reader's draft. */
+  clearScheduledDraft(threadId: string, words: string, parts: readonly ContentPart[], stillCurrent: () => boolean): boolean {
+    const local = useComposerStore.getState();
+    if (!stillCurrent() || (local.text[threadId] ?? '') !== words || JSON.stringify(local.parts[threadId] ?? []) !== JSON.stringify(parts)) return false;
+    useComposerStore.setState((state) => ({ text: { ...state.text, [threadId]: '' }, parts: { ...state.parts, [threadId]: [] }, nativeSelection: { ...state.nativeSelection, [threadId]: null } }));
+    void writeDraftOnce(threadId, [], 'queue', threadId, null, stillCurrent).catch(() => undefined);
+    return true;
+  },
   /** The person lets the next message of the thread go past these limits. */
   letNextPass(threadId: string, bypass: LimitBypassRequest | undefined): void {
     useComposerStore.setState((state) => {
@@ -170,9 +194,9 @@ export const composerWriter = {
       return { text: { ...state.text, [threadId]: `${before.trim() === '' ? '' : `${before.trimEnd()}\n\n`}${quoted}\n\n` } };
     });
   },
-  /** The agent said that it takes no steering: the menu offers none from now on. */
-  noteCannotSteer(agentId: string): void {
-    useComposerStore.setState((state) => ({ cannotSteer: { ...state.cannotSteer, [agentId]: true } }));
+  /** This turn said it takes no steering; a new turn may report a different capability. */
+  noteCannotSteer(threadId: string, turnId: string): void {
+    useComposerStore.setState((state) => ({ cannotSteer: { ...state.cannotSteer, [threadId]: turnId } }));
   },
   /** The person turns the composer's Plan switch of a thread on or off. */
   setPlanning(threadId: string, on: boolean): void {
@@ -193,6 +217,16 @@ export function useBox(threadId: string): { text: string; setText: (text: string
   return { text, setText: useCallback((next: string) => composerWriter.setText(threadId, next), [threadId]), refusal };
 }
 
+/** A delayed refusal can describe only the same live turn in its original read scope. */
+export function noteSteerRefusal(target: ThreadReadTarget, turnId: string | null): void {
+  if (turnId === null) return;
+  const current = threadViewOf(target);
+  if (current.closed === null && (current.read === null || current.read.ready)
+    && (runningTurn(current)?.id ?? current.thread?.current_turn_id ?? null) === turnId) {
+    composerWriter.noteCannotSteer(typeof target === 'string' ? target : target.threadId, turnId);
+  }
+}
+
 /** Sends a message. The box has been emptied by the caller; a refusal gives the text back. */
 export function submitInput(target: ThreadReadTarget, message: string | ContentPart[], delivery: Delivery, bypass?: LimitBypassRequest, clientId: string = newActKey(), plan = false): void {
   const read = typeof target === 'string' ? defaultThreadRead(target) : target;
@@ -200,7 +234,9 @@ export function submitInput(target: ThreadReadTarget, message: string | ContentP
   const lifetime = draftLifetime;
   const content: ContentPart[] = typeof message === 'string' ? [{ type: 'text', text: message }] : message;
   const text = content.filter((part) => !isForwarded(part) && part.type === 'text').map((part) => 'text' in part ? part.text : '').join('\n');
-  const continuation = threadViewOf(read).read?.projection?.viewed_continuation_id;
+  const view = threadViewOf(read);
+  const continuation = view.read?.projection?.viewed_continuation_id;
+  const steerTurnId = delivery === 'steer' ? runningTurn(view)?.id ?? view.thread?.current_turn_id ?? null : null;
   const entry: SendingInput = { clientId, content, delivery, bypass, ...(plan ? { plan } : {}), state: 'sending', at: new Date().toISOString(),
     ...(continuation === undefined ? {} : { continuationId: continuation }) };
   setSending(threadId, (list) => [...list.filter((held) => held.clientId !== clientId), entry]);
@@ -221,8 +257,7 @@ export function submitInput(target: ThreadReadTarget, message: string | ContentP
       if (error instanceof ApiError) {
         // Refused: nothing was sent. The words go back into the box, and the refusal is read beside it.
         setSending(threadId, (list) => list.filter((held) => held.clientId !== clientId));
-        const agentId = threadViewOf(read).thread?.binding?.agent.id;
-        if (delivery === 'steer' && error.is('capability.unsupported') && agentId !== undefined) composerWriter.noteCannotSteer(agentId);
+        if (delivery === 'steer' && error.is('capability.unsupported')) noteSteerRefusal(read, steerTurnId);
         useComposerStore.setState((state) => ({
           refused: { ...state.refused, [threadId]: error },
           text: { ...state.text, [threadId]: (state.text[threadId] ?? '') === '' ? text : `${text}\n${state.text[threadId] ?? ''}` },
@@ -261,13 +296,14 @@ export type DraftStatus = 'idle' | 'saving' | 'failed';
  * Keeps the box and the server's draft together: the draft is put into an empty box once when the
  * thread is opened, and the box is saved a second after the last key.
  */
-export function useDraftSync(threadId: string, enabled: boolean, delivery: Delivery, reading = true): DraftStatus {
-  const writes = useDraftWriter(threadId, enabled);
-  const text = useComposerStore((state) => state.text[threadId] ?? '');
-  const parts = useComposerStore((state) => state.parts[threadId] ?? NOPARTS);
+export function useDraftSync(threadId: string, enabled: boolean, delivery: Delivery, reading = true, storeKey = threadId, onDirty?: (dirty: boolean) => void): DraftStatus {
+  const writes = useDraftWriter(threadId, enabled, storeKey);
+  const text = useComposerStore((state) => state.text[storeKey] ?? '');
+  const parts = useComposerStore((state) => state.parts[storeKey] ?? NOPARTS);
+  const identity = `${threadId}:${storeKey}`;
   const draft = useQuery({ ...draftQuery(threadId), enabled: enabled && reading, retry: false });
   const restored = useRef<string | null>(null);
-  const saved = useRef(JSON.stringify({ text, parts }));
+  const saved = useRef<string | null>(null);
   const currentDelivery = useRef(delivery);
   useEffect(() => { currentDelivery.current = delivery; }, [delivery]);
   useEffect(() => {
@@ -276,44 +312,51 @@ export function useDraftSync(threadId: string, enabled: boolean, delivery: Deliv
       // The last editor may leave before its typing debounce fires (for example, to browse an edit).
       // Flush only its restored dirty draft and only for the same signed-in reader. A remaining
       // editor keeps the existing debounce, and writeDraftOnce coalesces simultaneous releases.
-      if (!enabled || lifetime !== draftLifetime || restored.current !== threadId || draftWriters.has(threadId)) return;
+      if (!enabled || lifetime !== draftLifetime || restored.current !== identity || draftWriters.has(threadId)) return;
       const local = useComposerStore.getState();
-      const words = local.text[threadId] ?? '', attached = local.parts[threadId] ?? NOPARTS;
+      const words = local.text[storeKey] ?? '', attached = local.parts[storeKey] ?? NOPARTS;
       if (JSON.stringify({ text: words, parts: attached }) === saved.current) return;
       const content: ContentPart[] = [...(words === '' ? [] : [{ type: 'text' as const, text: words }]), ...attached];
-      void writeDraftOnce(threadId, content, currentDelivery.current).catch(() => undefined);
+      void writeDraftOnce(threadId, content, currentDelivery.current, storeKey).catch(() => undefined);
     };
-  }, [enabled, threadId]);
+  }, [enabled, threadId, storeKey, identity]);
 
   useEffect(() => {
-    if (!draft.isSuccess || restored.current === threadId) return;
-    restored.current = threadId;
+    if (!enabled || !draft.isSuccess || restored.current === identity) return;
+    restored.current = identity;
     const first = draft.data?.content.find((part) => part.type === 'text');
     // An explicitly emptied local draft is still known: a cached older server answer must
     // not put an accepted message (or removed files) back when the composer remounts.
-    if (useComposerStore.getState().text[threadId] === undefined) {
-      composerWriter.setText(threadId, first?.text ?? '');
+    if (useComposerStore.getState().text[storeKey] === undefined) {
+      composerWriter.setText(storeKey, first?.text ?? '');
     }
-    if (useComposerStore.getState().parts[threadId] === undefined) {
-      composerWriter.setParts(threadId, draft.data?.content.filter((part) => !isForwarded(part) && part.type !== 'text') ?? []);
+    if (useComposerStore.getState().parts[storeKey] === undefined) {
+      composerWriter.setParts(storeKey, draft.data?.content.filter((part) => !isForwarded(part) && part.type !== 'text') ?? []);
     }
+    if (!Object.hasOwn(useComposerStore.getState().nativeSelection, storeKey)) useComposerStore.setState((state) => ({ nativeSelection: { ...state.nativeSelection, [storeKey]: draft.data?.native_action ?? null } }));
     saved.current = JSON.stringify({ text: first?.text ?? '', parts: draft.data?.content.filter((part) => !isForwarded(part) && part.type !== 'text') ?? [] });
-  }, [draft.isSuccess, draft.data, threadId]);
+  }, [enabled, draft.isSuccess, draft.data, identity, storeKey]);
 
   const save = useMutation({
-    mutationFn: (value: { text: string; parts: ContentPart[] }) => writeDraftOnce(threadId, value.text.trim() === '' && value.parts.length === 0 ? [] : [...(value.text === '' ? [] : [{ type: 'text' as const, text: value.text }]), ...value.parts], delivery),
+    mutationFn: (value: { text: string; parts: ContentPart[]; threadId: string; storeKey: string; delivery: Delivery; identity: string }) => writeDraftOnce(value.threadId, value.text.trim() === '' && value.parts.length === 0 ? [] : [...(value.text === '' ? [] : [{ type: 'text' as const, text: value.text }]), ...value.parts], value.delivery, value.storeKey),
   });
   const { mutate } = save;
   useEffect(() => {
-    // Only what was typed after the draft was restored is saved: the restored text is the server's already.
+    // Save only local differences from the restored server baseline.
+    // A newly allocated conversation can already have local text and parts when its first read finishes.
     const key = JSON.stringify({ text, parts });
-    if (!writes || restored.current !== threadId || key === saved.current) return;
+    if (!writes || restored.current !== identity || key === saved.current) return;
     const timer = setTimeout(() => {
       saved.current = key;
-      mutate({ text, parts });
+      mutate({ text, parts, threadId, storeKey, delivery, identity });
     }, DRAFT_SAVE_AFTER_MS);
     return () => clearTimeout(timer);
-  }, [text, parts, writes, threadId, mutate]);
+  }, [text, parts, writes, identity, threadId, storeKey, delivery, mutate, draft.isSuccess]);
 
-  return save.isPending ? 'saving' : save.isError ? 'failed' : 'idle';
+  const current = save.variables?.identity === identity;
+  useEffect(() => {
+    const changed = restored.current !== identity || saved.current === null ? text !== '' || parts.length > 0 : JSON.stringify({ text, parts }) !== saved.current;
+    onDirty?.(changed || current && (save.isPending || save.isError));
+  }, [text, parts, identity, draft.isSuccess, draft.data, current, save.isPending, save.isError, onDirty]);
+  return current && save.isPending ? 'saving' : current && save.isError ? 'failed' : 'idle';
 }
