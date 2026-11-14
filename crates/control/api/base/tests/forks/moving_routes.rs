@@ -451,6 +451,23 @@ async fn an_owner_thread_move_uses_native_history_and_fresh_defaults_then_ends_t
             .fetch_one(w.s.rig.db.pool())
             .await?;
     assert!(source_deleted);
+    let progress =
+        w.s.rig
+            .world
+            .app
+            .call(orch_api_contract::workspace::JobGet, &[&job])
+            .token(&w.s.ada.token)
+            .send()
+            .await;
+    assert_eq!(
+        progress.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&progress.raw)
+    );
+    let progress = progress.ok();
+    assert_eq!(progress.id, job);
+    assert_eq!(progress.result["thread_id"], json!(target));
     let new: (Id, Id) = sqlx::query_as(
         "SELECT topic_id,owner_id FROM threads t JOIN nodes n ON n.id=t.node_id WHERE t.node_id=$1",
     )

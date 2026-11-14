@@ -1,12 +1,13 @@
 /** One complete resource picker: the existing Combobox, with protected Home groups and native choices. */
-import { useState } from 'react';
+import { type KeyboardEvent, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useListChoice } from '@/lib/listState';
 import { useFormatContext } from '@/lib/appearance';
+import { isComposing } from '@/lib/shortcuts';
 import { ResourceGroupHeader } from '@/features/resources/GroupHeader';
 import { resourceGroupKey, useResourcePickerGroups } from '@/features/resources/PickerContext';
 import { groupResourceRows, resourceGroupMeta, resourceHomeLabel } from '@/features/resources/groups';
-import { MachineLink } from '@/features/resources/machines/MachineLink';
+import { MachineOrigin } from '@/features/resources/machines/MachineOrigin';
 import { Combobox, type ComboboxGroup, type ComboboxOption, type ComboboxProps } from '@/ui/Combobox';
 import type { SelectOption, SelectProps } from '@/ui/Select';
 import type { ChoiceResource } from '@/ui/DetailCard';
@@ -37,10 +38,15 @@ export function ResourcePicker<Value extends string>({value,onValueChange,option
       resource:option.resource,
     });
   }
-  return <ResourcePickerLookup {...props} hint={chosen?.preview?.hint === undefined ? props.hint : <>{props.hint}{chosen.preview.hint}</>} groups={groups} query={query} onQueryChange={setQuery}
+  const searchKey = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Enter' || !(event.target instanceof HTMLInputElement) || event.target.getAttribute('role') !== 'combobox') return;
+    // Committing composed text is not a choice; a dismissed or empty locator never submits its form.
+    if (isComposing(event.nativeEvent)) event.stopPropagation(); else event.preventDefault();
+  };
+  return <div className="contents" onKeyDownCapture={searchKey}><ResourcePickerLookup {...props} hint={chosen?.preview?.hint === undefined ? props.hint : <>{props.hint}{chosen.preview.hint}</>} groups={groups} query={query} onQueryChange={setQuery}
     displayValue={typeof valueLabel==='string'?valueLabel:chosen===undefined?value===''?undefined:t('resourceGroups.selectionUnavailable'):text(chosen)}
     initialActiveValue={value} pickerKey={pickerKey} currentHomes={currentHomes}
-    onSelect={(option)=>{onValueChange(option.value);setQuery('');}} />;
+    onSelect={(option)=>{onValueChange(option.value);setQuery('');}} /></div>;
 }
 
 export interface ResourceLookupOption<Value extends string> extends ComboboxOption<Value> {resource?:ChoiceResource}
@@ -116,7 +122,7 @@ export function ResourcePickerLookup<Value extends string>({groups,query,onQuery
       } as const;
       const alias=reason!==null&&Object.hasOwn(aliases,reason)?aliases[reason as keyof typeof aliases]:undefined;
       const unavailable=reason===null?null:alias===undefined?reason:t(`resourceGroups.reasons.${alias}`);
-      return {...option,description:<>{option.description}{unavailable!==null&&<span className="block text-sm text-text-muted">{unavailable}</span>}{(origin!==null&&origin!==undefined)&&<span data-resource-origin className="flex min-w-0 items-center gap-1 text-sm text-text-muted"><span>{t('resourceGroups.from')}</span><MachineLink machine={origin}/></span>}</>};
+      return {...option,description:<>{option.description}{unavailable!==null&&<span className="block text-sm text-text-muted">{unavailable}</span>}{(origin!==null&&origin!==undefined)&&<span data-resource-origin className="flex min-w-0 items-center gap-1 text-sm text-text-muted"><MachineOrigin machine={origin}/></span>}</>};
     }),
     }));
   })];

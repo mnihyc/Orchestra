@@ -59,7 +59,8 @@ test('a topic member can view the new thread but cannot send, and a person added
     // Viewers keep the common composer, with its input and send controls disabled.
     await expect(member.getByRole('textbox', { name: 'Message to the agent' })).toBeDisabled();
     await expect(member.getByRole('button', { name: 'Send', exact: true })).toBeDisabled();
-    await page.locator('[data-thread-header]').getByRole('button', { name: 'Share thread', exact: true }).click();
+    await page.locator('[data-thread-header] [data-thread-more]').click();
+    await page.getByRole('menuitem', { name: 'Share thread', exact: true }).click();
     await sharing(page).getByRole('combobox', { name: 'Add people, groups or roles' }).fill('@vera');
     await page.getByRole('option', { name: /Vera Rubin/ }).click();
     await sharing(page).getByRole('combobox', { name: 'What they can do' }).click();
@@ -87,8 +88,10 @@ for (const kind of KINDS) test(`${kind.kind}: a followed holder is removed here 
   const id = kind.url.split('/').at(-1);
   if (id === undefined) throw new Error('The permission target needs its native identity');
   const opening = await capturePermissions(page, id);
-  if (kind.kind === 'thread') await page.locator('[data-thread-header]').getByRole('button', { name: 'Share thread', exact: true }).click();
-  else if (kind.kind === 'document') await page.getByRole('button', { name: 'Share', exact: true }).click();
+  if (kind.kind === 'thread') {
+    await page.locator('[data-thread-header] [data-thread-more]').click();
+    await page.getByRole('menuitem', { name: 'Share thread', exact: true }).click();
+  } else if (kind.kind === 'document') await page.getByRole('button', { name: 'Share', exact: true }).click();
   else {
     await page.getByRole('button', { name: `Actions for ${kind.name}` }).first().click();
     await page.getByRole('menuitem', { name: 'Share…' }).click();

@@ -356,6 +356,9 @@ pub struct SearchListQuery {
     /// A node: only what lies in it and below it. Everything the caller can read when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<Id>,
+    /// Only items of this conversation stream, applied before matching and paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<String>,
     /// A comma list of item kinds, `chat_message` and `document`; empty selects none, absence all.
     #[serde(
         default,

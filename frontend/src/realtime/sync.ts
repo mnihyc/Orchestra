@@ -64,6 +64,14 @@ export interface DurableFeed<Data> {
   subscribed?: (frame: Extract<FeedFrame, { op: 'subscribed' }>) => void;
 }
 
+/**
+ * Whether a read ended because it was cancelled or overtaken (its history was replaced, its view left), and not because
+ * anything went wrong: such a read has no answer and no fault, and a reader who scrolls quickly makes many of them.
+ */
+export function isCancellation(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
 export interface FeedFollower {
   /** The sequence the page has come to; `null` before the first load. */
   lastSeq: () => number | null;
@@ -89,21 +97,53 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
   let busy: Promise<void> = Promise.resolve();
   const current = (version: number): boolean => !stoppedNow && version === generation;
 
+  /** How many reads in a row were cancelled while this follower still stood: they are asked for again, not reported. */
+  let cancelled = 0;
+  let cancellationRetry: ReturnType<typeof setTimeout> | undefined;
   const run = (work: (version: number) => Promise<void>): void => {
     const version = generation;
     busy = busy.then(async () => {
       if (!current(version)) return;
-      try { await work(version); }
-      catch (error) { if (current(version)) feed.failed?.(error); }
+      try {
+        await work(version);
+        if (!current(version)) return;
+        cancelled = 0;
+        clearTimeout(cancellationRetry);
+        cancellationRetry = undefined;
+      }
+      catch (error) {
+        if (!current(version)) return;
+        // Supersession retires this demand, not the chat. Fence its queued work and subscription before asking for
+        // the current opening with the shared backoff, however often the reader changes history.
+        if (isCancellation(error)) {
+          const pause = retryPause(cancelled);
+          cancelled += 1;
+          socketGeneration += 1;
+          subscription?.unsubscribe(); subscription = null;
+          retireLoads('keep');
+          const retryVersion = generation;
+          cancellationRetry = setTimeout(() => {
+            if (!current(retryVersion)) return;
+            run(async (version) => {
+              await repair(version);
+              if (current(version) && subscription === null) subscribe();
+            });
+          }, pause);
+          return;
+        }
+        feed.failed?.(error);
+      }
     });
   };
 
   /** A former authority's work cannot publish rows, errors or cursors into its replacement. */
-  function retireLoads(): void {
+  function retireLoads(cursor: 'clear' | 'keep' = 'clear'): void {
+    clearTimeout(cancellationRetry);
+    cancellationRetry = undefined;
     generation += 1;
     abort.abort();
     abort = new AbortController();
-    lastSeq = null;
+    if (cursor === 'clear') lastSeq = null;
     // A cancelled transport may ignore abort. Its completion is fenced, and cannot hold up the new reader.
     busy = Promise.resolve();
   }

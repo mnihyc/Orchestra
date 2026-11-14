@@ -12,7 +12,7 @@ import { show } from './support';
 
 vi.mock('@/features/source/Restore', () => ({ RestoreFromTurn: () => null }));
 const THREAD = 'review-recovery-actions';
-const context: TimelineContext = { threadId: THREAD, threadName: 'Recover work', detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: THREAD, threadName: 'Recover work', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: true, canManage: true, live: true, lit: null, selection: NOT_PICKING };
 const originalLocale = currentLocale();
 afterEach(async () => { threadWriter.evict(THREAD); await setLocale(originalLocale); });

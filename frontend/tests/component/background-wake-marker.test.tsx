@@ -16,7 +16,7 @@ import { show } from './support';
 const THREAD = 'wake-thread';
 const READ = defaultThreadRead(THREAD);
 const author = userRef(me(3, 'alex', 'Alex'));
-const context: TimelineContext = { threadId: THREAD, threadName: 'Repair login', detail: 'summary', recent: new Set(), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: THREAD, threadName: 'Repair login', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: false, canManage: false, live: true, lit: null, selection: NOT_PICKING };
 const data = (more: Partial<MarkerBackgroundWake> = {}): MarkerBackgroundWake => ({ admitted: true, input_id: 'wake-input', causes: [wakeCause()], ...more });
 function numbered(item: Item, sequence: number): Item { return { ...item, thread_id: THREAD, segment_id: 'wake-segment', seq_created: sequence, seq_updated: sequence }; }
@@ -41,7 +41,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await setLocale(locale); document.documentElement.dataset.theme = theme;
     load(data({ causes: [wakeCause(), wakeCause({ id: 'auth-review', kind: 'subagent', label: 'Review auth', state: 'failed', exit_code: null })] }));
     const view = threadViewOf(READ);
-    const rows = buildRows(view, { detail: 'summary', hideHistory: true, foldOpened: new Set(), meId: null });
+    const rows = buildRows(view, { detail: 'normal', hideHistory: true, meId: null });
     expect(rows.find((row) => row.kind === 'item')).toMatchObject({ id: 'wake-marker' });
     const { container } = show(<TimelineContextValue.Provider value={context}><div style={{ width }}>
       {rows.flatMap((row) => {
