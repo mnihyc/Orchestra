@@ -1223,7 +1223,7 @@ export class Resources {
       access:{permissions:['machine.view','machine.use','machine.manage','access.own','access.manage'],admin_only:[],administers:false,admin_access:null,participating:true,through:[{kind:'owner'}]},
       installation:this.installation(record),
       environment_sandboxes: [],
-      software_update: this.componentUpdates.get(record.id) ?? {running_version:record.connector,recommended_version:record.connector,behind:false,status:'current',detail:null,command:'orch-connector update'},
+      software_update: this.componentUpdates.get(record.id) ?? {automatic:false,running_version:record.connector,recommended_version:record.connector,behind:false,status:'current',detail:null,command:'orch-connector update'},
       id: record.id,
       name: record.name,
       online: record.online && record.status === 'active',
@@ -1511,7 +1511,7 @@ export class Resources {
     const keptData = access.permissions.includes('host.manage') ? this.world.trace.hostKeptData(person, record.id) : [];
     return {
       offline_since: record.online === false ? record.offlineSince ?? null : null,
-      software_update: this.componentUpdates.get(record.id) ?? {running_version:'0.1.0',recommended_version:'0.1.0',behind:false,status:'current',detail:null,command:'orch-node update'},
+      software_update: this.componentUpdates.get(record.id) ?? {automatic:false,running_version:'0.1.0',recommended_version:'0.1.0',behind:false,status:'current',detail:null,command:'orch-node update'},
       id: record.id,
       name: record.name,
       address: record.home === null ? `system.${record.name}` : `acme.${record.owner ?? 'ada'}.${record.name}`,
@@ -2494,12 +2494,11 @@ export class Resources {
     if (method === 'POST' && updateRoute !== null) {
       const id = updateRoute[2] ?? '';
       const node = updateRoute[1] === 'hosts';
-      const machine = node ? undefined : this.findMachine(person,id);
+      if (!node) this.findMachine(person,id);
       if (node) this.mustManageHost(person,this.findHost(id));
       const held = this.componentUpdates.get(id);
       if (held === undefined) throw new Refusal(409,'conflict.exists','No update is available.');
-      const disabled = machine?.policy['update.auto'] === false;
-      const next:ComponentUpdate = {...held,status:disabled?'refused':'updating',detail:disabled?`update.auto is off on this machine. Run \`${held.command}\` on the machine to update it locally.`:null};
+      const next:ComponentUpdate = {...held,automatic:false,status:'updating',detail:null};
       this.componentUpdates.set(id,next);
       this.world.users.tellAll({what:'resources',kind:node?'host':'machine',id});
       return {status:200,body:next};
@@ -3295,7 +3294,7 @@ export class Resources {
         const reconnect = body.reconnect === true;
         const running = reconnect ? recommended : [asText(body.running), machine?.connector, previous?.running_version].find((version) => typeof version === 'string' && version !== '') ?? '0.1.0';
         if (machine !== undefined) {machine.connector=running;machine.online=true;}
-        const next:ComponentUpdate = {running_version:running,recommended_version:recommended,behind:running!==recommended,status:'current',detail:null,command:host===undefined?'orch-connector update':'orch-node update'};
+        const next:ComponentUpdate = {automatic:false,running_version:running,recommended_version:recommended,behind:running!==recommended,status:'current',detail:null,command:host===undefined?'orch-connector update':'orch-node update'};
         this.componentUpdates.set(id,next);
         this.world.users.tellAll({what:'resources',kind:host===undefined?'machine':'host',id});
         return {status:200,body:{id,...next}};

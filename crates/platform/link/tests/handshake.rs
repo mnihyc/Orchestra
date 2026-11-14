@@ -69,6 +69,7 @@ impl SessionAuthority for Registry {
                 .update_idle
                 .then(|| orch_link_contract::session::UpdatePermit {
                     recommended: "0.2.0".into(),
+                    automatic: true,
                 }),
             n: query.n,
             ok: true,
@@ -605,6 +606,20 @@ async fn a_connector_older_than_the_system_accepts_is_told_to_update_and_a_newer
     };
     assert_eq!(reject.code, RejectCode::ProtocolUnsupported);
     assert!(serving.await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn a_connector_that_has_to_update_is_told_which_version_it_has_and_which_it_needs() {
+    let f = fixture(false);
+    let old = f.client("0.0.9", None);
+    let (_, connected) = f.run(None, &old, &f.clock, (HOST, HOST)).await;
+    let Err(HandshakeError::Rejected(reject)) = connected else {
+        panic!("an old connector was admitted")
+    };
+    assert_eq!(reject.code, RejectCode::UpgradeRequired);
+    assert!(reject.detail.contains("0.0.9"), "{}", reject.detail);
+    assert!(reject.detail.contains("0.1.0"), "{}", reject.detail);
+    assert!(reject.detail.contains("update"), "{}", reject.detail);
 }
 
 #[tokio::test(start_paused = true)]

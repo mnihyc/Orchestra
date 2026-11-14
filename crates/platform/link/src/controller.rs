@@ -282,6 +282,10 @@ impl ControllerLink {
                     self.shared.issuer.on_cmd_ack(&ack);
                     None
                 }
+                UpFrame::CmdSeen(seen) => {
+                    self.shared.issuer.on_cmd_seen(&seen);
+                    None
+                }
                 UpFrame::CmdRes(result) => {
                     self.shared.issuer.on_cmd_res(&result);
                     None

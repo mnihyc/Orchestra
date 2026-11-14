@@ -1616,38 +1616,36 @@ impl Engine {
         Ok(())
     }
 
-    /// A piece of an item's text: held, and handed to whoever has the thread open, until it is written to the
-    /// item ([`crate::streaming`]); with no interval to hold it for, written to the item at once.
+    /// A streamed stretch is retained in this cursor transaction before being handed to live readers.
+    /// Full item rows are coalesced later; zero interval writes the item immediately.
     async fn on_item_delta(
         &self,
         unit: &mut Unit<'_>,
         batch: &Batch,
         delta: &ItemDelta,
     ) -> Result<(), EngineError> {
+        if delta.offset < 0 || delta.len <= 0 || delta.offset.checked_add(delta.len).is_none() {
+            return Ok(());
+        }
         if self.inner.config.stream_flush.is_zero() {
+            self.write_held_of(unit, batch.thread_id).await?;
             return self.write_delta(unit, batch, delta).await;
         }
-        let key = (batch.segment.id, delta.native_ref.clone());
-        if self.inner.growing.expects(&key, delta.field).is_none() {
-            let Some(item) = self.item_of(unit, batch, &delta.native_ref).await? else {
-                return Ok(());
-            };
-            if item.status != "in_progress" {
-                return Ok(());
-            }
-            let base = crate::streaming::length_of(&item.payload, delta.field);
-            self.inner.growing.begin(&key, &item, delta.field, base);
-        }
-        // A stretch that was taken in already is skipped; one that skips ahead waits for the completed item, which
-        // carries the whole.
-        let Some(held) = self.inner.growing.add(&key, delta) else {
+        let Some(item) = self.item_of(unit, batch, &delta.native_ref).await? else {
             return Ok(());
         };
+        if item.status != "in_progress" {
+            return Ok(());
+        }
+        let base = crate::streaming::length_of(&item.payload, delta.field);
+        if !crate::streaming::hold(unit.conn, item.id, batch.segment.id, base, delta).await? {
+            return Ok(());
+        }
         self.inner.live.delta(&LiveDelta {
             thread_id: batch.thread_id,
-            item_id: held.item,
-            turn_id: held.turn,
-            stream: held.stream,
+            item_id: item.id,
+            turn_id: item.turn_id,
+            stream: item.stream,
             field: delta.field,
             offset: delta.offset,
             len: delta.len,
@@ -1830,9 +1828,6 @@ impl Engine {
         };
         let complete_payload = serde_json::to_value(&completed.payload)?;
         // The completed item carries its whole text: what is held of it is written by this.
-        self.inner
-            .growing
-            .forget(&(batch.segment.id, completed.native_ref.clone()));
         let existing = self.item_of(unit, batch, &completed.native_ref).await?;
         let Some(kind) = existing
             .as_ref()

@@ -57,6 +57,7 @@ pub async fn views(
             let behind = newer(recommended, &running);
             let pending = row.filter(|row| newer(&row.recommended_version, &running));
             let view = ComponentUpdate {
+                automatic: pending.is_some_and(|row| row.requested_by.is_none()),
                 running_version: running,
                 recommended_version: recommended.clone(),
                 behind,
@@ -94,6 +95,7 @@ struct TrackedRequest {
     machine: Id,
     recommended: String,
     origin: Option<Origin>,
+    automatic: bool,
 }
 
 struct CheckedRequest {
@@ -128,6 +130,7 @@ impl TrackedRequest {
             machine,
             recommended: row.recommended_version,
             origin,
+            automatic: row.requested_by.is_none(),
         }))
     }
     async fn check(
@@ -141,6 +144,7 @@ impl TrackedRequest {
         if current.id != self.id
             || current.recommended != self.recommended
             || current.origin != self.origin
+            || current.automatic != self.automatic
         {
             return Ok(None);
         }
@@ -244,6 +248,7 @@ impl Link {
         }
         Ok(Some(orch_link_contract::session::UpdatePermit {
             recommended: grant.tracked.recommended,
+            automatic: grant.tracked.automatic,
         }))
     }
 
@@ -371,6 +376,7 @@ impl Link {
                         SerialKey::Machine,
                         &MachineUpdateNow {
                             recommended: live.recommended_version.clone(),
+                            automatic: tracked.as_ref().is_none_or(|request| request.automatic),
                         },
                     )
                     .map_err(|_| crate::dispatch::DispatchError::Unavailable)?;
@@ -443,7 +449,7 @@ impl Link {
             }
             // This node cannot receive commands on its old build. Its certificate-authenticated
             // handshake refusal carries the idle grant instead, while this same fence stays held.
-            if machine.roles.iter().any(|role| role == "node")
+            if (machine.placement == "connected" || machine.roles.iter().any(|role| role == "node"))
                 && matches!(
                     self.inner
                         .settings
@@ -469,6 +475,7 @@ impl Link {
                 SerialKey::Machine,
                 &MachineUpdateNow {
                     recommended: live.recommended_version,
+                    automatic: tracked.as_ref().is_none_or(|request| request.automatic),
                 },
             )
             .map_err(|_| crate::dispatch::DispatchError::Unavailable)?

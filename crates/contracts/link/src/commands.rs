@@ -379,6 +379,13 @@ pub struct CmdAck {
     pub id: Id,
 }
 
+/// A machine received the complete command, before any durable acceptance work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct CmdSeen {
+    /// The command that arrived whole.
+    pub id: Id,
+}
+
 /// The system's wish that a command not be carried out after all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct CmdCancel {
@@ -1257,6 +1264,33 @@ impl std::fmt::Display for CommandKind {
     }
 }
 
+impl CommandKind {
+    /// Requests or answers of these kinds can outgrow a message's byte allowance.
+    /// They use the same parts transport with a wide logical length; each part still fits a frame.
+    #[must_use]
+    pub const fn is_paged(self) -> bool {
+        matches!(
+            self,
+            Self::AgentDiscoverSessions
+                | Self::AgentHistoryManage
+                | Self::AgentHistoryHomeCleanup
+                | Self::OrchToolResult
+                | Self::ProviderComplete
+                | Self::ProviderGenerate
+                | Self::ProviderService
+                | Self::ProviderEmbed
+                | Self::FsList
+                | Self::FsArchiveList
+                | Self::GitStatus
+                | Self::GitCommit
+                | Self::GitPush
+                | Self::FsRestorePlan
+                | Self::ProcList
+                | Self::NodeResourcesList
+        )
+    }
+}
+
 impl Cmd {
     /// The frame for a command of the catalogue.
     pub fn new<B: CommandBody>(
@@ -1326,6 +1360,8 @@ pub struct MachineProbe {}
 pub struct MachineUpdateNow {
     /// The same recommendation announced by ready.versions; no arbitrary download address is accepted.
     pub recommended: String,
+    /// True is an automatic drain grant; false retains a person's explicit Update choice.
+    pub automatic: bool,
 }
 
 /// What the physical program did with Update now.
@@ -5679,7 +5715,7 @@ mod tests {
     fn update_now_is_one_machine_serial_command_for_connector_and_node_with_a_typed_answer() {
         let decoded = Command::decode(
             "machine.update.now",
-            serde_json::json!({"recommended":"1.2.3"}),
+            serde_json::json!({"recommended":"1.2.3","automatic":false}),
         )
         .unwrap();
         assert_eq!(decoded.kind(), CommandKind::MachineUpdateNow);
@@ -5697,7 +5733,7 @@ mod tests {
         assert!(
             Command::decode(
                 "machine.update.now",
-                serde_json::json!({"recommended":"1.2.3","url":"https://elsewhere.test/program"})
+                serde_json::json!({"recommended":"1.2.3","automatic":false,"url":"https://elsewhere.test/program"})
             )
             .is_err()
         );

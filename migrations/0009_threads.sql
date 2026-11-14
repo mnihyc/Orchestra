@@ -390,6 +390,20 @@ CREATE INDEX items_execution_history_idx ON items USING btree (thread_id) WHERE 
 
 CREATE UNIQUE INDEX items_native_key ON items USING btree (segment_id, native_ref) WHERE (native_ref IS NOT NULL);
 
+-- Stream cursors and their displayed stretches commit together; full item rows are coalesced later.
+CREATE TABLE item_stream_parts (
+    item_id uuid NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    -- Provenance can outlive a purged session while its aliased item remains.
+    source_segment uuid NOT NULL,
+    field text NOT NULL CHECK (field IN ('text','summary','output')),
+    part_offset bigint NOT NULL CHECK (part_offset >= 0),
+    part_len bigint NOT NULL CHECK (part_len > 0),
+    data bytea NOT NULL,
+    captured_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    PRIMARY KEY (item_id, field, part_offset)
+);
+CREATE INDEX item_stream_parts_due_idx ON item_stream_parts (captured_at, item_id);
+
 CREATE INDEX items_parent_item_idx ON items USING btree (parent_item_id) WHERE (parent_item_id IS NOT NULL);
 
 CREATE INDEX items_pinned_idx ON items USING btree (thread_id, pinned_at) WHERE (pinned_at IS NOT NULL);
