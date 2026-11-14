@@ -222,7 +222,7 @@ async fn commands_with_one_key_run_one_at_a_time_in_the_order_they_came_and_othe
 }
 
 #[tokio::test]
-async fn a_command_whose_deadline_passed_before_its_turn_is_not_started() {
+async fn a_short_command_that_waited_in_line_behind_a_long_one_still_runs_when_its_turn_comes() {
     let rig = rig();
     rig.machine.link.connected().await;
     rig.machine.handler.hold(CommandKind::SessionClose);
@@ -232,21 +232,23 @@ async fn a_command_whose_deadline_passed_before_its_turn_is_not_started() {
         deadline(&rig.clock, 600),
         &SessionClose { thread_id: thread },
     );
-    let late = rig.controller.issue(
+    // Thirty seconds of work, asked while the line is held by a long one.
+    let short = rig.controller.issue(
         &SerialKey::Thread(thread),
         deadline(&rig.clock, 30),
         &SessionClose { thread_id: thread },
     );
     within(10, rig.machine.handler.started(blocker)).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // The line stays held for far longer than the short command's thirty seconds.
     rig.clock.advance(chrono::Duration::seconds(60));
     rig.machine.handler.release();
-    let ended = within(10, rig.controller.wait_command(late)).await;
-    let Progress::Failed(error) = ended else {
-        panic!("{ended:?}")
-    };
-    assert_eq!(error.code, ErrorCode::Timeout.as_str());
-    assert_eq!(rig.machine.handler.runs_of(late), 0);
+    let ended = within(10, rig.controller.wait_command(short)).await;
+    assert!(
+        matches!(ended, Progress::Succeeded(_)),
+        "the time spent waiting is not the command's own: {ended:?}"
+    );
+    assert_eq!(rig.machine.handler.runs_of(short), 1);
 }
 
 #[tokio::test]
@@ -424,12 +426,14 @@ async fn a_machine_that_does_not_acknowledge_a_command_is_asked_once_more_and_th
     let handle = issuer.issue(command(&clock, 3_600));
     assert!(matches!(frames.recv().await, Some(DownFrame::Cmd(_))));
     assert_eq!(handle.progress(), Progress::Sent);
+    issuer.on_cmd_seen(&orch_link_contract::commands::CmdSeen { id: handle.id() });
     tokio::time::advance(Duration::from_secs(31)).await;
     issuer.tick(tokio::time::Instant::now());
     assert!(
         matches!(frames.recv().await, Some(DownFrame::Cmd(_))),
         "sent once more"
     );
+    issuer.on_cmd_seen(&orch_link_contract::commands::CmdSeen { id: handle.id() });
     tokio::time::advance(Duration::from_secs(31)).await;
     issuer.tick(tokio::time::Instant::now());
     let Progress::Failed(error) = handle.progress() else {

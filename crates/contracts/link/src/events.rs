@@ -462,6 +462,8 @@ pub struct SessionTitle {
 /// The body of `session.lost`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionLost {
+    /// The native outcome is unavailable, rather than confirmed lost. Preserve admitted work without retry.
+    pub uncertain: bool,
     /// Why.
     pub reason: String,
 }
@@ -598,8 +600,7 @@ pub struct ItemCompleted {
     pub status: foreign::ItemStatus,
     /// What it holds for good.
     pub payload: foreign::ItemPayload,
-    /// The whole output of a command, where it is too long for the
-    /// payload.
+    /// Retained command output bytes; the payload declares their original interval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_blob: Option<BlobRef>,
 }
@@ -1536,7 +1537,7 @@ mod tests {
         event("session.title", json!({ "title": "Fix the login" }));
         event(
             "session.lost",
-            json!({ "reason": "the harness was restarted" }),
+            json!({ "uncertain":false, "reason": "the harness was restarted" }),
         );
         event(
             "turn.started",

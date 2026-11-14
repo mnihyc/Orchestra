@@ -9,6 +9,7 @@ use orch_link_contract::commands::{
     CommandError, ErrorCode, MachineUpdateNow, MachineUpdateNowResult,
 };
 use orch_link_contract::events::{Event, MachineUpdateFailed, MachineUpdateRequested};
+use orch_link_contract::session::UpdatePermit;
 use orch_link_contract::streams::Stream;
 use orch_link_contract::version::RejectCode;
 use orch_types::Time;
@@ -24,7 +25,7 @@ pub struct Requests {
     physical: bool,
     program: crate::update::Program,
     version: String,
-    approved: Mutex<Option<String>>,
+    approved: Mutex<Option<UpdatePermit>>,
     supported: AtomicBool,
     changed: tokio::sync::Notify,
 }
@@ -59,7 +60,7 @@ impl Requests {
                 "this program does not self-update; update its environment or provider runtime",
             ));
         }
-        if !enabled {
+        if command.automatic && !enabled {
             return Err(CommandError::new(ErrorCode::Unsupported, self.refusal()));
         }
         let newer = newer(&command.recommended, &self.version);
@@ -67,8 +68,10 @@ impl Requests {
             *self
                 .approved
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                Some(command.recommended.clone());
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(UpdatePermit {
+                recommended: command.recommended.clone(),
+                automatic: command.automatic,
+            });
             self.changed.notify_one();
         }
         Ok(MachineUpdateNowResult {
@@ -78,7 +81,7 @@ impl Requests {
         })
     }
 
-    fn take(&self) -> Option<String> {
+    fn take(&self) -> Option<UpdatePermit> {
         self.approved
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -87,7 +90,7 @@ impl Requests {
 
     fn refusal(&self) -> String {
         format!(
-            "update.auto is off on this machine. Its local policy refuses Update now. Run `{}` on the machine to update it locally.",
+            "Automatic updates are off (update.auto). Choose Update now or run `{}` on the machine to update explicitly.",
             self.program.command()
         )
     }
@@ -181,7 +184,7 @@ fn requested(
     offered: Option<&str>,
     running: &str,
 ) -> bool {
-    !managed && (required || (enabled && offered.is_some_and(|offered| newer(offered, running))))
+    !managed && enabled && (required || offered.is_some_and(|offered| newer(offered, running)))
 }
 
 fn enabled(connector: &Connector) -> bool {
@@ -229,6 +232,7 @@ pub async fn until_installed(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut status = connector.link().status();
     let mut schedule = Schedule::new(connector.services().clock.time());
+    let mut auto_off_reported = false;
     loop {
         let hourly = tokio::select! {
             _ = ticker.tick() => schedule.take_due(connector.services().clock.time()),
@@ -242,10 +246,19 @@ pub async fn until_installed(
                 code: RejectCode::UpgradeRequired,
                 update_permit: Some(permit),
                 ..
-            } => Some(permit.recommended.clone()),
+            } => Some(permit.clone()),
             _ => None,
         };
         let approved = connector.update_requests.take().or(minimum_permit);
+        let automatic = approved.as_ref().is_none_or(|approval| approval.automatic);
+        if automatic && !enabled(connector) {
+            if mandatory && !auto_off_reported {
+                failed(connector, connector.update_requests.refusal()).await;
+                auto_off_reported = true;
+            }
+            continue;
+        }
+        auto_off_reported = false;
         if approved.is_none()
             && ((!hourly && !mandatory)
                 || !requested(
@@ -290,12 +303,12 @@ pub async fn until_installed(
         }
         // Wait for work that was already admitted, and keep honoring a switch turned off meanwhile.
         while connector.turns_running() > 0 {
-            if !mandatory && !enabled(connector) {
+            if automatic && !enabled(connector) {
                 break;
             }
             tokio::time::sleep(IDLE_LOOK_EVERY).await;
         }
-        if !mandatory && !enabled(connector) {
+        if automatic && !enabled(connector) {
             failed(connector, connector.update_requests.refusal()).await;
             continue;
         }
@@ -325,7 +338,7 @@ pub async fn until_installed(
         }
         if approved
             .as_ref()
-            .is_some_and(|version| newer(version, &prepared.offer.version))
+            .is_some_and(|approval| newer(&approval.recommended, &prepared.offer.version))
         {
             failed(connector,"The staged offer is behind the approved recommendation; the running version is kept.".into()).await;
             continue;
@@ -340,7 +353,7 @@ pub async fn until_installed(
             continue;
         }
         loop {
-            if !mandatory && !enabled(connector) {
+            if automatic && !enabled(connector) {
                 failed(connector, connector.update_requests.refusal()).await;
                 break;
             }
@@ -349,7 +362,7 @@ pub async fn until_installed(
                 continue;
             };
             // Recheck after the fence: a locally disabled automatic installation does not slip through a busy download.
-            if !mandatory && !enabled(connector) {
+            if automatic && !enabled(connector) {
                 failed(connector, connector.update_requests.refusal()).await;
                 break;
             }
@@ -381,6 +394,33 @@ mod tests {
     use super::requested;
 
     #[test]
+    fn automatic_off_prevents_installation_even_when_an_authenticated_upgrade_is_required() {
+        assert!(!requested(false, false, true, None, "1.0.0"));
+        assert!(!requested(false, false, true, Some("2.0.0"), "1.0.0"));
+    }
+
+    #[test]
+    fn an_explicit_update_can_be_scheduled_without_enabling_automatic_updates() {
+        for program in [
+            crate::update::Program::Connector,
+            crate::update::Program::Node,
+        ] {
+            let requests = super::Requests::new(true, program, "1.0.0".into());
+            requests.enable();
+            let result = requests
+                .request(
+                    &orch_link_contract::commands::MachineUpdateNow {
+                        recommended: "1.1.0".into(),
+                        automatic: false,
+                    },
+                    false,
+                )
+                .unwrap();
+            assert_eq!(result.status, "scheduled");
+        }
+    }
+
+    #[test]
     fn a_kept_local_update_auto_off_refuses_both_physical_programs_with_their_command() {
         use crate::policy::PolicyStore;
         use crate::update::Program;
@@ -398,6 +438,7 @@ mod tests {
                 .request(
                     &MachineUpdateNow {
                         recommended: "1.1.0".into(),
+                        automatic: true,
                     },
                     store.policy().unwrap().update_auto,
                 )
@@ -415,12 +456,19 @@ mod tests {
                 .request(
                     &MachineUpdateNow {
                         recommended: "1.1.0".into(),
+                        automatic: true,
                     },
                     store.policy().unwrap().update_auto,
                 )
                 .unwrap();
             assert_eq!(accepted.status, "scheduled");
-            assert_eq!(requests.take().as_deref(), Some("1.1.0"));
+            assert_eq!(
+                requests
+                    .take()
+                    .as_ref()
+                    .map(|approval| approval.recommended.as_str()),
+                Some("1.1.0")
+            );
         }
     }
 
@@ -444,6 +492,6 @@ mod tests {
         assert!(!requested(false, false, false, Some("2.0.0"), "1.0.0"));
         assert!(requested(false, true, false, Some("2.0.0"), "1.0.0"));
         assert!(!requested(false, true, false, Some("1.0.0"), "1.0.0"));
-        assert!(requested(false, false, true, None, "1.0.0"));
+        assert!(!requested(false, false, true, None, "1.0.0"));
     }
 }

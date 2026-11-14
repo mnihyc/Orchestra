@@ -388,6 +388,7 @@ struct ListRows {
     continuation: Option<String>,
     kinds: Vec<String>,
     details: bool,
+    rows: bool,
     facts: Vec<(orch_access_contract::key_scope::KeyTargetKind, Id)>,
     grouping: grouping::Prepared,
 }
@@ -397,6 +398,7 @@ struct ListSelection {
     limit: u32,
     kinds: Vec<String>,
     details: bool,
+    rows: bool,
     parent: Option<String>,
     access_parent: Option<Id>,
     after: Option<Cursor>,
@@ -429,7 +431,8 @@ fn list_selection(query: &EverythingListQuery) -> ApiResult<ListSelection> {
         ));
     }
     let kinds = kinds(query)?;
-    let details = query.resource_details.unwrap_or(false);
+    let rows = query.resource_rows.unwrap_or(false);
+    let details = query.resource_details.unwrap_or(false) || rows;
     let resource_filter = details
         || query.resource_state.is_some()
         || query.harness.is_some()
@@ -514,6 +517,7 @@ fn list_selection(query: &EverythingListQuery) -> ApiResult<ListSelection> {
         limit,
         kinds,
         details,
+        rows,
         parent,
         access_parent,
         after,
@@ -581,8 +585,7 @@ async fn list_snapshot(
             &principal,
             rows,
             &projection,
-            None,
-            None,
+            PreparedViews::default(),
         )
         .await?
     };
@@ -622,6 +625,7 @@ async fn list_rows(
     let limit = selected.limit;
     let kinds = &selected.kinds;
     let details = selected.details;
+    let thin_rows = selected.rows;
     let parent = &selected.parent;
     let after = &selected.after;
     let system = selected.system;
@@ -740,9 +744,17 @@ async fn list_rows(
         continuation,
         kinds: kinds.clone(),
         details,
+        rows: thin_rows,
         facts,
         grouping: grouping::Prepared::default(),
     })
+}
+
+#[derive(Default)]
+struct PreparedViews<'a> {
+    resources: Option<&'a resources::scoped::Prepared>,
+    library: Option<&'a library::Prepared>,
+    sharing: Option<&'a std::collections::HashMap<Id, resources::PreparedSharing>>,
 }
 
 async fn render_rows(
@@ -751,8 +763,7 @@ async fn render_rows(
     principal: &orch_authz::Principal,
     rows: ListRows,
     projection: &Projection,
-    prepared: Option<&resources::scoped::Prepared>,
-    prepared_library: Option<&library::Prepared>,
+    prepared: PreparedViews<'_>,
 ) -> ApiResult<Page<EverythingRow>> {
     let ListRows {
         found,
@@ -760,11 +771,12 @@ async fn render_rows(
         continuation,
         kinds,
         details,
+        rows: thin,
         facts: _,
         grouping,
     } = rows;
     let mut resource_views = if details {
-        match prepared {
+        match prepared.resources {
             Some(prepared) => prepared.render(ctx, conn, principal).await?,
             None => {
                 resources::page(ctx, conn, principal, &kinds[0], &found, &grants, projection)
@@ -775,7 +787,7 @@ async fn render_rows(
         std::collections::HashMap::new()
     };
     let mut library_facts = if details {
-        match prepared_library {
+        match prepared.library {
             Some(prepared) => prepared.render(),
             None => library::page(conn, principal, &found, &grants, Time::new(ctx.now)).await?,
         }
@@ -820,6 +832,7 @@ async fn render_rows(
     )
     .await
     .map_err(ApiError::internal)?;
+    let mut shared_homes = std::collections::HashSet::new();
     let mut items = Vec::with_capacity(found.len());
     for (row, grant) in found.into_iter().zip(grants) {
         let group = match row.id.as_str() {
@@ -874,7 +887,37 @@ async fn render_rows(
         } else {
             None
         };
+        let resource = resource_views.remove(&row.id);
+        let resource_row = if thin {
+            resource.as_ref().map(resources::list_row)
+        } else {
+            None
+        };
+        let sharing = if thin
+            && let Some(home) = group_metadata
+                .as_ref()
+                .and_then(|group| group.home.as_ref())
+            && !home.redacted
+            && home.kind != NodeKind::Thread
+            && shared_homes.insert(home.id)
+        {
+            Some(
+                resources::sharing(
+                    ctx,
+                    conn,
+                    principal,
+                    home.id,
+                    &row.kind,
+                    prepared.sharing.and_then(|sharing| sharing.get(&home.id)),
+                )
+                .await,
+            )
+        } else {
+            None
+        };
         items.push(EverythingRow {
+            sharing,
+            resource_row,
             grouping: group_metadata,
             library: library_facts.remove(&row.id),
             library_threads: row
@@ -887,7 +930,7 @@ async fn render_rows(
                 .parse::<Id>()
                 .ok()
                 .and_then(|id| displays.get(&id).cloned()),
-            resource: resource_views.remove(&row.id),
+            resource: if thin { None } else { resource },
             admin_access: markers.get(&(row.kind.clone(), row.id.clone())).cloned(),
             participating: grant.participating,
             kind: word(&row.kind)?,

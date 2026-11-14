@@ -22,7 +22,7 @@
 //! dealt with.
 
 use crate::commands::{CommandHandler, CommandServer, ServerOptions};
-use crate::framing::Measurements;
+use crate::framing::{Measurements, Refused};
 use crate::gateways::PrimaryGateway;
 use crate::journal::Journal;
 use crate::reconnect::{Backoff, DialError, Dialer, Endpoints};
@@ -38,7 +38,7 @@ use orch_link_contract::events::{Event, Report};
 use orch_link_contract::frames::Frame;
 use orch_link_contract::session::{HEARTBEAT_SECS, MachineFactsRates, Platform, Ready, Role};
 use orch_link_contract::streams::{Eph, Stream};
-use orch_link_contract::version::RejectCode;
+use orch_link_contract::version::{Limits, RejectCode};
 use orch_pki::certificates::{Certificate, LeafKey};
 use orch_types::{Clock, Id};
 use std::path::PathBuf;
@@ -367,6 +367,24 @@ pub enum MachineRequestError {
     /// The system may have committed before the reply was lost; never claim it certainly failed.
     #[error("the local request was not confirmed; inspect the machine's Tools before trying again")]
     Unconfirmed,
+    /// The request is larger than a message on this link may be.
+    #[error(
+        "the request is {bytes} bytes, and a message on this link may have {limit} at most (`max_message_bytes` in the `[link]` section of the settings)"
+    )]
+    TooLarge {
+        /// Its size.
+        bytes: usize,
+        /// The most a message may have.
+        limit: usize,
+    },
+}
+
+/// Why the session did not take a request: it is over, or the request is larger than it carries.
+fn refusal_of(refused: Refused) -> MachineRequestError {
+    match refused {
+        Refused::TooLarge { bytes, limit } => MachineRequestError::TooLarge { bytes, limit },
+        Refused::SessionOver | Refused::Unwritable => MachineRequestError::Offline,
+    }
 }
 
 struct PendingImport {
@@ -823,7 +841,7 @@ impl MachineLink {
         };
         sender
             .send(Frame::McpImportAsk(request))
-            .map_err(|_| MachineRequestError::Offline)?;
+            .map_err(refusal_of)?;
         tokio::time::timeout(
             Duration::from_secs(orch_link_contract::mcp_import::ANSWER_WITHIN_SECS),
             told,
@@ -871,7 +889,7 @@ impl MachineLink {
         };
         sender
             .send(Frame::PortLocalAsk(request))
-            .map_err(|_| MachineRequestError::Offline)?;
+            .map_err(refusal_of)?;
         tokio::time::timeout(
             Duration::from_secs(orch_link_contract::local_ports::ANSWER_WITHIN_SECS),
             receive,
@@ -922,6 +940,21 @@ impl MachineLink {
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .map(SessionSender::data_frame_bytes)
+    }
+
+    /// The most bytes of a message the session in hand carries: what a gateway stated, or the shipped
+    /// limit while no session stands. What cannot be sent whole may be cut by whoever knows how, up to this.
+    #[must_use]
+    pub fn message_bytes(&self) -> usize {
+        self.shared
+            .session
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map_or(
+                Limits::default().message_bytes(),
+                SessionSender::max_message_bytes,
+            )
     }
 
     /// The figures of the link as a machine reports them in its facts.
@@ -1546,13 +1579,18 @@ async fn core(
                             send_all(session.as_ref(), frames);
                         }
                         Err(error) => {
+                            // The caller is given the refusal, and so is whoever reads the log.
+                            if let PublishError::TooLarge { bytes, max } = &error {
+                                tracing::error!(%stream, kind = event.kind().as_str(), bytes, max, "an event was not published: it is larger than a message may be");
+                                metrics::counter!("orch_link_events_refused_total", "kind" => event.kind().as_str()).increment(1);
+                            }
                             let _ = reply.send(Err(error));
                         }
                     }
                 }
                 Input::Report { eph } => {
                     if let Some(open) = session.as_ref() {
-                        let _ = open.send_events(Frame::Eph(eph));
+                        noted(open.send_events(Frame::Eph(eph)), "a report");
                     }
                 }
                 Input::Ready(start) => {
@@ -1577,7 +1615,7 @@ async fn core(
                     session_gateway = Some(gateway_id.clone());
                     tunnels.session_up_at(sender.clone(), &gateway_id, retained_supported);
                     shared.auxiliary.primary_ready();
-                    match streams.on_ready(&ready.cursors, sender.max_frame_bytes(), now) {
+                    match streams.on_ready(&ready.cursors, sender.limits(), now) {
                         Ok(frames) => send_all(Some(&sender), frames),
                         Err(error) => {
                             tracing::error!(%error, "the streams could not be brought up to date")
@@ -1627,13 +1665,16 @@ async fn core(
                                 true,
                                 clock.time(),
                             );
-                            let _ = sender.send(Frame::PortConnectionsReply(
-                                orch_link_contract::ports::PortConnectionsReply {
-                                    request_ref: query.request_ref,
-                                    environment_id: query.environment_id,
-                                    connections,
-                                },
-                            ));
+                            noted(
+                                sender.send(Frame::PortConnectionsReply(
+                                    orch_link_contract::ports::PortConnectionsReply {
+                                        request_ref: query.request_ref,
+                                        environment_id: query.environment_id,
+                                        connections,
+                                    },
+                                )),
+                                "a report of port connections",
+                            );
                         }
                         #[cfg(feature = "test-observers")]
                         if let Some(flight) = flight {
@@ -1740,10 +1781,27 @@ async fn core(
     }
 }
 
+/// Notes a frame that the session did not take. One that is too large for what the session carries is
+/// said, with its size and the limit, and counted: it is never lost in silence. The session being over
+/// is no news. Returns whether the session is there to take the next frame.
+fn noted(sent: Result<(), Refused>, what: &str) -> bool {
+    match sent {
+        Ok(()) => true,
+        Err(Refused::SessionOver) => false,
+        Err(refused) => {
+            tracing::error!(%refused, what, "a frame was not sent");
+            metrics::counter!("orch_link_frames_refused_total").increment(1);
+            true
+        }
+    }
+}
+
 fn send_all(session: Option<&SessionSender>, frames: Vec<Frame>) {
     if let Some(session) = session {
         for frame in frames {
-            let _ = session.send_events(frame);
+            if !noted(session.send_events(frame), "a frame of events") {
+                return;
+            }
         }
     }
 }
@@ -1764,8 +1822,10 @@ async fn pump(streams: &mut StreamSender, session: &SessionSender, now: Instant)
     if let Ok(files) = streams.sync_handles() {
         sync_files(files).await;
     }
+    // A frame that cannot be sent is said, and the ones behind it go on: the streams and the frames after
+    // it do not wait for it.
     for frame in frames {
-        if session.send_events(frame).is_err() {
+        if !noted(session.send_events(frame), "a frame of events") {
             return;
         }
     }

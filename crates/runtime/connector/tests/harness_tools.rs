@@ -351,7 +351,7 @@ async fn a_harness_whose_environment_is_on_its_own_machine_reaches_its_tools_wit
             "arrangement": "separated", "provider": { "path": "native", "provider_id": rig.provider },
             "exec": { "executor": executor, "tool_set": (executor == "orch-exec").then_some("plain"),
                       "environment_id": rig.environment, "generation": facts.generation },
-            "mcp": [], "orch_tools": [], "raw_events": false
+            "mcp": [], "orch_tools": [], "output_capture_bytes":67108864, "web_action_wait_secs":120, "raw_events": false
         }))
         .unwrap();
         rig.succeed(&open).await;
@@ -461,7 +461,7 @@ async fn a_local_harness_cannot_call_a_running_server_it_was_not_given() {
         "sandbox_mode": "workspace", "instructions": "x", "memory": null,
         "arrangement": "separated", "provider": { "path": "native", "provider_id": rig.provider },
         "exec": { "executor": null, "environment_id": rig.environment, "generation": facts.generation },
-        "mcp": [{ "name": "allowed", "ticket": ticket }], "orch_tools": [], "raw_events": false
+        "mcp": [{ "name": "allowed", "ticket": ticket }], "orch_tools": [], "output_capture_bytes":67108864, "web_action_wait_secs":120, "raw_events": false
     }))
     .unwrap();
     rig.succeed(&open).await;

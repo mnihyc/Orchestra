@@ -33,7 +33,7 @@ use crate::Shared;
 use crate::credentials::WINDOW_MINUTES;
 use crate::events::{
     Emitter, OUTPUT_PIECE_BYTES, PIECE_CHARS, PIECE_MILLIS, byte_pieces, char_count, file_change,
-    lock, output_hash, pieces, tool_call, turn_error,
+    lock, pieces, tool_call, turn_error,
 };
 use crate::sessions::{Counter, LiveSession, PendingApproval, TurnRecord, append_note};
 
@@ -1564,8 +1564,25 @@ impl Runner {
         payload["duration_ms"] =
             Json::from(self.shared.clock.time().unix_millis() - self.started_of(&payload));
         if let Some(output) = raw_output {
-            payload["raw"]["output"] =
-                serde_json::to_value(OutputRef::of(output)).unwrap_or(Json::Null);
+            let store = orch_agent_contract::output::OutputStore::new(
+                self.shared.home.root().join("outputs"),
+            );
+            let total = i64::try_from(output.len()).unwrap_or(i64::MAX);
+            let captured = store
+                .retain(output, total, self.live.spec.settings.output_capture_bytes)
+                .map_or_else(
+                    |_| {
+                        orch_agent_contract::output::inline(
+                            orch_agent_contract::output::tail(
+                                output,
+                                self.live.spec.settings.output_capture_bytes,
+                            ),
+                            total,
+                        )
+                    },
+                    |(output, _)| output,
+                );
+            payload["raw"]["output"] = serde_json::to_value(captured).unwrap_or(Json::Null);
         }
         payload["raw"]["is_error"] = Json::from(is_error);
         self.emitter
@@ -1604,7 +1621,19 @@ impl Runner {
             &native_ref,
             stream,
             parent,
-            started(&OutputRef::default(), None),
+            started(
+                &OutputRef {
+                    inline_limit: Some(
+                        self.live
+                            .spec
+                            .settings
+                            .output_capture_bytes
+                            .min(orch_agent_contract::events::OUTPUT_INLINE_MAX_BYTES as u64),
+                    ),
+                    ..OutputRef::default()
+                },
+                None,
+            ),
             command,
             "fake_shell",
             &serde_json::json!({ "command": command }),
@@ -1632,20 +1661,27 @@ impl Runner {
                 return Err(flow);
             }
         }
-        let blob = if shown.truncated {
-            let hash = output_hash(output);
-            let kept = self.shared.home.root().join("outputs");
-            if std::fs::create_dir_all(&kept).is_ok() {
-                let _ = std::fs::write(kept.join(hash.to_string()), output);
-            }
-            shown = shown.with_blob(hash);
-            Some(orch_agent_contract::events::BlobRef {
-                hash,
-                size: i64::try_from(output.len()).unwrap_or(i64::MAX),
-            })
-        } else {
-            None
-        };
+        let store =
+            orch_agent_contract::output::OutputStore::new(self.shared.home.root().join("outputs"));
+        let (retained, blob) = store
+            .retain(
+                output,
+                i64::try_from(output.len()).unwrap_or(i64::MAX),
+                self.live.spec.settings.output_capture_bytes,
+            )
+            .unwrap_or_else(|_| {
+                (
+                    orch_agent_contract::output::inline(
+                        orch_agent_contract::output::tail(
+                            output,
+                            self.live.spec.settings.output_capture_bytes,
+                        ),
+                        i64::try_from(output.len()).unwrap_or(i64::MAX),
+                    ),
+                    None,
+                )
+            });
+        shown = retained;
         let status = if exit_code == 0 {
             ItemStatus::Completed
         } else {

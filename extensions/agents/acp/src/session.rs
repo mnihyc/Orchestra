@@ -791,7 +791,10 @@ impl Session {
         }
         self.emit(events);
         if !closing {
-            self.emit([SessionEvent::SessionLost(SessionLost { reason: why })]);
+            self.emit([SessionEvent::SessionLost(SessionLost {
+                uncertain: false,
+                reason: why,
+            })]);
         }
     }
 
@@ -1133,6 +1136,7 @@ impl Session {
         }
         self.emit(ended.0);
         self.emit([SessionEvent::SessionLost(SessionLost {
+            uncertain: false,
             reason: "the program did not stop when it was asked to; it was ended".to_owned(),
         })]);
         self.flush_events().await;
