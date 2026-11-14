@@ -2146,7 +2146,8 @@ async fn a_file_is_renamed_and_so_is_a_directory_with_all_that_is_in_it() {
     let moved = ask::rename(&site, &site.ada, "web/README.md", "web/READ-ME.md")
         .await
         .ok();
-    assert_eq!(moved.entry.path, "web/READ-ME.md");
+    assert_eq!(moved.stat.entry.path, "web/READ-ME.md");
+    assert_eq!(moved.kept_entries, 0);
     assert!(!site.disk.exists("web/README.md"));
     assert_eq!(site.disk.read("web/READ-ME.md").unwrap(), b"# Web\n");
 

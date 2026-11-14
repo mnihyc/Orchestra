@@ -27,6 +27,7 @@ import type {
   FetchState,
   FileListSource,
   FileMatch,
+  FileRenameResult,
   FileStat,
   GitStatus,
   Job,
@@ -262,7 +263,7 @@ export async function makeDirectory(door: Door, path: string, key: string): Prom
 }
 
 /** Moves a file or a directory; it is also how one is renamed. */
-export function renameFile(door: Door, from: string, to: string): Promise<FileStat> {
+export function renameFile(door: Door, from: string, to: string): Promise<FileRenameResult> {
   return ok(api.POST('/environments/{id}/files/rename', { params: { path: pathOf(door), query: through(door) }, body: { from, to } }));
 }
 

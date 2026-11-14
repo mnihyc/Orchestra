@@ -17,6 +17,7 @@ import { NOT_PICKING, TimelineContextValue, type TimelineContext, useTimelineCon
 import { ConversationLane } from '@/features/timeline/Lane';
 import { useRecordedItem } from '@/features/timeline/historical';
 import { recentTurns } from '@/features/timeline/rows';
+import { useTimelinePreferences } from '@/features/timeline/preferences';
 import { useViewShown, type ViewProps } from '@/features/workbench/views';
 import type { Item } from '@/generated/api-types';
 import { forgetThreadRead, useSocketStatus, useThreadFeed } from '@/realtime/live';
@@ -104,6 +105,7 @@ export function SubagentLane({ item, panel = false }: { item: ToolItem; panel?: 
 
 function Panel({ threadId, itemId, continuationId }: { threadId: string; itemId: string; continuationId: string | null }) {
   const { t } = useTranslation();
+  const preferences = useTimelinePreferences(threadId);
   const read = useThreadReadRef(threadId);
   useLayoutEffect(() => selectThreadContinuation(read, continuationId), [read, continuationId]);
   useThreadFeed(read);
@@ -119,7 +121,7 @@ function Panel({ threadId, itemId, continuationId }: { threadId: string; itemId:
   if (item === undefined) return <SkeletonRows rows={3} />;
   if (item.kind !== 'tool_call' || item.payload.tool.kind !== 'subagent') return <p className="p-3 text-sm">{t('timeline.subagent.unavailable')}</p>;
   const readOnly = threadReadOnly(view);
-  const context: TimelineContext = { threadId, threadName: view.thread?.name ?? '', detail: 'steps', recent: recentTurns(view.turns), layout: 'one', setLayout: () => undefined, meId: null, canInteract: !readOnly && holds(view.thread?.access, 'thread.interact'), canManage: !readOnly && holds(view.thread?.access, 'thread.manage'), readOnly, live: socket.phase === 'ready', lit: null, selection: NOT_PICKING, compact: true };
+  const context: TimelineContext = { threadId, threadName: view.thread?.name ?? '', detail: preferences.detail, diagnostics: preferences.diagnostics, hideHistory: preferences.hideHistory, recent: recentTurns(view.turns), layout: preferences.layout, setLayout: preferences.setLayout, meId: null, canInteract: !readOnly && holds(view.thread?.access, 'thread.interact'), canManage: !readOnly && holds(view.thread?.access, 'thread.manage'), readOnly, live: socket.phase === 'ready', lit: null, selection: NOT_PICKING, compact: true };
   return <TimelineContextValue.Provider value={context}><ScrollArea role="region" aria-label={t('timeline.subagent.panelTitle')} tabIndex={0} className="focus-inset h-full p-3" data-subagent-panel={item.id}><SubagentLane item={item} panel /></ScrollArea></TimelineContextValue.Provider>;
 }
 

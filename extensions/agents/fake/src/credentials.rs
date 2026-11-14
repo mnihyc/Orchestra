@@ -15,9 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use orch_agent_contract::adapter::{AdapterError, AdapterEvent, EventSink};
-use orch_agent_contract::credentials::{
-    Custody, GivenCredential, IssuedCredential, MIN_ISSUE_INTERVAL_MILLIS,
-};
+use orch_agent_contract::credentials::{GivenCredential, IssuedCredential};
 use orch_agent_contract::descriptor::{ArrangementType, ProviderKind};
 use orch_agent_contract::facts::{
     CredentialFacts, CredentialYield, LimitReached, PlanCredits, ProviderFacts, UsageWindow,
@@ -39,9 +37,8 @@ use crate::events::lock;
 pub const DEVICE_ADDRESS: &str = "https://fake.invalid/device";
 /// The address the sign-in on a page shows.
 pub const AUTHORIZE_ADDRESS: &str = "https://fake.invalid/authorize";
-/// How close to its end a copy is when the harness says it will need another: the shortest time
-/// between two copies, which a renewal then waits no longer than.
-pub const EXPIRY_MARGIN_SECS: i64 = MIN_ISSUE_INTERVAL_MILLIS / 1_000;
+/// The fake's default notice before its two-minute copy expires, independent of when it may renew.
+pub const EXPIRY_MARGIN_SECS: i64 = 30;
 /// How long a window of the plan is: five hours.
 pub const WINDOW_MINUTES: i64 = 300;
 /// How much of the plan's window a turn uses, in percent. A few turns do not use it up.
@@ -114,8 +111,6 @@ pub struct Credentials {
     pub tenant: Option<String>,
     /// How many copies were issued, for the value of the next.
     issued: u64,
-    /// When the last copy was issued.
-    last_issue: Option<Time>,
     /// Whether the plan is used up.
     pub exhausted: bool,
     /// When the plan is whole again, if it was used up until a moment that was chosen; without it the plan
@@ -215,23 +210,10 @@ impl Credentials {
                 "the login is away and has not been returned".to_owned(),
             ));
         }
-        let declared = issued
-            .iter()
-            .find(|declared| declared.form == form)
-            .ok_or_else(|| AdapterError::Unsupported(format!("credential form {form}")))?;
-        if self
-            .last_issue
-            .is_some_and(|last| now.unix_millis() - last.unix_millis() < MIN_ISSUE_INTERVAL_MILLIS)
-            && declared.custody == Custody::Shared
-        {
-            return Err(AdapterError::Other {
-                code: "too_soon".to_owned(),
-                message: "a copy was issued less than 30 seconds ago".to_owned(),
-                retryable: true,
-            });
+        if !issued.iter().any(|declared| declared.form == form) {
+            return Err(AdapterError::Unsupported(format!("credential form {form}")));
         }
         self.issued += 1;
-        self.last_issue = Some(now);
         let credential = match form {
             FORM_TOKEN => IssuedCredential {
                 form: form.to_owned(),
@@ -765,13 +747,13 @@ mod tests {
     }
 
     #[test]
-    fn a_second_copy_within_thirty_seconds_is_refused_and_may_be_asked_for_again() {
+    fn a_new_copy_is_issued_immediately_without_moving_the_original_login() {
         let mut credentials = signed_in();
-        credentials.issue(FORM_TOKEN, &forms(), at(0)).unwrap();
-        let error = credentials.issue(FORM_TOKEN, &forms(), at(10)).unwrap_err();
-        assert_eq!(error.code(), "too_soon");
-        assert!(error.retryable());
-        assert!(credentials.issue(FORM_TOKEN, &forms(), at(30)).is_ok());
+        let first = credentials.issue(FORM_TOKEN, &forms(), at(0)).unwrap();
+        let second = credentials.issue(FORM_TOKEN, &forms(), at(0)).unwrap();
+        assert_ne!(first.credential.expose(), second.credential.expose());
+        assert!(credentials.signed_in.is_some());
+        assert!(!credentials.moved_away);
     }
 
     #[test]

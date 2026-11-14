@@ -1780,7 +1780,7 @@ async fn rename(
     ctx: Ctx,
     query: orch_api_contract::environment::ThroughThreadQuery,
     body: FileFromToBody,
-) -> ApiResult<FileStat> {
+) -> ApiResult<orch_api_contract::workspace::FileRenameResult> {
     let (from, to) = two_paths(&body)?;
     let mut conn = ctx.app.db.acquire().await?;
     let (door, machine) = writer(&ctx, &mut conn, query.thread).await?;
@@ -1797,7 +1797,7 @@ async fn rename(
     )
     .await
     .map_err(|failure| failure.problem(Doing::Renaming))?;
-    let stat = moved;
+    let stat = &moved.stat;
     let mut tx = ctx.app.db.begin().await?;
     storage::forget_cached_under(&mut tx, door.env.id, &from).await?;
     audited(
@@ -1806,13 +1806,13 @@ async fn rename(
         &door,
         orch_db::audit::action!(AuditAction::WorkspaceFileRenamed),
         &said(&ctx, &format!("renamed {from} to {to}"))?,
-        serde_json::json!({ "from": from, "to": to, "size": stat.entry.size, "hash": stat.hash }),
+        serde_json::json!({ "from": from, "to": to, "size": stat.entry.size, "hash": stat.hash, "kept_entries": moved.kept_entries }),
     )
     .await?;
     orch_db::queries::environments::thread_engine::touch_activity(&mut tx, door.env.id, ctx.now)
         .await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(stat)
+    Ok(moved)
 }
 
 /// Deletes a file, or a directory with what is in it.

@@ -809,7 +809,7 @@ impl Engine {
             Event::OrchToolCall(call) => self.on_tool_call(batch, &call).await,
             Event::CredentialNeeded(need) => {
                 // A harness that runs on a copy of the credential says it lacks one (the part that keeps
-                // providers): the schedule issues another, and fails the turn if it asks too often.
+                // providers): the schedule issues another, coalescing requests while one is in flight.
                 let lease = threads::open_lease_of(&mut *unit.conn, batch.thread_id).await?;
                 match lease.filter(|lease| lease.mode == "shared") {
                     Some(lease) => lock(&self.inner.credentials).needs(lease.id, need.reason),

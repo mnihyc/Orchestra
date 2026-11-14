@@ -45,6 +45,12 @@ interface Clipboard {
 
 /** What was cut or copied in the tree, until it is pasted or replaced. */
 const EMPTY_CLIPBOARD: Clipboard = { environmentId: null, mode: null, paths: [] };
+
+/** Every way of moving reports the entries that could not safely leave their old name. */
+async function moveFile(door: Door, from: string, to: string, t: TFunction): Promise<void> {
+  const moved = await renameFile(door, from, to);
+  if (moved.kept_entries > 0) toast({ tone: 'info', title: t('files.menu.moveKept', { count: moved.kept_entries, path: from }) });
+}
 export const useFileClipboard = create<Clipboard>(() => EMPTY_CLIPBOARD);
 client.session.subscribe((next, previous) => {
   if (next.readerVersion !== previous.readerVersion) useFileClipboard.setState(EMPTY_CLIPBOARD);
@@ -162,7 +168,7 @@ export function useFileActions({ access, environment, open, collapseAll, search,
           for (const from of paths) {
             if (client.session.getState().readerVersion !== reader) return;
             const to = joinPath(directory, baseName(from));
-            if (mode === 'cut') await renameFile(door, from, to);
+            if (mode === 'cut') await moveFile(door, from, to, t);
             else await copyFile(door, from, to);
           }
           if (client.session.getState().readerVersion !== reader) return;
@@ -299,7 +305,7 @@ export function useFileActions({ access, environment, open, collapseAll, search,
       try {
         for (const from of paths) {
           if (from === target.path || target.path.startsWith(`${from}/`) || parentOf(from) === target.path) continue;
-          await renameFile(door, from, joinPath(target.path, baseName(from)));
+          await moveFile(door, from, joinPath(target.path, baseName(from)), t);
         }
         await refresh(target.path, ...paths.map(parentOf));
       } catch {
@@ -452,7 +458,7 @@ function NameDialog({ act, blocked, onClose, door, refresh, open }: { blocked: s
             break;
           }
           case 'rename':
-            await renameFile(door, act.entry.path, joinPath(parentOf(act.entry.path), name));
+            await moveFile(door, act.entry.path, joinPath(parentOf(act.entry.path), name), t);
             await refresh(parentOf(act.entry.path));
             break;
           case 'duplicate':
@@ -461,7 +467,7 @@ function NameDialog({ act, blocked, onClose, door, refresh, open }: { blocked: s
             break;
           case 'move': {
             const destination = cleanDirectory(text);
-            for (const entry of act.entries) await renameFile(door, entry.path, joinPath(destination, entry.name));
+            for (const entry of act.entries) await moveFile(door, entry.path, joinPath(destination, entry.name), t);
             await refresh(destination, ...act.entries.map((entry) => parentOf(entry.path)));
             break;
           }

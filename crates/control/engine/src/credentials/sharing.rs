@@ -6,8 +6,8 @@
 //! and the one machine a copy may go to; the provider's runtime issues the copy, sealed to that machine;
 //! the engine passes the sealed form on to the harness and keeps none of it. A copy that lapses is
 //! replaced before it does (`credential.refresh_margin_secs` ahead) and whenever the harness says it
-//! needs another, but never while an issue is in flight and never within thirty seconds of the last: a
-//! harness that asks more often than that fails its turn as `provider_unauthorized`.
+//! needs another. Requests while an issue is in flight are coalesced into a pending renewal; the
+//! configured interval paces automatic renewal without delaying a harness's request.
 
 use super::Given;
 use crate::commands::{Outcome, Outgoing};
@@ -37,16 +37,12 @@ use serde_json::json;
 
 /// How many leases one look at the copies that are about to lapse takes up.
 const RENEW_BATCH: i64 = 200;
-/// The words of a turn that was ended because its harness asked for a credential too often.
-const TOO_OFTEN: &str =
-    "the harness asked for a credential again within thirty seconds of the last one it was given";
-
 /// What an attempt to issue a copy came to.
 #[derive(Debug)]
 pub(crate) enum Issue {
     /// The harness holds a fresh copy, which lapses at the time given, if it does.
     Given(Option<Time>),
-    /// An issue is in flight, or the last was less than thirty seconds ago: nothing was done.
+    /// An issue is in flight, or an automatic renewal waits for its configured interval.
     NotNow,
     /// It could not be done, in the words a failed start carries; nothing left the provider.
     Failed(Box<StartFailure>),
@@ -151,8 +147,8 @@ impl Engine {
 
     /// Issues a copy of the form under the lease and gives it to the harness: the provider's runtime
     /// issues it sealed to the machine of the harness, the engine passes the sealed form on in
-    /// `agent.credential.set`, and the issue is written down. Not done while an issue is in flight or the
-    /// last was less than thirty seconds ago.
+    /// `agent.credential.set`, and the issue is written down. An issue in flight owns the exchange;
+    /// later requests remain pending until it finishes.
     pub(crate) async fn issue_copy(
         &self,
         lease: &LeaseRow,
@@ -162,8 +158,20 @@ impl Engine {
         protocol: Option<&str>,
     ) -> Result<Issue, EngineError> {
         self.restore_copy_state(lease.id).await?;
+        let interval = if lease.mode == "shared" {
+            let mut conn = self.inner.db.acquire().await?;
+            setting::<i64>(
+                &mut conn,
+                SettingsPlace::System,
+                keys::CREDENTIAL_REFRESH_MIN_INTERVAL_SECS,
+            )
+            .await?
+            .unwrap_or_default()
+        } else {
+            0
+        };
         let now = Time::new(self.inner.clock.now());
-        let Some(number) = lock(&self.inner.credentials).begin(lease.id, now) else {
+        let Some(number) = lock(&self.inner.credentials).begin(lease.id, now, interval) else {
             return Ok(Issue::NotNow);
         };
         let done = self
@@ -294,7 +302,7 @@ impl Engine {
         Ok(())
     }
 
-    /// Rehydrates expiry, the minimum issue interval and the next command identity from durable state.
+    /// Rehydrates expiry, the last issue time and the next command identity from durable state.
     async fn restore_copy_state(&self, lease: Id) -> Result<(), EngineError> {
         let held = lock(&self.inner.credentials).of(lease);
         if held.last.is_some() || held.in_flight {
@@ -386,15 +394,7 @@ impl Engine {
         };
         match self.issue_copy(lease, &provider, key, &form, None).await? {
             Issue::Given(_) => Ok(()),
-            Issue::NotNow => {
-                // A harness that asks again within thirty seconds of the last copy is refused: its turn
-                // fails, so that it does not hold the provider's runtime in a loop.
-                let held = lock(&self.inner.credentials).of(lease.id);
-                if held.needed.is_some() && !held.in_flight {
-                    self.fail_turn_unauthorized(lease, TOO_OFTEN).await?;
-                }
-                Ok(())
-            }
+            Issue::NotNow => Ok(()),
             Issue::Failed(failure) | Issue::Lost(failure) => {
                 tracing::warn!(lease = %lease.id, why = %failure.message, "a credential could not be issued for a running turn");
                 self.fail_turn_unauthorized(lease, &failure.message).await

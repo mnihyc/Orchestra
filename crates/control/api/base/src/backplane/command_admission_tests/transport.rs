@@ -206,7 +206,7 @@ fn opening(fixture: &Fixture, thread: Id) -> Proof<SessionOpen> {
         "workspace_root":"/workspace", "instruction_root_marker":true,
         "directory":"/workspace", "cwd":"/workspace", "mounts":[],
         "model":"fixture-model", "effort":null, "params":{},
-        "approval_mode":"ask", "sandbox_mode":"read_only", "instructions":"", "memory":null,
+        "approval_mode":"ask", "web_action_wait_secs":120, "sandbox_mode":"read_only", "instructions":"", "memory":null,
         "arrangement":"together",
         "provider":{"path":"forwarded", "provider_id":new_id(), "protocol":"openai-responses", "ticket":"synthetic-first-transport"},
         "exec":{"executor":null, "environment_id":fixture.environment, "generation":1},

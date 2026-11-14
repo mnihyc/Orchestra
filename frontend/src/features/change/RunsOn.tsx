@@ -1,11 +1,10 @@
-import { ResourcePicker } from '@/ui/ResourcePicker';
 /** Provider, profile, model and effort the result runs on.
  *
- * What a thread runs on, chosen as the dialog that starts a thread chooses it, from the lists the person may use:
- * the providers that are ready and theirs first (the one the thread is on now marked), the others below with the
- * reason; the agent profile the provider offers; the model and its effort; and how agent and provider are placed.
- * A model and an effort alone are settings of the thread and need no change of what it runs on, so they are
- * offered only together with another provider or profile, where they have to be chosen again.
+ * What a thread runs on, chosen with the controls of the box of a thread: the models of every provider the person may
+ * use, in groups under the providers' names (so that choosing a model chooses its provider; the providers that cannot be
+ * used come last, with the reason), the agent profile that works with that provider, the effort of the model, and how
+ * agent and provider are placed. A model and an effort alone are settings of the thread and need no change of what it
+ * runs on, so the effort is offered only together with another provider or profile, where it has to be chosen again.
  */
 import { useQuery } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
@@ -13,9 +12,13 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { agentsQuery, providerModelsQuery, providersQuery } from '@/api/resources';
-import type { Agent, Provider, ProviderModel, Thread } from '@/generated/api-types';
+import { threadBindingOptionsQuery } from '@/api/start';
+import type { Agent, ModelOption, Provider, ProviderModel, Thread } from '@/generated/api-types';
+import { type AgentChoice, AgentChip } from '@/features/composer/BindingLists';
+import { effortGroups } from '@/features/composer/modelRows';
+import { ChoiceChip } from '@/features/composer/PickList';
+import { ProviderModelChip, providerModelsOf } from '@/features/composer/ProviderModelChip';
 import { ProviderArrangementChoice } from '@/features/start/Arrangement';
-import { ResourceHint, resourcePreview, resourceChoice } from '@/features/resource-facts/ResourceFacts';
 import { providerLabels } from '@/features/resources/providers/labels';
 import { ResourceCreationActions } from '@/features/resources/ResourceCreation';
 import type { AutomaticRuns, Choices } from '@/features/change/choices';
@@ -24,7 +27,6 @@ import { useFocusFirst } from '@/features/change/Sentence';
 import { ErrorState } from '@/ui/ErrorState';
 import { StateLine } from '@/ui/StateLine';
 import { InlineAlert } from '@/ui/InlineAlert';
-import { Select } from '@/ui/Select';
 
 /** Whether the harness of a profile has said what it is: until it has, no thread can be placed on it. */
 export const hasReported = (agent: Agent): boolean => {
@@ -53,28 +55,28 @@ export function runsOf(choices: Choices, thread: Thread): Runs {
 export const movesRuns = (choices: Choices): boolean => choices.providerId !== null || choices.agentId !== null;
 
 /**
- * The agent profile that goes with another provider: the thread's own where the provider offers it and its harness has
- * reported what it is, else the first that can be placed; `null` keeps the thread's own.
+ * Keep the currently selected profile when the provider offers it and it has reported its support;
+ * otherwise choose the first available profile. `null` represents the thread's original profile.
  */
-export function agentFor(provider: Provider | undefined, agents: readonly Agent[], thread: Thread): string | null {
-  const chosen = chosenProfileFor(provider, agents, thread);
+export function agentFor(provider: Provider | undefined, agents: readonly Agent[], thread: Thread, selected = thread.binding?.agent.id): string | null {
+  const chosen = chosenProfileFor(provider, agents, selected);
   return chosen === undefined || chosen.id === thread.binding?.agent.id ? null : chosen.id;
 }
 
-function chosenProfileFor(provider: Provider | undefined, agents: readonly Agent[], thread: Thread): Agent | undefined {
+function chosenProfileFor(provider: Provider | undefined, agents: readonly Agent[], selected: string | undefined): Agent | undefined {
   const profiles = profilesFor(provider, agents).filter(hasReported);
-  return profiles.find((agent) => agent.id === thread.binding?.agent.id) ?? profiles[0];
+  return profiles.find((agent) => agent.id === selected) ?? profiles[0];
 }
 
 /** Facts about the profile default, recorded when the selector actually applies it. */
-export function automaticProfileFor(provider: Provider | undefined, agents: readonly Agent[], thread: Thread): AutomaticRuns {
-  const previous = agents.find((agent) => agent.id === thread.binding?.agent.id);
-  const chosen = chosenProfileFor(provider, agents, thread);
+export function automaticProfileFor(provider: Provider | undefined, agents: readonly Agent[], thread: Thread, selected = thread.binding?.agent.id): AutomaticRuns {
+  const previous = agents.find((agent) => agent.id === selected);
+  const chosen = chosenProfileFor(provider, agents, selected);
   if (provider === undefined || chosen === undefined) return {};
   const keeper = provider.protocols.length === 0 && provider.agent?.id === chosen.id;
   return { profile: { providerId: provider.id, agentId: chosen.id,
-    by: keeper ? 'keeper' : chosen.id === thread.binding?.agent.id ? 'retained' : 'first',
-    previous: chosen.id === thread.binding?.agent.id ? null : previous?.disabled === true ? 'disabled' : previous !== undefined && !hasReported(previous) ? 'unreported' : keeper ? 'keeper' : 'unavailable' } };
+    by: keeper ? 'keeper' : chosen.id === selected ? 'retained' : 'first',
+    previous: chosen.id === selected ? null : previous?.disabled === true ? 'disabled' : previous !== undefined && !hasReported(previous) ? 'unreported' : keeper ? 'keeper' : 'unavailable' } };
 }
 
 /** Refused readable profiles stay in the picker; this does not replace native compatibility review. */
@@ -87,7 +89,7 @@ function profileWhy(provider: Provider | undefined, agent: Agent, t: TFunction):
 }
 
 /** The same fallback the selector uses, together with its actual origin. */
-function effortFor(model: ProviderModel, previous: string | null, providerId: string): { effort: string | null; origin: NonNullable<AutomaticRuns['effort']> } {
+function effortFor(model: Pick<ProviderModel, 'model_name' | 'parameters'>, previous: string | null, providerId: string): { effort: string | null; origin: NonNullable<AutomaticRuns['effort']> } {
   const takes = model.parameters.efforts ?? [];
   const retained = previous !== null && takes.includes(previous);
   const effort = takes.length === 0 ? null : retained ? previous : (model.parameters.default_effort ?? takes[0] ?? null);
@@ -131,14 +133,15 @@ export function profilesFor(provider: Provider | undefined, agents: readonly Age
  * provider that was chosen for the person (the next one, for a thread held back by its provider) has its model too while the
  * editor is closed.
  */
-export function useModelFor(thread: Thread, choices: Choices, onChange: (patch: Partial<Choices>) => void, enabled = true): readonly ProviderModel[] {
+export function useModelFor(thread: Thread, choices: Choices, onChange: (patch: Partial<Choices>) => void, enabled = true, prefer: string | null = null): readonly ProviderModel[] {
   const runs = runsOf(choices, thread);
   const models = useQuery({ ...providerModelsQuery(runs.providerId), enabled: enabled && runs.providerId !== '' });
   useEffect(() => {
     if (!enabled || !movesRuns(choices) || models.isError) return;
     const listed = (models.data ?? []).filter((candidate) => candidate.enabled);
     if (listed.length === 0 || choices.model !== null && listed.some((candidate) => candidate.model_name === runs.model)) return;
-    const keep = listed.find((candidate) => candidate.model_name === thread.model);
+    const wanted = prefer === null ? undefined : listed.find((candidate) => candidate.model_name === prefer);
+    const keep = wanted ?? listed.find((candidate) => candidate.model_name === thread.model);
     const next = keep ?? listed[0];
     if (next === undefined) return;
     const { effort, origin } = effortFor(next, thread.effort, runs.providerId);
@@ -146,7 +149,7 @@ export function useModelFor(thread: Thread, choices: Choices, onChange: (patch: 
     onChange({ model: next.model_name, effort, automaticRuns: { ...choices.automaticRuns,
       model: { providerId: runs.providerId, model: next.model_name, by: keep === undefined ? 'first' : 'retained', replaced: next.model_name !== runs.model },
       effort: origin } });
-  }, [enabled, choices, models.data, models.isError, runs.model, runs.providerId, thread.model, thread.effort, onChange]);
+  }, [enabled, choices, models.data, models.isError, runs.model, runs.providerId, thread.model, thread.effort, onChange, prefer]);
   return models.data ?? [];
 }
 
@@ -155,7 +158,7 @@ export interface RunsOnProps {
   choices: Choices;
   onChange: (patch: Partial<Choices>) => void;
   focus?: boolean;
-  /** One provider/profile picker for an ordinary switch; native planning still decides whether it can run. */
+  /** A compact switch shows only the automatic profile explanation. */
   compact?: boolean;
 }
 
@@ -167,6 +170,10 @@ export function RunsOn({ thread, choices, onChange, focus = false, compact = fal
   const runs = runsOf(choices, thread);
   const moved = movesRuns(choices);
   const [arrangementOpen, setArrangementOpen] = useState(false);
+  // The agent that went with a change of provider, said in one line under the controls.
+  const [agentNotice, setAgentNotice] = useState<string | null>(null);
+  // The models of every provider the person may choose, grouped under the providers' names: the choice of a model is the choice of its provider.
+  const wide = useQuery(threadBindingOptionsQuery(thread.id));
 
   const usableIds = new Set((usable.data ?? []).map((provider) => provider.id));
   const known = [...new Map([...(everything.data ?? []), ...(usable.data ?? [])].map((provider) => [provider.id, provider])).values()];
@@ -175,7 +182,6 @@ export function RunsOn({ thread, choices, onChange, focus = false, compact = fal
     ...(usable.isFetchedAfterMount && !usable.isError ? usable.data ?? [] : []),
   ].map((candidate) => [candidate.id, candidate])).values()], new Map());
   const ready = known.filter((provider) => usableIds.has(provider.id) && (provider.status === 'ready' || provider.status === 'exhausted'));
-  const unusable = known.filter((provider) => !ready.some((one) => one.id === provider.id));
   const provider = known.find((candidate) => candidate.id === runs.providerId);
   const offered = profilesFor(provider, agents.data ?? []);
 
@@ -185,26 +191,36 @@ export function RunsOn({ thread, choices, onChange, focus = false, compact = fal
   const efforts = model?.parameters.efforts ?? [];
   const waiting = everything.isPending || agents.isPending || (runs.providerId !== '' && models.isPending);
   const ref = useFocusFirst<HTMLDivElement>(focus && !everything.isPending && !agents.isPending);
-  const pairs = [...ready, ...unusable].flatMap((candidate) => (agents.data ?? []).map((agent) => ({
-    value: `${candidate.id}:${agent.id}`, provider: candidate, agent,
-  })));
-  const choosePair = (value: string) => {
-    const pair = pairs.find((candidate) => candidate.value === value);
-    if (pair === undefined || !usableIds.has(pair.provider.id) || providerWhy(pair.provider, true, t) !== null || profileWhy(pair.provider, pair.agent, t) !== null) return;
-    const providerId = pair.provider.id === thread.binding?.provider.id ? null : pair.provider.id;
-    const agentId = pair.agent.id === thread.binding?.agent.id ? null : pair.agent.id;
-    onChange({ providerId, agentId, model: null, effort: undefined, arrangement: null, automaticRuns: {} });
+  const agentName = (id: string): string => agents.data?.find((candidate) => candidate.id === id)?.name ?? (id === thread.binding?.agent.id ? thread.binding.agent.name : '');
+  const providerName = provider === undefined ? thread.binding?.provider.name ?? '' : names.get(provider.id) ?? provider.name;
+  const fitting = new Set(profilesFor(provider, agents.data ?? []).map((agent) => agent.id));
+  const agentChoices: AgentChoice[] = (agents.data ?? []).map((agent) => ({ id: agent.id, name: agent.name, fits: fitting.has(agent.id), usable: profileWhy(provider, agent, t) === null,
+    reason: agent.disabled ? 'disabled' : !hasReported(agent) ? 'harness_unreported' : null }));
+  const chooseAgent = (agentId: string) => {
+    const agent = agents.data?.find((candidate) => candidate.id === agentId);
+    if (agent === undefined || profileWhy(provider, agent, t) !== null) return;
+    const { profile: _profile, ...automaticRuns } = choices.automaticRuns ?? {};
+    setAgentNotice(null);
+    onChange({ agentId: agentId === thread.binding?.agent.id ? null : agentId, automaticRuns });
   };
-
-  const choose = (providerId: string) => {
-    const same = providerId === (thread.binding?.provider.id ?? '');
-    if (same) {
+  const chooseModel = (chosen: { id: string }, option: ModelOption, close: () => void) => {
+    const next = known.find((candidate) => candidate.id === chosen.id);
+    if (next === undefined || !usableIds.has(next.id) || providerWhy(next, true, t) !== null) return;
+    const agentId = agentFor(next, agents.data ?? [], thread, runs.agentId);
+    const same = next.id === thread.binding?.provider.id;
+    if (same && agentId === null) {
+      setAgentNotice(null);
       onChange({ providerId: null, agentId: null, model: null, effort: undefined, arrangement: null, automaticRuns: {} });
+      close();
       return;
     }
-    const next = known.find((candidate) => candidate.id === providerId);
-    if (next === undefined || !usableIds.has(next.id) || providerWhy(next, true, t) !== null) return;
-    onChange({ providerId, agentId: agentFor(next, agents.data ?? [], thread), model: null, effort: undefined, arrangement: null, automaticRuns: automaticProfileFor(next, agents.data ?? [], thread) });
+    const selected = agentId ?? thread.binding?.agent.id ?? '';
+    setAgentNotice(selected === runs.agentId ? null : t('composer.pick.agent.changed', { agent: agentName(selected), was: agentName(runs.agentId), provider: names.get(next.id) ?? next.name }));
+    const { effort, origin } = effortFor(option, runs.effort, next.id);
+    const { model: _model, effort: _effort, ...kept } = choices.automaticRuns ?? {};
+    const automaticRuns = next.id === runs.providerId && selected === runs.agentId ? kept : automaticProfileFor(next, agents.data ?? [], thread, runs.agentId);
+    onChange({ providerId: same ? null : next.id, agentId, model: option.model_name, effort, arrangement: null, automaticRuns: { ...automaticRuns, effort: origin } });
+    close();
   };
 
   return (
@@ -215,78 +231,29 @@ export function RunsOn({ thread, choices, onChange, focus = false, compact = fal
       {agents.isError && <ErrorState compact error={agents.error} onRetry={() => { void agents.refetch(); }} retrying={agents.isFetching} />}
       {everything.isPending || everything.isError && known.length === 0 ? null : known.length === 0 ? (
         <InlineAlert tone="warning">{t('start.provider.none')}</InlineAlert>
-      ) : compact ? (
-        <div className="flex min-w-0 flex-col gap-1"><ResourcePicker pickerKey="change.RunsOn.switchChoice.picker" label={t('switchChoice.picker')} value={`${runs.providerId}:${runs.agentId}`} onValueChange={choosePair}
-          placeholder={thread.binding === null ? t('thread.blocked.unbound') : t('switchChoice.option', { agent: thread.binding.agent.name, provider: thread.binding.provider.name })}
-          options={pairs.map((pair) => ({ value: pair.value,
-            ...resourceChoice({ kind: 'provider', provider: pair.provider }),
-            name: t('switchChoice.option', { agent: pair.agent.name, provider: names.get(pair.provider.id) ?? pair.provider.name }),
-            disabled: !usableIds.has(pair.provider.id) || (pair.provider.status !== 'ready' && pair.provider.status !== 'exhausted') || profileWhy(pair.provider, pair.agent, t) !== null,
-            description: <><ResourceHint subject={{ kind: 'provider', provider: pair.provider }} />{providerWhy(pair.provider, usableIds.has(pair.provider.id), t) ?? profileWhy(pair.provider, pair.agent, t)}</>,
-          }))} />
-          <AutomaticChoice kind="profile" origins={choices.automaticRuns} runs={runs} />
-        </div>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2">
-          <ResourcePicker pickerKey="change.RunsOn.change.runs.provider"
-            label={t('change.runs.provider')}
-            value={runs.providerId}
-            onValueChange={choose}
-            options={[...ready, ...unusable].map((candidate) => ({
-              value: candidate.id,
-              preview: resourcePreview({ kind: 'provider', provider: candidate }),
-              name: candidate.id === thread.binding?.provider.id ? t('change.runs.providerNow', { name: names.get(candidate.id) ?? candidate.name }) : names.get(candidate.id) ?? candidate.name,
-              disabled: !usableIds.has(candidate.id) || (candidate.status !== 'ready' && candidate.status !== 'exhausted'),
-              description: <span className="flex flex-col gap-1">
-                <ResourceHint subject={{ kind: 'provider', provider: candidate }} />
-                {providerWhy(candidate, usableIds.has(candidate.id), t) !== null && <span>{providerWhy(candidate, usableIds.has(candidate.id), t)}</span>}
-              </span>,
-            }))}
-          />
-          <div className="flex min-w-0 flex-col gap-1"><ResourcePicker pickerKey="change.RunsOn.change.runs.agent"
-            label={t('change.runs.agent')}
-            value={runs.agentId}
-            disabled={agents.isPending || (agents.data?.length ?? 0) === 0}
-            onValueChange={(agentId) => {
-              const agent = agents.data?.find((candidate) => candidate.id === agentId);
-              if (agent === undefined || profileWhy(provider, agent, t) !== null) return;
-              const { profile: _profile, ...automaticRuns } = choices.automaticRuns ?? {};
-              onChange({ agentId: agentId === thread.binding?.agent.id ? null : agentId, automaticRuns });
-            }}
-            options={(agents.data ?? []).map((agent) => ({ value: agent.id, name: agent.name, ...resourceChoice({ kind: 'agent', agent, provider, models: listed }), description: profileWhy(provider, agent, t), disabled: profileWhy(provider, agent, t) !== null }))}
-          />
-            <AutomaticChoice kind="profile" origins={choices.automaticRuns} runs={runs} />
+        <div className="flex min-w-0 flex-col gap-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <ProviderModelChip what={t('composer.model.chip')} searchLabel={t('composer.model.find')} providers={wide.data === undefined ? [] : providerModelsOf(wide.data)} pending={wide.isPending}
+              current={{ provider: runs.providerId, model: runs.model }} name={modelLabel(runs.model, listed, runs.providerId === thread.binding?.provider.id ? thread.model_display : null, t)}
+              onModel={chooseModel} />
+            {moved && efforts.length > 0 && <ChoiceChip what={t('change.runs.effort')} value={effortLabel(runs.effort, t) ?? ''} control="effort"
+              groups={effortGroups(model, runs.effort, t)} onChoose={(row, close) => {
+                const { effort: _effort, ...automaticRuns } = choices.automaticRuns ?? {};
+                onChange({ effort: row.id, automaticRuns });
+                close();
+              }} />}
+            <AgentChip choices={agentChoices} value={runs.agentId} name={agentName(runs.agentId)} provider={providerName} pending={agents.isPending} onChoose={(agent) => chooseAgent(agent.id)} />
           </div>
+          {agentNotice !== null && <p role="status" className="text-sm text-text-muted" data-agent-notice>{agentNotice}</p>}
+          {models.isError && <ErrorState compact error={models.error} onRetry={() => { void models.refetch(); }} retrying={models.isFetching} />}
+          {!models.isPending && !models.isError && runs.providerId !== '' && listed.length === 0 && <StateLine compact message={t('start.model.none')} />}
+          <AutomaticChoice kind="profile" origins={choices.automaticRuns} runs={runs} />
+          {!compact && <AutomaticChoice kind="model" origins={choices.automaticRuns} runs={runs} />}
+          {!compact && <AutomaticChoice kind="effort" origins={choices.automaticRuns} runs={runs} />}
         </div>
       )}
       {!waiting && (ready.length === 0 || !offered.some(hasReported)) && <ResourceCreationActions onReadChoices={(kind) => { if (kind === 'providers') void usable.refetch(); else void agents.refetch(); }} />}
-      {(!compact || moved) && runs.providerId !== '' && (
-        <div className="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-          <div className="flex min-w-0 flex-col gap-1"><Select
-            label={t(moved ? 'change.runs.model' : 'changeCompact.currentModel')}
-            value={model === undefined ? '' : runs.model ?? ''}
-            placeholder={t(models.isPending ? 'common.loading' : 'change.runs.modelUnknown')}
-            disabled={!moved || models.isPending || listed.length === 0}
-            onValueChange={(next) => {
-              const chosen = listed.find((candidate) => candidate.model_name === next);
-              if (!chosen?.enabled) return;
-              const { effort, origin } = effortFor(chosen, runs.effort, runs.providerId);
-              onChange({ model: next, effort, automaticRuns: { profile: choices.automaticRuns?.profile, effort: origin } });
-            }}
-            options={listed.map((candidate) => ({ value: candidate.model_name, name: modelLabel(candidate.model_name, listed, runs.providerId === thread.binding?.provider.id && candidate.model_name === thread.model ? thread.model_display : null, t), ...resourceChoice({ kind: 'model', model: candidate, providerId: runs.providerId, usage: provider?.choice_usage, effort: runs.effort }), disabled: !candidate.enabled, ...(!candidate.enabled ? { description: t('change.runs.unavailable.modelDisabled') } : {}) }))}
-          />
-            {models.isError && <ErrorState compact error={models.error} onRetry={() => { void models.refetch(); }} retrying={models.isFetching} />}
-            {!models.isPending && !models.isError && listed.length === 0 && <StateLine compact message={t('start.model.none')} />}
-            <AutomaticChoice kind="model" origins={choices.automaticRuns} runs={runs} />
-          </div>
-          <div className="flex min-w-0 flex-col gap-1">{efforts.length > 0 && <Select label={t(moved ? 'change.runs.effort' : 'changeCompact.currentEffort')} value={runs.effort ?? ''} disabled={!moved} onValueChange={(effort) => {
-            const { effort: _effort, ...automaticRuns } = choices.automaticRuns ?? {};
-            onChange({ effort, automaticRuns });
-          }} options={efforts.map((value) => ({ value, name: effortLabel(value, t) ?? '' }))} />}
-            <AutomaticChoice kind="effort" origins={choices.automaticRuns} runs={runs} caption={efforts.length === 0} />
-          </div>
-        </div>
-      )}
       {moved && provider !== undefined && (
         <details className="text-sm" onToggle={(event) => setArrangementOpen(event.currentTarget.open)}>
           <summary className="cursor-default rounded-md text-text-muted select-none hover:text-text">{t('change.runs.arrangement')}</summary>

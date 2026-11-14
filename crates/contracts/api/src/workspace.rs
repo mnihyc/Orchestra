@@ -295,6 +295,17 @@ pub struct FileStat {
     pub is_text: bool,
 }
 
+/// A completed rename or move, including any source entries a cross-filesystem copy kept safe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileRenameResult {
+    /// The destination as it stands after the move.
+    #[serde(flatten)]
+    pub stat: FileStat,
+    /// Entries observed left at the source, including containing directories. Unreadable
+    /// subtrees count once. Zero means none were observed; a later writer can create more.
+    pub kept_entries: u64,
+}
+
 /// Where a request to have a file brought to the blob store stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -1233,7 +1244,7 @@ crate::endpoints! {
     EnvironmentFileMkdir: POST "/environments/{id}/files/mkdir", Permission("files.manage"), query ThroughThreadQuery, json FilePathBody, json FileMkdirResponse, 200,
         operation Op::receipt(&Op::returning(Write, &[Object(K::Environment)], Target::PermissionObject));
     /// Renames a file or a directory, which is also how one is moved.
-    EnvironmentFileRename: POST "/environments/{id}/files/rename", Permission("files.manage"), query ThroughThreadQuery, json FileFromToBody, json FileStat, 200,
+    EnvironmentFileRename: POST "/environments/{id}/files/rename", Permission("files.manage"), query ThroughThreadQuery, json FileFromToBody, json FileRenameResult, 200,
         operation Op::single(Write, &[Object(K::Environment)], Target::PermissionObject);
     /// Copies a file, or a directory with what is in it.
     EnvironmentFileCopy: POST "/environments/{id}/files/copy", Permission("files.manage"), query ThroughThreadQuery, json FileFromToBody, json FileCopyResponse, 200,

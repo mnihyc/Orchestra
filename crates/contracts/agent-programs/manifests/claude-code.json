@@ -155,6 +155,10 @@
       {
         "name": "tools.result_form",
         "feature": "orch_tools"
+      },
+      {
+        "name": "input_prefix",
+        "feature": "native_input_prefix"
       }
     ],
     "tool_names": {

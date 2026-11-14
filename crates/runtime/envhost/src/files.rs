@@ -15,10 +15,11 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use chrono::DateTime;
-use orch_api_contract::workspace::{DirEntry, DirEntryKind, FileStat};
+use orch_api_contract::workspace::{DirEntry, DirEntryKind, FileRenameResult, FileStat};
 use orch_link_contract::commands::{ExpectedHash, FileVersion, FsFetchResult};
 use orch_types::{Hash, Time};
 
@@ -161,6 +162,79 @@ struct Cleanup {
     name: OsString,
     is_dir: bool,
     armed: bool,
+}
+
+/// Copy evidence is streamed to disk, in children-first order, rather than retained for a whole
+/// source tree in memory. Losing the journal leaves the source intact.
+struct CopyJournal(BufWriter<File>);
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CopyRecord {
+    path: String,
+    meta: Meta,
+    parent_dev: u64,
+    parent_ino: u64,
+}
+
+impl CopyJournal {
+    fn new() -> Result<Self> {
+        tempfile::tempfile()
+            .map(|file| Self(BufWriter::new(file)))
+            .map_err(|error| HostError::io("recording what a move copied", error))
+    }
+
+    fn record(&mut self, real: &RelPath, meta: Meta, parent: &Dir) -> Result<()> {
+        let parent = parent
+            .stat_self()
+            .map_err(|error| HostError::io("checking a copied entry's parent", error))?;
+        serde_json::to_writer(
+            &mut self.0,
+            &CopyRecord {
+                path: real.to_string(),
+                meta,
+                parent_dev: parent.dev,
+                parent_ino: parent.ino,
+            },
+        )
+        .map_err(|error| {
+            HostError::io("recording what a move copied", std::io::Error::other(error))
+        })?;
+        self.0
+            .write_all(b"\n")
+            .map_err(|error| HostError::io("recording what a move copied", error))
+    }
+
+    fn reader(self) -> Result<BufReader<File>> {
+        let mut file = self
+            .0
+            .into_inner()
+            .map_err(|error| HostError::io("finishing a move's copy record", error.into_error()))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| HostError::io("reading a move's copy record", error))?;
+        Ok(BufReader::new(file))
+    }
+}
+
+/// Count the entries observed left at the source, including their containing directories.
+/// An unreadable or excessively deep directory counts once; it is never removed to count it.
+fn entries_left(parent: &Dir, name: &OsStr, depth: usize) -> u64 {
+    let meta = match parent.lstat(name) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(_) => return 1,
+    };
+    if !meta.is_dir() || depth >= WALK_DEPTH_MAX {
+        return 1;
+    }
+    let Ok(dir) = parent.open_child(name) else {
+        return 1;
+    };
+    let mut count = 1u64;
+    let _ = dir.visit_names(&mut |child| {
+        count = count.saturating_add(entries_left(&dir, child, depth + 1));
+        true
+    });
+    count
 }
 
 impl Cleanup {
@@ -925,7 +999,7 @@ impl Files {
 
     /// Renames the entry at `from` to `to`, which must not exist. A link is renamed, not what it
     /// leads to.
-    pub fn rename(&self, from: &RelPath, to: &RelPath) -> Result<FileStat> {
+    pub fn rename(&self, from: &RelPath, to: &RelPath) -> Result<FileRenameResult> {
         self.require_write()?;
         let source = self.ws().locate(from, Locate::ENTRY)?;
         let source_meta = source
@@ -968,14 +1042,80 @@ impl Files {
         {
             Ok(()) => {}
             Err(error) if is_cross_device(&error) => {
-                self.copy(from, to)?;
-                self.remove_checked(from, true)?;
+                let (stat, journal) = self.copy_for_move(from, to)?;
+                let kept_entries = self.remove_copied(from, journal)?;
+                return Ok(FileRenameResult { stat, kept_entries });
             }
             Err(error) => return Err(HostError::io(format!("renaming {from}"), error)),
         }
         self.inner.cache.forget(&source.real);
         self.note_orch_write(&target.real);
-        self.stat(to)
+        Ok(FileRenameResult {
+            stat: self.stat(to)?,
+            kept_entries: 0,
+        })
+    }
+
+    fn copy_for_move(&self, from: &RelPath, to: &RelPath) -> Result<(FileStat, CopyJournal)> {
+        let mut journal = CopyJournal::new()?;
+        let stat = self.copy_recorded(from, to, Some(&mut journal))?;
+        Ok((stat, journal))
+    }
+
+    fn remove_copied(&self, from: &RelPath, journal: CopyJournal) -> Result<u64> {
+        for line in journal.reader()?.lines() {
+            crate::error::check_cancelled()?;
+            let line =
+                line.map_err(|error| HostError::io("reading a move's copy record", error))?;
+            let record: CopyRecord = serde_json::from_str(&line).map_err(|error| {
+                HostError::io("reading a move's copy record", std::io::Error::other(error))
+            })?;
+            // A source without a stable file identity cannot be proved to be this copy.
+            // Leave it available at its old name and include it in the returned count.
+            if record.meta.ino == 0 || record.parent_ino == 0 {
+                continue;
+            }
+            let path = self.parse(&record.path)?;
+            let Ok(located) = self.ws().locate(&path, Locate::ENTRY) else {
+                continue;
+            };
+            let Some(meta) = located.meta else {
+                continue;
+            };
+            let Ok(parent) = located.parent.stat_self() else {
+                continue;
+            };
+            if parent.dev != record.parent_dev
+                || parent.ino != record.parent_ino
+                || meta.kind != record.meta.kind
+            {
+                continue;
+            }
+            let same = if meta.is_dir() {
+                meta.dev == record.meta.dev && meta.ino == record.meta.ino
+            } else {
+                meta.identity() == record.meta.identity()
+            };
+            if !same {
+                continue;
+            }
+            // A writer can still change this entry between this last check and its unlink.
+            // Never recurse here: uncopied, changed and newly created children must survive.
+            let removed = if meta.is_dir() {
+                located.parent.rmdir(located.name()?)
+            } else {
+                located.parent.unlink(located.name()?)
+            };
+            if removed.is_ok() {
+                self.inner.cache.forget(&located.real);
+            }
+        }
+        let source = match self.ws().locate(from, Locate::ENTRY) {
+            Ok(source) => source,
+            Err(HostError::NotFound(_)) => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        Ok(entries_left(&source.parent, source.name()?, 0))
     }
 
     /// Removes the entry at `path`; a directory with what is in it only if `recursive` is set. A
@@ -1014,6 +1154,15 @@ impl Files {
     /// Copies the entry at `from` to `to`, which must not exist: a file, or a directory with what
     /// is in it that the ignore rules do not leave out. The copy appears whole or not at all.
     pub fn copy(&self, from: &RelPath, to: &RelPath) -> Result<FileStat> {
+        self.copy_recorded(from, to, None)
+    }
+
+    fn copy_recorded(
+        &self,
+        from: &RelPath,
+        to: &RelPath,
+        journal: Option<&mut CopyJournal>,
+    ) -> Result<FileStat> {
         self.require_write()?;
         let source = self.ws().locate(from, Locate::ENTRY)?;
         let source_meta = source
@@ -1041,11 +1190,13 @@ impl Files {
         };
         let temp = temp_name();
         let mut cleanup = Cleanup::new(&target.parent, &temp, source_meta.is_dir())?;
-        let mut budget = Budget {
+        // A move streams between local filesystems, without storing a blob on the server.
+        let moving = journal.is_some();
+        let mut budget = (!moving).then(|| Budget {
             left: self.inner.limits.max_blob_bytes,
             limit: self.inner.limits.max_blob_bytes,
             what: from.to_string(),
-        };
+        });
         self.copy_entry(
             &source.parent,
             &source_name,
@@ -1056,13 +1207,21 @@ impl Files {
             &temp,
             0,
             &mut budget,
+            journal,
         )?;
         target
             .parent
             .rename_to(&temp, &target.parent, &target_name, false)
             .map_err(|error| HostError::io(format!("putting the copy {to} in place"), error))?;
         cleanup.disarm();
-        let _ = target.parent.sync();
+        if moving {
+            target
+                .parent
+                .sync()
+                .map_err(|error| HostError::io("flushing the destination of a move", error))?;
+        } else {
+            let _ = target.parent.sync();
+        }
         self.note_orch_write(&target.real);
         self.stat(to)
     }
@@ -1081,16 +1240,26 @@ impl Files {
         to_dir: &Dir,
         to_name: &OsStr,
         depth: usize,
-        budget: &mut Budget,
+        budget: &mut Option<Budget>,
+        mut journal: Option<&mut CopyJournal>,
     ) -> Result<()> {
         match meta.kind {
             Kind::File => {
                 let source = from_dir
                     .open_read(from_name)
                     .map_err(|error| HostError::io(format!("opening {real}"), error))?;
-                budget.take(meta.size)?;
+                let before = file_meta(&source)
+                    .map_err(|error| HostError::io(format!("looking at {real}"), error))?;
+                if !before.is_file() {
+                    return Err(HostError::Changed(format!(
+                        "{real} changed before it was copied"
+                    )));
+                }
+                if let Some(budget) = budget {
+                    budget.take(before.size)?;
+                }
                 let target = to_dir
-                    .create_new(to_name, meta.mode & WRITABLE_MODE_BITS)
+                    .create_new(to_name, before.mode & WRITABLE_MODE_BITS)
                     .map_err(|error| HostError::io("making the copy of a file", error))?;
                 let mut offset = 0u64;
                 let mut buffer = vec![0u8; COPY_CHUNK_BYTES];
@@ -1121,9 +1290,19 @@ impl Files {
                 let _ = target.set_modified(
                     std::time::UNIX_EPOCH
                         + std::time::Duration::from_nanos(
-                            u64::try_from(meta.mtime_ns).unwrap_or(0),
+                            u64::try_from(before.mtime_ns).unwrap_or(0),
                         ),
                 );
+                target
+                    .sync_all()
+                    .map_err(|error| HostError::io("flushing a copied file", error))?;
+                if let Some(journal) = journal {
+                    let after = file_meta(&source)
+                        .map_err(|error| HostError::io(format!("looking at {real}"), error))?;
+                    if before.identity() == after.identity() {
+                        journal.record(real, before, from_dir)?;
+                    }
+                }
                 Ok(())
             }
             Kind::Symlink => {
@@ -1132,7 +1311,15 @@ impl Files {
                     .map_err(|error| HostError::io(format!("reading the link {real}"), error))?;
                 to_dir
                     .symlink(&target, to_name)
-                    .map_err(|error| HostError::io("making the copy of a link", error))
+                    .map_err(|error| HostError::io("making the copy of a link", error))?;
+                if let Some(journal) = journal
+                    && from_dir
+                        .lstat(from_name)
+                        .is_ok_and(|after| after.identity() == meta.identity())
+                {
+                    journal.record(real, *meta, from_dir)?;
+                }
+                Ok(())
             }
             Kind::Dir => {
                 if depth >= WALK_DEPTH_MAX {
@@ -1146,52 +1333,74 @@ impl Files {
                 let from_child = from_dir
                     .open_child(from_name)
                     .map_err(|error| HostError::io(format!("entering {real}"), error))?;
+                let opened = from_child
+                    .stat_self()
+                    .map_err(|error| HostError::io(format!("looking at {real}"), error))?;
                 let to_child = to_dir
                     .open_child(to_name)
                     .map_err(|error| HostError::io("entering the copy of a directory", error))?;
-                let mut names = from_child
-                    .names()
+                let mut failure = None;
+                from_child
+                    .visit_names(&mut |name| {
+                        let copied = (|| -> Result<()> {
+                            let Some(text) = name.to_str() else {
+                                return Ok(());
+                            };
+                            if is_internal_name(text) {
+                                return Ok(());
+                            }
+                            let Ok(child_real) = real.join(text) else {
+                                return Ok(());
+                            };
+                            let Ok(child_meta) = from_child.lstat(name) else {
+                                return Ok(());
+                            };
+                            if let Some(scope) = scope
+                                && scope.is_ignored(&child_real, child_meta.is_dir())
+                            {
+                                return Ok(());
+                            }
+                            let child_scope = match (scope, child_meta.is_dir()) {
+                                (Some(scope), true) => Some(scope.enter(
+                                    &child_real,
+                                    &from_child.open_child(name).map_err(|error| {
+                                        HostError::io(format!("entering {child_real}"), error)
+                                    })?,
+                                )),
+                                _ => None,
+                            };
+                            self.copy_entry(
+                                &from_child,
+                                name,
+                                &child_meta,
+                                &child_real,
+                                child_scope.as_ref(),
+                                &to_child,
+                                name,
+                                depth + 1,
+                                budget,
+                                journal.as_deref_mut(),
+                            )
+                        })();
+                        if let Err(error) = copied {
+                            failure = Some(error);
+                            false
+                        } else {
+                            true
+                        }
+                    })
                     .map_err(|error| HostError::io(format!("listing {real}"), error))?;
-                names.sort();
-                for name in names {
-                    let Some(text) = name.to_str() else { continue };
-                    if is_internal_name(text) {
-                        continue;
-                    }
-                    let Ok(child_real) = real.join(text) else {
-                        continue;
-                    };
-                    let Ok(child_meta) = from_child.lstat(&name) else {
-                        continue;
-                    };
-                    if let Some(scope) = scope
-                        && scope.is_ignored(&child_real, child_meta.is_dir())
-                    {
-                        continue;
-                    }
-                    let child_scope = match (scope, child_meta.is_dir()) {
-                        (Some(scope), true) => Some(scope.enter(
-                            &child_real,
-                            &from_child.open_child(&name).map_err(|error| {
-                                HostError::io(format!("entering {child_real}"), error)
-                            })?,
-                        )),
-                        _ => None,
-                    };
-                    self.copy_entry(
-                        &from_child,
-                        &name,
-                        &child_meta,
-                        &child_real,
-                        child_scope.as_ref(),
-                        &to_child,
-                        &name,
-                        depth + 1,
-                        budget,
-                    )?;
+                if let Some(error) = failure {
+                    return Err(error);
                 }
                 let _ = to_dir.set_mode(to_name, meta.mode & WRITABLE_MODE_BITS);
                 let _ = to_dir.set_mtime(to_name, meta.mtime_ns);
+                to_child
+                    .sync()
+                    .map_err(|error| HostError::io("flushing a copied directory", error))?;
+                if let Some(journal) = journal {
+                    journal.record(real, opened, from_dir)?;
+                }
                 Ok(())
             }
             Kind::Other => Ok(()),
@@ -1808,6 +2017,96 @@ mod tests {
         f.files.copy(&path("proj"), &path("proj2")).unwrap();
         assert!(f.dir.join("proj2/main.c").exists());
         assert!(!f.dir.join("proj2/main.o").exists());
+    }
+
+    #[test]
+    fn a_move_between_filesystems_keeps_ignored_and_new_entries_at_the_source() {
+        let f = fixture_with(&["*.key"], Gates::OPEN);
+        std::fs::create_dir(f.dir.join("src")).unwrap();
+        std::fs::write(f.dir.join("src/copied"), "original").unwrap();
+        std::fs::write(f.dir.join("src/keep.key"), "private").unwrap();
+        let (_, journal) = f.files.copy_for_move(&path("src"), &path("dest")).unwrap();
+        std::fs::write(f.dir.join("src/new"), "arrived during the copy").unwrap();
+        assert_eq!(f.files.remove_copied(&path("src"), journal).unwrap(), 3);
+        assert_eq!(read(&f.dir, "dest/copied"), "original");
+        assert!(!f.dir.join("dest/keep.key").exists());
+        assert!(!f.dir.join("src/copied").exists());
+        assert_eq!(read(&f.dir, "src/keep.key"), "private");
+        assert_eq!(read(&f.dir, "src/new"), "arrived during the copy");
+    }
+
+    #[test]
+    fn a_move_between_filesystems_keeps_a_file_changed_through_an_open_handle() {
+        use std::io::Write;
+        let f = fixture();
+        std::fs::write(f.dir.join("src"), "original").unwrap();
+        let mut writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(f.dir.join("src"))
+            .unwrap();
+        let (_, journal) = f.files.copy_for_move(&path("src"), &path("dest")).unwrap();
+        writer.write_all(b" and later work").unwrap();
+        writer.sync_all().unwrap();
+        assert_eq!(f.files.remove_copied(&path("src"), journal).unwrap(), 1);
+        assert_eq!(read(&f.dir, "src"), "original and later work");
+        assert_eq!(read(&f.dir, "dest"), "original");
+    }
+
+    #[test]
+    fn a_move_between_filesystems_keeps_a_replaced_file_even_when_its_bytes_match() {
+        let f = fixture();
+        std::fs::write(f.dir.join("src"), "original").unwrap();
+        let (_, journal) = f.files.copy_for_move(&path("src"), &path("dest")).unwrap();
+        std::fs::write(f.dir.join("replacement"), "original").unwrap();
+        std::fs::rename(f.dir.join("replacement"), f.dir.join("src")).unwrap();
+        assert_eq!(f.files.remove_copied(&path("src"), journal).unwrap(), 1);
+        assert_eq!(read(&f.dir, "src"), "original");
+        assert_eq!(read(&f.dir, "dest"), "original");
+    }
+
+    #[test]
+    fn a_move_between_filesystems_does_not_clean_a_replacement_parent() {
+        let f = fixture();
+        std::fs::create_dir(f.dir.join("src")).unwrap();
+        std::fs::write(f.dir.join("src/file"), "original").unwrap();
+        let (_, journal) = f.files.copy_for_move(&path("src"), &path("dest")).unwrap();
+        std::fs::rename(f.dir.join("src"), f.dir.join("elsewhere")).unwrap();
+        std::fs::create_dir(f.dir.join("src")).unwrap();
+        std::fs::hard_link(f.dir.join("elsewhere/file"), f.dir.join("src/file")).unwrap();
+        assert_eq!(f.files.remove_copied(&path("src"), journal).unwrap(), 2);
+        assert_eq!(read(&f.dir, "src/file"), "original");
+        assert_eq!(read(&f.dir, "elsewhere/file"), "original");
+        assert_eq!(read(&f.dir, "dest/file"), "original");
+    }
+
+    #[test]
+    fn a_move_between_filesystems_removes_only_unchanged_copies_children_first() {
+        let f = fixture();
+        std::fs::create_dir_all(f.dir.join("src/inner")).unwrap();
+        std::fs::write(f.dir.join("src/inner/file"), "original").unwrap();
+        std::os::unix::fs::symlink("inner/file", f.dir.join("src/link")).unwrap();
+        let (_, journal) = f.files.copy_for_move(&path("src"), &path("dest")).unwrap();
+        assert_eq!(f.files.remove_copied(&path("src"), journal).unwrap(), 0);
+        assert!(!f.dir.join("src").exists());
+        assert_eq!(read(&f.dir, "dest/inner/file"), "original");
+        assert_eq!(
+            std::fs::read_link(f.dir.join("dest/link")).unwrap(),
+            std::path::Path::new("inner/file")
+        );
+    }
+
+    #[test]
+    fn a_local_move_does_not_use_the_servers_blob_storage_limit() {
+        let mut f = fixture();
+        Arc::get_mut(&mut f.files.inner)
+            .unwrap()
+            .limits
+            .max_blob_bytes = 1;
+        std::fs::write(f.dir.join("src"), "larger than a stored blob").unwrap();
+        let (_, journal) = f.files.copy_for_move(&path("src"), &path("dest")).unwrap();
+        assert_eq!(f.files.remove_copied(&path("src"), journal).unwrap(), 0);
+        assert_eq!(read(&f.dir, "dest"), "larger than a stored blob");
+        assert!(!f.dir.join("src").exists());
     }
 
     #[test]
