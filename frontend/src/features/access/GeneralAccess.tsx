@@ -6,6 +6,7 @@ import type { AccessChoice } from '@/generated/api-types';
 
 import { Button } from '@/ui/Button';
 import { Checkbox } from '@/ui/Checkbox';
+import { HelpHint } from '@/ui/HelpHint';
 import { Select, type SelectOption } from '@/ui/Select';
 
 import { type Catalogue, type GeneralAccess, type GeneralAccessPreset, middleOf } from './model';
@@ -66,7 +67,25 @@ export function GeneralAccessControl({ catalogue, kind, place, rulesPlace = plac
         aside={value === 'custom' && onReset !== undefined ? <Button size="sm" variant="ghost" disabled={disabled} onClick={onReset}>{t('access.general.back', { place: rulesPlace })}</Button> : undefined}
       />
       {value === 'defaults' && summary !== undefined && <p className="text-sm text-text-muted">{summary}</p>}
-      {environment !== undefined && <Checkbox label={t('access.general.letIn')} tooltip={environment.tooltip} checked={environment.checked} onCheckedChange={environment.onChange} disabled={environment.disabled ?? disabled} />}
+      {environment !== undefined && <EnvironmentAccessChoice tooltip={environment.tooltip} checked={environment.checked} onCheckedChange={environment.onChange} disabled={environment.disabled ?? disabled} />}
     </div>
   );
+}
+
+/** The same environment choice explains its grant without changing rights a person already holds. */
+export function EnvironmentAccessChoice({ label, checked, onCheckedChange, disabled = false, tooltip, manage = false }: {
+  label?: string;
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+  disabled?: boolean;
+  tooltip?: string | undefined;
+  manage?: boolean;
+}) {
+  const { t } = useTranslation();
+  const term = label ?? t('access.general.letIn');
+  return <div className="flex min-w-0 items-center gap-1">
+    <Checkbox label={term} tooltip={tooltip} checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} />
+    <HelpHint term={term} what={t(manage ? 'access.general.environmentManageHelp' : 'access.general.environmentViewHelp')}
+      which={t('access.general.environmentOffHelp')} where={tooltip} />
+  </div>;
 }

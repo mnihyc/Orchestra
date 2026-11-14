@@ -37,6 +37,7 @@ import { type Candidate, useCandidates, useTargetOrg } from './candidates';
 import { type Changes } from './changes';
 import { askToLetIn, letInChange, offerFor } from './doors';
 import { CoversLine, type PlaceKind, type Reach, ReachSelect } from './Covers';
+import { EnvironmentAccessChoice } from './GeneralAccess';
 import { firstChoice, keptLine, mayGiveAsRole, mayGiveChoice, ROLE_OF_CHOICE, sharingIsKept, whyNot } from './gives';
 import { HolderView, placeName } from './holders';
 import { type Catalogue, CHOICE_ORDER, containerOf, middleOf, nameChange } from './model';
@@ -166,7 +167,7 @@ export function AddHolders({ page, target, catalogue, changes, initial = 'full_v
   const outsiders = staged.filter((entry) => entry.outside);
   const said = note?.(choice) ?? null;
   const why = whyNot(page, { t, name: target.name, kind: target.kind, choice: (entry) => choiceWords(t, entry, target.kind) }, { onPlace: place !== null });
-  const expires = until === '' ? null : new Date(`${until}T23:59:59`).toISOString();
+  const expires = until === '' ? null : new Date(until).toISOString();
 
   // Giving a role is one request for each person: the ones that were given leave the list, the one that was refused stays with its reason.
   const giving = useMutation({
@@ -328,7 +329,7 @@ export function AddHolders({ page, target, catalogue, changes, initial = 'full_v
       {optionsOpen && <div className="flex flex-wrap items-start gap-3 rounded-md border border-border p-3">
         {candidates.placePicker}
         {place !== null && <ReachSelect place={target.name} value={reach} onValueChange={setReach} className="flex-[1_1_12rem]" />}
-        <DateField label={t('access.add.until')} value={until} onValueChange={setUntil} aria-label={t('access.add.untilLabel')} fieldClassName="w-[12rem]" />
+        <DateField type="datetime-local" label={t('access.add.until')} value={until} onValueChange={setUntil} aria-label={t('access.add.untilLabel')} fieldClassName="w-[12rem]" />
         {!inside && exportRows.length > 0 && (mayExport
           ? <Checkbox label={t('access.export.label')} checked={takeAway} onCheckedChange={setTakeAway} />
           : <p className="text-sm text-text-muted">{t('access.export.cannot')}</p>)}
@@ -359,10 +360,11 @@ export function AddHolders({ page, target, catalogue, changes, initial = 'full_v
 
       {staged.length > 0 && <TellThem target={target} staged={staged} state={tell} onChange={setTell} />}
       {offer !== null && staged.length > 0 && environmentChoice === undefined && (
-        <Checkbox
+        <EnvironmentAccessChoice
           label={offer.mayView ? t('access.doors.letIn', { name: offer.environment.name }) : t('access.doors.askFor', { owner: offer.environment.owner?.display_name ?? '' })}
           checked={letIn}
           onCheckedChange={setLetIn}
+          manage={offer.giveManage.length > 0 || offer.askManage.length > 0}
         />
       )}
       {waiting !== null && <InlineAlert tone="info">{waiting}</InlineAlert>}

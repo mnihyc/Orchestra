@@ -20,7 +20,7 @@ describe('settings and the decision guides', () => {
       expect(settingKeyOf(settingArticle(def.key))).toBe(def.key);
     }
     for (const guide of GUIDANCE) for (const key of guide.settings) expect(SETTINGS_REGISTRY.some((def) => def.key === key), key).toBe(true);
-    expect(findSettingHelp(SETTINGS_REGISTRY, 'requests.expiry_hours').map((def) => def.key)).toContain('requests.expiry_hours');
+    expect(findSettingHelp(SETTINGS_REGISTRY, 'requests.expiry_minutes').map((def) => def.key)).toContain('requests.expiry_minutes');
     expect(settingDefinitionForKey(SETTINGS_REGISTRY, 'agent.params.service_tier')?.key).toBe('agent.params');
   });
   it('finds the approval guide by a how-do-I phrase, a technical key and the translated setting name', () => {
@@ -39,13 +39,13 @@ describe('settings and the decision guides', () => {
   });
   it('links to the exact key at its visible source and makes no hidden-place link', () => {
     const source: SettingSource = { scope: 'project', node: { id: 'project-1', kind: 'project', name: 'Web', redacted: false } };
-    const def = { key: 'requests.expiry_hours', class: 'policy' as const };
-    expect(sourceSettingHref(source, def)).toBe('/project/project-1/settings?section=defaults&setting=requests.expiry_hours');
+    const def = { key: 'requests.expiry_minutes', class: 'policy' as const };
+    expect(sourceSettingHref(source, def)).toBe('/project/project-1/settings?section=defaults&setting=requests.expiry_minutes');
     expect(sourceSettingHref({ ...source, node: { ...source.node!, redacted: true, name: null } }, def)).toBeNull();
-    expect(sourceSettingHref({ scope: 'system', node: null }, def)).toBe('/admin/settings?setting=requests.expiry_hours');
+    expect(sourceSettingHref({ scope: 'system', node: null }, def)).toBe('/admin/settings?setting=requests.expiry_minutes');
     expect(sourceSettingHref({ scope: 'org', node: { ...source.node!, kind: 'org' } }, def)).toBeNull();
-    expect(sourceSettingHref({ scope: 'org', node: { ...source.node!, kind: 'org' } }, def, undefined, 'team/web')).toBe('/org/team%2Fweb/settings/defaults?setting=requests.expiry_hours');
-    expect(sourceSettingHref({ scope: 'provider_own', node: null }, def, { kind: 'provider', id: 'provider-1' })).toBe('/resources/providers/provider-1?tab=settings&setting=requests.expiry_hours');
+    expect(sourceSettingHref({ scope: 'org', node: { ...source.node!, kind: 'org' } }, def, undefined, 'team/web')).toBe('/org/team%2Fweb/settings/defaults?setting=requests.expiry_minutes');
+    expect(sourceSettingHref({ scope: 'provider_own', node: null }, def, { kind: 'provider', id: 'provider-1' })).toBe('/resources/providers/provider-1?tab=settings&setting=requests.expiry_minutes');
   });
 });
 

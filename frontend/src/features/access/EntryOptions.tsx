@@ -203,8 +203,10 @@ export function EntryOptions({ open, onClose, def, row, entryId, holder, changes
   const entry = followedHolder === undefined ? row.entries.find((candidate) => candidate.id === entryId) : row.inherited?.entries?.find((candidate) => holderKey(candidate.holder) === holderKey(followedHolder));
   const fields = optionFields(def.options_schema);
   const [values, setValues] = useState<Json>(() => valuesOf(fields, entry?.options));
-  const [until, setUntil] = useState(entry?.expires_at?.slice(0, 10) ?? '');
-  const expiresAt = until === (entry?.expires_at?.slice(0, 10) ?? '') ? entry?.expires_at ?? null : until === '' ? null : new Date(`${until}T23:59:59`).toISOString();
+  const end = entry?.expires_at === null || entry?.expires_at === undefined ? null : new Date(entry.expires_at);
+  const original = end === null ? '' : new Date(end.getTime() - end.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+  const [until, setUntil] = useState(original);
+  const expiresAt = until === original ? entry?.expires_at ?? null : until === '' ? null : new Date(until).toISOString();
   const permission = permissionNameOf(def);
 
   return (
@@ -245,7 +247,7 @@ export function EntryOptions({ open, onClose, def, row, entryId, holder, changes
       }
     >
       <div className="flex flex-col gap-4 py-2">
-        <DateField label={t('access.cell.until')} value={until} onValueChange={setUntil} hint={t('access.options.untilHint')} />
+        <DateField type="datetime-local" label={t('access.cell.until')} value={until} onValueChange={setUntil} hint={t('access.options.untilHint')} />
         <Fields fields={fields} values={values} onChange={setValues} />
         {changes.error !== null && changes.error !== undefined && <ErrorAlert error={changes.error} />}
       </div>

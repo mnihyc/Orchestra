@@ -11,6 +11,7 @@ import { client } from '@/api/client';
 import { captureThreadRead, selectThreadContinuation } from '@/api/threadRead';
 import type * as Draft from '@/features/composer/Draft';
 import { useComposerStore } from '@/features/composer/Draft';
+import { takeMentions } from '@/features/chat/discuss';
 import { ThreadScreen } from '@/features/thread/Thread';
 import { ViewCompactContext } from '@/features/workbench/Narrow';
 import type { MissingAccess, Thread, ThreadLimits, ThreadParameters } from '@/generated/api-types';
@@ -127,8 +128,10 @@ describe.each(modes)('a live viewer at $width px in $theme', mode => {
     const controls = within(screen.getByRole('group', { name: i18n.t('composer.row.label') }));
     expect(controls.getByRole('button', { name: i18n.t('composer.plus.label') })).toBeDisabled();
     expect(view.container.querySelector('input[type="file"]')).toBeDisabled();
-    const model = controls.getByRole('button', { name: i18n.t('composer.model.current', { model: 'Reasoner (High)' }) });
-    expect(model).toBeDisabled(); expect(model).toHaveTextContent('Reasoner (High)');
+    const model = controls.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.chip'), value: 'Reasoner' }) });
+    expect(model).toBeDisabled(); expect(model).toHaveTextContent('Reasoner');
+    const effort = controls.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.effort.title'), value: 'High' }) });
+    expect(effort).toBeDisabled(); expect(effort).toHaveTextContent('High');
     const send = controls.getByRole('button', { name: i18n.t('composer.send') });
     expect(send).toBeVisible(); expect(send).toBeDisabled();
     expect(controls.getByRole('button', { name: i18n.t('composer.deliveryMenu') })).toBeDisabled();
@@ -213,8 +216,24 @@ it.each(['archived', 'inspection'] as const)('retains the existing %s exclusion 
 it.each(['en', 'zh-CN'] as const)('shows the disabled placeholder, model, effort and access action in %s', async locale => {
   await setLocale(locale); draw();
   expect(screen.getByRole('textbox', { name: i18n.t('composer.label') })).toHaveAttribute('placeholder', i18n.t('thread.watching.title'));
-  const value = `Reasoner (${i18n.t('choiceCatalog.effort.high.name')})`;
-  const model = screen.getByRole('button', { name: i18n.t('composer.model.current', { model: value }) });
-  expect(model).toBeDisabled(); expect(model).toHaveTextContent(value);
+  const high = i18n.t('choiceCatalog.effort.high.name');
+  const model = screen.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.chip'), value: 'Reasoner' }) });
+  expect(model).toBeDisabled(); expect(model).toHaveTextContent('Reasoner');
+  const effort = screen.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.effort.title'), value: high }) });
+  expect(effort).toBeDisabled(); expect(effort).toHaveTextContent(high);
   expect(screen.getByRole('button', { name: i18n.t('access.request.title') })).toBeEnabled();
+});
+
+it.each(['en', 'zh-CN'] as const)('lets an environment viewer ask its owner in chat with one click in %s', async locale => {
+  await setLocale(locale);
+  if (native.environment === null) throw new Error('The viewer fixture needs its environment');
+  const thread: Thread = { ...native, input_access: { allowed: false, missing: [...native.input_access.missing, {
+    object: { kind: 'environment', id: native.environment.id, name: native.environment.name, owner: native.owner },
+    permissions: ['environment.use'], options: null, ask: [native.owner], ask_more: 0, override: false, closed: null,
+  }] } };
+  draw(modes[0], thread);
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('access.request.askInChat') }));
+  expect(takeMentions(thread.chat_id)).toEqual([{ name: native.owner.display_name, target: { kind: 'user', id: native.owner.id } }]);
+  expect(calls.request).not.toHaveBeenCalled();
+  expect(calls.submit).not.toHaveBeenCalled();
 });

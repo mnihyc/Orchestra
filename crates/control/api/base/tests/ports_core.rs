@@ -1768,7 +1768,7 @@ async fn d357_no_approval_mode_decides_a_port_and_its_card_lives_the_shortest_re
             json!("bypass"),
         )
         .await;
-    world.set("requests.expiry_hours", json!(2)).await;
+    world.set("requests.expiry_minutes", json!(120)).await;
     let thread = asking_thread(&world, &manager, project, env).await;
     let made = world
         .app
@@ -1794,7 +1794,7 @@ async fn d357_no_approval_mode_decides_a_port_and_its_card_lives_the_shortest_re
     let off = expires.get() - (world.now() + chrono::Duration::hours(2));
     assert!(
         off.num_seconds().abs() <= 1,
-        "requests.expiry_hours, not a port setting of its own: {off}"
+        "requests.expiry_minutes, not a port setting of its own: {off}"
     );
     world.advance(chrono::Duration::hours(2) + chrono::Duration::seconds(2));
     assert_eq!(reconcile(&world, env).await, vec![made.opening.id]);

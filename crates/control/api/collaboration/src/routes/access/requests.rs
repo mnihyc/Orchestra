@@ -215,8 +215,9 @@ pub(super) fn read_body(body: &api::AccessRequestCreateBody, asker: Id) -> ApiRe
 pub async fn create(
     ctx: Ctx,
     (): (),
-    body: api::AccessRequestCreateBody,
+    mut body: api::AccessRequestCreateBody,
 ) -> ApiResult<api::AccessRequestWriteResponse> {
+    body.expires_at = body.expires_at.map(Time::to_minute);
     let asks = read_body(&body, ctx.user()?.id())?;
     let (mut tx, initial) = transaction_guard::begin(&ctx).await?;
     orch_db::queries::approvals::access::lock_requester(&mut tx, initial.user().id()).await?;

@@ -47,9 +47,24 @@ vi.mock('@/features/access/RowCell', () => ({ FollowMark: () => null, RowCell: (
 vi.mock('@/features/access/Reaches', () => ({ EnvironmentReachLine: () => null, ReachesLine: () => null, privateWarning: () => null }));
 vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (place: { name?: string | null } | null | undefined) => place?.name ?? null, useKnownPlaces: () => new Map() }));
 
-beforeEach(() => { start.mockClear(); fixture.defaultsKind = 'thread'; });
+beforeEach(async () => { await setLocale('en'); start.mockClear(); fixture.defaultsKind = 'thread'; });
 
 describe('one general access choice', () => {
+  it.each(['en', 'zh-CN'] as const)('explains the environment view grant and preserves existing access when unticked in %s', async (locale) => {
+    await setLocale(locale);
+    const changed = vi.fn();
+    show(<GeneralAccessControl catalogue={CATALOGUE} kind="thread" place="Fix login" value="defaults" onChange={() => undefined}
+      environment={{ checked: false, onChange: changed }} />);
+    const label = i18n.t('access.general.letIn');
+    expect(screen.getByRole('checkbox', { name: label })).not.toBeChecked();
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('help.hint.label', { term: label }) }));
+    expect(screen.getByText(i18n.t('access.general.environmentViewHelp'))).toBeVisible();
+    expect(screen.getByText(i18n.t('access.general.environmentOffHelp'))).toBeVisible();
+    await userEvent.keyboard('{Escape}');
+    await userEvent.click(screen.getByRole('checkbox', { name: label }));
+    expect(changed).toHaveBeenCalledWith(true);
+  });
+
   it.each(['org', 'project', 'topic'] as const)('lists a %s’s holder levels and provenance without repeating a defaults paragraph', async (kind) => {
     fixture.defaultsKind = kind;
     const changes: Changes = { busy: false, doing: null, error: null, stale: null, forget: () => undefined, again: () => Promise.resolve(false), run: () => Promise.resolve(false) };
@@ -77,7 +92,7 @@ describe('one general access choice', () => {
     await user.click(screen.getByRole('button', { name: 'Options' }));
     const choice = await screen.findByRole('combobox', { name: 'General access' });
     expect(choice).toHaveTextContent('Defaults');
-    expect(screen.getByRole('checkbox', { name: 'Let them into the environment' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Viewers can open the environment' })).toBeChecked();
     await user.click(choice);
     await user.keyboard('{ArrowDown}');
     const viewChoice = await screen.findByRole('option', { name: 'View' });

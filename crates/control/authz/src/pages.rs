@@ -467,7 +467,7 @@ pub enum ChangeError {
         owner: Id,
     },
     /// An entry that names somebody from outside the root tree, new or given a new end, would run
-    /// beyond the bound of its place (`sharing.external_max_days`): it has no end, or a later one.
+    /// beyond the bound of its place (`sharing.external_max_minutes`): it has no end, or a later one.
     #[error("an entry for somebody from outside would run beyond the bound of its place")]
     ExternalLifetime {
         /// The latest end it may have, counted from now.
@@ -2588,7 +2588,7 @@ where
     }
 
     // An entry that names somebody from outside the root tree runs no longer than the bound of its
-    // place (`sharing.external_max_days`, counted from now): a new one without an end or with a later
+    // place (`sharing.external_max_minutes`, counted from now): a new one without an end or with a later
     // one is refused with the latest end it may have and the place that sets the bound, and so is one
     // given a new end beyond it. An admin who names themself is no outsider to what they administer.
     if let Some(site) = &setup.site

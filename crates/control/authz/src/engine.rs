@@ -1213,7 +1213,7 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
         let Some(tightest) = outside
             .iter()
             .filter_map(|site| bounds.at(&crate::external::way_of(site)))
-            .min_by_key(|bound| bound.days)
+            .min_by_key(|bound| bound.minutes)
         else {
             return Ok(());
         };

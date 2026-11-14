@@ -1,0 +1,11 @@
+fmt
+clippy
+contracts
+test -p orch-types --lib
+test -p orch-settings-contract --lib
+test -p orch-authz --test external_lifetime --test reach
+test -p orch-api-core --test users --test access_requests --test ports_core --test thread_environment_readers --test invitation_roles --test invitation_operation_scopes --test invitation_authority_after
+test -p orch-engine --test orch_capabilities
+web typecheck
+web lint
+web test -- tests/component/general-access.test.tsx tests/component/start-viewer-default.test.tsx tests/component/access-request-duration.test.tsx tests/component/invite-default.test.tsx tests/component/viewer-composer.test.tsx tests/component/team-chat-shortcut.test.tsx tests/component/chat-draft-requests.test.tsx tests/unit/discuss-session.test.ts tests/unit/chat-forward.test.ts tests/unit/places.test.ts tests/unit/help-settings.test.ts tests/unit/settings.test.ts tests/component/help-release.test.tsx
