@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts tests/component/before-orch-history.test.tsx tests/component/harness-unrecognized-marker.test.tsx tests/component/thread-turn-files.test.tsx

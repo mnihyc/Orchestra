@@ -119,7 +119,60 @@ function overlay(before: Record<string, unknown>, row: Record<string, unknown>):
     const old = before[key]; const value = row[key];
     next[key] = key !== 'access' && record(old) && record(value) ? overlay(old, value) : value;
   }
+  if (before.list_row === true) {
+    if ('enabled_models_count' in before && Array.isArray(row.models)) next.enabled_models_count = row.models.filter((model: unknown) => record(model) && model.enabled === true).length;
+    if ('upstreams_count' in before && Array.isArray(row.upstreams)) {
+      next.upstreams_count = row.upstreams.length;
+      next.no_key_needed = row.upstreams.length > 0 && row.upstreams.every((entry: unknown) => record(entry) && record(entry.options) && entry.options.auth === 'none');
+    }
+    if ('threads_count' in before && Array.isArray(row.threads)) {
+      next.threads_count = row.threads.length;
+      next.topics_count = new Set(row.threads.flatMap((entry: unknown) => record(entry) && record(entry.topic) && typeof entry.topic.id === 'string' ? [entry.topic.id] : [])).size;
+    }
+    if ('start_allowed' in before && record(row.network)) next.start_allowed = !(row.network.required_mode === 'restricted' && row.network.mode === 'open');
+    if ('profile' in before && record(row.profile)) next.profile = { harness_version: row.profile.harness_version ?? null };
+    if ('spec' in before && record(row.spec)) {
+      const spec = row.spec;
+      next.spec = 'driver' in before ? {
+        image: spec.image ?? null, runtime: spec.runtime ?? null,
+        network: { mode: record(spec.network) ? spec.network.mode ?? null : null },
+        security: { read_only_rootfs: record(spec.security) && spec.security.read_only_rootfs === true, no_new_privileges: record(spec.security) && spec.security.no_new_privileges === true },
+        ...(record(spec.build) ? { build: {} } : {}), ...(record(spec.archive) ? { archive: {} } : {}),
+      } : { transport: spec.transport ?? spec.type ?? null };
+    }
+    if (record(next.facts)) next.facts = { ...next.facts, spend: [], available_resets: null, extra_usage: null };
+    if (record(next.choice_usage)) next.choice_usage = { ...next.choice_usage, performance: [] };
+    if ('plan_label' in before && record(row.facts)) {
+      const source = record(row.sources) && record(row.sources.facts) && record(row.sources.facts.descriptor) ? row.sources.facts.descriptor : null;
+      const plans = source !== null && record(source.facts) && record(source.facts.plans) ? source.facts.plans : {};
+      const plan = row.facts.plan;
+      next.plan_label = typeof plan === 'string' ? plans[plan] ?? plan : null;
+    }
+    if ('source_consent' in before && record(row.sources)) next.source_consent = ['facts', 'models', 'presenter'].some((key) => { const source = record(row.sources) ? row.sources[key] : null; return record(source) && source.address !== null && source.address !== undefined; });
+  }
   return next;
+}
+
+/** The JSON type of a member: what tells one answer's shape from another's. */
+function memberType(value: unknown): string {
+  return value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+}
+
+/** Whether an object that carries a row's identifier is a view of that row, so that the row may be written over it.
+ *
+ * A row is found in the loaded data by its identifier alone, and other answers name the same thing in a shape of
+ * their own: a listing of what an agent reaches gives a thread a `path` of text, where the thread's own row has a
+ * `path` of references. Such an object belongs to its own answer and stays as the server gave it. A view of the row
+ * agrees with it on the type of every member both of them have, through the objects inside; a member that either
+ * side leaves empty decides nothing. */
+function viewOf(before: Record<string, unknown>, row: Record<string, unknown>): boolean {
+  return Object.keys(before).every((key) => {
+    if (!(key in row)) return true;
+    const old = before[key]; const value = row[key];
+    if (old === null || old === undefined || value === null || value === undefined) return true;
+    if (memberType(old) !== memberType(value)) return false;
+    return key === 'access' || !record(old) || !record(value) || viewOf(old, value);
+  });
 }
 
 /** References and node summaries may rename a thread, never overwrite its capabilities or binding. */
@@ -159,7 +212,7 @@ function replace(before: unknown, change: RowChange['row'], thread?: Thread): un
     // A separately authorized thread can still name its bound provider. Revoking the rich
     // provider view removes that view, not a required name/reference inside another DTO.
     if (change.value === null) return 'access' in before || 'resource' in before ? null : before;
-    const complete=change.partial!==true && before.content_hidden!==true && record(before.access) && Array.isArray(before.access.permissions) && !record(before.resource);
+    const complete=change.partial!==true && before.list_row!==true && before.content_hidden!==true && record(before.access) && Array.isArray(before.access.permissions) && !record(before.resource);
     const nameOnly = INVENTORY_KINDS.has(change.kind) && 'my_access' in before && 'path' in before && !record(before.resource);
     if (nameOnly) {
       // Preserve the inventory's withheld metadata and native policy/path, even when the detail knows more.
@@ -169,9 +222,9 @@ function replace(before: unknown, change: RowChange['row'], thread?: Thread): un
       if (typeof before.state === 'string' && typeof state === 'string') next.state = state;
     } else next = before.kind === 'thread' && record(before.access)
       ? thread === undefined ? threadMetadata(before, change.value) : { ...thread }
-      : complete ? {...change.value} : overlay(before, change.value);
+      : complete ? {...change.value} : viewOf(before, change.value) ? overlay(before, change.value) : before;
     // References and inventory rows name the object kind; a rich provider/template DTO names its subtype.
-    if (typeof before.kind === 'string' && ((before.kind === change.kind && !complete) || ('my_access' in before && 'path' in before))) next.kind = before.kind;
+    if (next !== before && typeof before.kind === 'string' && ((before.kind === change.kind && !complete) || ('my_access' in before && 'path' in before))) next.kind = before.kind;
     // Everything wraps the native DTO in a tagged resource, with its own name/state columns.
     if (record(before.resource) && before.resource.kind === change.kind && change.partial !== true) {
       next = { ...next, resource: { ...before.resource, value: change.value } };
@@ -206,6 +259,8 @@ function matches(key: QueryKey, kind: string, row: Record<string, unknown>, know
   if (key[0] === 'shared-with-me' && !known) return false;
   if (key[0] === 'documents') {
     if (!record(row.node) || typeof row.node.id !== 'string' || typeof row.deleted !== 'boolean') return known;
+    if (key[5] === 'references' && typeof key[6] === 'string' && typeof row.title === 'string'
+      && !row.title.toLowerCase().includes(key[6].toLowerCase())) return false;
     if (row.deleted !== (key[3] === true)) return false;
     const here = row.node.id === key[1];
     if (!here && key[2] !== true) return false;
@@ -273,13 +328,14 @@ export function missingInventoryProjection(cache:QueryClient,change:RowChange['r
     }
     return undefined;
   };
-  const detailed=(key:QueryKey)=>record(key[3]) && record(key[3].resource) && key[3].resource.details===true;
+  const detailed=(key:QueryKey)=>record(key[3]) && record(key[3].resource) && (key[3].resource.details===true || key[3].resource.rows===true);
   const queries=[...cache.getQueryCache().getAll()].sort((one,other)=>Number(detailed(other.queryKey))-Number(detailed(one.queryKey)));
   let visible:QueryKey|null=null;
   for(const query of queries) {
     if(!inventory(query.queryKey,change.kind))continue;
     const row=find(query.state.data);
-    const value=row!==undefined && record(row.resource) && record(row.resource.value) ? row.resource.value : undefined;
+    const nested = row?.resource_row ?? row?.resource;
+    const value = record(nested) && record(nested.value) ? nested.value : undefined;
     // A known ordinary name row retains its native path/policy during state/name updates.
     // Private/path-only rows, new membership and changed authority still need the exact inventory cut.
     const knownName = row !== undefined && typeof row.name === 'string' && typeof row.my_access === 'string'
@@ -391,14 +447,24 @@ function writeRow(cache: QueryClient, change: RowChange['row'], thread?: Thread)
   else if (!threadView && change.value !== null && change.partial !== true) cache.setQueryData([detail, change.id], change.value);
 }
 
+/**
+ * Whether a row is the whole view of its resource. A provider's row in a list, or a thread's own row of its provider, says how
+ * many models there are and holds none of them: it does not stand for the provider's page.
+ */
+function wholeRow(kind: string, row: Record<string, unknown>): boolean {
+  if (row.list_row === true) return false;
+  if (kind !== 'provider' || typeof row.models_count !== 'number') return true;
+  return Array.isArray(row.models) && row.models.length >= row.models_count;
+}
+
 /** Use a list's already-authorized native row before asking the API for the same detail. */
 export function cachedRow<Kind extends keyof CachedResources>(cache: QueryClient, kind: Kind, id: string): CachedResources[Kind] | undefined {
   const find = (value: unknown): Record<string, unknown> | undefined => {
     if (Array.isArray(value)) {
       for (const one of value as unknown[]) { const found = find(one); if (found !== undefined) return found; }
     } else if (record(value)) {
-      if (value.id === id && value.content_hidden !== true && record(value.resource) && value.resource.kind === kind && record(value.resource.value)) return value.resource.value;
-      if (value.id === id && value.content_hidden !== true && record(value.access) && !('resource' in value)) return value;
+      if (value.id === id && value.content_hidden !== true && record(value.resource) && value.resource.kind === kind && record(value.resource.value) && wholeRow(kind, value.resource.value)) return value.resource.value;
+      if (value.id === id && value.content_hidden !== true && record(value.access) && !('resource' in value) && wholeRow(kind, value)) return value;
       for (const one of Object.values(value)) if (Array.isArray(one) || record(one)) { const found = find(one); if (found !== undefined) return found; }
     }
     return undefined;

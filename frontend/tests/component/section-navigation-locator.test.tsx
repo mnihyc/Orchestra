@@ -1,4 +1,4 @@
-/** Loaded section names are a local locator; choosing follows the existing native scoped link. */
+/** Section names are real scoped links in one list or strip; pressing one follows its native destination. */
 import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, Outlet, RouterProvider, useRouterState } from '@tanstack/react-router';
 import userEvent from '@testing-library/user-event';
@@ -60,11 +60,11 @@ function current(nav: HTMLElement, expected: string) {
   expect(links[0]).toHaveAccessibleName(expected);
 }
 
-it.each(modes)('finds all 24 Management destinations locally and reaches the last by keyboard in %s/%s', async (locale, theme) => {
+it.each(modes)('lists all 24 Management destinations as links in one list or strip, never a dropdown, and goes to a pressed one in %s/%s', async (locale, theme) => {
   await setLocale(locale); document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
   const user = userEvent.setup(); const { router, reads } = draw('/admin/overview');
   const label = i18n.t('admin.nav.label'); const nav = await screen.findByRole('navigation', { name: label });
-  const field = within(nav).getByRole('combobox', { name: label });
+  expect(within(nav).queryByRole('combobox')).not.toBeInTheDocument();
   expect(LISTED.map((entry) => entry.id)).toEqual([
     'overview', 'users', 'tokens', 'orgs', 'everything', 'sign-in', 'email', 'hosts', 'runtimes', 'templates', 'mcp',
     'capabilities', 'harnesses', 'agents', 'plugins', 'defaults', 'rates', 'settings', 'storage', 'semantic-search',
@@ -74,25 +74,14 @@ it.each(modes)('finds all 24 Management destinations locally and reaches the las
   expect(within(nav).getAllByRole('link')).toHaveLength(24);
   for (const entry of LISTED) expect(within(nav).getByRole('link', { name: i18n.t(`admin.sections.${entry.id}.title`) })).toHaveAttribute('href', `/admin/${entry.id}`);
   const initial = i18n.t('admin.sections.overview.title'); const last = i18n.t('admin.sections.audit.title');
-  current(nav, initial); expect(field).toHaveValue(initial); expect(reads).toHaveBeenCalledTimes(1);
-  await user.click(field); expect(screen.getAllByRole('option')).toHaveLength(24);
-  expect(field).toHaveAttribute('placeholder', i18n.t('ui.combobox.search'));
-  await user.type(field, last);
-  expect(screen.getAllByRole('option')).toHaveLength(1); expect(screen.getByRole('option', { name: last })).toBeVisible();
-  expect(router.state.location.href).toBe('/admin/overview'); current(nav, initial); expect(reads).toHaveBeenCalledTimes(1);
-  await user.keyboard('{Escape}'); expect(field).toHaveValue(initial); expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
-  await user.keyboard('{ArrowDown}'); expect(screen.getAllByRole('option')).toHaveLength(24);
-  await user.keyboard('{End}'); expect(screen.getByRole('option', { name: last, selected: true })).toBeVisible();
-  await user.keyboard('{Enter}');
+  current(nav, initial); expect(reads).toHaveBeenCalledTimes(1);
+  // The list scrolls by itself where it is longer than the window; where narrow, the same names are a row that scrolls sideways.
+  expect(nav.querySelector('ul')).toHaveClass('overflow-x-auto');
+  await user.click(within(nav).getByRole('link', { name: last }));
   await waitFor(() => expect(router.state.location.pathname).toBe('/admin/audit'));
   await waitFor(() => expect(router.state.status).toBe('idle'));
   const settled = screen.getByRole('navigation', { name: label }); current(settled, last);
-  const selectedField = within(settled).getByRole('combobox', { name: label }); expect(selectedField).toHaveValue(last);
-  expect(screen.queryByRole('listbox')).not.toBeInTheDocument(); expect(reads).toHaveBeenCalledTimes(2);
-  await user.type(selectedField, '__missing_destination__');
-  expect(screen.getByText(i18n.t('ui.combobox.empty'))).toBeVisible(); expect(screen.queryAllByRole('option')).toHaveLength(0);
-  await user.keyboard('{Enter}{Escape}'); expect(router.state.location.href).toBe('/admin/audit'); current(settled, last);
-  expect(selectedField).toHaveValue(last); expect(reads).toHaveBeenCalledTimes(2);
+  expect(within(settled).queryByRole('combobox')).not.toBeInTheDocument(); expect(reads).toHaveBeenCalledTimes(2);
 });
 
 const scopes = [
@@ -102,14 +91,12 @@ const scopes = [
 
 for (const scope of scopes) it.each(['en', 'zh-CN'] as const)(`keeps the exact scoped native destination from ${scope.href} in %s`, async (locale) => {
   await setLocale(locale); const user = userEvent.setup(); const { router, reads } = draw(scope.href);
-  const nav = await screen.findByRole('navigation', { name: 'Scoped sections' });
-  const field = within(nav).getByRole('combobox', { name: 'Scoped sections' }); const name = sectionLabel('audit', i18n.t);
-  expect(field).toHaveValue(sectionLabel('defaults', i18n.t)); current(nav, sectionLabel('defaults', i18n.t));
+  const nav = await screen.findByRole('navigation', { name: 'Scoped sections' }); const name = sectionLabel('audit', i18n.t);
+  expect(within(nav).queryByRole('combobox')).not.toBeInTheDocument(); current(nav, sectionLabel('defaults', i18n.t));
   expect(within(nav).getByRole('link', { name })).toHaveAttribute('href', scope.destination);
-  await user.type(field, name); expect(screen.getAllByRole('option')).toHaveLength(1);
   expect(router.state.location.href).toBe(scope.href); expect(reads).toHaveBeenCalledTimes(1);
-  await user.keyboard('{Enter}'); await waitFor(() => expect(router.state.location.href).toBe(scope.destination));
+  await user.click(within(nav).getByRole('link', { name })); await waitFor(() => expect(router.state.location.href).toBe(scope.destination));
   expect(router.state.location.search).toEqual(scope.search); expect(reads).toHaveBeenCalledTimes(2);
   const changed = await screen.findByRole('navigation', { name: 'Scoped sections' });
-  current(changed, name); expect(within(changed).getByRole('combobox', { name: 'Scoped sections' })).toHaveValue(name);
+  current(changed, name); expect(within(changed).queryByRole('combobox')).not.toBeInTheDocument();
 });
