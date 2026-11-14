@@ -12,12 +12,12 @@ mod workspace;
 use http::StatusCode;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::workspace::{
-    ARCHIVE_LIST_LIMIT_MAX, ArchiveEntryKind, ArchiveFormat, EnvironmentArchiveEntryGet,
-    EnvironmentArchiveEntryGetQuery, EnvironmentArchiveList, EnvironmentArchiveListQuery,
-    EnvironmentChangeList, EnvironmentChangeListQuery, EnvironmentFileSearch,
-    EnvironmentFileSearchQuery, EnvironmentFileSearchReply, EnvironmentGitDiffGet,
-    EnvironmentGitDiffGetQuery, EnvironmentGitStatusGet, EnvironmentGitStatusGetQuery,
-    FILE_SEARCH_LIMIT_MAX, FileSearchIn, GIT_DIFF_MAX_BYTES, GitUnavailable, TRUNCATED_HEADER,
+    ArchiveEntryKind, ArchiveFormat, EnvironmentArchiveEntryGet, EnvironmentArchiveEntryGetQuery,
+    EnvironmentArchiveList, EnvironmentArchiveListQuery, EnvironmentChangeList,
+    EnvironmentChangeListQuery, EnvironmentFileSearch, EnvironmentFileSearchQuery,
+    EnvironmentFileSearchReply, EnvironmentGitDiffGet, EnvironmentGitDiffGetQuery,
+    EnvironmentGitStatusGet, EnvironmentGitStatusGetQuery, FileSearchIn, GitUnavailable,
+    TRUNCATED_HEADER,
 };
 use orch_config::ServerConfig;
 use orch_link_contract::commands::{CommandError, CommandKind, ErrorCode as MachineCode};
@@ -180,6 +180,71 @@ async fn the_changes_are_for_whoever_may_read_the_files() {
 // ---------------------------------------------------------------- searching
 
 #[tokio::test]
+async fn a_changed_system_file_cache_allowance_reaches_running_workspaces_and_reset_restores_it() {
+    use orch_api_contract::admin::{
+        AdminSettingDelete, AdminSettingDeleteQuery, AdminSettingSet, AdminSettingSetBody,
+    };
+    let site = live_site().await;
+    site.world.make_admin(&site.ada.person).await;
+    let defaults = orch_link_contract::commands::WorkspaceLimits::default();
+    let default_cache = defaults.directory_cache_bytes;
+    // The running fixture retains the complete attachment from its current machine session.
+    sqlx::query("INSERT INTO commands(id,machine_id,kind,body,state,result,deadline_at) VALUES($1,$2,'env.attach',$3,'succeeded',$4,$5)")
+        .bind(orch_types::new_id())
+        .bind(site.machine)
+        .bind(json!({
+            "environment_id": site.environment,
+            "workspace": defaults,
+            "workspace_root": null,
+            "ignore": [],
+            "index": "full",
+            "mounts": null,
+            "variables": {},
+            "secrets": {}
+        }))
+        .bind(json!({}))
+        .bind(site.world.now() + chrono::Duration::minutes(2))
+        .execute(&mut *site.world.conn().await)
+        .await
+        .unwrap();
+    let key = "workspace.directory_cache_bytes";
+    site.app()
+        .call(AdminSettingSet, &[&key])
+        .token(&site.ada.token)
+        .body(&AdminSettingSetBody {
+            value: json!(8 * 1024 * 1024),
+            locked: None,
+            expected_revision: None,
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        site.disk
+            .attaches()
+            .last()
+            .map(|body| body.workspace.directory_cache_bytes),
+        Some(8 * 1024 * 1024)
+    );
+    site.app()
+        .call(AdminSettingDelete, &[&key])
+        .token(&site.ada.token)
+        .query(&AdminSettingDeleteQuery {
+            expected_revision: None,
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        site.disk
+            .attaches()
+            .last()
+            .map(|body| body.workspace.directory_cache_bytes),
+        Some(default_cache)
+    );
+}
+
+#[tokio::test]
 async fn an_exact_recorded_change_survives_a_later_edit_under_the_same_file_view_gate() {
     let site = live_site().await;
     let first = site
@@ -271,6 +336,7 @@ async fn search(
 
 fn by_name(q: &str) -> EnvironmentFileSearchQuery {
     EnvironmentFileSearchQuery {
+        cursor: None,
         thread: None,
         q: q.to_owned(),
         scope: None,
@@ -295,7 +361,7 @@ async fn files_are_found_by_name_in_the_last_list_whether_or_not_the_machine_is_
     site.publish_manifest().await;
     for _ in 0..2 {
         let found = match search(&site, &site.vic, by_name("MAIN")).await.ok() {
-            EnvironmentFileSearchReply::Names(entries) => entries,
+            EnvironmentFileSearchReply::Names(page) => page.entries,
             other @ EnvironmentFileSearchReply::Content(_) => panic!("{other:?}"),
         };
         assert_eq!(
@@ -316,6 +382,87 @@ async fn files_are_found_by_name_in_the_last_list_whether_or_not_the_machine_is_
 }
 
 #[tokio::test]
+async fn cached_name_search_keeps_every_result_reachable_with_a_small_page_byte_allowance() {
+    let site = live_site().await;
+    site.world
+        .set_at(
+            orch_settings::Target::Node(site.topic),
+            "workspace.directory_page_bytes",
+            json!(1),
+        )
+        .await;
+    site.publish_manifest().await;
+    site.power_off().await;
+    let mut query = EnvironmentFileSearchQuery {
+        limit: Some(1_000_000),
+        ..by_name("web")
+    };
+    let mut paths = std::collections::BTreeSet::new();
+    loop {
+        let page = match search(&site, &site.vic, query.clone()).await.ok() {
+            EnvironmentFileSearchReply::Names(page) => page,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(page.source, orch_api_contract::forks::FilesSource::Cached);
+        assert_eq!(page.entries.len(), 1);
+        for entry in page.entries {
+            assert!(paths.insert(entry.path));
+        }
+        query.cursor = page.next_cursor;
+        if query.cursor.is_none() {
+            break;
+        }
+    }
+    assert!(paths.contains("web/src/main.rs"));
+    assert!(paths.contains("web/src/lib.rs"));
+    assert!(paths.contains("web/README.md"));
+    assert!(paths.contains("web/docs/guide.txt"));
+    assert_eq!(paths.len(), 7);
+    assert_eq!(site.sent(CommandKind::FsSearch), 0);
+}
+
+#[tokio::test]
+async fn a_cached_name_cursor_keeps_the_exact_case_sensitive_search_it_started() {
+    let site = live_site().await;
+    site.disk.put("web/Case-a.txt", b"a");
+    site.disk.put("web/Case-b.txt", b"b");
+    site.disk.put("web/case-c.txt", b"c");
+    site.publish_manifest().await;
+    let mut query = EnvironmentFileSearchQuery {
+        case: Some(true),
+        limit: Some(1),
+        ..by_name("Case")
+    };
+    let first = match search(&site, &site.vic, query.clone()).await.ok() {
+        EnvironmentFileSearchReply::Names(page) => page,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(first.entries[0].path, "web/Case-a.txt");
+    query.cursor = first.next_cursor;
+    assert!(query.cursor.is_some());
+    assert_eq!(
+        search(
+            &site,
+            &site.vic,
+            EnvironmentFileSearchQuery {
+                q: "case".to_owned(),
+                ..query.clone()
+            },
+        )
+        .await
+        .problem()
+        .code,
+        ErrorCode::ConflictStaleRevision
+    );
+    let last = match search(&site, &site.vic, query).await.ok() {
+        EnvironmentFileSearchReply::Names(page) => page,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(last.entries[0].path, "web/Case-b.txt");
+    assert!(last.next_cursor.is_none());
+}
+
+#[tokio::test]
 async fn a_search_is_for_at_least_two_characters() {
     let site = live_site().await;
     site.publish_manifest().await;
@@ -330,16 +477,28 @@ async fn a_search_is_for_at_least_two_characters() {
 }
 
 #[tokio::test]
-async fn names_cannot_be_searched_where_no_list_is_kept_or_none_has_come_yet() {
+async fn filenames_remain_searchable_when_whole_indexing_is_unavailable() {
     let site = live_site().await;
-    // The machine is there and has not sent a list.
-    assert_eq!(
-        search(&site, &site.ada, by_name("main"))
-            .await
-            .problem()
-            .code,
-        ErrorCode::EnvironmentUnavailable
-    );
+    sqlx::query("UPDATE environments SET facts = '{\"index\": \"live\"}' WHERE id = $1")
+        .bind(site.environment)
+        .execute(&site.world.db.pool)
+        .await
+        .unwrap();
+    let found = search(&site, &site.ada, by_name("main")).await.ok();
+    match found {
+        EnvironmentFileSearchReply::Names(page) => {
+            assert_eq!(page.entries[0].path, "web/src/main.rs")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(site.sent(CommandKind::FsSearch), 1);
+}
+
+#[tokio::test]
+async fn an_online_tree_needs_no_manifest_for_names_and_an_offline_tree_reports_its_source() {
+    let site = live_site().await;
+    let found = search(&site, &site.ada, by_name("main")).await.ok();
+    assert!(matches!(found, EnvironmentFileSearchReply::Names(page) if page.entries.len() == 1));
     site.power_off().await;
     assert_eq!(
         search(&site, &site.ada, by_name("main"))
@@ -359,7 +518,7 @@ async fn names_cannot_be_searched_where_no_list_is_kept_or_none_has_come_yet() {
             .await
             .problem()
             .code,
-        ErrorCode::WorkspaceNotIndexed
+        ErrorCode::SourceOffline
     );
 }
 
@@ -428,7 +587,7 @@ async fn a_search_in_the_text_keeps_to_the_directory_asked_for_and_carries_the_o
 }
 
 #[tokio::test]
-async fn how_many_matches_may_be_asked_for_is_bounded() {
+async fn explicit_search_windows_can_exceed_the_default_and_zero_is_still_invalid() {
     let site = live_site().await;
     search(
         &site,
@@ -441,7 +600,7 @@ async fn how_many_matches_may_be_asked_for_is_bounded() {
     .await
     .ok();
     let body = &site.played.as_ref().unwrap().seen_of(CommandKind::FsSearch)[0].body;
-    assert_eq!(body["limit"], FILE_SEARCH_LIMIT_MAX);
+    assert_eq!(body["limit"], 100_000);
     let none = search(
         &site,
         &site.ada,
@@ -513,6 +672,8 @@ async fn archive_list(
         .call(EnvironmentArchiveList, &[&site.environment])
         .token(&by.token)
         .query(&EnvironmentArchiveListQuery {
+            q: None,
+            cursor: None,
             thread: Some(site.thread),
             path: path.to_owned(),
             inside: Some("/docs/".to_owned()),
@@ -571,7 +732,7 @@ async fn what_an_archive_holds_is_read_where_it_lies() {
 }
 
 #[tokio::test]
-async fn how_many_entries_of_an_archive_are_listed_is_bounded_and_a_missing_archive_is_not_found() {
+async fn archive_windows_can_exceed_the_default_and_a_missing_archive_is_not_found() {
     let site = live_site().await;
     site.disk.put("web/pack.zip", b"PK");
     archive_list(&site, &site.ada, "web/pack.zip", Some(1_000_000))
@@ -583,7 +744,7 @@ async fn how_many_entries_of_an_archive_are_listed_is_bounded_and_a_missing_arch
         .unwrap()
         .seen_of(CommandKind::FsArchiveList)[0]
         .body;
-    assert_eq!(body["limit"], ARCHIVE_LIST_LIMIT_MAX);
+    assert_eq!(body["limit"], 1_000_000);
     assert_eq!(
         archive_list(&site, &site.ada, "web/pack.zip", Some(0))
             .await
@@ -701,6 +862,8 @@ async fn git_diff(site: &Site, by: &Who, staged: Option<bool>) -> orch_api_core:
         .call(EnvironmentGitDiffGet, &[&site.environment])
         .token(&by.token)
         .query(&EnvironmentGitDiffGetQuery {
+            cursor: None,
+            max_bytes: None,
             thread: Some(site.thread),
             path: None,
             staged,
@@ -782,6 +945,8 @@ async fn a_difference_can_be_read_by_bytes_without_fetching_more_than_the_bounde
     let site = live_site().await;
     *site.disk.diff.lock().unwrap() = Some(("0123456789".to_owned(), true));
     let query = EnvironmentGitDiffGetQuery {
+        cursor: None,
+        max_bytes: None,
         thread: Some(site.thread),
         path: Some("web".to_owned()),
         staged: None,
@@ -856,18 +1021,19 @@ async fn the_differences_come_as_plain_text_and_what_is_staged_can_be_asked_for(
 }
 
 #[tokio::test]
-async fn a_difference_longer_than_two_mebibytes_is_cut_and_says_so() {
+async fn a_native_difference_page_is_not_cut_again_and_its_continuation_is_preserved() {
     let site = live_site().await;
-    let long = "é".repeat(usize::try_from(GIT_DIFF_MAX_BYTES).unwrap());
+    let long = "é".repeat(2 * 1024 * 1024);
+    let expected = long.len();
     *site.disk.diff.lock().unwrap() = Some((long, false));
     let cut = git_diff(&site, &site.ada, None).await;
     assert_eq!(cut.status, StatusCode::OK);
-    assert!(cut.raw.len() <= usize::try_from(GIT_DIFF_MAX_BYTES).unwrap());
+    assert_eq!(cut.raw.len(), expected);
     assert!(
         std::str::from_utf8(&cut.raw).is_ok(),
         "cut at a character, not in the middle of one"
     );
-    assert_eq!(cut.headers[TRUNCATED_HEADER], "1");
+    assert!(cut.headers.get(TRUNCATED_HEADER).is_none());
 
     // A machine that cut it itself says so as well.
     *site.disk.diff.lock().unwrap() = Some(("short".to_owned(), true));

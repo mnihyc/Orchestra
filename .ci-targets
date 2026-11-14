@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-envhost --lib
+test -p orch-envhost --test environment
+test -p orch-engine --test source --test source_uniform

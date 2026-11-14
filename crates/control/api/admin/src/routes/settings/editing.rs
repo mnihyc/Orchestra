@@ -176,6 +176,8 @@ impl<K: Input> effects::Effect for Editor<K> {
             let request = K::request(query, body);
             if let Request::Set(body) = &request {
                 super::super::resources::validation::setting(&ctx.app.engine, &key, &body.value)?;
+                super::super::resources::validation::named_things_exist(conn, &key, &body.value)
+                    .await?;
             }
             lock_footprint(conn, node, kind, &key).await?;
             let needs = setting_needs(conn, node, &key).await?;
@@ -448,6 +450,16 @@ pub(super) async fn run<K: Input>(
                 .await
         {
             tracing::warn!(node=%output.node,%error,"inherited resource changes remain pending");
+        }
+        if orch_engine::environments::is_workspace_setting(&output.key)
+            && let Err(error) = completed
+                .ctx
+                .app
+                .engine
+                .workspace_scope_changed(output.node)
+                .await
+        {
+            tracing::warn!(node=%output.node,%error,"inherited workspace changes remain pending");
         }
     }
     let full = reply::render::<Setting<K>>(&completed.ctx, &completed.accepted, output).await?;

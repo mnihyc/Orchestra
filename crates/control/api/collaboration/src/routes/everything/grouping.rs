@@ -8,15 +8,11 @@ use crate::registry::Ctx;
 
 use crate::routes::resources::view;
 
-use orch_access_contract::permissions::Permission;
-
 use orch_api_contract::nodes::NodeRef;
 
 use orch_api_contract::resource_groups::ResourceGrouping;
 
 use orch_api_contract::resources::MachineRef;
-
-use orch_authz::Policy;
 
 use orch_authz::Principal;
 
@@ -111,17 +107,8 @@ pub(super) async fn prepare(
             }
             None => principal,
         };
-        if orch_authz::resources::check_machine(
-            conn,
-            reader,
-            machine,
-            Permission::MachineView,
-            Policy::default(),
-        )
-        .await
-        .map_err(ApiError::internal)?
-        .is_allowed()
-        {
+        // A container's machine has no page of its own: it labels nothing, and the list reads on.
+        if crate::routes::resources::grouping::origin_label_allowed(conn, reader, machine).await? {
             allowed.push(machine);
         }
     }

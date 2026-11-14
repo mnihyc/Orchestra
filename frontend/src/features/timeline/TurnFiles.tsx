@@ -1,21 +1,26 @@
 /** One turn's admitted file changes; opening their list does not open another history or workspace. */
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import type { FileChange, Item, Turn } from '@/generated/api-types';
 import { FileLink } from '@/features/files/FileLink';
 import { useTimelineContext } from '@/features/timeline/context';
 import { useThreadPart } from '@/realtime/stores/thread';
+import { Input } from '@/ui/Input';
 import { Tooltip } from '@/ui/Tooltip';
 
 export interface TurnChanges {
-  files: { change: FileChange; itemId: string }[];
+  files: { change: Pick<FileChange, 'path'> & { change: FileChange['change'] | null }; itemId: string | null }[];
   added: number;
   removed: number;
+  partial: boolean;
+  coverage: 'observed' | 'tools';
+  reported: number;
 }
 
 /** Distinct paths retain their last recorded change while counts include every edit made in this turn. */
-export function turnChanges(items: ReadonlyMap<string, Item>, order: readonly string[], turnId: string): TurnChanges {
-  const paths = new Map<string, { change: FileChange; itemId: string }>();
+export function turnChanges(items: ReadonlyMap<string, Item>, order: readonly string[], turnId: string, observed?: readonly string[] | null): TurnChanges {
+  const paths = new Map<string, TurnChanges['files'][number]>();
   let added = 0; let removed = 0;
   for (const id of order) {
     const item = items.get(id);
@@ -25,30 +30,41 @@ export function turnChanges(items: ReadonlyMap<string, Item>, order: readonly st
       added += change.added; removed += change.removed;
     }
   }
-  return { files: [...paths.values()], added, removed };
+  const reported = paths.size;
+  const known = observed !== undefined && observed !== null;
+  const files = known ? [...new Set(observed)].map((path) => paths.get(path) ?? { change: { path, change: null }, itemId: null }) : [...paths.values()];
+  return { files, added, removed, reported, coverage: known ? 'observed' : 'tools', partial: !known || files.some((file) => file.itemId === null) };
 }
 
 export function useTurnChanges(threadId: string, turnId: string): TurnChanges {
   const items = useThreadPart(threadId, (view) => view.items);
   const order = useThreadPart(threadId, (view) => view.order);
-  return useMemo(() => turnChanges(items, order, turnId), [items, order, turnId]);
+  const observed = useThreadPart(threadId, (view) => view.turns.get(turnId)?.files_changed_paths);
+  return useMemo(() => turnChanges(items, order, turnId, observed), [items, order, turnId, observed]);
+}
+
+export function turnFilesLabel(t: TFunction, changes: TurnChanges): string {
+  return t(changes.coverage === 'observed' ? 'thread.viewModes.files' : 'thread.turnFiles.reported', { count: changes.files.length });
 }
 
 export function TurnFiles({ turn, changes }: { turn: Turn; changes: TurnChanges }) {
   const { t } = useTranslation();
   const { detail } = useTimelineContext();
   const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
   const count = changes.files.length;
   if (count === 0) return null;
-  if (detail === 'summary') return <span data-turn-files-count={turn.id}>{t('thread.viewModes.files', { count })}</span>;
+  if (detail === 'summary') return <span data-turn-files-count={turn.id}>{turnFilesLabel(t, changes)}</span>;
   return <details data-turn-files={turn.id} onToggle={(event) => setOpen(event.currentTarget.open)} className="basis-full text-xs text-text-muted">
-    <summary className="w-fit cursor-pointer rounded-md py-1">{t('thread.viewModes.files', { count })}</summary>
-    {open && <ul className="flex flex-col gap-1 py-1" aria-label={t('thread.turnFiles.list')}>
-      {changes.files.map(({ change }) => <li key={change.path} className="flex min-w-0 flex-wrap items-center gap-2">
+    <summary className="w-fit cursor-pointer rounded-md py-1">{turnFilesLabel(t, changes)}</summary>
+    {open && <div className="flex flex-col gap-1 py-1">
+      {count > 10 && <Input label={t('thread.turnFiles.search')} hideLabel placeholder={t('thread.turnFiles.search')} value={search} onChange={(event) => setSearch(event.target.value)} />}
+      <ul className="flex max-h-64 flex-col gap-1 overflow-y-auto" aria-label={t('thread.turnFiles.list')}>
+      {changes.files.filter(({ change }) => change.path.toLocaleLowerCase().includes(search.toLocaleLowerCase())).map(({ change }) => <li key={change.path} className="flex min-w-0 flex-wrap items-center gap-2">
         <code className="min-w-0 flex-1 wrap-anywhere">{change.path}</code>
         {change.change === 'delete' ? <Tooltip content={t('inspector.changes.deleted')}><span aria-disabled="true">{t('inspector.changes.openFile')}</span></Tooltip>
           : <FileLink path={change.path}>{t('inspector.changes.openFile')}</FileLink>}
       </li>)}
-    </ul>}
+    </ul></div>}
   </details>;
 }

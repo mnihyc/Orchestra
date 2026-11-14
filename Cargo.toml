@@ -269,7 +269,7 @@ tempfile = "3"                                             # atomic writes and t
 rustix = { version = "1.1", default-features = false, features = ["std", "fs", "process", "param"] }  # file operations relative to a directory, signals and pidfds, without unsafe code
 nix = { version = "0.31", default-features = false, features = ["sched", "mount", "fs", "user"] }  # the node helper's namespace, chroot and device operations
 tar = { version = "0.4", default-features = false }        # what a tar archive holds, read without unpacking it
-zip = { version = "9", default-features = false, features = ["deflate-flate2"] }  # what a zip archive holds, read without unpacking it
+zip = { version = "=9.2.0", default-features = false, features = ["deflate-flate2"] }  # pin the iterable index API used to keep archive readers bounded
 flate2 = "1"                                               # looking into a tar.gz
 bzip2 = "0.6"                                              # looking into a tar.bz2
 liblzma = "0.4"                                            # looking into a tar.xz

@@ -249,13 +249,14 @@ impl DirectoryPages {
             build.cancel();
             build.join().await?;
         }
+        self.join_searches(environment, attachment).await?;
         self.reap().await
     }
 }
 
 // Shared futures retain one error. Reconstruct the same typed failure for each reader rather
 // than erase its normalized code/retryability. IO keeps its OS code, or kind and original words.
-fn copy_error(error: &HostError) -> HostError {
+pub(super) fn copy_error(error: &HostError) -> HostError {
     match error {
         HostError::Cancelled => HostError::Cancelled,
         HostError::NotFound(value) => HostError::NotFound(value.clone()),

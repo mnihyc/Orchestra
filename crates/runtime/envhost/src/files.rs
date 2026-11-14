@@ -80,6 +80,102 @@ pub(crate) struct DirectoryVersion {
     identity: crate::platform::Identity,
 }
 
+/// A visible directory streamed through its held native handle, with a checked observation end.
+pub(crate) struct DirectoryStream {
+    files: Files,
+    path: RelPath,
+    real: RelPath,
+    dir: Dir,
+    scope: Option<crate::ignore::Scope>,
+    names: Box<dyn Iterator<Item = std::io::Result<OsString>>>,
+    before: DirectoryVersion,
+    done: bool,
+    verify_end: bool,
+}
+
+impl DirectoryStream {
+    pub(crate) fn footprint(&self) -> usize {
+        std::mem::size_of::<Self>() + self.path.as_str().len() + self.real.as_str().len()
+    }
+}
+
+impl Iterator for DirectoryStream {
+    type Item = Result<DirEntry>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        loop {
+            let name = match self.names.next() {
+                Some(Ok(name)) => name,
+                Some(Err(error)) => {
+                    self.done = true;
+                    return Some(Err(HostError::io(format!("listing {}", self.path), error)));
+                }
+                None => {
+                    self.done = true;
+                    if !self.verify_end {
+                        return None;
+                    }
+                    return match self.files.directory_version(&self.path) {
+                        Ok(version) if version == self.before => None,
+                        Ok(_) => Some(Err(HostError::Changed(
+                            "the directory changed during its metadata observation".to_owned(),
+                        ))),
+                        Err(error) => Some(Err(error)),
+                    };
+                }
+            };
+            let one = || -> Result<Option<DirEntry>> {
+                let Some(text) = name.to_str() else {
+                    return Ok(None);
+                };
+                if is_internal_name(text) {
+                    return Ok(None);
+                }
+                let shown = self.path.join(text)?;
+                let real = self.real.join(text)?;
+                let meta = self
+                    .dir
+                    .lstat(&name)
+                    .map_err(|error| HostError::io(format!("describing {shown}"), error))?;
+                if self
+                    .scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.is_ignored(&real, meta.is_dir()))
+                {
+                    return Ok(None);
+                }
+                let target = if meta.is_symlink() {
+                    Some(
+                        self.dir
+                            .read_link(&name)
+                            .map_err(|error| HostError::io(format!("reading link {shown}"), error))?
+                            .to_string_lossy()
+                            .into_owned(),
+                    )
+                } else {
+                    None
+                };
+                Ok(Some(self.files.entry_of(
+                    &shown,
+                    text,
+                    &self.files.displayed_meta(&shown, &meta),
+                    target,
+                )))
+            };
+            match one() {
+                Ok(None) => {}
+                Ok(Some(entry)) => return Some(Ok(entry)),
+                Err(error) => {
+                    self.done = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+    }
+}
+
 /// A file opened for reading, checked to be a regular file, with the version it is.
 #[derive(Debug, Clone)]
 pub struct Opened {
@@ -363,9 +459,14 @@ impl Files {
         let Some(rules) = &self.inner.ignore else {
             return Ok(());
         };
-        if rules.is_ignored(self.ws(), asked, is_dir)
-            || rules.is_ignored(self.ws(), &located.real, is_dir)
-        {
+        let ignored = rules
+            .check(self.ws(), asked, is_dir)
+            .map_err(|problem| HostError::Unsupported(problem.message()))?;
+        let real_ignored = &located.real != asked
+            && rules
+                .check(self.ws(), &located.real, is_dir)
+                .map_err(|problem| HostError::Unsupported(problem.message()))?;
+        if ignored || real_ignored {
             return Err(HostError::Ignored(format!(
                 "{asked} is left out by the workspace's ignore rules"
             )));
@@ -457,67 +558,52 @@ impl Files {
         path: &RelPath,
         visit: &mut dyn FnMut(DirEntry) -> Result<()>,
     ) -> Result<DirectoryVersion> {
+        let mut stream = self.directory_stream(path)?;
+        let before = stream.before.clone();
+        for entry in &mut stream {
+            visit(entry?)?;
+        }
+        Ok(before)
+    }
+
+    pub(crate) fn live_directory_stream(&self, path: &RelPath) -> Result<DirectoryStream> {
+        let mut stream = self.directory_stream(path)?;
+        // A live traversal reports an interval, not immutable membership of the whole tree.
+        stream.verify_end = false;
+        Ok(stream)
+    }
+
+    pub(crate) fn directory_stream(&self, path: &RelPath) -> Result<DirectoryStream> {
         let before = self.directory_version(path)?;
         let located = self.ws().locate(path, Locate::THROUGH)?;
         let dir = self.ws().open_dir(&located)?;
-        let scope = match &self.inner.ignore {
-            Some(rules) => Some(rules.scope_at(self.ws(), &located.real).ok_or_else(|| {
-                HostError::Ignored(format!(
-                    "{path} is left out by the workspace's ignore rules"
-                ))
-            })?),
-            None => None,
-        };
-        let mut failed = None;
-        dir.visit_names(&mut |name| {
-            let mut one = || -> Result<()> {
-                let Some(text) = name.to_str() else {
-                    return Ok(());
-                };
-                if is_internal_name(text) {
-                    return Ok(());
-                }
-                let shown = path.join(text)?;
-                let real = located.real.join(text)?;
-                let meta = dir
-                    .lstat(name)
-                    .map_err(|error| HostError::io(format!("describing {shown}"), error))?;
-                if scope
-                    .as_ref()
-                    .is_some_and(|scope| scope.is_ignored(&real, meta.is_dir()))
-                {
-                    return Ok(());
-                }
-                let target = if meta.is_symlink() {
-                    Some(
-                        dir.read_link(name)
-                            .map_err(|error| HostError::io(format!("reading link {shown}"), error))?
-                            .to_string_lossy()
-                            .into_owned(),
-                    )
-                } else {
-                    None
-                };
-                visit(self.entry_of(&shown, text, &self.displayed_meta(&shown, &meta), target))
-            };
-            match one() {
-                Ok(()) => true,
-                Err(error) => {
-                    failed = Some(error);
-                    false
-                }
-            }
+        let scope = self
+            .ignore()
+            .map(|rules| {
+                rules.scope_at(self.ws(), &located.real).ok_or_else(|| {
+                    HostError::Ignored(format!(
+                        "{path} is left out by the workspace's ignore rules"
+                    ))
+                })
+            })
+            .transpose()?;
+        if let Some(problem) = scope.as_ref().and_then(crate::ignore::Scope::problem) {
+            return Err(HostError::Unsupported(problem.message()));
+        }
+        let names = dir
+            .names_stream()
+            .map_err(|error| HostError::io(format!("listing {path}"), error))?;
+        Ok(DirectoryStream {
+            files: self.clone(),
+            path: path.clone(),
+            real: located.real,
+            dir,
+            scope,
+            names,
+            before,
+            done: false,
+            verify_end: true,
         })
-        .map_err(|error| HostError::io(format!("listing {path}"), error))?;
-        if let Some(error) = failed {
-            return Err(error);
-        }
-        if self.directory_version(path)? != before {
-            return Err(HostError::Changed(
-                "the directory changed during its metadata capture".to_owned(),
-            ));
-        }
-        Ok(before)
     }
 
     /// Lists the directory at `path` (through a link, if it is one): at most
@@ -1083,6 +1169,9 @@ impl Files {
         depth: usize,
         budget: &mut Budget,
     ) -> Result<()> {
+        if let Some(problem) = scope.and_then(crate::ignore::Scope::problem) {
+            return Err(HostError::Unsupported(problem.message()));
+        }
         match meta.kind {
             Kind::File => {
                 let source = from_dir
