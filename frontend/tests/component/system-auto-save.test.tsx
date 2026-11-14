@@ -1,15 +1,20 @@
 /** Management's scalar controls share the registry's guarded one-answer automatic save/Undo path. */
 import { act, cleanup, screen, waitFor } from '@testing-library/react';
+import { QueryClient } from '@tanstack/react-query';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Admin from '@/api/admin';
 import type * as Settings from '@/api/settings';
+import { identityProvidersKey } from '@/api/admin';
+import { metaKey } from '@/api/auth';
 import { NumberSetting, SwitchSetting } from '@/features/admin/SettingRows';
+import { SignIn } from '@/features/admin/SignIn';
 import type { ResolvedSetting } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { TYPING_PAUSE_MS } from '@/lib/debounce';
 import { show } from './support';
+import { meta } from '../doubles/fixtures';
 
 const calls = vi.hoisted(() => ({ read: vi.fn<() => Promise<ResolvedSetting[]>>(), put: vi.fn<typeof Settings.putSetting>(), clear: vi.fn<typeof Settings.clearSetting>() }));
 vi.mock('@/api/admin', async (load) => ({ ...await load<typeof Admin>(), systemSettingsQuery: { queryKey: ['admin', 'settings'], queryFn: calls.read } }));
@@ -19,6 +24,33 @@ const row = (key: string, value: unknown, revision = 7): ResolvedSetting => ({ k
   source: { scope: 'system', node: null }, locked_by: null, writable: true, parts: [] });
 beforeEach(() => { vi.clearAllMocks(); calls.put.mockReset(); calls.clear.mockReset(); });
 afterEach(async () => { cleanup(); useAppearance.setState(appearance); await setLocale('en'); });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const mail of [true, false]) {
+  it(`states that confirmed addresses are required at sign-in and preserves the mail prerequisite in ${locale}, mail ${String(mail)}`, async () => {
+    await setLocale(locale);
+    calls.read.mockResolvedValue([row('registration.email_verification', 'off')]);
+    calls.put.mockResolvedValue(row('registration.email_verification', 'required', 8));
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    cache.setQueryData(metaKey, meta({ mail })); cache.setQueryData(identityProvidersKey, []);
+    const view = show(<SignIn />, cache);
+    try {
+      const name = locale === 'en' ? 'Require a confirmed address to sign in' : '登录时要求邮箱已确认';
+      const control = await screen.findByRole('switch', { name });
+      const hint = locale === 'en' ? 'System administrators and people without an email address can sign in without confirmation. Existing sessions stay signed in.'
+        : '系统管理员和未设置邮箱的人无需确认即可登录。已登录的会话不受影响。';
+      expect(control).not.toBeChecked();
+      const user = userEvent.setup();
+      await user.hover(control);
+      expect(await screen.findByRole('tooltip')).toHaveTextContent(mail ? hint : i18n.t('admin.signIn.verify.noMail'));
+      await user.unhover(control);
+      await user.click(control);
+      if (mail) {
+        await waitFor(() => expect(calls.put).toHaveBeenCalledExactlyOnceWith({ kind: 'system' }, 'registration.email_verification', { value: 'required', locked: false, expectedRevision: 7 }));
+        await waitFor(() => expect(control).toBeChecked());
+      } else { expect(control).toBeDisabled(); expect(calls.put).not.toHaveBeenCalled(); }
+    } finally { view.unmount(); cache.clear(); }
+  });
+}
 
 for (const [locale, theme] of [['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const) {
   it(`saves a valid number without a Save button and fences Undo in ${locale}/${theme}`, async () => {

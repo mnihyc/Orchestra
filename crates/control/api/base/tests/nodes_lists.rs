@@ -52,6 +52,79 @@ async fn tree(world: &World) -> Tree {
 }
 
 #[tokio::test]
+async fn a_hierarchy_branch_pages_its_children_without_loading_other_branches() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let query: OrgTreeGetQuery =
+        serde_json::from_value(serde_json::json!({"parent_id":t.web,"limit":1})).unwrap();
+    let first = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.boss.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(first.readable().len(), 1);
+    assert_eq!(first.readable()[0].parent_id, Some(t.web));
+    let cursor = first
+        .next_cursor
+        .clone()
+        .expect("the other child has a continuation");
+    let second_query: OrgTreeGetQuery =
+        serde_json::from_value(serde_json::json!({"parent_id":t.web,"limit":1,"cursor":cursor}))
+            .unwrap();
+    let second = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.boss.token)
+        .query(&second_query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(second.seq, first.seq);
+    assert_eq!(second.readable().len(), 1);
+    assert_ne!(first.readable()[0].id, second.readable()[0].id);
+    assert_eq!(second.readable()[0].parent_id, Some(t.web));
+    assert!(second.complete);
+    let wrong: OrgTreeGetQuery =
+        serde_json::from_value(serde_json::json!({"parent_id":t.acme,"cursor":first.next_cursor}))
+            .unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(OrgTreeGet, &[&t.acme])
+            .token(&t.boss.token)
+            .query(&wrong)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::RequestInvalid
+    );
+}
+
+#[tokio::test]
+async fn a_tree_page_size_can_exceed_the_shipped_delta_threshold() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let query = OrgTreeGetQuery {
+        limit: Some(u32::try_from(TREE_SYNC_MAX_CHANGES + 1).unwrap()),
+        ..Default::default()
+    };
+    let reply = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.boss.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert!(reply.complete);
+    assert_eq!(reply.readable().len(), 5);
+}
+
+#[tokio::test]
 async fn a_tree_holds_every_node_the_caller_may_view_with_its_marks() {
     let world = World::new().await;
     let t = tree(&world).await;
@@ -161,6 +234,7 @@ async fn a_full_tree_pages_past_the_delta_bound_and_keeps_its_initial_sequence()
         .call(OrgTreeGet, &[&t.acme])
         .token(&t.dan.token)
         .query(&OrgTreeGetQuery {
+            parent_id: None,
             since: Some(seq),
             ..Default::default()
         })
@@ -300,6 +374,7 @@ async fn a_tree_since_a_sequence_holds_what_changed_and_marks_what_is_gone_from_
         .call(OrgTreeGet, &[&t.acme])
         .token(&t.dan.token)
         .query(&OrgTreeGetQuery {
+            parent_id: None,
             since: Some(first.seq),
             ..OrgTreeGetQuery::default()
         })
@@ -330,6 +405,7 @@ async fn a_tree_since_a_sequence_holds_what_changed_and_marks_what_is_gone_from_
         .call(OrgTreeGet, &[&t.acme])
         .token(&t.dan.token)
         .query(&OrgTreeGetQuery {
+            parent_id: None,
             since: Some(since.seq),
             ..OrgTreeGetQuery::default()
         })

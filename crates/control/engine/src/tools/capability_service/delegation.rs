@@ -221,6 +221,9 @@ impl ParentLink {
             let parameters: orch_provider_contract::models::ModelParameters =
                 serde_json::from_value(model.parameters)?;
             let use_request = model::ModelUse {
+                purpose: orch_access_contract::permissions::ProviderPurpose::for_capability(
+                    &record.capability,
+                ),
                 place: record.call.thread,
                 provider: record.provider,
                 offering: &record.model,

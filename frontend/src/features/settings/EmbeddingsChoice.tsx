@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
 import { ProviderDefaultChoice, ProviderDefaultName } from '@/features/settings/ProviderChoice';
+import { ProviderModelChoice } from '@/features/settings/ProviderModelChoice';
 import { type Shape, words } from '@/features/settings/settingsModel';
 import { searchFieldName } from '@/features/settings/settingText';
 import { ValueControl, type ValueControlProps } from '@/features/settings/ValueControl';
@@ -49,6 +50,8 @@ export function SemanticTuningSummary({value,inControl=false,label}:{value:unkno
 
 /** The member that names the provider; the others are edited as the registry draws them. */
 const PROVIDER_MEMBER = 'provider_id';
+/** The member that names the model; it is chosen among the provider's enabled models, never typed. */
+const MODEL_MEMBER = 'model_name';
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -59,8 +62,9 @@ export function EmbeddingsChoice(props: ValueControlProps) {
   if (shape.type !== 'object') return <ValueControl {...props} />;
   const held = isRecord(value) ? value : {};
   const provider = typeof held[PROVIDER_MEMBER] === 'string' ? held[PROVIDER_MEMBER] : '';
-  const rest: Shape = { ...shape, members: shape.members.filter((member) => member.name !== PROVIDER_MEMBER) };
-  const others = Object.fromEntries(Object.entries(held).filter(([name]) => name !== PROVIDER_MEMBER));
+  const model = typeof held[MODEL_MEMBER] === 'string' ? held[MODEL_MEMBER] : '';
+  const rest: Shape = { ...shape, members: shape.members.filter((member) => member.name !== PROVIDER_MEMBER && member.name !== MODEL_MEMBER) };
+  const others = Object.fromEntries(Object.entries(held).filter(([name]) => name !== PROVIDER_MEMBER && name !== MODEL_MEMBER));
   return (
     <div className="flex flex-col gap-4">
       <ProviderDefaultChoice
@@ -70,16 +74,18 @@ export function EmbeddingsChoice(props: ValueControlProps) {
         showLabel
         hideLabel
         disabled={disabled === true}
-        onChange={(next) => onChange({ ...held, [PROVIDER_MEMBER]: next })}
+        onChange={(next) => onChange({ ...held, [PROVIDER_MEMBER]: next, [MODEL_MEMBER]: '' })}
         {...(props.onEdited === undefined ? {} : { onEdited: props.onEdited })}
       />
+      <ProviderModelChoice providerId={provider} value={model} label={labelField(MODEL_MEMBER)} disabled={disabled === true}
+        onChange={(next) => { props.onEdited?.(); onChange({ ...held, [MODEL_MEMBER]: next }); }} />
       <ValueControl
         {...props}
         shape={rest}
         memberLabel={labelField}
         value={others}
         hideLabel
-        onChange={(next) => onChange({ ...(isRecord(next) ? next : {}), [PROVIDER_MEMBER]: provider })}
+        onChange={(next) => onChange({ ...(isRecord(next) ? next : {}), [PROVIDER_MEMBER]: provider, [MODEL_MEMBER]: model })}
       />
     </div>
   );

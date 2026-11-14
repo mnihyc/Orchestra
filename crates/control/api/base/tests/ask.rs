@@ -4,11 +4,15 @@
     clippy::expect_used,
     reason = "a deciding case fails by panicking"
 )]
+#[path = "ask/admin_mode.rs"]
+mod admin_mode;
 #[path = "ask/backend_reserve.rs"]
 mod backend_reserve;
 #[path = "ask/context.rs"]
 mod context;
 mod places;
+#[path = "ask/refusals.rs"]
+mod refusals;
 mod rig;
 mod support;
 
@@ -1610,10 +1614,13 @@ async fn ask_model_options_include_native_constraints_without_provider_read_oper
         .unwrap();
     assert!(option.allowed, "{:?}", option.unavailable_reason);
     let schema = option.request_option_schema.as_ref().unwrap();
-    assert_eq!(
-        schema,
-        &option.model.as_ref().unwrap().option_constraints["openai-responses"]
-    );
+    // Ask declares its own read tools, so hosted web search is the one option it does not offer.
+    let mut offered = option.model.as_ref().unwrap().option_constraints["openai-responses"].clone();
+    offered["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("web_search");
+    assert_eq!(schema, &offered);
     assert!(orch_types::schema::validate(schema, &json!({"temperature":0.3})).is_ok());
     assert!(orch_types::schema::validate(schema, &json!({"temperature":0.8})).is_err());
     assert_eq!(schema["properties"]["temperature"]["maximum"], 0.5);
@@ -1858,6 +1865,173 @@ async fn ask_models_refuses_outside_choices_and_reports_policy_empty_and_unusabl
     );
     assert!(unusable.default_model.is_none());
     assert_eq!(*calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn another_organizations_provider_can_be_shared_for_ask_without_letting_threads_use_it() {
+    use orch_access_contract::permissions::ProviderPurpose;
+    use orch_api_contract::access::{PageChange, PermissionPageGet, PermissionPageUpdate};
+    use orch_engine::access::ResourceAccess;
+    let s = Scene::new().await;
+    let receiver = places::person(&s.rig.world, "askguest").await;
+    places::join(
+        &s.rig.world,
+        s.tree.org.base.id,
+        s.tree.org.base.id,
+        &receiver,
+        "viewer",
+        &s.ada,
+    )
+    .await;
+    let provider = configured_provider(&s).await;
+    let foreign = places::make_org(&s.rig.world, &s.ada, "Model owners", "model-owners").await;
+    sqlx::query("UPDATE providers SET org_id=$2,home_id=$2 WHERE id=$1")
+        .bind(provider)
+        .bind(foreign.base.id)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let page = s
+        .rig
+        .world
+        .app
+        .call(PermissionPageGet, &[&"providers", &provider])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let grant: PageChange = serde_json::from_value(json!({"expected_revision":page.revision,"name":[{
+        "choice":"full_interact","holders":[{"kind":"user","id":receiver.id()}],"options":{"purposes":["ask"]}
+    }]})).unwrap();
+    s.rig
+        .world
+        .app
+        .call(PermissionPageUpdate, &[&"providers", &provider])
+        .token(&s.ada.token)
+        .body(&grant)
+        .send()
+        .await
+        .ok();
+    let page = s
+        .rig
+        .world
+        .app
+        .call(PermissionPageGet, &[&"providers", &provider])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let entry = page.rows.iter().find(|row| row.permission == "provider.use").unwrap().entries.iter()
+        .find(|entry| matches!(&entry.holder, orch_api_contract::access::Holder::User {user} if user.id == receiver.id())).unwrap();
+    assert_eq!(entry.options["purposes"], json!(["ask"]));
+    let entry_id = entry.id;
+    let choices = s
+        .rig
+        .world
+        .app
+        .call(AskModelsGet, &[])
+        .token(&receiver.token)
+        .query(&AskModelsQuery {
+            root_org_id: s.tree.org.base.id,
+        })
+        .send()
+        .await
+        .ok();
+    assert!(choices.models[0].allowed);
+    let access = orch_api_core::thread_access::AuthzAccess::new(s.rig.world.app.app.clock.clone());
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    let turn = access
+        .provider_use(
+            &mut conn,
+            &orch_engine::access::ProviderUse {
+                person: receiver.id(),
+                node: s.tree.topic.base.id,
+                provider,
+                model: None,
+                effort: None,
+                runs_in: None,
+                purpose: ProviderPurpose::Turn,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        !turn.is_allowed(),
+        "Ask access cannot choose the provider for a thread"
+    );
+    drop(conn);
+    s.rig
+        .machine
+        .handler
+        .on(CommandKind::ProviderGenerate, |_| Ok(simple_answer()));
+    let made = create(&s, &receiver, None).await;
+    s.rig
+        .world
+        .app
+        .call(AskMessageCreate, &[&made.conversation_id])
+        .token(&receiver.token)
+        .body(&AskMessageBody {
+            client_id: "ask-only-share".into(),
+            content: vec![ContentPart::Text {
+                text: "Use the shared Ask model".into(),
+            }],
+            context: None,
+            model: None,
+        })
+        .send()
+        .await
+        .ok();
+    eventually("the Ask-only provider answers the person", || async {
+        read(&s, &receiver, made.conversation_id)
+            .await
+            .messages
+            .iter()
+            .any(|message| {
+                message.role == AskRole::Assistant
+                    && message.complete
+                    && message.content.iter().any(|part| {
+                        matches!(part, ContentPart::Text {text} if text == "A retained answer")
+                    })
+            })
+    })
+    .await;
+    let page = s
+        .rig
+        .world
+        .app
+        .call(PermissionPageGet, &[&"providers", &provider])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let update: PageChange = serde_json::from_value(json!({"expected_revision":page.revision,"rows":[{
+        "permission":"provider.use","update":[{"entry_id":entry_id,"options":{"purposes":["turn"]}}]
+    }]})).unwrap();
+    s.rig
+        .world
+        .app
+        .call(PermissionPageUpdate, &[&"providers", &provider])
+        .token(&s.ada.token)
+        .body(&update)
+        .send()
+        .await
+        .ok();
+    let choices = s
+        .rig
+        .world
+        .app
+        .call(AskModelsGet, &[])
+        .token(&receiver.token)
+        .query(&AskModelsQuery {
+            root_org_id: s.tree.org.base.id,
+        })
+        .send()
+        .await
+        .ok();
+    assert!(
+        !choices.models[0].allowed,
+        "thread Use cannot also appear as Ask Use"
+    );
 }
 
 #[tokio::test]

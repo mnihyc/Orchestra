@@ -1,4 +1,4 @@
-//! The options an entry carries: models, efforts, arrangement types and the places work may run in on a provider, and the limits of a host and of a template; what a person's entries allow.
+//! The options an entry carries: purposes, models, efforts, arrangement types and the places work may run in on a provider, and the limits of a host and of a template; what a person's entries allow.
 //!
 //! An entry in the Use row of a provider, a host or a template says what its holder may do with it,
 //! and nothing else takes options. A person is let in by several entries at once (their own, a
@@ -18,7 +18,7 @@
 
 use orch_access_contract::pages::{Entry, Holder};
 use orch_access_contract::permissions::{
-    Arrangement, HostUse, Options, Permission, ProviderUse, TemplateUse,
+    Arrangement, HostUse, Options, Permission, ProviderPurpose, ProviderUse, TemplateUse,
 };
 use orch_access_contract::whereabouts::Whereabouts;
 use orch_agent_contract::discovery::ModelPattern;
@@ -97,10 +97,12 @@ pub fn of_provider(options: &Options) -> ProviderUse {
     }
 }
 
-/// What a person wants to do through a provider, as far as it is known. What is not known does not
-/// narrow: a question that carries no model asks about the entries that allow the place, and so on.
+/// What a person wants to do through a provider, with its actual purpose. Other details not yet known
+/// do not narrow: a question that carries no model asks about the entries that allow the place.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Wanted<'a> {
+    /// The actual work being admitted; a thread choice asks for ordinary turns.
+    pub purpose: ProviderPurpose,
     /// The model, as the provider names it, with the groups of the provider's models it is in.
     pub model: Option<(&'a str, &'a [String])>,
     /// The reasoning effort.
@@ -119,9 +121,10 @@ pub struct Wanted<'a> {
 /// allowed is what a single entry allows, never what several allow member by member.
 #[must_use]
 pub fn entry_allows(options: &ProviderUse, wanted: &Wanted<'_>) -> bool {
-    wanted
-        .model
-        .is_none_or(|(model, groups)| allows_model(options, model, groups))
+    options.allows_purpose(wanted.purpose)
+        && wanted
+            .model
+            .is_none_or(|(model, groups)| allows_model(options, model, groups))
         && wanted.service.is_none_or(|(service, groups)| {
             options
                 .services
@@ -520,6 +523,64 @@ mod tests {
             model: Some((name, &[])),
             ..Wanted::default()
         }
+    }
+
+    #[test]
+    fn an_ask_only_entry_serves_ask_and_never_combines_its_model_with_another_purpose() {
+        use orch_access_contract::permissions::ProviderPurpose;
+        let entries = [
+            provider_use(serde_json::json!({"models":["shared"],"purposes":["ask"]})),
+            provider_use(serde_json::json!({"models":["private"],"purposes":["turn"]})),
+        ];
+        assert!(one_allows(
+            &entries,
+            &Wanted {
+                purpose: ProviderPurpose::Ask,
+                ..in_model("shared")
+            }
+        ));
+        assert!(!one_allows(&entries, &in_model("shared")));
+        assert!(!one_allows(
+            &entries,
+            &Wanted {
+                purpose: ProviderPurpose::Ask,
+                ..in_model("private")
+            }
+        ));
+        assert!(one_allows(&entries, &in_model("private")));
+        assert!(one_allows(
+            &[ProviderUse::default()],
+            &Wanted {
+                purpose: ProviderPurpose::Ask,
+                ..in_model("shared")
+            }
+        ));
+        assert!(entries[0].within(&ProviderUse::default()));
+        assert!(!ProviderUse::default().within(&entries[0]));
+        for purpose in ProviderPurpose::ALL {
+            let one = provider_use(serde_json::json!({"purposes":[purpose]}));
+            for requested in ProviderPurpose::ALL {
+                assert_eq!(
+                    entry_allows(
+                        &one,
+                        &Wanted {
+                            purpose: *requested,
+                            ..Wanted::default()
+                        }
+                    ),
+                    purpose == requested,
+                    "a purpose-specific grant admits exactly that purpose"
+                );
+            }
+        }
+        let empty = provider_use(serde_json::json!({"purposes":[]}));
+        assert!(ProviderPurpose::ALL.iter().all(|purpose| !entry_allows(
+            &empty,
+            &Wanted {
+                purpose: *purpose,
+                ..Wanted::default()
+            }
+        )));
     }
 
     fn at(environment: Id) -> Whereabouts {

@@ -1,7 +1,9 @@
 /** The native missing access beside a viewer's disabled message controls. */
-import { useCallback, useState } from 'react';
+import { useCallback, useContext, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AccessRequest } from '@/features/access/AccessRequest';
+import { mentionInChat } from '@/features/chat/discuss';
+import { ViewRouteContext } from '@/features/workbench/viewOpening';
 import { effortLabel, modelLabel } from '@/features/change/modelLabel';
 import type { Thread } from '@/generated/api-types';
 import { reloadThread } from '@/realtime/live';
@@ -11,10 +13,12 @@ import { Dialog } from '@/ui/Dialog';
 
 export function ViewerAccessLine({ thread }: { thread: Thread }) {
   const { t } = useTranslation();
+  const route = useContext(ViewRouteContext);
   const [requesting, setRequesting] = useState(false);
   const read = useThreadReadRef(thread.id);
   const refresh = useCallback(() => reloadThread(read), [read]);
   const missing = thread.input_access.missing;
+  const environmentOwner = missing.find((entry) => entry.object.kind === 'environment')?.object.owner;
   const requestable = missing.filter((entry) => entry.closed === null && (entry.ask.length > 0 || entry.ask_more > 0));
   const ask = [...new Map(requestable.flatMap((entry) => entry.ask).map((person) => [person.id, person])).values()];
   const person = thread.environment?.placement === 'connected' && missing.some((entry) => entry.object.kind === 'thread');
@@ -31,6 +35,7 @@ export function ViewerAccessLine({ thread }: { thread: Thread }) {
       : requestable.length > 0 ? t('thread.watching.askOthers')
         : person ? t('thread.watching.person', { owner: thread.owner.display_name, thread: thread.name }) : t('thread.watching.nobody')}</span>
     {requestable.length > 0 && <Button size="sm" variant="ghost" onClick={() => setRequesting(true)}>{t('access.request.title')}</Button>}
+    {environmentOwner !== null && environmentOwner !== undefined && <Button size="sm" variant="ghost" onClick={() => mentionInChat(thread.id, thread.chat_id, environmentOwner, route)}>{t('access.request.askInChat')}</Button>}
     <Dialog open={requesting && requestable.length > 0} onOpenChange={setRequesting} title={t('access.request.title')}>
       <AccessRequest missing={requestable} objectId={thread.id} forThread={thread.id} fixed onChanged={refresh} />
     </Dialog>

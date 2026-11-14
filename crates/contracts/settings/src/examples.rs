@@ -15,11 +15,13 @@ pub const ASK_MAX_STEPS: &str = "16";
 pub const ASK_MAX_OUTPUT_TOKENS: &str = "4096";
 pub const ASK_CONTEXT_TOKENS: &str = "120000";
 pub const ASK_MAX_TOOLS: &str = "32";
-pub const ASK_TOOL_BYTES: &str = "65536";
-pub const ASK_TURN_TOOL_BYTES: &str = "262144";
+pub const ASK_DOCS_HITS: &str = "8";
+pub const ASK_DOCS_EXCERPT_TOKENS: &str = "2000";
+pub const ASK_MAX_OPERATIONS: &str = "40";
+pub const ASK_MAX_LINKS: &str = "100";
 pub const AGENT_EFFORT: &str = r#""high""#;
 pub const AGENT_PARAMS: &str = "{}";
-pub const AGENT_FEATURES: &str = r#"{"vision":true}"#;
+pub const AGENT_FEATURES: &str = r#"{"codex.cyber_access":false}"#;
 pub const AGENT_INSTRUCTIONS: &str =
     r#""Run the relevant tests before describing a change as complete.""#;
 /// Joining text, inherited through the existing organization append setting.
@@ -42,6 +44,12 @@ pub const AGENTS_HARNESS_TRUST_MIRROR: &str = "false";
 pub const AGENTS_HARNESS_MIRROR: &str = r#""https://mirror.example.invalid/releases""#;
 /// Unset leaves the native program's cache lifetime unchanged.
 pub const AGENTS_PROMPT_CACHE_TTL: &str = "null";
+/// A slower native action may use a longer wait without changing the turn's execution.
+pub const AGENTS_WEB_ACTION_WAIT_SECS: &str = "240";
+/// Retained evidence has an independent read deadline, in milliseconds.
+pub const AGENTS_NATIVE_RESULT_WAIT_MS: &str = "3000";
+/// A busy session may retain a larger native burst during optional evidence reads.
+pub const AGENTS_NATIVE_RESULT_BUFFER_BYTES: &str = "16777216";
 pub const AGENTS_SUBAGENTS_AT_ONCE: &str = "8";
 pub const AGENTS_SUBAGENT_DEPTH: &str = "1";
 pub const AGENTS_SKILLS: &str = r#"{"019a0000-0000-7000-8000-000000000006":"latest","019a0000-0000-7000-8000-000000000007":"019a0000-0000-7000-8000-000000000008","019a0000-0000-7000-8000-000000000009":"off"}"#;
@@ -102,6 +110,7 @@ pub const SUMMARY_TARGETS: &str = r#"{"thread":{"automatic":true,"on":["turn_com
 pub const SUMMARY_FOLLOW_INTERVAL_SECS: &str = "5";
 pub const SUMMARY_READ_BATCH_SIZE: &str = "100";
 pub const PROVIDERS_ALLOWED: &str = r#"["acme.*"]"#;
+pub const MODELS_ADD_SWITCHES_ON: &str = r#""basic""#;
 pub const COLLAB_ATTRIBUTION: &str = r#""always""#;
 pub const COLLAB_DEFAULT_DELIVERY: &str = r#""queue""#;
 pub const COMPOSER_PASTE_INLINE_CONTEXT_SHARE: &str = "25";
@@ -134,6 +143,7 @@ pub const ORCH_TOOLS_OWNER_READS: &str = "false";
 pub const ORCH_TOOLS_SEARCH_QUERY_CHARS: &str = "2000";
 pub const ORCH_TOOLS_SEARCH_RESULTS: &str = "300";
 pub const ORCH_TOOLS_SEARCH_CONTEXT: &str = "10";
+pub const THREADS_OPENING_ITEMS: &str = "60";
 /// No final offline deadline is imposed by default.
 pub const THREADS_OFFLINE_DEADLINE: &str = "null";
 pub const THREADS_BACKGROUND_WAKE: &str = r#""on""#;
@@ -159,6 +169,7 @@ pub const SOURCE_BRANCH: &str = r#""release""#;
 pub const SOURCE_SECRET_NAME: &str = r#""REPOSITORY_TOKEN""#;
 pub const WORKSPACE_RECORD_DAYS: &str = "7";
 pub const WORKSPACE_RECORD_MAX_BYTES: &str = "1073741824";
+pub const WORKSPACE_RECORD_WAIT_SECS: &str = "30";
 pub const BROADCAST_DELIVERY: &str = r#""steer""#;
 pub const BROADCAST_FALLBACK: &str = r#""next_turn""#;
 pub const BROADCAST_WAKE_IDLE: &str = "false";
@@ -172,7 +183,7 @@ pub const BROWSER_ENABLED: &str = "true";
 pub const PORTS_ENABLED: &str = "true";
 pub const PORTS_MAX_OPEN: &str = "16";
 pub const PORTS_LINK_MAX_SECS: &str = "86400";
-pub const REQUESTS_EXPIRY_HOURS: &str = "24";
+pub const REQUESTS_EXPIRY_MINUTES: &str = "1440";
 pub const BROWSER_PRESET: &str = r#""headless""#;
 pub const BROWSER_ARGS: &str = r#"["--lang=en-US"]"#;
 pub const BROWSER_VIEWPORT: &str = r#""1280x800""#;
@@ -229,7 +240,7 @@ pub const BROADCAST_CHAT_MESSAGES_PER_HOUR: &str = "60";
 /// Messages to one thread have an hourly budget of their own, apart from announcements.
 pub const BROADCAST_THREAD_MESSAGES_PER_HOUR: &str = "60";
 pub const CAPABILITY_RECREATE_GRACE_SECS: &str = "120";
-pub const ACCESS_REQUEST_EXPIRY_DAYS: &str = "14";
+pub const ACCESS_REQUEST_EXPIRY_MINUTES: &str = "20160";
 pub const ACCESS_MAX_PENDING_REQUESTS: &str = "10";
 pub const ACCESS_QUICK_GRANT_DURATIONS: &str = r#"["1d","7d","30d","always"]"#;
 pub const NODES_NEW_COLOR: &str = r#""random""#;
@@ -273,7 +284,7 @@ pub const SHARING_ALLOW_EXTERNAL: &str = "true";
 pub const SHARING_ALLOW_COPY_OUT: &str = "true";
 pub const SHARING_ALLOW_HOLDERS: &str = "true";
 pub const SHARING_ON_LINK: &str = "true";
-pub const SHARING_EXTERNAL_MAX_DAYS: &str = "30";
+pub const SHARING_EXTERNAL_MAX_MINUTES: &str = "43200";
 pub const USAGE_RATES: &str =
     r#"{"gpt-6*":{"input_per_mtok":"1","cached_input_per_mtok":"0.1","output_per_mtok":"4"}}"#;
 pub const USAGE_CATALOGUE: &str = "true";
@@ -306,6 +317,7 @@ pub const DOCS_HISTORY_MAX_BYTES: &str = "16777216";
 pub const DOCS_FILE_MAX_BYTES: &str = "8589934592";
 pub const DOCS_FILES_MAX_BYTES: &str = "1073741824";
 /// A reading-only place can leave the graph and the meaning list out.
+pub const DOCUMENTS_README_BLOCKS: &str = "20";
 pub const DOCUMENTS_LINKS_SHOWN: &str = r#"["referenced_by","references"]"#;
 /// A longer first page for readers who scan many sources.
 pub const DOCUMENTS_LINKS_PAGE_SIZE: &str = "40";
@@ -315,10 +327,12 @@ pub const DOCUMENTS_LINKS_MENTIONS_COUNTED: &str = "500";
 pub const DOCUMENTS_LINKS_ACCESS_CHECKS: &str = "2000";
 pub const DOCUMENTS_LINKS_GRAPH_NODES: &str = "300";
 pub const CHAT_ATTACHMENT_MAX_BYTES: &str = "8589934592";
+pub const SEARCH_TEXT_CHARS: &str = "40000";
 pub const SEARCH_WORD_RECENT_CANDIDATES: &str = "200";
 pub const SEARCH_WORD_CANDIDATES: &str = "50";
 pub const SEARCH_WORD_PROBE_CANDIDATES: &str = "20000";
 pub const SEARCH_PAGE_SIZE: &str = "20";
+pub const NAVIGATION_TREE_PAGE_SIZE: &str = "50";
 pub const SEARCH_REORDER_WINDOW_SECS: &str = "5";
 pub const SEARCH_MEANING_PAUSE_MS: &str = "800";
 pub const SEARCH_CURSOR_ENTRIES: &str = "100";
@@ -344,8 +358,8 @@ pub const ORGS_PERSONAL_FLAT: &str = "true";
 pub const ORGS_CREATED_BY: &str = r#""invited""#;
 pub const NAVIGATION_ORDER: &str = r#"{"by":"changed"}"#;
 pub const INVITATIONS_FORMS: &str = r#"["link","email"]"#;
-pub const INVITATIONS_DEFAULT_HOURS: &str = "168";
-pub const INVITATIONS_MAX_HOURS: &str = "720";
+pub const INVITATIONS_DEFAULT_MINUTES: &str = "10080";
+pub const INVITATIONS_MAX_MINUTES: &str = "43200";
 pub const INVITATIONS_MAX_USES: &str = "100";
 pub const MAIL_SHARED: &str = "true";
 pub const REGISTRATION_EMAIL_VERIFICATION: &str = r#""required""#;

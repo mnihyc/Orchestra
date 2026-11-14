@@ -397,6 +397,7 @@ impl QueryAuthority {
             .background_provider_use(
                 conn,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Embeddings,
                     person: self.work.writer,
                     node: self.work.read.org,
                     provider: self.work.generation.provider,
