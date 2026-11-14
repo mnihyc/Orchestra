@@ -1,0 +1,7 @@
+fmt
+clippy
+test -p orch-db --lib -- queries::machine_reports::tests::
+test -p orch-api-core --test machines --test kmounts_files
+web typecheck
+web lint
+web test -- tests/component/machine-enrollment.test.tsx tests/component/machine-enrollment-arrival.test.tsx tests/component/machine-enroll-again-address.test.tsx tests/component/gateways/installation.test.tsx
