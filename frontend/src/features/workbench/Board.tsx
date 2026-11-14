@@ -1,3 +1,5 @@
+import { mark as perfMark } from '@/lib/marks';
+import { shapeOfTab, TabSkeleton } from '@/features/workbench/TabSkeleton';
 import { selectContentTab } from '@/features/workbench/contentNavigation';
 import { LiveThreadStateIcon } from '@/ui/ThreadState';
 /** The workbench drawn from its layout tree: every group of tabs in its area, each view kept alive while its tab moves, and a tab carried from one place to another by pointer or by keyboard.
@@ -85,6 +87,8 @@ import { useWorkbench } from '@/features/workbench/store';
 import { useFrameReadiness } from '@/shell/FrameReadiness';
 import { isClosable, tabEntries } from '@/features/workbench/Tabs';
 import { SlideOutBar } from './SlideOutBar';
+import { usePeek } from './peek';
+import { useSidebarPreferences } from '@/features/navigation/preferences';
 import { useViews, type ViewDefinition, viewOf } from '@/features/workbench/views';
 import { useVisibleLayout } from '@/features/workbench/availability';
 import { AddViewButton } from '@/features/workbench/OpenViews';
@@ -156,7 +160,10 @@ export function ViewSlot({ tab, primary = false }: { tab: Tab; primary?: boolean
     parent.addEventListener('focusin', focus, true);
     parent.addEventListener('pointerdown', focus, true);
     const closeOpening = ready ? showViewOpening(key, openingForView(tab.id)) : () => undefined;
+    perfMark('switch/shown', { tab: tab.id });
+    const painted = requestAnimationFrame(() => perfMark('switch/painted', { tab: tab.id }));
     return () => {
+      cancelAnimationFrame(painted);
       closeOpening();
       parent.removeEventListener('focusin', focus, true);
       parent.removeEventListener('pointerdown', focus, true);
@@ -165,7 +172,7 @@ export function ViewSlot({ tab, primary = false }: { tab: Tab; primary?: boolean
     };
   }, [key, ready, tab.id]);
   return <div className="h-full min-h-0">
-    {!ready && (primary && pending !== null ? pending : <SkeletonRows rows={4} className="p-3" />)}
+    {!ready && (primary && pending !== null ? pending : <TabSkeleton shape={shapeOfTab(tab)} />)}
     <div ref={slot} hidden={!ready} className="h-full min-h-0" />
   </div>;
 }
@@ -555,6 +562,13 @@ export function Board({ rail, top, status, pending }: BoardProps) {
   const spotOf = (data: unknown): DropSpot | null => (data as DropSpot | undefined) ?? null;
   const focusMode = useWorkbench((state) => state.focusMode);
   const beside = shape === 'wide' || focusMode;
+  // A hidden bar peeks only for a person who chose that, and only after the pointer has rested at its edge.
+  const { peek } = useSidebarPreferences();
+  usePeek({
+    enabled: peek === true && !focusMode && pending === undefined,
+    bars: SLIDING_BARS.filter((id) => (id !== 'right' || beside) && barHasViews(layout, id) && !layout[id].open),
+    onPeek: setOverlay,
+  });
 
   return (
     <DndContext
@@ -613,7 +627,6 @@ export function Board({ rail, top, status, pending }: BoardProps) {
         if (id === 'right' && !beside) return null;
         const usable = barHasViews(layout, id);
         return <Fragment key={id}>
-          {!layout[id].open && usable && <div data-bar-edge={id} aria-hidden className="fixed top-0 bottom-(--status-bar-height) z-(--layer-sticky) w-(--bar-reveal-width)" style={id === 'left' ? { left: 'var(--rail-width)' } : { right: 0 }} onPointerEnter={(event) => { if (event.pointerType !== 'touch') setOverlay(id); }} />}
           <SlideOutBar bar={id} size={layout[id].size} open={usable && overlay === id && !layout[id].open} docked={layout[id].open} onClose={() => setOverlay(null)}>{bar(id).content}</SlideOutBar>
         </Fragment>;
       })}
