@@ -1,0 +1,6 @@
+fmt
+clippy
+contracts
+test -p orch-db --test machine_names
+test -p orch-engine --lib
+test -p orch-engine --test provider_rejection
