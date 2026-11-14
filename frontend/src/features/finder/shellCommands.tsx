@@ -7,7 +7,6 @@
  * own menu, made commands: one list of acts, written once, with what the caller may not do switched off and
  * why.
  */
-import { screenBuilt } from '@/shell/availability';
 import { usePlaceLabel } from '@/features/navigation/placeLabels';
 import { useMutation } from '@tanstack/react-query';
 import { useRouter } from '@tanstack/react-router';
@@ -198,17 +197,17 @@ export function useGlobalCommands(): void {
     const list: Command[] = [];
     const keysOf = (action: KeyActionId | undefined) => (action === undefined ? undefined : keysAct(action, choices) ?? undefined);
     /** A command that leads to a screen: by the route it has in the table of routes, and offered only where the router has the route. */
-    const leadsTo = (id: string, pattern: string, address: string, title: Command['title'], icon: LucideIcon, shortcut?: string) =>
+    const leadsTo = (id: string, pattern: string, address: string, title: Command['title'], icon: LucideIcon, shortcut?: string, keywords?: Command['keywords']) =>
       list.push({
         id,
         kind: 'go',
         title,
-        keywords: (t2) => words(t2, 'commands.words.go'),
+        keywords: (t2) => [...words(t2, 'commands.words.go'), ...(keywords?.(t2) ?? [])],
         icon,
         ...(shortcut === undefined ? {} : { shortcut }),
         path: address,
         run: (how) => (how === 'tab' ? window.open(address, '_blank', 'noopener') : router.history.push(address)),
-        available: () => exists(pattern) && screenBuilt(address),
+        available: () => exists(pattern),
       });
 
     for (const where of SCREENS.filter((entry) => entry.section !== 'settings')) {
@@ -240,7 +239,8 @@ export function useGlobalCommands(): void {
     // Management is for the administrators of the system, who expect it; nobody else is offered it.
     if (system) for (const section of LISTED) {
       leadsTo(`go.admin.${section.id}`, '/admin/$section', pathOf({ to: '/admin/$section', params: { section: section.id } }),
-        (t2) => t2('commands.settingsSection', { scope: t2('screens.admin.title'), section: t2(`admin.sections.${section.id}.title`) }), section.icon);
+        (t2) => t2('commands.settingsSection', { scope: t2('screens.admin.title'), section: t2(`admin.sections.${section.id}.title`) }), section.icon,
+        undefined, section.id === 'email' ? (t2) => words(t2, 'commands.words.email') : undefined);
     }
     if (mode.data?.available === true) {
       const enabled = !mode.data.as_admin;

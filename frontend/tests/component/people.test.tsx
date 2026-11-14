@@ -7,11 +7,17 @@ import * as people from '@/api/people';
 import { ApiError } from '@/api/client';
 import { CommentField } from '@/features/people/CommentField';
 import { DiscussionBell } from '@/features/people/DiscussionBell';
+import { CopyDocumentDialog } from '@/features/people/CopyDocument';
 import { i18n, setLocale } from '@/i18n';
 import { choiceCopy } from '@/i18n/choices';
 import { ADA } from '../doubles/chat-rows';
 import { show } from './support';
 import type { Document as HeardDocument } from '@/generated/api-types';
+
+vi.mock('@/api/nodes', () => ({ nodeQuery: () => ({ queryKey: ['copy-place'], queryFn: () => Promise.resolve({ id: 'destination', name: 'Destination', path: [], access: { permissions: [] }, archived: false }) }), orgsQuery: { queryKey: ['copy-orgs'], queryFn: () => Promise.resolve([]) } }));
+vi.mock('@/api/settings', () => ({ settingsQuery: () => ({ queryKey: ['copy-settings'], queryFn: () => Promise.resolve([]) }) }));
+vi.mock('@/realtime/live', () => ({ useOrgTreeFeed: () => undefined }));
+vi.mock('@/features/search/NamePicker', () => ({ NamePicker: () => null }));
 
 vi.mock('@/api/people', async (original) => ({ ...(await original<typeof people>()), setDiscussionLevel: vi.fn(), documentReadersQuery: (id: string, q: string) => ({ queryKey: ['readers', id, q], queryFn: () => Promise.resolve({ items: q === '' || ADA.username.startsWith(q) ? [{ user: ADA, can_view: true }] : [], next_cursor: null }) }) }));
 beforeEach(() => { vi.mocked(people.setDiscussionLevel).mockReset(); });
@@ -65,4 +71,18 @@ it.each(['en', 'zh-CN'] as const)('the document bell keeps its shipped involved 
   expect(selected).toHaveAttribute('aria-checked', 'true');
   expect(selected).toHaveAccessibleDescription(involved.description);
   expect(screen.getByRole('menuitemradio', { name: all.name })).toHaveAttribute('aria-checked', 'false');
+});
+
+
+it.each([['en', 'Private copy'], ['zh-CN', '私有副本']] as const)('keeps the private-copy choice named the same before and after it is checked in %s', async (locale, name) => {
+  await setLocale(locale);
+  show(<CopyDocumentDialog destination="destination" onClose={() => undefined} />);
+  const choice = screen.getByRole('checkbox', { name });
+  expect(choice).not.toBeChecked();
+  fireEvent.click(choice);
+  expect(screen.getByRole('checkbox', { name })).toBe(choice);
+  expect(choice).toBeChecked();
+  fireEvent.click(choice);
+  expect(screen.getByRole('checkbox', { name })).toBe(choice);
+  expect(choice).not.toBeChecked();
 });
