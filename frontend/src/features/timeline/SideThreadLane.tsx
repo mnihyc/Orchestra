@@ -29,6 +29,7 @@ import { usePromptFocus } from '@/features/timeline/usePromptFocus';
 import { useTimelineWindowKey } from '@/features/timeline/windowKey';
 import { ConversationLane } from '@/features/timeline/Lane';
 import { recentTurns, queuedInputs, sendingInTray } from '@/features/timeline/rows';
+import { useTimelinePreferences } from '@/features/timeline/preferences';
 import { sideLaneKey, timelineUi, useThreadUi } from '@/features/timeline/state';
 import { revealView } from '@/features/workbench/openView';
 import { useViewShown, type ViewProps } from '@/features/workbench/views';
@@ -93,6 +94,7 @@ interface SideFocus { read: ThreadReadRef; reader: number | undefined; request: 
 interface SideConversationProps {
   parentId: string; sideId: string; panel?: boolean; by?: UserRef; at?: string; readOwner?: string;
   location?: SideLocation; onLocation?: (next: SideLocation) => void;
+  reading?: { diagnostics: boolean; hideHistory: boolean };
 }
 interface SideRequest {
   scope: AbortController | null; controller: AbortController; loading: boolean; error: unknown;
@@ -140,7 +142,7 @@ function SideConversation(props: SideConversationProps) {
     onVersionSelect={selectVersion} focus={focus} /></ThreadReadProvider>;
 }
 
-function SideConversationBody({ parentId, sideId, panel = false, by, at, readOwner, read, parentRead, location, onVersionSelect, focus }: SideConversationProps & {
+function SideConversationBody({ parentId, sideId, panel = false, by, at, readOwner, read, parentRead, location, onVersionSelect, focus, reading }: SideConversationProps & {
   read: ThreadReadRef; parentRead: ThreadReadRef; location: SideLocation; onVersionSelect: SelectPromptVersion; focus: SideFocus | null;
 }) {
   const { t } = useTranslation();
@@ -233,9 +235,13 @@ function SideConversationBody({ parentId, sideId, panel = false, by, at, readOwn
   const jump = () => { onVersionSelect(location.continuationId); reloadThread(read); };
   const thread = view.thread;
   const recent = useMemo(() => recentTurns(view.turns), [view.turns]);
+  const diagnostics = reading?.diagnostics ?? parent.diagnostics ?? false;
+  const hideHistory = reading?.hideHistory ?? parent.hideHistory ?? false;
+  const revealed = useMemo(() => itemId === null ? new Set<string>() : new Set([itemId]), [itemId]);
   const context = useMemo<TimelineContext>(() => ({ threadId: sideId, threadName: thread?.name ?? '', detail: 'steps', recent, layout: 'one', setLayout: () => undefined,
+    diagnostics, hideHistory, revealed,
     meId, canInteract: !readOnly && holds(thread?.access, 'thread.interact'), canManage: !readOnly && holds(thread?.access, 'thread.manage'), readOnly, live, lit: null, selection: NOT_PICKING,
-    onVersionSelect, laneThreads: [...(parent.laneThreads ?? []), sideId] }), [sideId, thread?.name, thread?.access, recent, meId, live, parent.laneThreads, readOnly, onVersionSelect]);
+    onVersionSelect, laneThreads: [...(parent.laneThreads ?? []), sideId] }), [sideId, thread?.name, thread?.access, recent, meId, live, parent.laneThreads, readOnly, onVersionSelect, diagnostics, hideHistory, revealed]);
   const queued = useThreadPart(sideId, useShallow(queuedInputs));
   const pending = useMemo(() => sendingInTray(view, sending), [view, sending]);
   if (view.closed === 'deleted') return <p className="text-sm text-text-muted">{t('side.lane.closedUnknown', { name: thread?.name ?? t('side.lane.unnamed') })}</p>;
@@ -330,6 +336,7 @@ export function SideThreadPanel({ tab }: ViewProps) {
   const shown = useViewShown();
   const parentId = tab.of?.thread;
   const sideId = tab.of?.side;
+  const preferences = useTimelinePreferences(parentId);
   return !shown || parentId === undefined || sideId === undefined ? null : <ScrollArea role="region" aria-label={t('side.panelTitle')} tabIndex={0}
-    className="focus-inset h-full p-3" data-side-panel={sideId}><SideConversation key={sideId} parentId={parentId} sideId={sideId} readOwner={tab.id} panel location={{ continuationId: tab.of?.continuation === '' ? null : tab.of?.continuation ?? null, promptId: tab.of?.prompt, itemId: tab.of?.item ?? null }} /></ScrollArea>;
+    className="focus-inset h-full p-3" data-side-panel={sideId}><SideConversation key={sideId} parentId={parentId} sideId={sideId} readOwner={tab.id} panel reading={{ diagnostics: preferences.diagnostics, hideHistory: preferences.hideHistory }} location={{ continuationId: tab.of?.continuation === '' ? null : tab.of?.continuation ?? null, promptId: tab.of?.prompt, itemId: tab.of?.item ?? null }} /></ScrollArea>;
 }

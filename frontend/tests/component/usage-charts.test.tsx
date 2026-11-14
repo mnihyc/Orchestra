@@ -205,5 +205,5 @@ it('reopens an expired page with a fresh first read even before its source clock
   if(review!==null)await userEvent.click(review);
   await userEvent.click(await screen.findByRole('button',{name:'Try again'}));
   await waitFor(()=>expect(planRead).toHaveBeenCalledTimes(3));
-  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  await waitFor(()=>expect(screen.queryByRole('alert')).not.toBeInTheDocument());
 });

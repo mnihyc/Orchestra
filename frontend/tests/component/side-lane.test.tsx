@@ -17,7 +17,7 @@ import { SideLaneSlot, SideThreadLaneRow, SideThreadPanel } from '@/features/tim
 import { SideThreadList } from '@/features/side-threads/SideChips';
 import { ViewOpeningContext } from '@/features/workbench/viewOpening';
 import { sideLaneKey, timelineUi } from '@/features/timeline/state';
-import type { ContentPart, Draft, Item, MarkerSideClosed, NodeRef, Thread } from '@/generated/api-types';
+import type { ContentPart, Draft, Item, MarkerPayload, MarkerSideClosed, NodeRef, Thread } from '@/generated/api-types';
 import { currentLocale, i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { defaultThreadRead, resultThreadRead, type ThreadReadTarget } from '@/realtime/threadScope';
@@ -98,6 +98,26 @@ afterEach(async () => {
 
 describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('a shared aside lane in %s / %s', (locale, theme) => {
   beforeEach(async () => { await setLocale(locale); useAppearance.setState({ locale, theme, resolvedTheme: theme }); });
+
+  it.each([false, true])('uses the main conversation classification with Diagnostics %s', (diagnostics) => {
+    const reports = [
+      ['session_status', { type: 'active', active_flags: [] }, 'Quiet session program'],
+      ['mcp_startup', { status: 'starting' }, 'Starting service program'],
+      ['mcp_startup', { status: 'ready' }, 'Ready service program'],
+      ['mcp_startup', { status: 'failed', message: 'Credentials expired' }, 'Failed service program'],
+    ] as const;
+    act(() => threadWriter.apply(SIDE, { items: reports.map(([change, value, program], index) => numbered(marker(`side-report-${index}`, { marker: 'harness_changed', data: {
+      program, change, subject: 'Source catalog', previous: { state: 'unsupported' }, value, expected: { state: 'unsupported' },
+      changed: false, diverged: false, next_turn: false, turn_id: 'side-turn', reported_at: '2026-10-01T10:00:00.000Z',
+    } } as MarkerPayload, { turn: 'side-turn' }), 22 + index)) }));
+    draw(true, { ...context, diagnostics });
+    const lane = screen.getByRole('region', { name: i18n.t('side.lane.label', { name: reference.name }) });
+    expect(lane).toHaveTextContent('Failed service program');
+    for (const program of ['Quiet session program', 'Starting service program', 'Ready service program']) {
+      if (diagnostics) expect(lane).toHaveTextContent(program);
+      else expect(lane).not.toHaveTextContent(program);
+    }
+  });
 
   it('uses the same bordered frame, messages and command displays as a child stream, then follows the actual answer', async () => {
     draw();

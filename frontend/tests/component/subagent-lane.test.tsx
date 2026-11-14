@@ -12,14 +12,14 @@ import { ViewOpeningContext } from '@/features/workbench/viewOpening';
 import { SubagentLane, SubagentPanel } from '@/features/timeline/SubagentLane';
 import { timelineUi, useTimelineUi } from '@/features/timeline/state';
 import { buildRows } from '@/features/timeline/rows';
-import type { Item, Thread, ThreadItemListReply } from '@/generated/api-types';
+import type { Item, MarkerPayload, Thread, ThreadItemListReply } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { defaultThreadRead } from '@/realtime/threadScope';
 import { threadViewOf, threadWriter } from '@/realtime/stores/thread';
 import { ACME } from '../doubles/fixtures';
 import { backgroundWork } from '../doubles/background-wake';
 import { World } from '../doubles/world';
-import { agentMessage, change, command, fileChange, LOGIN_DIFF, toolCall, turn } from '../doubles/thread-rows';
+import { agentMessage, change, command, fileChange, LOGIN_DIFF, marker, toolCall, turn } from '../doubles/thread-rows';
 import { show } from './support';
 import { retiredCopy } from './retired-copy';
 
@@ -66,12 +66,32 @@ beforeEach(() => {
 });
 afterEach(async () => { cleanup(); threadWriter.evict(THREAD); timelineUi.forget(THREAD); vi.useRealTimers(); await setLocale('en'); document.documentElement.removeAttribute('data-theme'); });
 
-function draw(open = true) {
+function draw(open = true, reader = context) {
   timelineUi.setStep(THREAD, 'review-call', open);
-  return show(<TimelineContextValue.Provider value={context}><ToolCallRow threadId={THREAD} id="review-call" /></TimelineContextValue.Provider>);
+  return show(<TimelineContextValue.Provider value={reader}><ToolCallRow threadId={THREAD} id="review-call" /></TimelineContextValue.Provider>);
 }
 
 describe('a sub-agent lane', () => {
+  it.each([false, true])('uses the main conversation classification with Diagnostics %s', (diagnostics) => {
+    const reports = [
+      ['session_status', { type: 'active', active_flags: [] }, 'Quiet session program'],
+      ['mcp_startup', { status: 'starting' }, 'Starting service program'],
+      ['mcp_startup', { status: 'ready' }, 'Ready service program'],
+      ['mcp_startup', { status: 'failed', message: 'Credentials expired' }, 'Failed service program'],
+    ] as const;
+    act(() => threadWriter.apply(THREAD, { items: reports.map(([change, value, program], index) => numbered(marker(`child-report-${index}`, { marker: 'harness_changed', data: {
+      program, change, subject: 'Source catalog', previous: { state: 'unsupported' }, value, expected: { state: 'unsupported' },
+      changed: false, diverged: false, next_turn: false, turn_id: 'turn-1', reported_at: '2026-10-01T10:00:00.000Z',
+    } } as MarkerPayload, { stream: STREAM, turn: 'turn-1' }), 22 + index)) }));
+    draw(true, { ...context, diagnostics });
+    const lane = screen.getByRole('region', { name: 'Sub-agent reviewer' });
+    expect(lane).toHaveTextContent('Failed service program');
+    for (const program of ['Quiet session program', 'Starting service program', 'Ready service program']) {
+      if (diagnostics) expect(lane).toHaveTextContent(program);
+      else expect(lane).not.toHaveTextContent(program);
+    }
+  });
+
   it('keeps a running child collapsed without a history request until its row is opened', async () => {
     show(<TimelineContextValue.Provider value={context}><ToolCallRow threadId={THREAD} id="review-call" /></TimelineContextValue.Provider>);
     expect(screen.queryByRole('region', { name: 'Sub-agent reviewer' })).not.toBeInTheDocument();
