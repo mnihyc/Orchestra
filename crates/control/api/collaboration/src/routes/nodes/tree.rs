@@ -194,20 +194,84 @@ pub(super) async fn org_tree_in(
     if kind != NodeKind::Org || !is_root || place.org != root {
         return Err(ApiError::not_found());
     }
-    if query.since.is_some() && (query.cursor.is_some() || query.limit.is_some()) {
+    let scoped = query.parent_id.is_some()
+        || query.path_to.is_some()
+        || query.q.is_some()
+        || query.kind.is_some()
+        || query.below_id.is_some();
+    for id in [query.parent_id, query.path_to, query.below_id]
+        .into_iter()
+        .flatten()
+    {
+        let (at, _) = placed(conn, id).await?;
+        if at.org != root {
+            return Err(ApiError::not_found());
+        }
+    }
+    if query.since.is_some() && (query.cursor.is_some() || query.limit.is_some() || scoped) {
         return Err(invalid(
             "since",
-            "cannot be combined with a full-load cursor or limit",
+            "cannot be combined with a snapshot selector",
         ));
     }
-    let limit = query.limit.map_or(TREE_SYNC_MAX_CHANGES, i64::from);
-    if !(1..=TREE_SYNC_MAX_CHANGES).contains(&limit) {
-        return Err(invalid("limit", "must be between 1 and 5000"));
+    if query.path_to.is_some()
+        && (query.parent_id.is_some()
+            || query.q.is_some()
+            || query.kind.is_some()
+            || query.below_id.is_some()
+            || query.cursor.is_some())
+    {
+        return Err(invalid(
+            "path_to",
+            "cannot be combined with a directory or search",
+        ));
     }
+    let path = if let Some(id) = query.path_to {
+        Some(
+            hierarchy::node(conn, id)
+                .await?
+                .ok_or_else(ApiError::not_found)?
+                .path,
+        )
+    } else {
+        None
+    };
+    let limit = if let Some(limit) = query.limit {
+        i64::from(limit)
+    } else if scoped {
+        let parent = query.parent_id.unwrap_or(root);
+        orch_settings::get::<i64>(
+            conn,
+            orch_settings::Place::Node(parent),
+            orch_settings_contract::registry::keys::NAVIGATION_TREE_PAGE_SIZE,
+        )
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::internal("the hierarchy page size has no value"))?
+    } else {
+        TREE_SYNC_MAX_CHANGES
+    };
+    if limit < 1 {
+        return Err(invalid("limit", "must be positive"));
+    }
+    let branch = orch_types::Hash::of(
+        &serde_json::to_vec(&(
+            query.parent_id,
+            query.path_to,
+            &query.q,
+            query.kind,
+            query.below_id,
+        ))
+        .map_err(ApiError::internal)?,
+    )
+    .to_string();
     let (seq, after) = if let Some(cursor) = query.cursor.as_deref() {
         let bad = || invalid("cursor", "is not a cursor of this tree");
         let parts: Vec<&str> = cursor.split('|').collect();
-        if parts.len() != 4 || parts[0] != root.to_string() || parts[1] != caller.user().to_string()
+        if parts.len() != 5
+            || parts[0] != root.to_string()
+            || parts[1] != caller.user().to_string()
+            || parts[3] != branch
         {
             return Err(bad());
         }
@@ -215,7 +279,7 @@ pub(super) async fn org_tree_in(
         if seq < 0 {
             return Err(bad());
         }
-        (seq, Some(parts[3].parse::<Id>().map_err(|_| bad())?))
+        (seq, Some(parts[4].parse::<Id>().map_err(|_| bad())?))
     } else {
         (hierarchy::tree_seq(conn, root).await?, None)
     };
@@ -227,6 +291,8 @@ pub(super) async fn org_tree_in(
                 PreparedTree {
                     reply: OrgTreeGetReply {
                         settings: None,
+                        ancestors: Vec::new(),
+                        feed: None,
                         seq,
                         since: query.since,
                         complete: false,
@@ -252,7 +318,31 @@ pub(super) async fn org_tree_in(
         let mut selected = Vec::new();
         let mut position = after;
         'pages: loop {
-            let batch = hierarchy::tree_page(conn, root, position, limit + 1).await?;
+            let kind = match query.kind {
+                Some(NodeKind::Org) => Some("org"),
+                Some(NodeKind::Project) => Some("project"),
+                Some(NodeKind::Topic) => Some("topic"),
+                Some(NodeKind::Thread) => Some("thread"),
+                None => None,
+            };
+            let batch = hierarchy::tree_window(
+                conn,
+                root,
+                query.parent_id,
+                position,
+                if path.is_some() {
+                    i64::MAX
+                } else {
+                    limit.saturating_add(1)
+                },
+                &hierarchy::TreeSelector {
+                    text: query.q.as_deref(),
+                    kind,
+                    below: query.below_id,
+                    ids: path.as_deref(),
+                },
+            )
+            .await?;
             let exhausted = i64::try_from(batch.len()).unwrap_or(i64::MAX) <= limit;
             if let Some(last) = batch.last() {
                 position = Some(last.id);
@@ -261,16 +351,83 @@ pub(super) async fn org_tree_in(
             for (row, target) in batch.into_iter().zip(targets) {
                 selected.push(row);
                 selected_targets.push(target);
-                if i64::try_from(selected.len()).unwrap_or(i64::MAX) > limit {
+                if path.is_none() && i64::try_from(selected.len()).unwrap_or(i64::MAX) > limit {
                     break 'pages;
                 }
             }
-            if exhausted {
+            if exhausted || path.is_some() {
                 break;
             }
         }
         selected
     };
+    let next_cursor = if query.since.is_none()
+        && path.is_none()
+        && i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit
+    {
+        rows.truncate(usize::try_from(limit).unwrap_or(0));
+        rows.last()
+            .map(|row| format!("{root}|{}|{seq}|{branch}|{}", caller.user(), row.id))
+    } else {
+        None
+    };
+    let result_ids = rows.iter().map(|row| row.id).collect::<HashSet<_>>();
+    if scoped && path.is_none() {
+        let ids = rows
+            .iter()
+            .map(|row| row.id)
+            .chain(query.parent_id)
+            .collect::<Vec<_>>();
+        let ancestors = hierarchy::with_ancestors(conn, &ids)
+            .await?
+            .into_iter()
+            .filter(|row| !result_ids.contains(&row.id))
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        let native = hierarchy::tree_window(
+            conn,
+            root,
+            None,
+            None,
+            i64::MAX,
+            &hierarchy::TreeSelector {
+                ids: Some(&ancestors),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let (ancestors, targets) = scope::selected_rows(ctx, conn, caller, native).await?;
+        rows.extend(ancestors);
+        selected_targets.extend(targets);
+    }
+    let fold_parents = if scoped && path.is_none() {
+        result_ids.iter().copied().collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let candidates = hierarchy::tree_fold_candidates(conn, caller.user(), &fold_parents).await?;
+    let fold_graph = orch_authz::engine::Graph::load(
+        conn,
+        &candidates.iter().map(|row| row.id).collect::<Vec<_>>(),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    let mut fold_candidates = Vec::new();
+    for row in candidates {
+        let target = orch_engine::operation_scope::targets::from_node_identity(&fold_graph, row.id)
+            .ok_or_else(ApiError::not_found)?;
+        if scope::permits(
+            ctx,
+            caller,
+            &sources::TREE,
+            Source::Results,
+            target.object.kind,
+            &target,
+        )? {
+            selected_targets.push(target);
+            fold_candidates.push(row);
+        }
+    }
     let all_ids = selected_targets
         .iter()
         .filter_map(|t| t.object.id)
@@ -278,14 +435,63 @@ pub(super) async fn org_tree_in(
     let primary = scope::collection(Source::Results, selected_targets);
     let plan = native::bind_known(ctx, &sources::TREE, std::slice::from_ref(&primary))?;
     let principal = native::preparation_principal(ctx, conn, caller, &plan).await?;
-    let next_cursor =
-        if query.since.is_none() && i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit {
-            rows.truncate(usize::try_from(limit).unwrap_or(0));
-            rows.last()
-                .map(|row| format!("{root}|{}|{seq}|{}", caller.user(), row.id))
-        } else {
-            None
-        };
+    let fold_visible = access::holding(
+        conn,
+        &principal,
+        &fold_candidates.iter().map(|row| row.id).collect::<Vec<_>>(),
+        PermissionName::OfNode(NodePermission::View),
+        Act::Use,
+        Policy::default(),
+    )
+    .await
+    .map_err(ApiError::internal)?
+    .into_iter()
+    .map(|row| row.id)
+    .collect::<BTreeSet<_>>();
+    let thread_ids = fold_candidates
+        .iter()
+        .filter(|row| row.kind == "thread" && fold_visible.contains(&row.id))
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    let fold_displays = orch_engine::views::thread_displays(
+        conn,
+        &thread_ids,
+        Some(caller.user()),
+        principal.now(),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    let mut folds = fold_parents
+        .iter()
+        .map(|id| (*id, orch_api_contract::nodes::TreeFold::default()))
+        .collect::<HashMap<_, _>>();
+    for row in fold_candidates
+        .iter()
+        .filter(|row| fold_visible.contains(&row.id))
+    {
+        for id in row.path.iter().filter(|id| **id != row.id) {
+            let Some(fold) = folds.get_mut(id) else {
+                continue;
+            };
+            if row.parent_id == Some(*id) {
+                fold.children += 1;
+            }
+            fold.waiting += row.waiting;
+            fold.unread |= row.unread;
+            fold.mentions += row.mentions;
+            if let Some(display) = fold_displays.get(&row.id) {
+                let order = &orch_api_contract::threads::THREAD_DISPLAY_URGENCY;
+                if let Some(rank) = order.iter().position(|state| *state == display.state)
+                    && fold
+                        .urgency
+                        .and_then(|state| order.iter().position(|at| *at == state))
+                        .is_none_or(|held| rank < held)
+                {
+                    fold.urgency = Some(display.state);
+                }
+            }
+        }
+    }
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
     let readable_docs = super::tree_docs::readable(conn, &principal, &ids)
         .await
@@ -325,7 +531,7 @@ pub(super) async fn org_tree_in(
         .values()
         .filter_map(|each| each.admin_access.and_then(|reach| reach.place.node()))
         .collect();
-    let prepared_settings = if query.since.is_none() && query.cursor.is_none() {
+    let prepared_settings = if !scoped && query.since.is_none() && query.cursor.is_none() {
         let target = targets::node(conn, root).await?;
         if scope::permits(
             ctx,
@@ -385,11 +591,12 @@ pub(super) async fn org_tree_in(
         scope::names(ctx, conn, &principal, caller, &sources::TREE, wanted).await?;
     let admin_refs = names.qualified_refs(conn, &principal, &admin_ids).await?;
     let hidden_ids = hidden.keys().copied().collect::<BTreeSet<_>>();
-    let visible = rows
+    let mut visible = rows
         .iter()
         .filter(|row| !row.deleted && listed.contains_key(&row.id))
         .map(|row| row.id)
         .collect::<BTreeSet<_>>();
+    visible.extend(fold_visible);
     let docs = readable_docs
         .iter()
         .filter(|id| visible.contains(id))
@@ -422,7 +629,7 @@ pub(super) async fn org_tree_in(
     )
     .await
     .map_err(ApiError::internal)?;
-    let nodes = rows
+    let nodes: Vec<Listed<TreeNode>> = rows
         .into_iter()
         .filter_map(|row| {
             let kind = node_kind(&row.kind)?;
@@ -435,6 +642,7 @@ pub(super) async fn org_tree_in(
                 return query.since.map(|_| Listed::visible(gone(&row, kind)));
             };
             Some(Listed::visible(TreeNode {
+                folded: folds.remove(&row.id),
                 activity_at: Some(orch_types::Time::new(row.activity_at)),
                 admin_access: each
                     .admin_access
@@ -487,6 +695,27 @@ pub(super) async fn org_tree_in(
             }))
         })
         .collect();
+    let (mut nodes, ancestors): (Vec<_>, Vec<_>) = nodes.into_iter().partition(|row| match row {
+        Listed::Visible(row) => result_ids.contains(&row.content.id),
+        Listed::Hidden(row) => result_ids.contains(&row.id),
+    });
+    if let Some(path) = &path {
+        nodes.sort_by_key(|row| {
+            path.iter().position(|id| match row {
+                Listed::Visible(row) => *id == row.content.id,
+                Listed::Hidden(row) => *id == row.id,
+            })
+        });
+    }
+    let feed = scoped.then(|| {
+        orch_realtime_contract::feeds::Feed::DocumentTree(
+            orch_realtime_contract::document_tree::DocumentTreeView::Hierarchy {
+                root,
+                query: query.clone(),
+            },
+        )
+        .to_string()
+    });
     let (settings, settings_facts) = match prepared_settings {
         Some((prepared, target)) => (
             Some(
@@ -503,6 +732,8 @@ pub(super) async fn org_tree_in(
         PreparedTree {
             reply: OrgTreeGetReply {
                 settings,
+                ancestors,
+                feed,
                 seq,
                 since: query.since,
                 complete: next_cursor.is_none(),
@@ -605,6 +836,7 @@ orch_api_base::__api_bind_a30b746301!();
 /// is marked deleted, with nothing else of it.
 fn gone(row: &hierarchy::TreeRow, kind: NodeKind) -> TreeNode {
     TreeNode {
+        folded: None,
         activity_at: None,
         admin_access: None,
         participating: false,
@@ -1409,3 +1641,17 @@ async fn check_tags(conn: &mut orch_db::Conn, topic: Id, tags: &[Id]) -> ApiResu
         .collect();
     super::tags::check(conn, Some(topic), tags, &carried).await
 }
+
+/// Live hierarchy pages use the same admitted native read as their HTTP opening.
+pub(crate) async fn hierarchy_metadata(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &orch_authz::Principal,
+    query: &OrgTreeGetQuery,
+) -> ApiResult<OrgTreeGetReply> {
+    Ok(org_tree_in(ctx, conn, principal.caller(), query)
+        .await?
+        .0
+        .reply)
+}
+orch_api_base::__api_bind_eb1fd91e22!();

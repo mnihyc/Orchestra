@@ -13,6 +13,14 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DocumentTreeView {
+    /// One open hierarchy level, one selector page, or one revealed ancestry path.
+    Hierarchy {
+        /// The actual root organization.
+        root: orch_types::Id,
+        /// Exact bounded selector; this view never accepts a whole-tree or delta read.
+        query: orch_api_contract::nodes::OrgTreeGetQuery,
+    },
+
     /// One requested directory page, or its flat retained document-ancestry inventory.
     Directory {
         /// Exact root/folder identity.
@@ -38,9 +46,14 @@ pub enum DocumentTreeView {
 }
 
 /// A current page/entry replacement. No historical row replay is claimed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum DocumentTreeData {
+    /// Replace one authorized hierarchy page; never replay a root's complete history.
+    Hierarchy {
+        hierarchy: Box<orch_api_contract::nodes::OrgTreeGetReply>,
+    },
+
     /// Replace only this subscribed page.
     Directory {
         /// The same projection as the HTTP list.

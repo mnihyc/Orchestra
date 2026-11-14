@@ -59,6 +59,7 @@ pub struct State {
 
 fn identity(view: &DocumentTreeView) -> Id {
     match view {
+        DocumentTreeView::Hierarchy { root, .. } => *root,
         DocumentTreeView::Directory {
             at: DocumentDirectory::NodeDocs(id) | DocumentDirectory::Container(id),
             ..
@@ -80,6 +81,7 @@ async fn context(
         return Ok(None);
     };
     let route = match view {
+        DocumentTreeView::Hierarchy { .. } => orch_api_contract::nodes::OrgTreeGet::ROUTE,
         DocumentTreeView::Directory { .. } => {
             orch_api_contract::document_tree::DocumentTreeList::ROUTE
         }
@@ -117,6 +119,33 @@ pub(crate) async fn decide(
         return Ok(Access::NotFound);
     };
     let result = match view {
+        DocumentTreeView::Hierarchy { root, query } => {
+            let Some(org) = orch_db::queries::hierarchy::org(&mut conn, *root).await? else {
+                return Ok(Access::NotFound);
+            };
+            if org.parent_id.is_some() {
+                return Ok(Access::NotFound);
+            }
+            let ids = [Some(*root), query.parent_id, query.path_to, query.below_id]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            if !orch_db::queries::feeds::gone_nodes(&mut conn, &ids)
+                .await?
+                .is_empty()
+            {
+                return Ok(Access::Gone);
+            }
+            for id in ids {
+                let Some(row) = orch_db::queries::hierarchy::node(&mut conn, id).await? else {
+                    return Ok(Access::NotFound);
+                };
+                if row.org_id != *root {
+                    return Ok(Access::NotFound);
+                }
+            }
+            return Ok(Access::Allowed);
+        }
         DocumentTreeView::Directory {
             at: DocumentDirectory::NodeDocs(node),
             ..
@@ -192,6 +221,7 @@ pub(crate) async fn decide(
 }
 
 struct Current {
+    tree_seq: Option<i64>,
     data: DocumentTreeData,
     cut: metadata::Cut,
     inspections: Vec<crate::middleware::inspection::Info>,
@@ -201,12 +231,18 @@ async fn unchanged(
     inner: &Arc<Inner>,
     sub: &Subscription,
     cut: &metadata::Cut,
+    tree_seq: Option<i64>,
 ) -> Result<bool, Fail> {
     let mut conn = inner.db.acquire().await?;
     let Some(principal) = principal_for_connection(inner, &mut conn, sub.connection()).await?
     else {
         return Ok(false);
     };
+    if let Some(seq) = tree_seq
+        && orch_db::queries::hierarchy::tree_seq(&mut conn, cut.root).await? != seq
+    {
+        return Ok(false);
+    }
     match metadata::unchanged(&mut conn, &principal, cut, inner.clock.time()).await {
         Ok(()) => Ok(true),
         Err(error) if error.code() == ErrorCode::ConflictStaleRevision => Ok(false),
@@ -221,6 +257,20 @@ async fn read(
     view: &DocumentTreeView,
 ) -> Result<Current, ApiError> {
     match view {
+        DocumentTreeView::Hierarchy { root, query } => {
+            let cut = metadata::cut(conn, principal, *root, ctx.now.into()).await?;
+            let hierarchy =
+                crate::routes::nodes::tree::hierarchy_metadata(ctx, conn, principal, query).await?;
+            Ok(Current {
+                tree_seq: Some(orch_db::queries::hierarchy::tree_seq(conn, *root).await?),
+                data: DocumentTreeData::Hierarchy {
+                    hierarchy: Box::new(hierarchy),
+                },
+                cut,
+                inspections: Vec::new(),
+            })
+        }
+
         DocumentTreeView::Directory {
             at,
             deleted,
@@ -257,6 +307,7 @@ async fn read(
                 other => (other?, false),
             };
             Ok(Current {
+                tree_seq: None,
                 data: DocumentTreeData::Directory {
                     directory: Box::new(value),
                     restart,
@@ -275,6 +326,7 @@ async fn read(
                 inspections,
             } = metadata::entry(ctx, conn, principal, *item, *inspect_deleted).await?;
             Ok(Current {
+                tree_seq: None,
                 data: DocumentTreeData::Entry {
                     entry: Box::new(value),
                 },
@@ -287,6 +339,19 @@ async fn read(
 
 fn fingerprint(data: &Json) -> Result<Hash, Fail> {
     let mut semantic = data.clone();
+    if let Some(hierarchy) = semantic.get_mut("hierarchy").and_then(Json::as_object_mut) {
+        hierarchy.remove("feed");
+        hierarchy.remove("seq");
+        if let Some(cursor) = hierarchy.get_mut("next_cursor")
+            && let Some(text) = cursor.as_str()
+        {
+            let mut parts = text.split('|').map(str::to_owned).collect::<Vec<_>>();
+            if parts.len() == 5 {
+                parts[2] = "current".to_owned();
+                *cursor = Json::String(parts.join("|"));
+            }
+        }
+    }
     if let Some(directory) = semantic.get_mut("directory") {
         // AEAD nonces rotate even when candidate progress is identical. Their bytes are not a change.
         if let Some(cursor) = directory.get_mut("next_cursor")
@@ -372,7 +437,7 @@ pub(crate) async fn current(
         return Ok(());
     };
     drop(conn);
-    if !unchanged(inner, sub, &loaded.cut).await? {
+    if !unchanged(inner, sub, &loaded.cut, loaded.tree_seq).await? {
         inner.ephemeral.document_tree_changed(Some(loaded.cut.root));
         return Ok(());
     }
@@ -407,7 +472,7 @@ pub(crate) async fn current(
     let epoch = super::sync::read_epoch(inner).await?;
     if epoch != loaded.cut.epoch
         || !inner.recheck(sub, st, epoch).await?
-        || !unchanged(inner, sub, &loaded.cut).await?
+        || !unchanged(inner, sub, &loaded.cut, loaded.tree_seq).await?
     {
         inner.ephemeral.document_tree_changed(Some(loaded.cut.root));
         return Ok(());

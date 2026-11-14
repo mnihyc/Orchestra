@@ -137,7 +137,9 @@ pub struct NodeOverviewGetQuery {
 }
 
 /// What kind of node something is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
     /// An org. It lies in another org or stands alone; inside another org it is what people usually
@@ -531,6 +533,10 @@ pub struct JobRef {
 /// A node of the tree, with what a tree view needs and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TreeNode {
+    /// Current reader-visible descendants summarized without retaining their rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folded: Option<TreeFold>,
+
     /// Own and rolled-up thread, document and chat activity; absent only on a deletion stub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_at: Option<Time>,
@@ -574,6 +580,21 @@ pub struct TreeNode {
     /// The native document-directory membership stamp, independent of this node's name or activity.
     #[serde(default)]
     pub docs_seq: Seq,
+}
+
+/// Attention inside a hierarchy branch, computed for this reader at the page's cut.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TreeFold {
+    /// Readable direct children, including children not loaded in this browser.
+    pub children: i64,
+    /// Pending decisions inside it.
+    pub waiting: i64,
+    /// Any unread followed thread or chat inside it.
+    pub unread: bool,
+    /// Unread personal mentions inside it.
+    pub mentions: i64,
+    /// The most urgent current thread presentation inside it.
+    pub urgency: Option<crate::threads::ThreadDisplayState>,
 }
 
 /// What a tree view says of a topic.
@@ -666,6 +687,13 @@ crate::common::full_or_receipt! {
 /// The nodes of an org's tree that the caller may view, whole or as a change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct OrgTreeGetReply {
+    /// The same bounded metadata protocol used by document directory views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed: Option<String>,
+    /// Authorized structural ancestors of this page, outside its result window.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ancestors: Vec<Listed<TreeNode>>,
+
     /// The native settings of this root, on the first full-load page only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<Vec<crate::settings::ResolvedSetting>>,
@@ -1671,17 +1699,36 @@ pub struct NodeAuditListQuery {
 }
 
 /// What an org's tree answers with, from a sequence.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(deny_unknown_fields)]
 pub struct OrgTreeGetQuery {
+    /// Reveal this node's ancestor path instead of reading siblings or descendants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_to: Option<Id>,
+    /// Search readable names in the root on the server; an empty value lists its first page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Narrow a paged selector to this native node kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<NodeKind>,
+    /// Restrict selector results to this place and its descendants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub below_id: Option<Id>,
+
+    /// Only the direct children of this node within the root organization. Omitted reads the full tree.
+    /// A branch snapshot cannot be combined with `since`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<Id>,
     /// Only the nodes that changed after this tree sequence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<Seq>,
     /// Continue a full load; cannot be combined with `since`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
-    /// Nodes scanned in a full-load page, from 1 to [`TREE_SYNC_MAX_CHANGES`].
-    /// Omitted means that maximum. A delta always uses the change bound.
+    /// Positive page size. A branch defaults to navigation.tree_page_size; a full tree defaults
+    /// to the ordinary sync batch size. An explicit size may be larger. A delta uses its change bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
