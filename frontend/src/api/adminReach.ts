@@ -20,7 +20,7 @@ function pages<Row>(key: readonly unknown[], admin: boolean, read: (cursor: stri
     queryFn: async ({ pageParam, signal }): Promise<ReachPage<Row>> => {
       current(reader, signal); const answer = await read(pageParam, signal); current(reader, signal); return answer;
     },
-    getNextPageParam: (page) => page.next_cursor, retry: false, staleTime: 0, gcTime: 0,
+    getNextPageParam: (page) => page.next_cursor, retry: false, gcTime: 0,
   });
 }
 export const reachKeys = {
@@ -52,7 +52,7 @@ export function adminTokenActivityQuery(person: string, token: string, query: Ap
       current(reader, signal);
       const answer = await ok(api.GET('/admin/users/{id}/tokens/{token_id}/activity', { params: { path: { id: person, token_id: token }, query }, signal }));
       current(reader, signal); return answer;
-    }, retry: false, staleTime: 0, gcTime: 0,
+    }, retry: false, gcTime: 0,
   });
 }
 export const ownUploadsQuery = () => pages<UploadInventoryItem>(reachKeys.uploads, false, (cursor, signal) => ok(api.GET('/me/uploads', { params: { query: pageQuery(cursor) }, signal })));
@@ -70,7 +70,7 @@ export function exportManifestQuery(id: string, admin = false) {
   return queryOptions({ ...(admin ? ADMIN_QUERY : {}), queryKey: ['admin-artifact', 'export', id, admin, reader] as const,
     queryFn: async ({ signal }): Promise<ReachExport> => {
       current(reader, signal); const answer = await ok(api.GET('/exports/{id}', { params: { path: { id } }, signal })); current(reader, signal); return answer;
-    }, retry: false, staleTime: 0, gcTime: 0,
+    }, retry: false, gcTime: 0,
   });
 }
 
@@ -87,7 +87,7 @@ export function artifactSnapshotQuery(id: string, admin = false) {
   return queryOptions({ ...(admin ? ADMIN_QUERY : {}), queryKey: ['admin-artifact', 'snapshot', id, admin, reader] as const,
     queryFn: async ({ signal }): Promise<ReachSnapshot> => {
       current(reader, signal); const answer = await ok(api.GET('/snapshots/{id}', { params: { path: { id } }, signal })); current(reader, signal); return answer;
-    }, retry: false, staleTime: 0, gcTime: 0,
+    }, retry: false, gcTime: 0,
   });
 }
 

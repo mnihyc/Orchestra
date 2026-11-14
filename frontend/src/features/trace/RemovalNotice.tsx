@@ -16,7 +16,7 @@ export function RemovalNotice({ environment }: { environment: Environment }) {
   const { t } = useTranslation(); const format = useFormatContext();
   const [openedAt] = useState(Date.now);
   const lifecycle = environmentLifecycle(environment);
-  const policy = useQuery({ ...environmentSettingsQuery(environment.id), enabled: lifecycle === 'unit', staleTime: 0 });
+  const policy = useQuery({ ...environmentSettingsQuery(environment.id), enabled: lifecycle === 'unit' });
   const row = policy.data?.find((entry) => entry.key === 'env.removed_keep_days');
   const removal = environment.removal;
   const lifetime = record(environment.config)['env.lifetime'];

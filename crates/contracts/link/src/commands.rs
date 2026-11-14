@@ -1013,7 +1013,7 @@ commands! {
     /// Adds an input to the turn that is running.
     TurnSteer = "turn.steer": AGENT, Thread, 30, Download, TurnSteer => Empty;
     /// Stops the turn that is running.
-    TurnInterrupt = "turn.interrupt": AGENT, Thread, 30, None, TurnInterrupt => Empty;
+    TurnInterrupt = "turn.interrupt": AGENT, None, 30, None, TurnInterrupt => Empty;
     /// Gives a harness the decision it asked for.
     ApprovalResolve = "approval.resolve": AGENT, Thread, 30, None, ApprovalResolve => Empty;
     /// Gives a harness the outcome of a call to one of the system's own tools.
@@ -1867,6 +1867,8 @@ pub struct SessionOpen {
     /// Whether owned background completions may wake this session.
     #[serde(default = "orch_agent_contract::session::background_wake_default")]
     pub background_wake: bool,
+    /// Seconds before a native web action without an end is closed with its reason.
+    pub web_action_wait_secs: u64,
     /// A native image-generation override; absent keeps the selected program's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_generation: Option<bool>,
@@ -5114,7 +5116,7 @@ mod tests {
             "sandbox_mode": "workspace",
             "available_models": [], "side_reading": null, "workspace_configuration": null,
             "subagent_limits": {"at_once": 8, "depth": 1},
-            "background_wake": true,
+            "web_action_wait_secs": 120, "background_wake": true,
             "instructions": "You are working inside Orch.",
             "memory": { "directory": "/workspace/web/.orch/memory", "kept_by": "agent" },
             "arrangement": "separated",

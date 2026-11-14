@@ -732,6 +732,8 @@ pub use orch_api_contract::threads::MarkerHarnessChanged;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "marker", content = "data", rename_all = "snake_case")]
 pub enum MarkerPayload {
+    /// A retained native session was opened again after its inputs changed.
+    SessionReopened(orch_api_contract::threads::MarkerSessionReopened),
     /// A safe observed program setting/state, using the same history marker contract.
     HarnessChanged(Box<orch_api_contract::threads::MarkerHarnessChanged>),
     /// The resumed session keeps its original instructions until a new session is made.

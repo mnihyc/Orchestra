@@ -76,5 +76,5 @@ function read(target: SummaryTarget, reader: string, signal: AbortSignal): Promi
 export function searchSummaryProjectionQuery(target: SummaryTarget) {
   const reader = summaryReaderKey();
   return queryOptions({ queryKey: ['search-summary-projection', reader, target.kind, target.id] as const,
-    queryFn: ({ signal }) => read(target, reader, signal), staleTime: 0, retry: false });
+    queryFn: ({ signal }) => read(target, reader, signal), retry: false });
 }

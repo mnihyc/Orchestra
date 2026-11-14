@@ -6,10 +6,10 @@ import { useComposerStore } from '@/features/composer/Draft';
 import type { Thread } from '@/generated/api-types';
 
 /** The Plan switch decides, where the thread's program has plan mode; a place may start it on for a first message. */
-export function useGoalPlans(thread: Thread): boolean {
+export function useGoalPlans(thread: Thread, currentPlan?: boolean): boolean {
   const offered = thread.binding?.plan_mode === true;
   const chosen = useComposerStore((held) => held.planning[thread.id]);
-  const settings = useQuery({ ...settingsQuery(thread.id), enabled: offered });
+  const settings = useQuery({ ...settingsQuery(thread.id), enabled: offered && currentPlan === undefined });
   const planFirst = settings.data?.find((setting) => setting.key === 'thread.plan_first')?.value === true;
-  return offered && (chosen ?? (planFirst && thread.usage === null && thread.current_turn_id === null));
+  return offered && (currentPlan ?? chosen ?? (planFirst && thread.usage === null && thread.current_turn_id === null));
 }

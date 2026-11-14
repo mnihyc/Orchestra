@@ -132,7 +132,7 @@ it('groups distinct native homes without dropping mixed lifecycles or counting a
   const first = environments[0], second = environments[1];
   if (first === undefined || second === undefined) throw new Error('Both lifecycle fixtures are required');
   const elsewhere = { ...second, home: { ...second.home, id: 'another-visible-native-place', name: 'Another home' } };
-  const groups = environmentMoveGroups([first, elsewhere, first]);
+  const groups = environmentMoveGroups([first, elsewhere, first].map(({ id, home, template }) => ({ id, home, template })));
   expect(groups).toHaveLength(2);
   expect(groups[0]?.environments.map((row) => row.id)).toEqual([first.id]);
   expect(groups[1]?.environments.map((row) => row.id)).toEqual([second.id]);

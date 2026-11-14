@@ -17,7 +17,7 @@ import { ResourceList, useSearchText } from '@/features/resources/ResourceList';
 import { useHostActs } from '@/features/resources/hosts/acts';
 import { UpdateMark } from '@/features/resources/ComponentUpdate';
 import { oneOf } from '@/features/resources/search';
-import type { Host } from '@/generated/api-types';
+import type { HostListRow as Host } from '@/generated/api-types';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { Meter } from '@/ui/Meter';

@@ -1,4 +1,4 @@
-/** Topic tabs stay on one scrolling row in the actual pane, with every destination reachable. */
+/** Topic tabs wrap in the actual pane, keeping every destination visible and reachable. */
 import { expect, test, type Locator } from '@playwright/test';
 import { caption } from '../../e2e/capture/open.ts';
 import { signInScreenRoute } from '../../e2e/layout-fixtures.ts';
@@ -11,19 +11,15 @@ async function inStrip(list: Locator, tab: Locator) {
   }).toBe(true);
 }
 for (const width of [400, 1440] as const) for (const theme of ['light', 'dark'] as const) for (const locale of ['en', 'zh-CN'] as const) {
-  test(`topic tabs use one row and reveal the selected destination ${width}/${theme}/${locale}`, async ({ page }) => {
+  test(`topic tabs keep every destination visible on wrapped rows ${width}/${theme}/${locale}`, async ({ page }) => {
     await scenario(); await signInScreenRoute(page, { width, theme, locale }); await page.goto(`/topic/${ACME.fixLogin}`);
     const list = page.getByRole('tablist', { name: caption('@places.topic.sections', locale), exact: true }), tabs = list.getByRole('tab');
     await expect(tabs).toHaveCount(7);
     const lines = await tabs.evaluateAll((items) => items.map((item) => item.getBoundingClientRect().top));
-    expect(Math.max(...lines) - Math.min(...lines)).toBeLessThan(1);
+    if (width === 400) expect(Math.max(...lines) - Math.min(...lines)).toBeGreaterThan(1);
+    expect(await list.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    for (const tab of await tabs.all()) await inStrip(list, tab);
     await page.screenshot({ path: test.info().outputPath('topic-tabs.png') });
-    const overflow = await list.evaluate((element) => element.scrollWidth - element.clientWidth);
-    if (overflow > 0) {
-      await list.hover(); await page.mouse.wheel(0, overflow); await inStrip(list, tabs.last());
-      await page.mouse.wheel(0, -overflow); await inStrip(list, tabs.first());
-      await page.mouse.wheel(overflow, 0); await inStrip(list, tabs.last());
-    }
     // Settings is a separate section page; the other six keep this tab list mounted.
     for (const tab of (await tabs.all()).slice(0, -1)) {
       await tab.click(); await expect(tab).toHaveAttribute('aria-selected', 'true'); await inStrip(list, tab);

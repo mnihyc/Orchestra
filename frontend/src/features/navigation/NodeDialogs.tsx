@@ -553,7 +553,7 @@ function ArchiveDialog({ place, open, onClose }: DialogProps & { place: PlaceRef
   const { t } = useTranslation();
   const named = useNamedPlace(place);
   const authority = useQuery({ ...nodeQuery(place.id), enabled: open });
-  const plan = useQuery({ queryKey: ['archive-plan', place.id], queryFn: () => previewArchive(place.id), enabled: open, staleTime: 0, retry: false });
+  const plan = useQuery({ queryKey: ['archive-plan', place.id], queryFn: () => previewArchive(place.id), enabled: open, retry: false });
   const archive = useMutation({
     mutationFn: () => {
       if (plan.data === undefined || plan.isError || plan.data.blockers.length > 0) return Promise.reject(new Error(t('placeReview.newReviewRequired')));

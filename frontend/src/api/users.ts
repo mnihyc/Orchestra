@@ -5,6 +5,7 @@
  * what a person does to their own sign-in: the password, the second step by an authenticator app and
  * by a mailed code, the sessions that are open, linked identities, and API tokens.
  */
+import { READ_NOW } from '@/api/freshness';
 import { queryOptions } from '@tanstack/react-query';
 
 import { meQuery } from '@/api/auth';
@@ -78,7 +79,7 @@ export function revokeInvitation(id: string): Promise<void> {
 /** A bodyless security act needs the server's current account facts, even when the old profile is fresh. */
 async function refreshMe(): Promise<Me> {
   await queryClient.cancelQueries({ queryKey: meQuery.queryKey, exact: true });
-  return queryClient.query({ ...meQuery, staleTime: 0 });
+  return queryClient.query({ ...meQuery, ...READ_NOW });
 }
 
 /** Changes the password; every other session of the person ends with it. */
@@ -119,7 +120,6 @@ export function enableAuthenticator(code: string): Promise<MeTotpEnableReply> {
 export const recoveryCodesQuery = queryOptions({
   queryKey: ['recovery-codes'],
   queryFn: ({ signal }): Promise<RecoveryCodeStatus> => ok(api.GET('/me/recovery-codes', { signal })),
-  staleTime: 0,
 });
 
 /** Replaces every older saved code; the caller shows this batch once, outside persistent caches. */
@@ -191,7 +191,7 @@ export function tokenActivityQuery(id: string, query: ApiTokenActivityQuery) {
   return queryOptions<ApiTokenActivityPage>({
     queryKey: ['token-activity', 'personal', id, query.limit ?? null, query.cursor ?? null] as const,
     queryFn: ({ signal }): Promise<ApiTokenActivityPage> => ok(api.GET('/me/tokens/{id}/activity', { params: { path: { id }, query }, signal })),
-    staleTime: 0, retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
+    retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
   });
 }
 
