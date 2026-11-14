@@ -1,0 +1,13 @@
+fmt
+clippy
+contracts
+test -p orch-settings-contract --lib
+test -p orch-api-contract --lib
+test -p orch-db --lib -- queries::documents::tests::
+test -p orch-engine --lib -- projections::
+test -p orch-engine --lib -- views::
+test -p orch-engine --test search_projections
+test -p orch-api-core --test documents --test document_list_scopes --test private_documents --test search_content
+web typecheck
+web lint
+web test -- tests/component/document-new-title.test.tsx tests/component/document-description.test.tsx tests/component/document-editor-lifecycle.test.tsx tests/component/file-action-gates.test.tsx tests/component/search-stream.test.tsx tests/component/document-move.test.tsx tests/component/document-history-action-availability.test.tsx tests/unit/document-reference-intent.test.ts tests/unit/documents-blocks.test.ts tests/unit/document-cache-placement.test.ts

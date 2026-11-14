@@ -471,6 +471,13 @@ pub struct SearchOrderEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SearchStreamEvent {
+    /// The indexed field scope, including the current allowance for newly projected conversation text.
+    /// Word matches never imply full transcript coverage: raw calls, output, hidden reasoning,
+    /// side threads and text whose masking inputs cannot be opened are excluded.
+    Coverage {
+        /// Characters retained per masked conversation item. Existing projections change on rebuild.
+        conversation_chars: u64,
+    },
     /// The settings that govern this opening, resolved at the selected scope.
     Options {
         /// The initial number of visible rows.
