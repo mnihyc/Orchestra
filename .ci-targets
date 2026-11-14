@@ -1,0 +1,8 @@
+# n41-where: a default environment inherited from the nearest place and named; an environment that cannot run the chosen agent says why and offers the way; one compact field for where a thread runs; measured host figures; first compile.
+fmt
+clippy
+test -p orch-engine --lib
+test -p orch-api-core --test binding_options --test binding_readiness --test kfix_binding
+web typecheck
+web lint
+web test -- tests/component/start-environment-options.test.tsx tests/component/start-flow.test.tsx tests/component/start-submit.test.tsx tests/component/change-compact.test.tsx tests/component/resource-picker.test.tsx

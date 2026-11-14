@@ -15558,6 +15558,21 @@ export interface components {
             missing: components["schemas"]["MissingAccess"][];
         };
         /** @description What settings choose when a thread is bound without being told. */
+        /** @description The environment that the nearest setting of `env.default_id` names for the threads started here, whoever may use it. */
+        BindingDefaultEnvironment: {
+            /**
+             * Format: uuid
+             * @description The environment the setting names.
+             */
+            environment: string;
+            /** @description The place whose setting it is, when that is not the place asked about itself: a project or org above it. */
+            from: components["schemas"]["NodeRef"] | null;
+            /**
+             * @description Why the caller cannot start a thread in it, when they cannot: the reason of its row among the environments,
+             *     or `environment_not_seen` when it is not among those the caller may see.
+             */
+            reason: string | null;
+        };
         BindingDefaults: {
             /**
              * Format: uuid
@@ -15593,7 +15608,10 @@ export interface components {
             home_path: components["schemas"]["NodeRef"][];
             /** @description The host it is on, if managed. */
             host: components["schemas"]["HostRef"] | null;
-            /** @description Whether it is the topic's default. */
+            /**
+             * @description Whether it is the default of the threads started here: the environment the nearest setting of
+             *     `env.default_id` names (the topic's own, else its project's, else its org's), and the caller may use it.
+             */
             is_default: boolean;
             /** @description The machine it is on, if it is a directory on one. */
             machine: components["schemas"]["MachineRef"] | null;
@@ -15657,6 +15675,11 @@ export interface components {
             agent_access?: components["schemas"]["AgentAccessAvailability"] | null;
             /** @description Whether the caller may make a new environment. */
             can_create: components["schemas"]["BindingCanCreate"];
+            /**
+             * @description The environment the nearest setting names as the default, wherever it is set, and why the caller cannot use
+             *     it when they cannot; absent when no setting names one and when rebinding an existing thread.
+             */
+            default_environment?: components["schemas"]["BindingDefaultEnvironment"] | null;
             /** @description What settings choose. */
             defaults: components["schemas"]["BindingDefaults"];
             /** @description What a new thread does about its environment unless told. */
@@ -53001,6 +53024,7 @@ export type Binding = components['schemas']['Binding'];
 export type BindingAccess = components['schemas']['BindingAccess'];
 export type BindingAgent = components['schemas']['BindingAgent'];
 export type BindingCanCreate = components['schemas']['BindingCanCreate'];
+export type BindingDefaultEnvironment = components['schemas']['BindingDefaultEnvironment'];
 export type BindingDefaults = components['schemas']['BindingDefaults'];
 export type BindingEnvironment = components['schemas']['BindingEnvironment'];
 export type BindingMachine = components['schemas']['BindingMachine'];

@@ -106,7 +106,7 @@ it('does not place an imported thread in the old environment while asking for an
   io.asking = true;
   const user = userEvent.setup();
   show(<SetUpThread thread={imported()} onClose={vi.fn()} />);
-  await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.moreTitle') }));
+  await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.title') }));
   await user.click(screen.getByRole('option', { name: 'Env e2' }));
   const save = screen.getByRole('button', { name: 'Set up' });
   expect(save).toBeDisabled();

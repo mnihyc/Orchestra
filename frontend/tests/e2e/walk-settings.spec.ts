@@ -130,7 +130,6 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await page.goto(`/topic/${ACME.fixLogin}`);
     await page.locator('[data-quick-start]').getByRole('button', { name: words.start.quick.change, exact: true }).click();
     const dialog = page.getByRole('dialog', { name: words.start.title.replace('{{parent}}', 'Fix login'), exact: true });
-    await dialog.getByRole('radio', { name: words.start.where.useExisting, exact: true }).click();
     await dialog.getByRole('combobox', { name: words.start.where.title, exact: true }).click();
     const main = page.getByRole('option', { name: 'Failed Main', exact: true });
     await expect(main).toHaveAttribute('aria-disabled', 'true');
@@ -200,7 +199,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
       await dialog.getByRole('button', { name: words.start.options.title, exact: true }).click();
       const draft = dialog.getByRole('textbox', { name: words.start.message.title, exact: true });
       await expect(draft).toHaveValue('Keep the first paint and this draft');
-      await dialog.getByRole('combobox', { name: words.start.where.moreTitle, exact: true }).click();
+      await dialog.getByRole('combobox', { name: words.start.where.title, exact: true }).click();
       await page.getByRole('option', { name: 'Sandbox', exact: true }).click();
       await expect.poll(() => reads.length).toBe(2);
       expect(reads[1]?.searchParams.get('environment_id')).toBe(RUNS_ON.sandbox);

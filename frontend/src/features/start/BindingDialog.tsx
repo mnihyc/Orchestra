@@ -309,7 +309,8 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
 
             <Step title={t('start.where.title')} mark={<ChoiceOriginMark origin={resolved.origins.environment} />}>
               <Where compact place={parent} options={options} value={whereValue} onChange={(next) => pick({ environment: next, arrangement: null })} machines={machines.data ?? []} homeId={place.data?.org_id ?? ''} requesting={requesting} onRequestingChange={setRequesting} onRefresh={retry}
-                newEnvironment={picks.newEnvironment} onNewEnvironmentChange={(newEnvironment) => pick({ newEnvironment })} />
+                newEnvironment={picks.newEnvironment} onNewEnvironmentChange={(newEnvironment) => pick({ newEnvironment })}
+                note={resolved.environmentNote} agentHere={resolved.agentHere} />
               {requesting === null && resolved.fresh && <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={make.pending} />}
             </Step>
           </>
