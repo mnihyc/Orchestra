@@ -26,7 +26,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       const original = await response.json() as ThreadParameters;
       await route.fulfill({ response, json: { ...withModes(original), capabilities: capabilities() } });
     });
-    await page.route(`**/api/v1/threads/${MAIN}/opening?*`, async (route) => {
+    await page.route(`**/api/v1/threads/${MAIN}/opening*`, async (route) => {
       const response = await route.fetch();
       const original = await response.json() as { parameters: ThreadParameters | null };
       await route.fulfill({ response, json: { ...original, parameters: original.parameters === null ? null : { ...withModes(original.parameters), capabilities: capabilities() } } });

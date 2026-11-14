@@ -83,6 +83,33 @@ fn value(value: Value) -> NodeSettingSetBody {
 }
 
 #[tokio::test]
+async fn the_summarizer_editor_is_given_registered_choices_and_their_configuration_fields() {
+    let world = World::new().await;
+    let ada = person(&world, "ada").await;
+    let defs = world
+        .app
+        .call(SettingRegistryGet, &[])
+        .token(&ada.token)
+        .send()
+        .await
+        .ok();
+    let summarizer = defs
+        .iter()
+        .find(|def| def.key == "auto.summarizer")
+        .unwrap();
+    let kinds = summarizer.schema["x-summarizers"]
+        .as_array()
+        .expect("registered kinds are offered as choices");
+    let model = kinds.iter().find(|kind| kind["name"] == "model").unwrap();
+    assert!(!model["title"].as_str().unwrap().is_empty());
+    let fields = &model["config_schema"]["properties"];
+    assert_eq!(fields["provider_id"]["format"], "uuid");
+    assert_eq!(fields["model_name"]["type"], "string");
+    assert!(fields.get("context_tokens").is_some());
+    assert!(fields.get("max_output_tokens").is_some());
+}
+
+#[tokio::test]
 async fn the_registry_lists_every_key_with_its_class_and_where_it_is_written() {
     let world = World::new().await;
     let ada = person(&world, "ada").await;
@@ -400,6 +427,37 @@ async fn a_value_that_does_not_fit_and_a_key_that_is_not_there_are_refused() {
     .await
     .problem();
     assert_eq!(refused.code, ErrorCode::RequestInvalid);
+}
+
+#[tokio::test]
+async fn a_provider_that_does_not_exist_is_refused_at_save_with_its_kind_in_the_sentence() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    let missing = orch_types::new_id();
+    for (key, body) in [
+        ("agent.default_provider_id", json!(missing)),
+        (
+            "search.semantic.embeddings",
+            json!({"provider_id": missing, "model_name": "small"}),
+        ),
+    ] {
+        let refused = put(&world, &s.boss, s.acme, key, &value(body))
+            .await
+            .problem();
+        assert_eq!(refused.code, ErrorCode::RequestInvalid, "{key}");
+        let message = refused.extra["errors"][0]["message"].as_str().unwrap();
+        assert!(
+            message.contains("no provider with this identifier exists"),
+            "{key}: {message}"
+        );
+        assert!(
+            refused.extra["errors"][0]["path"]
+                .as_str()
+                .unwrap()
+                .starts_with("value"),
+            "{key}"
+        );
+    }
 }
 
 #[tokio::test]

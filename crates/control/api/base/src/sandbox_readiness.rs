@@ -85,6 +85,7 @@ impl Prepared {
             .map(|row| -> ApiResult<MachineRef> {
                 Ok(MachineRef {
                     id: row.id,
+                    host_id: row.host_id,
                     name: row.name.clone(),
                     online: row.online,
                     placement: serde_json::from_value(Json::String(row.placement.clone()))

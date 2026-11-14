@@ -1,17 +1,19 @@
-/** R1 W13: one press creates the page; its actual title, not a preliminary dialog, receives typing. */
+/** One press creates the page; its actual title receives typing. */
 import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Documents from '@/api/documents';
 import type * as Router from '@tanstack/react-router';
-import { TitleField } from '@/features/documents/Document';
+import { TitleField, type DocumentFieldSave } from '@/features/documents/Document';
 import { NameNewDocument } from '@/features/documents/NameNewDocument';
 import { useMakeDocument } from '@/features/documents/useMakeDocument';
 import { NewDocumentDialog } from '@/features/navigation/NodeDialogs';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
+import { NetworkError } from '@/lib/requests';
 import { Button } from '@/ui/Button';
+import { deferred } from './deferred';
 import { show } from './support';
 
 // These units consume only the created identity or the completion of a rename; native route tests own full DTOs.
@@ -87,6 +89,84 @@ it('never focuses or renames a title that this reader may not edit', () => {
   expect(screen.getByRole('textbox', { name: i18n.t('documents.page.titleLabel') })).not.toHaveFocus();
   expect(offered).not.toHaveBeenCalled();
   expect(calls.rename).not.toHaveBeenCalled();
+});
+
+it.each(modes)('keeps a failed title through remote updates and retries until it is acknowledged in %s/%s', async (locale, theme) => {
+  await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
+  calls.rename.mockRejectedValueOnce(new NetworkError('offline'));
+  const view = show(<TitleField doc={{ id: 'draft-title', title: 'Original' }} editable onEnter={vi.fn()} />);
+  const field = screen.getByRole('textbox', { name: i18n.t('documents.page.titleLabel') });
+  fireEvent.change(field, { target: { value: 'My retained title' } });
+  expect(await screen.findByRole('alert', {}, { timeout: 2_000 })).toHaveTextContent(i18n.t('documents.page.titleFailed'));
+  view.rerender(<TitleField doc={{ id: 'draft-title', title: 'A teammate’s title' }} editable onEnter={vi.fn()} />);
+  expect(field).toHaveValue('My retained title');
+  const pending = deferred<unknown>(); calls.rename.mockReturnValueOnce(pending.promise);
+  fireEvent.click(screen.getByRole('button', { name: i18n.t('common.tryAgain') }));
+  await waitFor(() => expect(calls.rename).toHaveBeenCalledTimes(2));
+  expect(screen.getByRole('status')).toHaveTextContent(i18n.t('documents.page.saving'));
+  expect(field).toHaveValue('My retained title');
+  await act(async () => { pending.resolve(undefined); await pending.promise; });
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  expect(calls.rename.mock.calls).toEqual([['draft-title', 'My retained title'], ['draft-title', 'My retained title']]);
+});
+
+it('sends title edits in order while an earlier save is still awaiting acknowledgement', async () => {
+  const pending = deferred<unknown>(); calls.rename.mockReturnValueOnce(pending.promise);
+  const view = show(<TitleField doc={{ id: 'ordered-title', title: 'Original' }} editable onEnter={vi.fn()} />);
+  const field = screen.getByRole('textbox', { name: i18n.t('documents.page.titleLabel') });
+  fireEvent.change(field, { target: { value: 'First title' } });
+  await waitFor(() => expect(calls.rename).toHaveBeenCalledTimes(1), { timeout: 2_000 });
+  fireEvent.change(field, { target: { value: 'Second title' } });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 800)); });
+  expect(calls.rename).toHaveBeenCalledTimes(1);
+  view.rerender(<TitleField doc={{ id: 'ordered-title', title: 'First title' }} editable onEnter={vi.fn()} />);
+  expect(field).toHaveValue('Second title');
+  await act(async () => { pending.resolve(undefined); await pending.promise; });
+  await waitFor(() => expect(calls.rename).toHaveBeenCalledTimes(2), { timeout: 2_000 });
+  expect(calls.rename.mock.calls).toEqual([['ordered-title', 'First title'], ['ordered-title', 'Second title']]);
+});
+
+it('keeps a failed title unsaved for the close decision and lets Save retry the retained text', async () => {
+  let guard: DocumentFieldSave | null = null;
+  const current = () => { if (guard === null) throw new Error('The title must register its close guard.'); return guard; };
+  calls.rename.mockRejectedValueOnce(new NetworkError('offline'));
+  show(<TitleField doc={{ id: 'close-title', title: 'Original' }} editable onEnter={vi.fn()} onSaveReady={(next) => { guard = next; }} />);
+  fireEvent.change(screen.getByRole('textbox', { name: i18n.t('documents.page.titleLabel') }), { target: { value: 'Keep before closing' } });
+  expect(current().hasUnsent()).toBe(true);
+  let saved = false;
+  await act(async () => { saved = await current().save(); });
+  expect(saved).toBe(false);
+  expect(current().hasUnsent()).toBe(true);
+  expect(screen.getByRole('textbox', { name: i18n.t('documents.page.titleLabel') })).toHaveValue('Keep before closing');
+  await act(async () => { saved = await current().save(); });
+  expect(saved).toBe(true);
+  expect(current().hasUnsent()).toBe(false);
+  expect(calls.rename.mock.calls).toEqual([['close-title', 'Keep before closing'], ['close-title', 'Keep before closing']]);
+});
+
+it('keeps an acknowledged title on blur while its older metadata is still catching up', async () => {
+  show(<TitleField doc={{ id: 'delayed-title', title: 'Original' }} editable onEnter={vi.fn()} />);
+  const field = screen.getByRole('textbox', { name: i18n.t('documents.page.titleLabel') });
+  fireEvent.focus(field);
+  fireEvent.change(field, { target: { value: 'Confirmed title' } });
+  await waitFor(() => expect(calls.rename).toHaveBeenCalledExactlyOnceWith('delayed-title', 'Confirmed title'), { timeout: 2_000 });
+  await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
+  fireEvent.blur(field);
+  expect(field).toHaveValue('Confirmed title');
+});
+
+it('shows a newer teammate title after the pending title is acknowledged', async () => {
+  const pending = deferred<unknown>(); calls.rename.mockReturnValueOnce(pending.promise);
+  const view = show(<TitleField doc={{ id: 'shared-title', title: 'Original' }} editable onEnter={vi.fn()} />);
+  const field = screen.getByRole('textbox', { name: i18n.t('documents.page.titleLabel') });
+  fireEvent.change(field, { target: { value: 'My acknowledged title' } });
+  await waitFor(() => expect(calls.rename).toHaveBeenCalledTimes(1), { timeout: 2_000 });
+  view.rerender(<TitleField doc={{ id: 'shared-title', title: 'Newer teammate title' }} editable onEnter={vi.fn()} />);
+  expect(field).toHaveValue('My acknowledged title');
+  await act(async () => { pending.resolve(undefined); await pending.promise; });
+  expect(field).toHaveValue('Newer teammate title');
+  expect(calls.rename).toHaveBeenCalledTimes(1);
 });
 
 it.each([{ pending: true, cancelled: false }, { pending: false, cancelled: true }])('honors an existing control’s pending/refusal state ($pending/$cancelled)', async ({ pending, cancelled }) => {

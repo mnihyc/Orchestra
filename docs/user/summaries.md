@@ -54,6 +54,30 @@ under shared caps. Size and interval values are defaults, not spending caps;
 locks above the place still apply. Call recovery follows the configured call
 rules for summaries.
 
+### Configure a summarizer
+
+Open **Settings → Automation → Summarizer** and press its pencil to edit this place's choice.
+Choose a registered summarizer. **A model** uses an API provider and an enabled model,
+chosen by name; the setting writer needs provider Use for other work. **Answer tokens**
+and **Context tokens** show their built-in defaults until you set your own. **Request options**
+and **Instructions per field** open when needed. An unusable provider or model is marked
+beside its field. Other registered kinds show their declared configuration fields.
+Setting up the model form needs no typed kind name, provider identifier or JSON.
+
+**None here** removes this place's choice so inheritance applies. **Edit as JSON** shows
+the raw value. The row's **Save** writes its whole draft once; **Discard** restores the
+saved value. Another row's switch or a filter keeps this draft without saving it.
+Enable automatic **Summary targets** separately; saving a summarizer does not enable
+automatic work. Titles and tags use it only when their own automation choice says so.
+
+The confirmed value lives in the server database. Program updates preserve it with that
+database. Removing this place's override restores inheritance without erasing the setting
+above. Provider Use, model availability and usage caps are checked again when a summary runs.
+
+Each **Summary targets** row has an **Automatic** switch. While enabled, **When**,
+**At most every**, **Reads up to** and **Writes up to** show defaults until you set your own.
+Its **Save** and **Discard** affect only that row's draft.
+
 Without an explicit interval, threads use 120 seconds, topics 900 seconds,
 documents 300 seconds, and chats and chat titles 300 seconds. Topic changes
 aggregate many threads; document edits and chat messages usually arrive in
