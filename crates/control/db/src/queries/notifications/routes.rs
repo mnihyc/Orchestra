@@ -511,6 +511,13 @@ pub async fn record_failure(
     Ok(episode.flatten())
 }
 
+/// Clears only a resolved quiet-zone problem, preserving unrelated delivery failures.
+pub async fn clear_quiet_problem(conn: &mut Conn, route: Id) -> Result<(), DbError> {
+    sqlx::query("UPDATE notification_routes SET last_error = NULL WHERE id = $1 AND last_error ->> 'code' = 'invalid_timezone'")
+        .bind(route).execute(conn).await?;
+    Ok(())
+}
+
 /// Notes that a sample message reached a route's person: when it last accepted moves, and
 /// nothing else, since a test sends no work that waited and repairs no failure by itself.
 pub async fn record_test_taken(
