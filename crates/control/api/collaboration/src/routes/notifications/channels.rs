@@ -66,6 +66,8 @@ use orch_api_contract::notifications::NotificationChannelCreateBody;
 
 use orch_api_contract::notifications::NotificationChannelListQuery;
 
+use orch_api_contract::notifications::NotificationChannelOwner;
+
 use orch_api_contract::notifications::NotificationChannelTestBody;
 
 use orch_api_contract::notifications::NotificationChannelUpdateBody;
@@ -588,6 +590,52 @@ pub(super) async fn prepare_views(
     Ok(PreparedViews {
         rows: shown,
         private_routes,
+    })
+}
+
+/// Native owner and field projection runs before a channel search or page is selected.
+pub async fn list(
+    ctx: Ctx,
+    query: NotificationChannelListQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::notifications::NotificationChannelPage> {
+    let source = format!(
+        "channels:{}:{:?}:{}",
+        ctx.user()?.id(),
+        query.org_id,
+        query.system.unwrap_or(false)
+    );
+    let page = query.collection();
+    let rows =
+        crate::key_operations::native::selected_read::<list_read::Channels>(ctx, query, ()).await?;
+    let kinds = rows
+        .iter()
+        .map(|row| row.kind.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let page = orch_api_base::collection::snapshot(
+        &page,
+        &source,
+        rows,
+        |row| {
+            (
+                match &row.owner {
+                    NotificationChannelOwner::System => 0,
+                    NotificationChannelOwner::Org(_) => 1,
+                    NotificationChannelOwner::Me => 2,
+                },
+                row.created_at,
+                row.id,
+            )
+        },
+        |row| format!("{} {}", row.name, row.kind),
+        false,
+    )?;
+    Ok(orch_api_contract::notifications::NotificationChannelPage {
+        items: page.items,
+        next_cursor: page.next_cursor,
+        kinds,
     })
 }
 

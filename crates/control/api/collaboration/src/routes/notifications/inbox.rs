@@ -631,7 +631,24 @@ pub async fn push_delete(ctx: Ctx, (): (), body: MePushSubscriptionDeleteBody) -
 
 /// The caller's own browsers that took push, without their endpoints or keys: each with a name
 /// from what it said of itself and the hash a browser finds itself by.
-pub async fn push_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<PushDevice>> {
+pub async fn push_list(
+    ctx: Ctx,
+    query: orch_api_contract::common::CollectionQuery,
+    (): (),
+) -> ApiResult<Page<PushDevice>> {
+    let source = format!("personal-devices:{}", ctx.user()?.id());
+    let rows = push_snapshot(ctx, (), ()).await?;
+    crate::collection::snapshot(
+        &query,
+        &source,
+        rows,
+        |row| (row.label.clone(), row.id),
+        |row| row.label.clone(),
+        false,
+    )
+}
+
+async fn push_snapshot(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<PushDevice>> {
     let mut conn = ctx.app.db.acquire().await?;
     let principal = ctx.operation_principal(&mut conn).await?;
     Ok(pages::push_devices_of(&mut conn, principal.user())

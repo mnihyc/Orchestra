@@ -18,7 +18,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::access::Role;
-use crate::common::{Page, PageQuery};
+use crate::common::{CollectionQuery, Page, PageQuery};
 use crate::nodes::{NodeKind, NodeRef, Org};
 use crate::routes::Access::{Public, Rule, User};
 
@@ -424,6 +424,33 @@ pub struct InvitationListQuery {
     /// Only the invitations into this org.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<Id>,
+    /// Only invitations that are unrevoked, unexpired and not used up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    /// Words in its visible destination, address, note or inviter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries in this page; 50 by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::common::query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// Continue the same org, active choice and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl InvitationListQuery {
+    /// Its ordinary named page.
+    #[must_use]
+    pub fn collection(&self) -> CollectionQuery {
+        CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
 }
 
 /// Accepts an invitation.
@@ -713,7 +740,7 @@ crate::endpoints! {
             Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("invitation_names_threads")),
         ]));
     /// Lists the invitations of a place, newest first.
-    InvitationList: GET "/invitations", Rule("the same as making one"), query InvitationListQuery, none, json Vec<Invitation>, 200,
+    InvitationList: GET "/invitations", Rule("the same as making one"), query InvitationListQuery, none, json Page<Invitation>, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Identity(I::Invitation)], Target::ResolvedCollection("invitation_destinations")),
             Facet::response_content(&[Identity(I::Chat)], Target::ResolvedCollection("invitation_chats")),

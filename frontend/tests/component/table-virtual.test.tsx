@@ -4,6 +4,25 @@ import { expect, it, vi } from 'vitest';
 import { Table } from '@/ui/Table';
 import { show } from './support';
 
+it('windows a first server page that already overflows its viewport', () => {
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) { return this.tagName === 'TR' ? 72 : 384; });
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(600);
+  const rows = Array.from({ length: 37 }, (_, index) => ({ id: String(index), name: `Page item ${index}` }));
+  show(<Table label="First page" rows={rows} rowKey={(row) => row.id} virtual columns={[{ id: 'name', header: 'Name', cell: (row) => row.name }]} />);
+  const table = screen.getByRole('table', { name: 'First page' });
+  expect(within(table).getAllByRole('row').length).toBeLessThan(30);
+  expect(within(table).queryByText('Page item 36')).toBeNull();
+  fireEvent.scroll(screen.getByRole('region', { name: 'First page' }), { target: { scrollTop: 2_592 } });
+  expect(within(table).getByText('Page item 36')).toBeVisible();
+});
+
+it('gives an ordinary growing table its own bounded scroll without discarding row state', () => {
+  const rows = Array.from({ length: 11 }, (_, index) => ({ id: String(index), name: `Item ${index}` }));
+  show(<Table label="Editable report" rows={rows} rowKey={(row) => row.id} columns={[{ id: 'name', header: 'Name', cell: (row) => <input aria-label={row.name} defaultValue={row.name} /> }]} />);
+  expect(screen.getByRole('region', { name: 'Editable report' })).toHaveClass('max-h-96', 'overflow-y-auto');
+  expect(screen.getAllByRole('textbox')).toHaveLength(11);
+});
+
 it('keeps the first and later rows reachable without mounting the whole list', () => {
   vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
     return this.tagName === 'TR' ? 72 : 384;

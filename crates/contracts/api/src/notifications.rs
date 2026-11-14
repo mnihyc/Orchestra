@@ -24,7 +24,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::chats::ChatLevel;
-use crate::common::{Page, PageQuery, SubscriptionLevel};
+use crate::common::{CollectionQuery, Page, PageQuery, SubscriptionLevel};
 use crate::nodes::NodeRef;
 use crate::routes::Access::{Permission, Rule, Session, User};
 use crate::users::UserRef;
@@ -561,6 +561,38 @@ pub struct NotificationRoute {
     pub last_sent_at: Option<Time>,
 }
 
+/// Search and continue the caller's stored delivery routes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationRouteListQuery {
+    /// Only routes kept after their channel was removed, or only current routes when false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained: Option<bool>,
+    /// Words in the safe channel name, kind or connected label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Requested entries; fifty by default, any positive u32.
+    #[serde(
+        default,
+        deserialize_with = "crate::common::query_u32",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub limit: Option<u32>,
+    /// Continue the same person, retained choice and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl NotificationRouteListQuery {
+    /// Shared native search and continuation.
+    pub fn collection(&self) -> crate::common::CollectionQuery {
+        crate::common::CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
+}
+
 /// A way out of the application to a person.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NotificationChannel {
@@ -867,6 +899,41 @@ pub struct NotificationChannelListQuery {
     /// with `org_id`; the default remains the channels that can reach the caller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<bool>,
+    /// Words in the visible channel name or notifier kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries in this page; 50 by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::common::query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// Continue the same channel owner and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl NotificationChannelListQuery {
+    /// Its ordinary named page, after the native owner selection.
+    #[must_use]
+    pub fn collection(&self) -> CollectionQuery {
+        CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
+}
+
+/// Channel rows and the complete visible kind facts needed by singleton creation choices.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct NotificationChannelPage {
+    /// Readable channel rows in this page.
+    pub items: Vec<NotificationChannel>,
+    /// Continue the same owner and search.
+    pub next_cursor: Option<String>,
+    /// Notifier kinds in the unfiltered authorized selection; no private channel contributes one.
+    pub kinds: Vec<String>,
 }
 
 /// Sets up a channel of the system or of a root org. Its `config` is checked against its
@@ -1194,13 +1261,13 @@ crate::endpoints! {
     MePushSubscriptionDelete: DELETE "/me/push-subscriptions", User, none, json MePushSubscriptionDeleteBody, none, 204,
         operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Lists the caller's own browsers that took push, without their endpoints or keys.
-    MePushSubscriptionList: GET "/me/push-subscriptions", User, none, none, json Vec<PushDevice>, 200,
+    MePushSubscriptionList: GET "/me/push-subscriptions", User, query crate::common::CollectionQuery, none, json crate::common::Page<PushDevice>, 200,
         operation Op::single(Read, &[Identity(I::Account)], Target::CurrentAccount);
     /// Takes one of the caller's own browsers out of push; the others stay.
     MePushSubscriptionRemove: DELETE "/me/push-subscriptions/{id}", User, none, none, none, 204,
         operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Lists the caller's own routes, with those whose channel was removed until they remove them.
-    MeNotificationRouteList: GET "/me/notification-routes", User, none, none, json Vec<NotificationRoute>, 200,
+    MeNotificationRouteList: GET "/me/notification-routes", User, query NotificationRouteListQuery, none, json crate::common::Page<NotificationRoute>, 200,
         operation Op::single(Read, &[Identity(I::Account)], Target::CurrentAccount);
     /// Removes one of the caller's own routes by its identifier: one that is off, or kept after its channel was removed.
     MeNotificationRouteRemove: DELETE "/me/notification-routes/by-id/{route_id}", User, none, none, none, 204,
@@ -1209,7 +1276,7 @@ crate::endpoints! {
     NotifierList: GET "/notifiers", User, none, none, json Vec<Notifier>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists the ways out that can reach the caller, each with their own route: the system's, those of the root orgs they belong to and their own.
-    NotificationChannelList: GET "/notification-channels", Rule("any signed-in caller; with org_id, settings.manage on that root org, to look after its channels; a system admin also gets the system's with their fields"), query NotificationChannelListQuery, none, json Vec<NotificationChannel>, 200,
+    NotificationChannelList: GET "/notification-channels", Rule("any signed-in caller; with org_id, settings.manage on that root org, to look after its channels; a system admin also gets the system's with their fields"), query NotificationChannelListQuery, none, json NotificationChannelPage, 200,
         operation Op::variants(&[
             Variant {
                 name: "available",
@@ -1294,7 +1361,7 @@ crate::endpoints! {
     MeNotificationRouteDelete: DELETE "/me/notification-routes/{channel_id}", User, none, none, none, 204,
         operation Op::single(Manage, &[Identity(I::Account)], Target::CurrentAccount);
     /// Lists the destinations of a node.
-    NodeDestinationList: GET "/nodes/{id}/destinations", Permission("settings.manage"), none, none, json Vec<Destination>, 200;
+    NodeDestinationList: GET "/nodes/{id}/destinations", Permission("settings.manage"), query CollectionQuery, none, json Page<Destination>, 200;
     /// Sets up a destination at a node, which is an org at any level, a project or a topic.
     NodeDestinationCreate: POST "/nodes/{id}/destinations", Permission("settings.manage"), none, json NodeDestinationCreateBody, json DestinationUpdateResponse, 200,
         operation Op::receipt(&Op::returning(Manage,&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::PermissionObject));

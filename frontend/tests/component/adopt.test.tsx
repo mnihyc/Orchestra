@@ -1,10 +1,10 @@
 /** The sessions a harness holds are listed with Adopt…, and adopting says where the thread would stand, the model and the history before anything happens. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
 
-import { adoptSession } from '@/api/adoption';
+import { adoptSession, type NativeSessionRead } from '@/api/adoption';
 import { ApiError } from '@/api/client';
 import { HarnessSessions, harnessesOfMachine, type SessionHarness } from '@/features/resources/adopt/Sessions';
 import type { AdoptPlan, AgentRef, NativeSession } from '@/generated/api-types';
@@ -41,9 +41,16 @@ const planned: AdoptPlan = {
 
 let listed: () => Promise<NativeSession[]> = () => Promise.resolve(sessions);
 let plan: () => Promise<AdoptPlan> = () => Promise.resolve(planned);
+const searches = vi.fn<(q: string) => void>();
 
 vi.mock('@/api/adoption', () => ({
-  harnessSessionsQuery: (provider: string, agent: string) => ({ queryKey: ['harness-sessions', provider, agent], queryFn: () => listed(), retry: false }),
+  harnessSessionsKey: (provider: string, agent: string) => ['harness-sessions', provider, agent],
+  harnessSessionsPageQuery: (provider: string, agent: string, q: string, read: NativeSessionRead) => ({ queryKey: ['harness-sessions', provider, agent, read.view, read.generation, q], initialPageParam: null,
+    queryFn: async ({ pageParam }: { pageParam: { source: string; cursor: string } | null }) => {
+      searches(q); const all = await listed(), rows = all.filter((row) => (row.title ?? '').includes(q));
+      const start = pageParam === null ? 0 : Number(pageParam.cursor);
+      read.captured('catalogue'); return { source: 'catalogue', items: rows.slice(start, start + 37), next_cursor: start + 37 < rows.length ? String(start + 37) : null };
+    }, getNextPageParam: (last: { next_cursor: string | null }) => last.next_cursor === null ? null : { source: 'catalogue', cursor: last.next_cursor }, retry: false, refetchOnMount: false }),
   adoptionPlanQuery: (topic: string) => ({ queryKey: ['adoption-plan', topic], queryFn: () => plan(), retry: false }),
   adoptSession: vi.fn(),
 }));
@@ -72,18 +79,18 @@ function draw(harnesses: readonly SessionHarness[] = [harness]) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   show(
     <QueryClientProvider client={client}>
-      <HarnessSessions harnesses={harnesses} />
+      <HarnessSessions harnesses={harnesses.map((source) => ({ providerId: source.providerId, providerName: source.providerName, agents: [source.agent] }))} />
     </QueryClientProvider>,
   );
 }
 
 it('lists each session with its name or first words, its folder, and the thread of one adopted already', async () => {
   draw();
-  const list = await screen.findByRole('list', { name: i18n.t('adopt.harness', { agent: 'Codex', provider: "Ada's Codex" }) });
+  const list = await screen.findByRole('table', { name: i18n.t('adopt.sessionRows', { name: i18n.t('adopt.harness', { agent: 'Codex', provider: "Ada's Codex" }) }) });
   expect(within(list).getByText('Fix the login')).toBeInTheDocument();
   const folder = within(list).getByText('work/web');
   expect(folder).toHaveAttribute('tabindex', '0');
-  await userEvent.tab();
+  act(() => folder.focus());
   expect(folder).toHaveFocus();
   expect(await screen.findByRole('tooltip')).toHaveTextContent('/work/web');
   expect(folder).toHaveAccessibleDescription('/work/web');
@@ -140,5 +147,47 @@ it('pairs each provider of a machine with the profiles of the same harness there
     providers: [{ id: 'provider-laptop', name: "Ada's Codex", harness_kind: 'codex' } as never, { id: 'provider-key', name: 'A key', harness_kind: null } as never],
     agents: [codex, claude],
   });
-  expect(pairs.map((pair) => `${pair.providerId}/${pair.agent.id}`)).toEqual(['provider-laptop/agent-codex']);
+  expect(pairs.flatMap((pair) => pair.agents.map((agent) => `${pair.providerId}/${agent.id}`))).toEqual(['provider-laptop/agent-codex']);
+});
+
+it('names the adopted thread first without rereading its native history for name edits', async () => {
+  const reading = vi.fn(() => Promise.resolve(planned)); plan = reading;
+  vi.mocked(adoptSession).mockResolvedValue({ id: 'thread-new', name: 'Named adoption' } as Awaited<ReturnType<typeof adoptSession>>);
+  draw(); const user = userEvent.setup();
+  await user.click(await screen.findByRole('button', { name: i18n.t('adopt.adoptNamed', { name: 'Fix the login' }) }));
+  const dialog = within(screen.getByRole('dialog'));
+  const name = dialog.getByRole('textbox', { name: i18n.t('adopt.dialog.name') + ' ' + i18n.t('ui.field.optional') });
+  expect(dialog.getAllByRole('textbox')[0]).toBe(name);
+  expect(name).toHaveAttribute('placeholder', 'Fix the login');
+  await user.click(dialog.getByRole('button', { name: i18n.t('adopt.dialog.topic') }));
+  const confirm = dialog.getByRole('button', { name: i18n.t('adopt.dialog.confirm') });
+  await waitFor(() => expect(confirm).toBeEnabled());
+  const reads = reading.mock.calls.length;
+  await user.click(name); await user.paste('Named adoption');
+  expect(reading).toHaveBeenCalledTimes(reads);
+  await user.click(confirm);
+  await waitFor(() => expect(adoptSession).toHaveBeenCalled());
+  expect(vi.mocked(adoptSession).mock.calls[0]?.[1]).toMatchObject({ name: 'Named adoption' });
+});
+
+it('searches a thousand native sessions on the server and keeps only the chosen source active', async () => {
+  const read = vi.fn(() => Promise.resolve(Array.from({ length: 1_001 }, (_, index) => ({ ...sessions[0]!, native_session_ref: String(index), title: 'Saved session ' + String(index).padStart(4, '0') }))));
+  listed = read;
+  draw(Array.from({ length: 1_001 }, (_, index) => ({ ...harness, providerId: 'provider-' + String(index), providerName: 'Provider ' + String(index) })));
+  const search = await screen.findByRole('searchbox');
+  await waitFor(() => expect(read).toHaveBeenCalledOnce());
+  expect(await screen.findByRole('button', { name: i18n.t('ui.pagination.more') })).toBeVisible();
+  const user = userEvent.setup(); await user.click(search); await user.paste('Saved session 1000');
+  expect(await screen.findByText('Saved session 1000')).toBeVisible();
+  expect(searches).toHaveBeenCalledWith('Saved session 1000');
+  expect(screen.queryByText('Saved session 0000')).toBeNull();
+  expect(screen.queryByRole('dialog')).toBeNull();
+});
+
+it('keeps a thousand providers and profiles as shared source groups rather than a million pairs', () => {
+  const agents = Array.from({ length: 1_001 }, (_, index) => ({ ...codex, id: 'profile-' + String(index) }));
+  const groups = harnessesOfMachine({ agents, providers: Array.from({ length: 1_001 }, (_, index) => ({ id: String(index), name: 'Source ' + String(index), harness_kind: 'codex' })) as never });
+  expect(groups).toHaveLength(1_001);
+  expect(groups[0]?.agents).toHaveLength(1_001);
+  expect(groups[1]?.agents).toBe(groups[0]?.agents);
 });

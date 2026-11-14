@@ -19,12 +19,13 @@ import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
 import { searchModesFor } from '@/features/models/webSearch';
 import { firstStep, formatContext, readTokens } from '@/features/models/context';
 import { accessProgramDisplayName } from '@/features/models/names';
-import { type EntryForm, effortsOf, type Faults, faultsOf, formOf, hasLargest, parametersOf, refusedAt, type StepForm } from '@/features/resources/providers/entry';
+import { type EntryForm, effortsOf, type Faults, faultsOf, formOf, hasLargest, parametersOf, refusedAt, reportedWindow, type StepForm } from '@/features/resources/providers/entry';
 import { ModelLimits } from '@/features/resources/providers/Caps';
 import { GroupsField, groupsOf } from '@/features/resources/providers/Groups';
 import { useHarnessTitle } from '@/features/resources/harnesses';
 import type { ModelParameters, Provider, ProviderModel, ServiceTier } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
 import { Button } from '@/ui/Button';
 import { adminSpec } from '@/ui/AdminAct';
 import { Checkbox } from '@/ui/Checkbox';
@@ -100,6 +101,7 @@ function Switches({
       {anyOn && (
         <Select
           label={start.label}
+          optional
           hint={start.hint}
           value={start.value === '' ? NONE : start.value}
           disabled={disabled}
@@ -112,6 +114,7 @@ function Switches({
         <div className="flex flex-wrap items-end gap-2">
           <Input
             label={anotherLabel}
+            optional
             value={typed}
             fieldClassName="min-w-0 flex-1 basis-[10rem]"
             onChange={(event) => setTyped(event.target.value)}
@@ -169,11 +172,15 @@ export interface EntryFieldsProps {
   otherGroups: readonly string[];
   /** The limits that cover the model, where it has an entry to ask about. */
   limits?: ReactNode;
+  /** What the provider's catalogue and the endpoint report of the model, which fills what is left empty: the window, and its efforts. */
+  reported?: { window: number | null; efforts: readonly string[] };
+  /** The window is required and nothing was written: shown at the field once a save was tried. */
+  windowMissing?: boolean;
   provider: Pick<Provider, 'kind' | 'harness_kind'> & Partial<Pick<Provider, 'protocols' | 'model_groups_max'>>;
 }
 
 /** The fields that say what a model can be run with here: the same in the dialog that adds a model and in its row editor. */
-export function EntryFields({ base, form, onChange, faults, disabled, otherGroups, limits, provider }: EntryFieldsProps) {
+export function EntryFields({ base, form, onChange, faults, disabled, otherGroups, limits, reported, windowMissing = false, provider }: EntryFieldsProps) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
   const harnessTitle = useHarnessTitle();
@@ -187,6 +194,8 @@ export function EntryFields({ base, form, onChange, faults, disabled, otherGroup
   const declaredSearchModes = searchModesFor(provider);
   const searchModes = declaredSearchModes.length > 0 ? declaredSearchModes : [...new Set([...(base.offered?.web_search ?? []), ...(base.web_search ?? [])])];
   const step = firstStep(parametersOf(form, base).rate);
+  // What a field left empty comes to: the catalogue's figure where it has one, else nothing.
+  const noneOr = (value: string | undefined): string => (value === undefined || value === '' ? t('models.editor.none') : t('models.editor.fromCatalogue', { value }));
 
   // What is on is listed with what is offered, so that a switch that was typed in can be switched off again.
   const tierItems: Item[] = [...new Map([...offeredTiers, ...form.tiers].map((tier) => [tier.id, tier])).values()].map((tier) => ({
@@ -233,9 +242,10 @@ export function EntryFields({ base, form, onChange, faults, disabled, otherGroup
       </Part>}
 
       <Part title={t('models.editor.efforts.title')}>
-        <Input help={<Hint id="model-efforts" />} label={t('providers.models.effortsLabel')} hint={t('models.editor.efforts.hint')} value={form.efforts} disabled={disabled} error={faults.efforts} onChange={(event) => onChange({ ...form, efforts: event.target.value })} autoComplete="off" />
+        <Input help={<Hint id="model-efforts" />} label={t('providers.models.effortsLabel')} optional hint={t('models.editor.efforts.hint')} placeholder={noneOr(reported?.efforts.join(', '))} value={form.efforts} disabled={disabled} error={faults.efforts} onChange={(event) => onChange({ ...form, efforts: event.target.value })} autoComplete="off" />
         <Select
           label={t('models.editor.defaultEffort')}
+          optional
           value={form.defaultEffort === '' || !efforts.includes(form.defaultEffort) ? NONE : form.defaultEffort}
           disabled={disabled || efforts.length === 0}
           error={faults.defaultEffort}
@@ -288,18 +298,22 @@ export function EntryFields({ base, form, onChange, faults, disabled, otherGroup
       <Part title={t('models.editor.context.title')} lead={<>{t('models.editor.context.lead')} <Hint id="model-context" /></>}>
         <Input
           label={t('models.editor.context.window')}
+          optional={reported?.window !== null}
           hint={t('models.editor.context.windowHint')}
+          placeholder={reported?.window === undefined || reported.window === null ? undefined : t('models.editor.fromCatalogue', { value: formatNumber(reported.window, locale) })}
           inputMode="numeric"
           value={form.window}
           disabled={disabled}
-          error={faults.window}
+          error={faults.window ?? (windowMissing ? t('models.fault.windowRequired') : undefined)}
           onChange={(event) => onChange({ ...form, window: event.target.value })}
           autoComplete="off"
         />
         <div className="flex flex-col gap-2">
           <Input
             label={t('models.editor.context.largest')}
+            optional
             hint={largest === null ? t('models.editor.context.largestHint') : t('models.editor.context.largestFilled')}
+            placeholder={t('models.editor.none')}
             inputMode="numeric"
             value={form.largest}
             disabled={disabled}
@@ -366,11 +380,11 @@ export function EntryFields({ base, form, onChange, faults, disabled, otherGroup
 
       <Part title={t('providers.models.rateTitle')} lead={<>{t('providers.models.rateLead')} <Hint id="model-rate" /></>}>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Input label={t('providers.models.rateInput')} inputMode="decimal" value={form.rate.input} disabled={disabled} onChange={(event) => onChange({ ...form, rate: { ...form.rate, input: event.target.value } })} autoComplete="off" />
-          <Input label={t('providers.models.rateCached')} inputMode="decimal" value={form.rate.cached} disabled={disabled} onChange={(event) => onChange({ ...form, rate: { ...form.rate, cached: event.target.value } })} autoComplete="off" />
-          <Input label={t('providers.models.rateOutput')} inputMode="decimal" value={form.rate.output} disabled={disabled} onChange={(event) => onChange({ ...form, rate: { ...form.rate, output: event.target.value } })} autoComplete="off" />
-          <Input label={t('webSearch.price')} optional inputMode="decimal" value={form.rate.search ?? ''} disabled={disabled} onChange={(event) => onChange({ ...form, rate: { ...form.rate, search: event.target.value } })} autoComplete="off" />
-          <Input label={t('providers.models.rateWrite')} optional inputMode="decimal" value={form.rate.write} disabled={disabled} onChange={(event) => onChange({ ...form, rate: { ...form.rate, write: event.target.value } })} autoComplete="off" />
+          <Input label={t('providers.models.rateInput')} optional placeholder={t('models.editor.none')} inputMode="decimal" value={form.rate.input} disabled={disabled} onChange={(event) => onChange({ ...form, rate: { ...form.rate, input: event.target.value } })} autoComplete="off" />
+          <Input label={t('providers.models.rateCached')} optional placeholder={t('models.editor.none')} inputMode="decimal" value={form.rate.cached} disabled={disabled} onChange={(event) => onChange({ ...form, rate: { ...form.rate, cached: event.target.value } })} autoComplete="off" />
+          <Input label={t('providers.models.rateOutput')} optional placeholder={t('models.editor.none')} inputMode="decimal" value={form.rate.output} disabled={disabled} onChange={(event) => onChange({ ...form, rate: { ...form.rate, output: event.target.value } })} autoComplete="off" />
+          <Input label={t('webSearch.price')} optional placeholder={t('models.editor.none')} inputMode="decimal" value={form.rate.search ?? ''} disabled={disabled} onChange={(event) => onChange({ ...form, rate: { ...form.rate, search: event.target.value } })} autoComplete="off" />
+          <Input label={t('providers.models.rateWrite')} optional placeholder={t('models.editor.none')} inputMode="decimal" value={form.rate.write} disabled={disabled} onChange={(event) => onChange({ ...form, rate: { ...form.rate, write: event.target.value } })} autoComplete="off" />
         </div>
         {form.tiers.map((tier) => (
           <Input
@@ -426,6 +440,10 @@ export function AddModelDialog({ provider, onClose }: { provider: Provider; onCl
   const [routing, setRouting] = useState('');
   const [display, setDisplay] = useState('');
   const [shown, setShown] = useState(false);
+  // A name the provider's catalogue lists is added with what the catalogue says of it; what it does not say is written here.
+  const catalogue = (provider.facts.models ?? []).find((suggestion) => suggestion.model_name === routing.trim())?.parameters;
+  const reported = { window: reportedWindow(catalogue), efforts: catalogue?.efforts ?? [] };
+  const needsWindow = form.window.trim() === '' && reported.window === null;
   const add = useMutation({
     mutationFn: () => {
       const parameters = parametersOf(form, {});
@@ -444,7 +462,7 @@ export function AddModelDialog({ provider, onClose }: { provider: Provider; onCl
   const refused = refusedAt(add.error);
   const submit = () => {
     setShown(true);
-    if (routing.trim() === '' || wrong) return;
+    if (routing.trim() === '' || wrong || needsWindow) return;
     add.mutate();
   };
   const routingFault = shown && routing.trim() === '' ? t('providers.models.routingEmpty') : refused.faults.routing;
@@ -475,8 +493,8 @@ export function AddModelDialog({ provider, onClose }: { provider: Provider; onCl
           submit();
         }}
       >
+        <Input label={t('providers.models.displayName')} optional hint={t('providers.models.displayHint')} placeholder={routing.trim() === '' ? t('models.editor.none') : routing.trim()} error={refused.faults.display} value={display} disabled={add.isPending} onChange={(event) => setDisplay(event.target.value)} autoComplete="off" />
         <Input label={t('providers.models.routingName')} hint={t('providers.models.routingHint')} mono value={routing} error={routingFault} disabled={add.isPending} onChange={(event) => setRouting(event.target.value)} autoComplete="off" />
-        <Input label={t('providers.models.displayName')} optional hint={t('providers.models.displayHint')} error={refused.faults.display} value={display} disabled={add.isPending} onChange={(event) => setDisplay(event.target.value)} autoComplete="off" />
         <EntryFields
           base={{}}
           form={form}
@@ -487,6 +505,8 @@ export function AddModelDialog({ provider, onClose }: { provider: Provider; onCl
           faults={{ ...refused.faults, ...faults }}
           disabled={add.isPending}
           otherGroups={groupsOf(provider.models).map((group) => group.name)}
+          reported={reported}
+          windowMissing={shown && needsWindow}
           provider={provider}
         />
         {add.error !== null && refused.rest && <ErrorAlert error={add.error} />}
@@ -507,6 +527,10 @@ export function ModelEditorDialog({ provider, model, onClose, proposedGroup }: {
     },
   });
   const refused = refusedAt(save.error);
+  const catalogue = (provider.facts.models ?? []).find((suggestion) => suggestion.model_name === model.model_name)?.parameters;
+  const reported = { window: reportedWindow(catalogue, model.parameters), efforts: catalogue?.efforts ?? [] };
+  const needsWindow = form.window.trim() === '' && reported.window === null;
+  const [tried, setTried] = useState(false);
   return (
     <Dialog
       open
@@ -520,7 +544,7 @@ export function ModelEditorDialog({ provider, model, onClose, proposedGroup }: {
           <Button disabled={save.isPending} onClick={onClose}>
             {t('common.cancel')}
           </Button>
-          <Button admin={adminSpec(provider, 'provider.manage')} variant="primary" pending={save.isPending} blocked={wrong} onClick={() => save.mutate()}>
+          <Button admin={adminSpec(provider, 'provider.manage')} variant="primary" pending={save.isPending} blocked={wrong} onClick={() => { if (needsWindow) setTried(true); else save.mutate(); }}>
             {t('providers.models.save')}
           </Button>
         </>
@@ -538,6 +562,8 @@ export function ModelEditorDialog({ provider, model, onClose, proposedGroup }: {
           disabled={save.isPending}
           otherGroups={groupsOf(provider.models).map((group) => group.name)}
           limits={<ModelLimits provider={provider} model={model} />}
+          reported={reported}
+          windowMissing={tried && needsWindow}
           provider={provider}
         />
         {save.error !== null && refused.rest && <ErrorAlert error={save.error} />}

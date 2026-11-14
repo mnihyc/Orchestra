@@ -1,3 +1,4 @@
+import { channelPage, pageOf } from './collection.ts';
 /** What the fake API says of a person's own settings: their password, second step, sessions, tokens and the state the interface keeps; and of an org's settings, the settings of a node, channels and destinations.
  *
  * It keeps to what the real API promises of these requests, as far as a screen can tell: the same
@@ -1215,7 +1216,7 @@ export class Settings implements Part {
       case 'POST /me/email-code/disable':
         return this.mailCodeDisable(person, body);
       case 'GET /me/sessions':
-        return { status: 200, body: this.sessionsOf(person) };
+        return { status: 200, body: pageOf(this.sessionsOf(person), _query, (row) => row.user_agent + ' ' + (row.ip ?? '')) };
       case 'DELETE /me/sessions': {
         const kept = this.sessionsOf(person).filter((session) => session.current);
         this.world.revokeBrowserSessions(person);
@@ -1223,7 +1224,7 @@ export class Settings implements Part {
         return { status: 200, body: kept };
       }
       case 'GET /me/tokens':
-        return { status: 200, body: this.tokensOf(person).map((held) => held.info) };
+        return { status: 200, body: pageOf(this.tokensOf(person).map((held) => held.info), _query, (row) => row.name) };
       case 'GET /me/token-operations':
         return { status: 200, body: structuredClone(TOKEN_OPERATIONS) };
       case 'POST /me/tokens':
@@ -1307,7 +1308,7 @@ export class Settings implements Part {
       const orgId = _query.get('org_id');
       if (orgId === null) return null;
       this.mayManageChannels(person, orgId);
-      return { status: 200, body: this.channels.get(orgId) ?? [] };
+      return { status: 200, body: channelPage(this.channels.get(orgId) ?? [], _query) };
     }
     if ((found = /^POST \/orgs\/([^/]+)\/notification-channels$/.exec(route))) {
       const orgId = found[1] ?? '';
@@ -1353,7 +1354,7 @@ export class Settings implements Part {
     }
     if ((found = /^GET \/nodes\/([^/]+)\/destinations$/.exec(route))) {
       this.world.places.node(person, found[1] ?? '');
-      return { status: 200, body: this.destinations.get(found[1] ?? '') ?? [] };
+      return { status: 200, body: pageOf(this.destinations.get(found[1] ?? '') ?? [], _query, (row) => row.name + ' ' + row.channel.name) };
     }
     if ((found = /^POST \/nodes\/([^/]+)\/destinations$/.exec(route))) {
       const nodeId = found[1] ?? '';

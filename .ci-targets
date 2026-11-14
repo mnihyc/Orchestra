@@ -1,0 +1,1 @@
+test -p orch-api-core --test hosted_environments --test hosts --test kfix_envreads --test topic_native_scopes --test kmounts_files --test kmounts_mcp --test admin_catalogue --test admin_native_scopes --test admin_system --test everything_resources
