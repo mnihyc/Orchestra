@@ -25,12 +25,15 @@ vi.mock('@tanstack/react-router', async (original) => ({
   useMatches: () => fake.path,
   useRouterState: () => undefined,
 }));
-vi.mock('@/api/environments', () => ({ environmentsQuery: () => ({ queryKey: ['tutorial-places-test'], queryFn: () => Promise.resolve(fake.rows) }) }));
+vi.mock('@/api/environments', async (original) => ({ ...await original<object>(), environmentsQuery: () => ({ queryKey: ['tutorial-places-test'], queryFn: () => Promise.resolve(fake.rows) }) }));
 vi.mock('@/features/access/AccessDialog', () => ({ openAccess: fake.open }));
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => fake.open }));
 vi.mock('@/features/help/Dismissed', () => ({ useDismissed: () => ({ isFinished: () => false, stepOf: () => 0, keepStep: fake.keep, finish: fake.finish, reopenAll: () => undefined }) }));
 vi.mock('@/features/workbench/Narrow', () => ({ useShape: () => 'wide' }));
-vi.mock('@/features/workbench/store', () => ({ useWorkbench: (select: (state: { change: typeof fake.change; setOverlay: typeof fake.overlay }) => unknown) => select({ change: fake.change, setOverlay: fake.overlay }) }));
+// A store as the modules that watch it need it: read through a selector, `getState`, and `subscribe` (the close guards subscribe when they are loaded).
+vi.mock('@/features/workbench/store', () => ({ useWorkbench: Object.assign(
+  (select: (state: { change: typeof fake.change; setOverlay: typeof fake.overlay }) => unknown) => select({ change: fake.change, setOverlay: fake.overlay }),
+  { getState: () => ({ change: fake.change, setOverlay: fake.overlay }), subscribe: () => () => undefined }) }));
 vi.mock('@/lib/viewChoices', () => ({ useViewChoice: () => ['screen', () => undefined] }));
 vi.mock('@/help/localized', () => ({ useLocalizedGuide: () => ({ articles: [{ id: 'test-guide', title: 'Test guide', headings: [], screens: ['/help'], keywords: [], body: '# Test guide\n\nLast paragraph.' }] }) }));
 

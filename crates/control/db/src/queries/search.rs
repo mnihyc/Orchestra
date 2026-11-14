@@ -843,7 +843,11 @@ pub(super) fn advanced_source_sql(selection: &str, kind: &str, source: &str, par
         "(SELECT COALESCE(adv_m.edited_at,adv_m.created_at) FROM chat_messages adv_m WHERE adv_m.id={part})"
     );
     let edited = fact("adv_d.updated_at", "adv_n.updated_at", &chat_edited);
-    advanced_facts_sql(selection, &owner, &creator, &editor, &created, &edited)
+    let facts = advanced_facts_sql(selection, &owner, &creator, &editor, &created, &edited);
+    format!(
+        "({facts}) AND ({selection}->>'stream' IS NULL OR ({kind}='item' AND EXISTS \
+        (SELECT 1 FROM items adv_i WHERE adv_i.id={part} AND adv_i.stream={selection}->>'stream')))"
+    )
 }
 
 /// Compare the recorded source facts without changing the ordering of candidate streams.
@@ -871,7 +875,7 @@ pub(super) fn advanced_source_needed(selection: Option<&orch_types::Json>) -> bo
             .and_then(|value| value.get(key))
             .is_some_and(|value| !value.is_null())
     };
-    ["owner_id", "created_by_id", "edited_by_id"]
+    ["owner_id", "created_by_id", "edited_by_id", "stream"]
         .iter()
         .any(|key| present(key))
         || present("date_field") && (present("from") || present("to"))

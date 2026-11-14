@@ -8,18 +8,28 @@ import { useState } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import { ApiError } from '@/api/client';
+import type { ReviewedThreadPlan } from '@/api/forks';
+import type { CopyDestinationJudgement } from '@/api/copyDestinations';
+import type { PickedPlace } from '@/features/settings/PlacePicker';
 import { ThreadChange } from '@/features/change/ThreadChange';
-import type { ErrorCode, ForkPlan, ForkRequest, PlanBlocker, Thread } from '@/generated/api-types';
+import type { ErrorCode, ForkPlan, ForkRequest, Job, PlanBlocker, Thread } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { NetworkError } from '@/lib/requests';
 import { Dialog } from '@/ui/Dialog';
 import { show } from './support';
 
-const state = vi.hoisted(() => ({ node: null as Thread | null, readNode: null as unknown as () => Promise<Thread | null>, answer: null as ForkPlan | null, read: vi.fn<(request: ForkRequest) => Promise<ForkPlan>>(), start: vi.fn() }));
-vi.mock('@tanstack/react-router', async (original) => ({ ...await original<object>(), useNavigate: () => vi.fn() }));
+const state = vi.hoisted(() => ({ node: null as Thread | null, readNode: null as unknown as () => Promise<Thread | null>, answer: null as ForkPlan | null, read: vi.fn<(request: ForkRequest) => Promise<ForkPlan>>(), moveRead: vi.fn<(request: ForkRequest) => Promise<ReviewedThreadPlan>>(), moveStart: vi.fn(), start: vi.fn(), readJob: vi.fn<(id: string) => Promise<Job>>(), navigate: vi.fn() }));
+vi.mock('@tanstack/react-router', async (original) => ({ ...await original<object>(), useNavigate: () => state.navigate }));
 vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(), nodeQuery: () => ({ queryKey: ['switch-node'], queryFn: () => state.readNode() }) }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<object>(), providersQuery: () => ({ queryKey: ['switch-providers'], queryFn: () => Promise.resolve([]) }), agentsQuery: () => ({ queryKey: ['switch-agents'], queryFn: () => Promise.resolve([]) }) }));
-vi.mock('@/api/forks', async (original) => ({ ...await original<object>(), planFork: (_id: string, request: ForkRequest) => state.read(request), startFork: state.start }));
+vi.mock('@/api/forks', async (original) => ({ ...await original<object>(), planFork: (_id: string, request: ForkRequest) => state.read(request), startFork: state.start,
+  planThreadMoveOut: (_id: string, request: ForkRequest) => state.moveRead(request), startThreadMoveOut: state.moveStart,
+  jobQuery: (id: string) => ({ queryKey: ['move-job', id], queryFn: () => state.readJob(id) }),
+}));
+vi.mock('@/features/duplicate/CopyPlacePicker', () => ({ CopyPlacePicker: ({ onChange, onStanding }: { onChange: (place: PickedPlace) => void; onStanding: (standing: CopyDestinationJudgement) => void }) => <button onClick={() => {
+  onChange({ id: 'other-topic', kind: 'topic', path: 'Other / Project / Topic', color: null, folder: false, rootOrgId: 'other-org', rootName: 'Other' });
+  onStanding({ destination: { kind: 'node', id: 'other-topic' }, cross_root: true, outcome: { state: 'allowed' } });
+}}>Choose another org</button> }));
 vi.mock('@/features/change/RunsOn', async (original) => ({ ...await original<object>(), useModelFor: () => [], RunsOn: ({ onChange }: { onChange: (patch: { providerId: string | null; agentId: string | null; model: string | null }) => void }) => <>
   <button onClick={() => onChange({ providerId: 'next', agentId: 'agent', model: 'shared-route' })}>Choose next provider</button>
   <button onClick={() => onChange({ providerId: null, agentId: null, model: null })}>Keep current provider</button>
@@ -39,6 +49,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   state.node = { id: 'thread', kind: 'thread', name: 'Login', model: 'shared-route', model_display: 'Shared model', effort: null, state: 'idle', side_of: null, blocked: null, path: [], owner: { id: 'owner' }, binding: { provider: { id: 'current' }, agent: { id: 'agent' } } } as unknown as Thread;
   state.readNode = () => Promise.resolve(state.node);
+  state.readJob.mockReset().mockReturnValue(new Promise<never>(() => undefined));
   state.answer = answer();
   state.read.mockImplementation(() => Promise.resolve(state.answer!));
 });
@@ -50,6 +61,50 @@ const refusals = {
   'a refused person': { error: problem(403, 'authz.denied', 'You may not switch this thread.'), told: () => screen.getByRole('alert') },
   'a failed network': { error: new NetworkError('offline'), told: () => screen.getByRole('alert') },
 } as const;
+
+it.each(['en', 'zh-CN'] as const)('moves through the native full-copy and original-deletion review without an ordinary fork or a second deletion in %s', async (locale) => {
+  await setLocale(locale);
+  const plan: ReviewedThreadPlan = { ...answer(), result: 'new', source: { id: 'thread', kind: 'thread', name: 'Login', redacted: false },
+    agent_access: { preset: { where: 'nothing', parts: {} }, choices: (['nothing', 'thread', 'topic', 'project'] as const).map((where) => ({ where, parts: {} })) },
+    original: { deletePlan: { subject: { kind: 'thread', id: 'thread' }, destination: { kind: 'node', id: 'other-topic' }, revision: 1, stamp: 'original-footprint', effects: ['remove_source'] }, notification: null, openSides: [] } };
+  state.moveRead.mockResolvedValue(plan);
+  state.moveStart.mockResolvedValue({ projection: 'receipt', job_id: 'move-job' });
+  show(<ThreadChange threadId="thread" kind="move-out" toTurn={null} focus={null} job={null} say={null} open onClose={() => undefined} />);
+  await userEvent.click(await screen.findByRole('button', { name: 'Choose another org' }));
+  const apply = screen.getByRole('button', { name: i18n.t('thread.moveOut.confirm') });
+  await waitFor(() => expect(apply).not.toHaveAttribute('aria-disabled', 'true'));
+  expect(state.moveRead).toHaveBeenLastCalledWith(expect.objectContaining({ result: 'new', topic_id: 'other-topic', history: { mode: 'all' }, access: 'defaults' }));
+  expect(screen.getByText(i18n.t('duplicate.moveEffects.remove_source'))).toBeVisible();
+  await userEvent.click(apply);
+  await waitFor(() => expect(state.moveStart).toHaveBeenCalledOnce());
+  expect(state.moveStart).toHaveBeenCalledWith('thread', { preflight_id: 'review', notify: false }, expect.any(String));
+  expect(state.read).not.toHaveBeenCalled();
+  expect(state.start).not.toHaveBeenCalled();
+});
+
+it.each(['en', 'zh-CN'] as const)('reopens accepted progress after the original disappears and opens the actual resulting thread in %s', async (locale) => {
+  await setLocale(locale);
+  state.readNode = () => Promise.reject(problem(404, 'not_found', 'The original thread was deleted.'));
+  state.readJob.mockResolvedValue({
+    id: 'accepted-move', kind: 'thread_fork', node_id: 'thread', environment_id: null, provider_id: null, batch_id: null, created_by: null,
+    created_at: '2026-11-01T10:00:00Z', started_at: '2026-11-01T10:00:01Z', finished_at: '2026-11-01T10:00:10Z',
+    state: 'succeeded', result: { thread_id: 'moved-thread' }, log: null, error: null,
+    progress: { phase: 'commit', percent: 100, message: null, phases: [], bytes_done: 0, bytes_total: null,
+      files_done: 0, files_total: null, rate_bps: null, eta_seconds: null },
+  });
+  const close = vi.fn();
+  // The ordinary Progress entry reopens a thread job without its original planner kind.
+  show(<ThreadChange threadId="thread" kind="switch" toTurn={null} focus={null} job="accepted-move" say={null} open onClose={close} />);
+  expect(await screen.findByRole('dialog', { name: i18n.t('change.progress.thread') })).toBeVisible();
+  const open = await screen.findByRole('button', { name: i18n.t('thread.moveOut.open') });
+  expect(state.readJob).toHaveBeenCalledWith('accepted-move');
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(state.read).not.toHaveBeenCalled();
+  expect(state.moveRead).not.toHaveBeenCalled();
+  await userEvent.click(open);
+  expect(close).toHaveBeenCalledOnce();
+  expect(state.navigate).toHaveBeenCalledExactlyOnceWith({ to: '/thread/$threadId', params: { threadId: 'moved-thread' } });
+});
 
 /** What the authority repair does to a read of a person's reach that is on screen: no data, and asked again. The answer comes when `arrive` is called. */
 async function readAgain(client: QueryClient): Promise<() => Promise<void>> {

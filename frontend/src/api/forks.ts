@@ -13,6 +13,7 @@ import { queryOptions } from '@tanstack/react-query';
 
 import { accepted, api, ApiError, ok, repeatable } from '@/api/client';
 import { liveValue } from '@/api/liveValue';
+import { readAgain } from '@/api/readAgain';
 import type {
   AgentAccessChoice,
   ForkBatch,
@@ -30,6 +31,7 @@ import type {
   Thread,
   ThreadSideCreateBody,
   ThreadSideCreateReply,
+  ThreadMoveOutPreviewResponse,
 } from '@/generated/api-types';
 
 export const forkKeys = {
@@ -77,6 +79,34 @@ export function startFork(threadId: string, body: ForkCreateBody, key: string): 
   return accepted(api.POST('/threads/{id}/forks', { params: { path: { id: threadId } }, body, ...repeatable(key) }));
 }
 
+export interface OriginalMoveReview {
+  deletePlan: NonNullable<ThreadMoveOutPreviewResponse['delete_plan']>;
+  notification: ThreadMoveOutPreviewResponse['notification'];
+  openSides: ThreadMoveOutPreviewResponse['open_side_threads'];
+}
+
+export type ReviewedThreadPlan = ForkPlan & { original?: OriginalMoveReview };
+
+/** A native full-copy plan and the original's deletion are reviewed together; no browser Delete follows it. */
+export async function planThreadMoveOut(threadId: string, request: ForkRequest, signal?: AbortSignal): Promise<ForkPlan & { original: OriginalMoveReview }> {
+  const result = await ok(api.POST('/threads/{id}/move-out/preview', {
+    params: { path: { id: threadId } }, body: request, ...(signal === undefined ? {} : { signal }),
+  }));
+  if ('projection' in result.plan || result.delete_plan === null) throw new Error('The move was prepared, but its full copy and deletion details are no longer available.');
+  const source = result.delete_plan.subject;
+  const destination = result.delete_plan.destination;
+  if (result.plan.source.id !== threadId || source.kind !== 'thread' || source.id !== threadId
+    || request.topic_id !== undefined && request.topic_id !== null && (destination.kind !== 'node' || destination.id !== request.topic_id)) {
+    throw new Error('The move review did not match its original and destination.');
+  }
+  return { ...result.plan, original: { deletePlan: result.delete_plan, notification: result.notification, openSides: result.open_side_threads } };
+}
+
+/** The confirmed native job alone copies and deletes; a sparse job acknowledgement stays accepted. */
+export function startThreadMoveOut(threadId: string, body: ForkCreateBody, key: string): Promise<ForkCreateResponse> {
+  return accepted(api.POST('/threads/{id}/move-out', { params: { path: { id: threadId } }, body, ...repeatable(key) }));
+}
+
 /** What switching several threads at once would do: one plan for each, each with its own blockers. */
 export async function planBatch(body: ForkBatchPreflightBody, signal?: AbortSignal): Promise<ForkBatchPlan> {
   const result = await ok(api.POST('/forks/preflight', { body, ...(signal === undefined ? {} : { signal }) }));
@@ -99,7 +129,9 @@ export async function startBatch(body: ForkCreateBody, key: string): Promise<For
 export const jobQuery = (id: string) =>
   queryOptions({
     queryKey: forkKeys.job(id),
-    queryFn: ({ signal }): Promise<Job> => liveValue(forkKeys.job(id), signal),
+    queryFn: ({ signal }): Promise<Job> => liveValue(forkKeys.job(id), signal, () => ok(api.GET('/jobs/{id}', { params: { path: { id } }, signal }))),
+    // While the live connection is not up nothing else tells a screen that the job moved.
+    refetchInterval: readAgain<Job>((job) => job === undefined || !isOver(job.state), false),
   });
 
 /** Stops a job before it commits; everything it made is taken away again. */

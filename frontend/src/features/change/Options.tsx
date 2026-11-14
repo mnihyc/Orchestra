@@ -46,9 +46,11 @@ export interface OptionsProps {
   topic: string;
   /** The source's creation default; built-in forks begin Private. */
   defaultPage?: PageChoice;
+  /** A cross-organization copy always creates its page from the destination defaults. */
+  accessChoices?: boolean;
 }
 
-export function Options({ choices, onChange, applied, plan, topic, defaultPage = 'original' }: OptionsProps) {
+export function Options({ choices, onChange, applied, plan, topic, defaultPage = 'original', accessChoices = true }: OptionsProps) {
   const { t } = useTranslation();
   const start = applied ?? SHIPPED;
   const set = (patch: Partial<OptionChoices>) => onChange({ options: { ...choices.options, ...patch } });
@@ -139,7 +141,7 @@ export function Options({ choices, onChange, applied, plan, topic, defaultPage =
           />
         </Row>
       )}
-      {fork && (
+      {fork && accessChoices && (
         <Row
           title={t('fork.page.title')}
           help={<ChoiceFieldHelp label={t('fork.page.title')} options={accessOptions} />}

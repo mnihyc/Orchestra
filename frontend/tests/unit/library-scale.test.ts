@@ -38,11 +38,11 @@ it('builds a million work steps with linear item reads and one indexed original-
   for(let i=0;i<999_999;i+=1){const key=`step-${i}`;items.set(key,{...base,id:key});order.push(key);}
   const tool=otherTool('last-tool',{name:'Lookup',args:{},turn:id});items.set(tool.id,tool);order.push(tool.id);
   const viewed=turn(id,{ordinal:1,state:'completed',inputId:'original-input',tokens:100_000_000});
-  const rows=buildRows({...EMPTY_VIEW,items,order,turns:new Map([[id,viewed]])},{detail:'summary',hideHistory:false,foldOpened:new Set(),meId:null});
+  const rows=buildRows({...EMPTY_VIEW,items,order,turns:new Map([[id,viewed]])},{detail:'normal',hideHistory:false,meId:null});
   expect(items.size).toBe(1_000_001);
   expect(items.reads).toBeLessThanOrEqual(16*items.size);
   expect(rows.find((row)=>row.kind==='footer')).toMatchObject({kind:'footer',turnId:id,inputItemId:'original'});
-  expect(rows.filter((row)=>row.kind==='fold')).toHaveLength(1);
+  expect(rows.filter((row)=>row.kind==='work')).toHaveLength(1);
 },120_000);
 
 it('bounds unavailable-storage fallback across 100000 visited pages while retaining recent valid choices',()=>{

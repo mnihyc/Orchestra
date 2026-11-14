@@ -42,8 +42,6 @@ const DEFAULT_WAIT: i64 = 10;
 const DEFAULT_VERIFY: i64 = 120;
 /// Verification may be given between ten seconds and one hour.
 const VERIFY_RANGE: std::ops::RangeInclusive<i64> = 10..=3_600;
-/// The shipped release accepts connectors from the first public protocol version.
-pub const CONNECTOR_MINIMUM: &str = "0.1.0";
 
 /// The object whose unit is replaced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

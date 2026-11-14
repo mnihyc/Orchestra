@@ -17,7 +17,7 @@ import { changeModelChoice, isSettingConflict, useRunsWith } from '@/features/co
 import { SettingConflict } from '@/features/composer/SettingConflict';
 import { useThreadPart } from '@/realtime/stores/thread';
 import { ErrorAlert } from '@/ui/ErrorState';
-import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
 import { openChange } from '@/features/change/target';
 import type { Thread } from '@/generated/api-types';
 import { isAgentHistoryRemoving, isMachineProgramVersionMismatch, waitingWords } from '@/features/timeline/waiting';
@@ -77,7 +77,8 @@ function OtherModels({ thread }: { thread: Thread }) {
   const selected = others.some((option) => option.model_name === currentModel) ? currentModel ?? '' : '';
   return (
     <div className="flex flex-col gap-1" data-family-limit>
-      <Select<string>
+      <ResourcePicker<string>
+        pickerKey="thread.recovery-model"
         size="sm"
         label={t('thread.blocked.familyChoose')}
         placeholder={reason ?? t('thread.blocked.familyChoose')}

@@ -1360,7 +1360,7 @@ crate::endpoints! {
             Target::Resolved("snapshot_environment"),
         );
     /// Reads a job.
-    JobGet: GET "/jobs/{id}", Rule("node.view on the job's thread, any permission on its environment, or provider.manage on its provider; an export's maker, or current access to a measurement's subject"), none, none, json Job, 200,
+    JobGet: GET "/jobs/{id}", Rule("node.view on the job's thread, any permission on its environment, or provider.manage on its provider; an export or thread move-out's maker, or current access to a measurement's subject"), none, none, json Job, 200,
         operation Op::variants(&[
             Variant {
                 name: "ordinary",

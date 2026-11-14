@@ -8,7 +8,8 @@
  * as a file either way. Left unchosen it is what the place carries (`thread.switch_history`), shown as chosen.
  */
 import type { TFunction } from 'i18next';
-import { useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { formatCredits } from '@/features/usage/figures';
@@ -19,16 +20,21 @@ import type { Choices, HistoryChoice } from '@/features/change/choices';
 import { useFocusFirst } from '@/features/change/Sentence';
 import { Hint } from '@/features/help/Hint';
 import { settingsQuery } from '@/api/settings';
+import { turnChoicesQuery, type TurnChoice } from '@/api/threads';
 import { placeHistory, summaryConfigured } from './summary';
 import type { ForkPlanHistory, HistorySummaryEstimate, Turn } from '@/generated/api-types';
 import { programNameIn } from '@/features/resources/programNames';
 import { featureName } from '@/features/resources/agents/buildChecks';
 import { useThreadView } from '@/realtime/stores/thread';
-import { Input } from '@/ui/Input';
+import { useThreadReadRef } from '@/realtime/threadReadContext';
+import { ErrorState } from '@/ui/ErrorState';
+import { Pagination } from '@/ui/Pagination';
+import { SkeletonRows } from '@/ui/Skeleton';
 import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
 
 /** The few words a turn is told by: what the person asked in it. */
-function turnLabel(turn: Turn, text: string, t: TFunction, whole = false): string {
+function turnLabel(turn: Pick<Turn, 'ordinal'>, text: string, t: TFunction, whole = false): string {
   const said = text.trim().replace(/\s+/g, ' ');
   const short = !whole && said.length > 60 ? `${said.slice(0, 57)}…` : said;
   return short === '' ? t('change.history.turn', { n: turn.ordinal }) : t('change.history.turnSaid', { n: turn.ordinal, text: short });
@@ -47,17 +53,33 @@ export function useTurns(threadId: string): { turn: Turn; text: string }[] {
   return [...view.turns.values()].sort((one, other) => one.ordinal - other.ordinal).map((turn) => ({ turn, text: said.get(turn.id) ?? '' }));
 }
 
-function TurnPick({ label, turns, value, onChange }: { label: string; turns: { turn: Turn; text: string }[]; value: number | null; onChange: (turn: number | null) => void }) {
+function TurnPick({ threadId, label, turns, value, onChange }: { threadId: string; label: string; turns: { turn: Turn; text: string }[]; value: number | null; onChange: (turn: number | null) => void }) {
   const { t } = useTranslation();
-  if (turns.length === 0) {
-    return <Input label={label} type="number" min={1} inputMode="numeric" value={value === null ? '' : String(value)} onChange={(event) => onChange(event.target.value === '' ? null : Math.max(1, Number(event.target.value)))} fieldClassName="w-(--field-narrow)" />;
+  const [open, setOpen] = useState(false);
+  const read = useThreadReadRef(threadId);
+  const options = turnChoicesQuery(read);
+  const older = useInfiniteQuery({ ...options, enabled: open && options.enabled });
+  const known = new Map<string, { turn: TurnChoice; text: string }>(turns.map((entry) => [entry.turn.id, entry]));
+  for (const page of older.data?.pages ?? []) for (const turn of page.turns) {
+    if (!known.has(turn.id)) known.set(turn.id, { turn, text: '' });
   }
+  const choices = [...known.values()].sort((one, other) => one.turn.ordinal - other.turn.ordinal);
+  const footer = older.isError && older.data === undefined
+    ? <ErrorState compact error={older.error} retrying={older.isRefetching} onRetry={() => void older.refetch()} />
+    : older.isPending && older.isFetching ? <SkeletonRows read={older} rows={1} />
+      : <Pagination hasMore={older.hasNextPage} loading={older.isFetchingNextPage} error={older.isFetchNextPageError ? older.error : undefined} onMore={() => void older.fetchNextPage()} />;
   return (
-    <Select
+    <ResourcePicker
+      pickerKey="change.history.turn"
       label={label}
+      open={open}
+      onOpenChange={setOpen}
+      loading={older.isFetching && older.data === undefined && turns.length === 0}
+      footer={footer}
+      empty={older.hasNextPage ? t('change.history.moreToSearch') : undefined}
       value={value === null ? '' : String(value)}
       onValueChange={(next) => onChange(next === '' ? null : Number(next))}
-      options={turns.map(({ turn, text }) => ({ value: String(turn.ordinal), label: turnLabel(turn, text, t), fullLabel: turnLabel(turn, text, t, true) }))}
+      options={choices.map(({ turn, text }) => ({ value: String(turn.ordinal), label: turnLabel(turn, text, t), fullLabel: turnLabel(turn, text, t, true) }))}
       fieldClassName="min-w-(--field-wide) flex-1"
     />
   );
@@ -116,11 +138,11 @@ export function HistoryChoices({ threadId, choices, onChange, focus = false, pla
       />
       {nativeReason !== null && (mode === 'all' || mode === 'upto' || mode === 'range') && <span className="text-sm wrap-anywhere text-text-muted" role="status">{planned?.method === 'neutral_import' ? t('programVersions.neutralCarry', { reason: nativeReason }) : nativeReason}</span>}
       {mode === 'summary' && planned?.mode === 'summary' && estimate !== null && <SummaryEstimate estimate={estimate} />}
-      {mode === 'upto' && <TurnPick label={t('change.history.upTo')} turns={turns} value={history.toTurn} onChange={(toTurn) => set({ toTurn })} />}
+      {mode === 'upto' && <TurnPick threadId={threadId} label={t('change.history.upTo')} turns={turns} value={history.toTurn} onChange={(toTurn) => set({ toTurn })} />}
       {mode === 'range' && (
         <div className="flex flex-wrap items-start gap-3">
-          <TurnPick label={t('change.history.from')} turns={turns} value={history.fromTurn ?? (turns[0]?.turn.ordinal ?? 1)} onChange={(fromTurn) => set({ fromTurn })} />
-          <TurnPick label={t('change.history.to')} turns={turns} value={history.toTurn ?? last} onChange={(toTurn) => set({ toTurn })} />
+          <TurnPick threadId={threadId} label={t('change.history.from')} turns={turns} value={history.fromTurn ?? (turns[0]?.turn.ordinal ?? 1)} onChange={(fromTurn) => set({ fromTurn })} />
+          <TurnPick threadId={threadId} label={t('change.history.to')} turns={turns} value={history.toTurn ?? last} onChange={(toTurn) => set({ toTurn })} />
         </div>
       )}
     </div>

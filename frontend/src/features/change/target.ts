@@ -16,6 +16,8 @@ export type ChangeKind =
   | 'switch'
   /** A second thread made out of a thread, or out of a side thread kept. */
   | 'fork'
+  /** A complete native copy to another organization, then deletion of the original. */
+  | 'move-out'
   /** A unit brought up to what it would be made from now. */
   | 'update'
   /** A new unit with nothing new in it. */
@@ -53,6 +55,10 @@ export interface ChangeOptions {
   toTurn?: number;
   /** For a switch, what the person came for: another provider, or another environment or directory. */
   focus?: 'provider' | 'environment';
+  /** For a switch asked for from a list that named what it is to run on: the provider, the agent and the model, each chosen before the wizard is seen. */
+  provider?: string;
+  agent?: string;
+  model?: string;
   /** For the progress of a job, or of a batch, that was started already. */
   job?: string;
   batch?: string;

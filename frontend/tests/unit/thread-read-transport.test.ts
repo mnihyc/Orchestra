@@ -2,14 +2,15 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { queryClient } from '@/api/query';
 import { captureThreadExecution, captureThreadRead, isCurrentThreadRead, selectThreadContinuation } from '@/api/threadRead';
-import { fetchOutput, fetchThreadSync, sendInput } from '@/api/threads';
+import { fetchOutput, fetchThreadSync, sendInput, turnChoicesQuery } from '@/api/threads';
 import { createRealtimeSocket } from '@/realtime/socket';
 import { createThreadReadFeed, forgetThreadRead } from '@/realtime/threadFeed';
 import { followFeed, UNSUBSCRIBE_AFTER_MS } from '@/realtime/sync';
 import { defaultThreadRead, resultThreadRead, threadReadRegistryKey, type ThreadReadRef } from '@/realtime/threadScope';
 import { flushDeltas, holdThreadRead, setThreadReadChangeHandler, setThreadReadHolder, setThreadReadRetainer,
   threadReadState, threadViewOf, threadWriter } from '@/realtime/stores/thread';
-import { Wire, deferred, viewedPrompt } from './continuation-fixtures';
+import { Wire, deferred, projection, viewedPrompt } from './continuation-fixtures';
+import { turn } from '../doubles/thread-rows';
 import { A, B, SHARED, T, bodyOf, coordinator, ownedRows, serve } from './thread-read-fixtures';
 
 const route = defaultThreadRead(T), preview = resultThreadRead(T,'preview-tab'), second = resultThreadRead(T,'second-tab');
@@ -40,6 +41,24 @@ afterEach(() => {
   for (const stop of stopped.splice(0).reverse()) stop(); flushDeltas(); threadWriter.clear(); queryClient.clear();
   setThreadReadChangeHandler(() => undefined); setThreadReadRetainer(() => undefined); setThreadReadHolder(() => () => undefined);
   vi.unstubAllGlobals(); vi.clearAllTimers(); vi.useRealTimers();
+});
+
+it('reads older turn choices in their owned history without retaining old turn bodies or replacing the conversation', async () => {
+  const old = turn('old-empty-turn', { ordinal: 1, state: 'completed', inputId: 'old-input' });
+  const server = serve((request) => new URL(request.url).pathname.endsWith('/turns') ? Promise.resolve(Response.json({
+    projection: { ...projection(B, A, 2, false), execution_revision: 1 }, turns: [old], segments: [], seq: 20, next_before: null,
+  })) : undefined);
+  setup(); selectThreadContinuation(preview, B); await fetchThreadSync(preview, null);
+  const before = threadViewOf(preview), routeBefore = threadViewOf(route);
+  const data = await queryClient.fetchInfiniteQuery(turnChoicesQuery(preview));
+  expect(data.pages[0]).toEqual({ turns: [{ id: old.id, ordinal: 1 }], next_before: null });
+  expect(threadViewOf(preview).order).toBe(before.order);
+  expect(threadViewOf(preview).turns.has(old.id)).toBe(false);
+  expect(threadViewOf(route)).toBe(routeBefore);
+  const request = server.calls.find((request) => new URL(request.url).pathname.endsWith('/turns'));
+  expect(request).toBeDefined();
+  expect(new URL(request!.url).searchParams.get('continuation_id')).toBe(B);
+  expect(new URL(request!.url).searchParams.get('projection_revision')).toBe('2');
 });
 
 it('route A and frozen B use distinct subscriptions on one socket with only the actual native feed', async () => {
