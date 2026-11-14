@@ -1,9 +1,9 @@
 ---
 group: providers
-screens: [/help, /thread/$threadId, /resources/providers/$id]
+screens: [/help, /thread/$threadId, /resources/providers/$id, /settings/interface, /topic/$topicId]
 keywords: [选项, 字段, 搜索, 参考, options, fields]
 heading_id.条目: entries
-summary: 提供方接口接受的每个请求选项，以及它改变什么。
+summary: 随产品提供的请求与界面选项，以及它们改变什么。
 ---
 
 # 选项字段参考
@@ -14,6 +14,9 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 
 | 参考标识 | 含义 |
 | --- | --- |
+| `option:PersonalState.sidebar.open_links` | 个人的“链接打开方式”，与侧栏状态一同保存：默认自动，也可选择当前视图或新视图。自动时，同一目标区域共用一个视图；当前视图会替换正在查看的页面，新视图会另开页面。目标已经打开时会切换到它。在“界面”或标签菜单中选择；显式复制视图及浏览器的修饰键点击仍遵循原有行为。 |
+| `option:TopicSearch.q` | 话题“概览”和“会话”页中的会话名称搜索。它筛选当前可见的实时集合，随话题地址传递，不作为设备默认值保存。 |
+| `option:codex.cyber_access_program` | 模型提供、且已在提供方启用的 Codex 访问计划。所选名称会原样传给原生轮次，不限于 Daybreak 系列；模型、账号资格及提供方使用权限仍须满足。 |
 | `option:ask.models.*.model` | 已启用 API 模型的路由名称，与 provider_id 一起标识一个允许的问一问模型。子级列表可以缩小可选范围，并保留父级顺序。 |
 | `option:ask.models.*.provider_id` | 此项允许的问一问模型所使用的 API 提供方标识。提问者和当前付费人仍须有权在对话所属组织中使用该提供方及模型。 |
 | `option:AccessOptions.models` | 此使用权限涵盖的模型。 |
@@ -26,6 +29,7 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 | `option:BindingOptions.providers` | 每个提供方及其模型和代理。 |
 | `option:BindingOptions.environments` | 当前读者可管理的已有环境，当前话题的环境优先。 |
 | `option:BindingOptions.environment_default` | 未另行选择时，新线程如何选择环境。 |
+| `option:BindingOptions.default_environment` | 最近一层设置指定的默认环境（无论设在哪一层），以及当前读者无法使用它时的原因；没有设置指定默认环境、或重新绑定现有线程时缺省。 |
 | `option:BindingOptions.source` | 已安全解析的仓库设置及仓库地址的来源位置。 |
 | `option:BindingOptions.access` | 在这里创建的线程最初采用的权限页。 |
 | `option:BindingOptions.agent_access` | 此创建上下文可选的代理权限；重新绑定不会创建新贡献。 |

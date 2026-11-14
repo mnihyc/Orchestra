@@ -32,6 +32,7 @@ it.each(['en', 'zh-CN'] as const)('creates an account without a fabricated perso
   show(<CreateUserDialog open onClose={() => undefined} />);
   expect(await screen.findByText(i18n.t('admin.users.create.noOwnOrg'))).toBeVisible();
   expect(screen.queryByRole('group', { name: i18n.t('admin.users.create.ownOrg') })).not.toBeInTheDocument();
+  expect(screen.getAllByRole('textbox')[0]).toBe(screen.getByLabelText(i18n.t('admin.users.create.name')));
   await fill(); await userEvent.click(submit());
   await waitFor(() => expect(calls.create).toHaveBeenCalledTimes(1));
   expect(calls.create.mock.calls[0]?.[0]).toEqual({ username: 'new-person', display_name: 'New person', is_system_admin: false });

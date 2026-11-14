@@ -75,6 +75,7 @@ export function OpenDialog({ environmentId, environmentName, list, watchers, thr
       }
     >
       <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (ready) open.mutate(); }}>
+        {making && <Input label={t('browser.open.name')} hint={t('browser.open.nameHint')} mono value={name} error={nameFault ?? undefined} onChange={(event) => setName(event.target.value.toLowerCase())} />}
         <RadioGroup<string>
           variant="list"
           label={t('browser.open.profile')}
@@ -85,7 +86,6 @@ export function OpenDialog({ environmentId, environmentName, list, watchers, thr
             { value: NEW, ...choiceOption(t, 'browserProfile.new'), description: t('browser.open.newProfile') },
           ]}
         />
-        {making && <Input label={t('browser.open.name')} hint={t('browser.open.nameHint')} mono value={name} error={nameFault ?? undefined} onChange={(event) => setName(event.target.value.toLowerCase())} />}
         {running === null && (
           <RadioGroup<BrowserPreset>
             variant="list"

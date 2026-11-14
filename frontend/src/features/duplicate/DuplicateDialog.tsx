@@ -108,8 +108,8 @@ export function DuplicateDialog({ target, quick = false, onClose }: { target: Du
     <div className="flex min-w-0 flex-col gap-4">
       <CopySetupBefore kind={target.kind} notes={target.refusal === undefined ? target.setup : undefined} />
       {!quick && <>
-        <CopyPlacePicker label={t('duplicate.destination')} subject={{ kind: target.kind, id: target.id }} sourceName={target.name} intent="duplicate" onStanding={setStanding} value={place} onChange={choosePlace} disabled={pending} includeThreads={target.kind === 'document'} />
         <Input label={t('duplicate.name')} optional value={name} onChange={(event) => { setName(event.target.value); write.reset(); }} disabled={pending} />
+        <CopyPlacePicker label={t('duplicate.destination')} subject={{ kind: target.kind, id: target.id }} sourceName={target.name} intent="duplicate" onStanding={setStanding} value={place} onChange={choosePlace} disabled={pending} includeThreads={target.kind === 'document'} />
         {target.kind === 'environment' && <Select label={t('duplicate.placement')} value={placement} onValueChange={(value) => { setPlacement(value); write.reset(); }} disabled={pending}
           options={[{ value: 'same', name: t('duplicate.samePlacement') }, { value: 'managed', name: t('duplicate.managedPlacement') }, { value: 'machine', name: t('duplicate.machinePlacement') }]} />}
         {(target.kind === 'mcp_server' && target.imported === true || target.kind === 'environment' && placement === 'machine') && <>

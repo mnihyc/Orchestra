@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-notifier-email --lib
+web typecheck
+web lint
+web test -- tests/component/group-chat-create.test.tsx tests/component/admin-creation-policy.test.tsx tests/component/metadata-declaration-locators.test.tsx tests/component/registration-lifecycle.test.tsx tests/component/provider-source-models.test.tsx tests/component/admin-org-choice.test.tsx tests/component/account-creation-replay.test.tsx tests/component/browser-discovery.test.tsx tests/component/skills.test.tsx tests/component/start-flow.test.tsx tests/unit/start-choices.test.ts tests/component/gateways/catalogue.test.tsx tests/component/duplicate.test.tsx tests/component/change-temporary.test.tsx tests/component/everything.test.tsx tests/component/navigation-recent-rows.test.tsx tests/component/recent-visit-order.test.tsx tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

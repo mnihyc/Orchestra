@@ -23,6 +23,10 @@ for (const locale of ['en', 'zh-CN'] as const) for (const result of ['new', 'rep
   expect(screen.queryByRole('switch', { name: i18n.t('temporary.name') })).not.toBeInTheDocument();
   await user.click(screen.getByRole('combobox', { name: i18n.t('change.where.label') }));
   await user.click(screen.getByRole('option', { name: i18n.t('changeCompact.destination.new') }));
+  const name = screen.getByRole('textbox', { name: i18n.t('change.where.name') + ' ' + i18n.t('ui.field.optional') });
+  expect(name.compareDocumentPosition(screen.getByRole('combobox', { name: i18n.t('change.where.label') })) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  await user.type(name, 'Copied workspace');
+  expect(screen.getByLabelText('Change request')).toHaveTextContent('Copied workspace');
   const temporary = screen.getByRole('switch', { name: i18n.t('temporary.name') });
   expect(temporary).not.toBeChecked(); expect(temporary).toHaveAccessibleDescription(i18n.t('temporary.description'));
   await user.click(temporary);
