@@ -33,8 +33,6 @@ pub const CONNECTION_BUDGET_VARIABLE: &str = "ORCH_TEST_DATABASE_CONNECTION_BUDG
 pub const CONNECTION_RESERVATION_VARIABLE: &str = "ORCH_TEST_DATABASE_CONNECTIONS_PER_FIXTURE";
 /// The identifier whose exact database records a test job checks at its end.
 pub const RUN_ID_VARIABLE: &str = "ORCH_TEST_DATABASE_RUN_ID";
-/// Seconds admission may wait for another fixture to finish.
-pub const ADMISSION_WAIT_VARIABLE: &str = "ORCH_TEST_DATABASE_WAIT_SECS";
 
 /// Four fixture connections suffice when several transactions run together.
 const POOL_SIZE: u32 = 4;
@@ -46,14 +44,11 @@ const DEFAULT_CONNECTION_BUDGET: u32 = MINIMUM_RESERVATION * 4;
 /// Leave one fifth of total connections for non-fixture traffic, matching the
 /// dedicated test server's 960-connection allowance out of 1,200 connections.
 const SERVER_HEADROOM_DIVISOR: u32 = 5;
-/// Admission allows the deployed enrollment and attach waits (120 + 150 seconds)
-/// and one job lease (30 seconds) for a fixture ahead of it to finish.
-const DEFAULT_ADMISSION_WAIT: u64 = 300;
 /// An admission poll touches only local locks; twenty looks a second avoid busy waiting.
 const ADMISSION_POLL: Duration = Duration::from_millis(50);
-/// Cleanup has the same administrative bound as admission, including a slow
-/// database drop on a busy server; a failure remains recorded for the job runner.
-const CLEANUP_WAIT: Duration = Duration::from_secs(DEFAULT_ADMISSION_WAIT);
+/// Allow a slow database drop on a busy server; a failure remains recorded for
+/// the job runner. This administrative bound does not limit queued admissions.
+const CLEANUP_WAIT: Duration = Duration::from_secs(300);
 /// Leave two minutes for assertions and cleanup within the twelve-minute test-program guard.
 const STATEMENT_TIMEOUT: &str = "10min";
 /// Notice an abandoned test client even while PostgreSQL is executing its statement.
@@ -216,12 +211,99 @@ fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
     std::fs::rename(pending, path)
 }
 
+/// A waiting fixture owns a numbered ticket until it is admitted or cancelled.
+/// Kernel locks distinguish live waiters from a process that exited, so a dead
+/// waiter cannot block another test process. Numbers order arrivals under the
+/// same gate used to claim slots; polling and CPU scheduling cannot reorder them.
+struct Admission {
+    _ticket: File,
+    path: PathBuf,
+}
+
+impl Admission {
+    async fn enqueue(directory: &Path) -> io::Result<Self> {
+        let gate = lock_file(&directory.join("budget.lock"))?;
+        while !try_lock(&gate)? {
+            tokio::time::sleep(ADMISSION_POLL).await;
+        }
+        let next_path = directory.join("next-ticket.json");
+        let next: u64 = match std::fs::read(&next_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error),
+        };
+        let following = next
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("database admission ticket numbers are exhausted"))?;
+        write_json(&next_path, &following)?;
+        let waiting = directory.join("waiting");
+        std::fs::create_dir_all(&waiting)?;
+        let path = waiting.join(format!("{next:020}.lock"));
+        let ticket = lock_file(&path)?;
+        if !try_lock(&ticket)? {
+            return Err(io::Error::other(
+                "a database admission ticket is already owned",
+            ));
+        }
+        Ok(Self {
+            _ticket: ticket,
+            path,
+        })
+    }
+
+    /// Called under the budget gate. Remove only abandoned tickets ahead of us.
+    fn is_first(&self) -> io::Result<bool> {
+        let waiting = self
+            .path
+            .parent()
+            .ok_or_else(|| io::Error::other("a database admission ticket has no directory"))?;
+        let mut paths = std::fs::read_dir(waiting)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<io::Result<Vec<_>>>()?;
+        paths.sort();
+        for path in paths {
+            if path == self.path {
+                return Ok(true);
+            }
+            let file = match OpenOptions::new().read(true).write(true).open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if !try_lock(&file)? {
+                return Ok(false);
+            }
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::other("a database admission ticket disappeared"))
+    }
+}
+
+impl Drop for Admission {
+    fn drop(&mut self) {
+        // A failed removal is harmless: the next waiter recognizes the unlocked
+        // ticket as abandoned. No database or connection belongs to this ticket.
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// The budget file serializes admission and configuration changes. A new
 /// budget is accepted only when every old slot is free, so different jobs
 /// cannot silently disagree about the capacity while a fixture is live.
-fn try_slot(directory: &Path, requested: Budget) -> io::Result<Option<(File, u32)>> {
+fn try_slot(
+    directory: &Path,
+    requested: Budget,
+    admission: &Admission,
+) -> io::Result<Option<(File, u32)>> {
     let gate = lock_file(&directory.join("budget.lock"))?;
     if !try_lock(&gate)? {
+        return Ok(None);
+    }
+    if !admission.is_first()? {
         return Ok(None);
     }
     let policy = directory.join("budget.json");
@@ -257,10 +339,6 @@ fn try_slot(directory: &Path, requested: Budget) -> io::Result<Option<(File, u32
 
 impl Lease {
     async fn acquire(admin: PgConnectOptions) -> io::Result<Self> {
-        let allowed = Duration::from_secs(configured_number(
-            ADMISSION_WAIT_VARIABLE,
-            DEFAULT_ADMISSION_WAIT,
-        )?);
         let base = std::env::var_os(LEASE_DIRECTORY_VARIABLE)
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join("orch-test-databases"));
@@ -271,22 +349,17 @@ impl Lease {
         // Capacity discovery uses one short administrative connection. It is
         // closed before waiting for a slot, so queued fixtures hold none.
         let budget = Budget::configured(&admin, &directory).await?;
-        let began = tokio::time::Instant::now();
+        let admission = Admission::enqueue(&directory).await?;
         let (file, slot) = loop {
-            if let Some(slot) = try_slot(&directory, budget)? {
+            if let Some(slot) = try_slot(&directory, budget, &admission)? {
                 break slot;
             }
-            if began.elapsed() >= allowed {
-                return Err(io::Error::other(format!(
-                    "waiting for a test database lease exceeded {allowed:?}: all {} slots reserve {} of {} connections; inspect the owned lease records in {}",
-                    budget.slots(),
-                    budget.slots() * budget.per_fixture,
-                    budget.connections,
-                    directory.display()
-                )));
-            }
+            // A large, healthy fixture can hold capacity longer than a small
+            // test runs. Wait our turn without a deadline or open connections;
+            // the job runner bounds hung programs and process exit frees locks.
             tokio::time::sleep(ADMISSION_POLL).await;
         };
+        drop(admission);
         let id = orch_types::new_id();
         let run_id =
             std::env::var(RUN_ID_VARIABLE).unwrap_or_else(|_| orch_types::new_id().to_string());
@@ -568,4 +641,78 @@ fn template_name() -> String {
     }
     let digest = orch_types::Hash::finish(&hasher).to_string();
     format!("orch_template_{}", &digest[..16])
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "a test fails by panicking")]
+mod tests {
+    use super::*;
+
+    const ONE_FIXTURE: Budget = Budget {
+        connections: MINIMUM_RESERVATION,
+        per_fixture: MINIMUM_RESERVATION,
+    };
+
+    #[tokio::test]
+    async fn queued_fixtures_are_admitted_in_arrival_order_across_slot_releases() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = Admission::enqueue(directory.path()).await.unwrap();
+        let held = try_slot(directory.path(), ONE_FIXTURE, &first)
+            .unwrap()
+            .unwrap();
+        drop(first);
+        let second = Admission::enqueue(directory.path()).await.unwrap();
+        let third = Admission::enqueue(directory.path()).await.unwrap();
+        assert!(
+            try_slot(directory.path(), ONE_FIXTURE, &second)
+                .unwrap()
+                .is_none()
+        );
+        drop(held);
+        assert!(
+            try_slot(directory.path(), ONE_FIXTURE, &third)
+                .unwrap()
+                .is_none()
+        );
+        let held = try_slot(directory.path(), ONE_FIXTURE, &second)
+            .unwrap()
+            .unwrap();
+        drop(second);
+        assert!(
+            try_slot(directory.path(), ONE_FIXTURE, &third)
+                .unwrap()
+                .is_none()
+        );
+        drop(held);
+        assert!(
+            try_slot(directory.path(), ONE_FIXTURE, &third)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_and_abandoned_waiters_do_not_hold_up_the_next_fixture() {
+        let directory = tempfile::tempdir().unwrap();
+        let cancelled = Admission::enqueue(directory.path()).await.unwrap();
+        let abandoned = Admission::enqueue(directory.path()).await.unwrap();
+        let next = Admission::enqueue(directory.path()).await.unwrap();
+        assert!(
+            try_slot(directory.path(), ONE_FIXTURE, &next)
+                .unwrap()
+                .is_none()
+        );
+        drop(cancelled);
+        // A stopped process releases its kernel lock without running Drop.
+        let path = abandoned.path.clone();
+        drop(abandoned);
+        File::create(&path).unwrap();
+        assert!(path.exists());
+        assert!(
+            try_slot(directory.path(), ONE_FIXTURE, &next)
+                .unwrap()
+                .is_some()
+        );
+        assert!(!path.exists());
+    }
 }

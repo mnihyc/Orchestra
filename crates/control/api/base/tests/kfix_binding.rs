@@ -6,6 +6,8 @@
 )]
 
 mod binding_support;
+#[path = "container_units/fixture.rs"]
+mod container_units;
 mod places;
 mod rig;
 mod support;
@@ -577,4 +579,49 @@ async fn a_harness_the_machine_cannot_run_says_why_once_as_its_state_and_is_aske
         status, "online",
         "an installation repaired meanwhile is found"
     );
+}
+
+#[tokio::test]
+async fn a_unit_whose_policy_lists_no_program_for_a_harness_is_not_asked_to_start_it() {
+    use orch_link_contract::commands::CommandKind;
+    let s = Scene::new().await;
+    let unit = {
+        let mut conn = s.rig.db.acquire().await.unwrap();
+        let (host, template) = container_units::host_and_template(
+            &mut conn,
+            s.ada.id(),
+            s.tree.org.base.id,
+            "Programs",
+            s.rig.world.now(),
+        )
+        .await;
+        container_units::provider_unit(&mut conn, host, template, s.on.provider, s.rig.world.now())
+            .await
+    };
+    let mut lists_none = reported();
+    lists_none["policy"]["agent.harnesses"] = json!([]);
+    sqlx::query("UPDATE machines SET facts = $2, online = true WHERE id = $1")
+        .bind(unit)
+        .bind(lists_none)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE agents SET descriptor = '{}', machine_id = $2 WHERE id = $1")
+        .bind(s.on.agent)
+        .bind(unit)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    s.rig.engine.discover_descriptors(unit).await.unwrap();
+    assert_eq!(
+        s.rig.seen.of_kind(CommandKind::AgentStart).len(),
+        0,
+        "the unit lists no program, so there is nothing to ask it to start"
+    );
+    let states: i64 = sqlx::query_scalar("SELECT count(*) FROM harnesses WHERE machine_id = $1")
+        .bind(unit)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(states, 0, "and nothing is said of it as a failure");
 }
