@@ -441,6 +441,7 @@ pub struct ScriptedCommands {
     link: Mutex<ControllerLink>,
     others: Mutex<HashMap<Id, ControllerLink>>,
     issued: Mutex<HashMap<Id, Issued>>,
+    lost_waits: Mutex<HashSet<String>>,
     clock: Arc<dyn Clock>,
     process: AtomicU64,
     /// Whether the link says that it holds events of a machine not taken in yet ([`World::hearing_behind`]).
@@ -458,6 +459,7 @@ impl ScriptedCommands {
             link: Mutex::new(link),
             others: Mutex::new(HashMap::new()),
             issued: Mutex::new(HashMap::new()),
+            lost_waits: Mutex::new(HashSet::new()),
             clock,
             process: AtomicU64::new(1),
             behind: AtomicBool::new(false),
@@ -558,6 +560,11 @@ impl ScriptedCommands {
             .values()
             .filter(|entry| entry.cmd.kind == kind)
             .count()
+    }
+
+    /// Loses a live waiter's result after the machine answered; the retained status still has it.
+    pub fn lose_waits_of(&self, kind: CommandKind) {
+        lock(&self.lost_waits).insert(kind.as_str().to_owned());
     }
 
     /// The commands of a kind as they were issued (a secret still the reference to it, a ticket still the
@@ -782,6 +789,14 @@ impl Commands for Process {
             return Err(CommandsError::Other("there is no such command".to_owned()));
         };
         let outcome = self.wait_handle(handle).await?;
+        let loses_wait = lock(&self.commands.issued).get(&id).is_some_and(|issued| {
+            lock(&self.commands.lost_waits).contains(issued.cmd.kind.as_str())
+        });
+        if loses_wait {
+            return Err(CommandsError::Other(
+                "the live waiter lost its reply after the command ended".to_owned(),
+            ));
+        }
         self.commands.complete_admitted(id, outcome).await
     }
 

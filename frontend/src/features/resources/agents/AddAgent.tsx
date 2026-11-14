@@ -80,6 +80,7 @@ export function AddAgentDialog({ onClose, onCreated, initialHome = '' }: { onClo
       <Button variant="primary" type="submit" form="add-agent" pending={made.isPending} blocked={blocked}>{t('agents.add.submit')}</Button>
     </>}>
     <form id="add-agent" className="flex min-w-0 flex-col gap-3 py-2" noValidate onSubmit={form.submit((values)=>!blocked && made.mutate(values.name))}>
+      <Input label={t('agents.add.name')} {...form.field('name')} disabled={made.isPending} autoComplete="off"/>
       <div className="flex items-center gap-1 text-sm font-medium"><span>{t('agentCreation.mode')}</span><AgentProgramHelp/></div>
       <Select<Mode> hideLabel label={t('agentCreation.mode')} value={mode} disabled={made.isPending} onValueChange={(next)=>{setMode(next);setChoice(null);}}
         options={[{value:'available',label:t('agentCreation.available')},{value:'machine',label:t('agentCreation.onMachine')}]}/>
@@ -98,7 +99,6 @@ export function AddAgentDialog({ onClose, onCreated, initialHome = '' }: { onClo
             onValueChange={(value)=>{const entry=choices.find((row)=>row.value===value);if(entry!==undefined)setChoice({...entry,source:'person'});}} options={shownChoices}/>}
       {selected && <AgentDetection kind={kind} machine={mode==='machine'?machine.data:undefined} catalogue={kinds.data?.find((entry)=>entry.kind===kind)}
         registered={mode==='machine'?freshRegistered.find((entry)=>entry.kind===kind)?.program:undefined}/>}
-      <Input label={t('agents.add.name')} {...form.field('name')} disabled={made.isPending} autoComplete="off"/>
       <HomePicker value={home} onChange={setHome} disabled={made.isPending}/>
       {made.error!==null && !placed && <ErrorAlert error={made.error}/>}
     </form>

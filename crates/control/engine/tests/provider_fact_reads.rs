@@ -1,4 +1,4 @@
-//! Provider observations follow registration, sign-in, page and activity clocks; credential notices follow token lifetime without warning-percent notifications.
+//! Provider observations follow registration, sign-in, page and activity clocks; credential notices follow chosen intervals without warning-percent notifications.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -1173,17 +1173,14 @@ async fn a_native_login_without_a_vendor_lapse_uses_successful_renewal_time_and_
 }
 
 #[tokio::test]
-async fn a_ten_day_token_is_warned_once_two_and_a_half_days_before_and_a_year_token_fourteen_days_before()
- {
-    for (life, notice) in [
-        (Duration::days(10), Duration::hours(60)),
-        (Duration::days(365), Duration::days(14)),
-    ] {
+async fn a_token_is_warned_once_at_its_chosen_interval_even_when_its_lifetime_is_short() {
+    for (life, notice_days) in [(Duration::days(10), 8), (Duration::days(365), 14)] {
+        let notice = Duration::days(notice_days);
         let (world, clock) = world().await;
         let provider = runtimes::managed_subscription(&world, "Imported token").await;
         let issued = clock.now();
         let ends = issued + life;
-        sqlx::query("UPDATE providers SET status = 'ready',facts = $2 WHERE id = $1").bind(provider).bind(json!({"credential":{"method":"access_token","yields":"token","issued_at":Time::new(issued),"expires_at":Time::new(ends)}})).execute(world.pool.pool()).await.unwrap();
+        sqlx::query("UPDATE providers SET status = 'ready',facts = $2,runtime_config = runtime_config || $3 WHERE id = $1").bind(provider).bind(json!({"credential":{"method":"access_token","yields":"token","issued_at":Time::new(issued),"expires_at":Time::new(ends)}})).bind(json!({"providers.expiry_notice_days":notice_days})).execute(world.pool.pool()).await.unwrap();
         world
             .engine()
             .watch_provider_credential_ends()
@@ -1222,6 +1219,57 @@ async fn a_ten_day_token_is_warned_once_two_and_a_half_days_before_and_a_year_to
             "the credential's same warning is not repeated the next day"
         );
     }
+}
+
+#[tokio::test]
+async fn every_token_is_considered_after_an_earlier_page_even_when_those_need_no_notice() {
+    let (world, clock) = world().await;
+    let provider = runtimes::managed_subscription(&world, "Token after an earlier page").await;
+    sqlx::query("UPDATE providers SET status='ready',facts=$2,runtime_config=runtime_config || $3 WHERE id=$1")
+        .bind(provider)
+        .bind(json!({"credential":{"yields":"token","issued_at":Time::new(clock.now()-Duration::days(9)),"expires_at":Time::new(clock.now()+Duration::days(1))}}))
+        .bind(json!({"providers.expiry_notice_days":2}))
+        .execute(world.pool.pool()).await.unwrap();
+    // One hundred lower identifiers fill the first page without needing any notice of their own.
+    sqlx::query(
+        "INSERT INTO providers(id,name,owner_id,org_id,home_id,kind,harness_kind,agent_id,
+                               upstreams,protocols,arrangements,status,facts)
+         SELECT ('00000000-0000-0000-0011-' || lpad(slot::text,12,'0'))::uuid,
+                'Earlier token ' || slot, p.owner_id,p.org_id,p.home_id,p.kind,
+                p.harness_kind,p.agent_id,p.upstreams,p.protocols,p.arrangements,'ready',$2
+           FROM providers p CROSS JOIN generate_series(1,100) AS slots(slot) WHERE p.id=$1",
+    )
+    .bind(provider)
+    .bind(json!({"credential":{"yields":"token","expires_at":Time::new(clock.now()+Duration::days(365))}}))
+    .execute(world.pool.pool()).await.unwrap();
+    let earlier: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM providers WHERE id < $1 AND name LIKE 'Earlier token %'",
+    )
+    .bind(provider)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(earlier, 100);
+    world
+        .engine()
+        .watch_provider_credential_ends()
+        .await
+        .unwrap();
+    assert_eq!(
+        notices(&world).await,
+        1,
+        "an earlier page must not hide a later provider's notice"
+    );
+    world
+        .engine()
+        .watch_provider_credential_ends()
+        .await
+        .unwrap();
+    assert_eq!(
+        notices(&world).await,
+        1,
+        "paging does not repeat an already delivered notice"
+    );
 }
 
 #[tokio::test]

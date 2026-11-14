@@ -63,6 +63,7 @@ export function RegisterAgentDialog({ machine, open, onClose }: { machine: Machi
       }
     >
       <form id="register-agent" className="flex flex-col gap-4 py-2" noValidate onSubmit={form.submit((values) => kind !== '' && home !== '' && register.mutate(values.name))}>
+        <Input label={t('machines.agent.name')} optional placeholder={proposed} {...form.field('name')} autoComplete="off" />
         <ChoiceLocator
           label={t('machines.agent.harness')}
           hint={harnesses.length === 0 ? t('machines.agent.noHarness') : t('machines.agent.harnessHint')}
@@ -76,7 +77,6 @@ export function RegisterAgentDialog({ machine, open, onClose }: { machine: Machi
             description: harness.path,
           }))}
         />
-        <Input label={t('machines.agent.name')} optional hint={t('machines.agent.nameHint', { proposed })} {...form.field('name')} autoComplete="off" />
         <HomePicker value={home} onChange={setHome} />
         {register.error !== null && !placed && <ErrorAlert error={register.error} />}
       </form>

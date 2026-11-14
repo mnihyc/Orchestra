@@ -10,8 +10,8 @@
 //! the one to the other. No row, event or log of the engine ever holds a credential in the clear.
 //!
 //! What the engine remembers here is small and lost with the process, which is safe: how many copies were
-//! issued under a lease and when (a new one is not issued within thirty seconds of the last, nor while
-//! one is in flight), what the harness said it lacks, and which providers have a return under way (a
+//! issued under a lease and when, which request an issue is serving, what the harness asked for while
+//! that issue was in flight, and which providers have a return under way (a
 //! return and a declaration that a credential is lost never run together).
 
 pub mod handover;
@@ -35,6 +35,8 @@ pub struct Issued {
     pub in_flight: bool,
     /// What the harness said it lacks, until a copy has been given.
     pub needed: Option<CredentialNeed>,
+    /// The request being served by the issue in flight; restored if that attempt fails.
+    pub serving: Option<CredentialNeed>,
     /// How many copies were issued under the lease: the number that makes each command's identifier its own.
     pub count: u32,
 }
@@ -78,14 +80,20 @@ impl Issuing {
         }
     }
 
-    /// Begins an issue under a lease, if one may be made now: not while one is in flight, and not within
-    /// thirty seconds of the last. The answer is the number of the issue, which names its commands.
-    pub fn begin(&mut self, lease: Id, now: Time) -> Option<u32> {
+    /// Begins one issue under a lease. A harness request bypasses the automatic renewal interval;
+    /// concurrent requests remain pending until the issue in flight finishes.
+    pub fn begin(&mut self, lease: Id, now: Time, minimum_interval_secs: i64) -> Option<u32> {
         let held = self.leases.entry(lease).or_default();
-        if !may_issue(held.in_flight, held.last, now) {
+        let interval = if held.needed.is_some() {
+            0
+        } else {
+            minimum_interval_secs
+        };
+        if !may_issue(held.in_flight, held.last, now, interval) {
             return None;
         }
         held.in_flight = true;
+        held.serving = held.needed.take();
         Some(held.count)
     }
 
@@ -95,7 +103,7 @@ impl Issuing {
         held.in_flight = false;
         held.last = Some(now);
         held.expires_at = expires_at;
-        held.needed = None;
+        held.serving = None;
         held.count = held.count.saturating_add(1);
     }
 
@@ -103,6 +111,7 @@ impl Issuing {
     pub fn failed(&mut self, lease: Id) {
         if let Some(held) = self.leases.get_mut(&lease) {
             held.in_flight = false;
+            held.needed = held.needed.or(held.serving.take());
         }
     }
 
@@ -380,28 +389,52 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_is_not_issued_while_one_is_in_flight_nor_within_thirty_seconds_of_the_last() {
+    fn a_requested_copy_is_renewed_without_waiting_but_issues_do_not_overlap() {
         let lease = new_id();
         let mut issuing = Issuing::default();
-        assert_eq!(issuing.begin(lease, at(0)), Some(0));
-        assert_eq!(issuing.begin(lease, at(1)), None, "one is in flight");
+        assert_eq!(issuing.begin(lease, at(0), 30), Some(0));
+        assert_eq!(issuing.begin(lease, at(1), 30), None, "one is in flight");
         issuing.done(lease, Some(at(3_600)), at(2));
         assert_eq!(
-            issuing.begin(lease, at(20)),
+            issuing.begin(lease, at(20), 30),
             None,
-            "the last was issued 18 seconds ago"
+            "an automatic renewal can retain its configured interval"
         );
+        issuing.needs(lease, CredentialNeed::Rejected);
         assert_eq!(
-            issuing.begin(lease, at(32)),
+            issuing.begin(lease, at(20), 30),
             Some(1),
-            "30 seconds have passed"
+            "the harness needs a replacement now"
         );
         issuing.failed(lease);
         assert_eq!(
-            issuing.begin(lease, at(33)),
+            issuing.begin(lease, at(21), 30),
             Some(1),
-            "an issue that gave nothing is not counted"
+            "a failed attempt keeps the request and is not counted"
         );
+    }
+
+    #[test]
+    fn requests_received_during_an_issue_are_kept_as_one_pending_renewal() {
+        let lease = new_id();
+        let mut issuing = Issuing::default();
+        issuing.needs(lease, CredentialNeed::Expiring);
+        assert_eq!(issuing.begin(lease, at(0), 30), Some(0));
+        issuing.needs(lease, CredentialNeed::Rejected);
+        issuing.needs(lease, CredentialNeed::Missing);
+        assert_eq!(issuing.begin(lease, at(1), 30), None);
+        issuing.done(lease, Some(at(3_600)), at(2));
+        assert_eq!(
+            issuing.of(lease).needed,
+            Some(CredentialNeed::Missing),
+            "the completed issue does not discard a request received while it was in flight"
+        );
+        assert_eq!(issuing.begin(lease, at(2), 30), Some(1));
+        issuing.failed(lease);
+        assert_eq!(issuing.of(lease).needed, Some(CredentialNeed::Missing));
+        assert_eq!(issuing.begin(lease, at(3), 30), Some(1));
+        issuing.done(lease, Some(at(3_600)), at(4));
+        assert_eq!(issuing.of(lease).needed, None);
     }
 
     #[test]
@@ -410,7 +443,7 @@ mod tests {
         let mut issuing = Issuing::default();
         issuing.needs(lease, CredentialNeed::Expiring);
         assert_eq!(issuing.of(lease).needed, Some(CredentialNeed::Expiring));
-        issuing.begin(lease, at(0));
+        issuing.begin(lease, at(0), 30);
         issuing.done(lease, None, at(1));
         assert_eq!(issuing.of(lease).needed, None);
         issuing.forget(lease);

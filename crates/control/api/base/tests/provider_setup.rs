@@ -73,23 +73,18 @@ async fn a_usable_profile_without_a_report_is_explained_without_guessing_subscri
         .await
         .unwrap();
     let page = setup(&world, &c.boss, c.acme).await.ok();
-    assert!(!page.subscriptions.iter().any(|entry| entry.agent.id == id));
     assert!(
-        page.subscriptions_unreported
-            .as_ref()
-            .is_some_and(|agents| agents.iter().any(|agent| agent.id == id))
+        serde_json::to_value(&page)
+            .unwrap()
+            .get("subscriptions_unreported")
+            .is_none(),
+        "subscription availability has one current representation"
     );
+    assert!(!page.subscriptions.iter().any(|entry| entry.agent.id == id));
     assert!(page.subscriptions_unavailable.as_ref().is_some_and(|rows|rows.iter().any(|row|
         row.agent.as_ref().is_some_and(|agent|agent.id==id)
         && row.reason==orch_api_contract::resources::ProviderSetupSubscriptionUnavailableReason::NotReported)));
     let hidden = setup(&world, &c.viewer, c.acme).await.ok();
-    assert!(
-        hidden
-            .subscriptions_unreported
-            .as_ref()
-            .is_none_or(|agents| agents.iter().all(|agent| agent.id != id)),
-        "unknown capability does not disclose an unusable private profile"
-    );
     assert!(
         hidden
             .subscriptions_unavailable

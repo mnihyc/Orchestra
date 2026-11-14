@@ -1296,9 +1296,12 @@ impl Recreating {
             )
             .await?;
         }
+        // A person who stopped or took away the old unit while the update was under way has it stay stopped.
+        let kept_stopped = plan.get("keep_old_stopped").and_then(Json::as_bool) == Some(true);
         let resume = !removed_capability
             && !guarded
             && !disabled
+            && !kept_stopped
             && (self.recipe.auto_start || !self.recipe.was_stopped);
         if resume
             && (plan.get("old_stop_requested").and_then(Json::as_bool) == Some(true)
