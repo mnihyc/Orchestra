@@ -10,12 +10,14 @@ import { shellBootstrapKey } from '@/shell/bootstrap';
 import { useShellKeyboard } from '@/shell/keyboard';
 import { useUnsavedGuard } from '@/features/workbench/store';
 import { useChatDraftGuard } from '@/features/chat/draft';
+import { useComposerDraftGuard } from '@/features/composer/Draft';
 
 export function ShellControls({ children }: { children: ReactNode }) {
   const userId = useStore(client.session, (state) => state.userId);
   useShellKeyboard(userId !== null);
   useUnsavedGuard();
   useChatDraftGuard();
+  useComposerDraftGuard();
   // Observe the aggregate's readiness; only Shell starts its request.
   const bootstrap = useQuery<MeBootstrapReply>({ queryKey: shellBootstrapKey(userId ?? ''), queryFn: skipToken }).data;
   return <>

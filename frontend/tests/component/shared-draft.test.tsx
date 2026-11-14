@@ -5,15 +5,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { SessionEvent } from '@/api/client';
 import type * as ClientApi from '@/api/client';
+import { ReceiptAcknowledged } from '@/api/client';
 import type * as SourceApi from '@/api/source';
 import type * as ThreadsApi from '@/api/threads';
-import { composerWriter, DRAFT_SAVE_AFTER_MS, submitInput, useBox, useComposerStore, useDraftSync } from '@/features/composer/Draft';
+import { composerWriter, DRAFT_SAVE_AFTER_MS, persistComposerDraft, submitInput, useBox, useComposerDraftGuard, useComposerStore, useDraftSync } from '@/features/composer/Draft';
+import type { ToastOptions } from '@/ui/Toast';
 import type { Draft } from '@/generated/api-types';
 import { threadWriter } from '@/realtime/stores/thread';
 import { threadInput } from '../doubles/thread-rows';
 
 const calls = vi.hoisted(() => ({ read: vi.fn<() => Promise<Draft | null>>(), save: vi.fn<typeof ThreadsApi.saveDraft>(),
-  send: vi.fn<typeof ThreadsApi.sendInput>(), clear: vi.fn<() => Promise<void>>(), session: new Set<(event: SessionEvent) => void>() }));
+  send: vi.fn<typeof ThreadsApi.sendInput>(), clear: vi.fn<() => Promise<void>>(), toast: vi.fn<(options: ToastOptions) => () => void>(), session: new Set<(event: SessionEvent) => void>() }));
+vi.mock('@/ui/Toast', () => ({ toast: calls.toast }));
 vi.mock('@/api/client', async (load) => {
   const actual = await load<typeof ClientApi>();
   return { ...actual, client: { ...actual.client, onSession: (listener: (event: SessionEvent) => void) => {
@@ -32,18 +35,22 @@ function Editor({ name }: { name: string }) {
   return <output aria-label={name}>{useBox(THREAD).text} / {status}</output>;
 }
 let query: QueryClient;
+function Guard() { useComposerDraftGuard(); return null; }
 function showEditors(lane: boolean, panel = true) {
-  return <QueryClientProvider client={query}>{lane && <Editor key="lane" name="lane" />}{panel && <Editor key="panel" name="panel" />}</QueryClientProvider>;
+  return <QueryClientProvider client={query}><Guard />{lane && <Editor key="lane" name="lane" />}{panel && <Editor key="panel" name="panel" />}</QueryClientProvider>;
 }
 beforeEach(() => {
+  act(() => { for (const listener of calls.session) listener({ type: 'signed_out' }); });
   vi.useFakeTimers(); calls.read.mockReset().mockResolvedValue(saved); calls.save.mockReset().mockResolvedValue(saved);
   calls.clear.mockReset().mockResolvedValue(undefined); calls.send.mockReset();
+  calls.toast.mockReset().mockReturnValue(() => undefined);
   query = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  useComposerStore.setState({ text: {}, parts: {}, sending: {}, refused: {} }); threadWriter.evict(THREAD);
+  useComposerStore.setState({ text: {}, parts: {}, sending: {}, refused: {}, draftSaves: {}, dirtyDrafts: new Set() }); threadWriter.evict(THREAD);
 });
 afterEach(async () => {
+  act(() => { for (const listener of calls.session) listener({ type: 'signed_out' }); });
   cleanup(); query.clear(); await advance(0); vi.useRealTimers(); threadWriter.evict(THREAD);
-  useComposerStore.setState({ text: {}, parts: {}, sending: {}, refused: {} });
+  useComposerStore.setState({ text: {}, parts: {}, sending: {}, refused: {}, draftSaves: {}, dirtyDrafts: new Set() });
 });
 
 describe('a draft shared by an aside lane and its panel', () => {
@@ -70,6 +77,72 @@ describe('a draft shared by an aside lane and its panel', () => {
     expect(calls.save).toHaveBeenCalledExactlyOnceWith(THREAD, [{ type: 'text', text: 'Keep this while browsing history' }], 'queue');
     await advance(DRAFT_SAVE_AFTER_MS);
     expect(calls.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains a failed final draft flush and reports it after the editor has gone', async () => {
+    calls.save.mockRejectedValue(new Error('Draft save failed'));
+    const view = render(showEditors(true, false)); await advance(1);
+    act(() => composerWriter.setText(THREAD, 'Private words kept while browsing'));
+    view.unmount(); await advance(0);
+    expect(calls.save).toHaveBeenCalledTimes(1);
+    expect(calls.toast.mock.lastCall?.[0].tone).toBe('danger');
+    expect(calls.toast.mock.lastCall?.[0].action?.run).toBeTypeOf('function');
+    render(showEditors(false, true)); await advance(1);
+    expect(screen.getByRole('status', { name: 'panel' })).toHaveTextContent('Private words kept while browsing / failed');
+    calls.save.mockResolvedValue(saved);
+    await act(() => persistComposerDraft(THREAD)); await advance(0);
+    expect(calls.save).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('status', { name: 'panel' })).toHaveTextContent('Private words kept while browsing / idle');
+  });
+
+  it('shows the same pending and failed save in both editors and after the last one closes', async () => {
+    let refuse: (error: Error) => void = () => undefined;
+    calls.save.mockImplementation(() => new Promise((_resolve, reject) => { refuse = reject; }));
+    const view = render(showEditors(true)); await advance(1);
+    act(() => composerWriter.setText(THREAD, 'Shared unsaved words')); await advance(DRAFT_SAVE_AFTER_MS);
+    for (const name of ['lane', 'panel']) expect(screen.getByRole('status', { name })).toHaveTextContent('Shared unsaved words / saving');
+    view.unmount();
+    act(() => refuse(new Error('The final save was not acknowledged'))); await advance(0);
+    render(showEditors(false, true)); await advance(1);
+    expect(screen.getByRole('status', { name: 'panel' })).toHaveTextContent('Shared unsaved words / failed');
+    expect(calls.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('never retries a background draft failure through a later reader', async () => {
+    calls.save.mockRejectedValue(new Error('Draft save failed'));
+    const view = render(showEditors(true, false)); await advance(1);
+    act(() => composerWriter.setText(THREAD, 'Private to the first reader'));
+    view.unmount(); await advance(0);
+    const retry = calls.toast.mock.lastCall?.[0].action?.run;
+    expect(retry).toBeTypeOf('function');
+    act(() => { for (const listener of calls.session) listener({ type: 'signed_out' }); });
+    await act(async () => { retry?.(); await Promise.resolve(); });
+    expect(calls.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('protects a failed draft after navigation until matching words are acknowledged', async () => {
+    calls.save.mockRejectedValue(new Error('Draft save failed'));
+    const view = render(showEditors(true, false)); await advance(1);
+    act(() => composerWriter.setText(THREAD, 'Do not lose these private words')); await advance(0);
+    const guarded = () => { const event = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented; };
+    expect(guarded()).toBe(true);
+    view.rerender(showEditors(false, false)); await advance(0);
+    expect(guarded()).toBe(true);
+    expect(calls.save).toHaveBeenCalledTimes(1);
+    calls.save.mockResolvedValue(saved);
+    await act(() => persistComposerDraft(THREAD)); await advance(0);
+    expect(guarded()).toBe(false);
+    expect(useComposerStore.getState().text[THREAD]).toBe('Do not lose these private words');
+  });
+
+  it('accepts a native draft receipt without resending or claiming failure', async () => {
+    calls.save.mockRejectedValue(new ReceiptAcknowledged({ projection: 'receipt', kind: 'draft', id: THREAD }, 200, 'draft-receipt'));
+    render(showEditors(true, false)); await advance(1);
+    act(() => composerWriter.setText(THREAD, 'The server acknowledged this draft')); await advance(DRAFT_SAVE_AFTER_MS);
+    expect(screen.getByRole('status', { name: 'lane' })).toHaveTextContent('The server acknowledged this draft / idle');
+    expect(calls.save).toHaveBeenCalledTimes(1);
+    expect(calls.toast).not.toHaveBeenCalled();
+    expect(useComposerStore.getState().dirtyDrafts.has(THREAD)).toBe(false);
   });
 
   it('does not flush a retiring editor through another signed-in reader', async () => {

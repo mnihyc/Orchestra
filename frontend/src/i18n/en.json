@@ -82,6 +82,7 @@
     "noModels": "No API models available here",
     "modelUnavailable": "This model is unavailable here",
     "sources": "Sources",
+    "noAnswer": "No answer was written. Try again.",
     "sourceUnavailable": "Source no longer available",
     "copy": "Copy answer",
     "retry": "Retry answer",
@@ -91,7 +92,6 @@
     "noHistory": "No conversations yet",
     "retention": "Kept for {{days}} days after the last message",
     "expires": "Expires",
-    "adminNotice": "This organization’s admins can inspect and export this conversation",
     "inspection": "Read-only admin inspection",
     "readOnlyTools": "Reads as you · cites sources · makes no changes",
     "paidBy": "Paid by",
@@ -99,7 +99,9 @@
     "privateThread": "Creates a Private permanent thread in this organization",
     "destination": "Destination topic",
     "defaultDestination": "Use the page’s topic or an authorized default",
-    "contextNoRoom": "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves.",
+    "contextNoRoom": "ask.context_tokens leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Increase ask.context_tokens or reduce ask.max_output_tokens.",
+    "windowNoRoom": "The context window of {{model}} leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Use a model with a larger window or reduce ask.max_output_tokens.",
+    "windowUnknown": "The context window of {{model}} is not recorded and is assumed to be small, and the answer’s reserve (ask.max_output_tokens) leaves no room for the conversation. Record the model’s context window or reduce ask.max_output_tokens.",
     "contextTooLong": "This conversation is too long for {{model}}; start a new one or keep it as a thread."
   },
   "viewWindow": {
@@ -263,8 +265,6 @@
     "environmentManager": "Ask {{who}} or an environment manager"
   },
   "switchChoice": {
-    "picker": "Agent and provider",
-    "option": "{{agent}} on {{provider}}",
     "modelUnavailable": "Waiting for a usable model",
     "hold": "New messages wait while the switch runs.",
     "approvalMode": "Approval: {{mode}}"
@@ -362,8 +362,6 @@
     },
     "currentEnvironment": "{{name}} · keep files",
     "sharedEnvironment": "{{name}} · share files",
-    "currentModel": "Current model",
-    "currentEffort": "Current effort",
     "startActions": "Thread actions",
     "automatic": "Automatic",
     "automaticHost": "Automatic · {{host}}",
@@ -2917,6 +2915,20 @@
         "description": "Nobody has said what this data is."
       }
     },
+    "modelAddSwitches": {
+      "all": {
+        "name": "Everything it offers",
+        "description": "Efforts, the window, every context size, speed and access program the catalogue lists"
+      },
+      "basic": {
+        "name": "Efforts and context",
+        "description": "Efforts, the window and every context size; speeds and access programs stay on offer"
+      },
+      "nothing": {
+        "name": "Only what it states",
+        "description": "The model's window and efforts; the rest stays on offer until a manager switches it on"
+      }
+    },
     "operationNotices": {
       "when_blocking": {
         "name": "When work is blocked",
@@ -3607,6 +3619,10 @@
       "allowed": {
         "title": "Allowed models",
         "description": "Patterns naming the models that may be used here at all; a model has to be named by every scope that sets a list."
+      },
+      "add_switches_on": {
+        "title": "Switched on when added",
+        "description": "What a model starts with when it is added from its provider's catalogue: everything it offers (all), only its efforts and context sizes (basic), or only its window and efforts (nothing). A manager can switch on the rest afterwards."
       }
     },
     "providers": {
@@ -5010,6 +5026,7 @@
       "label": "Context {{used}} of {{window}} ({{percent}}); shortens at {{compact}}",
       "labelBare": "Context {{used}} of {{window}} ({{percent}})",
       "open": "Show what fills the context ({{label}})",
+      "labelUsed": "Context {{used}} used; no window reported",
       "modelLabel": "{{model}}: {{context}}"
     },
     "panel": {
@@ -9874,7 +9891,11 @@
         "right": "Hide the right bar",
         "bottom": "Hide the bottom"
       },
-      "pin": "Keep open as a bar"
+      "pin": "Keep open as a bar",
+      "peek": {
+        "title": "Bars",
+        "label": "Show hidden bars on hover: {{state}}"
+      }
     },
     "sash": {
       "left": "Width of the left bar",
@@ -9941,9 +9962,10 @@
       "shellsHint": "Your shells in this environment. Open Terminal.",
       "connecting": "Connecting…",
       "connectingHint": "Connecting to live updates.",
-      "reconnectingSince": "Reconnecting… · {{time}}",
       "reconnecting": "Reconnecting…",
       "reconnectingHint": "What is on screen stays and can be read. Approving and steering wait for the connection; typing does not.",
+      "noLive": "No live updates · {{time}}",
+      "noLiveHint": "Live updates cannot connect, so this page reads again every few seconds. If this stays, ask whoever runs this system to check that the HTTPS front passes WebSocket upgrades for /api/v1/ws; orchctl doctor --url shows it as edge-ws.",
       "slow": "Slow connection · {{ms}} ms",
       "slowHint": "Sending, saving and shells take longer. Nothing you type waits."
     },
@@ -10049,7 +10071,7 @@
       "custom": "Custom",
       "back": "Back to {{place}}’s rules",
       "about": "Owners and people added keep their own access. The general choice decides everyone else’s access.",
-      "letIn": "Let them into the environment",
+      "letIn": "Viewers can open the environment",
       "cannotLetIn": "The thread’s access changed, but you cannot give its readers access to {{name}}. Ask its managers.",
       "changing": "Changing general access",
       "title": "Change general access to {{choice}}?",
@@ -13140,7 +13162,6 @@
   },
   "composer": {
     "row": {
-      "provider": "Provider: {{name}}",
       "archived": "Thread archived",
       "sideBinding": "Change the parent thread’s binding",
       "label": "Message controls",
@@ -13153,7 +13174,9 @@
       "empty": "Write a message or attach a file first.",
       "tooLong": "Shorten the message before sending.",
       "filesWaiting": "Wait for the attachments to finish.",
-      "waitingForTurn": "The running turn is still being loaded."
+      "waitingForTurn": "The running turn is still being loaded.",
+      "runsWith": "What this thread runs with",
+      "agentName": "Agent"
     },
     "mode": {
       "title": "Approval mode",
@@ -13194,16 +13217,11 @@
       "loading": "Reading…"
     },
     "model": {
-      "change": "Model and effort: {{model}}. Change",
-      "current": "Model and effort: {{model}}",
-      "efforts": "Efforts of {{model}}",
       "find": "Find a model",
       "list": "Models",
-      "noEffort": "This agent takes no effort setting.",
       "none": "No model set",
       "notAllowed": "Not allowed here",
       "readOnly": "Changing the model is for whoever manages this thread: {{who}}",
-      "title": "Model and effort",
       "reason": {
         "not_on_provider": "{{provider}} does not offer it",
         "disabled": "It is switched off",
@@ -13214,7 +13232,6 @@
       "exampleLarge": "Large example model",
       "exampleSmall": "Small example model",
       "example": "Example model",
-      "runsWith": "What this thread runs with",
       "conflict": {
         "title": "This choice changed",
         "model": "{{name}} switched to {{model}} just now. Choose again to apply your choice.",
@@ -13300,8 +13317,11 @@
         "context": "Choose the context size, such as /context 400k",
         "done": "{{what}}: {{value}}",
         "notOpen": "{{what}} “{{given}}” is not open for this model. Open: {{list}}.",
-        "sizeInvalid": "Write a size such as 400K, 1M or 400000."
-      }
+        "sizeInvalid": "Write a size such as 400K, 1M or 400000.",
+        "fast": "Switch the fast speed on or off"
+      },
+      "chip": "Model",
+      "window": "{{size}} context"
     },
     "label": "Message to the agent",
     "placeholder": "Message {{agent}}…",
@@ -13333,7 +13353,9 @@
     },
     "draft": {
       "saving": "Saving the draft…",
-      "failed": "The draft could not be saved"
+      "failed": "The draft could not be saved",
+      "kept": "Draft kept in this session",
+      "failedNamed": "Draft for “{{name}}” could not be saved"
     },
     "queue": {
       "title_one": "Queued ({{count}})",
@@ -13411,7 +13433,8 @@
       "label": "Plan",
       "on": "Planning: the agent proposes a plan and changes nothing until somebody proceeds. The approval mode stays as it is.",
       "off": "Plan first: the agent proposes a plan and changes nothing until somebody proceeds.",
-      "checking": "Checking the place’s Plan default…"
+      "checking": "Checking the place’s Plan default…",
+      "slash": "Work the next message in plan mode, such as /plan the task"
     },
     "confinement": {
       "placeDefault": "Sandbox default",
@@ -13419,6 +13442,67 @@
       "label": "Sandbox: {{mode}}",
       "readOnly": "Changing the sandbox is for whoever manages this thread: {{who}}",
       "notOffered": "The agent program has not offered a sandbox choice here."
+    },
+    "pick": {
+      "find": "Search",
+      "nothing": "Nothing matches",
+      "provider": {
+        "ask": "Ask for access",
+        "off": "Unavailable",
+        "why": {
+          "needs_setup": "needs a model",
+          "ready": "ready",
+          "exhausted": "at its limit",
+          "error": "reports an error",
+          "offline": "offline",
+          "disabled": "stopped",
+          "notAllowed": "not allowed here",
+          "noUse": "no access"
+        }
+      },
+      "agent": {
+        "off": "Does not work with {{provider}}",
+        "only": "The only agent that works with this provider",
+        "open": "Open agent",
+        "changed": "Agent changed to {{agent}}: {{was}} does not work with {{provider}}",
+        "why": {
+          "unreported": "not reported yet",
+          "error": "reports an error",
+          "disabled": "switched off",
+          "noUse": "no access",
+          "unavailable": "unavailable"
+        }
+      }
+    },
+    "chip": {
+      "value": "{{what}}: {{value}}",
+      "unset": "Not set",
+      "startsWith": "Where threads start"
+    },
+    "effort": {
+      "title": "Effort",
+      "default": "Default"
+    },
+    "slash": {
+      "fork": "Fork this thread into a new one",
+      "directory": "Choose the directory the thread works in"
+    },
+    "where": {
+      "label": "Works in {{where}}. Change"
+    },
+    "withheld": {
+      "agent": "{{agent}} does not offer it",
+      "access": "Only while the credential stays with the provider",
+      "placement": "Not offered in this kind of environment",
+      "providerKind": "Not offered with this kind of provider",
+      "feature": "Switched off in Agent features",
+      "provider": "The provider leaves it out for this model",
+      "condition": "Not offered here",
+      "act": {
+        "feature": "Switch on in Agent features",
+        "access": "Change how it runs",
+        "placement": "Change where it runs"
+      }
     }
   },
   "thread": {
@@ -13763,7 +13847,6 @@
       "arrangement": "No way of placing this agent works here."
     },
     "provider": {
-      "title": "Provider",
       "none": "There is no provider you can run work on yet. Somebody who manages providers has to add one, or give you the use of one.",
       "locked": "A place above fixes the provider for new threads here.",
       "notYours": "you may not use it; ask {{owner}}",
@@ -13786,10 +13869,7 @@
     },
     "model": {
       "model": "Model",
-      "effort": "Effort",
-      "pickProvider": "Choose a provider first.",
-      "none": "This provider lists no model you can choose yet.",
-      "closed": "it cannot be used here"
+      "none": "This provider lists no model you can choose yet."
     },
     "where": {
       "title": "Where it runs",
@@ -13951,9 +14031,6 @@
       "model": "No model is chosen for new threads in {{place}}.",
       "environment": "You manage no environment here and may not make one.",
       "arrangement": "{{agent}} cannot be placed on {{provider}} here: {{why}}",
-      "pickProvider": "Choose a provider",
-      "pickAgent": "Choose an agent",
-      "pickModel": "Choose a model",
       "keepFor": "Default for",
       "scope": {
         "topic": "This topic",
@@ -17907,7 +17984,7 @@
         "which": "To keep a page to a few people: make it private and name them. To go back to what the place decides: choose the place’s name."
       },
       "goes-environment": {
-        "title": "Let them into the environment",
+        "title": "Viewers can open the environment",
         "what": "A thread runs in an environment, and its files, processes, browsers and displays are that environment’s, given on its own page. This names the people just added there to look, and with Can manage of the thread to change files and open a shell too."
       },
       "goes-model": {
@@ -21681,7 +21758,8 @@
       "contextBoth": "Context {{window}}, up to {{largest}}",
       "contextLargest": "Context up to {{largest}}",
       "offered": "Offered, not switched on: {{list}}",
-      "suggestionsOffer": "What a suggestion offers (speeds, access programs, a larger context) is kept as offered. None of it is switched on by adding the model.",
+      "offers": "Offers: {{list}}",
+      "suggestionsOffer": "Adding a model switches on what it offers (efforts, context sizes, speeds, access programs), unless the organization's settings say otherwise. Narrow it afterwards under Edit options…",
       "edit": "Edit options…"
     },
     "editor": {
@@ -21694,6 +21772,8 @@
       "defaultSpeed": "Starting speed",
       "defaultProgram": "Starting access program",
       "defaultContext": "Starting context",
+      "fromCatalogue": "{{value}} from the catalogue",
+      "none": "none",
       "standard": "Standard",
       "noProgram": "None",
       "typedIn": "Typed in here: {{source}} does not list it",
@@ -22760,6 +22840,7 @@
     }
   },
   "change": {
+    "modelApplies": "Applies next turn",
     "steps": {
       "label": "Steps",
       "plan": "Plan",
@@ -22806,11 +22887,9 @@
       "made": "The plan was older than 15 minutes and has been made again. Look it over, then confirm."
     },
     "runs": {
-      "modelUnknown": "Model not reported",
       "unavailable": {
         "profileDisabled": "Profile disabled",
-        "keeper": "Provider requires its keeper profile",
-        "modelDisabled": "Disabled at provider"
+        "keeper": "Provider requires its keeper profile"
       },
       "automatic": {
         "profile": {
@@ -22843,7 +22922,6 @@
       "model": "Model",
       "effort": "Effort",
       "arrangement": "How agent and provider are placed",
-      "providerNow": "{{name}} (now)",
       "providerCurrent": "{{name}} (current provider)",
       "providerSelected": "{{name}} (selected provider)"
     },
@@ -23395,6 +23473,9 @@
       "askBoxAbout": "Sends this to a side thread and leaves the turn alone.",
       "moveOut": "Move to another org",
       "moveOutReason": "Moves with its main thread · Keep it to move it alone"
+    },
+    "slash": {
+      "about": "Ask a question on the side, without disturbing the turn"
     },
     "ask": {
       "title": "Side thread",
@@ -24115,7 +24196,6 @@
     "price": "Price",
     "priceValue": "{{input}} in · {{output}} out credits / 1M",
     "applies": "Applies",
-    "nextTurn": "Applies from the next turn",
     "runningEnvironments": "Running environments",
     "stoppedEnvironments": "Stopped environments",
     "mine": "Mine",
@@ -24417,6 +24497,9 @@
     "runtimeCount_other": "{{number}} runtimes",
     "offInBuild": "Off in this version: {{feature}}",
     "caseUnavailable": "Unavailable",
+    "checkedPending_one": "Checked · {{number}} check pending",
+    "checkedPending_other": "Checked · {{number}} checks pending",
+    "casesPending": "Not verified yet: {{names}}",
     "notChecked": "This version has not been checked",
     "checkFailed": "Compatibility check failed · review its results",
     "policySummary": "{{name}}: {{choice}}",
@@ -26151,7 +26234,6 @@
       "last_used": "Last used",
       "shared_default": "Shared default"
     },
-    "effort": "Effort {{value}}",
     "name": "Name {{value}}",
     "message": "Message {{value}}",
     "sourceUnreported": "Source not reported",
@@ -26192,6 +26274,8 @@
     "resultsRootPending": "The results’ organization cannot be opened",
     "model": "Model summarizer",
     "details": "Summary details",
+    "hide": "Hide summary",
+    "show": "Show summary",
     "inputFacts": "Source items: {{included}} included · {{shortened}} shortened · {{omitted}} omitted",
     "baseRates": "Configured model base rates",
     "noRates": "No base rates reported",

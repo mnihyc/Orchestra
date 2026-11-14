@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/shared-draft.test.tsx tests/component/draft-mark.test.tsx tests/component/draft-destination.test.tsx tests/component/thread-change-chosen.test.tsx tests/component/side-lane.test.tsx tests/component/finder-loading.test.tsx tests/unit/catalogue-usage.test.ts tests/component/ask-composer.test.tsx tests/component/ask-composer-recovery.test.tsx
