@@ -77,8 +77,8 @@ it('a preview opening follows active or explicit history without hydrating any s
   expect(queryClient.getQueryData([...threadKeys.limits(T),null])).toBe(limits);
   expect(queryClient.getQueryData(settingsKey(T))).toBe(settings);
   expect(queryClient.getQueryData(['node',T])).toBe(nativeThread);
-  expect(queryClient.getQueryData(threadKeys.outline(left))).toBeDefined();
-  expect(queryClient.getQueryData(threadKeys.outline(left))).not.toBe(queryClient.getQueryData(threadKeys.outline(route)));
+  expect(queryClient.getQueryData(threadKeys.outline(left))).toBeUndefined();
+  expect(threadKeys.outline(left)).not.toEqual(threadKeys.outline(route));
 });
 
 it('rejects a route capture used for a same-thread preview before any request or row mutation', async () => {

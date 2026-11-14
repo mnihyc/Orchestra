@@ -67,6 +67,75 @@ async fn wait_provider_runtime_job(world: &World) {
 }
 
 #[tokio::test]
+async fn a_stopped_managed_sign_in_remains_a_choice_without_starting_its_runtime() {
+    let world = World::observed().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "delegated-choice-host", 16_384).await;
+    provider_template(&world).await;
+    let provider = managed_subscription(&world, "Delegated subscription").await;
+    let (runtime, _unit) = made(&world, &host, provider).await;
+    world
+        .engine()
+        .stop_provider_runtime(provider, false, StopWhy::Person(world.ada))
+        .await
+        .unwrap();
+    host.tell(runtime, "stopped", None).await;
+    let mut descriptor: serde_json::Value = world
+        .scalar("SELECT descriptor FROM agents WHERE id=$1", world.agent)
+        .await;
+    descriptor["capabilities"]["image_generation"] = json!(true);
+    descriptor["x_capability_program"] = json!({"access":{"native":{"orch_tools":true,"native":{
+        "image_generation":{"enabled":true,"modes":["on"],"default_mode":"on","delegated_mode":"on",
+          "execution":[{"input":"image.request","result":"image.generated"}]}
+    }}}});
+    world.declares(descriptor).await;
+    sqlx::query("UPDATE providers SET status='offline' WHERE id=$1")
+        .bind(provider)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO provider_models(id,provider_id,model_name,display_name,parameters,groups,enabled,source,created_by) VALUES($1,$2,'native-image','Native image',$3,ARRAY['images'],true,'manual',$4)")
+        .bind(new_id()).bind(provider).bind(json!({"context_window":10000})).bind(world.ada).execute(world.pool.pool()).await.unwrap();
+    let before = host.count(K::NodeRuntimeStart);
+    let mut conn = world.pool.acquire().await.unwrap();
+    let person = Principal::load(
+        &mut conn,
+        Caller::session(world.ada),
+        Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    let choice = world
+        .engine()
+        .review_capability_backend(
+            &mut conn,
+            &person,
+            world.topic,
+            "image_generation",
+            orch_provider_contract::capabilities::BackendRef {
+                route: "image_generation.delegation".into(),
+                offering: Some(orch_provider_contract::capabilities::OfferingRef {
+                    provider,
+                    offering: "native-image".into(),
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        choice.allowed,
+        "a real stopped unit can be started by admitted work: {choice:?}"
+    );
+    assert_eq!(
+        host.count(K::NodeRuntimeStart),
+        before,
+        "reading a choice starts no unit or model work"
+    );
+    assert_eq!(runtime_state(&world, runtime).await, "stopped");
+}
+
+#[tokio::test]
 async fn scheduled_reads_preserve_deliberate_stops_and_refresh_restarts_them() {
     use orch_db::queries::provider_facts;
     for idle in [true, false] {

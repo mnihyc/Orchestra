@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-engine --lib -- tools::source::tests::image_services::delegation::
+test -p orch-engine --lib -- sessions::byte_stability_tests::
+test -p orch-engine --lib -- capability_routes::

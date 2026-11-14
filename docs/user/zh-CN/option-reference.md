@@ -1,9 +1,9 @@
 ---
 group: providers
-screens: [/help, /thread/$threadId, /resources/providers/$id]
+screens: [/help, /thread/$threadId, /resources/providers/$id, /settings/interface, /topic/$topicId]
 keywords: [选项, 字段, 搜索, 参考, options, fields]
 heading_id.条目: entries
-summary: 提供方接口接受的每个请求选项，以及它改变什么。
+summary: 随产品提供的请求、界面与提供方选项，以及它们改变什么。
 ---
 
 # 选项字段参考
@@ -14,8 +14,45 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 
 | 参考标识 | 含义 |
 | --- | --- |
+| `option:BackendRef.config.environment_id` | 程序会话后端的来源线程没有环境时，要准入的确切环境。普通线程工作始终保留其实际环境与目录；不会选择第一个在线环境。 |
+| `option:BackendRef.config.helper_topic_id` | 真实来源没有话题时，程序辅助线程在来源治理根组织内使用的现有话题。来源的实际话题优先。放置位置不会授予创建、环境或提供方权限。 |
+| `option:ProgramPlacement.environment_id` | 无线程程序消费方的明确环境引用。null 表示未设置；缺失、格式错误或空引用不能启动工作。 |
+| `option:ProgramPlacement.helper_topic_id` | 生产方没有实际话题时的明确辅助话题。它必须属于生产方的治理根组织。提供方凭据与任意程序输入不属于放置位置字段。 |
+| `option:Resolution.reason.program_placement_invalid` | 所选程序后端包含格式错误的放置引用，或包含不属于放置配置的字段。请修正选择；保留原后端，不会自动改选其他登录或环境。 |
+| `option:Support.execution` | 实际程序适配器报告已实现的输入与结果编解码器，以及经过验证的流式输出、读取工具桥和工具隔离支持。仅有委派模式或提供方名称不能证明这些能力。 |
+| `option:Route.execution` | 此路径所需的输入与结果编解码器和执行设施。预览与执行均要求匹配的已安装代码；选择路径不会启动工作。 |
+| `option:ResolvedRoute.execution` | 与所选路径一同保留、直到执行时检查的实际消费方要求。这些是技术要求，不是凭据或访问授权。 |
+| `option:ExecutionSupport.input` | 已安装适配器理解的确切输入编解码器标识。不同请求形状需要其实际编解码器。 |
+| `option:ExecutionSupport.result` | 确切的结果编解码器标识。文本回答、查看过的文件或附加图像不能证明另一种结果类型。 |
+| `option:ExecutionSupport.streaming` | 仅在已实现原生增量事件与持久回放时为真；流式回答消费方需要此支持。 |
+| `option:ExecutionSupport.read_tools` | 仅在已实现绑定真实来源的读取工具桥时为真。这不会授予来源的读取权限。 |
+| `option:ExecutionSupport.confined_tools` | 仅在验证原生执行将工具限制在已获准的消费方目录时为真。要求程序遵守规则的提示词不足以证明隔离。 |
+| `option:Resolution.reason` | 所选能力路径不可用的安全原因。execution_codec_unavailable 表示已安装执行器缺少所需编解码器或执行设施；program_execution_unavailable 表示原生适配器尚未验证此消费方。不会自动改选其他提供方。 |
+| `option:PersonalState.sidebar.open_links` | 个人的“链接打开方式”，与侧栏状态一同保存：默认自动，也可选择当前视图或新视图。自动时，同一目标区域共用一个视图；当前视图会替换正在查看的页面，新视图会另开页面。目标已经打开时会切换到它。在“界面”或标签菜单中选择；显式复制视图及浏览器的修饰键点击仍遵循原有行为。 |
+| `option:TopicSearch.q` | 话题“概览”和“会话”页中的会话名称搜索。它筛选当前可见的实时集合，随话题地址传递，不作为设备默认值保存。 |
+| `option:codex.cyber_access_program` | 模型提供、且已在提供方启用的 Codex 访问计划。所选名称会原样传给原生轮次，不限于 Daybreak 系列；模型、账号资格及提供方使用权限仍须满足。 |
+| `option:InputScheduleCreateBody.plan` | 每次未来输入的原定 Plan 选择。创建时必填；true 请求规划轮次，false 请求执行工作。发生时保留此选择，普通模式边界需要等待时也不会改成另一模式。 |
+| `option:InputScheduleCreateBody.delivery` | 未来输入必填的 queue、steer 或 interrupt 送达选择。保存后在到期时通过普通输入写入流程重新检查；创建计划不会立即发送。 |
+| `option:InputScheduleUpdateBody.plan` | 明确修改 Plan 是仅限作者、检查修订号的定义编辑。省略时保留已经审阅的选择。 |
+| `option:InputScheduleUpdateBody.delivery` | 明确修改 queue、steer 或 interrupt 是仅限作者、检查修订号的定义编辑。省略时保留已审阅的选择；仅暂停或恢复不会替换它。 |
+| `option:ThreadGoalUpdateBody.action` | 暂停、恢复，或接受未经核实的完成报告。Accept 是用户明确选择“标记为达成”；对未经核实的报告执行 Resume 表示“继续工作”，不表示已验证。 |
+| `option:AgentProfile.config.native_result_wait_ms` | Codex 可选的保留结果读取等待时间，单位毫秒。省略时采用系统设置默认值，并适配引擎的中断等待窗口。配置中明确给出的有效值会保留，无法适配时说明拒绝原因。 |
+| `option:AgentProfile.config.native_result_buffer_bytes` | Codex 读取证据期间按顺序保留后续输入的可选字节预算。省略时使用系统设置默认值。缓冲区压力只结束可选证据读取，不会丢弃输入或停止其他会话。 |
+| `option:SessionSettings.web_action_wait_secs` | 传给代理会话、沿所在位置继承并解析后的原生网页操作行等待时间。Codex 使用接收时间计时，并保留归属以接收之后真正到达的结束事件；此等待不会中断轮次。 |
+| `option:SessionOpen.web_action_wait_secs` | 连接器打开会话命令中必填的已解析网页操作行等待时间，会传入会话设置及重新打开会话的指纹。 |
+| `option:x_turn_end_delays.delays.*.default_setting` | 程序声明的系统设置键，用于提供配置省略时的毫秒等待默认值。引擎解析并适配中断等待窗口；不会缩短配置中明确给出的等待值。 |
+| `option:x_turn_end_delays.delays.*.pending_buffer` | 程序声明的证据等待期间可选有序输入缓冲。遇到压力时应结束可选证据读取并继续处理输入，不能丢弃或拒绝输入帧。 |
+| `option:x_turn_end_delays.delays.*.pending_buffer.pointer` | 指向程序配置中此字节预算的 JSON 指针。保留明确给出的有效配置值。 |
+| `option:x_turn_end_delays.delays.*.pending_buffer.default_bytes` | 程序的字节后备默认值。配置省略该指针时，引擎提供所声明系统设置的已注册默认值。 |
+| `option:x_turn_end_delays.delays.*.pending_buffer.default_setting` | 提供待处理输入字节默认值的系统设置键，必须指向可用的非负整数设置。 |
 | `option:ask.models.*.model` | 已启用 API 模型的路由名称，与 provider_id 一起标识一个允许的问一问模型。子级列表可以缩小可选范围，并保留父级顺序。 |
 | `option:ask.models.*.provider_id` | 此项允许的问一问模型所使用的 API 提供方标识。提问者和当前付费人仍须有权在对话所属组织中使用该提供方及模型。 |
+| `option:EverythingListQuery.resource_rows` | 返回紧凑的表格行，并在每页中为各个归属位置附带一次可读的共享摘要。打开资源时再读取其完整配置。 |
+| `option:EverythingListQuery.resource_details` | 未请求表格行时，返回资源的完整视图。需要展示完整配置的选择器使用此选项。 |
+| `option:ThreadOpeningGetQuery.limit` | 此次首屏读取的正数条目数，覆盖解析后的 threads.opening_items 默认值。较早条目仍可通过历史游标继续读取。 |
+| `option:ThreadOpeningGetQuery.continuation_id` | 选择此次读取的历史延续，不改变当前执行的延续。 |
+| `option:ThreadOpeningGetQuery.projection_revision` | 指定已知的历史投影版本。版本过旧时，返回 sync.complete=false 的原生重置和当前选择器；使用该选择器可重新读取当前窗口。 |
+| `option:ThreadModelParameter.options_partial` | 为真表示其他模型选项推迟读取。打开模型选择器时，再读取完整的线程参数。 |
 | `option:AccessOptions.models` | 此使用权限涵盖的模型。 |
 | `option:AccessOptions.services` | 此使用授权允许的已启用提供方服务，可按名称、系列或分组指定。省略时允许所有已启用服务；它与生成模型列表相互独立。 |
 | `option:AccessOptions.efforts` | 此使用权限涵盖的思考强度。 |
@@ -26,6 +63,7 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 | `option:BindingOptions.providers` | 每个提供方及其模型和代理。 |
 | `option:BindingOptions.environments` | 当前读者可管理的已有环境，当前话题的环境优先。 |
 | `option:BindingOptions.environment_default` | 未另行选择时，新线程如何选择环境。 |
+| `option:BindingOptions.default_environment` | 最近一层设置指定的默认环境（无论设在哪一层），以及当前读者无法使用它时的原因；没有设置指定默认环境、或重新绑定现有线程时缺省。 |
 | `option:BindingOptions.source` | 已安全解析的仓库设置及仓库地址的来源位置。 |
 | `option:BindingOptions.access` | 在这里创建的线程最初采用的权限页。 |
 | `option:BindingOptions.agent_access` | 此创建上下文可选的代理权限；重新绑定不会创建新贡献。 |

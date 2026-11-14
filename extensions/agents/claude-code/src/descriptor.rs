@@ -397,9 +397,10 @@ pub fn descriptor(version: &str, as_root: bool) -> AgentDescriptor {
         runtime_template: Some(runtime_template()),
         approval_modes: approval_modes(as_root),
         sandbox_modes: vec![SandboxMode::Workspace, SandboxMode::Open],
-        // Offered only once the exact loaded build's conformance proves every action path (plan-mode naming or
-        // an allowed-tools list proves neither); until then an aside is refused with why.
-        side_thread_modes: Vec::new(),
+        // The native trial checks an empty inventory and forces a forbidden action through the real program.
+        side_thread_modes: if manifest().proves("side_thread_modes.no_tools") {
+            vec![orch_agent_contract::descriptor::SideReading::NoTools]
+        } else { Vec::new() },
         capabilities: {
             let mut declared = capabilities();
             if !crate::config::input_prefix_supported(version) {

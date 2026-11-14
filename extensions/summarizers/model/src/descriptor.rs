@@ -2,7 +2,9 @@
 //!
 //! The configuration is the rest of auto.summarizer after its kind, with bounded activity defaults.
 
-use orch_link_contract::commands::{CompletionPurpose, ProviderComplete};
+use crate::completion::CompletionRequest;
+use orch_link_contract::commands::CompletionPurpose;
+use orch_provider_contract::capabilities::{BackendRef, OfferingRef};
 use orch_summarizer_contract::descriptor::{SummarizerDescriptor, SummaryField};
 use orch_summarizer_contract::summarizer::SummarizeError;
 use orch_types::{Id, Json};
@@ -56,14 +58,17 @@ impl Config {
         system: String,
         input: String,
         max_output_tokens: i64,
-    ) -> ProviderComplete {
-        ProviderComplete {
-            model_parameters: None,
-            provider_id: self.provider_id,
+    ) -> CompletionRequest {
+        CompletionRequest {
+            backend: BackendRef {
+                route: crate::capabilities::ROUTE.into(),
+                offering: Some(OfferingRef {
+                    provider: self.provider_id,
+                    offering: self.model_name.clone(),
+                }),
+                ..BackendRef::default()
+            },
             purpose: CompletionPurpose::Summary,
-            // The host selects a protocol offered by this actual provider.
-            protocol: String::new(),
-            model_name: self.model_name.clone(),
             params: Some(self.params.clone()),
             system,
             input,
@@ -150,6 +155,43 @@ mod tests {
             invalid[key] = value;
             assert!(Config::read(&invalid).is_err());
         }
+        Ok(())
+    }
+    #[test]
+    fn the_completion_port_keeps_its_exact_backend_before_choosing_a_transport()
+    -> Result<(), SummarizeError> {
+        let provider = orch_types::new_id();
+        let config = Config::read(&json!({"provider_id":provider,"model_name":"small"}))?;
+        let request = config.completion(
+            "Summarize the supplied material.".into(),
+            "An accepted item.".into(),
+            120,
+        );
+        assert_eq!(request.backend.route, crate::capabilities::ROUTE);
+        let offering = request
+            .backend
+            .offering
+            .as_ref()
+            .ok_or_else(|| SummarizeError::Config("The expected offering is absent.".into()))?;
+        assert_eq!(offering.provider, provider);
+        assert_eq!(offering.offering, "small");
+        let api = request.into_api()?;
+        assert_eq!(api.provider_id, provider);
+        assert_eq!(api.model_name, "small");
+        Ok(())
+    }
+
+    #[test]
+    fn a_program_backend_cannot_fall_through_to_an_api_completion() -> Result<(), SummarizeError> {
+        let config =
+            Config::read(&json!({"provider_id":orch_types::new_id(),"model_name":"small"}))?;
+        let mut request = config.completion("Summarize.".into(), "Supplied material.".into(), 120);
+        request.backend.route = "summary.delegation".into();
+        request.backend.config = json!({"environment_id":orch_types::new_id()});
+        assert!(matches!(
+            request.into_api(),
+            Err(SummarizeError::Skipped(_))
+        ));
         Ok(())
     }
 }

@@ -251,6 +251,15 @@ fn candidate<'a>(
     {
         return Err(refused("executor_not_installed"));
     }
+    if let Some(required) = &route.execution
+        && !route
+            .executor
+            .as_ref()
+            .and_then(|executor| context.executor_support.get(executor))
+            .is_some_and(|support| support.iter().any(|codec| codec.satisfies(required)))
+    {
+        return Err(refused("execution_codec_unavailable"));
+    }
     let backend = if route.uses_backend {
         Some(
             context
@@ -676,6 +685,7 @@ pub fn resolve(declarations: &Declarations, context: &ThreadContext) -> Vec<Reso
                             id: route_id.clone(),
                             kind: selected.route.kind.clone(),
                             executor: selected.route.executor.clone(),
+                            execution: selected.route.execution.clone(),
                             offering: selected.reference.clone(),
                             backend: selected.backend,
                             orch_tool: selected.route.orch_tool.clone(),

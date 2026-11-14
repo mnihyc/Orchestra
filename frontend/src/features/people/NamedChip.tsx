@@ -12,6 +12,7 @@ import { sharedTreeQuery } from '@/api/share';
 import { isPlainClick } from '@/features/chat/open';
 import { PLACE_ICONS, placePath } from '@/features/navigation/places';
 import { useNodeLabel, usePlaceLabel } from '@/features/navigation/placeLabels';
+import { useChipPresentation } from './chipSizes';
 import type { TypedReference } from '@/features/people/references';
 import { ReferenceCard } from '@/ui/ReferenceCard';
 import { idReferenceText, referenceTarget, referenceText } from '@/features/people/references';
@@ -26,8 +27,11 @@ import type { ChipPresentation } from './chipSizes';
 /** What a chip names: a place of a known kind, a node whose kind the server says, a document or a chat. */
 type ChipKind = 'org' | 'project' | 'topic' | 'thread' | 'node' | 'doc' | 'chat';
 
+/** The box of every reference chip, whatever it names and whether it is answered yet: its width is its glyph's 1rem, its gap, its words and its padding. */
+const REFERENCE_CHIP_BOX = 'inline-flex max-w-full items-center gap-1 rounded-sm bg-bg-muted px-1 align-baseline font-medium';
+
 /** The shared compact treatment for a readable reference. */
-export const REFERENCE_CHIP_CLASS = 'inline-flex max-w-full items-center gap-1 rounded-sm bg-bg-muted px-1 align-baseline font-medium text-text hover:bg-border';
+export const REFERENCE_CHIP_CLASS = `${REFERENCE_CHIP_BOX} text-text hover:bg-border`;
 
 /** The reference a chip names when its caller gave none: the thing whole. */
 function referenceOf(kind: ChipKind, id: string): TypedReference {
@@ -88,12 +92,26 @@ function FileChip({ reference, fallback, presentation }: { reference: TypedRefer
   return <TypedChip reference={{ ...reference, ...(reference.label !== undefined || typeof fallback !== 'string' ? {} : { label: fallback }) }} presentation={presentation} />;
 }
 
+/** A reference that is being asked about, drawn as the chip it will be: the words written, in the box of the chip that will replace them, with
+ * the place of its glyph kept. It is no link, no button and no live region, and says nothing of itself: a reader of the page finds the
+ * sentence as it was written until the answer makes it a link, or the chip that says no access. */
+function ResolvingChip({ words }: { words: string }) {
+  const { size } = useChipPresentation();
+  return <span className="inline-flex max-w-full align-baseline" data-chip-size={size === 'large' ? 'medium' : size}>
+    <span data-reference-state="resolving" className={`${REFERENCE_CHIP_BOX} text-text-muted`}>
+      <span aria-hidden className="relative size-4 shrink-0 after:absolute after:inset-[5px] after:rounded-full after:bg-text-muted after:opacity-40" />
+      <span className="min-w-0 truncate">{words}</span>
+    </span>
+  </span>;
+}
+
 /** A chip for a reference written as `id:<id>#n`, which does not say what it names: its card is asked as a place or a
  * thread, then as a document, then as a chat, and the first that answers is drawn as the chip of that kind. A reader
  * who may not read the thing keeps its authored label, or its kind where no label was stored. A part number opens
  * a thread at its turn and a chat at its message; a document's block is
  * named by its identifier, so a document opens whole. */
 export function IdChip({ id, number, fallback, label }: { id: string; number?: number; fallback: ReactNode; label?: string }) {
+  const { t } = useTranslation();
   const shared = label ?? (typeof fallback === 'string' ? fallback : undefined);
   const named = (reference:TypedReference):TypedReference=>({...reference,...(shared===undefined?{}:{label:shared})});
   const node = useQuery(referencePreviewQuery({ kind: 'node', id }));
@@ -102,7 +120,9 @@ export function IdChip({ id, number, fallback, label }: { id: string; number?: n
   const file = useQuery({ ...referencePreviewQuery({ kind: 'file', id, ...(number === undefined ? {} : { line: number }) }), enabled: node.isError && document.isError && chat.isError });
   if (file.data !== undefined) return <FileChip reference={named({ kind: 'file', id, ...(number === undefined ? {} : { line: number }) })} fallback={fallback} />;
   const found = node.data ?? document.data ?? chat.data;
-  if (found === undefined) return file.isError ? <TypedChip reference={named({ kind: 'node', id })} /> : fallback;
+  // The chip that says no access has the words as they were written, or the kind where there are none: the resolving chip has the same.
+  const words = shared?.trim();
+  if (found === undefined) return file.isError ? <TypedChip reference={named({ kind: 'node', id })} /> : <ResolvingChip words={words === undefined || words === '' ? t('people.reference.kinds.node') : words} />;
   if (found.kind === 'document') return <NamedChip path={`/doc/${id}`} id={id} kind="doc" original={fallback} reference={named({ kind: 'document', id })} />;
   if (found.kind === 'chat') return <NamedChip path={`/chat/${id}`} id={id} kind="chat" original={fallback} reference={named({ kind: 'chat', id, ...(number === undefined ? {} : { message: number }) })} />;
   const thread = found.node_kind === 'thread' || found.node_kind === null;
