@@ -274,7 +274,11 @@ const SKILLS_PLUGIN_MANIFEST: &str = r#"{
 /// out `skills/<name>/SKILL.md` and nothing else, and what the harness loads as a plugin is this adapter's to
 /// make. Nothing is done where the session's tools act elsewhere, since the skills' files would not be there.
 pub fn skills_plugin(spec: &SessionSpec) -> Result<(), AdapterError> {
-    let Some(skills) = spec.skills.as_ref().filter(|_| !through_executor(spec)) else {
+    let Some(skills) = spec
+        .skills
+        .as_ref()
+        .filter(|_| !through_executor(spec) && !crate::confinement::no_tools(spec))
+    else {
         return Ok(());
     };
     let plugin = std::path::Path::new(&skills.dir).join(".claude-plugin");
@@ -294,7 +298,7 @@ pub fn skills_plugin(spec: &SessionSpec) -> Result<(), AdapterError> {
 /// an empty directory of its own when it is with its provider and has no machine to work on.
 #[must_use]
 pub fn working_directory(setup: &HarnessSetup, spec: &SessionSpec) -> PathBuf {
-    if through_executor(spec) {
+    if through_executor(spec) || crate::confinement::no_tools(spec) {
         let base = setup.home.clone().unwrap_or_else(std::env::temp_dir);
         base.join("sessions").join(&spec.session_key).join("work")
     } else {
@@ -353,7 +357,7 @@ pub fn configuration_found(
 pub fn validate_instruction_settings(
     spec: &SessionSpec,
 ) -> Result<(), orch_agent_contract::adapter::AdapterError> {
-    if through_executor(spec) {
+    if through_executor(spec) || crate::confinement::no_tools(spec) {
         return Ok(());
     }
     let found = configuration_found(spec)?;
@@ -387,6 +391,9 @@ pub fn validate_instruction_settings(
 /// `user` alone where the profile names nothing else.
 #[must_use]
 pub fn setting_sources(configured: &str, spec: &SessionSpec) -> String {
+    if crate::confinement::no_tools(spec) {
+        return String::new();
+    }
     if spec
         .settings
         .workspace_configuration
@@ -412,6 +419,9 @@ pub fn setting_sources(configured: &str, spec: &SessionSpec) -> String {
 /// through a tool set that has a server, and the environment's servers by name.
 #[must_use]
 pub fn mcp_config(setup: &HarnessSetup, spec: &SessionSpec) -> Json {
+    if crate::confinement::no_tools(spec) {
+        return json!({"mcpServers":{}});
+    }
     let entry = |url: String| {
         json!({
             "type": "http",
@@ -477,6 +487,9 @@ pub fn documented_instruction_sources(
     use orch_agent_contract::session::{
         InstructionEvidence, InstructionFile, InstructionFileKind, directory_chain,
     };
+    if crate::confinement::no_tools(spec) {
+        return Vec::new();
+    }
     let mut files = Vec::new();
     if let Some(home) = &setup.home
         && home.join("CLAUDE.md").is_file()
@@ -609,7 +622,7 @@ pub fn settings_json(setup: &HarnessSetup, spec: &SessionSpec, turn: &TurnSettin
             );
         }
     }
-    let own_tools = !through_executor(spec);
+    let own_tools = !through_executor(spec) && !crate::confinement::no_tools(spec);
     if own_tools {
         settings.insert(
             "pluginConfigs".to_owned(),
@@ -677,6 +690,9 @@ pub fn settings_json(setup: &HarnessSetup, spec: &SessionSpec, turn: &TurnSettin
     // A plan the harness writes goes into the thread's directory, never into the provider's home that other
     // threads share.
     settings.insert("plansDirectory".to_owned(), json!(PLANS_DIRECTORY));
+    if crate::confinement::no_tools(spec) {
+        settings.extend(crate::confinement::settings());
+    }
     Json::Object(settings)
 }
 
@@ -759,6 +775,7 @@ pub(crate) fn expected_managed_pins(
 /// in the environment where that directory is.
 fn keeps_memory(spec: &SessionSpec) -> bool {
     !through_executor(spec)
+        && !crate::confinement::no_tools(spec)
         && spec
             .settings
             .memory
@@ -948,20 +965,22 @@ pub fn environment(launch: &Launch<'_>) -> Result<BTreeMap<String, String>, Adap
         }
     }
     env.retain(|name, _| !name.eq_ignore_ascii_case(MCP_TOKEN_VARIABLE));
-    env.insert(
-        MCP_TOKEN_VARIABLE.into(),
-        setup.loopback.token.expose().into(),
-    );
+    if !crate::confinement::no_tools(spec) {
+        env.insert(
+            MCP_TOKEN_VARIABLE.into(),
+            setup.loopback.token.expose().into(),
+        );
+    }
     clear_cache_ttl_environment(&mut env);
     for (name, ttl) in cache {
         env.insert(name.into(), ttl.as_str().into());
     }
-    if setup.managed_home {
+    if setup.managed_home || crate::confinement::no_tools(spec) {
         env.extend(managed_environment(keeps_memory(spec)));
     }
     env.insert(
         "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".to_owned(),
-        if spec.settings.background_wake {
+        if spec.settings.background_wake && !crate::confinement::no_tools(spec) {
             "0"
         } else {
             "1"
@@ -1097,7 +1116,11 @@ pub fn arguments(launch: &Launch<'_>) -> Vec<String> {
     args.push(mcp_config(setup, spec).to_string());
     // The thread's skills, as a plugin of this session only, from the thread's own directory (which `skills_plugin`
     // has made one); not where its commands run elsewhere, since the skills' files would not be there.
-    if let Some(skills) = spec.skills.as_ref().filter(|_| !through_executor(spec)) {
+    if let Some(skills) = spec
+        .skills
+        .as_ref()
+        .filter(|_| !through_executor(spec) && !crate::confinement::no_tools(spec))
+    {
         args.push("--plugin-dir".to_owned());
         args.push(skills.dir.clone());
     }
@@ -1111,15 +1134,19 @@ pub fn arguments(launch: &Launch<'_>) -> Vec<String> {
     }
     args.push("--system-prompt-snapshot".to_owned());
     args.push("off".to_owned());
-    args.extend(tool_arguments(
-        through_executor(spec),
-        orch_agent_contract::parameters::WebSearchMode::selected(&turn.params)
-            .ok()
-            .flatten()
-            == Some(orch_agent_contract::parameters::WebSearchMode::Live),
-        turn.page_fetch.unwrap_or(true),
-    ));
-    if !through_executor(spec) {
+    if crate::confinement::no_tools(spec) {
+        args.extend(["--tools".to_owned(), String::new()]);
+    } else {
+        args.extend(tool_arguments(
+            through_executor(spec),
+            orch_agent_contract::parameters::WebSearchMode::selected(&turn.params)
+                .ok()
+                .flatten()
+                == Some(orch_agent_contract::parameters::WebSearchMode::Live),
+            turn.page_fetch.unwrap_or(true),
+        ));
+    }
+    if !through_executor(spec) && !crate::confinement::no_tools(spec) {
         let directory = spec.settings.directory.trim_end_matches('/');
         if spec.settings.cwd.trim_end_matches('/') != directory {
             args.push("--add-dir".to_owned());
@@ -1210,6 +1237,7 @@ mod tests {
                 subagent_limits: Default::default(),
                 prompt_cache_ttl: None,
                 background_wake: true,
+                web_action_wait_secs: 120,
                 image_generation: None,
                 memory: Some(SessionMemory {
                     directory: "/workspace/web/.orch/memory".into(),
@@ -2403,5 +2431,43 @@ mod tests {
                 !tools.contains(&"Bash") && !tools.contains(&"Read") && !tools.contains(&"Write")
             );
         }
+    }
+    #[test]
+    fn a_tool_free_process_keeps_every_tool_and_ambient_source_out_even_with_native_tools_requested()
+     {
+        use orch_agent_contract::descriptor::SideReading;
+        let mut setup = setup();
+        setup.config.setting_sources = "user,project,local".into();
+        let mut wanted = spec();
+        wanted.settings.side_reading = Some(SideReading::NoTools);
+        wanted.settings.orch_tools.clear();
+        wanted.mcp.clear();
+        let launch = built(&setup, &wanted, &turn(), &Origin::New);
+        assert_eq!(after(&launch.args, "--tools"), Some(String::new()));
+        assert_eq!(
+            after(&launch.args, "--setting-sources"),
+            Some(String::new())
+        );
+        assert!(!launch.args.iter().any(|arg| matches!(
+            arg.as_str(),
+            "--plugin-dir" | "--add-dir" | "--allowedTools"
+        )));
+        let servers: Json =
+            serde_json::from_str(&after(&launch.args, "--mcp-config").unwrap()).unwrap();
+        assert_eq!(servers, json!({"mcpServers":{}}));
+        let settings: Json =
+            serde_json::from_str(&after(&launch.args, "--settings").unwrap()).unwrap();
+        assert_eq!(settings["disableAllHooks"], true);
+        assert_eq!(settings["autoMemoryEnabled"], false);
+        assert_eq!(settings["claudeMdExcludes"], json!(["**"]));
+        assert!(
+            launch
+                .cwd
+                .starts_with(setup.home.as_ref().unwrap().join("sessions").join(KEY))
+        );
+        assert!(!launch.cwd.starts_with(&wanted.settings.workspace_root));
+        assert_eq!(launch.env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1");
+        assert!(!launch.env.contains_key(MCP_TOKEN_VARIABLE));
+        assert!(documented_instruction_sources(&setup, &wanted).is_empty());
     }
 }

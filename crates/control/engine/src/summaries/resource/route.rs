@@ -1,8 +1,8 @@
 //! Resource summaries project native model facts into the existing capability resolver.
 use super::*;
 use orch_provider_contract::capabilities::{
-    self as cap, Availability, BackendRef, Declarations, Endpoint, Offering, OfferingRef, Price,
-    Provider, Registry, Resolution, Support, ThreadContext,
+    self as cap, Availability, Declarations, Endpoint, Offering, Price, Provider, Registry,
+    Resolution, Support, ThreadContext,
 };
 
 /// The selected provider/model, actual installed execution ports and current Use go through
@@ -25,10 +25,11 @@ async fn project_route(
     executors: Vec<String>,
     metadata: bool,
 ) -> Result<Resolution, EngineError> {
-    let provider = resources::provider(conn, config.provider_id)
+    let offering = config.offering().map_err(EngineError::unreadable)?;
+    let provider = resources::provider(conn, offering.provider)
         .await?
         .ok_or_else(refused)?;
-    let model = resources::model(conn, provider.id, &config.model_name)
+    let model = resources::model(conn, provider.id, &offering.offering)
         .await?
         .ok_or_else(refused)?;
     let protocol = super::completion_protocol(&provider.protocols)?.ok_or_else(refused)?;
@@ -83,21 +84,11 @@ async fn project_route(
     let allowed = require_model(conn, principal, place, config).await.is_ok();
     let context = ThreadContext {
         choices: BTreeMap::from([("summary".into(), Some("service".into()))]),
-        backends: BTreeMap::from([(
-            "summary".into(),
-            BackendRef {
-                route: orch_summarizer_model::capabilities::ROUTE.into(),
-                offering: Some(OfferingRef {
-                    provider: config.provider_id,
-                    offering: config.model_name.clone(),
-                }),
-                ..BackendRef::default()
-            },
-        )]),
+        backends: BTreeMap::from([("summary".into(), config.backend.clone())]),
         availability: BTreeMap::from([(
-            config.provider_id,
+            offering.provider,
             BTreeMap::from([(
-                config.model_name.clone(),
+                offering.offering.clone(),
                 Availability {
                     allowed,
                     show_provider: metadata,

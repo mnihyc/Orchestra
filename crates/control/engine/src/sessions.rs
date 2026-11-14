@@ -582,6 +582,7 @@ impl StartSnapshot {
                 .prompt_cache_ttl
                 .filter(|_| self.descriptor.capabilities.prompt_cache_ttl),
             background_wake: self.settings.background_wake,
+            web_action_wait_secs: self.settings.web_action_wait_secs,
             image_generation: self.settings.image_generation,
             native_configuration: self
                 .native_model
@@ -1087,6 +1088,7 @@ pub fn session_open_body_importing(
         subagent_limits: snapshot.settings.subagent_limits,
         prompt_cache_ttl: configuration.prompt_cache_ttl,
         background_wake: snapshot.settings.background_wake,
+        web_action_wait_secs: configuration.web_action_wait_secs,
         image_generation: configuration.image_generation,
         sandbox_mode: convert(&snapshot.sandbox)?,
         instructions: snapshot.instructions().text,
@@ -1538,7 +1540,7 @@ impl Engine {
         };
         let allowed = Box::pin(self.native_model_use_preview(conn, &snapshot)).await?;
         snapshot.native_model =
-            Box::pin(self.capture_native_model(conn, &snapshot, allowed)).await?;
+            Box::pin(self.capture_native_model(conn, &mut snapshot, allowed)).await?;
         Ok(StartLoad::Ready(Box::new(snapshot)))
     }
 }

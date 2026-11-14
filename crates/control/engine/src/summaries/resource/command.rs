@@ -410,9 +410,10 @@ impl Authority {
             Err(EngineError::BeforeEffect(_)) => return Ok(None),
             Err(error) => return Err(error),
         };
+        let configured = work.config.offering().map_err(EngineError::unreadable)?;
         if self.call != work.request
-            || request.provider_id != work.config.provider_id
-            || request.model_name != work.config.model_name
+            || request.provider_id != configured.provider
+            || request.model_name != configured.offering
         {
             let Some(recovery) = crate::calls::read_root(
                 conn,

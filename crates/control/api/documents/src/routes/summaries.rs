@@ -364,7 +364,7 @@ async fn read_view(
     let preview_producer = policy.producer.as_ref().or(manual_producer.as_ref());
     let default_provider = preview_producer
         .filter(|producer| producer.kind == "model")
-        .and_then(|producer| producer.config.get("provider_id"))
+        .and_then(|producer| producer.config.pointer("/backend/offering/provider"))
         .and_then(Json::as_str)
         .and_then(|id| id.parse::<Id>().ok());
     let default_fact = match default_provider {
@@ -668,9 +668,10 @@ impl effects::Effect for Refresher {
                 .await
                 .map_err(ApiError::engine)?;
                 let config=picked.config.ok_or_else(||ApiError::new(ErrorCode::ProviderUnavailable,if picked.problem==Some(orch_api_contract::summaries::SummaryManualProblem::CapReached) {"A usage cap has no room for summaries"} else {"No permitted API model is available; check provider access and model allowlists"}))?;
+                let offering = config.offering().map_err(ApiError::internal)?;
                 Some(orch_api_contract::summaries::SummaryModelChoice {
-                    provider_id: config.provider_id,
-                    model: config.model_name,
+                    provider_id: offering.provider,
+                    model: offering.offering.clone(),
                     params: Some(config.params),
                 })
             } else {
@@ -715,6 +716,11 @@ impl effects::Effect for Refresher {
             )
             .await
             .map_err(ApiError::engine)?;
+            let offering = value
+                .selected
+                .config
+                .offering()
+                .map_err(ApiError::internal)?;
             if !ctx
                 .app
                 .engine
@@ -722,8 +728,8 @@ impl effects::Effect for Refresher {
                     conn,
                     &orch_engine::caps::OwnCapAsk {
                         place: value.selected.material.identity.place(),
-                        provider: value.selected.config.provider_id,
-                        model: &value.selected.config.model_name,
+                        provider: offering.provider,
+                        model: &offering.offering,
                         tier: None,
                         purpose: "summary",
                         person: Some(principal.caller().user()),
@@ -758,8 +764,13 @@ impl effects::ApplyOwned for Refresher {
             let http = native::http_origin::capture_operation(ctx, &mut tx, &origin).await?;
             let accepted = serde_json::to_value(http.origin()).map_err(ApiError::internal)?;
             let arguments = serde_json::to_value(&value.body).map_err(ApiError::internal)?;
+            let offering = value
+                .selected
+                .config
+                .offering()
+                .map_err(ApiError::internal)?;
             let source = json!({"target":target,"range":value.selected.material.range,"snapshot":value.selected.material.snapshot,"policy":value.selected.policy.fingerprint,"http":http,
-                "model":{"provider_id":value.selected.config.provider_id,"model":value.selected.config.model_name,"params":value.selected.config.params}});
+                "model":{"provider_id":offering.provider,"model":offering.offering,"params":value.selected.config.params}});
             before.check()?;
             let cache = rows::ensure(
                 &mut tx,

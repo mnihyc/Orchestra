@@ -5,22 +5,101 @@
 use crate::{descriptor, prompts};
 use async_trait::async_trait;
 use orch_agent_contract::events::TokenUsage;
-use orch_link_contract::commands::{ProviderComplete, ProviderCompleteResult};
+use orch_link_contract::commands::{CompletionPurpose, ProviderComplete, ProviderCompleteResult};
+use orch_provider_contract::capabilities::BackendRef;
 use orch_summarizer_contract::descriptor::{SummarizerDescriptor, SummaryField};
 use orch_summarizer_contract::result::{SummaryResult, UsageEvent};
 use orch_summarizer_contract::summarizer::{SummarizeError, Summarizer, SummaryRequest};
 use orch_types::Id;
+use orch_types::Json;
 use std::sync::Arc;
 
-/// The host's permission-checked API-provider completion port.
+/// A selected backend and its rendered material, before a native transport has been chosen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionRequest {
+    /// Exact route, account offering and adapter references; never acting authority.
+    pub backend: BackendRef,
+    /// Existing summary accounting purpose.
+    pub purpose: CompletionPurpose,
+    /// Explicit model options; current defaults are resolved by the bound host.
+    pub params: Option<Json>,
+    /// The producer's field-specific instructions.
+    pub system: String,
+    /// The checked material supplied by the producer.
+    pub input: String,
+    /// The configured answer allowance.
+    pub max_output_tokens: i64,
+}
+
+impl CompletionRequest {
+    /// Only the installed API route becomes an API command; a native route cannot change its bill.
+    pub fn into_api(self) -> Result<ProviderComplete, SummarizeError> {
+        if self.backend.route != crate::capabilities::ROUTE {
+            return Err(SummarizeError::Skipped(
+                "The selected backend does not use the API completion port.".into(),
+            ));
+        }
+        self.backend
+            .validate()
+            .map_err(|reason| SummarizeError::Config(reason.into()))?;
+        if !(self.backend.config.is_null()
+            || self
+                .backend
+                .config
+                .as_object()
+                .is_some_and(serde_json::Map::is_empty))
+        {
+            return Err(SummarizeError::Config(
+                "The API summary route has no adapter placement options.".into(),
+            ));
+        }
+        let offering = self.backend.offering.ok_or_else(|| {
+            SummarizeError::Config("The summary backend needs an account offering.".into())
+        })?;
+        Ok(ProviderComplete {
+            model_parameters: None,
+            provider_id: offering.provider,
+            purpose: self.purpose,
+            protocol: String::new(),
+            model_name: offering.offering,
+            params: self.params,
+            system: self.system,
+            input: self.input,
+            max_output_tokens: self.max_output_tokens,
+        })
+    }
+}
+
+/// An answer from the selected transport; absent measurements remain unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionAnswer {
+    /// Actual returned text before field conformance.
+    pub text: String,
+    /// Reported use only; the host owns the authoritative ledger.
+    pub usage: Option<TokenUsage>,
+    /// Stable actual request or native receipt reference.
+    pub request_ref: Option<String>,
+}
+
+impl From<ProviderCompleteResult> for CompletionAnswer {
+    fn from(answer: ProviderCompleteResult) -> Self {
+        Self {
+            text: answer.text,
+            usage: Some(answer.usage),
+            request_ref: answer.request_ref,
+        }
+    }
+}
+
+/// The host's source-bound completion port; backend facts confer no source authority.
 #[async_trait]
 pub trait Complete: Send + Sync {
-    /// Calls the selected provider for work at this node without opening a harness.
+    /// Executes only through this producer's actual current authority and selected backend.
     async fn complete(
         &self,
         node: Id,
-        request: ProviderComplete,
-    ) -> Result<ProviderCompleteResult, SummarizeError>;
+        request: CompletionRequest,
+    ) -> Result<CompletionAnswer, SummarizeError>;
 }
 
 /// The built-in model producer over a host's completion port.
@@ -69,9 +148,9 @@ impl Summarizer for Model {
                 config.completion(system, input, config.max_output_tokens),
             )
             .await?;
-        let tokens: TokenUsage = answer.usage;
-        let usage = Some(UsageEvent {
-            model: config.model_name,
+        let model = config.offering()?.offering.clone();
+        let usage = answer.usage.map(|tokens| UsageEvent {
+            model,
             tokens,
             request_ref: answer.request_ref,
         });

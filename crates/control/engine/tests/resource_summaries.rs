@@ -125,7 +125,7 @@ async fn chosen(world: &World) {
         .set(
             world.topic,
             "auto.summarizer",
-            json!({"kind":"model","provider_id":world.provider,"model_name":MODEL}),
+            json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":world.provider,"offering":MODEL}}}),
         )
         .await;
 }

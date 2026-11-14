@@ -221,13 +221,17 @@ impl Engine {
             tx.commit().await.map_err(DbError::from)?;
             return Ok(());
         };
+        let offering = selected
+            .config
+            .offering()
+            .map_err(EngineError::unreadable)?;
         if !self
             .room_for_own_use(
                 &mut tx,
                 &crate::caps::OwnCapAsk {
                     place: selected.material.identity.place(),
-                    provider: selected.config.provider_id,
-                    model: &selected.config.model_name,
+                    provider: offering.provider,
+                    model: &offering.offering,
                     tier: None,
                     purpose: "summary",
                     person: None,

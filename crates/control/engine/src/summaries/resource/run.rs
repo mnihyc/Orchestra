@@ -69,7 +69,12 @@ impl Engine {
                     }
                 };
                 let parts = frame.into_parts();
-                let producer = json!({"kind":"model","provider_id":actual.provider_id,"model_name":actual.model_name});
+                let mut backend = work.config.backend.clone();
+                backend.offering = Some(orch_provider_contract::capabilities::OfferingRef {
+                    provider: actual.provider_id,
+                    offering: actual.model_name.clone(),
+                });
+                let producer = json!({"kind":"model","backend":backend});
                 let refs = serde_json::to_value(&work.refs)?;
                 parts
                     .first_effect

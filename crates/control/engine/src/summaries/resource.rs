@@ -114,13 +114,19 @@ pub async fn select_with_snapshot(
     {
         Some(producer) => Config::read(&producer.config).map_err(|_| refused())?,
         None if model.is_some() => serde_json::from_value(
-            serde_json::json!({"provider_id":model.map(|m|m.provider_id),"model_name":model.map(|m|&m.model)}),
+            serde_json::json!({"backend":{"route":orch_summarizer_model::capabilities::ROUTE,"offering":{"provider":model.map(|m|m.provider_id),"offering":model.map(|m|&m.model)}}}),
         )?,
         None => return Err(refused()),
     };
     if let Some(model) = model {
-        config.provider_id = model.provider_id;
-        config.model_name = model.model.clone();
+        config.backend = orch_provider_contract::capabilities::BackendRef {
+            route: orch_summarizer_model::capabilities::ROUTE.into(),
+            offering: Some(orch_provider_contract::capabilities::OfferingRef {
+                provider: model.provider_id,
+                offering: model.model.clone(),
+            }),
+            ..Default::default()
+        };
         config.params = model
             .params
             .clone()
@@ -202,7 +208,8 @@ pub async fn model_entry(
     place: Id,
     config: &Config,
 ) -> Result<Option<Id>, EngineError> {
-    let provider = resources::provider(conn, config.provider_id)
+    let offering = config.offering().map_err(EngineError::unreadable)?;
+    let provider = resources::provider(conn, offering.provider)
         .await?
         .filter(|row| {
             row.deleted_at.is_none()
@@ -213,13 +220,13 @@ pub async fn model_entry(
     if completion_protocol(&provider.protocols)?.is_none() {
         return Err(refused());
     }
-    let model = resources::model(conn, config.provider_id, &config.model_name)
+    let model = resources::model(conn, offering.provider, &offering.offering)
         .await?
         .filter(|row| row.enabled)
         .ok_or_else(refused)?;
     let effective = crate::resolved::load(conn, place).await?;
     if effective.models_allowed.as_ref().is_some_and(|patterns| {
-        !crate::models::allowed_by(patterns, &config.model_name, &model.groups)
+        !crate::models::allowed_by(patterns, &offering.offering, &model.groups)
     }) || crate::provider_policy::forbidden(conn, place, provider.id)
         .await?
         .is_some()
@@ -236,7 +243,7 @@ pub async fn model_entry(
         orch_provider_contract::calls::requested_effort(&config.params).map_err(|_| refused())?;
     // One entry has to allow the model and the effort together.
     if !usable.allows(&orch_authz::options::Wanted {
-        model: Some((&config.model_name, &model.groups)),
+        model: Some((&offering.offering, &model.groups)),
         effort,
         ..orch_authz::options::Wanted::default()
     }) {
@@ -306,6 +313,10 @@ impl Work {
         if http.as_ref().is_some_and(|http| http.origin() != &origin) {
             return Err(refused());
         }
+        let offering = selected
+            .config
+            .offering()
+            .map_err(EngineError::unreadable)?;
         Ok(Self {
             origin,
             http,
@@ -314,8 +325,8 @@ impl Work {
             issuer: request.requested_by,
             payer: principal.caller().user(),
             model: SummaryModelChoice {
-                provider_id: selected.config.provider_id,
-                model: selected.config.model_name.clone(),
+                provider_id: offering.provider,
+                model: offering.offering.clone(),
                 params: Some(selected.config.params.clone()),
             },
             config: selected.config.clone(),
@@ -425,11 +436,15 @@ impl Work {
 
 /// Hold only the native source/settings/provider footprint on the caller's short transaction.
 pub async fn lock_selection(conn: &mut Conn, selected: &Selection) -> Result<(), EngineError> {
+    let offering = selected
+        .config
+        .offering()
+        .map_err(EngineError::unreadable)?;
     command::lock_sources(
         conn,
         selected.material.identity.target(),
         &selected.material.source_refs,
-        selected.config.provider_id,
+        offering.provider,
     )
     .await
 }

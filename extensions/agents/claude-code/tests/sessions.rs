@@ -470,3 +470,81 @@ async fn the_effort_the_mode_and_the_model_are_changed_between_turns() {
     );
     rig.adapter.stop().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tool_free_summary_reads_only_its_supplied_words_and_cannot_execute_a_forced_tool() {
+    use orch_agent_contract::descriptor::SideReading;
+    let Some(mut rig) = Rig::new().await else {
+        return;
+    };
+    let poison = "ambient material must never enter a supplied-only summary";
+    std::fs::write(rig.work.path().join("CLAUDE.md"), poison).unwrap();
+    std::fs::write(rig.home.path().join("CLAUDE.md"), poison).unwrap();
+    rig.start_quick().await;
+    let mut spec = rig.spec(SessionMode::New, None);
+    spec.settings.side_reading = Some(SideReading::NoTools);
+    spec.settings.raw_events = true;
+    spec.settings.instructions = "Use only the supplied material.".into();
+    rig.open_with(spec).await;
+    let (_, events) = rig
+        .run("#!mock\nsay A summary of the supplied material.\n")
+        .await;
+    assert_eq!(outcome(&events), TurnOutcome::Completed);
+    assert!(said(&events).contains("A summary of the supplied material."));
+    let init = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::RawFrame(frame)
+                if frame.payload["type"] == "system" && frame.payload["subtype"] == "init" =>
+            {
+                Some(&frame.payload)
+            }
+            _ => None,
+        })
+        .expect("the real program must report its actual tool inventory");
+    assert!(
+        init["tools"].as_array().unwrap().is_empty(),
+        "no native, skill or MCP tool is available"
+    );
+    assert!(init["mcp_servers"].as_array().unwrap().is_empty());
+    assert!(rig.model.requests().iter().all(|request| {
+        !request.body.to_string().contains(poison)
+            && request
+                .body
+                .get("tools")
+                .is_none_or(|tools| tools.is_null() || tools.as_array().is_some_and(Vec::is_empty))
+    }));
+    let marker = rig.work.path().join("forbidden-summary-action");
+    let command = format!("printf forbidden > '{}'", marker.display());
+    let script = format!(
+        "#!mock\ntool Bash {}\nthen\nsay The forbidden tool was unavailable.\n",
+        json!({"command":command})
+    );
+    let (_, events) = rig.run_deciding(&script, common::allow).await;
+    assert_eq!(outcome(&events), TurnOutcome::Completed);
+    assert!(
+        !marker.exists(),
+        "even an explicitly forced model tool and an allowing reviewer cannot act"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::ApprovalRequested(_))),
+        "the absent tool cannot obtain an approval"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tool_free_session_cannot_open_an_extra_model_callable_server() {
+    use orch_agent_contract::descriptor::SideReading;
+    let Some(mut rig) = Rig::new().await else {
+        return;
+    };
+    rig.start_quick().await;
+    let mut spec = rig.spec(SessionMode::New, None);
+    spec.settings.side_reading = Some(SideReading::NoTools);
+    spec.mcp.push("unrequested-server".into());
+    let refused = rig.adapter.open_session(spec).await.unwrap_err();
+    assert_eq!(refused.code(), "unsupported");
+    assert!(rig.model.requests().is_empty());
+}

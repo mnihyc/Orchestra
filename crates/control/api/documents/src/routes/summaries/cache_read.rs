@@ -106,7 +106,7 @@ pub(super) async fn producer(
         let id = cache
             .producer
             .as_ref()
-            .and_then(|producer| producer.get("provider_id"))
+            .and_then(|producer| producer.pointer("/backend/offering/provider"))
             .cloned()
             .map(serde_json::from_value::<Id>)
             .transpose()
@@ -124,7 +124,7 @@ pub(super) async fn producer(
             view.offering = cache
                 .producer
                 .as_ref()
-                .and_then(|producer| producer.get("model_name"))
+                .and_then(|producer| producer.pointer("/backend/offering/offering"))
                 .and_then(Json::as_str)
                 .map(str::to_owned);
             providers.push(fact);

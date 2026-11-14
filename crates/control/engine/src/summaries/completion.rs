@@ -11,7 +11,7 @@ use orch_db::queries::{resources::thread_engine as resources, threads};
 use orch_db::{Conn, DbError};
 use orch_link_contract::commands::{ProviderComplete, ProviderCompleteResult, SerialKey};
 use orch_summarizer_contract::summarizer::SummarizeError;
-use orch_summarizer_model::Complete;
+use orch_summarizer_model::{Complete, CompletionAnswer, CompletionRequest};
 use orch_types::{Id, Json};
 use serde_json::json;
 
@@ -856,9 +856,10 @@ impl Complete for Host {
     async fn complete(
         &self,
         node: Id,
-        mut request: ProviderComplete,
-    ) -> Result<ProviderCompleteResult, SummarizeError> {
+        request: CompletionRequest,
+    ) -> Result<CompletionAnswer, SummarizeError> {
         use orch_provider_contract::calls::Purpose;
+        let mut request = request.into_api()?;
         let configured = (request.provider_id, request.model_name.clone());
         let mut tx = self.engine.db().begin().await.map_err(internal)?;
         let plan = crate::calls::plan_service(
@@ -1018,6 +1019,6 @@ impl Complete for Host {
                     .bind(node).bind(self.call).execute(&mut *conn).await.map_err(DbError::from).map_err(internal)?;
             }
         }
-        answer
+        answer.map(CompletionAnswer::from)
     }
 }
