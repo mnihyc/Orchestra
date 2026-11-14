@@ -25,6 +25,34 @@ States describe reported facts. Offline can recover; lost means an explicit perm
 | `state:ThreadDisplayState.idle` | No work or unseen result needs an icon. |
 | `state:ThreadDisplayState.archived` | The thread or a place above it is archived. |
 
+### StopState
+
+| Reference | Meaning |
+| --- | --- |
+| `state:StopState.stopping` | Stop was accepted. The program or the thread's current change has not finished stopping yet. |
+| `state:StopState.stopped` | The named turn has ended, or preparation without a turn was withdrawn. The final outcome stays in the thread. |
+
+### BlockedReason
+
+| Reference | Meaning |
+| --- | --- |
+| `state:BlockedReason.source_failed` | Source preparation failed. The source panel gives the recorded cause and Prepare again; the waiting message is kept. |
+
+### SessionReopenReason
+
+| Reference | Meaning |
+| --- | --- |
+| `state:SessionReopenReason.unknown` | The session was no longer known to be open, for example after the server or program restarted. |
+| `state:SessionReopenReason.instructions` | The standing instructions or a native instruction file changed before this turn. |
+| `state:SessionReopenReason.limits` | The session's sub-agent limits changed. |
+| `state:SessionReopenReason.configuration` | Its working directory or another choice applied at session opening changed. |
+| `state:SessionReopenReason.mcp` | The MCP servers offered to the session changed. |
+| `state:SessionReopenReason.tools` | The Orch tools offered to the session changed. |
+| `state:SessionReopenReason.skills` | The skills supplied to the session changed. |
+| `state:SessionReopenReason.program_reloads` | The program reloads its own context at session opening, and this turn required that opening. |
+| `state:SessionReopenReason.side_history` | The side thread needed to read its parent's history again. |
+| `state:MarkerKind.session_reopened` | A timeline line records a necessary session opening and its reason before a turn. |
+
 ### PageState
 
 | Reference | Meaning |
@@ -128,8 +156,8 @@ States describe reported facts. Offline can recover; lost means an explicit perm
 | Reference | Meaning |
 | --- | --- |
 | `state:GoalStatus.active` | Orch keeps the thread working on it. |
-| `state:GoalStatus.paused` | Held: a person paused it, or the agent said it is blocked. |
-| `state:GoalStatus.met` | The condition holds. |
+| `state:GoalStatus.paused` | Held by a person, a blocked report, or an unchecked completion report that needs a person's decision. |
+| `state:GoalStatus.met` | An independent check found the condition met, or a person explicitly accepted its evidence. |
 | `state:GoalStatus.stopped` | It ended without the condition: a limit was reached, or nobody may go on. |
 | `state:GoalStatus.cleared` | A person took it away. |
 
@@ -138,8 +166,36 @@ States describe reported facts. Offline can recover; lost means an explicit perm
 | Reference | Meaning |
 | --- | --- |
 | `state:GoalReportStatus.working` | It is working on it. |
-| `state:GoalReportStatus.met` | The condition holds. |
+| `state:GoalReportStatus.met` | The agent reports that the condition holds; this alone never marks the goal met. |
 | `state:GoalReportStatus.blocked` | Only a person can go on. |
+
+### GoalReason
+
+| Reference | Meaning |
+| --- | --- |
+| `state:GoalReason.unchecked` | A completion report has no usable independent check. The paused goal waits for Mark met or Keep working. |
+
+### GoalOutcome
+
+| Reference | Meaning |
+| --- | --- |
+| `state:GoalOutcome.unchecked` | The report and its evidence are retained without a completion decision. A helper being absent or unavailable never turns this into Met automatically. |
+
+### GoalCheckedBy
+
+| Reference | Meaning |
+| --- | --- |
+| `state:GoalCheckedBy.person` | A person explicitly accepted an unchecked completion report. The actual actor is recorded in the audit. Continuing work does not set this value. |
+
+### MarkerHarnessChanged
+
+These values identify the observation's `change` field, not the outcome of a turn.
+
+| Reference | Meaning |
+| --- | --- |
+| `state:MarkerHarnessChanged.warning` | Native warning words, kept for each occurrence and shown in ordinary conversation outside folded work. A warning alone does not fail a turn. |
+| `state:MarkerHarnessChanged.turn_diff` | The native turn's latest reported net file changes. Its snapshot replaces that stream's component edits; an empty snapshot clears its net changes. |
+| `state:MarkerHarnessChanged.turn_diff_unavailable` | Orch could not read a native diff update. Earlier valid changed files are kept, with a visible explanation rather than an invented replacement. |
 
 ### FirstStepsState
 
