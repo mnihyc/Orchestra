@@ -48,7 +48,7 @@ vi.mock('@/api/executors', () => ({ executorCatalogueQuery: { queryKey: ['profil
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useNavigate: () => calls.navigate,
   Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => null }));
-vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map() }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKnownPlaces: () => new Map() }));
 vi.mock('@/features/resources/agents/acts', () => ({ useAgentActs: () => ({ list: [], dialogs: null, page: () => ({ edit: null, primary: null, menu: [] }) }) }));
 vi.mock('@/features/resources/agents/Overrides', () => ({ DescriptorOverrides: () => null }));
 vi.mock('@/features/resources/ResourceList', () => ({ ResourceList: ({ filters }: { filters: ReactNode }) => <section>{filters}</section>, useSearchText: (value: string) => [value, vi.fn()] }));
@@ -59,7 +59,7 @@ vi.mock('@/shell/Page', async (load) => ({ ...await load<object>(), Page: ({ chi
   PageHeader: ({ title }: { title: string }) => <h1>{title}</h1> }));
 vi.mock('@/features/resources/HomePicker', () => ({ HomePicker: ({ value, onChange, disabled }: Pick<HomePickerProps, 'value' | 'onChange' | 'disabled'>) =>
   <select aria-label="Fixture home" value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}><option value="">Choose</option><option value={HOME_ID}>Workshop</option></select> }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/help', async (load) => ({ ...await load<object>(), useGuide: () => ({ articles: [] }) }));
 
 function draw(ui: ReactNode, knownKinds?: HarnessKindInfo[]) {

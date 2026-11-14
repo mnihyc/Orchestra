@@ -35,7 +35,7 @@ vi.mock('@/api/threads', async (importOriginal) => ({
   }),
   setThreadSetting: (id: string, key: string, body: NodeSettingSetBody) => server.write(id, key, body),
 }));
-vi.mock('@/realtime/live', () => ({ refreshThread: vi.fn() }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), refreshThread: vi.fn() }));
 // Approval-rule history is an adjacent, independent view; this suite exercises the real parameter body.
 vi.mock('@/features/approvals/ThreadRules', () => ({ ThreadRules: () => null }));
 

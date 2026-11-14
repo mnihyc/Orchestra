@@ -11,7 +11,7 @@ import { ScreenLoading } from '@/shell/ScreenLoading';
 import { show } from './support';
 
 vi.mock('@/shell/Shell', () => ({ Shell: ({ children }: { children: ReactNode }) => <><nav aria-label="Rail"><input aria-label="Frame draft" defaultValue="" /></nav><main>{children}</main></> }));
-vi.mock('@/routes/-access', () => ({ admit: () => Promise.resolve({}) }));
+vi.mock('@/routes/-access', async (loadOriginal) => ({ ...await loadOriginal<object>(), admit: () => Promise.resolve({}) }));
 vi.mock('@/shell/screenCode', () => ({ useScreenCodePrefetch: () => undefined }));
 afterEach(async () => { cleanup(); await setLocale('en'); document.documentElement.removeAttribute('data-theme'); });
 

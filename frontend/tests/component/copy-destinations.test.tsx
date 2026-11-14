@@ -13,7 +13,7 @@ import { org, me, userRef } from '../doubles/fixtures';
 import { treeNode } from '../doubles/tree-node';
 import { show } from './support';
 const calls = vi.hoisted(() => ({ judge: vi.fn<typeof Destinations.judgeCopyDestinations>(), access: vi.fn<(...args: unknown[]) => void>() }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: calls.access }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: calls.access }));
 vi.mock('@/api/copyDestinations', async (original) => ({ ...await original<typeof Destinations>(),
   copyDestinationsQuery: (request: Destinations.CopyDestinationsRequest, reader: readonly unknown[]) => ({ queryKey: ['copy-destinations', reader, request], queryFn: ({ signal }: { signal: AbortSignal }) => calls.judge(request, signal), retry: false, gcTime: 0 }),
 }));

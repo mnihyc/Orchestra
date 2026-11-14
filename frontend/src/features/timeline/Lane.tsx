@@ -30,7 +30,7 @@ const LaneItem = memo(function LaneItem({ id, head }: { id: string; head: boolea
     case 'announcement': return <AnnouncementCard item={item} />;
     case 'marker': return <MarkerLine item={item} />;
     case 'error': return <ErrorRow item={item} />;
-    case 'approval': return inspection === undefined ? <ApprovalCard item={item} /> : <InlineAlert tone="info">{t('trace.retainedApproval', { id: item.payload.approval_id })}</InlineAlert>;
+    case 'approval': return inspection === undefined ? <ApprovalCard item={item} /> : <InlineAlert tone="info">{t('trace.retainedApproval')}</InlineAlert>;
   }
 });
 

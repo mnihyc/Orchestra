@@ -39,8 +39,8 @@ vi.mock('@/api/auth',async(original)=>({ ...await original<typeof AuthApi>(),
 vi.mock('@/api/nodes',async(original)=>({ ...await original<typeof NodesApi>(),
   nodeQuery:(id:string)=>({queryKey:['compact-node',id],queryFn:()=>Promise.resolve(place)}),
 }));
-vi.mock('@/features/access/AccessDialog',()=>({openAccess:(...args:unknown[])=>{calls.defaults(...args);} }));
-vi.mock('@/features/navigation/placeLabels',()=>({usePlaceLabel:()=> (node:{name?:string|null}|null|undefined)=>node?.name??null}));
+vi.mock('@/features/access/AccessDialog',async (loadOriginal) => ({ ...await loadOriginal<object>(),openAccess:(...args:unknown[])=>{calls.defaults(...args);} }));
+vi.mock('@/features/navigation/placeLabels',async (loadOriginal) => ({ ...await loadOriginal<object>(),usePlaceLabel:()=> (node:{name?:string|null}|null|undefined)=>node?.name??null}));
 vi.mock('@/features/trace/Person',()=>({useTraceEntry:()=>()=>[],TracePerson:()=>null}));
 
 beforeEach(()=>{

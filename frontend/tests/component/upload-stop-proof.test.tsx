@@ -4,7 +4,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import { useUploads } from '@/lib/useUploads';
 
 const calls = vi.hoisted(() => ({ upload: vi.fn(), release: vi.fn<() => Promise<void>>(), publish: vi.fn(), stopped: vi.fn() }));
-vi.mock('@/features/workbench/viewOpening', () => ({ useViewWork: () => undefined }));
+vi.mock('@/features/workbench/viewOpening', async (loadOriginal) => ({ ...await loadOriginal<object>(), useViewWork: () => undefined }));
 vi.mock('@/lib/uploads', () => ({ UploadTask: class {
   readonly uploadId = 'private-upload';
   constructor(readonly file: File) {}

@@ -24,7 +24,7 @@ vi.mock('@/api/nodes', async (original) => ({...await original<Record<string, un
 vi.mock('@/api/trace', async (original) => ({...await original<Record<string, unknown>>(), selectedPersonQuery: (id: string) => ({
   queryKey: ['stream-person', id], enabled: id !== '', queryFn: () => calls.personFailure === null ? Promise.resolve({id, kind: 'human', username: 'ada', display_name: 'Ada', avatar: {text: 'A', color: 1}}) : Promise.reject(calls.personFailure),
 })}));
-vi.mock('@/shell/screen', () => ({useScreenHeading: () => undefined}));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(),useScreenHeading: () => undefined}));
 vi.mock('@/features/search/Hit', () => ({Hit: ({hit,matchField}: {hit: SearchHit;matchField?:string}) => <li data-match-field={matchField}><button>{hit.snippet}</button></li>}));
 function Page({initial = {q: 'release', sort: 'relevance'}}: {initial?: SearchParams}) {
   const [params, setParams] = useState(initial);

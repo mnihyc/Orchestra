@@ -9,7 +9,7 @@ import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 const server = vi.hoisted(() => ({ registry: vi.fn<() => Promise<SettingDef[]>>() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/settings', async (original) => ({ ...await original<object>(), putSetting: vi.fn(),
   registryQuery: { queryKey: ['settings-registry'], queryFn: server.registry },
 }));
@@ -39,7 +39,7 @@ it.each(['en', 'zh-CN'] as const)('edits the served writable value once in its r
   expect(screen.getAllByRole('switch')).toHaveLength(1);
   await user.click(field);
   await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, { value: true, expectedRevision: 2 }));
-  expect(screen.getByRole('switch', { name: def.title })).toBeChecked();
+  await waitFor(() => expect(screen.getByRole('switch', { name: def.title })).toBeChecked());
 });
 
 it('keeps a declared apply constraint once in the same row', async () => {

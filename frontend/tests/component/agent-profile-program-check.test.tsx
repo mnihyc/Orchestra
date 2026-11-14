@@ -26,7 +26,7 @@ vi.mock('@/api/harnesses', async (load) => ({ ...await load<object>(), programBu
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), useNavigate: () => vi.fn(), useLocation: () => ({ pathname: '/resources/example', searchStr: '' }),
   Link: ({ children, className }: { children: ReactNode; className?: string }) => <a className={className} href="#fixture">{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/features/settings/sourceAddress', () => ({ useSourceOrgAddress: () => 'workshop' }));
 vi.mock('@/features/resources/agents/acts', () => ({ useAgentActs: () => ({ page: () => ({ primary: null, edit: null, menu: [] }), dialogs: null }) }));

@@ -13,7 +13,7 @@ import { World } from '../doubles/world';
 
 const calls = vi.hoisted(() => ({ bootstrap: vi.fn<() => Promise<MeBootstrapReply>>(), nativeMeta: vi.fn<() => Promise<Meta>>() }));
 vi.mock('@/api/auth', async (original) => ({ ...await original<typeof AuthApi>(), fetchMeta: calls.nativeMeta }));
-vi.mock('@/shell/bootstrap', () => ({ shellBootstrapKey: (id: string) => ['shell-bootstrap', id], ensureShellBootstrap: calls.bootstrap }));
+vi.mock('@/shell/bootstrap', async (loadOriginal) => ({ ...await loadOriginal<object>(), shellBootstrapKey: (id: string) => ['shell-bootstrap', id], ensureShellBootstrap: calls.bootstrap }));
 const previous = client.session.getState();
 afterEach(() => { queryClient.clear(); client.session.setState(previous); vi.restoreAllMocks(); });
 

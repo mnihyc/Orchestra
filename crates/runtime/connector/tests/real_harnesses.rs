@@ -426,8 +426,19 @@ async fn hosted_turn(harness: Harness) {
         assert_eq!(request.credential.verdict, Verdict::Accepted, "{request:?}");
         assert_eq!(request.credential.presented_by, [Presentation::Bearer]);
     }
-    let usage = p.wait_provider_event("lease.usage", 1).await;
+    // Each request publishes usage independently after its response ends. The
+    // first report is not a barrier for the other requests of a native turn.
+    let usage = p.wait_provider_event("lease.usage", requests.len()).await;
     assert_eq!(usage.len(), requests.len(), "one report for each request");
+    let references: std::collections::BTreeSet<_> = usage
+        .iter()
+        .map(|event| event.body["request_ref"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        references.len(),
+        requests.len(),
+        "each report names a distinct request"
+    );
     let closed = p.close_lease(lease).await;
     assert_eq!(
         closed["requests"].as_u64().unwrap() as usize,

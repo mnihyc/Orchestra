@@ -14,7 +14,7 @@ vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useU
 vi.mock('@/features/settings/personal/away/live', async (load) => ({ ...await load<typeof AwayLive>(), useAwayLive: () => undefined }));
 vi.mock('@/features/settings/personal/away/Pause', () => ({ PauseControls: () => null }));
 vi.mock('@/features/inbox/away/Grouping', () => ({ useInboxGrouping: () => ({ value: 'day', loading: false, saving: false, choose: () => undefined, error: null }), GroupingControl: () => null }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: () => undefined }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: () => undefined }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 const previous = useUserStore.getState();
 afterEach(async () => { cleanup(); useUserStore.setState(previous); mark.mockClear(); await setLocale('en'); });

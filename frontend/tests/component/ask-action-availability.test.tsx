@@ -29,12 +29,12 @@ vi.mock('@/features/export/save', () => ({ saveFile: world.save }));
 vi.mock('@/features/ask/useConversation', () => ({ useConversation: () => ({ data: world.snapshot, isLoading: world.loading, error: world.error,
   deleted: world.deleted, notice: '', tools: {}, streamError: null, refetch: world.read, reconnect: world.read }) }));
 vi.mock('@/features/ask/Keep', () => ({ KeepAsk: () => { world.keep(); return <div role="dialog" aria-label="Keep destination" />; } }));
-vi.mock('@/features/access/AdminMode', () => ({ useAdminMode: () => ({ data: { as_admin: true } }), AdminModeEnableAction: () => null }));
+vi.mock('@/features/access/AdminMode', async (loadOriginal) => ({ ...await loadOriginal<object>(), useAdminMode: () => ({ data: { as_admin: true } }), AdminModeEnableAction: () => null }));
 vi.mock('@/features/workbench/ViewWindow', () => ({ ViewWindow: ({ actions, children }: { actions: ReactNode; children: ReactNode }) => <section>{actions}{children}</section> }));
-vi.mock('@/features/workbench/views', () => ({ useViewShown: () => true }));
-vi.mock('@/shell/screen', () => ({ useCurrentHeading: () => ({ nodeId: 'topic', title: 'Topic' }) }));
+vi.mock('@/features/workbench/views', async (loadOriginal) => ({ ...await loadOriginal<object>(), useViewShown: () => true }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useCurrentHeading: () => ({ nodeId: 'topic', title: 'Topic' }) }));
 vi.mock('@/realtime/stores/tree', async (original) => ({ ...await original<typeof TreeStore>(), useNodePath: () => ({ orgId: 'root' }) }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn(), openHelpReading: vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn(), openHelpReading: vi.fn() }));
 vi.mock('@/features/composer/Composer', () => ({ Composer: () => null }));
 vi.mock('@/features/ask/ModelAvailability', () => ({ AskModelAvailability: ({ children }: { children: (available: boolean) => ReactNode }) => children(true) }));
 

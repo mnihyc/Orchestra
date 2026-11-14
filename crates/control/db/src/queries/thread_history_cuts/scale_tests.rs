@@ -5,7 +5,9 @@ use orch_testkit::database::TestDb;
 use orch_types::Id;
 use serde_json::Value;
 
-use super::{has_before_items, has_before_sql, unconfirmed_inputs, unconfirmed_sql};
+use super::{
+    has_before_items, has_before_sql, missing_revision_sql, unconfirmed_inputs, unconfirmed_sql,
+};
 
 fn inspected_rows(node: &Value) -> u64 {
     if matches!(
@@ -146,5 +148,75 @@ async fn a_million_completed_turns_do_not_become_the_uncertainty_working_set() {
     assert!(
         inspected_rows(&plan[0]["Plan"]) <= 32,
         "an existence check must not decode before-Orch history: {plan}"
+    );
+    // The same million-row world proves that a fresh cut does not enumerate
+    // unchanged history while checking whether an older revision is missing.
+    sqlx::raw_sql("ALTER TABLE items ADD COLUMN seq_updated bigint NOT NULL DEFAULT 1;
+        CREATE INDEX items_continuation_updated_idx ON items(thread_id,continuation_id,seq_updated);
+        CREATE TEMP TABLE thread_history_cut_spans(cut_id uuid,thread_id uuid,owner_continuation_id uuid,
+            first_seq bigint,last_seq bigint,frozen_at bigint,loose_before_orch boolean,loose_low bigint,loose_high bigint,
+            PRIMARY KEY(cut_id,thread_id,owner_continuation_id));
+        CREATE TEMP TABLE thread_history_cut_rows(cut_id uuid,kind text,row_id uuid,PRIMARY KEY(cut_id,kind,row_id));
+        CREATE TEMP TABLE thread_history_cut_items(cut_id uuid,item_id uuid,body jsonb,PRIMARY KEY(cut_id,item_id));
+        CREATE TEMP TABLE thread_item_revisions(item_id uuid,seq_updated bigint,PRIMARY KEY(item_id,seq_updated));
+        INSERT INTO thread_history_cut_spans VALUES(md5('cut')::uuid,md5('thread1')::uuid,md5('view1')::uuid,1,1000,1000,true,0,1000);
+        INSERT INTO thread_history_cut_rows SELECT md5('cut')::uuid,'turn',id FROM turns WHERE thread_id=md5('thread1')::uuid;
+        ANALYZE items; ANALYZE thread_history_cut_spans; ANALYZE thread_history_cut_rows;")
+        .execute(&mut *conn).await.unwrap();
+    let cut: Id = sqlx::query_scalar("SELECT md5('cut')::uuid")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN (ANALYZE,TIMING OFF,FORMAT JSON) {}",
+        missing_revision_sql()
+    )))
+    .bind(cut)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert!(
+        inspected_rows(&plan[0]["Plan"]) <= 32,
+        "an unchanged cut checks the update index instead of the entire history: {plan}"
+    );
+    sqlx::query("UPDATE items SET seq_updated=1001 WHERE id=md5('item999')::uuid")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query_scalar::<_, bool>(missing_revision_sql())
+            .bind(cut)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap(),
+        "damage near the end is found without depending on the first item page"
+    );
+    sqlx::query("INSERT INTO thread_item_revisions VALUES(md5('item999')::uuid,1000)")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(
+        !sqlx::query_scalar::<_, bool>(missing_revision_sql())
+            .bind(cut)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE items SET seq_updated=1001 WHERE id=md5('item1000')::uuid")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO thread_history_cut_items VALUES($1,md5('item1000')::uuid,'{}')")
+        .bind(cut)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(
+        !sqlx::query_scalar::<_, bool>(missing_revision_sql())
+            .bind(cut)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap(),
+        "a retained frozen body does not need a live revision"
     );
 }

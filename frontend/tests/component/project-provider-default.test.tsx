@@ -38,9 +38,9 @@ vi.mock('@/api/client', async (load) => {
   } } };
 });
 vi.mock('@/api/settings', async (original) => ({ ...await original<object>(), putSetting: vi.fn(), clearSetting: vi.fn() }));
-vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
-vi.mock('@/features/resources/ResourceCreation', () => ({ ResourceCreateButton: ({ kind, onCreated }: { kind: string; onCreated?: (id: string) => void }) => {
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKnownPlaces: () => new Map() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/resources/ResourceCreation', async (loadOriginal) => ({ ...await loadOriginal<object>(), ResourceCreateButton: ({ kind, onCreated }: { kind: string; onCreated?: (id: string) => void }) => {
   return <button type="button" data-create-kind={kind} onClick={() => {
     calls.create();
     if (calls.created !== null) { calls.list.mockResolvedValue([calls.created]); onCreated?.(calls.created.id); }

@@ -49,16 +49,16 @@ vi.mock('@/api/settings', async (original) => {
   };
 });
 vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof Live>(), useOrgTreeFeed: () => undefined }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: () => undefined }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
-vi.mock('@/features/workbench/settingsTabTitle', () => ({ useSettingsTabTitle: (title: string) => title }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: () => undefined }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
+vi.mock('@/features/workbench/settingsTabTitle', async (loadOriginal) => ({ ...await loadOriginal<object>(), useSettingsTabTitle: (title: string) => title }));
 vi.mock('@/features/settings/Frame', () => ({ SettingsFrame: ({ children }: { children: ReactNode }) => <section>{children}</section> }));
 vi.mock('@/features/settings/org/Outsiders', () => ({ Outsiders: () => null }));
 vi.mock('@/features/onboarding/RoleSummary', () => ({ InvitationRoleLine: () => null }));
 vi.mock('@/features/org/Activity', () => ({ OrgActivity: () => null, ActivityFeed: () => null }));
 vi.mock('@/features/org/HeaderMenu', () => ({ OrgHeaderMenu: () => null }));
-vi.mock('@/features/navigation/favorites', () => ({ StarButton: () => null }));
-vi.mock('@/features/navigation/OrgSwitcher', () => ({ orgInitial: () => 'O', orgColor: () => 0 }));
+vi.mock('@/features/navigation/favorites', async (loadOriginal) => ({ ...await loadOriginal<object>(), StarButton: () => null }));
+vi.mock('@/features/navigation/OrgSwitcher', async (loadOriginal) => ({ ...await loadOriginal<object>(), orgInitial: () => 'O', orgColor: () => 0 }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeof Router>(),
   useRouter: () => ({ history: { push: vi.fn() } }), Link: ({ children }: { children: ReactNode }) => <a href="#local">{children}</a>,
 }));

@@ -16,7 +16,7 @@ const server = vi.hoisted(() => ({
 }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<object>(), useNavigate: () => server.navigate, useLocation: () => ({ pathname: '/resources/environments', search: {}, searchStr: '' }) }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resources/environments/DataSources', () => ({
   DataSourcesEditor: () => null,
   madeDataSources: () => ({ workspace: { kind: 'made_by_orch' }, home: { kind: 'made_by_orch' } }),

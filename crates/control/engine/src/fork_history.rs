@@ -127,6 +127,31 @@ pub async fn copy_conversation(
     )
     .await?;
     cut::copy(unit, &captured, target, segment, source_segment).await?;
+    // This temporary cut has no native lineage witness. Release its captured
+    // rows in primary-key order instead of making the header's FK cascade erase
+    // an entire long history under one request statement deadline.
+    let mut after: Option<(String, Id)> = None;
+    loop {
+        let next: Option<(String, Id)> = sqlx::query_as(
+            "WITH page AS MATERIALIZED (
+          SELECT kind,row_id FROM thread_history_cut_rows WHERE cut_id=$1
+            AND (kind,row_id)>=(COALESCE($2::text,''),COALESCE($3::uuid,'00000000-0000-0000-0000-000000000000'::uuid))
+            AND ($2::text IS NULL OR (kind,row_id)>($2,$3::uuid))
+          ORDER BY kind,row_id LIMIT $4
+        ),removed AS (DELETE FROM thread_history_cut_rows r USING page p
+          WHERE r.cut_id=$1 AND r.kind=p.kind AND r.row_id=p.row_id)
+        SELECT kind,row_id FROM page ORDER BY kind DESC,row_id DESC LIMIT 1",
+        )
+        .bind(target)
+        .bind(after.as_ref().map(|(kind, _)| kind.as_str()))
+        .bind(after.as_ref().map(|(_, row)| *row))
+        .bind(orch_db::queries::thread_history_cuts::PAGE)
+        .fetch_optional(&mut *unit.conn)
+        .await
+        .map_err(orch_db::DbError::from)?;
+        let Some(next) = next else { break };
+        after = Some(next);
+    }
     sqlx::query("DELETE FROM thread_history_cuts WHERE id=$1 AND owner_thread_id=$1")
         .bind(target)
         .execute(&mut *unit.conn)

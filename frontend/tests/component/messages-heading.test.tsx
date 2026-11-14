@@ -23,8 +23,8 @@ vi.mock('@/api/chats', async (load) => ({ ...await load<typeof Chats>(),
   orgChatsQuery: () => ({ queryKey: ['heading-own-chats'], initialPageParam: null,
     queryFn: () => Promise.resolve({ items: [], next_cursor: null }), getNextPageParam: () => undefined }),
 }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: calls.heading }));
-vi.mock('@/shell/org', () => ({ selectOrg: vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: calls.heading }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: vi.fn() }));
 vi.mock('@/realtime/live', async (load) => ({ ...await load<object>(), useOrgTreeFeed: vi.fn() }));
 vi.mock('@/features/chat/ChatView', async (load) => ({ ...await load<typeof ChatView>(), ChatView: () => null }));
 vi.mock('@/features/chat/AllChats', () => ({ AllChats: () => null }));

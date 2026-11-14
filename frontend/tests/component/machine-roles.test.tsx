@@ -13,9 +13,9 @@ import type { Machine } from '@/generated/api-types';
 import { i18n,setLocale } from '@/i18n';
 import { show } from './support';
 
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 vi.mock('@/api/resources',async(load)=>({...await load<typeof Resources>(),setMachineRoles:vi.fn()}));
-vi.mock('@tanstack/react-router',()=>({Link:({children}:{children:ReactNode})=><a href="/resources/machines/machine?tab=policy">{children}</a>}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),Link:({children}:{children:ReactNode})=><a href="/resources/machines/machine?tab=policy">{children}</a>}));
 
 function machine(delegated=true):Machine {return { ...unplacedGrouping(),revision:7,id:'machine',name:'world-box',online:true,placement:'connected',platform_os:'linux',
   platform_arch:'x86_64',connector_version:'1.0.0',protocol_version:1,owner:null,roles:['environment','agent'],status:'active',

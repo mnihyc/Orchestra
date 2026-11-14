@@ -11,7 +11,7 @@ import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/settings', async (load) => ({ ...await load<object>(), putSetting: vi.fn() }));
 const invitationForms = SETTINGS_REGISTRY.find(({ key }) => key === 'invitations.forms');
 if (invitationForms === undefined) throw new Error('The registry must declare invitation forms.');

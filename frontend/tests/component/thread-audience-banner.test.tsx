@@ -20,7 +20,7 @@ vi.mock('@/api/access', async (load) => ({ ...await load<typeof Access>(),
     queryFn: () => { source.read(); return source.failed ? Promise.reject(new Error('Audience refused')) : Promise.resolve(source.page); } }),
   permissionsQuery: { queryKey: ['permissions'], queryFn: () => Promise.resolve(CATALOGUE.reply) },
 }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: source.share }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: source.share }));
 vi.mock('@/api/settings', () => ({ settingsQuery: (id: string) => ({ queryKey: ['settings', id], queryFn: () => source.settingsFailed ? Promise.reject(new Error('Settings refused')) : Promise.resolve(source.settings) }) }));
 
 const before = client.session.getState();

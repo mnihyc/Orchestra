@@ -10,10 +10,10 @@ import { i18n } from '@/i18n';
 import { show } from './support';
 
 vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(), readNode: vi.fn(), previewArchive: vi.fn(), applyArchivePlan: vi.fn(), previewMove: vi.fn(), moveNode: vi.fn(), previewDelete: vi.fn(), deleteNode: vi.fn() }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabels: () => new Map<string, string>(), useNodeLabel: (_id: string, name: string | undefined) => name }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabels: () => new Map<string, string>(), useNodeLabel: (_id: string, name: string | undefined) => name }));
 vi.mock('@/features/access/names', () => ({ usePermissionName: () => (name: string) => name }));
 vi.mock('@/features/settings/PlacePicker', () => ({ PlacePicker: ({ label, onChange }: { label: string; onChange: (place: { id: string; kind: 'project'; path: string; folder: boolean; color: null }) => void }) => <button onClick={() => onChange({ id: 'destination', kind: 'project', path: 'Acme / Docs', folder: false, color: null })}>{label}</button> }));
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: React.ReactNode }) => <a href="#place">{children}</a> }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: React.ReactNode }) => <a href="#place">{children}</a> }));
 
 const place = (id: string): Node => ({ id, kind: 'topic', name: id, org_id: 'acme', revision: 4, archived: false, path: [{ id, kind: 'topic', name: id, redacted: false }], access: { permissions: ['topic.manage', 'topic.archive'] } } as Node);
 const ref = (id: string) => ({ id, kind: 'topic' as const, name: id, redacted: false });
@@ -49,6 +49,7 @@ it('shows every consequence first, applies sequentially, keeps a lost answer unc
   vi.mocked(readNode).mockResolvedValueOnce({ ...place('Lost'), revision: 5, archived: true });
   await userEvent.click(within(lost).getByRole('button', { name: 'Read current state' }));
   expect(await within(lost).findByText(/Current archive state/)).toBeVisible();
+  expect(within(lost).queryByText(/revision/i)).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole('button', { name: 'Undo successful rows' }));
   await waitFor(() => expect(applyArchivePlan).toHaveBeenLastCalledWith(undo));
   expect(vi.mocked(applyArchivePlan).mock.calls.filter(([plan]) => !plan.archiving).map(([plan]) => plan.node.id)).toEqual(['First']);
