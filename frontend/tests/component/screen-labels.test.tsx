@@ -1,26 +1,56 @@
 /** Management roots, finder acts and personal frames keep the same places and destinations as their screens. */
-import { screen, within } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient } from '@tanstack/react-query';
 import type { ComponentProps } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Everything } from '@/features/admin/Everything';
+import { meQuery } from '@/api/auth';
+import { orgsQuery } from '@/api/nodes';
 import { commandsNow } from '@/features/finder/commands';
-import { PlaceCommands } from '@/features/finder/shellCommands';
+import { answer, commandEntries } from '@/features/finder/local';
+import { PlaceCommands, useGlobalCommands } from '@/features/finder/shellCommands';
 import { placeOfRow } from '@/features/navigation/places';
 import { PersonalFrame } from '@/features/settings/PersonalFrame';
-import { i18n } from '@/i18n';
+import { managementSections } from '@/features/settings/navigation';
+import { sectionLabel } from '@/features/settings/sectionLabels';
+import { i18n, setLocale } from '@/i18n';
 import { treeWriter, useTreeStore } from '@/realtime/stores/tree';
 
-import { ACME, acmeTree } from '../doubles/fixtures';
+import { ACME, acmeTree, me } from '../doubles/fixtures';
 import { show } from './support';
 
-vi.mock('@/features/navigation/NodeMenu', () => ({ useNodeMenu: () => [{ id: 'rename', label: 'Rename', onSelect: vi.fn() }] }));
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodeMenu: () => [{ id: 'rename', label: 'Rename', onSelect: vi.fn() }] }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   Link: ({ to, activeOptions: _activeOptions, ...props }: ComponentProps<'a'> & { to: string; activeOptions?: unknown }) => <a href={to} {...props} />,
   useNavigate: () => vi.fn(),
-  useRouter: () => ({ history: { push: vi.fn() }, routesByPath: { '/project/$projectId/settings': {} } }),
+  useRouter: () => ({ history: { push: vi.fn() }, routesByPath: { '/project/$projectId/settings': {}, '/admin/$section': {} } }),
 }));
-afterEach(() => { useTreeStore.setState({ byOrg: new Map() }); });
+afterEach(async () => { cleanup(); useTreeStore.setState({ byOrg: new Map() }); await setLocale('en'); });
+
+function GlobalCommands() { useGlobalCommands(); return null; }
+
+it.each(['en', 'zh-CN'] as const)('finds email setup by SMTP and mail-server words and names the same destination in both scopes in %s', async (locale) => {
+  await setLocale(locale);
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  cache.setQueryData(meQuery.queryKey, { ...me(1, 'operator', 'Operator'), is_system_admin: true });
+  cache.setQueryData(orgsQuery.queryKey, []);
+  const view = show(<GlobalCommands />, cache);
+  try {
+    await waitFor(() => expect(commandsNow().some((command) => command.id === 'go.admin.email')).toBe(true));
+    const name = locale === 'en' ? 'Email and channels' : '邮件与渠道';
+    expect(managementSections(i18n.t).find((entry) => entry.id === 'email')?.label).toBe(name);
+    expect(sectionLabel('channels', i18n.t)).toBe(name);
+    const entries = commandEntries(commandsNow(), i18n.t);
+    for (const text of ['SMTP', 'mail server', 'email', ...(locale === 'zh-CN' ? ['邮件服务器', '邮箱'] : [])]) {
+      const found = answer(entries, text).find(({ item }) => item.id === 'go.admin.email')?.item;
+      expect(found, text).toBeDefined();
+      expect(found?.title(i18n.t)).toContain(name);
+      expect(found?.path).toBe('/admin/email');
+      expect(found?.available?.()).toBe(true);
+    }
+  } finally { view.unmount(); cache.clear(); }
+});
 
 describe('places in Management and finder acts', () => {
   it('opens Management Everything in the main-area inventory with system scope', () => {

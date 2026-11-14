@@ -121,13 +121,13 @@ function Thread({ event,scope }: { event: UsageEvent;scope:UsageScope }) {
     <span className="flex min-w-0 flex-col">
       {readable ? (
         <Link to="/thread/$threadId" params={{ threadId: thread.id }} search={event.turn_ordinal === null ? {} : { turn:event.turn_ordinal }} className="font-medium wrap-anywhere text-text hover:underline">
-          {scope.kind==='node' && scope.id===thread.id && event.turn_ordinal!==null ? t('usage.records.turn',{id:event.turn_ordinal}) : thread.name}
+          {scope.kind==='node' && scope.id===thread.id && event.turn_ordinal!==null ? t('usage.records.turn',{number:event.turn_ordinal}) : thread.name}
         </Link>
       ) : (
         <span className="wrap-anywhere text-text-muted">{t('usage.key.hidden', { kind: t('usage.key.kind.thread') })}</span>
       )}
       <span className="flex flex-wrap gap-x-3 gap-y-1 text-sm wrap-anywhere text-text-muted">
-        {context!=='' && <span>{context}</span>}{event.turn_ordinal!==null && readable && !(scope.kind==='node' && scope.id===thread.id) && <span>{t('usage.records.turn',{id:event.turn_ordinal})}</span>}
+        {context!=='' && <span>{context}</span>}{event.turn_ordinal!==null && readable && !(scope.kind==='node' && scope.id===thread.id) && <span>{t('usage.records.turn',{number:event.turn_ordinal})}</span>}
       </span>
     </span>
   );
