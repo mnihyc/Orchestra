@@ -123,7 +123,7 @@ export async function fixture(page: Page, supplied: AskGetReply[] = []) {
       await publish(ASK_ID, { kind: 'message', message: { ...answer } });
       snapshot.conversation.state = 'ready'; await publish(ASK_ID, { kind: 'conversation', conversation: { ...snapshot.conversation } });
     },
-    contextRefusal: async (code: 'ask_context_no_room' | 'ask_context_too_long', model: string) => {
+    contextRefusal: async (code: 'ask_context_too_long' | 'ask_turn_too_long', model: string) => {
       const snapshot = record(ASK_ID), answer = snapshot.messages.find((message) => message.id === ASK_ANSWER);
       if (answer === undefined) throw new Error('No answer fixture');
       answer.complete = true; snapshot.conversation.state = 'ready';

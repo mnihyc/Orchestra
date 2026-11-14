@@ -16,7 +16,7 @@ import { LibraryCounts } from './Library';
 import { ResourceGroupControl, ResourceGroupHeader } from './GroupHeader';
 import { groupResourceRows, RESOURCE_GROUP_MODES, resourceGroupMeta, type ResourceGroupMeta, type ResourceGroupMode } from './groups';
 import { useFormatContext } from '@/lib/appearance';
-import { MachineLink } from './machines/MachineLink';
+import { MachineOrigin } from './machines/MachineOrigin';
 import { Hint } from '@/features/help/Hint';
 import { useResourceCleanup } from '@/features/storage/acts';
 import { holds } from '@/lib/permissions';
@@ -254,7 +254,7 @@ export function ResourceListFrame<Row extends ResourceRow>({
       <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1"><div data-resource-name className="min-w-0 flex-1 basis-[min(100%,12rem)]">{column.cell(row, shown)}</div><AsAdminMark of={adminAccessOf(row)?.place} responsive /></div>
       {showOwner && <ResourceOwner {...row} />}
       {origin !== null && origin !== undefined && <span data-resource-origin className="flex min-w-0 items-center gap-1 text-sm text-text-muted">
-        <span>{t('resourceGroups.from')}</span><MachineLink machine={origin} />
+        <MachineOrigin machine={origin} />
       </span>}
       {entry !== undefined && <LibraryCounts facts={entry.facts} threads={entry.threads} />}
     </div>; } });
@@ -351,6 +351,7 @@ export function ResourceListFrame<Row extends ResourceRow>({
         <EmptyState compact icon={<Search aria-hidden />} title={noMatch} />
       ) : (
         <Table
+          virtual
           boundedIdentity
           label={label}
           columns={shown}

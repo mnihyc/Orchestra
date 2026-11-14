@@ -316,6 +316,7 @@ export function AddProviderDialog({ onClose, initialRuntimeMachine, initialHome,
     </Button>
   </>}>
     <div ref={fields} className="flex min-w-0 flex-col gap-3 py-2" data-tutorial-target="provider-form">
+    <Input label={t('providers.add.name')} value={name} error={nameFault ?? serverFaults.name} disabled={pending} autoComplete="off" onChange={(event) => {setName(event.target.value);setNameFault(undefined);setServerFaults({});}} />
       {step === 1 ? <>
         <Select label={t('providerCreation.examples')} value={example} onValueChange={chooseExample} options={exampleOptions}/>
         {example.startsWith('preset:') && <span className="text-sm text-text-muted">{t('providerFill.sources.catalogue')}</span>}
@@ -365,7 +366,6 @@ export function AddProviderDialog({ onClose, initialRuntimeMachine, initialHome,
           {templateConflict && <InlineAlert tone="warning">{t('providerSources.templateConflict')}</InlineAlert>}
           {keepingMachine !== null && <Button size="sm" className="self-start" onClick={() => setRegistering(keepingMachine)}>{t('providerCreation.registerSource')}</Button>}
         </fieldset>
-        <Input label={t('providers.add.name')} value={name} error={nameFault ?? serverFaults.name} disabled={pending} autoComplete="off" onChange={(event) => {setName(event.target.value);setNameFault(undefined);setServerFaults({});}} />
         {arrangements.length === 0 && <InlineAlert tone="warning">{t('providerCreation.noAllowedArrangement')}</InlineAlert>}
         <details open={serverFaults.arrangements === undefined ? undefined : true}><summary className="cursor-pointer text-sm text-text-muted">{t('providers.add.arrangements')}</summary><div className="flex flex-col gap-2 pt-2">
           {serverFaults.arrangements !== undefined && <InlineAlert tone="warning">{serverFaults.arrangements}</InlineAlert>}
