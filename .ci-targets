@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-notifier-email --lib
+web typecheck
+web lint
+web test -- tests/component/people.test.tsx tests/component/tabs-keyboard.test.tsx tests/component/profile-editing.test.tsx tests/component/profile-message-people.test.tsx tests/component/rail-toggle.test.tsx tests/component/mobile-thread-navigation.test.tsx tests/component/workbench-page-context.test.tsx tests/component/workbench-routing-regressions.test.tsx tests/component/settings-section-navigation.test.tsx tests/component/thread-hover-actions.test.tsx tests/component/resource-landing.test.tsx tests/component/resource-navigation-presence.test.tsx tests/component/view-tab-menu.test.tsx tests/component/machine-enrollment-arrival.test.tsx tests/component/machine-enrollment.test.tsx tests/component/provider-source-create.test.tsx tests/component/make-environment.test.tsx tests/component/agent-profile-detection.test.tsx tests/component/new-template.test.tsx tests/component/usage-system-rates.test.tsx tests/unit/craft-catalogue.test.ts tests/unit/workbench-content-address.test.ts tests/unit/left-bar.test.ts tests/unit/route-links.test.ts

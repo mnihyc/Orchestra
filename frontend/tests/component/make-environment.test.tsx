@@ -186,3 +186,11 @@ for (const locale of ['en', 'zh-CN'] as const) it(`retains an unavailable preset
   await user.click(host);
   expect(server.create).not.toHaveBeenCalled();
 });
+
+
+it.each(['en', 'zh-CN'] as const)('names the new resource before its other setup choices in %s', async (locale) => {
+  await setLocale(locale);
+  show(<MakeEnvironmentDialog onClose={server.close} />);
+  const name = await screen.findByRole('textbox', { name: i18n.t('environments.make.name') });
+  expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],select')).toBe(name);
+});

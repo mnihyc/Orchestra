@@ -71,7 +71,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(wire.copy).toHaveBeenCalledWith('Fix this route\n\nThe route is fixed.', i18n.t('thread.turnActions.copied'));
     await userEvent.click(within(person).getByRole('button', { name: i18n.t('thread.turnActions.restoreBefore') }));
     await waitFor(() => expect(wire.checkpoint).toHaveBeenCalledExactlyOnceWith('before-person-message'));
-    expect(screen.getByRole('dialog', { name: i18n.t('source.restore.titleTurn') })).toBeVisible();
+    expect(await screen.findByRole('dialog', { name: i18n.t('source.restore.titleTurn') })).toBeVisible();
     expect(wire.send).not.toHaveBeenCalled(); expect(wire.retry).not.toHaveBeenCalled();
   });
 }
@@ -107,4 +107,27 @@ it.each(['failed', 'interrupted'] as const)('retries a middle %s turn through it
   await userEvent.click(retry);
   await waitFor(() => expect(wire.retry).toHaveBeenCalledWith(expect.objectContaining({ threadId: view.id }), view.completed.id, expect.any(String)));
   expect(wire.send).not.toHaveBeenCalled();
+});
+
+
+it.each(['en', 'zh-CN'] as const)('offers the visible message actions by name in the same menu in %s', async (locale) => {
+  await setLocale(locale);
+  const view = draw(400);
+  const person = view.container.querySelector<HTMLElement>('[data-hover-actions="person"]');
+  const agent = view.container.querySelector<HTMLElement>('[data-hover-actions="turn"]');
+  if (person === null || agent === null) throw new Error('Both action rows are present');
+  const user = userEvent.setup();
+  await user.click(within(person).getByRole('button', { name: i18n.t('timeline.actions.more') }));
+  const personMenu = screen.getByRole('menu');
+  for (const key of ['timeline.actions.copy', 'messageVersions.edit', 'thread.turnActions.restoreBefore'] as const) {
+    expect(within(personMenu).getByRole('menuitem', { name: i18n.t(key), exact: true })).toBeVisible();
+  }
+  await user.keyboard('{Escape}');
+  await user.click(within(agent).getByRole('button', { name: i18n.t('thread.turnActions.more') }));
+  const agentMenu = screen.getByRole('menu');
+  for (const key of ['thread.turnActions.copy', 'timeline.footer.retry', 'timeline.selection.forkNow'] as const) {
+    expect(within(agentMenu).getByRole('menuitem', { name: i18n.t(key), exact: true })).toBeVisible();
+  }
+  await user.click(within(agentMenu).getByRole('menuitem', { name: i18n.t('thread.turnActions.copy'), exact: true }));
+  expect(wire.copy).toHaveBeenCalledWith('Fix this route\n\nThe route is fixed.', i18n.t('thread.turnActions.copied'));
 });

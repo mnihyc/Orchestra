@@ -299,7 +299,7 @@ export function ItemFrame({ item, extra, label, children, className, messageActi
         <div ref={body} data-item-body>{children}</div>
         {item.chat_refs > 0 && <ChatRefs count={item.chat_refs} />}
         {messageActions !== undefined ? <HoverActions owner="person">{messageActions}
-          <Menu label={label} align="end" entries={entries.filter((entry) => !['copy', 'edit-message', 'restore-turn'].includes(entry.id))} trigger={<IconButton size="sm" label={t('timeline.actions.more')} icon={<Ellipsis aria-hidden />} />} />
+          <Menu label={label} align="end" entries={entries} trigger={<IconButton size="sm" label={t('timeline.actions.more')} icon={<Ellipsis aria-hidden />} />} />
         </HoverActions> : <div ref={acts} data-item-acts className="absolute top-0 right-0 opacity-0 transition-opacity group-focus-within/item:opacity-100 group-hover/item:opacity-100">
           <Menu label={label} align="end" entries={entries} trigger={<IconButton size="sm" label={t('timeline.actions.more')} icon={<Ellipsis aria-hidden />} />} />
         </div>}

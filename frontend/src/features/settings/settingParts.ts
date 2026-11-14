@@ -33,3 +33,12 @@ export function inheritedParts(setting: SettingWithParts, target: SettingsTarget
 export function valueText(value: unknown): string {
   return typeof value === 'string' ? value : value === undefined ? '' : JSON.stringify(value, null, 2);
 }
+
+/** What the places above set for a map keyed by name, member by member as the map is joined: a later place replaces the same member of an earlier one. */
+export function inheritedTargets(setting: SettingWithParts, target: SettingsTarget): Record<string, unknown> {
+  const joined: Record<string, unknown> = {};
+  for (const part of inheritedParts(setting, target)) {
+    if (typeof part.value === 'object' && part.value !== null && !Array.isArray(part.value)) Object.assign(joined, part.value);
+  }
+  return joined;
+}

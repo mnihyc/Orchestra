@@ -133,3 +133,11 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(screen.getByLabelText(t('agents.add.name'))).toHaveValue('Retain custom profile draft');
   });
 });
+
+
+it.each(['en', 'zh-CN'] as const)('names the new agent profile before its setup choices in %s', async (locale) => {
+  await setLocale(locale);
+  open();
+  const name = screen.getByRole('textbox', { name: i18n.t('agents.add.name') });
+  expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],select')).toBe(name);
+});

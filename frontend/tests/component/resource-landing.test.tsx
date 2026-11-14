@@ -10,7 +10,7 @@ import { client } from '@/api/client';
 import { ViewOpeningContext, ViewRouteContext } from '@/features/workbench/viewOpening';
 import { show } from './support';
 
-const world = vi.hoisted(() => ({ summary: vi.fn(), names: vi.fn<(kind: string) => void>(), navigate: vi.fn(), path: '/resources' }));
+const world = vi.hoisted(() => ({ summary: vi.fn(), names: vi.fn<(kind: string, q: string, cursor: string | null) => void>(), navigate: vi.fn(), path: '/resources' }));
 vi.mock('@/shell/screen', () => ({ useScreenHeading: () => undefined }));
 vi.mock('@tanstack/react-router', () => ({
   Link: ({ children, to, ...props }: { children: ReactNode; to: string }) => createElement('a', { ...props, href: to }, children),
@@ -20,9 +20,14 @@ vi.mock('@tanstack/react-router', () => ({
 vi.mock('@/api/resource-summary', () => ({ resourceSummaryQuery: (opening: string) => ({ queryKey: ['resource-summary', opening], staleTime: Infinity, queryFn: () => {
   world.summary(); return Promise.resolve({ providers: 2, agents: 51, machines: 0, environments: 3, templates: 1, hosts: 1, mcp: 0, mounts: 4, skills: 5 });
 } }) }));
-vi.mock('@/api/everything', () => ({ everythingQuery: (_reader: string, _parent: string, filter: { kinds: string[] }) => ({
-  queryKey: ['resource-navigation', filter.kinds], initialPageParam: null, getNextPageParam: () => null,
-  queryFn: () => { const kind = filter.kinds[0] ?? ''; world.names(kind); return Promise.resolve({ items: [{ id: 'reviewer', name: 'Reviewer' }], next_cursor: null }); },
+vi.mock('@/api/everything', () => ({ everythingQuery: (_reader: string, _parent: string, filter: { kinds: string[]; q: string }) => ({
+  queryKey: ['resource-navigation', filter.kinds, filter.q], initialPageParam: null as string | null,
+  getNextPageParam: (page: { next_cursor: string | null }) => page.next_cursor ?? undefined,
+  queryFn: ({ pageParam }: { pageParam: string | null }) => {
+    const kind = filter.kinds[0] ?? ''; world.names(kind, filter.q, pageParam);
+    if (filter.q !== '') return Promise.resolve({ items: kind !== 'agent' ? [] : [{ id: pageParam === null ? 'first-match' : 'last-match', name: pageParam === null ? 'Needle first page' : 'Needle at the end' }], next_cursor: kind === 'agent' && pageParam === null ? 'next' : null });
+    return Promise.resolve({ items: [{ id: 'reviewer', name: 'Reviewer' }], next_cursor: null });
+  },
 }) }));
 vi.mock('@/features/resources/agents/AddAgent', () => ({ AddAgentDialog: ({ onClose }: { onClose: () => void }) => <div role="dialog" aria-label="Agent creation"><button onClick={onClose}>Close</button></div> }));
 
@@ -92,4 +97,21 @@ it('never expands visited kinds or resurrects legacy automatic expansions, and r
   await act(async () => { await Promise.resolve(); });
   expect(world.names.mock.calls.map(([kind]) => kind)).toEqual(['agent']);
   expect(JSON.parse(localStorage.getItem('orch.ada.resources.expanded') ?? '[]')).toEqual(['agents']);
+});
+
+
+it('finds resources beyond a first page without keeping the search or expanding kinds permanently', async () => {
+  client.session.setState({ userId: 'ada' });
+  show(<ResourcesView />);
+  const search = screen.getByRole('searchbox', { name: 'Find resources' });
+  fireEvent.change(search, { target: { value: 'needle' } });
+  expect(await screen.findByRole('link', { name: 'Needle first page' })).toBeVisible();
+  expect(new Set(world.names.mock.calls.filter(([, q]) => q === 'needle').map(([kind]) => kind)).size).toBe(9);
+  fireEvent.click(screen.getByRole('button', { name: i18n.t('everything.more') }));
+  expect(await screen.findByRole('link', { name: 'Needle at the end' })).toBeVisible();
+  expect(world.names).toHaveBeenCalledWith('agent', 'needle', 'next');
+  expect(localStorage.getItem('orch.ada.resources.expanded')).toBeNull();
+  fireEvent.change(search, { target: { value: '' } });
+  await waitFor(() => expect(screen.queryByRole('link', { name: 'Needle at the end' })).not.toBeInTheDocument());
+  expect(world.names.mock.calls.some(([, q]) => q === '')).toBe(false);
 });

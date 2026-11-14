@@ -11,7 +11,7 @@
  */
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { Link, useRouterState } from '@tanstack/react-router';
-import { Boxes, LoaderCircle, RotateCw } from 'lucide-react';
+import { Boxes, RotateCw } from 'lucide-react';
 import { type ReactElement, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
@@ -28,6 +28,10 @@ import { listAsLeft, type ResourceKind } from '@/features/resources/trail';
 import { registerView } from '@/features/workbench/views';
 import { useViewShown } from '@/features/workbench/viewOpening';
 import { useAppearance } from '@/lib/appearance';
+import { useDebounced } from '@/lib/debounce';
+import { Input } from '@/ui/Input';
+import { SkeletonRows } from '@/ui/Skeleton';
+import { StateLine } from '@/ui/StateLine';
 import { formatNumber } from '@/lib/format';
 import { cx } from '@/ui/cx';
 import { Tree, type TreeRow } from '@/ui/Tree';
@@ -69,7 +73,7 @@ export function resourceRows(lists: Readonly<Record<ResourceKind, Pick<KindList,
     const { things, failed } = lists[kind];
     const id = kindRowId(kind);
     // A kind with nothing in it has nothing to open; one that is still unknown may have.
-    const count = counts === undefined ? things?.length ?? null : counts[kind];
+    const count = counts === undefined ? lists[kind].more === true ? null : things?.length ?? null : counts[kind];
     const expandable = count === null || count > 0;
     const expanded = expandable && open.has(kind);
     rows.push({ id, depth: 0, parentId: null, expandable, expanded, item: { type: 'kind', kind, count } });
@@ -87,21 +91,21 @@ export function resourceRows(lists: Readonly<Record<ResourceKind, Pick<KindList,
 }
 
 /** Only an expanded kind reads its names, in bounded pages without resource-detail readers. */
-function useBranch(kind: ResourceKind, open: ReadonlySet<ResourceKind>, reader: string | null): KindList {
+function useBranch(kind: ResourceKind, open: ReadonlySet<ResourceKind>, reader: string | null, q: string): KindList {
   const shown = useViewShown();
   const options = everythingQuery(reader ?? '', 'resources', { scope: 'mine', kinds: [INVENTORY_KINDS[kind]],
-    q: '', owner: null, createdFrom: '', createdTo: '', sort: 'name', direction: 'asc' }, 'resource-navigation', { keepReading: true });
+    q, owner: null, createdFrom: '', createdTo: '', sort: 'name', direction: 'asc' }, 'resource-navigation', { keepReading: true });
   const query = useInfiniteQuery({ ...options, enabled: shown && reader !== null && open.has(kind) });
   return { things: query.data?.pages.flatMap((page) => page.items.flatMap((row) => row.name === null ? [] : [{ id: row.id, name: row.name }])) ?? null,
     failed: query.isError, retry: () => { if (query.isFetchNextPageError) void query.fetchNextPage(); else void query.refetch(); },
     more: query.hasNextPage, readMore: () => void query.fetchNextPage() };
 }
 
-function useKindLists(open: ReadonlySet<ResourceKind>, reader: string | null): Record<ResourceKind, KindList> {
-  return { providers: useBranch('providers', open, reader), agents: useBranch('agents', open, reader),
-    machines: useBranch('machines', open, reader), environments: useBranch('environments', open, reader),
-    templates: useBranch('templates', open, reader), hosts: useBranch('hosts', open, reader),
-    mcp: useBranch('mcp', open, reader), mounts: useBranch('mounts', open, reader), skills: useBranch('skills', open, reader) };
+function useKindLists(open: ReadonlySet<ResourceKind>, reader: string | null, q: string): Record<ResourceKind, KindList> {
+  return { providers: useBranch('providers', open, reader, q), agents: useBranch('agents', open, reader, q),
+    machines: useBranch('machines', open, reader, q), environments: useBranch('environments', open, reader, q),
+    templates: useBranch('templates', open, reader, q), hosts: useBranch('hosts', open, reader, q),
+    mcp: useBranch('mcp', open, reader, q), mounts: useBranch('mounts', open, reader, q), skills: useBranch('skills', open, reader, q) };
 }
 
 // The old key mixed deliberate choices with automatic reveals from visits. Keep only explicit expansions now.
@@ -164,21 +168,30 @@ export function ResourcesView() {
   const [opened, setOpened] = useState<{ userId: string | null; kinds: ReadonlySet<ResourceKind> } | null>(null);
   const kept = useMemo(() => readOpen(userId), [userId]);
   const open = opened !== null && opened.userId === userId ? opened.kinds : kept;
-  const lists = useKindLists(open, userId);
+  const [search, setSearch] = useState('');
+  const q = useDebounced(search.trim());
+  const searching = q !== '';
+  const [searchClosed, setSearchClosed] = useState<{ q: string; kinds: ReadonlySet<ResourceKind> } | null>(null);
+  const expanded = useMemo(() => searching ? new Set(KINDS.map((kind) => kind.name).filter((kind) => searchClosed === null || searchClosed.q !== q || !searchClosed.kinds.has(kind))) : open, [searching, q, searchClosed, open]);
+  const lists = useKindLists(expanded, userId, q);
   useEffect(() => {
     if (opened !== null) writeOpen(opened.userId, opened.kinds);
   }, [opened]);
-  const rows = resourceRows(lists, open, locale, summary.data);
+  const rows = resourceRows(lists, expanded, locale, searching ? undefined : summary.data);
   const onExpandedChange = useCallback(
     (id: string, expanded: boolean) => {
       const kind = KINDS.find((one) => kindRowId(one.name) === id)?.name;
       if (kind === undefined) return;
+      if (searching) {
+        setSearchClosed((before) => { const kinds = new Set(before?.q === q ? before.kinds : []); if (expanded) kinds.delete(kind); else kinds.add(kind); return { q, kinds }; });
+        return;
+      }
       const next = new Set(open);
       if (expanded) next.add(kind);
       else next.delete(kind);
       setOpened({ userId, kinds: next });
     },
-    [open, userId],
+    [open, userId, searching, q],
   );
   const renderRow = useCallback(
     (row: TreeRow<ResourceItem>) => {
@@ -205,8 +218,7 @@ export function ResourcesView() {
       if (item.state === 'loading') {
         return (
           <span className="flex min-w-0 flex-1 items-center gap-2 text-text-muted">
-            <LoaderCircle className="animate-spin" aria-hidden />
-            <span className="truncate">{t('common.loading')}</span>
+            <SkeletonRows rows={1} className="min-w-0 flex-1" />
           </span>
         );
       }
@@ -227,8 +239,10 @@ export function ResourcesView() {
 
   return (
     <nav aria-label={t('navigation.resources.title')} className="flex h-full min-h-0 flex-col bg-bg-subtle">
+      <div className="shrink-0 px-2 pt-1 pb-2"><Input type="search" label={t('navigation.resources.search')} hideLabel value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t('ui.combobox.search')} autoComplete="off" /></div>
       <ScrollArea className="flex flex-1 flex-col py-1">
         {summary.isError && <button type="button" className="focus-inset min-h-9 px-3 text-left text-sm text-text-muted" onClick={() => void summary.refetch()}>{t('navigation.resources.retry')}</button>}
+        {searching && Object.values(lists).every((list) => list.things?.length === 0 && !list.failed) && <StateLine compact className="px-3" title={t('navigation.resources.noMatches')} />}
         <Tree label={t('navigation.resources.tree')} rows={rows} currentId={current} onExpandedChange={onExpandedChange} nameOf={nameOf} renderRow={renderRow} wrapRow={wrapRow} />
       </ScrollArea>
     </nav>
