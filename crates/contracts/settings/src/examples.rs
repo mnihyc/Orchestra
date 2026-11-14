@@ -134,6 +134,7 @@ pub const ORCH_TOOLS_OWNER_READS: &str = "false";
 pub const ORCH_TOOLS_SEARCH_QUERY_CHARS: &str = "2000";
 pub const ORCH_TOOLS_SEARCH_RESULTS: &str = "300";
 pub const ORCH_TOOLS_SEARCH_CONTEXT: &str = "10";
+pub const THREADS_OPENING_ITEMS: &str = "60";
 /// No final offline deadline is imposed by default.
 pub const THREADS_OFFLINE_DEADLINE: &str = "null";
 pub const THREADS_BACKGROUND_WAKE: &str = r#""on""#;

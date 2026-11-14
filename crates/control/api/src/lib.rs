@@ -572,6 +572,12 @@ pub mod backplane {
         async fn a_runtime_network_report_obeys_the_runtime_hosts_source_binding() {
             orch_api_base::backplane::machine_report_tests::__api_run_a_runtime_network_report_obeys_the_runtime_hosts_source_binding().await
         }
+        #[cfg(test)]
+        #[tokio::test]
+        async fn the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted()
+         {
+            orch_api_base::backplane::machine_report_tests::__api_run_the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted().await
+        }
     }
     #[cfg(test)]
     pub(crate) mod command_admission_tests {
@@ -3084,9 +3090,9 @@ pub mod realtime {
         }
         #[cfg(test)]
         #[tokio::test]
-        async fn opening_outline_and_conversation_keep_the_same_cut_while_the_native_turn_ends()
+        async fn opening_and_outline_use_their_own_coherent_cuts_while_the_native_turn_ends()
         -> ::orch_api_base::realtime::history_read_tests::Proof {
-            orch_api_base::realtime::history_read_tests::__api_run_opening_outline_and_conversation_keep_the_same_cut_while_the_native_turn_ends().await
+            orch_api_base::realtime::history_read_tests::__api_run_opening_and_outline_use_their_own_coherent_cuts_while_the_native_turn_ends().await
         }
         #[cfg(test)]
         #[tokio::test]

@@ -371,14 +371,17 @@ pub fn source_approval(row: &ItemRow) -> Option<Id> {
 #[must_use]
 pub fn item_view(row: &ItemRow, people: &People) -> Item {
     let mut item = record_item_view(row, people);
-    // Complete file images belong to the guarded restore supplier. Human
-    // timeline readers and written exports expose the tool's bounded diff.
-    if let orch_api_contract::threads::ItemPayload::ToolCall(call) = &mut item.payload
-        && let orch_api_contract::threads::ToolPayload::FileChange { changes } = &mut call.tool
-    {
-        for change in changes {
-            change.before = None;
-            change.after = None;
+    if let orch_api_contract::threads::ItemPayload::ToolCall(call) = &mut item.payload {
+        // The call as its harness made it repeats the typed call and is as long: the timeline leaves it out,
+        // and `item_raw_in` reads it when a person opens it.
+        call.raw = None;
+        // Complete file images belong to the guarded restore supplier. Human
+        // timeline readers and written exports expose the tool's bounded diff.
+        if let orch_api_contract::threads::ToolPayload::FileChange { changes } = &mut call.tool {
+            for change in changes {
+                change.before = None;
+                change.after = None;
+            }
         }
     }
     item
@@ -473,6 +476,9 @@ pub fn turn_view(row: &TurnRow, display: &str, people: &People) -> Result<Turn, 
                     .unwrap_or("internal"),
             );
             object.insert("message".to_owned(), Json::String(message));
+            // An error stored without this member (Ask's failures before 0.1.3 were) must not make the
+            // whole turn, and with it the thread, unreadable: it is read as not worth trying again.
+            object.entry("retryable").or_insert(Json::Bool(false));
         }
         error
     });
@@ -1881,15 +1887,14 @@ impl Engine {
         self.item_view_in(conn, thread, item, None, None).await
     }
 
-    /// A direct known-item link resolves its actual owner unless a prefix view was explicitly chosen.
-    pub async fn item_view_in(
-        &self,
+    /// The row of an item that a direct link names: its actual owner, unless a prefix view was explicitly chosen.
+    async fn item_row_in(
         conn: &mut Conn,
         thread: Id,
         item: Id,
         continuation: Option<Id>,
         revision: Option<i64>,
-    ) -> Result<Item, ReadError> {
+    ) -> Result<ItemRow, ReadError> {
         let owner = match continuation {
             Some(owner) => owner,
             None => history_rows::item_owner(conn, thread, item)
@@ -1904,9 +1909,41 @@ impl Engine {
                 crate::continuations::projection::scope(&projection),
             ));
         }
-        let row = history_rows::item(conn, thread, owner, item)
+        history_rows::item(conn, thread, owner, item)
             .await?
-            .ok_or(ReadError::NotFound)?;
+            .ok_or(ReadError::NotFound)
+    }
+
+    /// A tool call exactly as its harness made it, which `item_view` leaves out of the thread's timeline: found
+    /// the way the item itself is, and an item that is no tool call has none.
+    pub async fn item_raw_in(
+        &self,
+        conn: &mut Conn,
+        thread: Id,
+        item: Id,
+        continuation: Option<Id>,
+        revision: Option<i64>,
+    ) -> Result<orch_api_contract::threads::RawCall, ReadError> {
+        let row = Self::item_row_in(conn, thread, item, continuation, revision).await?;
+        if row.kind != "tool_call" {
+            return Err(ReadError::NotFound);
+        }
+        row.payload
+            .get("raw")
+            .and_then(|raw| serde_json::from_value(raw.clone()).ok())
+            .ok_or(ReadError::NotFound)
+    }
+
+    /// A direct known-item link resolves its actual owner unless a prefix view was explicitly chosen.
+    pub async fn item_view_in(
+        &self,
+        conn: &mut Conn,
+        thread: Id,
+        item: Id,
+        continuation: Option<Id>,
+        revision: Option<i64>,
+    ) -> Result<Item, ReadError> {
+        let row = Self::item_row_in(conn, thread, item, continuation, revision).await?;
         let people = People::load(conn, [row.author_id, row.pinned_by].into_iter().flatten())
             .await?
             .with_approvals(conn, source_approval(&row))
