@@ -95,6 +95,7 @@ pub mod resource_facts;
 pub mod resource_facts_sources;
 pub mod resource_groups;
 pub mod resource_reads;
+pub mod resource_rows;
 pub mod resources;
 pub mod restore_sources;
 pub mod routes;

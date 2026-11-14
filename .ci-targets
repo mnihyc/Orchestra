@@ -1,0 +1,7 @@
+test -p orch-notifier-email --lib
+test -p orch-worker-core --test channel_setup
+test -p orch-api-core --test notifications_routes --test accounts
+test -p orchctl --test channel
+web typecheck
+web lint
+web test -- tests/unit/settings-labels.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts tests/component/screen-labels.test.tsx tests/component/settings-section-navigation.test.tsx tests/component/section-navigation-locator.test.tsx
