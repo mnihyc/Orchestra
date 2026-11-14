@@ -26112,7 +26112,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "operation_id": "MachineUpdateNow",
     "method": "POST",
     "path": "/machines/{id}/update",
-    "title": "Requests a verified physical connector update, drained under its local update.auto policy.",
+    "title": "Requests an explicit verified physical connector update after its active work drains.",
     "delegation": "business",
     "variants": [
       {
@@ -40623,6 +40623,37 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "ProviderFactsModelsGet",
+    "method": "GET",
+    "path": "/providers/{id}/facts/models",
+    "title": "Lists the models the provider's source last listed, as it kept them and not as the provider's own list; discovery suggests them and never adds one. Empty where no list was read; `facts_state.models` says why.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderFactsModelsGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "id",
+                "kind": "provider"
+              }
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "ProviderFactsOverridesSet",
     "method": "PUT",
     "path": "/providers/{id}/facts-overrides",
@@ -42662,7 +42693,9 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "resources": [
               "provider",
               "agent",
-              "environment"
+              "environment",
+              "mcp_server",
+              "mount"
             ],
             "target": {
               "kind": "resolved",
@@ -43315,6 +43348,33 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "key_scope_threads"
             },
             "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "SettingParameterFormResolve",
+    "method": "POST",
+    "path": "/settings/parameters/form",
+    "title": "Resolves supplied native declarations with the same model constraints as thread parameter controls; reads no resource or credential.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "SettingParameterFormResolve",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
           }
         ]
       }
@@ -50984,7 +51044,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "operation_id": "ThreadInterrupt",
     "method": "POST",
     "path": "/threads/{id}/interrupt",
-    "title": "Stops a running turn, and holds what waits in the queue until somebody resumes it.",
+    "title": "Stops a running turn, or the start of the next one, and holds what waits in the queue until somebody resumes it. The answer is at once: the Stop is recorded, and says that the thread is stopping until the program has stopped.",
     "delegation": "business",
     "variants": [
       {
@@ -51184,6 +51244,51 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ThreadItemRawGet",
+    "method": "GET",
+    "path": "/threads/{id}/items/{item_id}/raw",
+    "title": "Reads a tool call exactly as its harness made it: its own name for the tool, its arguments and what came back. A thread's items leave this out.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ThreadItemRawGet.read",
+        "name": "read",
+        "selector": "inspect_deleted is not true",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      },
+      {
+        "legacy_tokens": true,
+        "operation": "ThreadItemRawGet.inspect_deleted",
+        "name": "inspect_deleted",
+        "selector": "inspect_deleted is true; apply the stored thread restoration rule",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
           }
         ]
       }
