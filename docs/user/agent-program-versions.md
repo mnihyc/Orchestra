@@ -58,11 +58,15 @@ behavior does not fail a turn.
 | Checking interface… | Reading the program's interface |
 | Checking conformance… | Running the native cases |
 | Checked | The checks passed, or this release certified the build |
+| Checked · N checks pending | The checks it ran passed; a later release added N checks it has not run yet. They run in the background, without anyone asking, and nothing the build had proved is taken away meanwhile |
 | Untested | No completed check; the result says what is missing |
 | Failed | A check failed; the disabled feature is shown first, with its case in the results |
 
 A failed optional feature is unavailable with that build. Other features
-continue to work. An untested or failed target has a warning in its update
+continue to work. A check that could not run, for want of a host or because a
+host's node is of an earlier release and lacks a check, is not a failure: the
+build keeps what its last check proved, and the check it did not run says so
+and waits for a host that can run it. An untested or failed target has a warning in its update
 plan. Operators can still choose it. A checksum mismatch is refused.
 Exact input checkpoints are unavailable for Codex 0.167.2 while its native
 goal-state and item-history checks remain unproved.
@@ -105,12 +109,14 @@ host by itself, so that a build the program updates to is checked soon after it 
 **Compatibility not verified** until that check has finished.
 A newer build keeps editing a sent message, continuing from an earlier version
 of one, ending a background command from Orch and the proof of web searches,
-whatever its line; when a later build has changed one of these, the act fails
-with the program's own error. A build of the tested line (Claude Code 2.1.x from
-2.1.319, Codex 0.167.x) is **Supported**; a later line shows **Compatibility not
-verified**. Auto approval with Codex stays offered for a build that is not
-checked; it is off for a build only when a check of that exact build ran Auto's
-trial and the trial failed. Native import with Codex needs a passing check of
+whatever its line. Editing and continuing (Claude Code), ending a background
+command and steering a running turn (Codex) and Auto approval (Codex) stay on for
+a build that is not checked; each is off for a build only when the check of that
+exact build failed it, and the build's page then names it.
+When a later build has changed one of them and no check has shown it yet, the act
+fails with the program's own error. A build of the tested line (Claude Code 2.1.x
+from 2.1.319, Codex 0.167.x) is **Supported**; a later line shows **Compatibility
+not verified**. Native import with Codex needs a passing check of
 that exact build; without one the conversation is carried as items. A program
 older than the oldest tested build (Claude Code 2.1.319, Codex 0.167.0) does not
 start.
@@ -122,7 +128,10 @@ An environment names each reported program even when its build has no catalogue 
 
 Changing a policy leaves running units as they are. **Update available**
 means the unit's build differs from what it would receive now. A change
-shows both versions and says **newer** or **older**.
+shows both versions and says **newer** or **older**. For Orch's own connector and tools it
+shows the releases, such as 0.1.2 → 0.1.3, and says **a newer build** when only the build of one
+release differs; build and checksum strings are not shown. A changed runtime definition says that it
+changed, and its checksums are behind **Copy ID**.
 
 For one environment, set Exact in its settings to the desired older or
 newer build, then choose **Update…**. Review the target's check, what stays,

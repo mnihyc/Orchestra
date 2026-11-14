@@ -1,0 +1,9 @@
+fmt
+clippy
+contracts
+test -p orch-agent-contract --lib
+test -p orch-link-contract --lib
+test -p orch-link --test commands
+test -p orch-connector-core --test agent_role
+test -p orch-engine --test approvals --test approval_rules
+test -p orch-api-core --test approvals --test approval_operation_scopes

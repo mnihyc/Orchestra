@@ -507,6 +507,26 @@ impl AgentAdapter for AgentBridge {
             .map(|_| ())
     }
 
+    fn interrupt_handle(&self) -> Option<orch_agent_contract::adapter::Interrupt> {
+        let plugin = self.plugin.clone();
+        Some(Arc::new(move |thread, turn| {
+            let plugin = plugin.clone();
+            Box::pin(async move {
+                if !plugin.supports(method::TURN_INTERRUPT) {
+                    return Err(AdapterError::Unsupported("interrupt".into()));
+                }
+                plugin
+                    .call(
+                        method::TURN_INTERRUPT,
+                        json!({ "thread_id": thread, "turn_id": turn }),
+                    )
+                    .await
+                    .map_err(adapter_error)
+                    .map(|_| ())
+            })
+        }))
+    }
+
     async fn interrupt(&mut self, thread: ThreadId, turn: TurnId) -> Result<(), AdapterError> {
         let sent = json!({ "thread_id": thread, "turn_id": turn });
         self.ask(method::TURN_INTERRUPT, "interrupt", sent)

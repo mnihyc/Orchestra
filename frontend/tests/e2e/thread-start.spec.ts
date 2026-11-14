@@ -26,19 +26,20 @@ test('a thread is made from the defaults of its place, with a name and a first m
   await openDialog(page);
   const form = dialog(page);
 
-  // What may be run on comes first, and what may not is said below with why.
-  const providers = form.getByRole('combobox', { name: 'Provider', exact: true });
-  await expect(providers).toHaveValue('OpenAI key');
-  await providers.click();
-  await expect(page.getByRole('option', { name: /OpenAI key/ })).toHaveAttribute('aria-selected', 'true');
-  await expect(page.getByRole('option', { name: /Codex subscription/ })).toBeVisible();
-  await expect(page.getByRole('option', { name: /Team Anthropic/ })).toBeVisible();
-  await expect(page.getByRole('dialog', { name: 'Provider', exact: true }).locator('[role="option"][aria-disabled="true"]')).toHaveCount(1);
+  // The provider is the model's: the models of what may be run on come first, in groups under the provider's name, and what may not is said last with why.
+  const model = form.getByRole('button', { name: /^Model:/ });
+  await expect(model).toContainText('GPT-5.4');
+  await model.click();
+  const list = page.getByRole('dialog', { name: 'Model', exact: true });
+  await expect(list.getByText('OpenAI key', { exact: true })).toBeVisible();
+  await expect(list.getByText('Codex subscription', { exact: true })).toBeVisible();
+  await expect(list.getByText('Team Anthropic', { exact: true })).toBeVisible();
+  await expect(list.locator('[role="menuitemradio"][aria-checked="true"]')).toHaveCount(1);
+  await expect(list.locator('[role="menuitemradio"]:disabled')).toHaveCount(1);
   await page.keyboard.press('Escape');
-  // The environment that the topic names is the one chosen, and the agent and the model follow the provider.
+  // The environment that the topic names is the one chosen, and the agent follows the provider of the model.
   await expect(form.getByRole('combobox', { name: 'Where it runs' })).toHaveValue(/Workspace/u);
-  await expect(form.getByRole('combobox', { name: 'Agent' })).toHaveValue(/Codex/u);
-  await expect(form.getByRole('combobox', { name: 'Model' })).toContainText('GPT-5.4');
+  await expect(form.getByRole('button', { name: /^Agent:/ })).toContainText('Codex');
 
   await form.getByRole('textbox', { name: nameField }).fill('Investigate the flaky test');
   await form.getByRole('textbox', { name: 'First message' }).fill('Please look at the flaky test');

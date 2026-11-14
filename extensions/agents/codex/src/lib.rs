@@ -1809,27 +1809,52 @@ impl AgentAdapter for CodexAdapter {
         shared.end_background(thread, command).await
     }
 
+    fn interrupt_handle(&self) -> Option<orch_agent_contract::adapter::Interrupt> {
+        let processes: Vec<_> = self
+            .model_processes
+            .values()
+            .chain(self.running.iter())
+            .map(|running| Arc::clone(&running.shared))
+            .collect();
+        if processes.is_empty() {
+            return None;
+        }
+        Some(Arc::new(move |thread, turn| {
+            let shared = processes
+                .iter()
+                .find(|shared| shared.with_session(thread, |_| ()).is_ok())
+                .cloned();
+            Box::pin(async move {
+                let shared =
+                    shared.ok_or_else(|| AdapterError::SessionNotFound(thread.to_string()))?;
+                let (native, running) = shared.with_session(thread, |record| {
+                    (
+                        record.mapper.native_thread().to_owned(),
+                        record.mapper.running_turn(),
+                    )
+                })?;
+                // A turn that has already ended is interrupted by nothing: the turn ended as it did.
+                let Some((_, native_turn)) = running.filter(|(running, _)| *running == turn) else {
+                    return Ok(());
+                };
+                shared
+                    .rpc()
+                    .call(
+                        "turn/interrupt",
+                        json!({ "threadId": native, "turnId": native_turn }),
+                    )
+                    .await
+                    .map_err(map_rpc)?;
+                Ok(())
+            })
+        }))
+    }
+
     async fn interrupt(&mut self, thread: ThreadId, turn: TurnId) -> Result<(), AdapterError> {
-        let (shared, _) = self.live_session(thread)?;
-        let (native, running) = shared.with_session(thread, |record| {
-            (
-                record.mapper.native_thread().to_owned(),
-                record.mapper.running_turn(),
-            )
-        })?;
-        // A turn that has already ended is interrupted by nothing: the turn ended as it did.
-        let Some((_, native_turn)) = running.filter(|(running, _)| *running == turn) else {
-            return Ok(());
-        };
-        shared
-            .rpc()
-            .call(
-                "turn/interrupt",
-                json!({ "threadId": native, "turnId": native_turn }),
-            )
-            .await
-            .map_err(map_rpc)?;
-        Ok(())
+        let handle = self
+            .interrupt_handle()
+            .ok_or_else(|| AdapterError::HarnessUnavailable("the harness is not running".into()))?;
+        handle(thread, turn).await
     }
 
     async fn resolve_approval(

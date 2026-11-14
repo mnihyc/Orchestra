@@ -21,6 +21,7 @@ import { SkeletonRows } from '@/ui/Skeleton';
 import { StateLine } from '@/ui/StateLine';
 import { Table } from '@/ui/Table';
 import { PeopleCount } from '@/ui/PeopleList';
+import { CopyId } from '@/ui/CopyId';
 import { CommandBox } from '@/features/resources/Facts';
 import { Dependents, RecordName } from './Storage';
 
@@ -87,7 +88,7 @@ export function Cleanup({ request, onClose, onAccepted, onFinished, onRefused }:
       <JobProgress job={job} heading={t('storage.cleanup.running')} reconnecting={progress.isError} />
       {ended && <StateLine title={t(`source.job.${job.state}`)} tone={job.state === 'failed' ? 'warning' : 'neutral'} message={job.error?.message} />}
       {results.length > 0 && <Table label={t('storage.cleanup.results')} boundedIdentity rows={results} rowKey={(row) => row.id} columns={[
-        { id: 'name', header: t('storage.name'), cell: (row) => { const record = records.get(row.id); return record === undefined ? <span className="truncate" title={row.id}>{row.id}</span> : <RecordName row={record} />; } },
+        { id: 'name', header: t('storage.name'), cell: (row) => { const record = records.get(row.id); return record === undefined ? <span className="flex items-center gap-1"><span className="truncate">{t('storage.cleanup.itemUnknown')}</span><CopyId value={row.id} /></span> : <RecordName row={record} />; } },
         { id: 'outcome', header: t('storage.cleanup.outcome'), cell: (row) => <div><span>{t(`storage.cleanup.outcomes.${row.outcome}`,{defaultValue:row.outcome})}</span>{row.reason !== null && <p className="text-sm text-text-muted">{t(`storage.blockers.${row.reason}`, { defaultValue: row.reason })}</p>}</div> },
       ]} />}
       {stop.error !== null && <ErrorAlert error={stop.error} />}
