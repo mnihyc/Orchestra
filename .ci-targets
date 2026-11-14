@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-api-base --lib
+test -p orch-api-core --test ask
