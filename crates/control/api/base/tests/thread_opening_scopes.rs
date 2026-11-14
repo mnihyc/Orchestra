@@ -19,8 +19,8 @@ use orch_api_contract::input_schedules::{
 };
 use orch_api_contract::settings::{NodeSettingSet, NodeSettingSetBody};
 use orch_api_contract::threads::{
-    ContentPart, Delivery, ThreadDraftSet, ThreadDraftSetBody, ThreadOpeningGet,
-    ThreadOpeningGetQuery, ThreadOutlinePage, ThreadSyncGet, ThreadSyncGetQuery,
+    ContentPart, Delivery, ThreadDraftSet, ThreadDraftSetBody, ThreadOpening, ThreadOpeningGet,
+    ThreadOpeningGetQuery, ThreadSyncGet, ThreadSyncGetQuery,
 };
 use orch_api_contract::usage::{CapInput, CapMeter, CapSplit, CapSubjectInput, UsageCapCreate};
 use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
@@ -309,25 +309,10 @@ async fn an_opening_uses_its_own_thread_read_and_preserves_the_callers_draft_and
     assert_eq!(opened["sync"]["thread"]["id"], json!(thread));
     assert_eq!(opened["sync"]["items"], ordinary["sync"]["items"]);
     for opening in [&opened, &ordinary] {
-        assert_eq!(opening["sync"]["seq"], opening["outline"]["seq"]);
-        assert_eq!(
-            opening["sync"]["projection"],
-            opening["outline"]["projection"]
-        );
+        assert!(opening.get("outline").is_none());
+        assert!(opening.get("settings").is_none());
+        assert!(opening["sync"]["projection"].is_object());
     }
-    // The later snapshot can include a thread sequence advance without changing the outline window.
-    let opened_outline: ThreadOutlinePage =
-        serde_json::from_value(opened["outline"].clone()).unwrap();
-    let ordinary_outline: ThreadOutlinePage =
-        serde_json::from_value(ordinary["outline"].clone()).unwrap();
-    assert!(ordinary_outline.seq >= opened_outline.seq);
-    assert_eq!(
-        ThreadOutlinePage {
-            seq: ordinary_outline.seq,
-            ..opened_outline
-        },
-        ordinary_outline,
-    );
     assert_eq!(opened["draft"], ordinary["draft"]);
     assert!(opened["draft"].to_string().contains(PRIVATE_DRAFT));
     assert!(
@@ -335,7 +320,7 @@ async fn an_opening_uses_its_own_thread_read_and_preserves_the_callers_draft_and
         "binding sources are an independent Read"
     );
     assert!(ordinary["parameters"].is_object());
-    assert!(!opened["settings"].as_array().unwrap().is_empty());
+    assert!(opened.get("settings").is_none());
     assert_eq!(
         s.rig
             .world
@@ -445,7 +430,7 @@ async fn native_parameter_sources_require_this_operation_and_do_not_borrow_provi
 }
 
 #[tokio::test]
-async fn settings_keep_the_native_value_while_provenance_names_use_the_openings_own_sources() {
+async fn composer_values_keep_their_provenance_with_only_the_openings_own_names() {
     let s = Scene::new().await;
     let topic = s.tree.topic.base.id;
     for (name, value) in [
@@ -468,12 +453,7 @@ async fn settings_keep_the_native_value_while_provenance_names_use_the_openings_
     }
     let thread = s.thread().await.base.id;
     let ordinary = ok(open(&s, &s.ada.token, thread, &ThreadOpeningGetQuery::default()).await);
-    let ordinary_effort = ordinary["settings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["key"] == "agent.effort")
-        .unwrap();
+    let ordinary_effort = &ordinary["parameters"]["effort"];
     assert_eq!(ordinary_effort["value"], "high");
     assert_eq!(ordinary_effort["source"]["node"]["id"], json!(topic));
     let reader = key(
@@ -481,6 +461,9 @@ async fn settings_keep_the_native_value_while_provenance_names_use_the_openings_
         &s.ada,
         vec![
             rule("thread", thread),
+            rule("provider", s.on.provider),
+            rule("agent", s.on.agent),
+            rule("environment", s.on.environment),
             rule_for("NodeSettingList", "topic", topic, "read"),
         ],
     )
@@ -492,12 +475,7 @@ async fn settings_keep_the_native_value_while_provenance_names_use_the_openings_
         &ThreadOpeningGetQuery::default(),
     )
     .await);
-    let setting = opened["settings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["key"] == "agent.effort")
-        .unwrap();
+    let setting = &opened["parameters"]["effort"];
     assert_eq!(setting["value"], ordinary_effort["value"]);
     assert_eq!(setting["source"]["node"]["id"], json!(topic));
     assert!(setting["source"]["node"]["name"].is_null());
@@ -505,7 +483,13 @@ async fn settings_keep_the_native_value_while_provenance_names_use_the_openings_
     let reader = key(
         &s,
         &s.ada,
-        vec![rule("thread", thread), rule("topic", topic)],
+        vec![
+            rule("thread", thread),
+            rule("provider", s.on.provider),
+            rule("agent", s.on.agent),
+            rule("environment", s.on.environment),
+            rule("topic", topic),
+        ],
     )
     .await;
     let opened = ok(open(
@@ -515,12 +499,7 @@ async fn settings_keep_the_native_value_while_provenance_names_use_the_openings_
         &ThreadOpeningGetQuery::default(),
     )
     .await);
-    let setting = opened["settings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["key"] == "agent.effort")
-        .unwrap();
+    let setting = &opened["parameters"]["effort"];
     assert_eq!(setting["value"], ordinary_effort["value"]);
     assert_eq!(
         setting["source"]["node"]["name"],
@@ -709,7 +688,7 @@ async fn a_native_screen_is_not_returned_after_the_original_key_expires_in_activ
 }
 
 #[tokio::test]
-async fn the_opening_keeps_native_branch_membership_and_cursor_validation_under_its_own_read() {
+async fn the_opening_keeps_native_branch_membership_and_cursor_reset_under_its_own_read() {
     let s = Scene::new().await;
     let thread = s.thread().await.base.id;
     let other = s
@@ -735,9 +714,45 @@ async fn the_opening_keeps_native_branch_membership_and_cursor_validation_under_
         projection_revision: Some(0),
         ..Default::default()
     };
-    assert_eq!(
-        open(&s, &reader.secret, thread, &query).await.status,
-        StatusCode::CONFLICT
+    let reset: ThreadOpening =
+        serde_json::from_value(ok(open(&s, &reader.secret, thread, &query).await)).unwrap();
+    let native = s
+        .rig
+        .world
+        .app
+        .call(ThreadSyncGet, &[&thread])
+        .token(&s.ada.token)
+        .query(&ThreadSyncGetQuery {
+            projection_revision: Some(0),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert!(!reset.sync.complete && !native.complete);
+    assert!(
+        reset.sync.items.is_empty()
+            && reset.sync.turns.is_empty()
+            && reset.sync.inputs.is_empty()
+            && reset.sync.segments.is_empty()
+    );
+    assert_eq!(reset.sync.projection, native.projection);
+    let current = reset.sync.projection.unwrap();
+    let reloaded: ThreadOpening = serde_json::from_value(ok(open(
+        &s,
+        &reader.secret,
+        thread,
+        &ThreadOpeningGetQuery {
+            continuation_id: Some(current.viewed_continuation_id),
+            projection_revision: Some(current.projection_revision),
+            ..Default::default()
+        },
+    )
+    .await))
+    .unwrap();
+    assert!(
+        reloaded.sync.complete,
+        "the native returned selector opens a current window"
     );
     let query = ThreadOpeningGetQuery {
         limit: Some(0),
@@ -754,4 +769,256 @@ async fn the_opening_keeps_native_branch_membership_and_cursor_validation_under_
         open(&s, &s.ada.token, thread, &query).await.problem().code,
         orch_api_contract::common::ErrorCode::RequestInvalid
     );
+}
+
+#[tokio::test]
+async fn an_opening_carries_the_threads_row_of_its_provider_and_not_the_providers_own_page() {
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    let opened = ok(open(&s, &s.ada.token, thread, &ThreadOpeningGetQuery::default()).await);
+    let provider = &opened["parameters"]["provider"];
+    assert_eq!(provider["id"], json!(s.on.provider));
+    assert!(provider["name"].is_string() && provider["access"].is_object());
+    assert!(
+        provider["models_count"].is_number(),
+        "it says how many models the provider lists"
+    );
+    assert!(provider["facts"].is_object() && provider["facts_state"].is_object());
+    for member in [
+        "models",
+        "sources",
+        "upstreams",
+        "harnesses",
+        "runtime",
+        "service_catalogue",
+        "model_group_options",
+        "arrangements",
+        "config",
+    ] {
+        assert!(
+            provider.get(member).is_none(),
+            "{member} is the provider's own page's, read from GET /providers/id"
+        );
+    }
+    assert!(
+        provider["facts"].get("models").is_none(),
+        "nor is the list its upstream gave"
+    );
+    let ordinary = ok(open(&s, &s.ada.token, thread, &ThreadOpeningGetQuery::default()).await);
+    assert_eq!(
+        provider, &ordinary["parameters"]["provider"],
+        "the same row whoever asks"
+    );
+}
+
+#[tokio::test]
+async fn a_two_hundred_item_thread_opens_with_one_screen_under_one_hundred_twenty_kilobytes() {
+    use orch_engine::ingest::{ItemSpec, add_item};
+    use orch_engine::unit::Unit;
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    s.say(
+        &s.ada,
+        thread,
+        "Inspect the workspace",
+        Delivery::Queue,
+        "screen-size",
+    )
+    .await
+    .ok();
+    let start = s.rig.turn_start(thread, 0).await;
+    s.rig.say(thread, rig::turn_began(start.turn_id)).await;
+    let segment: Id = sqlx::query_scalar("SELECT current_segment_id FROM threads WHERE node_id=$1")
+        .bind(thread)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    let listing: Vec<_> = (0..96).map(|n| json!({
+        "model_name":format!("listed-{n}"), "display_name":format!("Listed {n}"), "listed":true,
+        "parameters":{"request_options":{"openai-responses":{"type":"object","description":"x".repeat(4096)}}}
+    })).collect();
+    sqlx::query(
+        "UPDATE providers SET facts=facts || jsonb_build_object('models',$2::jsonb) WHERE id=$1",
+    )
+    .bind(s.on.provider)
+    .bind(json!(listing))
+    .execute(s.rig.db.pool())
+    .await
+    .unwrap();
+    for n in 0..95 {
+        sqlx::query("INSERT INTO provider_models (id,provider_id,model_name,display_name,parameters,enabled,source,created_by) VALUES ($1,$2,$3,$3,$4,true,'manual',$5)")
+            .bind(new_id()).bind(s.on.provider).bind(format!("choice-{n}"))
+            .bind(json!({"context_window":200_000,"request_options":{"openai-responses":{"type":"object","description":"x".repeat(1024)}}}))
+            .bind(s.ada.id()).execute(s.rig.db.pool()).await.unwrap();
+    }
+    // A footer needs the meaning of recorded options even when the current model no longer
+    // offers them. Profile help and unrelated declarations belong to their own editor.
+    sqlx::query(
+        "UPDATE provider_models SET parameters=parameters - 'context_max' WHERE provider_id=$1",
+    )
+    .bind(s.on.provider)
+    .execute(s.rig.db.pool())
+    .await
+    .unwrap();
+    let declared = json!([
+        {"key":"old_context","title":"Context","description":"profile help ".repeat(20_000),
+         "group":"model","type":"integer","range":{"min":1000,"max":{"from_model":"context_max"}},
+         "default":{"from_model":"default_context"},"scopes":["thread"],"apply":"new_session",
+         "eligible_when":{"model_has":"context_max"}},
+        {"key":"verbosity","title":"Verbosity","description":"profile help ".repeat(20_000),
+         "group":"behaviour","type":"enum","options":[{"value":"terse","label":"Terse"}],
+         "default":"terse","scopes":["thread"],"apply":"next_turn",
+         "eligible_when":{"model_has":"context_max"}}
+    ]);
+    sqlx::query("UPDATE agents SET descriptor=jsonb_set(descriptor,'{parameters}',$2::jsonb),descriptor_overrides='{}' WHERE id=$1")
+        .bind(s.on.agent).bind(declared).execute(s.rig.db.pool()).await.unwrap();
+    // A representative screen holds command excerpts as well as short message rows; the
+    // repeated raw form must not multiply either the history size or the upstream catalogue.
+    let output = json!({"inline":"fixture output ".repeat(70),"total_len":1050,"truncated":false,"blob":null});
+    let payload = json!({"title":"Inspect a module","started_at":s.rig.world.now(),"duration_ms":1,
+        "tool":{"kind":"command","command":"inspect module","cwd":"/workspace","exit_code":0,"background":false,"process_id":null,"actions":[],"output":output},
+        "raw":{"name":"Bash","input":{"inline":"inspect module","total_len":14,"truncated":false,"blob":null},"output":output,"is_error":false}});
+    let mut tx = s.rig.db.begin().await.unwrap();
+    {
+        let mut unit = Unit::new(&mut tx, s.rig.world.now());
+        for n in 0..200 {
+            let reference = format!("screen-step-{n}");
+            add_item(
+                &mut unit,
+                &ItemSpec {
+                    thread,
+                    segment,
+                    turn: Some(start.turn_id),
+                    stream: "main",
+                    parent: None,
+                    kind: "tool_call",
+                    status: "completed",
+                    author: None,
+                    payload: &payload,
+                    native_ref: Some(&reference),
+                },
+            )
+            .await
+            .unwrap();
+        }
+    }
+    tx.commit().await.unwrap();
+    let reply = open(&s, &s.ada.token, thread, &ThreadOpeningGetQuery::default()).await;
+    assert_eq!(
+        reply.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&reply.raw)
+    );
+    assert!(
+        reply.raw.len() < 120_000,
+        "the first screen was {} bytes",
+        reply.raw.len()
+    );
+    let opening = body(&reply);
+    assert!(opening.get("outline").is_none() && opening.get("settings").is_none());
+    let items = opening["sync"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 40);
+    assert_eq!(opening["sync"]["has_older"], true);
+    assert_eq!(
+        opening["parameters"]["model"]["options"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(opening["parameters"]["model"]["options_partial"], true);
+    let declarations = opening["parameters"]["agent"]["parameters"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        declarations.len(),
+        1,
+        "only recorded footer traits travel with the first screen"
+    );
+    assert_eq!(declarations[0]["key"], "old_context");
+    assert!(declarations[0].get("description").is_none() && declarations[0].get("title").is_none());
+    assert!(
+        opening["parameters"]["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|parameter| {
+                parameter["key"] != "old_context" && parameter["key"] != "verbosity"
+            })
+    );
+    assert!(opening["parameters"]["environment"]["workspace_root"].is_string());
+    let before = serde_json::from_value(items[0]["seq_created"].clone()).unwrap();
+    let older = s
+        .rig
+        .world
+        .app
+        .call(orch_api_contract::threads::ThreadItemList, &[&thread])
+        .token(&s.ada.token)
+        .query(&orch_api_contract::threads::ThreadItemListQuery {
+            before: Some(before),
+            limit: Some(200),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert!(
+        older.items.len() >= 160,
+        "the rest remains available by cursor"
+    );
+    s.rig
+        .world
+        .set_at(Target::Node(thread), "threads.opening_items", json!(60))
+        .await;
+    let larger = ok(open(&s, &s.ada.token, thread, &ThreadOpeningGetQuery::default()).await);
+    assert_eq!(
+        larger["sync"]["items"].as_array().unwrap().len(),
+        60,
+        "the first window is a default, not a cap"
+    );
+}
+
+#[tokio::test]
+async fn file_links_use_a_current_absolute_workspace_report_and_keep_the_registered_fallback() {
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    let generation: i32 = sqlx::query_scalar(
+        "UPDATE environments SET workspace_root='/registered' WHERE id=$1 RETURNING generation",
+    )
+    .bind(s.on.environment)
+    .fetch_one(s.rig.db.pool())
+    .await
+    .unwrap();
+    for (reported_generation, reported_root, expected) in [
+        (generation, "/native", "/native"),
+        (generation - 1, "/old", "/registered"),
+        (generation, "relative/root", "/registered"),
+        (generation, "9:/invalid", "/registered"),
+        (generation, "C:\\native", "C:/native"),
+    ] {
+        sqlx::query("UPDATE environments SET facts=facts || $2::jsonb WHERE id=$1")
+            .bind(s.on.environment)
+            .bind(json!({"generation":reported_generation,"workspace_root":reported_root}))
+            .execute(s.rig.db.pool())
+            .await
+            .unwrap();
+        let opening = ok(open(&s, &s.ada.token, thread, &ThreadOpeningGetQuery::default()).await);
+        let compact = &opening["parameters"]["environment"];
+        assert_eq!(compact["id"], s.on.environment.to_string());
+        assert_eq!(compact["registered_root"], "/registered");
+        assert_eq!(compact["workspace_root"], expected);
+        assert_eq!(compact["generation"], generation);
+        assert!(compact.get("facts").is_none() && compact.get("config").is_none());
+        let parameters = s
+            .rig
+            .world
+            .app
+            .call(orch_api_contract::settings::ThreadParameterGet, &[&thread])
+            .token(&s.ada.token)
+            .send()
+            .await
+            .ok();
+        assert_eq!(parameters.environment.unwrap().workspace_root, expected);
+    }
 }

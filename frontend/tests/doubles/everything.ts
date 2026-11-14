@@ -1,5 +1,6 @@
+import { resourceListRow } from './resource-rows.ts';
 /** The complete inventory in the fake world, using its existing place, document, chat and resource readers. */
-import type { EverythingAccess, EverythingKind, EverythingRow, NodeRef, UserRef } from '../../src/generated/api-types.ts';
+import type { EverythingAccess, EverythingKind, EverythingRow, NodeRef, UserRef, PermissionPage, ResourceSharing, Problem } from '../../src/generated/api-types.ts';
 import { MADE_AT } from './fixtures.ts';
 import { inventoryRow } from './everything-row.ts';
 import { webHref } from './destinations.ts';
@@ -174,7 +175,8 @@ export class EverythingWorld implements Part {
     const owner = query.get('owner');
     const adminAccess = query.get('admin_access');
     const participating = query.get('participating') === 'true';
-    const details = query.get('resource_details') === 'true';
+    const rowView = query.get('resource_rows') === 'true';
+    const details = query.get('resource_details') === 'true' || rowView;
     const state = query.get('resource_state'), harness = query.get('harness'), subkind = query.get('resource_kind'), home = query.get('home');
     const resourceView = query.get('resource_view');
     const inView=(row:EverythingRow)=>{
@@ -284,7 +286,24 @@ export class EverythingWorld implements Part {
     if (!Number.isInteger(limit) || limit < 1 || limit > PAGE_MAX) throw new Refusal(400, 'request.invalid', 'Choose between 1 and 200 rows.');
     const items = rows.slice(0, limit);
     const last = items.at(-1);
-    const shown = details ? items : items.map(({ resource: _resource, ...row }) => row);
+    const shared = new Set<string>();
+    const sharing = (row: EverythingRow): ResourceSharing | undefined => {
+      const home = row.home ?? row.resource?.value.home;
+      if ((home === null || home === undefined) || home.redacted || home.kind === 'thread' || shared.has(home.id)) return undefined;
+      shared.add(home.id);
+      try {
+        const reply = this.world.access.handle(person, 'GET', `/nodes/${home.id}/defaults`, new URLSearchParams(), {});
+        return reply === null ? undefined : { home_id: home.id, rows: (reply.body as PermissionPage).rows, problem: null };
+      } catch (error) {
+        if (!(error instanceof Refusal)) throw error;
+        return { home_id: home.id, rows: null, problem: error.answer.body as Problem };
+      }
+    };
+    const shown = rowView ? items.map((row) => {
+      const { resource, ...other } = row;
+      return { ...other, sharing: sharing(row), ...((resource === null || resource === undefined) ? {} : { resource_row: resourceListRow(resource) }) };
+    }) : details ? items.map(({ resource_row: _resourceRow, sharing: _sharing, ...row }) => row)
+      : items.map(({ resource: _resource, resource_row: _resourceRow, sharing: _sharing, ...row }) => row);
     return { status: 200, body: { items: shown, next_cursor: rows.length > limit && last !== undefined ? Buffer.from(JSON.stringify({ selection, scoreAt, ...position(last) })).toString('base64url') : null } };
   }
 

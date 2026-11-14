@@ -9,6 +9,8 @@ mod places;
 mod rig;
 mod support;
 
+#[path = "container_units/fixture.rs"]
+mod container_units;
 #[path = "everything_resources/figures_scopes.rs"]
 mod figures_scopes;
 #[path = "everything_resources/library_people_scopes.rs"]
@@ -24,7 +26,7 @@ use orch_api_contract::{
 };
 use orch_authz::ownership::{NewAccess, start_resource};
 use orch_db::queries::resources::access_fixtures;
-use orch_types::{Id, Time};
+use orch_types::{Id, Time, new_id};
 use places::{Who, admin, join, make_org, person};
 use support::World;
 
@@ -1237,5 +1239,246 @@ async fn hosts_page_by_the_same_memory_load_as_their_meter_and_by_running_units_
             }
         }
         assert_eq!(found, expected.map(|id| id.to_string()));
+    }
+}
+
+/// A provider whose connection runs in a container of its own, as the system leaves it once the container has enrolled:
+/// the unit's machine has no owner, no home and no page of its own, and the provider names it as its machine and as the
+/// machine its key is on.
+async fn provider_in_a_container(world: &World, owner: &Who, home: Id, name: &str) -> (Id, Id) {
+    let provider = resource(world, owner, home, "provider", name).await;
+    let mut conn = world.conn().await;
+    let (host, template) =
+        container_units::host_and_template(&mut conn, owner.id(), home, name, world.now()).await;
+    let unit =
+        container_units::provider_unit(&mut conn, host, template, provider, world.now()).await;
+    (provider, unit)
+}
+
+#[tokio::test]
+async fn a_provider_whose_connection_runs_in_a_container_is_listed_whichever_view_is_asked_and_names_no_origin()
+ {
+    let world = World::new().await;
+    let owner = person(&world, "unit-owner").await;
+    let home = make_org(&world, &owner, "Unit home", "unit-home")
+        .await
+        .base
+        .id;
+    let (provider, unit) = provider_in_a_container(&world, &owner, home, "OpenAI").await;
+    for view in [
+        None,
+        Some(orch_api_contract::resources::ProviderListScope::Mine),
+        Some(orch_api_contract::resources::ProviderListScope::Managed),
+        Some(orch_api_contract::resources::ProviderListScope::Usable),
+        Some(orch_api_contract::resources::ProviderListScope::Viewable),
+    ] {
+        let mut ask = query("provider");
+        ask.limit = Some(50);
+        ask.resource_view = view;
+        let page = read(&world, &owner, &ask).await;
+        let row = page
+            .items
+            .iter()
+            .find(|row| row.id == provider.to_string())
+            .unwrap_or_else(|| panic!("the provider is in the list for {view:?}"));
+        // The container's machine is nobody's to open, so it labels nothing: the row keeps its home and has no origin.
+        let grouping = row.grouping.as_ref().unwrap();
+        assert_eq!(grouping.home.as_ref().unwrap().id, home, "{view:?}");
+        assert!(grouping.origin_machine.is_none(), "{view:?}");
+    }
+    let _ = unit;
+}
+
+#[tokio::test]
+async fn a_row_of_the_providers_list_holds_what_its_table_draws_and_leaves_out_what_only_a_provider_page_does()
+ {
+    let world = World::new().await;
+    let owner = person(&world, "row-owner").await;
+    let root = make_org(&world, &owner, "Row home", "row-home")
+        .await
+        .base
+        .id;
+    // Three providers, each with a dozen models of its own, with the option schemas a vendor's list carries,
+    // and an upstream that lists 96 more.
+    let options: serde_json::Map<String, serde_json::Value> = (0..40)
+        .map(|k| {
+            (
+                format!("option_{k}"),
+                serde_json::json!({ "type": "string", "description": "x".repeat(80) }),
+            )
+        })
+        .collect();
+    let parameters = serde_json::json!({
+        "efforts": ["low", "high"], "context_window": 200_000,
+        "request_options": { "openai-responses": { "type": "object", "properties": options } }
+    });
+    let listing: Vec<serde_json::Value> = (0..96)
+        .map(|n| {
+            serde_json::json!({
+                "model_name": format!("vendor-model-{n:02}"), "display_name": format!("Vendor model {n:02}"),
+                "listed": true, "parameters": parameters
+            })
+        })
+        .collect();
+    for name in ["Alpha", "Beta", "Gamma"] {
+        let id = resource(&world, &owner, root, "provider", name).await;
+        let mut conn = world.conn().await;
+        for n in 0..12 {
+            sqlx::query("INSERT INTO provider_models(id,provider_id,model_name,display_name,parameters,groups,enabled,source,created_by) VALUES($1,$2,$3,'',$4,ARRAY[]::text[],true,'manual',$5)")
+                .bind(new_id())
+                .bind(id)
+                .bind(format!("model-{n:02}"))
+                .bind(&parameters)
+                .bind(owner.id())
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE providers SET facts = facts || jsonb_build_object('models', $2::jsonb) WHERE id=$1")
+            .bind(id)
+            .bind(serde_json::Value::Array(listing.clone()))
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let whole = read(
+        &world,
+        &owner,
+        &EverythingListQuery {
+            limit: Some(10),
+            ..query("provider")
+        },
+    )
+    .await;
+    let rows = read(
+        &world,
+        &owner,
+        &EverythingListQuery {
+            limit: Some(10),
+            resource_details: None,
+            resource_rows: Some(true),
+            ..query("provider")
+        },
+    )
+    .await;
+    assert_eq!(whole.items.len(), 3);
+    assert_eq!(rows.items.len(), 3);
+    for item in &whole.items {
+        let wire = serde_json::to_value(item.resource.as_ref().unwrap()).unwrap();
+        assert_eq!(wire["value"]["models"].as_array().unwrap().len(), 12);
+        assert_eq!(wire["value"]["models_count"], 12);
+    }
+    for item in &rows.items {
+        let wire = serde_json::to_value(item.resource_row.as_ref().unwrap()).unwrap();
+        let row = &wire["value"];
+        assert!(
+            row.get("models").is_none(),
+            "a row does not list the models"
+        );
+        assert_eq!(row["models_count"], 12, "it says how many there are");
+        assert!(
+            row["facts"].get("models").is_none(),
+            "nor the upstream's list of them"
+        );
+        assert_eq!(row["facts"]["models_count"], 96);
+        assert!(row.get("sources").is_none());
+        assert!(row["name"].is_string() && row["access"].is_object() && row["owner"].is_object());
+    }
+    let size = serde_json::to_vec(&rows).unwrap().len();
+    assert!(
+        size < 15_000,
+        "a page of three providers is {size} bytes, of {} for their whole views",
+        serde_json::to_vec(&whole).unwrap().len()
+    );
+    assert_eq!(
+        rows.items
+            .iter()
+            .filter(|row| row.sharing.is_some())
+            .count(),
+        1,
+        "the common home's sharing summary is carried once"
+    );
+    assert!(
+        rows.items
+            .iter()
+            .filter_map(|row| row.sharing.as_ref())
+            .all(|sharing| sharing.rows.is_some())
+    );
+}
+
+#[tokio::test]
+async fn each_resource_list_reads_its_row_without_requesting_the_resource_page() {
+    let world = World::new().await;
+    let owner = person(&world, "list-row-owner").await;
+    let home = make_org(&world, &owner, "List home", "list-home")
+        .await
+        .base
+        .id;
+    for kind in [
+        "machine",
+        "provider",
+        "agent",
+        "environment",
+        "template",
+        "mcp_server",
+        "mount",
+        "skill",
+        "host",
+    ] {
+        let id = resource(&world, &owner, home, kind, &format!("listed-{kind}")).await;
+        let ask = EverythingListQuery {
+            resource_details: None,
+            resource_rows: Some(true),
+            limit: Some(20),
+            ..query(kind)
+        };
+        let reply = world
+            .app
+            .call(EverythingList, &[])
+            .token(&owner.token)
+            .query(&ask)
+            .send_bytes()
+            .await;
+        assert!(
+            reply.status.is_success(),
+            "{kind}: {}",
+            String::from_utf8_lossy(&reply.raw)
+        );
+        let page: serde_json::Value = serde_json::from_slice(&reply.raw).unwrap();
+        let item = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id.to_string())
+            .unwrap();
+        assert!(
+            item.get("resource").is_none(),
+            "{kind} list requests no full view"
+        );
+        let row = &item["resource_row"]["value"];
+        assert_eq!(row["id"], id.to_string());
+        assert_eq!(row["list_row"], true);
+        assert!(
+            row["revision"].is_number(),
+            "{kind} rows retain the version a full editor must reach"
+        );
+        assert!(row["access"].is_object());
+        for member in [
+            "config",
+            "descriptor",
+            "facts_overridden",
+            "runtime_config",
+            "kept",
+            "kept_data",
+            "kept_layers",
+            "installation",
+            "providers",
+            "environments",
+        ] {
+            assert!(
+                row.get(member).is_none(),
+                "{kind} row does not carry {member}"
+            );
+        }
     }
 }

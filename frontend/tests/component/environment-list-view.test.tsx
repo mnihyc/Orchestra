@@ -13,7 +13,7 @@ import type { Environment, EverythingRowPage } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { forgetViewChoiceDeviceData } from '@/lib/viewChoices';
 import { GRACE } from '../doubles/chat-rows';
-import { inventoryRow } from '../doubles/everything-row';
+import { resourceInventoryRow as inventoryRow } from '../doubles/everything-row';
 import { me } from '../doubles/fixtures';
 import { detailEnvironment } from './resource-detail-fixtures';
 import { show, skipOverflowFallback } from './support';
@@ -65,7 +65,7 @@ it('uses the fresh-device Use view, preserves chosen Viewable and All, and widen
   let showControl = screen.getByRole('combobox', { name: showLabel });
   expect(showControl).toHaveTextContent(i18n.t('library.views.usable'));
   expect(screen.queryByRole('link', { name: viewOnly.name })).not.toBeInTheDocument();
-  expect(read.mock.calls[0]).toMatchObject(['/everything', { params: { query: { kinds: 'environment', parent: 'resources', resource_details: true, resource_view: 'usable' } } }]);
+  expect(read.mock.calls[0]).toMatchObject(['/everything', { params: { query: { kinds: 'environment', parent: 'resources', resource_rows: true, resource_view: 'usable' } } }]);
 
   await user.click(showControl);
   await user.click(screen.getByRole('option', { name: i18n.t('library.views.viewable') }));

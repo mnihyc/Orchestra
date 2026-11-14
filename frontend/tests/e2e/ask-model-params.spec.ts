@@ -63,10 +63,12 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const picker = page.getByRole('dialog', { name: t('ask.model'), exact: true });
     await expect(picker.getByRole('menuitemradio').first()).toHaveAccessibleName(t('ask.defaultModel'));
     await expect(picker.getByRole('menuitemradio', { name: 'Excluded API model', exact: true })).toHaveCount(0);
-    await expect(picker.getByRole('group', { name: t('composer.model.efforts', { model: 'Readable API model' }) })).toHaveCount(0);
-    await picker.getByRole('group', { name: t('composer.model.efforts', { model: 'Second API model' }) })
-      .getByRole('menuitemradio', { name: t('choiceCatalog.effort.high.name'), exact: true }).click();
+    // The efforts are the effort control's, never rows of the model list: the model that does not list one has no effort control.
+    await expect(panel.getByRole('button', { name: new RegExp(`^${t('composer.effort.title')}`) })).toHaveCount(0);
+    await picker.getByRole('menuitemradio', { name: 'Second API model', exact: true }).click();
     await expect(trigger).toContainText('Second API model');
+    await panel.getByRole('button', { name: new RegExp(`^${t('composer.effort.title')}`) }).click();
+    await page.getByRole('menuitemradio', { name: t('choiceCatalog.effort.high.name'), exact: true }).click();
     if (!await picker.isVisible()) await trigger.click();
     const temperature = picker.getByRole('spinbutton', { name: 'Temperature' });
     await expect(temperature).toHaveAttribute('min', '0'); await expect(temperature).toHaveAttribute('max', '1');

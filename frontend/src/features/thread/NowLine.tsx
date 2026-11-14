@@ -12,7 +12,7 @@ import type { Item, Turn } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { holds } from '@/lib/permissions';
 import { formatSpan, useRunningClock } from '@/lib/time';
-import { runningTurn, threadReadOnly, useThreadPart } from '@/realtime/stores/thread';
+import { currentTurnOver, runningTurn, threadReadOnly, threadStopReadOnly, useThreadPart } from '@/realtime/stores/thread';
 import { useSocketStatus } from '@/realtime/live';
 import { Tooltip } from '@/ui/Tooltip';
 import { StateChip, type WorkState } from '@/ui/StateChip';
@@ -47,8 +47,10 @@ export function useThreadNow(threadId: string) {
   const thread = useThreadPart(threadId, (view) => view.thread);
   const turn = useThreadPart(threadId, runningTurn);
   const readOnly = useThreadPart(threadId, threadReadOnly);
+  const stopReadOnly = useThreadPart(threadId, threadStopReadOnly);
+  const over = useThreadPart(threadId, currentTurnOver);
   const socket = useSocketStatus();
-  const fresh = useThreadPart(threadId, (view) => view.closed === null && view.error === null && view.loaded !== 'none');
+  const fresh = useThreadPart(threadId, (view) => view.closed === null && view.error === null);
   const live = socket.phase === 'ready' && fresh;
   const items = useThreadPart(threadId, (view) => view.items);
   const order = useThreadPart(threadId, (view) => view.order);
@@ -60,15 +62,15 @@ export function useThreadNow(threadId: string) {
   const approvals = useMemo(() => current.filter((item): item is ApprovalItem => item.kind === 'approval' && item.status === 'pending'), [current]);
   const observed = useQueries({ queries: approvals.map((item) => ({ ...approvalQuery(item.payload.approval_id), enabled: false })) });
   const waiting = approvals.filter((item, index) => (approvalAtItem(item, observed[index]?.data)?.state ?? 'pending') === 'pending');
-  const active = !readOnly && turn !== null && thread !== null && thread.lock === null && !thread.archived
+  const active = !stopReadOnly && !over && thread !== null && thread.lock === null && !thread.archived
     && (thread.state === 'running' || thread.state === 'starting' || thread.state === 'waiting_approval');
   const now = useRunningClock(active);
   const item = waiting[0] ?? current.findLast((one) => one.status === 'in_progress' && (one.kind === 'tool_call' || one.kind === 'reasoning' || one.kind === 'agent_message'));
-  const activity = turn === null ? null : activityWords(item, turn, t);
+  const activity = turn === null ? thread === null ? null : { text: t(thread.state === 'starting' ? 'thread.now.starting' : 'thread.now.working'), since: null } : activityWords(item, turn, t);
   const since = activity?.since === null || activity?.since === undefined ? NaN : Date.parse(activity.since);
   const time = Number.isFinite(since) ? formatSpan(Math.max(0, now - since), format) : null;
   const label = activity === null ? '' : [activity.text, time].filter((part) => part !== null).join(' · ');
-  return { active, label, toolCalls: current.filter((one) => one.kind === 'tool_call').length, approvals: waiting.length, thread, turn, live, readOnly };
+  return { active, label, toolCalls: current.filter((one) => one.kind === 'tool_call').length, approvals: waiting.length, thread, turn, live, readOnly, stopReadOnly };
 }
 
 interface ThreadNowValue {
@@ -82,8 +84,8 @@ export const useProvidedThreadNow = () => useContext(ThreadNowContext);
 /** Header and its line share the same activity, clock and interruption in one screen. */
 export function ThreadNowProvider({ threadId, children }: { threadId: string; children: ReactNode }) {
   const now = useThreadNow(threadId);
-  const mayStop = now.thread !== null && holds(now.thread.access, 'thread.interact') && now.live && !now.readOnly;
-  const stop = useStop(threadId, now.turn?.id ?? null, mayStop);
+  const mayStop = now.thread !== null && holds(now.thread.access, 'thread.interact') && now.live && !now.stopReadOnly;
+  const stop = useStop(threadId, now.turn?.id ?? now.thread?.current_turn_id ?? null, mayStop, now.thread?.state === 'starting');
   return <ThreadNowContext.Provider value={{ now, stop, mayStop }}>{children}</ThreadNowContext.Provider>;
 }
 

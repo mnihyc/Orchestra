@@ -333,6 +333,7 @@ impl Rig {
             "directory": directory, "cwd": directory, "mounts": [],
             "model": "fake-large", "effort": "medium", "params": {},
             "approval_mode": "on_request", "sandbox_mode": "workspace",
+            "web_action_wait_secs": 120,
             "instructions": "You are working inside Orch.", "memory": null,
             "arrangement": "together",
             "provider": { "path": "native", "provider_id": self.provider },

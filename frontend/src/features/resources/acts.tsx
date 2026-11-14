@@ -1,10 +1,11 @@
 /** What a row of a list of resources can do, said once: its button, its menu, its right-click menu and the acts several ticked rows share.
  *
  * Every row has at its end the act most used as a visible button, and a menu with
- * the rest; the same entries open under the right mouse button, with the menu key and with `Shift+F10`.
+ * every act by name; the same entries open under the right mouse button, with the menu key and with `Shift+F10`.
  * An applicable act the reader may not do stays disabled with its reason. Rows that are ticked have the acts they all take
  * above the table, and an act that destroys names what it is about to destroy before it does it.
  */
+import { i18n } from '@/i18n';
 import { linkTo, type LinkObject } from '@/lib/links';
 import type { TFunction } from 'i18next';
 import { Copy, Ellipsis, LoaderCircle, Pencil, Share2 } from 'lucide-react';
@@ -77,6 +78,7 @@ export interface RowActs {
 /** An act as an entry of a menu. */
 export function entryOf(act: Act): MenuEntry {
   const admin = isAdminAct(act.admin) ? act.admin : undefined;
+  const disabled = typeof act.disabled === 'string' ? act.disabled : act.pending === true ? i18n.t('common.loading') : act.disabled;
   const description = admin === undefined ? act.description : <>{act.description}<AdminActNotice spec={admin} /></>;
   return {
     id: act.id,
@@ -85,7 +87,7 @@ export function entryOf(act: Act): MenuEntry {
     ...(description === undefined ? {} : { description }),
     ...(act.shortcut === undefined ? {} : { shortcut: act.shortcut }),
     ...(act.danger === true ? { danger: true } : {}),
-    ...(act.disabled === undefined ? {} : { disabled: act.disabled }),
+    ...(disabled === undefined ? {} : { disabled }),
     onSelect: act.run,
   };
 }
@@ -184,22 +186,38 @@ export function RowPrimaryCell({ name, acts }: { name: string; acts: RowActs }) 
   );
 }
 
-/** The primary button is always present; the row's menus contain the remaining acts once. */
-export function secondaryEntries(acts: RowActs): readonly MenuEntry[] {
-  const remaining: MenuEntry[] = [];
-  for (const entry of acts.entries) {
-    if ((entry.type === undefined || entry.type === 'item') && entry.id === acts.primary?.id) continue;
-    if (entry.type === 'separator' && (remaining.length === 0 || remaining.at(-1)?.type === 'separator')) continue;
-    remaining.push(entry);
+/** Visible acts stay in named menus once, with the same handler, authority and pending state. */
+function withVisibleActs(entries: readonly MenuEntry[], visible: readonly (Act | null)[]): readonly MenuEntry[] {
+  const acts = new Map(visible.filter((act): act is Act => act !== null).map((act) => [act.id, act]));
+  const seen = new Set<string>();
+  const rows: MenuEntry[] = [];
+  for (const entry of entries) {
+    const act = entry.type === undefined || entry.type === 'item' ? acts.get(entry.id) : undefined;
+    if (act !== undefined) {
+      if (seen.has(act.id)) continue;
+      seen.add(act.id); rows.push(entryOf(act));
+    } else rows.push(entry);
   }
-  if (remaining.at(-1)?.type === 'separator') remaining.pop();
-  return remaining;
+  const missing = [...acts.values()].filter((act) => !seen.has(act.id)).map(entryOf);
+  const combined: MenuEntry[] = [...missing, ...(missing.length > 0 && rows.length > 0 ? [{ type: 'separator' as const, id: 'visible-acts' }] : []), ...rows];
+  const result: MenuEntry[] = [];
+  for (const entry of combined) {
+    if (entry.type === 'separator' && (result.length === 0 || result.at(-1)?.type === 'separator')) continue;
+    result.push(entry);
+  }
+  if (result.at(-1)?.type === 'separator') result.pop();
+  return result;
+}
+
+export function rowMenuEntries(acts: RowActs): readonly MenuEntry[] {
+  const primary = acts.primary === null ? null : { ...acts.primary, pending: acts.busy || acts.primary.pending === true };
+  return withVisibleActs(acts.entries, [primary]);
 }
 
 /** The end of a row: the menu of every act of the row, and the sign that one is under way where there is no place for it beside the menu. */
 export function RowMenuCell({ name, acts, working }: { name: string; acts: RowActs; working: boolean }) {
   const { t } = useTranslation();
-  const entries = secondaryEntries(acts);
+  const entries = rowMenuEntries(acts);
   if (entries.length === 0) return working && acts.busy ? <Working name={name} /> : null;
   return (
     <div className="flex items-center justify-end gap-1">
@@ -214,7 +232,7 @@ export function RowMenuCell({ name, acts, working }: { name: string; acts: RowAc
   );
 }
 
-/** The acts in the heading of a resource's page, at the end of the line with its name: the act most used as a button, Edit, and the menu of the rest. */
+/** The acts in the heading of a resource's page, at the end of the line with its name: the act most used as a button, Edit, and a menu naming every act. */
 export function HeadingActs({
   name,
   primary,
@@ -232,6 +250,10 @@ export function HeadingActs({
   admin?: AdminActSpec;
 }) {
   const { t } = useTranslation();
+  const primaryAdmin = primary?.admin ?? (primary !== null && MANAGEMENT_ACTS.has(primary.id) ? admin : undefined);
+  const visiblePrimary = primary === null ? null : { ...primary, ...(primaryAdmin === undefined ? {} : { admin: primaryAdmin }) };
+  const visibleEdit = edit === null ? null : { ...edit, label: t('resources.act.editButton'), ...(admin === undefined ? {} : { admin }) };
+  const headingEntries = withVisibleActs(adminEntries(menu, admin), [visiblePrimary, visibleEdit]);
   return (
     <>
       {before}
@@ -247,11 +269,11 @@ export function HeadingActs({
           {t('resources.act.editButton')}
         </Button>
       )}
-      {menu.length > 0 && (
+      {headingEntries.length > 0 && (
         <Menu
           label={t('resources.act.menuOf', { name })}
           align="end"
-          entries={adminEntries(menu, admin)}
+          entries={headingEntries}
           trigger={<IconButton size="sm" variant="secondary" label={t('resources.act.menuOf', { name })} icon={<Ellipsis aria-hidden />} />}
         />
       )}

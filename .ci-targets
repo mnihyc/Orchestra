@@ -1,0 +1,2 @@
+fmt
+test -p orch-connector-core --test agent_role

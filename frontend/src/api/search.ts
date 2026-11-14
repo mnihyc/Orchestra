@@ -109,6 +109,17 @@ export const namesQuery = (search: NameSearch) =>
     placeholderData: (previous, held) => held?.queryKey[4] === (search.orgId ?? '') && held.queryKey.at(-1) === (search.participating ?? false) && held.queryKey.at(-2) === (search.starred ?? false) ? previous : undefined,
   });
 
+/** Resolve a saved choice through the same authorized native names reader as the picker. */
+export const nameByIdQuery = (kind: NameKind, id: string) => queryOptions({
+  queryKey: ['names', 'identity', kind, id] as const,
+  queryFn: async ({ signal }): Promise<NameHit | null> => {
+    const page = await ok(api.GET('/search/names', { params: { query: { id, kinds: kind } }, signal }));
+    return page.items.find((hit) => hit.id === id && hit.kind === kind) ?? null;
+  },
+  staleTime: NAMES_FRESH_MS,
+  retry: false,
+});
+
 // ---------------------------------------------------------------- the registry the finder reads settings from
 
 /** Every setting there is, as the registry defines it: read once, since it changes only with a release. */
