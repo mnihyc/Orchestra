@@ -37,6 +37,7 @@ import { type Candidate, useCandidates, useTargetOrg } from './candidates';
 import { type Changes } from './changes';
 import { askToLetIn, letInChange, offerFor } from './doors';
 import { CoversLine, type PlaceKind, type Reach, ReachSelect } from './Covers';
+import { EnvironmentAccessChoice } from './GeneralAccess';
 import { firstChoice, keptLine, mayGiveAsRole, mayGiveChoice, ROLE_OF_CHOICE, sharingIsKept, whyNot } from './gives';
 import { HolderView, placeName } from './holders';
 import { type Catalogue, CHOICE_ORDER, containerOf, middleOf, nameChange } from './model';
@@ -359,10 +360,11 @@ export function AddHolders({ page, target, catalogue, changes, initial = 'full_v
 
       {staged.length > 0 && <TellThem target={target} staged={staged} state={tell} onChange={setTell} />}
       {offer !== null && staged.length > 0 && environmentChoice === undefined && (
-        <Checkbox
+        <EnvironmentAccessChoice
           label={offer.mayView ? t('access.doors.letIn', { name: offer.environment.name }) : t('access.doors.askFor', { owner: offer.environment.owner?.display_name ?? '' })}
           checked={letIn}
           onCheckedChange={setLetIn}
+          manage={offer.giveManage.length > 0 || offer.askManage.length > 0}
         />
       )}
       {waiting !== null && <InlineAlert tone="info">{waiting}</InlineAlert>}

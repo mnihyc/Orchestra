@@ -1,0 +1,7 @@
+fmt
+clippy
+contracts
+test -p orch-settings-contract --lib
+web typecheck
+web lint
+web test -- tests/component/general-access.test.tsx tests/component/start-viewer-default.test.tsx

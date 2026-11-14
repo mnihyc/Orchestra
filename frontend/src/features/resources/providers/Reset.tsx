@@ -101,7 +101,6 @@ export function ProviderReset({ provider, onHistory }: { provider: PlanProvider;
             <p className="text-sm text-text-muted">{review.credit.expires_at === null ? t('providerPlan.reset.lapseUnknown') : t('providerPlan.reset.lapse', { when: formatExact(review.credit.expires_at, format) })}</p>
             <p className="text-sm text-text">{t('providerPlan.reset.counts', { before: review.body.available_count, after: Math.max(0, review.body.available_count - 1) })}</p>
             <div className="flex flex-col gap-2"><h3 className="text-sm font-medium text-text">{t('providerPlan.reset.affected')}</h3><ul className="flex flex-col gap-2">{review.provider.facts.windows.map((window) => <li key={window.id} className="text-sm text-text-muted">{t('providerPlan.reset.present', { label: windowName(window), percent: formatNumber(window.used_percent, format.locale, { maximumFractionDigits: 2 }) })}</li>)}</ul>{review.provider.facts.windows.length === 0 && <EmptyState compact title={t('providerPlan.reset.windowsMissing')} />}</div>
-            <p className="break-all text-xs text-text-subtle">{t('providerPlan.reset.receipt', { id: review.body.request_id })}</p>
           </>}
         </>}
         {use.error !== null && !stale && !unknown && <ErrorAlert error={use.error} />}
