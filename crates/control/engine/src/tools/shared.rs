@@ -168,18 +168,22 @@ impl Engine {
         &'a self,
         call: &'a CallContext,
         thread: &'a ThreadRow,
+        budgets: &'a super::search_budgets::SearchBudgets,
     ) -> BoxFuture<'a, Result<Answer, EngineError>> {
         Box::pin(async move {
             let arguments: Arguments = match serde_json::from_value(call.arguments.clone()) {
                 Ok(arguments) => arguments,
                 Err(error) => return Ok(Refusal::invalid(error.to_string()).into()),
             };
-            let depth = u32::try_from(arguments.depth.unwrap_or(1).clamp(1, 4)).unwrap_or(1);
-            let limit = arguments.limit.unwrap_or(50);
-            if !(1..=super::definitions::PAGE_MAX).contains(&limit) {
-                return Ok(Refusal::invalid("limit must be between 1 and 200").into());
+            let depth = match arguments.depth.map(u32::try_from).transpose() {
+                Ok(depth) if depth != Some(0) => depth.unwrap_or(budgets.list_depth),
+                _ => return Ok(Refusal::invalid("depth must be a positive 32-bit count").into()),
+            };
+            let limit = arguments.limit.unwrap_or(budgets.list_rows);
+            if limit < 1 {
+                return Ok(Refusal::invalid("limit must be positive").into());
             }
-            let limit = usize::try_from(limit).unwrap_or(50);
+            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
             let sort = arguments.sort.unwrap_or_default();
             let include_archived = arguments.include_archived.unwrap_or(false);
             let pattern = match arguments.names.as_deref().map(Pattern::new) {

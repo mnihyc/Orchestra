@@ -69,6 +69,7 @@ CREATE TABLE snapshots (
     tree_ref text,
     repository_head text,
     unavailable_reason text,
+    recording_indexing jsonb,
     expires_at timestamp with time zone,
     label text DEFAULT ''::text NOT NULL,
     selection jsonb NOT NULL,

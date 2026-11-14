@@ -4,7 +4,7 @@
  * workspace's tree; in files lists the lines that hold it, read from the environment as it is now, so it
  * needs the environment online and says so when it is not. A hit opens its file at that line.
  */
-import { useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery } from '@tanstack/react-query';
 import { CaseSensitive, Folder, FolderOpen, Regex, Search, X } from 'lucide-react';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -18,6 +18,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
 import { IconButton } from '@/ui/IconButton';
 import { Input } from '@/ui/Input';
+import { Button } from '@/ui/Button';
 import { SegmentedControl } from '@/ui/SegmentedControl';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { FileChip } from './FileChip';
@@ -42,14 +43,14 @@ export const NO_SEARCH: SearchState = { text: '', mode: 'names', regex: false, c
 export interface SearchBoxProps {
   state: SearchState;
   onChange: (state: SearchState) => void;
-  /** Whether the workspace is searched by name at all: it is not where it is too large to index. */
-  namesAvailable: boolean;
+  /** The source's actual partial-coverage reason, beside the search that uses it. */
+  reason?: string;
   /** The directory the thread's own is, for the label of the scope. */
   directory: string;
   autoFocus?: boolean;
 }
 
-export function SearchBox({ state, onChange, namesAvailable, directory, autoFocus }: SearchBoxProps) {
+export function SearchBox({ state, onChange, reason, directory, autoFocus }: SearchBoxProps) {
   const { t } = useTranslation();
   return (
     <div className="flex flex-col gap-1 px-2 pb-1">
@@ -78,7 +79,7 @@ export function SearchBox({ state, onChange, namesAvailable, directory, autoFocu
           value={state.mode}
           onValueChange={(mode) => onChange({ ...state, mode })}
           segments={[
-            { value: 'names', ...choiceOption(t, 'fileSearch.names'), disabled: !namesAvailable },
+            { value: 'names', ...choiceOption(t, 'fileSearch.names') },
             { value: 'content', ...choiceOption(t, 'fileSearch.content') },
           ]}
         />
@@ -89,6 +90,7 @@ export function SearchBox({ state, onChange, namesAvailable, directory, autoFocu
           </>
         )}
       </div>
+      {reason !== undefined && <p className="truncate text-xs text-text-muted" title={reason}>{reason}</p>}
       {state.mode === 'content' && (
         <p className="flex items-center gap-1 text-xs text-text-muted">
           <Folder className="shrink-0" aria-hidden />
@@ -132,16 +134,20 @@ export function SearchResults({ door, state, directory, onOpenPath, onOpenFolder
   const text = useDebounced(state.text.trim());
   const ready = text.length >= SEARCH_LEAST_CHARS;
   const under = state.under === '' ? directory : state.under;
-  const names = useQuery({
+  const names = useInfiniteQuery({
     queryKey: workspaceKeys.search(door, text, 'names'),
-    queryFn: ({ signal }) => searchNames(door, text, signal),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ signal, pageParam }) => searchNames(door, text, signal, pageParam),
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
     enabled: ready && state.mode === 'names',
     staleTime: 10_000,
     retry: false,
   });
-  const content = useQuery({
+  const content = useInfiniteQuery({
     queryKey: [...workspaceKeys.search(door, text, 'content'), under, state.regex, state.caseSensitive] as const,
-    queryFn: ({ signal }) => searchContent(door, text, { under, regex: state.regex, caseSensitive: state.caseSensitive }, signal),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ signal, pageParam }) => searchContent(door, text, { under, regex: state.regex, caseSensitive: state.caseSensitive, ...(pageParam === undefined ? {} : { cursor: pageParam }) }, signal),
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
     enabled: ready && state.mode === 'content',
     staleTime: 10_000,
     retry: false,
@@ -151,15 +157,12 @@ export function SearchResults({ door, state, directory, onOpenPath, onOpenFolder
   const grouped = useMemo(() => {
     const data = content.data;
     const groups = new Map<string, ContentMatches['matches']>();
-    for (const match of data?.matches ?? []) groups.set(match.path, [...(groups.get(match.path) ?? []), match]);
+    for (const match of data?.pages.flatMap((page) => page.matches) ?? []) groups.set(match.path, [...(groups.get(match.path) ?? []), match]);
     return [...groups];
   }, [content.data]);
 
   if (!ready) return <EmptyState compact className="flex-1" icon={<Search aria-hidden />} title={t('files.search.tooShort', { count: SEARCH_LEAST_CHARS })} />;
   if (query.error !== null) {
-    if (query.error instanceof ApiError && query.error.is('workspace.not_indexed')) {
-      return <EmptyState compact className="flex-1" icon={<Search aria-hidden />} title={t('files.search.notIndexed')} />;
-    }
     if (query.error instanceof ApiError && query.error.is('source.offline')) {
       return <EmptyState compact className="flex-1" icon={<Search aria-hidden />} title={t('files.search.offline')} />;
     }
@@ -168,10 +171,13 @@ export function SearchResults({ door, state, directory, onOpenPath, onOpenFolder
   if (query.isPending) return <SkeletonRows read={query} rows={5} />;
 
   if (state.mode === 'names') {
-    const entries = names.data ?? [];
-    if (entries.length === 0) return <EmptyState compact className="flex-1" icon={<Search aria-hidden />} title={t('files.search.none')} />;
+    const entries = names.data?.pages.flatMap((page) => page.entries) ?? [];
+    const last = names.data?.pages.at(-1);
+    if (entries.length === 0 && !names.hasNextPage) return <EmptyState compact className="flex-1" icon={<Search aria-hidden />} title={t('files.search.none')} />;
     return (
-      <ul aria-label={t('files.search.results')} className="min-h-0 flex-1 overflow-auto" data-testid="search-results">
+      <div className="min-h-0 flex-1 overflow-auto" data-testid="search-results">
+      <p role="status" className="px-3 py-1 text-xs text-text-muted">{last?.source === 'cached' ? t('files.search.cachedNames') : t('files.search.liveNames', { count: last?.searched ?? 0 })}</p>
+      <ul aria-label={t('files.search.results')}>
         {entries.map((entry) => (
           <li key={entry.path} className="flex items-center">
             {entry.type !== 'dir' ? <span className="min-w-0 flex-1 px-3 py-1"><FileChip source={workspaceSource(door, entry.path, entry.path, entry.size)} presentation={{ place: 'compact' }} bare onOpen={() => onOpenPath(entry.path, null)} /></span> : <button
@@ -188,16 +194,20 @@ export function SearchResults({ door, state, directory, onOpenPath, onOpenFolder
           </li>
         ))}
       </ul>
+      {names.hasNextPage && <Button size="sm" variant="ghost" pending={names.isFetchingNextPage} onClick={() => void names.fetchNextPage()}>{t('files.search.more')}</Button>}
+      </div>
     );
   }
 
   const data = content.data;
-  if (data === undefined || data.matches.length === 0) return <EmptyState compact className="flex-1" icon={<Search aria-hidden />} title={t('files.search.none')} />;
+  const count = data?.pages.reduce((total, page) => total + page.matches.length, 0) ?? 0;
+  const searched = data?.pages.at(-1)?.searched ?? 0;
+  if (data === undefined || (count === 0 && !content.hasNextPage)) return <EmptyState compact className="flex-1" icon={<Search aria-hidden />} title={t('files.search.none')} />;
   return (
     <div className="min-h-0 flex-1 overflow-auto" data-testid="search-results">
       <p className="px-3 py-1 text-xs text-text-muted" role="status">
-        {t('files.search.summary', { count: data.matches.length, files: grouped.length, searched: data.searched })}
-        {data.truncated && ` ${t('files.search.cut')}`}
+        {t('files.search.summary', { count, files: grouped.length, searched })}
+        {content.hasNextPage && ` ${t('files.search.continues')}`}
       </p>
       <ul aria-label={t('files.search.results')}>
         {grouped.map(([path, matches]) => (
@@ -226,6 +236,7 @@ export function SearchResults({ door, state, directory, onOpenPath, onOpenFolder
           </li>
         ))}
       </ul>
+      {content.hasNextPage && <Button size="sm" variant="ghost" pending={content.isFetchingNextPage} onClick={() => void content.fetchNextPage()}>{t('files.search.more')}</Button>}
     </div>
   );
 }

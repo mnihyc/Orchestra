@@ -468,6 +468,8 @@ async fn automatic_preparation_keeps_an_existing_directory_without_requiring_an_
         .on(CommandKind::FsRecord, |_| {
             Ok(CommandResult::FsRecord(
                 orch_link_contract::source::FsRecordResult {
+                    indexing: None,
+
                     state: orch_link_contract::source::RecordState::Unavailable,
                     tree_ref: None,
                     repository_head: None,
@@ -796,6 +798,8 @@ async fn a_terminal_source_failure_blocks_without_retrying_and_explicit_retry_ke
             .handler
             .on(CommandKind::FsRecord, |_| {
                 Ok(CommandResult::FsRecord(FsRecordResult {
+                    indexing: None,
+
                     state: RecordState::Unavailable,
                     tree_ref: None,
                     repository_head: None,
@@ -835,11 +839,22 @@ async fn a_terminal_source_failure_blocks_without_retrying_and_explicit_retry_ke
         assert_eq!(shown.state, SourceState::Failed);
         assert_eq!(
             shown.reason.as_deref(),
+            // The source keeps the code the machine refused with, for the page to explain in its own words.
             Some(if is_policy {
                 "workspace.remote_write_disabled"
             } else {
-                "workspace.source_failed"
+                "internal"
             })
+        );
+        // The sentence the thread is blocked with names the reason the source keeps, for the page to explain.
+        let blocked = world.sync(thread).await.thread.blocked.unwrap();
+        assert!(
+            blocked
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains(&format!("({})", shown.reason.as_deref().unwrap())),
+            "{blocked:?}"
         );
         let job_id = shown.job.unwrap().id;
         assert_eq!(hosting::wait_over(&world, job_id).await.0, "failed");

@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-link --test large_messages
+test -p orch-link-contract --test largest_messages
+test -p orch-gateway-core --test large_messages

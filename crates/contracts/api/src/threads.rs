@@ -351,10 +351,21 @@ pub enum StartingStep {
     Credential,
     /// A session.
     Session,
+    /// The files of the directory, recorded before the turn so that they can be put back.
+    Recording,
     /// Its files.
     Files,
     /// The turn itself.
     Turn,
+}
+
+/// The command a starting thread's step waits for, and the other work that holds it up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StartingWork {
+    /// The kind of command the step waits for, such as `fs.mkdir`, `git.prepare` or `fs.record`.
+    pub command: String,
+    /// The kind of command of other work, on the same machine and in the same line, that it waits behind.
+    pub behind: Option<String>,
 }
 
 /// The `kind` of a thread: always `thread`.
@@ -818,6 +829,12 @@ pub struct Thread {
     pub side_reading: Option<SideReading>,
     /// What a starting thread is waiting for.
     pub starting_step: Option<StartingStep>,
+    /// When the step it is waiting for began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_since: Option<Time>,
+    /// The command that step waits for, and what holds it up; none while it waits for nothing in particular.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_work: Option<StartingWork>,
     /// Why it cannot go on.
     pub blocked: Option<ThreadBlocked>,
     /// What a person's Stop holds of its queue.
@@ -1678,8 +1695,11 @@ pub struct ToolCallPayload {
     pub started_at: Time,
     /// How long it took, once it ended.
     pub duration_ms: Option<i64>,
-    /// The identical call exactly as the harness issued it.
-    pub raw: RawCall,
+    /// The identical call exactly as the harness issued it. A thread's timeline does not carry it (it is the
+    /// same content as `tool`, and as long); it is read apart by `GET /threads/{id}/items/{item_id}/raw`, and
+    /// stands in an export of the whole record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<RawCall>,
 }
 
 /// A request for approval. Harness cards carry their current projection for this reader,
@@ -3001,6 +3021,15 @@ pub struct TurnLimit {
     pub retry_after_secs: Option<i64>,
 }
 
+/// The indexing progress observed when a turn starts with per-file restore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TurnRecordingProgress {
+    /// Files examined by the background pass.
+    pub done: u64,
+    /// Files included in that pass.
+    pub total: u64,
+}
+
 /// One turn of the agent: its answer to one input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Turn {
@@ -3018,6 +3047,18 @@ pub struct Turn {
     pub input_id: Id,
     /// The complete or explicitly unavailable recorded files before this turn.
     pub before_snapshot_id: Option<Id>,
+    /// How many paths changed during the turn, from complete recordings or the index journal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_changed: Option<i64>,
+    /// Directory-relative paths from the end observation, independent of tool patches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_changed_paths: Option<Vec<String>>,
+    /// Why whole recording is unavailable, on the thread's first affected turn only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_notice: Option<String>,
+    /// Indexing progress at the turn's first recording fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_indexing: Option<TurnRecordingProgress>,
     /// The model's routing name.
     pub model: String,
     /// The model's display name.
@@ -3304,10 +3345,6 @@ pub struct ThreadOpening {
     pub parameters: Option<crate::settings::ThreadParameters>,
     /// The native limits for a new input; absent only when unavailable to this reader.
     pub limits: Option<ThreadLimits>,
-    /// The settings, including each setting's own writability and source.
-    pub settings: Vec<crate::settings::ResolvedSetting>,
-    /// The initial bounded outline page, from the same conversation cut as sync.
-    pub outline: ThreadOutlinePage,
     /// The current tool carrier observation; omitted for a retained conversation view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<crate::nodes::OverviewPart<crate::gateways::ThreadTunnelGatewayStatus>>,
@@ -3630,7 +3667,7 @@ pub struct ThreadOpeningGetQuery {
     pub continuation_id: Option<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_revision: Option<i64>,
-    /// Items in the initial window; the same bounds as [`ThreadSyncGetQuery::limit`].
+    /// Items in the initial window; the resolved `threads.opening_items` default when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -3747,6 +3784,15 @@ pub struct ThreadBlobGetQuery {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UploadBlobGetQuery {
+    /// Continue the same immutable archive selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Match archive child names without regard to case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Archive rows in this page; omitted uses the current default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
     /// List the archive without extracting it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive: Option<bool>,
@@ -4345,6 +4391,28 @@ crate::endpoints! {
         ]);
     /// Reads one item of a thread.
     ThreadItemGet: GET "/threads/{id}/items/{item_id}", Permission("thread.view"), query continuations::ThreadReadSelector, none, json Item, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored thread restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
+    /// Reads a tool call exactly as its harness made it: its own name for the tool, its arguments and what came back. A thread's items leave this out.
+    ThreadItemRawGet: GET "/threads/{id}/items/{item_id}/raw", Permission("thread.view"), query continuations::ThreadReadSelector, none, json RawCall, 200,
         operation Op::variants(&[
             Variant {
                 name: "read",

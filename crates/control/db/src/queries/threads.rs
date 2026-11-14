@@ -68,7 +68,7 @@ pub mod turn_state {
 /// The columns of a thread and of its node that the engine reads.
 const THREAD_SELECT: &str = "SELECT t.node_id, t.topic_id, t.environment_id, t.workspace_dir, t.state, t.blocked_reason,
         t.source, t.links, t.work_observed,
-        t.blocked_detail, t.starting_step, t.agent_id, t.provider_id, t.arrangement, t.executor, t.tool_set,
+        t.blocked_detail, t.starting_step, t.starting_step_at, t.starting_command, t.starting_behind, t.agent_id, t.provider_id, t.arrangement, t.executor, t.tool_set,
         t.current_segment_id, t.current_turn_id, t.active_continuation_id, t.execution_revision, t.next_seq, t.seq_state, t.activity_seq,
         COALESCE((SELECT jsonb_agg(notice ORDER BY position) FROM
           (SELECT notice,position FROM thread_pending_notices WHERE thread_id=t.node_id ORDER BY position LIMIT 64) head),'[]'::jsonb) AS pending_notices,
@@ -102,6 +102,12 @@ pub struct ThreadRow {
     pub blocked_detail: Option<String>,
     /// What a starting thread waits for.
     pub starting_step: Option<String>,
+    /// When that step began.
+    pub starting_step_at: Option<DateTime<Utc>>,
+    /// The kind of command the step waits for, while one is out.
+    pub starting_command: Option<String>,
+    /// The kind of command, of other work in the same line on the machine, that command waits behind.
+    pub starting_behind: Option<String>,
     /// Its agent profile.
     pub agent_id: Option<Id>,
     /// Its provider.
@@ -294,6 +300,30 @@ pub async fn set_starting_step(
     )
     .bind(thread)
     .bind(step)
+    .bind(seq)
+    .execute(conn)
+    .await?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Says which command a `starting` thread's step waits for and which other work, in the same line on the
+/// machine, holds it up (both none for none); nothing is done to a thread in another state or without a
+/// step. The answer says whether anything changed, so that a number is spent only on a change.
+pub async fn set_starting_work(
+    conn: &mut Conn,
+    thread: Id,
+    command: Option<&str>,
+    behind: Option<&str>,
+    seq: Seq,
+) -> Result<bool, DbError> {
+    let done = sqlx::query(
+        "UPDATE threads SET starting_command = $2, starting_behind = $3, seq_state = $4
+          WHERE node_id = $1 AND state = 'starting' AND starting_step IS NOT NULL
+            AND (starting_command IS DISTINCT FROM $2 OR starting_behind IS DISTINCT FROM $3)",
+    )
+    .bind(thread)
+    .bind(command)
+    .bind(behind)
     .bind(seq)
     .execute(conn)
     .await?;
@@ -1836,7 +1866,7 @@ pub async fn count_delivering_authors(conn: &mut Conn, thread: Id) -> Result<i64
 // ---------------------------------------------------------------- turns
 
 pub(crate) const TURN_SELECT: &str = "SELECT id, thread_id, segment_id, ordinal, state, input_id, model, effort, params, lease_id,
-        before_snapshot_id, end_manifest_blob, files_end_manifest,
+        before_snapshot_id, end_manifest_blob, files_changed, files_changed_paths, recording_notice, recording_indexing,
         native_turn_ref, error, usage, usage_detail, context, limit_bypass, phase, phase_at, phase_attempt, interrupted_by, command_cleanup,
         waiting_since, waited_ms, started_at, completed_at, created_at, seq_updated, plan
    FROM turns";
@@ -1860,8 +1890,19 @@ pub struct TurnRow {
     pub before_snapshot_id: Option<Id>,
     /// The turn's verified end manifest blob, or unknown coverage.
     pub end_manifest_blob: Option<Vec<u8>>,
-    /// Included end hashes/types/executable bits, or unknown watcher coverage.
-    pub files_end_manifest: Option<Json>,
+    /// How many paths changed, from a complete before/end comparison or the index journal.
+    /// Unknown when neither has complete change coverage.
+    #[sqlx(default)]
+    pub files_changed: Option<i32>,
+    /// Directory-relative paths observed during this turn, independent of file-tool patches.
+    #[sqlx(default)]
+    pub files_changed_paths: Option<Json>,
+    /// Whole-recording coverage explained on this thread's first affected turn only.
+    #[sqlx(default)]
+    pub recording_notice: Option<String>,
+    /// The indexing progress that explains a turn's first recording fallback.
+    #[sqlx(default)]
+    pub recording_indexing: Option<Json>,
     /// The model it ran with.
     pub model: String,
     /// The effort it ran with.
@@ -1955,7 +1996,7 @@ pub async fn insert_turn(conn: &mut Conn, new: &NewTurn<'_>, seq: Seq) -> Result
                        COALESCE((SELECT COALESCE(run_as, author_id) FROM thread_inputs WHERE id=$4), (SELECT owner_id FROM nodes WHERE id=$2)),
                        COALESCE((SELECT plan FROM thread_inputs WHERE id=$4), false))
                RETURNING id, thread_id, segment_id, ordinal, state, input_id, model, effort, params, lease_id,
-                    before_snapshot_id, end_manifest_blob, files_end_manifest,
+                    before_snapshot_id, end_manifest_blob,
                     native_turn_ref, error, usage, limit_bypass, phase, phase_at, phase_attempt, interrupted_by, command_cleanup, started_at,
                     completed_at, created_at, seq_updated, waiting_since, waited_ms, plan";
     Ok(sqlx::query_as(sql)

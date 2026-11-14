@@ -96,8 +96,16 @@ fn connect(fixture: &mut Fixture, issuer: CommandIssuer) -> oneshot::Receiver<()
                                 );
                             }
                         };
-                        link.route_up(&gateway, machine, session, UpFrame::CmdAck(CmdAck { id }))
-                            .await;
+                        link.route_up(
+                            &gateway,
+                            machine,
+                            session,
+                            UpFrame::CmdAck(CmdAck {
+                                id,
+                                key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+                            }),
+                        )
+                        .await;
                         link.route_up(
                             &gateway,
                             machine,
@@ -206,7 +214,7 @@ fn opening(fixture: &Fixture, thread: Id) -> Proof<SessionOpen> {
         "workspace_root":"/workspace", "instruction_root_marker":true,
         "directory":"/workspace", "cwd":"/workspace", "mounts":[],
         "model":"fixture-model", "effort":null, "params":{},
-        "approval_mode":"ask", "sandbox_mode":"read_only", "instructions":"", "memory":null,
+        "approval_mode":"ask", "web_action_wait_secs":120, "sandbox_mode":"read_only", "instructions":"", "memory":null,
         "arrangement":"together",
         "provider":{"path":"forwarded", "provider_id":new_id(), "protocol":"openai-responses", "ticket":"synthetic-first-transport"},
         "exec":{"executor":null, "environment_id":fixture.environment, "generation":1},

@@ -177,7 +177,10 @@ async fn an_idle_update_fence_holds_a_new_turn_out_and_a_running_approval_keeps_
     tokio::time::timeout(PATIENCE, async {
         loop {
             let progress = rig.controller.progress(id);
-            if matches!(progress, Some(Progress::Accepted)) {
+            if matches!(
+                progress,
+                Some(Progress::Accepted | Progress::Running | Progress::Released)
+            ) {
                 break;
             }
             assert!(

@@ -199,11 +199,11 @@ export function sourcesOfParts(kind: 'chat' | 'thread', owner: string, parts: re
   });
 }
 
-export async function sourceArchive(source: FileSource, inside: string, signal?: AbortSignal): Promise<ArchiveListing> {
+export async function sourceArchive(source: FileSource, inside: string, signal?: AbortSignal, options: { cursor?: string; q?: string; limit?: number } = {}): Promise<ArchiveListing> {
   const reader = libraryReader(); currentSource(source, reader, signal);
   const url = source.archiveUrl;
   if (url === undefined) throw new Error('No archive source');
-  const listing = await (await traceRequest(append(url, { inside }), { ...(signal === undefined ? {} : { signal }) })).json() as ArchiveListing;
+  const listing = await (await traceRequest(append(url, { inside, ...(options.cursor === undefined ? {} : { cursor: options.cursor }), ...(options.q === undefined ? {} : { q: options.q }), ...(options.limit === undefined ? {} : { limit: String(options.limit) }) }), { ...(signal === undefined ? {} : { signal }) })).json() as ArchiveListing;
   currentSource(source, reader, signal); return listing;
 }
 
