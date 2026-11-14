@@ -1,0 +1,4 @@
+# n41-summaries: a stored summary command identified without regard to member order; first compile of the one repair.
+clippy
+test -p orch-engine --lib
+test -p orch-api-core --test summaries

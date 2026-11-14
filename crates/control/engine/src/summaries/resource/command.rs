@@ -298,7 +298,9 @@ impl Authority {
             automatic: None,
             call: command.id,
             machine: command.machine,
-            body: Hash::of(&serde_json::to_vec(&command.body)?),
+            // PostgreSQL keeps an object's members in its own order, so the body is identified
+            // without regard to member order, as every other stored command body is.
+            body: crate::jobs::command_identity::hash(&command.body)?,
             endpoint,
         })
     }
@@ -320,7 +322,7 @@ impl Authority {
             automatic: Some(source),
             call: command.id,
             machine: command.machine,
-            body: Hash::of(&serde_json::to_vec(&command.body)?),
+            body: crate::jobs::command_identity::hash(&command.body)?,
             endpoint,
         })
     }
@@ -347,7 +349,7 @@ impl Authority {
         if id != self.call
             || machine != self.machine
             || kind != "provider.complete"
-            || Hash::of(&serde_json::to_vec(body)?) != self.body
+            || crate::jobs::command_identity::hash(body)? != self.body
         {
             return Ok(None);
         }
