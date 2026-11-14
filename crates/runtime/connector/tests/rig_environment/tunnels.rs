@@ -272,7 +272,7 @@ impl AgentSide {
             "sandbox_mode": "workspace", "instructions": "x", "memory": null,
             "arrangement": "separated",
             "provider": { "path": "native", "provider_id": self.provider },
-            "exec": exec, "mcp": mcp, "orch_tools": [], "raw_events": false
+            "exec": exec, "mcp": mcp, "orch_tools": [], "output_capture_bytes":67108864, "raw_events": false
         }))
         .unwrap();
         self.succeed(&SerialKey::Thread(thread), &open).await;

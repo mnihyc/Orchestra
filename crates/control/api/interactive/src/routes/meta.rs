@@ -281,6 +281,9 @@ async fn setup(ctx: Ctx, (): (), body: SetupCreateBody) -> ApiResult<Answer<Setu
         },
     )
     .await?;
+    if crate::routes::notifications::push_public_key().is_some() {
+        orch_worker_core::channel_setup::ensure_system_push(&mut tx, user.id, ctx.now).await?;
+    }
     let how = json!({ "proofs": [SignInProof::Password], "setup": true });
     let opened = open_session(&ctx, &mut tx, &user, how).await?;
     orch_db::idempotency::creation::observe_account(&mut tx, user.id, "setup_account", 200).await?;

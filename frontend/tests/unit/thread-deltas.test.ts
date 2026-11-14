@@ -9,7 +9,7 @@ import {
   dropCodePoints,
   joinRow,
   mergeDeltas,
-  OUTPUT_TAIL_CHARS,
+  OUTPUT_TAIL_BYTES,
 } from '@/realtime/deltas';
 
 import { agentMessage, command, reasoning } from '../doubles/thread-rows';
@@ -98,16 +98,16 @@ describe('the output of a command', () => {
   });
 
   it('keeps only its end when it grows long, and says that something was cut', () => {
-    const big = 'x'.repeat(OUTPUT_TAIL_CHARS);
+    const big = 'x'.repeat(OUTPUT_TAIL_BYTES);
     const item = command('c', { command: 'yes', output: big, exit: null, status: 'in_progress' });
-    const outcome = applyDelta(item, OUTPUT_TAIL_CHARS, piece('c', 'output', OUTPUT_TAIL_CHARS, 'END', 3));
+    const outcome = applyDelta(item, OUTPUT_TAIL_BYTES, piece('c', 'output', OUTPUT_TAIL_BYTES, 'END', 3));
     expect(outcome.kind).toBe('applied');
     if (outcome.kind !== 'applied' || outcome.item.kind !== 'tool_call' || outcome.item.payload.tool.kind !== 'command') return;
     const output = outcome.item.payload.tool.output;
-    expect(output.inline.length).toBe(OUTPUT_TAIL_CHARS);
+    expect(output.inline.length).toBe(OUTPUT_TAIL_BYTES);
     expect(output.inline.endsWith('END')).toBe(true);
     expect(output.truncated).toBe(true);
-    expect(output.total_len).toBe(OUTPUT_TAIL_CHARS + 3);
+    expect(output.total_len).toBe(OUTPUT_TAIL_BYTES + 3);
   });
 
   it('is not guessed at when a piece of bytes overlaps what is held', () => {
@@ -151,4 +151,27 @@ describe('a row that arrives for an item that is being written', () => {
     expect(textOf(joined.item)).toBe('Hello world.');
     expect(joined.applied.text).toBe(12);
   });
+});
+
+it('keeps a live Unicode output tail within its byte allowance without splitting a character', () => {
+  const item = command('unicode-output', { command: 'build', output: '', exit: null, status: 'in_progress' });
+  const text = '字🙂'.repeat(OUTPUT_TAIL_BYTES);
+  const bytes = new TextEncoder().encode(text).length;
+  const result = applyDelta(item, 0, piece('unicode-output', 'output', 0, text, bytes));
+  expect(result.kind).toBe('applied');
+  if (result.kind !== 'applied' || result.item.kind !== 'tool_call' || result.item.payload.tool.kind !== 'command') throw new Error('The native output must apply');
+  const output = result.item.payload.tool.output;
+  expect(new TextEncoder().encode(output.inline).length).toBeLessThanOrEqual(OUTPUT_TAIL_BYTES);
+  expect(output.inline).not.toContain('�');
+  expect(output.total_len).toBe(bytes);
+});
+
+it('keeps the smaller accepted inline allowance while output grows', () => {
+  const row = command('small-live-output', { command: 'build', output: '', exit: null, status: 'in_progress' });
+  if (row.kind !== 'tool_call' || row.payload.tool.kind !== 'command') throw new Error('A command fixture is required');
+  const item = { ...row, payload: { ...row.payload, tool: { ...row.payload.tool, output: { ...row.payload.tool.output, inline_limit: 1_000 } } } };
+  const result = applyDelta(item, 0, piece(item.id, 'output', 0, 'x'.repeat(2_000), 2_000));
+  if (result.kind !== 'applied' || result.item.kind !== 'tool_call' || result.item.payload.tool.kind !== 'command') throw new Error('The output must apply');
+  expect(result.item.payload.tool.output.inline).toHaveLength(1_000);
+  expect(result.item.payload.tool.output.total_len).toBe(2_000);
 });

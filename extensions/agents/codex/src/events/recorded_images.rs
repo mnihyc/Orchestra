@@ -143,6 +143,7 @@ fn replay(
         "captured support belongs to its exact native build"
     );
     let config = MapperConfig {
+        output_capture_bytes: 67_108_864,
         thread_id: Id::from_u128(1),
         segment_id: Id::from_u128(2),
         native_thread: thread.ok_or("the native thread opening is missing")?,

@@ -68,7 +68,7 @@ pub mod turn_state {
 /// The columns of a thread and of its node that the engine reads.
 const THREAD_SELECT: &str = "SELECT t.node_id, t.topic_id, t.environment_id, t.workspace_dir, t.state, t.blocked_reason,
         t.source, t.links, t.work_observed,
-        t.blocked_detail, t.starting_step, t.agent_id, t.provider_id, t.arrangement, t.executor, t.tool_set,
+        t.blocked_detail, t.starting_step, t.starting_step_at, t.starting_command, t.starting_behind, t.agent_id, t.provider_id, t.arrangement, t.executor, t.tool_set,
         t.current_segment_id, t.current_turn_id, t.active_continuation_id, t.execution_revision, t.next_seq, t.seq_state, t.activity_seq,
         COALESCE((SELECT jsonb_agg(notice ORDER BY position) FROM
           (SELECT notice,position FROM thread_pending_notices WHERE thread_id=t.node_id ORDER BY position LIMIT 64) head),'[]'::jsonb) AS pending_notices,
@@ -102,6 +102,12 @@ pub struct ThreadRow {
     pub blocked_detail: Option<String>,
     /// What a starting thread waits for.
     pub starting_step: Option<String>,
+    /// When that step began.
+    pub starting_step_at: Option<DateTime<Utc>>,
+    /// The kind of command the step waits for, while one is out.
+    pub starting_command: Option<String>,
+    /// The kind of command, of other work in the same line on the machine, that command waits behind.
+    pub starting_behind: Option<String>,
     /// Its agent profile.
     pub agent_id: Option<Id>,
     /// Its provider.
@@ -294,6 +300,30 @@ pub async fn set_starting_step(
     )
     .bind(thread)
     .bind(step)
+    .bind(seq)
+    .execute(conn)
+    .await?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Says which command a `starting` thread's step waits for and which other work, in the same line on the
+/// machine, holds it up (both none for none); nothing is done to a thread in another state or without a
+/// step. The answer says whether anything changed, so that a number is spent only on a change.
+pub async fn set_starting_work(
+    conn: &mut Conn,
+    thread: Id,
+    command: Option<&str>,
+    behind: Option<&str>,
+    seq: Seq,
+) -> Result<bool, DbError> {
+    let done = sqlx::query(
+        "UPDATE threads SET starting_command = $2, starting_behind = $3, seq_state = $4
+          WHERE node_id = $1 AND state = 'starting' AND starting_step IS NOT NULL
+            AND (starting_command IS DISTINCT FROM $2 OR starting_behind IS DISTINCT FROM $3)",
+    )
+    .bind(thread)
+    .bind(command)
+    .bind(behind)
     .bind(seq)
     .execute(conn)
     .await?;
@@ -1836,7 +1866,7 @@ pub async fn count_delivering_authors(conn: &mut Conn, thread: Id) -> Result<i64
 // ---------------------------------------------------------------- turns
 
 pub(crate) const TURN_SELECT: &str = "SELECT id, thread_id, segment_id, ordinal, state, input_id, model, effort, params, lease_id,
-        before_snapshot_id, end_manifest_blob, files_end_manifest,
+        before_snapshot_id, end_manifest_blob, files_end_manifest, files_changed,
         native_turn_ref, error, usage, usage_detail, context, limit_bypass, phase, phase_at, phase_attempt, interrupted_by, command_cleanup,
         waiting_since, waited_ms, started_at, completed_at, created_at, seq_updated, plan
    FROM turns";
@@ -1862,6 +1892,10 @@ pub struct TurnRow {
     pub end_manifest_blob: Option<Vec<u8>>,
     /// Included end hashes/types/executable bits, or unknown watcher coverage.
     pub files_end_manifest: Option<Json>,
+    /// How many included files the turn changed, from its recorded before-state and its observed end; unknown
+    /// until both exist.
+    #[sqlx(default)]
+    pub files_changed: Option<i32>,
     /// The model it ran with.
     pub model: String,
     /// The effort it ran with.
@@ -2633,6 +2667,41 @@ pub async fn user_message_kept(
         .bind(native_ref)
         .fetch_optional(conn)
         .await?)
+}
+
+/// Stream delivery needs identity and the durable cursor, not a copy of the growing payload.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct StreamItemRow {
+    /// Item identity.
+    pub id: Id,
+    /// Owning thread.
+    pub thread_id: Id,
+    /// Owning turn.
+    pub turn_id: Option<Id>,
+    /// Timeline stream.
+    pub stream: String,
+    /// Current item state.
+    pub status: String,
+    /// Committed presentation cursor, including pending durable pieces.
+    pub visible_len: i64,
+}
+
+/// Pending pieces supply the cursor; only the first piece after coalescing reads the full field.
+pub async fn stream_item(
+    conn: &mut Conn,
+    segment: Id,
+    native_ref: &str,
+    field: &str,
+) -> Result<Option<StreamItemRow>, DbError> {
+    Ok(sqlx::query_as("SELECT i.id,i.thread_id,i.turn_id,i.stream,i.status,
+        COALESCE((SELECT p.part_offset+p.part_len FROM item_stream_parts p WHERE p.item_id=i.id AND p.field=$3 ORDER BY p.part_offset DESC LIMIT 1),
+          CASE $3 WHEN 'text' THEN char_length(COALESCE(i.payload->>'text',''))::bigint
+          WHEN 'summary' THEN char_length(COALESCE(i.payload->>'summary',''))::bigint
+          ELSE COALESCE((i.payload #>> '{tool,output,total_len}')::bigint,0) END) AS visible_len
+        FROM items i WHERE (i.segment_id=$1 AND i.native_ref=$2) OR
+          (i.thread_id=(SELECT thread_id FROM segments WHERE id=$1) AND i.native_ref='fork-history:' || $1::uuid::text || ':' || $2)
+        ORDER BY (i.segment_id=$1) DESC LIMIT 1")
+        .bind(segment).bind(native_ref).bind(field).fetch_optional(conn).await?)
 }
 
 /// What an item is changed to.

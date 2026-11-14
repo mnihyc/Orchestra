@@ -1031,6 +1031,7 @@ impl AgentAdapter for AcpAdapter {
             stderr: launched.stderr.clone(),
             learned,
             mapper: MapperConfig {
+                output_capture_bytes: settings.output_capture_bytes,
                 thread_id: settings.thread_id,
                 segment_id: settings.segment_id,
                 program: Arc::clone(&program),
