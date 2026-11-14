@@ -4,6 +4,7 @@ import { writeFile } from 'node:fs/promises';
 import { ACME, PEOPLE, bodySent, configureThread, emit, scenario, signIn } from './support.ts';
 import { recordedConversation } from '../doubles/recorded-conversation.ts';
 import { DOCS } from './documents-support.ts';
+import { restAtEdge, showHiddenBarsOnHover } from './workbench-support.ts';
 
 test.beforeEach(async () => { await scenario(); });
 
@@ -31,6 +32,7 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
     await page.setViewportSize({ width, height: 1000 });
     await page.emulateMedia({ colorScheme: theme });
     await signIn(page, PEOPLE.vera);
+    if (width === 1440) await showHiddenBarsOnHover(page);
     await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
     await page.goto(`/thread/${ACME.mainThread}`);
     await expect(page.locator('[data-workbench-chrome]')).toBeAttached();
@@ -125,7 +127,7 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
       const toggle = page.getByRole('button', { name: 'Left bar', exact: true });
       await toggle.click(); await expect(bar).toHaveCount(0);
       const before = await main.boundingBox();
-      await page.mouse.move(60, 160);
+      await restAtEdge(page, 'left');
       const floating = page.getByRole('dialog', { name: 'Left bar', exact: true });
       await expect(floating).toBeVisible();
       expect((await main.boundingBox())?.width).toBe(before?.width);
@@ -139,7 +141,7 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
       await expect(floating).toHaveCount(0);
       await toggle.press('Control+\\');
       await expect(bar).toHaveCount(0);
-      await page.locator('[data-bar-edge="left"]').hover();
+      await restAtEdge(page, 'left');
       await expect(floating).toBeVisible();
       expect(await floating.evaluate((element) => getComputedStyle(element).animationName)).toBe('none');
       await page.keyboard.press('Escape');

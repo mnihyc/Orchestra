@@ -49,8 +49,9 @@ export function ownChoices(settings: readonly ResolvedSetting[] | undefined): Re
 }
 
 /** Every model chooser keeps compatible thread choices and reports each incompatible choice it removes. */
-export async function changeModelChoice(thread: Pick<Thread, 'id' | 'model'>, choice: { model: string; effort: string | null; option: ModelOption }, states: readonly State[], settings: readonly ResolvedSetting[]) {
-  await setThreadSetting(thread.id, 'agent.model', { value: choice.model, expected_revision: settingOf(settings, 'agent.model').own?.revision ?? 0 });
+export async function changeModelChoice(thread: Pick<Thread, 'id' | 'model'>, choice: { model: string; effort: string | null; option: ModelOption; effortOnly?: boolean }, states: readonly State[], settings: readonly ResolvedSetting[]) {
+  // A change of the effort alone leaves the model's own setting as it is.
+  if (choice.effortOnly !== true) await setThreadSetting(thread.id, 'agent.model', { value: choice.model, expected_revision: settingOf(settings, 'agent.model').own?.revision ?? 0 });
   if (choice.effort !== null) await setThreadSetting(thread.id, 'agent.effort', { value: choice.effort, expected_revision: settingOf(settings, 'agent.effort').own?.revision ?? 0 });
   if (choice.model === thread.model) return { dropped: [], option: choice.option };
   const own = ownChoices(settings) ?? {};

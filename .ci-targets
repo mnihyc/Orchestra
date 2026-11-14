@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/document-new-title.test.tsx tests/component/document-description.test.tsx tests/component/document-editor-lifecycle.test.tsx tests/component/file-action-gates.test.tsx tests/component/search-stream.test.tsx tests/component/document-move.test.tsx tests/component/document-history-action-availability.test.tsx tests/unit/document-reference-intent.test.ts tests/unit/documents-blocks.test.ts tests/unit/document-cache-placement.test.ts
