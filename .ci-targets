@@ -1,0 +1,6 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --test container_units --test machine_policy_scopes --test machine_registration --test kfix_binding --test everything_resources --test realtime_diagnostics
+test -p orch-api-core --lib
+test -p orch-engine --test preflight
