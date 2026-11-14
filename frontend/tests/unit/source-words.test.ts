@@ -15,6 +15,7 @@ it.each(['en', 'zh-CN'] as const)('uses catalogue sentences for every recording 
       ['live_tree', 'source.restore.why.liveTree'], ['not_ready', 'source.restore.why.notReady'],
       ['store_unavailable', 'source.restore.why.storeUnavailable'], ['too_large', 'source.restore.why.tooLarge'],
       ['off', 'source.restore.why.recordingOff'], ['offline', 'source.restore.why.offline'],
+      ['changed_during_recording', 'source.restore.why.changedDuring'], ['unreadable', 'source.restore.why.unreadable'],
       ['future_recording_failure', 'source.restore.why.other'],
     ] as const) {
       const words = unrecordedReason(i18n.t, snapshot({ state: 'unavailable', unavailable_reason: reason }));

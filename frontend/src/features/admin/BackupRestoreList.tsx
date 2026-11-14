@@ -9,6 +9,7 @@ import type { BackupInventoryGroup, BackupInventoryLocation, DatabaseBackupRecor
 import type { TranslationKey } from '@/i18n';
 import { Button } from '@/ui/Button';
 import { CopyButton } from '@/ui/CopyButton';
+import { CopyId } from '@/ui/CopyId';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
@@ -27,11 +28,15 @@ const CATEGORIES: Readonly<Record<string, TranslationKey | undefined>> = {
 
 function Location({ location }: { location: BackupInventoryLocation }) {
   const { t } = useTranslation();
+  // The identifiers of what was kept are for whoever looks it up: one Copy ID act, never lines of the page.
+  const identifiers = ([['object', location.object_id], ['host', location.host_id], ['machine', location.machine_id], ['runtime', location.runtime_id]] as const)
+    .flatMap(([kind, value]) => value === null ? [] : [`${t(`backupRestore.fields.${kind}`)}: ${value}`]);
   return <li className="flex min-w-0 flex-col gap-2 rounded-md border border-border p-3 text-sm">
     <Facts rows={[
       { name: t('backupRestore.location'), value: location.location_known && location.location !== null ? <code className="wrap-anywhere">{location.location}</code> : t('backupRestore.unknownLocation') },
       { name: t('backupRestore.copy'), value: t(location.copy_available === null ? 'backupRestore.uninspectedCopy' : location.copy_available ? 'backupRestore.copyFound' : 'backupRestore.noCopy') },
-      ...([['object', location.object_id], ['host', location.host_id], ['machine', location.machine_id], ['runtime', location.runtime_id], ['driver', location.driver], ['storage', location.storage], ['mount', location.mount]] as const).flatMap(([kind, value]) => value === null ? [] : [{ name: t(`backupRestore.fields.${kind}`), value: <code className="wrap-anywhere">{value}</code> }]),
+      ...([['driver', location.driver], ['storage', location.storage], ['mount', location.mount]] as const).flatMap(([kind, value]) => value === null ? [] : [{ name: t(`backupRestore.fields.${kind}`), value: <code className="wrap-anywhere">{value}</code> }]),
+      ...(identifiers.length === 0 ? [] : [{ name: t('backupRestore.identifiers'), value: <CopyId value={identifiers.join('\n')} /> }]),
     ]} />
   </li>;
 }

@@ -502,15 +502,19 @@ pub struct WorkspaceObserve {
     pub thread_id: Id,
     /// The ended turn, when one exists.
     pub turn_id: Option<Id>,
+    /// The recording whose starting watcher cursor belongs to this turn.
+    pub before_snapshot_id: Option<Id>,
     /// The workspace-relative directory.
     pub directory: String,
 }
 
-/// Complete end hashes, or unknown coverage on a live or not-ready tree.
+/// Complete end hashes and journal paths have independent coverage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceObserveResult {
     /// The uploaded common end manifest, or null when it cannot be complete.
     pub end_manifest_blob: Option<Hash>,
+    /// Distinct directory-relative paths since the before recording, or unknown after lost notices.
+    pub changed_paths: Option<Vec<String>>,
 }
 
 /// The prepared source's safe metadata.

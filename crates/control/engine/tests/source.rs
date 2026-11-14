@@ -670,6 +670,99 @@ async fn a_successful_empty_recording_survives_store_validation_and_is_kept_for_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_large_directory_turn_has_a_changed_files_count_without_a_whole_recording() {
+    let world = World::new().await;
+    let thread = world.thread("Large directory").await;
+    world.machine.handler.on(CommandKind::FsRecord, |_| {
+        Ok(CommandResult::FsRecord(FsRecordResult {
+            reason: Some("too_large".to_owned()),
+            ..fallback()
+        }))
+    });
+    world
+        .machine
+        .handler
+        .on(CommandKind::WorkspaceObserve, |command| {
+            let Command::WorkspaceObserve(request) = command else {
+                panic!("unexpected command")
+            };
+            assert!(request.before_snapshot_id.is_some());
+            Ok(CommandResult::WorkspaceObserve(WorkspaceObserveResult {
+                end_manifest_blob: None,
+                changed_paths: Some(vec!["code.txt".into(), "new.txt".into()]),
+            }))
+        });
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Change files"))
+        .await
+        .unwrap();
+    let start = world.turn_start(thread, 0).await;
+    world
+        .say(
+            thread,
+            Event::TurnCompleted(TurnCompleted {
+                turn_id: start.turn_id,
+                status: TurnOutcome::Completed,
+                error: None,
+            }),
+        )
+        .await;
+    common::eventually("the journal supplies the turn's file count", || async {
+        world
+            .scalar::<Option<i32>>(
+                "SELECT files_changed FROM turns WHERE id = $1",
+                start.turn_id,
+            )
+            .await
+            == Some(2)
+    })
+    .await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    let turn = threads::turn(&mut conn, start.turn_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(turn.end_manifest_blob.is_none());
+    assert!(turn.files_end_manifest.is_none());
+    let saved = storage::snapshot(&mut conn, turn.before_snapshot_id.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.unavailable_reason.as_deref(), Some("too_large"));
+    assert_eq!(turn.recording_notice.as_deref(), Some("too_large"));
+    assert_eq!(
+        turn.files_changed_paths,
+        Some(json!(["code.txt", "new.txt"]))
+    );
+    let details: serde_json::Value = sqlx::query_scalar("SELECT details FROM audit_log WHERE action = 'workspace.changed_by_agent' AND node_id = $1")
+        .bind(thread).fetch_one(&mut *conn).await.unwrap();
+    assert_eq!(details["paths"], json!(["code.txt", "new.txt"]));
+    assert_eq!(world.began(CommandKind::GitStatus), 0);
+    drop(conn);
+    world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("Change more files"),
+        )
+        .await
+        .unwrap();
+    let next = world.turn_start(thread, 1).await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    assert!(
+        threads::turn(&mut conn, next.turn_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .recording_notice
+            .is_none(),
+        "whole-recording coverage is explained once in this thread"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn complete_before_and_watcher_end_states_make_one_bounded_actual_change_history() {
     let world = World::new().await;
     let directory = tempfile::tempdir().unwrap();
@@ -745,6 +838,7 @@ async fn complete_before_and_watcher_end_states_make_one_bounded_actual_change_h
         .on(CommandKind::WorkspaceObserve, move |_| {
             Ok(CommandResult::WorkspaceObserve(WorkspaceObserveResult {
                 end_manifest_blob: Some(end_hash),
+                changed_paths: None,
             }))
         });
     world

@@ -549,6 +549,23 @@ pub async fn set_before_state(conn: &mut Conn, turn: Id, snapshot: Id) -> Result
         == 1)
 }
 
+/// Keeps how many included files a turn changed, from its before-state and its observed end; none when either
+/// is unknown.
+pub async fn set_end_changes(
+    conn: &mut Conn,
+    turn: Id,
+    changed: Option<i32>,
+    paths: Option<&Json>,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE turns SET files_changed = $2, files_changed_paths = $3 WHERE id = $1")
+        .bind(turn)
+        .bind(changed)
+        .bind(paths)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// Keeps complete end hashes or explicit unknown coverage before this thread's next turn.
 pub async fn set_end_manifest(
     conn: &mut Conn,

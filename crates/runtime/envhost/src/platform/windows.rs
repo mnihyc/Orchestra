@@ -308,6 +308,11 @@ impl Dir {
         Ok(())
     }
 
+    /// Windows has no call that flushes a whole filesystem: the same as [`Dir::sync`].
+    pub fn sync_filesystem(&self) -> io::Result<()> {
+        self.sync()
+    }
+
     /// Sets what Windows keeps of the permission bits of the file or directory called `name`:
     /// whether it is read-only. Never of a link.
     pub fn set_mode(&self, name: &OsStr, mode: u32) -> io::Result<()> {

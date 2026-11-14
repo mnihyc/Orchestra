@@ -24,6 +24,7 @@ import { AttachmentChips } from '@/features/composer/Attachments';
 import { PersonThingProvider } from '@/features/people/personContext';
 import { readPastedText } from '@/lib/pastedText';
 import { ItemFrame, itemText } from '@/features/timeline/ItemActions';
+import { RecordingNotice } from '@/features/source/RecordingNotice';
 import { RestoreFromTurn } from '@/features/source/Restore';
 import { useTurnChanges } from '@/features/timeline/TurnFiles';
 import { useTimelineContext } from '@/features/timeline/context';
@@ -125,6 +126,7 @@ function HumanMessage({ item }: { item: UserItem }) {
   const { parts, delivery } = item.payload;
   const summary = useThreadPart(threadId, (view) => item.payload.input_id === null ? undefined : view.promptSummaries.get(item.payload.input_id));
   const currentTurn = useThreadPart(threadId, (view) => view.thread?.current_turn_id ?? null);
+  const environmentId = useThreadPart(threadId, (view) => view.thread?.environment?.id);
   const ownTurn = useThreadPart(threadId, (view) => item.turn_id === null ? undefined : view.turns.get(item.turn_id));
   const fileChanges = useTurnChanges(threadId, item.turn_id ?? '');
   const [editing, setEditing] = useState(false);
@@ -186,6 +188,7 @@ function HumanMessage({ item }: { item: UserItem }) {
               <Part key={index} part={part} owner={author} updatedAt={item.created_at} />
             ))}
           </div>}
+          {ownTurn?.input_id === item.payload.input_id && <RecordingNotice environmentId={environmentId} reason={ownTurn.recording_notice} />}
           {!editing && context.inspection === undefined && (mine || (summary?.total ?? 0) > 1) && <div className="flex flex-wrap items-center gap-1">
             {summary !== undefined && <PromptNavigation threadId={threadId} prompt={summary} onSelect={context.onVersionSelect} />}
           </div>}

@@ -564,3 +564,71 @@ fn captured_state_and_crash_pin_reopen_after_abrupt_exit() -> TestResult {
     // calls. It does not simulate loss of the kernel cache or certify non-Unix power loss.
     Ok(())
 }
+
+#[test]
+fn a_baseline_of_many_files_is_flushed_once_for_all_of_them_and_before_a_root_names_them()
+-> TestResult {
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    let workspace = capture.files.root().root_path().to_owned();
+    for number in 0..40 {
+        std::fs::write(
+            workspace.join(format!("file-{number}.txt")),
+            format!("the bytes of file {number}"),
+        )?;
+    }
+    capture.index.scan(
+        capture.files.root(),
+        capture.files.ignore().ok_or("ignore rules absent")?,
+    )?;
+    capture.clear();
+    capture
+        .states
+        .refresh(&capture.files, &capture.index, None, true)?;
+    let flushes = capture
+        .events()
+        .iter()
+        .filter(|event| matches!(event, DirectoryEvent::Sync(_)))
+        .count();
+    assert_eq!(
+        flushes, 0,
+        "a file of a baseline is not flushed one by one (three flushes a file took hours at two hundred thousand files)"
+    );
+    let store = capture.states.store();
+    assert!(
+        store.deferred_written() >= 40,
+        "every file was read and kept"
+    );
+    assert_eq!(
+        (store.flushes(), store.unsynced_objects()),
+        (1, 0),
+        "one flush for the whole pass"
+    );
+    let request = capture.request();
+    let captured = capture.states.capture(
+        &capture.files,
+        &request,
+        1,
+        capture.now,
+        &capture.operation(),
+    )?;
+    assert_eq!(captured.result.files, 40);
+    assert_eq!(
+        (store.flushes(), store.unsynced_objects()),
+        (2, 0),
+        "the trees of the state were flushed once, before its root was kept"
+    );
+    let (root, parsed) = store.load(request.snapshot_id, capture.now)?;
+    assert_eq!(parsed.entries.len(), 40);
+    for entry in parsed
+        .entries
+        .iter()
+        .filter(|entry| entry.t != EntryKind::Dir)
+    {
+        assert_eq!(
+            std::fs::read(store.read_entry(&root, entry)?.path())?,
+            std::fs::read(workspace.join(&entry.p))?
+        );
+    }
+    Ok(())
+}

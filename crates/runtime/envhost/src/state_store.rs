@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
@@ -40,6 +40,14 @@ pub struct RecordPolicy {
 struct RecordedReply {
     request_hash: Hash,
     reply: FsRecordResult,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingCursor {
+    attachment: Id,
+    directory: String,
+    cursor: Option<u64>,
 }
 
 /// A recorded root protected while one bounded operation reads or applies it.
@@ -218,6 +226,12 @@ pub struct ObjectStore {
     // the physical store's pin/exclusive gate. Retiring one attachment never revives its clones.
     retired: Arc<AtomicBool>,
     durability: DirectoryDurability,
+    /// Objects written without their own flush since the last flush of the whole store.
+    unsynced: Arc<AtomicU64>,
+    /// How many objects were ever written without their own flush, and how many flushes of the
+    /// whole store were made for them.
+    written: Arc<AtomicU64>,
+    flushes: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -269,11 +283,17 @@ impl DirectoryDurability {
     }
 
     fn ensure(&self, path: &Path) -> Result<()> {
+        self.ensure_with(path, true)
+    }
+
+    /// Makes the directory exist. With `durable` each edge is flushed at once; without it the
+    /// caller flushes the whole store later (see `ObjectStore::make_durable`).
+    fn ensure_with(&self, path: &Path, durable: bool) -> Result<()> {
         match std::fs::symlink_metadata(path) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if let Some(parent) = directory_parent(path) {
-                    self.ensure(parent)?;
+                    self.ensure_with(parent, durable)?;
                 }
                 match std::fs::create_dir(path) {
                     Ok(()) =>
@@ -300,7 +320,7 @@ impl DirectoryDurability {
         }
         // A failed parent barrier may leave the directory visible. Retrying an existing name
         // must flush that edge too, before creating a child or publishing a file inside it.
-        if let Some(parent) = directory_parent(path) {
+        if durable && let Some(parent) = directory_parent(path) {
             self.sync(parent)?;
         }
         Ok(())
@@ -434,6 +454,9 @@ impl ObjectStore {
             live,
             retired: Arc::new(AtomicBool::new(false)),
             durability,
+            unsynced: Arc::new(AtomicU64::new(0)),
+            written: Arc::new(AtomicU64::new(0)),
+            flushes: Arc::new(AtomicU64::new(0)),
         };
         if !store.root.join("git/HEAD").exists() {
             store.write_metadata(
@@ -635,6 +658,56 @@ impl ObjectStore {
             .join("roots")
             .join(format!("{snapshot}.json"))
             .exists()
+    }
+
+    /// Keeps the first watcher cursor even when this directory cannot be recorded as a whole.
+    /// A retry never moves the start past changes that already belong to this turn.
+    pub(crate) fn remember_changes(
+        &self,
+        snapshot: Id,
+        directory: &str,
+        attachment: Id,
+        cursor: Option<u64>,
+    ) -> Result<()> {
+        let path = self
+            .root
+            .join("results")
+            .join(format!("{snapshot}.changes"));
+        if path.exists() {
+            return Ok(());
+        }
+        let bytes = serde_json::to_vec(&RecordingCursor {
+            attachment,
+            directory: directory.to_owned(),
+            cursor,
+        })
+        .map_err(|error| HostError::Internal(error.to_string()))?;
+        self.write_metadata(&path, &bytes)
+    }
+
+    /// An attachment's journal can never stand in for one lost on detach or restart.
+    pub(crate) fn changes_cursor(
+        &self,
+        snapshot: Id,
+        directory: &str,
+        attachment: Id,
+    ) -> Result<Option<u64>> {
+        let path = self
+            .root
+            .join("results")
+            .join(format!("{snapshot}.changes"));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = read_bounded(&path, manifest::MANIFEST_MAX_EXPANDED_BYTES)?;
+        let saved: RecordingCursor = serde_json::from_slice(&bytes).map_err(|error| {
+            HostError::Unsupported(format!("recording cursor is invalid: {error}"))
+        })?;
+        Ok(
+            (saved.attachment == attachment && saved.directory == directory)
+                .then_some(saved.cursor)
+                .flatten(),
+        )
     }
 
     /// The first durable recording reply for an identity, including a reasoned fallback.
@@ -1102,16 +1175,26 @@ impl ObjectStore {
             .join(&oid[2..]))
     }
 
-    fn publish_object(&self, staged: tempfile::NamedTempFile, oid: &str) -> Result<()> {
+    /// Puts a staged object in its place. With `durable` the object and its directory are flushed
+    /// one by one before this returns; without it the object only counts as written, and
+    /// [`ObjectStore::make_durable`] flushes every such object together before a root names them.
+    fn publish_object(
+        &self,
+        staged: tempfile::NamedTempFile,
+        oid: &str,
+        durable: bool,
+    ) -> Result<()> {
         let path = self.object_path(oid)?;
         let parent = path
             .parent()
             .ok_or_else(|| HostError::Internal("a Git object has no directory".to_owned()))?;
-        self.durability.ensure(parent)?;
-        staged
-            .as_file()
-            .sync_all()
-            .map_err(|error| HostError::io("syncing a recorded object", error))?;
+        self.durability.ensure_with(parent, durable)?;
+        if durable {
+            staged
+                .as_file()
+                .sync_all()
+                .map_err(|error| HostError::io("syncing a recorded object", error))?;
+        }
         // Replacing this name publishes the same verified object content, and also repairs an
         // existing corrupt copy instead of declaring a newly recorded blob complete over it.
         staged
@@ -1121,11 +1204,62 @@ impl ObjectStore {
         if let Some(control) = &self.durability.control {
             control.record(DirectoryEvent::Published(path.clone()));
         }
-        self.durability.sync(parent)
+        if durable {
+            self.durability.sync(parent)
+        } else {
+            self.unsynced.fetch_add(1, Ordering::SeqCst);
+            self.written.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// How many objects were written without their own flush and have not been flushed since.
+    #[must_use]
+    pub fn unsynced_objects(&self) -> u64 {
+        self.unsynced.load(Ordering::SeqCst)
+    }
+
+    /// How many objects were ever written without their own flush: what the baselines have read.
+    #[must_use]
+    pub fn deferred_written(&self) -> u64 {
+        self.written.load(Ordering::SeqCst)
+    }
+
+    /// How many flushes of the whole store were made for such objects.
+    #[must_use]
+    pub fn flushes(&self) -> u64 {
+        self.flushes.load(Ordering::SeqCst)
+    }
+
+    /// Flushes every object written without its own flush (the cached copies of a baseline, the trees
+    /// of a state) in one call to the store's filesystem. A root is published only after this, so
+    /// it never names an object that a crash could still lose; what a baseline merely caches costs
+    /// one flush per pass instead of three per file.
+    pub fn make_durable(&self) -> Result<()> {
+        let pending = self.unsynced.load(Ordering::SeqCst);
+        if pending == 0 {
+            return Ok(());
+        }
+        platform::Dir::open_path(&self.root)
+            .and_then(|dir| dir.sync_filesystem())
+            .map_err(|error| HostError::io("flushing recorded objects", error))?;
+        self.unsynced.fetch_sub(pending, Ordering::SeqCst);
+        self.flushes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Stores raw file bytes as an owned Git blob and returns its Git and BLAKE3 identifiers.
     pub fn write_blob(&self, file: &mut File, size: u64) -> Result<(String, Hash)> {
+        self.write_blob_with(file, size, true)
+    }
+
+    /// Stores raw file bytes like [`ObjectStore::write_blob`], without flushing the object: for a
+    /// baseline, whose objects are flushed together by [`ObjectStore::make_durable`].
+    pub fn write_blob_deferred(&self, file: &mut File, size: u64) -> Result<(String, Hash)> {
+        self.write_blob_with(file, size, false)
+    }
+
+    fn write_blob_with(&self, file: &mut File, size: u64, durable: bool) -> Result<(String, Hash)> {
         let before = platform::file_meta(file)
             .map_err(|error| HostError::io("checking a recorded file", error))?;
         if !before.is_file() || before.size != size {
@@ -1177,12 +1311,22 @@ impl ObjectStore {
         let staged = encoder
             .finish()
             .map_err(|error| HostError::io("finishing a recorded blob", error))?;
-        self.publish_object(staged, &oid)?;
+        self.publish_object(staged, &oid, durable)?;
         Ok((oid, Hash::finish(&hash)))
     }
 
     /// Stores an owned Git blob or tree without any project attribute or filter processing.
     pub fn write_object(&self, kind: &str, bytes: &[u8]) -> Result<String> {
+        self.write_object_with(kind, bytes, true)
+    }
+
+    /// Stores an object like [`ObjectStore::write_object`], without flushing it: for the trees of a
+    /// state and the link text of a baseline, flushed together by [`ObjectStore::make_durable`].
+    pub fn write_object_deferred(&self, kind: &str, bytes: &[u8]) -> Result<String> {
+        self.write_object_with(kind, bytes, false)
+    }
+
+    fn write_object_with(&self, kind: &str, bytes: &[u8], durable: bool) -> Result<String> {
         if !matches!(kind, "blob" | "tree") {
             return Err(HostError::Unsupported(
                 "only recorded blobs and trees are stored".to_owned(),
@@ -1205,6 +1349,7 @@ impl ObjectStore {
                 .finish()
                 .map_err(|error| HostError::io("finishing a recorded object", error))?,
             &oid,
+            durable,
         )?;
         Ok(oid)
     }
@@ -1307,7 +1452,7 @@ impl ObjectStore {
                 self.verify_object(&oid, "tree", Some(body.len() as i64), Some(Hash::of(&body)))?;
                 oid
             } else {
-                self.write_object("tree", &body)?
+                self.write_object_deferred("tree", &body)?
             };
             let path = RelPath::parse(&directory, PathStyle::Posix)?;
             if let Some(parent) = path.parent() {
@@ -1326,6 +1471,7 @@ impl ObjectStore {
 
     /// Publishes a complete root only after its manifest and every owned object are durable.
     pub fn keep(&self, state: &StateRoot, manifest: &[u8]) -> Result<()> {
+        self.make_durable()?;
         RelPath::parse(&state.directory, PathStyle::Posix)?;
         if Hash::of(manifest) != state.manifest_blob {
             return Err(HostError::Unsupported(

@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-envhost --lib
+test -p orch-envhost --test environment
+test -p orch-engine --test source --test source_uniform --test live_mounts
+test -p orch-connector-core --test recording_keys --test link_cuts
+web typecheck
+web lint
+web test -- tests/unit/large-trees.test.ts tests/unit/source-words.test.ts tests/unit/thread-timeline.test.ts

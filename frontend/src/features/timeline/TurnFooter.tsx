@@ -153,7 +153,7 @@ function TurnFooterView({ turnId,inputItemId }: { turnId: string;inputItemId?:st
   const files = changed.files.length;
   const { added, removed } = changed;
   if (files > 0) parts.push(<span key="changed" className="inline-flex flex-wrap items-center gap-1" data-turn-changes={turnId}>
-    {detail === 'summary' ? t('thread.viewModes.files', { count: files }) : t('timeline.footer.changed', { count: files, added, removed })}
+    {detail === 'summary' || changed.partial ? t('thread.viewModes.files', { count: files }) : t('timeline.footer.changed', { count: files, added, removed })}
     {inspection === undefined && <><span aria-hidden>·</span><button type="button" className="rounded-sm underline underline-offset-2 hover:text-text" onClick={() => openTurnReview(threadId, turnId)}>{t('thread.turnFiles.review')}</button></>}
   </span>);
   return (

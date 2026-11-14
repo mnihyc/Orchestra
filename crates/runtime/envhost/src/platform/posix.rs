@@ -273,6 +273,19 @@ impl Dir {
         rustix::fs::fsync(&self.fd).map_err(io_error)
     }
 
+    /// Writes everything not yet on disk in the filesystem that holds this directory, in one call
+    /// where the system has one (Linux); elsewhere this directory's own changes.
+    pub fn sync_filesystem(&self) -> io::Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            rustix::fs::syncfs(&self.fd).map_err(io_error)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        {
+            self.sync()
+        }
+    }
+
     /// Sets the permission bits of the file or directory called `name`, never of a link.
     pub fn set_mode(&self, name: &OsStr, mode: u32) -> io::Result<()> {
         plain(name)?;
