@@ -78,6 +78,8 @@ pub const FILES_NATIVE_IMAGE_BYTES: &str = "20971520";
 pub const THREAD_SIDE_THREADS: &str = "true";
 pub const THREAD_SIDE_MAX: &str = "4";
 pub const THREAD_SIDE_IDLE_HOURS: &str = "24";
+/// Five minutes shows that the notice may come later than the default.
+pub const THREAD_SILENT_AFTER_SECS: &str = "300";
 pub const THREAD_INPUTS_WITHOUT_USE: &str = r#""held""#;
 pub const THREAD_SWITCH_HISTORY: &str = r#""carry""#;
 pub const THREAD_SWITCH_CARRY_SHARE: &str = "80";

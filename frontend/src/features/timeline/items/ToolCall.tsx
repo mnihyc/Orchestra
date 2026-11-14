@@ -159,8 +159,8 @@ function ToolCallRowView({ item }: { item: ToolItem }) {
     }
     return null;
   });
-  // Every tool starts as one row, including the most recent edit and failed command.
-  const open = ui.steps.get(item.id) ?? (context.liveTools === true && running);
+  // Every tool starts as one row, including the most recent edit and failed command; reading Verbose, a running one is open as it prints.
+  const open = ui.steps.get(item.id) ?? (context.detail !== 'normal' && context.readOnly !== true && running);
   const raw = ui.raw.has(item.id);
   const tookMs = running ? Math.max(0, now - Date.parse(item.payload.started_at)) : item.payload.duration_ms;
   const took = tookMs === null || tookMs < 1000 ? null : formatSpan(tookMs, format);

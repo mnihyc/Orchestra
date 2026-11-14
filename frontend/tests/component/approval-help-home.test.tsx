@@ -21,7 +21,7 @@ vi.mock('@/realtime/stores/tree', async (load) => ({ ...await load<typeof TreeSt
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
 
 const owner = userRef(me(1, 'ada', 'Ada'));
-const context: TimelineContext = { threadId: 'help-thread', threadName: 'Deploy', detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: 'help-thread', threadName: 'Deploy', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: true, canManage: true, live: true, lit: null, selection: NOT_PICKING };
 const native = harnessApproval('command-help', { threadId: context.threadId, itemId: 'command-item', title: 'Run checks', requester: owner,
   request: { request_kind: 'command', options: ALLOW_DENY, detail: { command: 'check redirect', cwd: '/workspace', reason: null } } });

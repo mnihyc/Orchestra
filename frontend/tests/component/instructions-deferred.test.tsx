@@ -10,7 +10,7 @@ import { marker } from '../doubles/thread-rows';
 import { show } from './support';
 
 const context: TimelineContext = {
-  threadId: 'resumed-thread', threadName: 'Resumed work', detail: 'steps', recent: new Set(),
+  threadId: 'resumed-thread', threadName: 'Resumed work', detail: 'normal',
   layout: 'one', setLayout: () => undefined, meId: null, canInteract: true, canManage: false,
   live: true, lit: null, selection: NOT_PICKING,
 };
@@ -34,7 +34,7 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     const item = { ...marker('instructions-note', payload), seq_created: 1, seq_updated: 1 };
     if (item.kind !== 'marker') throw new Error('The fixture is a history marker');
     const view = viewFromRows(EMPTY_VIEW, { items: [item] }, false);
-    const rows = buildRows(view, { detail: 'steps', hideHistory: false, foldOpened: new Set(), meId: null });
+    const rows = buildRows(view, { detail: 'normal', hideHistory: false, meId: null });
     expect(rows.filter((row) => row.kind === 'markers').flatMap((row) => row.ids)).toEqual([item.id]);
     show(<TimelineContextValue.Provider value={context}><MarkerLine item={item} /></TimelineContextValue.Provider>);
     const sentence = markerSentence(payload, i18n.t.bind(i18n), { locale: language });
@@ -43,7 +43,9 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     expect(sentence).toContain('Codex');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
-    expect(document.querySelector('time')).toHaveAttribute('dateTime');
+    // A line of history has no time beside it; the moment is its hover text.
+    expect(document.querySelector('time')).toBeNull();
+    expect(screen.getByText(sentence).closest('[title]')).not.toBeNull();
     expect(fetch).not.toHaveBeenCalled();
   });
 });

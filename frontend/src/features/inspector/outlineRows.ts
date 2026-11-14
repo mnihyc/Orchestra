@@ -6,6 +6,25 @@ import type { ThreadView } from '@/realtime/stores/thread';
 const visible = (kind: OutlineKind) => kind === 'turn' || kind === 'user_message' || kind === 'agent_message' || kind === 'milestone' || kind === 'approval' || kind === 'error';
 const key = (entry: OutlineEntry) => entry.kind === 'turn' ? `turn:${entry.turn_ordinal}` : `${entry.kind}:${entry.item_id}`;
 
+/**
+ * What the agent says between its tools is not a point of the conversation worth going to: of its messages in one stretch (from a turn or
+ * a person's message to the next) only the last is listed, which is its answer.
+ */
+function withoutCommentary(entries: readonly OutlineEntry[]): OutlineEntry[] {
+  const dropped = new Set<OutlineEntry>();
+  let stretch: OutlineEntry[] = [];
+  const close = () => {
+    for (const entry of stretch.slice(0, -1)) dropped.add(entry);
+    stretch = [];
+  };
+  for (const entry of entries) {
+    if (entry.kind === 'turn' || entry.kind === 'user_message') close();
+    else if (entry.kind === 'agent_message') stretch.push(entry);
+  }
+  close();
+  return entries.filter((entry) => !dropped.has(entry));
+}
+
 /** Keep older server entries, replace held ones with their current text, and add new live points. */
 export function outlineRows(stored: readonly OutlineEntry[], view: Pick<ThreadView, 'order' | 'items' | 'turns'>): OutlineEntry[] {
   const entries = new Map(stored.filter((entry) => visible(entry.kind)).map((entry) => [key(entry), entry]));
@@ -36,5 +55,5 @@ export function outlineRows(stored: readonly OutlineEntry[], view: Pick<ThreadVi
       if (typeof args === 'object' && args !== null && 'category' in args && args.category === 'milestone' && 'title' in args && typeof args.title === 'string') add(item, 'milestone', args.title);
     }
   }
-  return [...entries.values()].sort((a, b) => a.seq - b.seq || Number(b.kind === 'turn') - Number(a.kind === 'turn'));
+  return withoutCommentary([...entries.values()].sort((a, b) => a.seq - b.seq || Number(b.kind === 'turn') - Number(a.kind === 'turn')));
 }

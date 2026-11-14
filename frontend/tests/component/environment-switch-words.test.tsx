@@ -14,7 +14,7 @@ import { marker } from '../doubles/thread-rows';
 import { resourcePlan } from './plan-resource-fixtures';
 import { show } from './support';
 
-const context: TimelineContext = { threadId: 'work', threadName: 'Work', detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: 'work', threadName: 'Work', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: true, canManage: false, live: true, lit: null, selection: NOT_PICKING };
 const plan = resourcePlan('work');
 if (plan.from.kind !== 'agent' || plan.from.environment === null) throw new Error('The environment-switch fixture needs its actual source workspace');

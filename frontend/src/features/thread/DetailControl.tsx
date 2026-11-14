@@ -1,16 +1,16 @@
-/** Three viewing intents use the conversation's existing depth and live-tool preferences. */
+/** The three ways to read a thread: Normal folds the work of a turn into one line, Verbose draws every step, Diagnostics adds the program's own state. */
 import { useTranslation } from 'react-i18next';
-import type { ThreadViewMode, TimelinePreferences } from '@/features/timeline/preferences';
+import type { TimelinePreferences } from '@/features/timeline/preferences';
+import type { WorkDetail } from '@/features/timeline/rows';
 import { Select } from '@/ui/Select';
 
-export function DetailControl({ preferences }: { preferences: Pick<TimelinePreferences, 'detail' | 'liveTools' | 'setViewMode'> }) {
+export function DetailControl({ preferences }: { preferences: Pick<TimelinePreferences, 'detail' | 'setDetail'> }) {
   const { t } = useTranslation();
-  const mode: ThreadViewMode = preferences.detail === 'summary' ? 'focused' : preferences.liveTools ? 'live' : 'full';
   return <div data-thread-detail className="min-w-0 max-w-full">
-    <Select<ThreadViewMode> label={t('thread.viewModes.label')} hideLabel value={mode} onValueChange={preferences.setViewMode} options={[
-      { value: 'focused', label: t('thread.viewModes.focused'), description: t('thread.viewModes.focusedAbout') },
-      { value: 'full', label: t('thread.viewModes.full'), description: t('thread.viewModes.fullAbout') },
-      { value: 'live', label: t('thread.viewModes.live'), description: t('thread.viewModes.liveAbout') },
+    <Select<WorkDetail> label={t('thread.viewModes.label')} hideLabel value={preferences.detail} onValueChange={preferences.setDetail} options={[
+      { value: 'normal', label: t('thread.viewModes.normal') },
+      { value: 'verbose', label: t('thread.viewModes.verbose') },
+      { value: 'diagnostics', label: t('thread.viewModes.diagnostics') },
     ]} />
   </div>;
 }

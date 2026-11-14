@@ -16,7 +16,7 @@ import { show } from './support';
 const ask = vi.hoisted(() => vi.fn());
 vi.mock('@/features/side-threads/ask', () => ({ openSideAsk: ask }));
 const THREAD = 'aside-entry';
-const context: TimelineContext = { threadId: THREAD, threadName: 'Review the redirect', detail: 'steps', recent: new Set(['source-turn']), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: THREAD, threadName: 'Review the redirect', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: true, canManage: false, live: true, lit: null, selection: NOT_PICKING };
 const item = { ...agentMessage('source-answer', 'The same-origin test is important.', { turn: 'source-turn' }), thread_id: THREAD, seq_created: 1, seq_updated: 1 };
 const thread = { id: THREAD, name: context.threadName, seq: 1, archived: false, lock: null, side_of: null, binding: null,

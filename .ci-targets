@@ -1,0 +1,9 @@
+# n41-thread: the thread page joined from its two lanes: a fixed header and dock with one status line, a turn as message, one work line, answer and card, three ways to read, message navigation, the agents panel with switching, and the setting of how long a silent turn waits before the line says so
+fmt
+clippy
+contracts
+test -p orch-settings-contract --lib
+web typecheck
+web lint
+web test
+web build

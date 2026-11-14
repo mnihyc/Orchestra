@@ -1414,6 +1414,33 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
+    "key": "thread.silent_after_secs",
+    "title": "Silence notice",
+    "description": "How many seconds nothing may arrive from a running agent, with no tool running, before a thread's status line says how long nothing came.",
+    "group": "collaboration",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic"
+    ],
+    "merge": "replace",
+    "default": 120,
+    "example": 300,
+    "text_key": "day100.builtin.thread.silent_after_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
     "key": "thread.goal.max_turns",
     "title": "Goal turns",
     "description": "The most turns a goal may use here; 0 is no limit. A goal may set a stricter own limit; it cannot raise a limit set above it. Reaching a limit stops the goal and says which.",

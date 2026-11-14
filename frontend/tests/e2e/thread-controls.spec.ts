@@ -31,58 +31,22 @@ async function bounds(locator: Locator) {
   return rect!;
 }
 
-/** Check painted text, rather than textContent alone: an ellipsis keeps the missing words in the DOM. */
-async function fullyShown(locator: Locator): Promise<void> {
-  await expect(locator).toBeVisible();
-  const text = await locator.evaluate((element) => {
-    const box = element.getBoundingClientRect();
-    const range = document.createRange();
-    range.selectNodeContents(element);
-    return {
-      box: { left: box.left, right: box.right, top: box.top, bottom: box.bottom },
-      lines: Array.from(range.getClientRects(), (line) => ({ left: line.left, right: line.right, top: line.top, bottom: line.bottom })),
-    };
-  });
-  expect(text.lines.length).toBeGreaterThan(0);
-  for (const line of text.lines) {
-    expect(line.left).toBeGreaterThanOrEqual(text.box.left - 1);
-    expect(line.right).toBeLessThanOrEqual(text.box.right + 1);
-    expect(line.top).toBeGreaterThanOrEqual(text.box.top - 1);
-    expect(line.bottom).toBeLessThanOrEqual(text.box.bottom + 1);
-  }
-}
-
 for (const width of [1280, 1440, 390, 400]) {
   test(`the header and every message control fit with readable compact labels at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await open(page);
     const header = page.locator('[data-thread-header]');
-    const quick = header.locator('[data-thread-quick-actions]');
-    const actionsMode = await header.getAttribute('data-thread-actions-mode');
     const frame = await bounds(header), title = await bounds(header.getByRole('heading', { name: 'Main thread' }));
     const state = await bounds(header.getByText('Idle', { exact: true }));
     expect(state.x).toBeGreaterThanOrEqual(frame.x); expect(state.x + state.width).toBeLessThanOrEqual(frame.x + frame.width);
-    const actionRow = await bounds(header.locator('[data-thread-actions-row]'));
-    if (width < 640) expect(actionRow.y).toBeGreaterThanOrEqual(title.y + title.height);
-    const frequent = ['Duplicate', 'Duplicate to…', 'Side thread…', 'Switch provider or agent…', 'Find in the conversation'];
-    if (actionsMode === 'all') {
-      for (const name of frequent) {
-        const button = quick.getByRole('button', { name, exact: true }), rect = await bounds(button);
-        expect(rect.height).toBeLessThanOrEqual(29); expect(rect.x).toBeGreaterThanOrEqual(frame.x - 1);
-        expect(rect.x + rect.width).toBeLessThanOrEqual(Math.min(width, frame.x + frame.width) + 1); await expect(button).toHaveText('');
-      }
-    } else {
-      await expect(quick).not.toBeVisible(); await header.locator('[data-thread-more]').click();
-      for (const name of frequent) await expect(page.getByRole('menuitem', { name, exact: true })).toHaveCount(1);
-      await page.keyboard.press('Escape');
-    }
-    const actionCenters: number[] = [];
-    for (const action of ['Star', 'Notifications for this thread', 'Share thread', 'Actions for Main thread']) {
-      if (actionsMode === 'menu' && action !== 'Actions for Main thread') continue;
-      const button = await bounds(header.getByRole('button', { name: action, exact: true }));
-      actionCenters.push(button.y + button.height / 2); expect(button.x + button.width).toBeLessThanOrEqual(width);
-    }
-    expect(Math.max(...actionCenters) - Math.min(...actionCenters)).toBeLessThanOrEqual(2);
+    // One row: the title and the state stand on one line, and the row is as high as a control.
+    expect(frame.height).toBeLessThanOrEqual(40);
+    expect(Math.abs(title.y + title.height / 2 - (state.y + state.height / 2))).toBeLessThanOrEqual(4);
+    const menu = await bounds(header.getByRole('button', { name: 'Actions for Main thread', exact: true }));
+    expect(menu.x + menu.width).toBeLessThanOrEqual(width);
+    await header.locator('[data-thread-more]').click();
+    for (const name of ['Duplicate', 'Duplicate to…', 'Side thread…', 'Switch provider or agent…', 'Find in the conversation', 'Star', 'Share thread']) await expect(page.getByRole('menuitem', { name, exact: true })).toHaveCount(1);
+    await page.keyboard.press('Escape');
     await expect(header.getByText('Add a description')).toHaveCount(0);
     await expect(header.getByRole('button', { name: /Model and effort|Approval mode|Show what fills the context|Edit links/ })).toHaveCount(0);
     const row = controls(page);
@@ -170,20 +134,21 @@ for (const width of [1440, 400]) {
   });
 }
 
-test('at 400 px a long title keeps every word above its state and actions', async ({ page }) => {
+test('at 400 px a long title is cut to one line with its whole name under the pointer, and the head stays one row', async ({ page }) => {
   await page.setViewportSize({ width: 400, height: 900 });
   await open(page);
   const name = 'New thread about the release and the final provider review';
   await emit(MAIN, { thread: { name } });
   const header = page.locator('[data-thread-header]');
   const heading = header.getByRole('heading', { name, exact: true });
-  await fullyShown(heading);
-  const title = await bounds(heading);
+  await expect(heading).toBeVisible();
+  await expect(heading).toHaveAttribute('title', name);
+  const frame = await bounds(header), title = await bounds(heading);
   const state = await bounds(header.getByText('Idle', { exact: true }));
+  expect(frame.height).toBeLessThanOrEqual(40);
   expect(title.x + title.width).toBeLessThanOrEqual(400);
-  expect(state.y).toBeGreaterThanOrEqual(title.y + title.height);
-  expect((await bounds(header.locator('[data-thread-actions-row]'))).y).toBeGreaterThanOrEqual(title.y + title.height);
-  await expect(header.getByRole('button', { name: 'Share thread', exact: true })).toBeVisible();
+  expect(state.x + state.width).toBeLessThanOrEqual(400);
+  expect(Math.abs(title.y + title.height / 2 - (state.y + state.height / 2))).toBeLessThanOrEqual(4);
   await header.getByRole('button', { name: /Rename/ }).click();
   await expect(header.getByRole('textbox')).toHaveValue(name);
 });

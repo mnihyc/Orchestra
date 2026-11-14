@@ -20,7 +20,7 @@ const given = vi.hoisted(() => vi.fn<(thread: string, selection: { turn?: string
 vi.mock('@/features/inspector/givenFocus', () => ({ openGiven: given }));
 vi.mock('@/features/source/Restore', () => ({ RestoreFromTurn: () => null }));
 const THREAD = 'accessibility-thread';
-const context: TimelineContext = { threadId: THREAD, threadName: 'Login', detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: THREAD, threadName: 'Login', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: false, canManage: false, live: true, lit: null, selection: NOT_PICKING };
 const stored = (state: 'completed' | 'running' = 'completed') => turn('turn-1', { ordinal: 1, state, inputId: 'input-1', completedAt: state === 'completed' ? '2026-10-01T10:00:01Z' : null });
 const pointer = (id: string, record: string) => marker(id, { marker: 'orch_context', data: { model_input_id: record, purpose: 'input' } }, { turn: 'turn-1' });

@@ -8,8 +8,8 @@
  * is marked read two seconds after it has been on screen with the tab in front.
  */
 import { useCompactControls } from '@/features/workbench/Narrow';
-import { ArrowDown, Bot, LoaderCircle } from 'lucide-react';
-import { memo, type ReactNode, type Ref, useCallback, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { Bot, LoaderCircle } from 'lucide-react';
+import { type ReactNode, type Ref, useCallback, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { StateLine } from '@/ui/StateLine';
 import { useStore } from 'zustand';
@@ -21,25 +21,20 @@ import { captureThreadRead, isCurrentThreadRead } from '@/api/threadRead';
 import { type ItemSelection, NOT_PICKING, type PromptFocus, type SelectPromptVersion, type TimelineContext, TimelineContextValue, useTimelineContext } from '@/features/timeline/context';
 import { usePromptFocus } from '@/features/timeline/usePromptFocus';
 import { NewLine } from '@/features/timeline/Catchup';
-import { AgentMessage } from '@/features/timeline/items/AgentMessage';
-import { AnnouncementCard } from '@/features/timeline/items/Announcement';
 import { BeforeOrchHeading } from '@/features/timeline/items/BeforeOrch';
-import { ApprovalCard } from '@/features/timeline/items/Approval';
-import { ErrorRow } from '@/features/timeline/items/Error';
 import { MarkerLine } from '@/features/timeline/items/Marker';
-import { Plan } from '@/features/timeline/items/Plan';
-import { Reasoning } from '@/features/timeline/items/Reasoning';
-import { ToolCallRow } from '@/features/timeline/items/ToolCall';
-import { UserMessage } from '@/features/timeline/items/UserMessage';
+import { StartLine } from '@/features/timeline/items/StartLine';
+import { ItemRow } from '@/features/timeline/ItemRow';
 import { useTimelinePreferences } from '@/features/timeline/preferences';
-import { buildRows, estimateRow, type Row, recentTurns } from '@/features/timeline/rows';
-import { StatusLine } from '@/features/timeline/StatusLine';
+import { buildRows, estimateRow, type Row } from '@/features/timeline/rows';
 import { SideThreadLaneRow } from '@/features/timeline/SideThreadLane';
-import { useThreadUi } from '@/features/timeline/state';
+import { timelineUi, useThreadUi } from '@/features/timeline/state';
 import { keepTimelinePosition, readTimelinePosition } from './position';
-import { WorkFold } from '@/features/timeline/Steps';
+import { WorkGroup } from '@/features/timeline/Steps';
 import { TurnFooter } from '@/features/timeline/TurnFooter';
 import { reloadThread, useSocketStatus } from '@/realtime/live';
+import { isCancellation } from '@/realtime/sync';
+import { retryPause } from '@/lib/requests';
 import { ThreadReadProvider, useThreadReadRef } from '@/realtime/threadReadContext';
 import { resultThreadRead, type ThreadReadRef } from '@/realtime/threadScope';
 import { threadReadOnly, threadViewOf, threadWriter, useThreadPart, useThreadView } from '@/realtime/stores/thread';
@@ -48,7 +43,6 @@ import { useAfterDelay } from '@/lib/afterDelay';
 import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
-import { InlineAlert } from '@/ui/InlineAlert';
 import { SkeletonGroup, Skeleton } from '@/ui/Skeleton';
 import { VirtualList, type VirtualListHandle } from '@/ui/VirtualList';
 
@@ -68,21 +62,33 @@ function StoredHistory({ snapshot, read }: { snapshot: ThreadSync; read: ThreadR
   const key = snapshot.thread.id;
   const preferences = useTimelinePreferences(key);
   const view = useThreadView(key);
-  const ui = useThreadUi(key);
   useEffect(() => {
     threadWriter.reset(read, snapshot, snapshot.has_older);
     return () => threadWriter.evict(read);
   }, [read, snapshot]);
-  const rows = buildRows(view, { detail: preferences.detail, hideHistory: preferences.hideHistory, foldOpened: ui.folds, meId: null }).filter((row) => row.kind !== 'divider' && row.kind !== 'status');
+  const rows = buildRows(view, { detail: preferences.detail, hideHistory: preferences.hideHistory, meId: null }).filter((row) => row.kind !== 'divider' && row.kind !== 'status');
   const context: TimelineContext = { threadId: key, threadName: snapshot.thread.name,
     inspection: { threadId: snapshot.thread.id, ...(snapshot.projection === undefined || snapshot.projection === null ? {} : { continuationId: snapshot.projection.viewed_continuation_id }) },
-    detail: preferences.detail, recent: recentTurns(view.turns), layout: preferences.layout, setLayout: preferences.setLayout, meId: null, canInteract: false, canManage: false, live: false, lit: null, selection: NOT_PICKING };
+    detail: preferences.detail, layout: preferences.layout, setLayout: preferences.setLayout, meId: null, canInteract: false, canManage: false, live: false, lit: null, selection: NOT_PICKING };
   return <TimelineContextValue.Provider value={context}><ol role="list" className="mx-auto flex w-full max-w-(--reading-width) list-none flex-col gap-6 px-2 py-4" data-stored-timeline>{rows.map((row) => <li key={row.key}><RowView row={row} /></li>)}</ol></TimelineContextValue.Provider>;
+}
+
+/** How an item is brought into view: where it stands (the middle, or the top of the view) and whether it is lit for a moment. */
+export interface RevealOptions {
+  align?: 'start' | 'center';
+  highlight?: boolean;
+}
+
+/** Where the reader stands in the conversation: at its end or not, how many rows came since, and whether the newest part is still to be read. */
+export interface FollowState {
+  atEnd: boolean;
+  away: number;
+  ahead: boolean;
 }
 
 export interface TimelineHandle {
   /** Brings an item into view (reading it from the server if it is not held). */
-  scrollToItem: (itemId: string) => void;
+  scrollToItem: (itemId: string, options?: RevealOptions) => void;
   /** Brings the newest end into view. */
   scrollToEnd: () => void;
   /** Rows in view, for the bar that says an approval waits off screen. */
@@ -103,6 +109,12 @@ export interface TimelineProps {
   empty: ReactNode;
   /** The ids of the items in view, as they change. */
   onVisible?: (ids: ReadonlySet<string>) => void;
+  /** The item at the top of the view, as it changes: a row's own item, or the first of the items a line stands for. */
+  onTop?: (itemId: string | null) => void;
+  /** Where the reader stands in the conversation, as it changes; the screen draws the button that goes to the end. */
+  onFollow?: (state: FollowState) => void;
+  /** Whether the view keeps the end in sight while the reader is at it (the default); the screen pauses it while a sent message holds the top. */
+  follow?: boolean;
   /** The items being picked, to forward, quote or discuss: the screen holds them, the items show them. */
   selection?: ItemSelection;
   onVersionSelect?: SelectPromptVersion | undefined;
@@ -130,7 +142,7 @@ function Skeletons() {
   );
 }
 
-export function Timeline({ viewport, threadId, shown = true, item: linked, items: alsoLinked = null, empty, onVisible, selection = NOT_PICKING, onVersionSelect, focusPrompt, highlightLink = true, pinApprovals = false, ref }: TimelineProps) {
+export function Timeline({ viewport, threadId, shown = true, item: linked, items: alsoLinked = null, empty, onVisible, onTop, onFollow, follow = true, selection = NOT_PICKING, onVersionSelect, focusPrompt, highlightLink = true, pinApprovals = false, ref }: TimelineProps) {
   const compact = useCompactControls();
   const { t } = useTranslation();
   const read = useThreadReadRef(threadId);
@@ -159,37 +171,44 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
   const [older, setOlder] = useState({ scope: requestScope, loading: false, failed: false });
   const loadingOlder = older.scope === requestScope && older.loading;
   const olderFailed = older.scope === requestScope && older.failed;
+  // After a read of older items really failed, the reader's next scroll to the top does not ask again at once: it waits as long as
+  // a read waits between its attempts (one, two, four seconds), and Try again does not wait.
+  const olderPause = useRef({ failures: 0, until: 0 });
   const visible = useRef<ReadonlySet<string>>(new Set());
   const sideRevealed = useRef<{ threadId: string; request: number } | null>(null);
 
   const rows = useMemo<Row[]>(
-    () => buildRows(view, { detail: preferences.detail, hideHistory: preferences.hideHistory, foldOpened: ui.folds, meId }),
+    // What the thread is doing now stands in the dock, as the one line there; the conversation ends with its last item.
+    () => buildRows(view, { detail: preferences.detail, hideHistory: preferences.hideHistory, meId }).filter((row) => row.kind !== 'status'),
     // The rows depend on these parts of the view and on nothing else.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [view.order, view.items, view.turns, view.thread, view.read, view.openedReadSeq, view.openedSeq, preferences.detail, preferences.hideHistory, ui.folds, meId],
+    [view.order, view.items, view.turns, view.thread, view.read, view.openedReadSeq, view.openedSeq, preferences.detail, preferences.hideHistory, meId],
   );
-  const recent = useMemo(() => recentTurns(view.turns), [view.turns]);
-  if (positionRead === 'waiting' && restored?.item !== null && restored?.item !== undefined && view.items.has(restored.item)) setPositionRead('done');
+  // What is drawn now, for a link that names an item among the work of a turn.
+  const drawn = useRef(rows);
+  useEffect(() => { drawn.current = rows; }, [rows]);
+  // The read around the place the reader left is started once. What it waits on is whether the item is held, not the rows
+  // that come and go as the thread moves: a read restarted by every live row would be cancelled by the next one for ever.
+  const restoredItem = restored === null ? null : restored.item;
+  const restoredHeld = restoredItem !== null && view.items.has(restoredItem);
+  if (positionRead === 'waiting' && restoredHeld) setPositionRead('done');
   useEffect(() => {
-    if (positionRead !== 'waiting' || view.loaded === 'none' || restored?.item === null || restored?.item === undefined) return;
-    if (view.items.has(restored.item)) return;
+    if (positionRead !== 'waiting' || view.loaded === 'none' || restoredItem === null || restoredHeld) return;
     const captured = captureThreadRead(read);
     const controller = new AbortController();
-    fetchItems(read, { around: restored.item }, undefined, controller.signal).then((reply) => {
+    fetchItems(read, { around: restoredItem }, undefined, controller.signal).then((reply) => {
       if (!isCurrentThreadRead(captured) || controller.signal.aborted) return;
       threadWriter.window(read, reply.items, reply.has_older, reply.has_newer);
       setPositionRead('done');
     }).catch(() => { if (isCurrentThreadRead(captured) && !controller.signal.aborted) setPositionRead('failed'); });
     return () => controller.abort();
-  }, [positionRead, view.loaded, view.items, restored, read]);
+  }, [positionRead, view.loaded, restoredItem, restoredHeld, read]);
   const context = useMemo<TimelineContext>(
     () => ({
       threadId,
       threadName: thread?.name ?? '',
       detail: preferences.detail,
-      liveTools: !readOnly && preferences.liveTools,
       pinApprovals: pinApprovals && !readOnly,
-      recent,
       layout: preferences.layout,
       setLayout: preferences.setLayout,
       meId,
@@ -201,38 +220,58 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
       lit,
       selection: readOnly ? NOT_PICKING : selection,
     }),
-    [threadId, thread, preferences.detail, preferences.liveTools, preferences.layout, preferences.setLayout, recent, meId, socket.phase, lit, selection, readOnly, onVersionSelect, pinApprovals],
+    [threadId, thread, preferences.detail, preferences.layout, preferences.setLayout, meId, socket.phase, lit, selection, readOnly, onVersionSelect, pinApprovals],
   );
 
   // New rows below the reader's place: counted since they were last at the end.
   if (atEnd && seen !== rows.length) setSeen(rows.length);
   const away = atEnd ? 0 : Math.max(0, rows.length - seen);
+  const ahead = view.loaded === 'window' && view.hasNewer;
+  const rowsAway = view.loaded === 'window' ? 0 : away;
+  useEffect(() => { onFollow?.({ atEnd, away: rowsAway, ahead }); }, [onFollow, atEnd, rowsAway, ahead]);
 
-  // Older items, read when the reader comes to the top.
-  const loadOlder = useCallback(() => {
+  // Older items, read when the reader comes to the top. A read that was cancelled or overtaken (the reader went on scrolling, the
+  // history was replaced) is no failure and leaves nothing on the screen; one that failed leaves a small line, and the
+  // conversation stays where it is.
+  const readOlder = useCallback(() => {
     if (!view.hasOlder || loadingOlder || view.order.length === 0) return;
     const first = view.items.get(view.order[0] ?? '');
     if (first === undefined) return;
     const captured = captureThreadRead(read);
     setOlder({ scope: requestScope, loading: true, failed: false });
     fetchItems(read, { before: first.seq_created, stream: 'main' })
-      .then((reply) => threadWriter.older(read, reply.items, reply.has_older))
-      .catch(() => { if (isCurrentThreadRead(captured)) setOlder({ scope: requestScope, loading: false, failed: true }); })
+      .then((reply) => {
+        olderPause.current = { failures: 0, until: 0 };
+        threadWriter.older(read, reply.items, reply.has_older);
+      })
+      .catch((error: unknown) => {
+        if (!isCurrentThreadRead(captured) || isCancellation(error)) return;
+        olderPause.current = { failures: olderPause.current.failures + 1, until: Date.now() + retryPause(olderPause.current.failures) };
+        setOlder({ scope: requestScope, loading: false, failed: true });
+      })
       .finally(() => setOlder((held) => held.scope === requestScope ? { ...held, loading: false } : held));
   }, [view.hasOlder, view.order, view.items, loadingOlder, read, requestScope]);
+  const loadOlder = useCallback(() => {
+    if (Date.now() < olderPause.current.until) return;
+    readOlder();
+  }, [readOlder]);
+  const loadOlderAgain = useCallback(() => {
+    olderPause.current.until = 0;
+    readOlder();
+  }, [readOlder]);
 
   // A link names an item: it is brought into view, from the server if the page does not hold it.
   const bring = useCallback(
-    (itemId: string, also: readonly string[] = [], highlight = true) => {
+    (itemId: string, also: readonly string[] = [], highlight = true, align: 'start' | 'center' = 'center') => {
       const captured = captureThreadRead(read);
       const show = () => {
         // Rows are drawn after this render; the list finds the row by its key, which for an item is its id,
-        // and for an item inside the folded work of a turn is the line that stands for that turn.
+        // and for an item among the work of a turn is the group that holds it, which is opened to show it.
         requestAnimationFrame(() => {
           if (!isCurrentThreadRead(captured)) return;
-          const held = threadViewOf(read).items.get(itemId);
-          const folded = held?.turn_id === null || held === undefined ? null : `fold:${held.turn_id}`;
-          if (list.current?.scrollToKey(itemId, 'center') === true || (folded !== null && list.current?.scrollToKey(folded, 'center') === true)) {
+          const group = drawn.current.find((row) => row.kind === 'work' && row.ids.includes(itemId));
+          if (group !== undefined) timelineUi.setStep(read, group.key, true);
+          if (list.current?.scrollToKey(itemId, align) === true || (group !== undefined && list.current?.scrollToKey(group.key, align) === true)) {
             if (highlight) {
               const lighted: ReadonlySet<string> = new Set([itemId, ...also]);
               setLit(lighted);
@@ -263,7 +302,8 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
     if (view.loaded === 'window' && view.hasNewer) reloadThread(read);
     list.current?.scrollToEnd();
   }, [linkKey, read, view.loaded, view.hasNewer]);
-  useImperativeHandle(ref, () => ({ scrollToItem: bring, scrollToEnd: jump, visibleItemIds: () => visible.current }), [bring, jump]);
+  const reveal = useCallback((itemId: string, options?: RevealOptions) => bring(itemId, [], options?.highlight ?? true, options?.align ?? 'center'), [bring]);
+  useImperativeHandle(ref, () => ({ scrollToItem: reveal, scrollToEnd: jump, visibleItemIds: () => visible.current }), [reveal, jump]);
   useEffect(() => {
     if (linked !== null && linkActive && view.loaded !== 'none') bring(linked, alsoLinked ?? [], highlightLink);
     // Only a new link brings its item; the conversation growing does not.
@@ -339,12 +379,6 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
     );
   }
 
-  const showJump = !atEnd || view.loaded === 'window' && view.hasNewer;
-  const jumpButton = (
-    <Button className="pointer-events-auto shadow-md" variant="secondary" size="sm" icon={<ArrowDown aria-hidden />} onClick={jump}>
-      {view.loaded !== 'window' && away > 0 ? t('timeline.newBelow', { count: away }) : t('timeline.jump')}
-    </Button>
-  );
   return (
     <TimelineContextValue.Provider value={context}>
       <div ref={root} className={viewport === undefined ? "relative flex h-full min-h-0 flex-col" : "relative flex min-h-16 flex-col"}>
@@ -356,7 +390,7 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
               </span>
             ) : (
               <StateLine role="alert" tone="danger" compact className="shadow-sm" message={t('timeline.earlierFailed')}
-                action={<Button size="sm" variant="ghost" onClick={loadOlder}>{t('common.tryAgain')}</Button>} />
+                action={<Button size="sm" variant="ghost" onClick={loadOlderAgain}>{t('common.tryAgain')}</Button>} />
             )}
           </div>
         )}
@@ -373,10 +407,10 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
           render={renderRow}
           onNearStart={loadOlder}
           onAtEnd={setAtEnd}
+          follow={follow}
           onPosition={(position) => {
             const row = rows.find((row) => row.key === position.key);
-            const item = row?.kind === 'item' || row?.kind === 'side' ? row.id : row?.kind === 'fold' || row?.kind === 'markers' ? row.ids[0] ?? null : null;
-            keepTimelinePosition(read, view.read?.selection ?? null, { ...position, item });
+            keepTimelinePosition(read, view.read?.selection ?? null, { ...position, item: rowItem(row) });
           }}
           onRange={(first, last) => {
             const ids = new Set<string>();
@@ -386,47 +420,31 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
             }
             visible.current = ids;
             onVisible?.(ids);
+            onTop?.(rowItem(rows[first]));
           }}
         />
-        {showJump && (viewport === undefined
-          ? <div className="pointer-events-none absolute right-0 bottom-3 left-0 flex justify-center">{jumpButton}</div>
-          // Where the view scrolls the conversation with its controls, this root is as tall as the whole conversation: the button
-          // sticks to the foot of what the reader sees of it, and rests at the end of the conversation, above the controls, when that is in view.
-          : <div data-jump-anchor className="pointer-events-none sticky bottom-0 z-(--layer-sticky) h-0">
-              <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">{jumpButton}</div>
-            </div>)}
       </div>
     </TimelineContextValue.Provider>
   );
 }
 
-/** One item of the conversation, read from the store by its id so that a change to one item draws that row alone. */
-const ItemRow = memo(function ItemRow({ id, head }: { id: string; head: boolean }) {
-  const { threadId, inspection } = useTimelineContext();
-  const { t } = useTranslation();
-  const item = useThreadPart(threadId, (view) => view.items.get(id));
-  if (item === undefined) return null;
-  switch (item.kind) {
-    case 'user_message':
-      return <UserMessage item={item} />;
-    case 'agent_message':
-      return <AgentMessage item={item} head={head} />;
-    case 'reasoning':
-      return <Reasoning item={item} />;
-    case 'plan':
-      return <Plan item={item} />;
-    case 'tool_call':
-      return <ToolCallRow threadId={threadId} id={id} />;
-    case 'approval':
-      return inspection === undefined ? <ApprovalCard item={item} /> : <InlineAlert tone="info">{t('trace.retainedApproval', { id: item.payload.approval_id })}</InlineAlert>;
-    case 'announcement':
-      return <AnnouncementCard item={item} />;
-    case 'marker':
-      return <MarkerLine item={item} />;
-    case 'error':
-      return <ErrorRow item={item} />;
+/** The item a row is at: its own, or the first of those a line stands for; for the end of a turn, the message it answers. */
+function rowItem(row: Row | undefined): string | null {
+  if (row === undefined) return null;
+  switch (row.kind) {
+    case 'item':
+    case 'side':
+      return row.id;
+    case 'work':
+    case 'markers':
+    case 'start':
+      return row.ids[0] ?? null;
+    case 'footer':
+      return row.inputItemId ?? null;
+    default:
+      return null;
   }
-});
+}
 
 function MarkersRow({ ids }: { ids: readonly string[] }) {
   const { threadId } = useTimelineContext();
@@ -443,20 +461,23 @@ function NewLineRow() {
 function RowView({ row }: { row: Row }) {
   switch (row.kind) {
     case 'item':
-      return <ItemRow id={row.id} head={row.head === true} />;
-    case 'fold':
-      return <WorkFold turnId={row.turnId} ids={row.ids} open={row.open} />;
+      return <ItemRow id={row.id} answer={row.answer === true} named={row.named === true} />;
+    case 'work':
+      return <WorkGroup rowKey={row.key} turnId={row.turnId} ids={row.ids} last={row.last} live={row.live} only={row.only} />;
     case 'markers':
       return <MarkersRow ids={row.ids} />;
     case 'side':
       return <SideThreadLaneRow id={row.id} {...(row.closedId === undefined ? {} : { closedId: row.closedId })} {...(row.sourceTurn === undefined ? {} : { sourceTurn: row.sourceTurn })} />;
     case 'footer':
-      return <TurnFooter turnId={row.turnId} inputItemId={row.inputItemId} />;
+      return <TurnFooter turnId={row.turnId} inputItemId={row.inputItemId} answered={row.answered === true} lined={row.lined === true} />;
     case 'divider':
       return <NewLineRow />;
     case 'status':
-      return <StatusLine />;
+      // What the thread is doing now stands in the dock.
+      return null;
     case 'before':
       return <BeforeOrchHeading />;
+    case 'start':
+      return <StartLine ids={row.ids} />;
   }
 }

@@ -1,46 +1,37 @@
 /** Streaming agent Markdown and final actions.
  *
- * What the agent said, without a bubble. The first thing it says in a turn follows its mark and name.
- * It is Markdown, with a caret after the text while it is still arriving. What can be done with it
+ * What the agent said, as plain text on the page: no bubble, no mark, no name. A sentence said between steps stands
+ * in quiet type among them; the last thing said in a turn that is over, its answer, carries the turn's toolbar
+ * on hover. It is Markdown, with a caret after the text while it is still arriving. What can be done with it
  * (copy, its link, pin) is in the menu at its end, which takes no room of its own under the text.
  */
-import { Bot } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { Item } from '@/generated/api-types';
-import { useAgentOf } from '@/features/timeline/agent';
+import { AnswerFrame } from '@/features/timeline/AnswerFrame';
 import { useTimelineContext } from '@/features/timeline/context';
 import { ItemFrame } from '@/features/timeline/ItemActions';
 import { AgentReferences } from '@/features/people/AgentReferences';
-import { Avatar } from '@/ui/Avatar';
+import { useThreadPart } from '@/realtime/stores/thread';
 import { Markdown } from '@/ui/Markdown';
-import { cx } from '@/ui/cx';
 
 type AgentItem = Extract<Item, { kind: 'agent_message' }>;
 
-export function AgentMark({ threadId, segmentId }: { threadId: string; segmentId: string | null }) {
-  const agent = useAgentOf(threadId, segmentId);
-  const name = agent?.name ?? '';
-  return (
-    <p className="flex items-center gap-2 text-sm">
-      <Avatar kind="agent" size={24} text={Array.from(name)[0] ?? ''} color={0} mark={<Bot aria-hidden />} />
-      <span className="font-medium text-text">{name}</span>
-    </p>
-  );
-}
+/** The type of a sentence said between steps: smaller and quieter than the type the text is set in. */
+export const QUIET = 'text-sm! text-text-muted!';
 
-export function AgentMessage({ item, head }: { item: AgentItem; head: boolean }) {
+export function AgentMessage({ item, answer = false, quiet = false }: { item: AgentItem; answer?: boolean; quiet?: boolean }) {
   const { t } = useTranslation();
   const { threadId, compact = false } = useTimelineContext();
+  const turn = useThreadPart(threadId, (view) => answer && item.turn_id !== null ? view.turns.get(item.turn_id) : undefined);
   const running = item.status === 'in_progress';
-  return (
-    <ItemFrame item={item} label={t('timeline.agent.menu')}>
-      <div className={cx('flex flex-col', compact ? 'gap-1' : 'gap-2')}>
-        {head && <AgentMark threadId={threadId} segmentId={item.segment_id} />}
-        <AgentReferences threadId={threadId}>
-          <Markdown text={item.payload.text} streaming={running} compact={compact} />
-        </AgentReferences>
-      </div>
-    </ItemFrame>
+  const said = (
+    <div className="min-w-0">
+      <AgentReferences threadId={threadId}>
+        <Markdown text={item.payload.text} streaming={running} compact={compact || quiet} {...(quiet ? { className: QUIET } : {})} />
+      </AgentReferences>
+    </div>
   );
+  if (turn !== undefined) return <AnswerFrame item={item} turn={turn}>{said}</AnswerFrame>;
+  return <ItemFrame item={item} label={t('timeline.agent.menu')}>{said}</ItemFrame>;
 }

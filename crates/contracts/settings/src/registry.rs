@@ -2235,6 +2235,8 @@ registry! {
         "Plan first", "Whether the composer's Plan switch starts on for a thread's first message: the agent proposes a plan and changes nothing until somebody proceeds. The approval mode stays as it is.";
     THREAD_PLAN_ANSWERED_BY = "thread.plan_answered_by", Collaboration, Policy, SYSTEM_TO_TOPIC, Stricter, value("\"writers\""), choice(&["writers", "managers"]),
         "Who answers plans", "Who may proceed with a plan an agent proposes, or keep it planning: whoever may write to the agent here, or only those who manage the thread.";
+    THREAD_SILENT_AFTER_SECS = "thread.silent_after_secs", Collaboration, Parameter, SYSTEM_TO_TOPIC, Replace, value("120"), int(1, Unit::Seconds),
+        "Silence notice", "How many seconds nothing may arrive from a running agent, with no tool running, before a thread's status line says how long nothing came.";
     THREAD_GOAL_MAX_TURNS = "thread.goal.max_turns", Collaboration, Policy, SYSTEM_TO_TOPIC, Min, value("0"), int(0, Unit::Count),
         "Goal turns", "The most turns a goal may use here; 0 is no limit. A goal may set a stricter own limit; it cannot raise a limit set above it. Reaching a limit stops the goal and says which.";
     THREAD_GOAL_MAX_MINUTES = "thread.goal.max_minutes", Collaboration, Policy, SYSTEM_TO_TOPIC, Min, value("0"), int(0, Unit::Minutes),

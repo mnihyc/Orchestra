@@ -1,15 +1,17 @@
 import { threadIconFacts } from '@/ui/ThreadState';
 /** The thread as a screen of the workbench: the conversation with its composer, and its other views in the arrangement chosen.
  *
- * The screen of a thread: its head, the conversation with the agent's work, what stands above the
- * composer (why the thread cannot go on, what holds it, a plan, approvals that wait, the queue), and the
- * composer, disabled for somebody who may only watch, or the line that the thread is archived.
+ * The screen of a thread has three parts and only the middle one scrolls. The head is one row (and Find's bar under
+ * it) that stays where it is. The conversation scrolls: the lines that tell of the thread, the summary, the README and
+ * the conversation with the agent's work. The dock stays under it: what stands above the composer (why the thread
+ * cannot go on, what holds it, approvals that wait, the queue, a plan) and the composer, disabled for somebody who
+ * may only watch, or the line that the thread is archived.
  * The thread is followed live, so the screen is always the thread as it is now, and says when
  * it could not be brought up to date.
  */
 import { ThreadSummaryInspector } from '@/features/summaries/ThreadSummaryInspector';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Archive, MessageSquareText } from 'lucide-react';
+import { Archive, Lock, MessageSquareText } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
@@ -27,7 +29,7 @@ import { useReadWhenOpened } from '@/features/inbox/Counters';
 import { NoAccess } from '@/features/access/NoAccess';
 import { readableNavigationRoot } from '@/features/navigation/currentOrg';
 import { Composer } from '@/features/composer/Composer';
-import { composerWriter, type SendingInput, useSending } from '@/features/composer/Draft';
+import { composerWriter, useSending } from '@/features/composer/Draft';
 import { QueueTray } from '@/features/composer/QueueTray';
 import { PlaceReadme } from '@/features/documents/Readme';
 import { PersonThingProvider } from '@/features/people/personContext';
@@ -42,7 +44,14 @@ import { SourcePreparation } from '@/features/source/Preparation';
 import { ReviewTray } from '@/features/source/Review';
 import { ThreadHeader } from '@/features/thread/Header';
 import { AudienceBanner } from '@/features/thread/AudienceBanner';
-import { NowLine, ThreadNowProvider } from '@/features/thread/NowLine';
+import { ThreadNowProvider } from '@/features/thread/NowLine';
+import { AgentSwitchContext } from '@/features/thread/agentSwitch';
+import { FollowButton } from '@/features/thread/FollowButton';
+import { useMessageKeys, useMessageNav } from '@/features/thread/messageMoves';
+import { StickyPrompt } from '@/features/thread/MessageParts';
+import { useReplyRoom } from '@/features/thread/replyRoom';
+import { SentMessageBlock } from '@/features/thread/SentMessageBlock';
+import { partitionWaiting } from '@/features/thread/sentMessages';
 import { PendingAgentSchedules } from '@/features/schedules/Schedules';
 import { PinnedApprovals } from '@/features/thread/PinnedApprovals';
 import { isThreadForScreen, threadCapabilities } from '@/features/thread/cached';
@@ -53,23 +62,26 @@ import { PassiveStrip } from '@/features/thread/PassiveStrip';
 import type { ItemSelection, PromptFocus, SelectPromptVersion } from '@/features/timeline/context';
 import { FindInConversation } from '@/features/timeline/FindInConversation';
 import { PlanLine } from '@/features/timeline/PlanLine';
-import { queuedInputs, sendingInTray } from '@/features/timeline/rows';
+import { StatusLine } from '@/features/timeline/StatusLine';
+import { SubagentConversation } from '@/features/timeline/SubagentLane';
 import { TimelineSelectionBar } from '@/features/timeline/SelectionBar';
-import { Timeline, type TimelineHandle } from '@/features/timeline/Timeline';
+import { type FollowState, Timeline, type TimelineHandle } from '@/features/timeline/Timeline';
 import { useTimelineWindowKey } from '@/features/timeline/windowKey';
 import { holds } from '@/lib/permissions';
-import { reloadThread, useThreadFeed } from '@/realtime/live';
-import { threadReadState, useThreadView } from '@/realtime/stores/thread';
+import { refreshThread, reloadThread, useSocketStatus, useThreadFeed } from '@/realtime/live';
+import { useReadAgain } from '@/lib/useReadAgain';
+import { threadReadState, threadViewOf, useThreadView } from '@/realtime/stores/thread';
 import { selectOrg } from '@/shell/org';
 import { useScreenHeading } from '@/shell/screen';
 import { Button } from '@/ui/Button';
+import { cx } from '@/ui/cx';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { Skeleton, SkeletonGroup } from '@/ui/Skeleton';
 import { LimitPrompt } from '@/ui/LimitPrompt';
 
-function Frame({ children }: { children: React.ReactNode }) {
-  return <div className="mx-auto flex w-full max-w-(--reading-width) shrink-0 flex-col gap-2 px-4 pb-3">{children}</div>;
+function Frame({ children, className }: { children: React.ReactNode; className?: string }) {
+  return <div className={cx('mx-auto flex w-full max-w-(--reading-width) shrink-0 flex-col gap-2 px-4 pb-3', className)}>{children}</div>;
 }
 
 function ThreadSkeleton() {
@@ -105,20 +117,31 @@ export interface ThreadProps {
   onVersionSelect?: SelectPromptVersion | undefined;
   prompt?: string | undefined;
   focusPrompt?: PromptFocus | null | undefined;
+  /** The step of a sub-agent whose conversation is shown in place of the main one: the address carries it. */
+  agent?: string | null;
+  /** Shows a sub-agent's conversation (its step) or the main one again (`null`), by changing the address. */
+  onAgent?: ((step: string | null) => void) | undefined;
 }
 
-export function ThreadScreen({ threadId, item, items = null, turn, continuation = null, onVersionSelect, prompt, focusPrompt }: ThreadProps) {
+/** The items in view before the list has said which they are. */
+const NOTHING_IN_VIEW: ReadonlySet<string> = new Set();
+
+/** While the page shows a turn as under way, the thread is read again this often (while the live connection is up; every three seconds while it is not): a frame that never came would otherwise leave "Generating" on the screen until the page was loaded again. Small: one read of what changed since the last row held. */
+const RUNNING_READ_AGAIN_MS = 5_000;
+
+export function ThreadScreen({ threadId, item, items = null, turn, continuation = null, onVersionSelect, prompt, focusPrompt, agent = null, onAgent }: ThreadProps) {
   const { t } = useTranslation();
   const userId = useStore(client.session, (state) => state.userId);
   const read = useThreadReadRef(threadId);
   const instance = useViewInstance();
   const focusedContent = useContentFocused();
   const shown = useViewShown();
-  const root = useRef<HTMLDivElement>(null);
+  // The whole screen is what Find answers for (its key reaches it from the composer too); the middle part is what scrolls.
+  const frame = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
-  const bindRoot = useCallback((element: HTMLDivElement | null) => {
-    root.current = element; setViewport(element);
-  }, []);
+  const [spacer, setSpacer] = useState<HTMLDivElement | null>(null);
+  // The lines that tell of the thread are drawn by the header, into this place at the top of the scrolling part.
+  const [notesHost, setNotesHost] = useState<HTMLDivElement | null>(null);
   const timeline = useRef<TimelineHandle>(null);
   const [proceeding, setProceeding] = useState(false);
   useLayoutEffect(() => selectThreadContinuation(read, continuation), [read, continuation]);
@@ -133,6 +156,13 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
   // Only the actually displayed conversation marks its notifications read; frame metadata does not.
   useReadWhenOpened(!reading.readOnly && view.closed === null && view.loaded !== 'none' ? threadId : null);
   const thread = isThreadForScreen(view.thread, threadId) ? view.thread : null;
+  // A read that begins again (a live frame was lost, the connection came back) leaves the box where it stands and usable, so what is being typed keeps its place and its focus: removing it made the row of controls vanish and the page jump.
+  const [boxWas, setBoxWas] = useState(false);
+  const holdBox = boxWas && thread !== null && !thread.archived && reading.readiness === 'loading' && reading.selection === null
+    && (reading.projection === null || reading.projection.viewed_continuation_id === reading.projection.active_continuation_id);
+  const boxNow = holdBox || thread !== null && !reading.readOnly && !thread.archived;
+  // Remembered from one render to the next; adjusted while rendering, as React asks for a value that follows others.
+  if (boxWas !== boxNow) setBoxWas(boxNow);
   const navigationOrg = readableNavigationRoot(thread?.path);
   // The items being picked, to forward, quote or discuss: held here, where the conversation and the bar that stands in place of the box meet.
   const picking = useSelection<string>(view.order);
@@ -162,7 +192,74 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
     if (focusedContent && navigationOrg !== null) selectOrg(userId, navigationOrg);
   }, [navigationOrg, userId, focusedContent]);
 
+  // The status stays true without the live connection's help: while a turn is shown as under way the thread is read again, once more when the page is looked at again, and once when the connection comes back. A thread that is being opened again is left to that opening.
+  const turnShown = thread !== null && (thread.state === 'running' || thread.state === 'starting' || thread.state === 'waiting_approval');
+  const readNow = useCallback(() => { if (document.visibilityState === 'visible' && threadReadState(threadViewOf(read)).readiness === 'ready') refreshThread(read); }, [read]);
+  useReadAgain(turnShown && shown, readNow, RUNNING_READ_AGAIN_MS);
+  useEffect(() => {
+    if (!turnShown || !shown) return;
+    document.addEventListener('visibilitychange', readNow);
+    return () => document.removeEventListener('visibilitychange', readNow);
+  }, [turnShown, shown, readNow]);
+  const connected = useSocketStatus().phase === 'ready';
+  const wasConnected = useRef(connected);
+  useEffect(() => {
+    if (connected && !wasConnected.current && shown) readNow();
+    wasConnected.current = connected;
+  }, [connected, shown, readNow]);
+
+  // Escape brings the main conversation back from a sub-agent's, where nothing else is using the key.
+  useEffect(() => {
+    if (agent === null || onAgent === undefined) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (instance !== null && (!(event.target instanceof Node) || instance.root.current?.contains(event.target) !== true)) return;
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      if (target !== null && target.closest('input, textarea, select, [role="dialog"], [role="menu"], [role="listbox"]') !== null) return;
+      event.preventDefault();
+      onAgent(null);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [agent, onAgent, instance]);
+
   const sending = useSending(threadId);
+  // What waits: a message that the thread takes into a turn of its own is a message in the conversation; the queue holds the rest.
+  const waiting = partitionWaiting(view, sending);
+  // Where the reader stands in the conversation, told by the list; the round button above the dock reads it.
+  const [following, setFollowing] = useState<FollowState>({ atEnd: true, away: 0, ahead: false });
+  // After Send the sent message is brought to the top of the view and the view stays there while the reply grows: following waits
+  // until the reader has been away from the end and is at it again, or goes there with the round button.
+  const [sendCount, setSendCount] = useState(0);
+  const [sent, setSent] = useState<{ count: number; hold: boolean } | null>(null);
+  const [released, setReleased] = useState(0);
+  const [wasAway, setWasAway] = useState(false);
+  if ((sent?.count ?? 0) !== sendCount) {
+    setSent({ count: sendCount, hold: waiting.message !== null });
+    setWasAway(false);
+  }
+  const holding = sent !== null && sent.hold && released !== sent.count;
+  if (holding) {
+    if (!following.atEnd && !wasAway) setWasAway(true);
+    else if (following.atEnd && wasAway) {
+      setReleased(sent.count);
+      setWasAway(false);
+    }
+  }
+  const room = useReplyRoom(viewport, spacer, holding);
+  // The people's messages and where the reader is among them: the keys, the arrows, the Messages list and the sticky prompt read it.
+  const [top, setTop] = useState<string | null>(null);
+  const [inView, setInView] = useState<ReadonlySet<string>>(NOTHING_IN_VIEW);
+  const nav = useMessageNav(threadId, { top, visible: inView },
+    (id) => timeline.current?.scrollToItem(id, { align: 'start', highlight: false }),
+    () => { frame.current?.querySelector<HTMLElement>('[data-scroll-area]')?.scrollTo({ top: 0 }); });
+  useMessageKeys(nav, shown && focusedContent && agent === null);
+  useLayoutEffect(() => {
+    if (sent === null || sent.count === 0) return;
+    const block = sent.hold ? viewport?.querySelector<HTMLElement>('[data-sent-message]') : null;
+    if (viewport !== null && block !== null && block !== undefined) room.hold(viewport, block);
+    else timeline.current?.scrollToEnd();
+  }, [sent, viewport, room]);
   const unarchive = useMutation({
     mutationFn: () => unarchiveNode(threadId),
   });
@@ -190,83 +287,122 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
     return <ThreadSkeleton />;
   }
 
+  // The step of the sub-agent shown in place of the conversation names it; one the page does not hold yet is named by what it is.
+  const agentStep = agent === null ? undefined : view.items.get(agent);
+  const shownAgent = agent === null ? null : { id: agent, name: (agentStep?.kind === 'tool_call' && agentStep.payload.tool.kind === 'subagent' ? agentStep.payload.tool.name : null) ?? t('timeline.step.subagentUnnamed') };
   const mayDrive = holds(thread.access, 'thread.interact');
   const composerShown = !reading.readOnly && !thread.archived;
   const drivingShown = composerShown && mayDrive && thread.input_access.allowed;
+  // The composer carries the Stop of a running turn; where it is not drawn (a sub-agent's conversation, a selection being made) the status line does.
+  const composerDrawn = agent === null && !(picking.active && !reading.readOnly) && (composerShown || holdBox);
 
   return (
-    <PersonThingProvider thing={{ kind: 'thread', id: threadId }}><ThreadNowProvider threadId={threadId}><div ref={bindRoot} className="flex h-full min-h-0 flex-col overflow-x-hidden overflow-y-auto" data-screen="thread" data-scroll-area>
-      <ThreadHeader thread={thread} recoverySwitchVisible={threadSwitchRecovery(thread, reading.readOnly) !== undefined} onRevealItem={(id) => timeline.current?.scrollToItem(id)} />
-      <AudienceBanner thread={thread} />
-      <Frame><ThreadSummaryInspector threadId={threadId} enabled={shown} /></Frame>
-      <NowLine threadId={threadId} />
-      {!reading.readOnly && thread.environment !== null && thread.binding !== null && <div className="min-w-0 shrink-0 px-4 pt-1">
-        <ThreadGatewayStatus threadId={threadId} executionRevision={thread.execution_revision} line />
-      </div>}
-      {linkedTurn.isError && <ErrorAlert error={linkedTurn.error} />}
-      <FindInConversation threadId={threadId} timeline={timeline} root={root} />
-      {/* The thread's README stands above its conversation, folded to one line once it was read. */}
-      {thread.readme !== null && (
-        <div className="px-4 pt-2">
-          <PlaceReadme readme={thread.readme} foldable />
-        </div>
-      )}
-      {/* Virtual rows and excess controls share the view; the conversation retains its minimum row. */}
-      <div className="min-h-16 flex-auto shrink-0">
-        {/* A local address an agent writes leads a reader of the environment's Ports door to that port. */}
-        <LocalAddresses environmentId={thread.environment?.id ?? null} canView={thread.environment_permissions.includes('ports.view')}>
-          {viewport !== null && <Timeline
-            key={windowKey}
-            ref={timeline}
-            viewport={viewport}
-            threadId={threadId}
-            item={item ?? promptItem ?? linkedTurn.data?.items[0]?.id ?? null}
-            items={items}
-            pinApprovals={composerShown}
-            selection={selection}
-            onVersionSelect={onVersionSelect}
-            focusPrompt={focusPrompt}
-            highlightLink={prompt === undefined}
-            empty={thread.binding === null && thread.program?.id !== 'orch' ? <p className="text-sm text-text-muted">{t('thread.screen.unbound')}</p> : <BindingSummary thread={thread} />}
-          />}
-        </LocalAddresses>
-      </div>
-      {shown && <PendingAgentSchedules thread={thread} readOnly={reading.readOnly} />}
-      <Frame>
-        {/* What says how things stand takes one row, the most urgent first; what waits for an answer keeps its own. */}
-        <PassiveStrip entries={[
-          ...(reading.readOnly ? [] : [
-            { id: 'blocked', node: <BlockedBanner thread={thread} onProceed={() => setProceeding(true)} /> },
-            { id: 'lock', node: <LockBanner thread={thread} /> },
-          ]),
-          { id: 'connection', node: <ConnectionBanner threadId={threadId} /> },
-          { id: 'goal', node: <GoalLine thread={thread} /> },
-          { id: 'continuation', node: <ContinuationNotice key={windowKey} threadId={threadId} view={view} onSelect={onVersionSelect} /> },
-          ...(reading.readOnly ? [] : [{ id: 'source', node: <SourcePreparation thread={thread} /> }]),
-          ...(drivingShown && !picking.active ? [{ id: 'review', node: <ReviewTray threadId={threadId} /> }] : []),
-        ]} />
-        {composerShown && <PinnedApprovals threadId={threadId} />}
-        <PlanLine threadId={threadId} onJump={(id) => timeline.current?.scrollToItem(id)} />
-        <QueueTray threadId={threadId} queued={queuedInputs(view)} sending={sendingTray(view, sending)} readOnly={reading.readOnly} />
-        {picking.active && !reading.readOnly ? (
-          <TimelineSelectionBar threadId={threadId} ids={picking.ids} canQuote={drivingShown} onCancel={picking.clear} />
-        ) : reading.readOnly ? null : thread.archived ? (
-          <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-bg-subtle px-4 py-3 text-sm text-text">
-            <Archive className="text-text-muted" aria-hidden />
-            <span className="flex-1">{thread.archived_by === null ? t('thread.archived.lineAnonymous') : t('thread.archived.line', { name: thread.archived_by.display_name })}</span>
-            {threadCapabilities(thread)?.archive === true ? (
-              <Button size="sm" pending={unarchive.isPending} onClick={() => unarchive.mutate()}>
-                {t('thread.archived.unarchive')}
-              </Button>
-            ) : (
-              <span className="text-text-muted">{t('thread.archived.who', { who: thread.owner.display_name })}</span>
+    <PersonThingProvider thing={{ kind: 'thread', id: threadId }}><ThreadNowProvider threadId={threadId}><AgentSwitchContext.Provider value={onAgent ?? null}><div ref={frame} className="flex h-full min-h-0 flex-col overflow-hidden" data-screen="thread">
+      <ThreadHeader thread={thread} recoverySwitchVisible={threadSwitchRecovery(thread, reading.readOnly) !== undefined} onRevealItem={(id) => timeline.current?.scrollToItem(id)} notes={notesHost} nav={nav} agent={shownAgent} onAgent={onAgent} />
+      <FindInConversation threadId={threadId} timeline={timeline} root={frame} />
+      <div className="relative flex min-h-16 flex-1 flex-col">
+        <div ref={setViewport} className="flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto" data-scroll-area>
+          <div ref={setNotesHost} className="flex min-w-0 shrink-0 flex-col gap-1 px-4 pt-2 empty:hidden" data-thread-notes />
+          {agent === null ? <>
+            <AudienceBanner thread={thread} />
+            <Frame><ThreadSummaryInspector threadId={threadId} enabled={shown} /></Frame>
+            {!reading.readOnly && thread.environment !== null && thread.binding !== null && <div className="min-w-0 shrink-0 px-4 pt-1">
+              <ThreadGatewayStatus threadId={threadId} executionRevision={thread.execution_revision} line />
+            </div>}
+            {linkedTurn.isError && <ErrorAlert error={linkedTurn.error} />}
+            {/* The thread's README stands above its conversation, folded to one line once it was read. */}
+            {thread.readme !== null && (
+              <div className="px-4 pt-2">
+                <PlaceReadme readme={thread.readme} foldable />
+              </div>
             )}
-            {unarchive.error !== null && <ErrorAlert error={unarchive.error} className="w-full" />}
-          </div>
-        ) : composerShown ? (
-          <Composer thread={thread} onSent={() => timeline.current?.scrollToEnd()} />
-        ) : null}
-      </Frame>
+            {/* Virtual rows share the view with what stands above them; the conversation retains its minimum row. */}
+            <div className="min-h-16 flex-auto shrink-0">
+              {/* A local address an agent writes leads a reader of the environment's Ports door to that port. */}
+              <LocalAddresses environmentId={thread.environment?.id ?? null} canView={thread.environment_permissions.includes('ports.view')}>
+                {viewport !== null && <Timeline
+                  key={windowKey}
+                  ref={timeline}
+                  viewport={viewport}
+                  threadId={threadId}
+                  item={item ?? promptItem ?? linkedTurn.data?.items[0]?.id ?? null}
+                  items={items}
+                  pinApprovals={composerShown}
+                  selection={selection}
+                  follow={!holding}
+                  onFollow={setFollowing}
+                  onTop={setTop}
+                  onVisible={setInView}
+                  onVersionSelect={onVersionSelect}
+                  focusPrompt={focusPrompt}
+                  highlightLink={prompt === undefined}
+                  empty={thread.binding === null && thread.program?.id !== 'orch' ? <p className="text-sm text-text-muted">{t('thread.screen.unbound')}</p> : <BindingSummary thread={thread} />}
+                />}
+              </LocalAddresses>
+            </div>
+            {waiting.message !== null && <SentMessageBlock message={waiting.message} />}
+          </> : (
+            <div className="mx-auto w-full max-w-(--reading-width) px-4 py-3"><SubagentConversation threadId={threadId} itemId={agent} /></div>
+          )}
+          <div ref={setSpacer} aria-hidden className="shrink-0" />
+        </div>
+        {agent === null && <StickyPrompt nav={nav} />}
+        {agent === null && (!following.atEnd || following.ahead) && <FollowButton away={following.away} onClick={() => {
+          room.free();
+          if (sent !== null) setReleased(sent.count);
+          timeline.current?.scrollToEnd();
+        }} />}
+      </div>
+      {/* The dock stays under the conversation. What stands above the composer scrolls inside itself when the screen has no more room; the line and the composer never do (the box's own menus stand above it, outside it). */}
+      <div className="flex min-h-0 shrink flex-col" data-thread-dock>
+        <div className="min-h-0 shrink overflow-y-auto">
+        {shown && <PendingAgentSchedules thread={thread} readOnly={reading.readOnly} />}
+        <Frame className="pt-2 pb-0">
+          {/* What says how things stand takes one row, the most urgent first; what waits for an answer keeps its own. */}
+          <PassiveStrip entries={[
+            ...(reading.readOnly ? [] : [
+              { id: 'blocked', node: <BlockedBanner thread={thread} onProceed={() => setProceeding(true)} /> },
+              { id: 'lock', node: <LockBanner thread={thread} /> },
+            ]),
+            { id: 'connection', node: <ConnectionBanner threadId={threadId} /> },
+            { id: 'goal', node: <GoalLine thread={thread} /> },
+            { id: 'continuation', node: <ContinuationNotice key={windowKey} threadId={threadId} view={view} onSelect={onVersionSelect} /> },
+            ...(reading.readOnly ? [] : [{ id: 'source', node: <SourcePreparation thread={thread} /> }]),
+            ...(drivingShown && !picking.active ? [{ id: 'review', node: <ReviewTray threadId={threadId} /> }] : []),
+          ]} />
+          {composerShown && <PinnedApprovals threadId={threadId} />}
+          <QueueTray threadId={threadId} queued={waiting.queued} sending={waiting.sending} readOnly={reading.readOnly} />
+          <PlanLine threadId={threadId} onJump={(id) => timeline.current?.scrollToItem(id)} />
+        </Frame>
+        </div>
+        <Frame className="pt-2">
+          <StatusLine threadId={threadId} withStop={!composerDrawn} />
+          {agent !== null ? (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-bg-subtle px-3 py-2 text-sm text-text-muted" data-agent-readonly>
+              <Lock className="shrink-0" aria-hidden />
+              <span className="min-w-0 flex-1 truncate">{t('thread.agents.readOnly', { name: shownAgent?.name ?? '' })}</span>
+              <Button size="sm" variant="ghost" onClick={() => onAgent?.(null)}>{t('thread.agents.backToMain')}</Button>
+            </div>
+          ) : picking.active && !reading.readOnly ? (
+            <TimelineSelectionBar threadId={threadId} ids={picking.ids} canQuote={drivingShown} onCancel={picking.clear} />
+          ) : reading.readOnly && !holdBox ? null : thread.archived ? (
+            <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-bg-subtle px-4 py-3 text-sm text-text">
+              <Archive className="text-text-muted" aria-hidden />
+              <span className="flex-1">{thread.archived_by === null ? t('thread.archived.lineAnonymous') : t('thread.archived.line', { name: thread.archived_by.display_name })}</span>
+              {threadCapabilities(thread)?.archive === true ? (
+                <Button size="sm" pending={unarchive.isPending} onClick={() => unarchive.mutate()}>
+                  {t('thread.archived.unarchive')}
+                </Button>
+              ) : (
+                <span className="text-text-muted">{t('thread.archived.who', { who: thread.owner.display_name })}</span>
+              )}
+              {unarchive.error !== null && <ErrorAlert error={unarchive.error} className="w-full" />}
+            </div>
+          ) : composerShown || holdBox ? (
+            <Composer thread={thread} onSent={() => setSendCount((count) => count + 1)} />
+          ) : null}
+        </Frame>
+      </div>
       <GoalEditorHost thread={thread} />
       {proceeding && limits.data !== undefined && (
         <LimitPrompt
@@ -282,10 +418,6 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
           }}
         />
       )}
-    </div></ThreadNowProvider></PersonThingProvider>
+    </div></AgentSwitchContext.Provider></ThreadNowProvider></PersonThingProvider>
   );
-}
-
-function sendingTray(view: ReturnType<typeof useThreadView>, sending: readonly SendingInput[]): readonly SendingInput[] {
-  return sendingInTray(view, sending);
 }

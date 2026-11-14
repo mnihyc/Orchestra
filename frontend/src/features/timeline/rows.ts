@@ -1,73 +1,58 @@
-/** The rows the conversation is drawn as: which items stand alone, which are folded into one line for their turn, and where the lines that belong to no item go.
+/** The rows the conversation is drawn as: which items stand alone, which are drawn together as the work of their turn, and where the lines that belong to no item go.
  *
  * The items of a thread are in the order they were made. What is drawn is decided here, apart from
- * any screen, so that it can be tested by what a reader would see: the work of a turn is shown step
- * by step or folded to one line by the depth the reader chose (Steps, Summary or Everything); lines
- * of the thread's history that one person made within a minute become one; the "New" line stands
+ * any screen, so that it can be tested by what a reader would see: in Normal reading everything the agent
+ * did between a person's message and its answer (steps, thought, and the sentences said between them)
+ * is one group with one line; in Verbose and Diagnostics reading every step is a row of its own.
+ * Lines of the thread's history that one person made within a minute become one; the "New" line stands
  * before the first thing the reader has not seen; a turn that is over ends in its footer; the next
  * waiting inputs belong to the queue above the composer; and what the thread is doing now, when it
- * is no item, is the last line.
+ * is no item, is the last line. The harness's own state (`rowKinds.ts`) is drawn only in Diagnostics
+ * reading; the beginning of a thread is one line that opens into the lines it stands for.
  */
 import { approvalSnapshot } from '@/features/approvals/snapshot';
 import type { SendingInput } from '@/features/composer/Draft';
 import type { Item, Thread, ThreadInput, Turn } from '@/generated/api-types';
 import { runningTurn, threadReadOnly, type ThreadView, waitingInputs } from '@/realtime/stores/thread';
 import { hiddenFailureItem } from './failures';
+import { noticeKey, rowKind, toldReportKey } from './rowKinds';
 
-export type WorkDetail = 'steps' | 'summary' | 'everything';
+/** How a conversation is read: Normal folds the work of a turn into one line; Verbose draws every step; Diagnostics adds the program's own state. */
+export type WorkDetail = 'normal' | 'verbose' | 'diagnostics';
 
 /** Lines of the thread's history by one person this close together become one line with a count. */
 export const MARKERS_JOINED_WITHIN_MS = 60_000;
 
 export type Row =
-  /** An item drawn on its own: a message, a step, a plan, an approval, an error. `head`: the first thing the agent says in its turn, which the agent's mark and name go before. */
-  | { kind: 'item'; key: string; id: string; head?: true }
-  /** The work of a turn, folded to one line; `open` shows its steps under the line. */
-  | { kind: 'fold'; key: string; turnId: string; ids: readonly string[]; open: boolean }
+  /** An item drawn on its own: a message, a step, a plan, an approval, an error. `answer`: the last thing the agent said in a turn that is over; `named`: a person's message in a thread that more than one person wrote in. */
+  | { kind: 'item'; key: string; id: string; answer?: true; named?: true }
+  /** The work of a turn between two things that are said: its steps and the sentences between them, drawn as one line that opens into them. `last`: no more work of the turn follows; `live`: the turn is still at it; `only`: it is all the work of its turn. */
+  | { kind: 'work'; key: string; turnId: string; ids: readonly string[]; last: boolean; live: boolean; only: boolean }
   /** Lines of the thread's history, joined: the first is drawn with how many there were. */
   | { kind: 'markers'; key: string; ids: readonly string[] }
   /** An aside at the turn it was asked from; its closing marker settles the same row. */
   | { kind: 'side'; key: string; id: string; closedId?: string; sourceTurn?: number }
-  /** The end of a turn that is over. */
-  | { kind: 'footer'; key: string; turnId: string; inputItemId?: string }
+  /** The end of a turn that is over. `answered`: its answer carries the turn's acts; `lined`: a work line above says how it ended. */
+  | { kind: 'footer'; key: string; turnId: string; inputItemId?: string; answered?: true; lined?: true }
   /** Where what the reader had not seen begins. */
   | { kind: 'divider'; key: string }
   /** What the thread is doing, when that is no item. */
   | { kind: 'status'; key: string }
   /** Where what an adopted session held before Orch took it in begins: the heading of those items. */
-  | { kind: 'before'; key: string };
+  | { kind: 'before'; key: string }
+  /** How the thread began: it was created, its source prepared, its agent started; drawn as one line that opens into those lines. */
+  | { kind: 'start'; key: string; ids: readonly string[] };
 
 export interface RowOptions {
   detail: WorkDetail;
   hideHistory: boolean;
-  /** Turns whose folded work the reader opened by hand: its steps stand under its line. */
-  foldOpened: ReadonlySet<string>;
   /** The person looking: what they wrote themselves is never "new" to them. */
   meId: string | null;
 }
 
-/** Items that are the agent's work between what it says: they fold when their turn does. */
-export function isWork(item: Item): boolean {
-  return item.kind === 'tool_call' || item.kind === 'reasoning' || item.kind === 'plan';
-}
-
-/** The turns whose work is shown step by step in Steps: the one that runs and the last one that is over. */
-export function recentTurns(turns: ReadonlyMap<string, Turn>): ReadonlySet<string> {
-  const recent = new Set<string>();
-  let lastOver: Turn | null = null;
-  for (const turn of turns.values()) {
-    if (turn.state === 'running' || turn.state === 'starting') recent.add(turn.id);
-    else if (lastOver === null || turn.ordinal > lastOver.ordinal) lastOver = turn;
-  }
-  if (lastOver !== null) recent.add(lastOver.id);
-  return recent;
-}
-
-/** Whether the work of a turn is folded, before the reader's own opening and closing. */
-export function foldsByDepth(detail: WorkDetail, turnId: string, recent: ReadonlySet<string>): boolean {
-  if (detail === 'everything') return false;
-  if (detail === 'summary') return true;
-  return !recent.has(turnId);
+/** What the agent did that is not a thing it says: a tool call, thought, a plan, or an approval that has been decided. */
+export function isStep(item: Item): boolean {
+  return item.kind === 'tool_call' || item.kind === 'reasoning' || item.kind === 'plan' || item.kind === 'approval' && item.status !== 'pending';
 }
 
 /** Whether a turn is over. */
@@ -104,8 +89,8 @@ export function hasStatusLine(thread: Thread | null, view: ThreadView): boolean 
 
 export function buildRows(view: ThreadView, options: RowOptions): Row[] {
   const { items, turns } = view;
-  const foldedWork = (item: Item) => isWork(item)
-    || options.detail === 'summary' && item.kind === 'approval' && item.status !== 'pending';
+  const grouped = options.detail === 'normal';
+  const diagnostics = options.detail === 'diagnostics';
   const contentSources = new Set<string>();
   for (const item of items.values()) {
     if (item.kind !== 'approval' || item.parent_item_id === null) continue;
@@ -117,23 +102,106 @@ export function buildRows(view: ThreadView, options: RowOptions): Row[] {
   // A content card owns its native work detail. Keep the item in the store, not a second question row.
   const order = view.order.filter((id) => !contentSources.has(id));
   const rows: Row[] = [];
-  const recent = recentTurns(turns);
 
-  // The turns whose work has a step in it, and the last place each turn is seen in the order.
-  const lastOfTurn = new Map<string, {last:number;inputItemId?:string}>();
-  const steps = new Map<string, string[]>();
-  const contextTurns = new Set<string>();
+  // A contradiction between what the person chose and what the harness reports is told once, by the line of the
+  // report; the notice error that the harness adds beside it belongs with the diagnostics.
+  const told = new Set<string>();
+  for (const id of order) {
+    const item = items.get(id);
+    const key = item === undefined ? null : toldReportKey(item);
+    if (key !== null) told.add(key);
+  }
+  const isDiagnostics = (item: Item): boolean => {
+    if (rowKind(item) === 'diagnostics') return true;
+    const key = noticeKey(item);
+    return key !== null && told.has(key);
+  };
+
+  // An earlier message of a turn that was not given as its answer, and that a later message of the same turn repeats
+  // word for word, stands once: as the later one.
+  const repeated = new Set<string>();
+  const later = new Set<string>();
+  for (let at = order.length - 1; at >= 0; at--) {
+    const id = order[at] ?? '';
+    const item = items.get(id);
+    if (item?.kind !== 'agent_message' || item.turn_id === null) continue;
+    const said = item.payload.text.trim();
+    if (said.length === 0) continue;
+    const key = JSON.stringify([item.turn_id, item.stream, said]);
+    if (item.payload.phase !== 'final' && later.has(key)) repeated.add(id);
+    later.add(key);
+  }
+
+  // How the thread began, before its first turn: created, its source prepared, its agent started.
+  const startIds: string[] = [];
+  let started = false;
+  if (!view.hasOlder) {
+    for (const id of order) {
+      const item = items.get(id);
+      if (item === undefined) continue;
+      if (item.kind === 'user_message' || (item.kind !== 'marker' && item.turn_id !== null)) break;
+      if (item.kind !== 'marker') continue;
+      const beginning = item.payload;
+      if (beginning.marker === 'created' || beginning.marker === 'source_prepared') startIds.push(id);
+      else if (beginning.marker === 'segment_started' && !beginning.data.resumed && !started) {
+        started = true;
+        startIds.push(id);
+      }
+    }
+  }
+  const startLines = started ? new Set(startIds) : new Set<string>();
+
+  // The last place each turn is seen in the order, and the input that began it; and whether more than one person wrote in
+  // the thread, for only then does a person's message say who wrote it.
+  const lastOfTurn = new Map<string, { last: number; inputItemId?: string }>();
+  let sender: string | null = null;
+  let several = false;
   order.forEach((id, index) => {
     const item = items.get(id);
+    if (item?.kind === 'user_message' && item.payload.source === 'user' && item.author !== null) {
+      if (sender === null) sender = item.author.id;
+      else if (sender !== item.author.id) several = true;
+    }
     const turnId = item?.turn_id ?? null;
     if (item === undefined || turnId === null) return;
-    let entry=lastOfTurn.get(turnId);
-    if(entry===undefined){entry={last:index};lastOfTurn.set(turnId,entry);}else entry.last=index;
-    if(item.kind==='user_message'&&entry.inputItemId===undefined)entry.inputItemId=item.id;
-    if (item.kind === 'marker' && item.payload.marker === 'orch_context') contextTurns.add(turnId);
-    if(foldedWork(item)){const group=steps.get(turnId);if(group===undefined)steps.set(turnId,[id]);else group.push(id);}
+    let entry = lastOfTurn.get(turnId);
+    if (entry === undefined) { entry = { last: index }; lastOfTurn.set(turnId, entry); } else entry.last = index;
+    if (item.kind === 'user_message' && entry.inputItemId === undefined) entry.inputItemId = item.id;
   });
-  const folded = (turnId: string): boolean => steps.has(turnId) && foldsByDepth(options.detail, turnId, recent);
+
+  // What the agent said in a turn is its answer, said in passing while it works, or not said at all. A message marked
+  // final is said to the person and stands on the page. One that is not marked stands there only while no step and no
+  // final message follows it: the reply being written under a running turn, or the last words of a turn that ended
+  // without a mark. Every other sentence between the steps is part of the work.
+  const lastStep = new Map<string, number>();
+  const lastFinal = new Map<string, number>();
+  order.forEach((id, index) => {
+    const item = items.get(id);
+    if (item === undefined || repeated.has(id)) return;
+    const turnId = item.turn_id;
+    if (turnId === null) return;
+    if (isStep(item)) lastStep.set(turnId, index);
+    else if (item.kind === 'agent_message' && item.payload.phase === 'final' && item.payload.text.trim() !== '') lastFinal.set(turnId, index);
+  });
+  const members = new Set<string>();
+  const lastMember = new Map<string, string>();
+  const answers = new Map<string, string>();
+  order.forEach((id, index) => {
+    const item = items.get(id);
+    if (item === undefined || repeated.has(id)) return;
+    const turnId = item.turn_id;
+    if (turnId === null) return;
+    if (isStep(item)) {
+      members.add(id);
+      lastMember.set(turnId, id);
+    } else if (item.kind === 'agent_message' && item.payload.text.trim() !== '') {
+      if (item.payload.phase === 'final' || index > (lastStep.get(turnId) ?? -1) && index > (lastFinal.get(turnId) ?? -1)) answers.set(turnId, id);
+      else {
+        members.add(id);
+        lastMember.set(turnId, id);
+      }
+    }
+  });
 
   // Start markers arrive at the end of the main stream, but carry their actual history boundary.
   // Relocate only to a held turn: a partial history window must not fetch unrelated history or lose
@@ -167,6 +235,27 @@ export function buildRows(view: ThreadView, options: RowOptions): Row[] {
     target.set(index, [...(target.get(index) ?? []), row]);
   }
 
+  // The work of a turn is drawn as one group: the steps and the sentences between them that follow one another stand
+  // as one row, which anything else drawn in between (something said to the person, a line of history, the "New" line,
+  // a message steered in) ends. A question or an approval that waits for a person stands under the group it came from.
+  const worked = new Set<string>();
+  let run: { turnId: string; ids: string[]; lifted: Row[] } | null = null;
+  const closeRun = () => {
+    const done = run;
+    run = null;
+    if (done === null) return;
+    const turn = turns.get(done.turnId);
+    const last = lastMember.get(done.turnId) === done.ids[done.ids.length - 1];
+    const live = last && turn !== undefined && (turn.state === 'running' || turn.state === 'starting');
+    worked.add(done.turnId);
+    rows.push({ kind: 'work', key: `work:${done.ids[0] ?? ''}`, turnId: done.turnId, ids: done.ids, last, live, only: true });
+    rows.push(...done.lifted);
+  };
+  const push = (...more: Row[]) => {
+    closeRun();
+    rows.push(...more);
+  };
+
   // What the reader had not seen when they opened the thread; what arrived since they watched arrive.
   const dividerAfter = view.openedReadSeq !== null && view.openedSeq !== null && view.openedReadSeq < view.openedSeq ? view.openedReadSeq : null;
   const dividerUntil = view.openedSeq ?? 0;
@@ -174,18 +263,19 @@ export function buildRows(view: ThreadView, options: RowOptions): Row[] {
   const placeDivider = (item: Item) => {
     if (dividerPlaced || dividerAfter === null) return;
     if (item.seq_created > dividerAfter && item.seq_created <= dividerUntil && item.author?.id !== options.meId) {
-      rows.push({ kind: 'divider', key: 'divider' });
+      push({ kind: 'divider', key: 'divider' });
       dividerPlaced = true;
     }
   };
 
-  const foldPlaced = new Set<string>();
-  const spoken = new Set<string>();
   // What a session held before it was adopted stands under one heading, where the first of it stands.
   let beforePlaced = false;
   let pendingMarkers: string[] = [];
   const flushMarkers = () => {
-    if (pendingMarkers.length > 0) rows.push({ kind: 'markers', key: `markers:${pendingMarkers[0] ?? ''}`, ids: pendingMarkers });
+    if (pendingMarkers.length > 0) {
+      closeRun();
+      rows.push({ kind: 'markers', key: `markers:${pendingMarkers[0] ?? ''}`, ids: pendingMarkers });
+    }
     pendingMarkers = [];
   };
 
@@ -193,33 +283,49 @@ export function buildRows(view: ThreadView, options: RowOptions): Row[] {
     const item = items.get(id);
     if (item === undefined) return;
     const preceding = sideBefore.get(index);
-    if (preceding !== undefined) { flushMarkers(); rows.push(...preceding); }
+    if (preceding !== undefined) { flushMarkers(); push(...preceding); }
+    // What stays out of the reading (the harness's own state, an answer said twice) leaves no line, no divider and no heading.
+    const hidden = (!diagnostics && isDiagnostics(item)) || repeated.has(id);
     // Items of a sub-agent's stream are not in the order; the order is the main stream.
-    placeDivider(item);
+    if (!hidden) placeDivider(item);
 
     // A failed adoption has no historical items yet. Its before-Orch band still explains the missing record.
     const missingHistory = item.kind === 'marker' && item.payload.marker === 'adopted' && item.payload.data.history_missing !== null;
-    if (!beforePlaced && (item.before_orch || missingHistory)) {
+    if (!hidden && !beforePlaced && (item.before_orch || missingHistory)) {
       flushMarkers();
       beforePlaced = true;
-      rows.push({ kind: 'before', key: 'before-orch' });
+      push({ kind: 'before', key: 'before-orch' });
     }
 
-    if (item.kind === 'marker' && (item.payload.marker === 'side_started' || item.payload.marker === 'side_closed')) {
+    if (startLines.has(id)) {
+      if (options.hideHistory) {
+        // History lines are not drawn.
+      } else if (diagnostics) {
+        // Where the reader asked for everything, each line of the beginning stands as it was made.
+        flushMarkers();
+        push({ kind: 'markers', key: `markers:${id}`, ids: [id] });
+      } else if (id === startIds[0]) {
+        // The lines of the beginning stand in one line, where the first of them stands.
+        flushMarkers();
+        push({ kind: 'start', key: 'start', ids: startIds });
+      }
+    } else if (hidden) {
+      // Kept as it was, and drawn where the reader asked for it.
+    } else if (item.kind === 'marker' && (item.payload.marker === 'side_started' || item.payload.marker === 'side_closed')) {
       flushMarkers();
       // A matching close is part of the source row. A window with only the close still says what ended.
-      if (item.payload.marker === 'side_closed' && !starts.has(item.payload.data.side.id)) rows.push({ kind: 'side', key: id, id });
+      if (item.payload.marker === 'side_closed' && !starts.has(item.payload.data.side.id)) push({ kind: 'side', key: id, id });
     } else if (item.kind === 'marker' && item.payload.marker === 'orch_context') {
       // A turn owns its context link in the footer. A session context before the first turn
       // still stands as work detail when ordinary history lines are hidden.
       flushMarkers();
-      if (item.turn_id === null) rows.push({ kind: 'item', key: id, id });
+      if (item.turn_id === null) push({ kind: 'item', key: id, id });
     } else if (item.kind === 'marker' && item.payload.marker === 'background_wake') {
       // A turn's recorded cause precedes its output even when ordinary lifecycle history is hidden.
       flushMarkers();
-      rows.push({ kind: 'item', key: id, id });
+      push({ kind: 'item', key: id, id });
     } else if (item.kind === 'marker') {
-      if (!options.hideHistory) {
+      if (!options.hideHistory || (diagnostics && rowKind(item) === 'diagnostics')) {
         const last = pendingMarkers.length > 0 ? items.get(pendingMarkers[pendingMarkers.length - 1] ?? '') : undefined;
         const joins =
           last?.kind === 'marker' && last.payload.marker !== 'agent_history' && item.payload.marker !== 'agent_history' &&
@@ -235,38 +341,45 @@ export function buildRows(view: ThreadView, options: RowOptions): Row[] {
       flushMarkers();
       if (hiddenFailureItem(view, item)) {
         // Its footer, or the final native row of this failure, owns the one error line.
-      } else if (foldedWork(item) && item.turn_id !== null && folded(item.turn_id)) {
-        if (!foldPlaced.has(item.turn_id)) {
-          foldPlaced.add(item.turn_id);
-          const open = options.foldOpened.has(item.turn_id);
-          rows.push({ kind: 'fold', key: `fold:${item.turn_id}`, turnId: item.turn_id, ids: steps.get(item.turn_id) ?? [], open });
+      } else if (grouped && item.turn_id !== null && members.has(id)) {
+        if (run?.turnId !== item.turn_id) {
+          closeRun();
+          run = { turnId: item.turn_id, ids: [], lifted: [] };
         }
-        // An opened fold shows its steps under the line, each as it would stand alone.
-        if (options.foldOpened.has(item.turn_id)) rows.push({ kind: 'item', key: id, id });
+        run.ids.push(id);
+      } else if (grouped && item.kind === 'approval' && item.status === 'pending' && run !== null && run.turnId === item.turn_id) {
+        // Waiting for a person: it stands whole under the group until it is decided, and then it is one of its steps.
+        run.lifted.push({ kind: 'item', key: id, id });
       } else {
-        // The first thing the agent says in a turn is preceded by its mark and name.
-        const head = item.kind === 'agent_message' && (item.turn_id === null || !spoken.has(item.turn_id));
-        if (item.kind === 'agent_message' && item.turn_id !== null) spoken.add(item.turn_id);
-        rows.push(head ? { kind: 'item', key: id, id, head: true } : { kind: 'item', key: id, id });
+        const turn = item.turn_id === null ? undefined : turns.get(item.turn_id);
+        const answer = item.turn_id !== null && answers.get(item.turn_id) === id && turn !== undefined && isOver(turn);
+        const named = several && item.kind === 'user_message' && item.payload.source === 'user';
+        push({ kind: 'item', key: id, id, ...(answer ? { answer: true as const } : {}), ...(named ? { named: true as const } : {}) });
       }
     }
 
     // A turn that is over ends in its footer, after the last thing it made.
     if (item.turn_id !== null && lastOfTurn.get(item.turn_id)?.last === index) {
       const turn = turns.get(item.turn_id);
-      if (turn !== undefined && (isOver(turn) || contextTurns.has(turn.id))) {
+      if (turn !== undefined && isOver(turn)) {
         flushMarkers();
-        const inputItemId=lastOfTurn.get(item.turn_id)?.inputItemId;
-        rows.push({ kind: 'footer', key: `footer:${item.turn_id}`, turnId: item.turn_id,...(inputItemId===undefined?{}:{inputItemId}) });
+        const inputItemId = lastOfTurn.get(item.turn_id)?.inputItemId;
+        push({ kind: 'footer', key: `footer:${item.turn_id}`, turnId: item.turn_id, ...(inputItemId === undefined ? {} : { inputItemId }),
+          ...(answers.has(item.turn_id) ? { answered: true as const } : {}), ...(worked.has(item.turn_id) || run?.turnId === item.turn_id ? { lined: true as const } : {}) });
       }
     }
     const following = sideAfter.get(index);
-    if (following !== undefined) { flushMarkers(); rows.push(...following); }
+    if (following !== undefined) { flushMarkers(); push(...following); }
   });
   flushMarkers();
+  closeRun();
 
   if (hasStatusLine(view.thread, view)) rows.push({ kind: 'status', key: 'status' });
-  return rows;
+
+  // A turn whose work was cut into several groups (a message steered in between) has no one time of its own for any of them.
+  const groups = new Map<string, number>();
+  for (const row of rows) if (row.kind === 'work') groups.set(row.turnId, (groups.get(row.turnId) ?? 0) + 1);
+  return rows.map((row) => row.kind === 'work' && groups.get(row.turnId) !== 1 ? { ...row, only: false } : row);
 }
 
 /** Every waiting input, including the first, delivering and held rows, belongs to the one queue. */
@@ -306,13 +419,16 @@ export function estimateRow(row: Row, items: ReadonlyMap<string, Item>): number 
       return 32;
     case 'before':
       return 56;
+    case 'start':
+      return 32;
     case 'side':
       // A folded aside is an ordinary control row; open lanes are measured by the list.
       return 36;
     case 'footer':
-      return 28;
-    case 'fold':
-      return 36;
+      return 48;
+    case 'work':
+      // The line alone, or the line over the bounded preview of a turn that is still at it.
+      return row.live ? 280 : 40;
     case 'item': {
       const item = items.get(row.id);
       switch (item?.kind) {

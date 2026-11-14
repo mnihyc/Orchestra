@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 
 import type { Item } from '@/generated/api-types';
 import { ItemFrame } from '@/features/timeline/ItemActions';
+import { QUIET } from '@/features/timeline/items/AgentMessage';
 import { useFormatContext } from '@/lib/appearance';
 import { formatSpan, useRunningClock } from '@/lib/time';
 import { Markdown } from '@/ui/Markdown';
@@ -44,7 +45,7 @@ export function Reasoning({ item }: { item: ReasoningItem }) {
         )}
         {open && canOpen && (
           <div className="ml-[calc(1rem+var(--spacing-1))] text-text-muted">
-            <Markdown text={summary} streaming={running} compact />
+            <Markdown text={summary} streaming={running} compact className={QUIET} />
           </div>
         )}
       </div>

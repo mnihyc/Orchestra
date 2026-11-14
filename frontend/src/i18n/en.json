@@ -82,6 +82,7 @@
     "noModels": "No API models available here",
     "modelUnavailable": "This model is unavailable here",
     "sources": "Sources",
+    "noAnswer": "No answer was written. Try again.",
     "sourceUnavailable": "Source no longer available",
     "copy": "Copy answer",
     "retry": "Retry answer",
@@ -91,7 +92,6 @@
     "noHistory": "No conversations yet",
     "retention": "Kept for {{days}} days after the last message",
     "expires": "Expires",
-    "adminNotice": "This organization’s admins can inspect and export this conversation",
     "inspection": "Read-only admin inspection",
     "readOnlyTools": "Reads as you · cites sources · makes no changes",
     "paidBy": "Paid by",
@@ -99,7 +99,9 @@
     "privateThread": "Creates a Private permanent thread in this organization",
     "destination": "Destination topic",
     "defaultDestination": "Use the page’s topic or an authorized default",
-    "contextNoRoom": "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves.",
+    "contextNoRoom": "ask.context_tokens leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Increase ask.context_tokens or reduce ask.max_output_tokens.",
+    "windowNoRoom": "The context window of {{model}} leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Use a model with a larger window or reduce ask.max_output_tokens.",
+    "windowUnknown": "The context window of {{model}} is not recorded and is assumed to be small, and the answer’s reserve (ask.max_output_tokens) leaves no room for the conversation. Record the model’s context window or reduce ask.max_output_tokens.",
     "contextTooLong": "This conversation is too long for {{model}}; start a new one or keep it as a thread."
   },
   "viewWindow": {
@@ -591,20 +593,6 @@
       "environment": {
         "name": "Environments",
         "description": "Set defaults for environments made inside this place."
-      }
-    },
-    "workDetail": {
-      "steps": {
-        "name": "Steps",
-        "description": "Show the main steps of the agent's work."
-      },
-      "summary": {
-        "name": "Summary",
-        "description": "Show a compact summary of the work."
-      },
-      "everything": {
-        "name": "Everything",
-        "description": "Show all available work detail."
       }
     },
     "navigationShow": {
@@ -3572,6 +3560,10 @@
         "title": "Who answers plans",
         "description": "Who may proceed with a plan an agent proposes, or keep it planning."
       },
+      "silent_after_secs": {
+        "title": "Silence notice",
+        "description": "How many seconds nothing may arrive from a running agent, with no tool running, before the status line says how long nothing came."
+      },
       "goal": {
         "max_turns": {
           "title": "Goal turns",
@@ -5010,6 +5002,7 @@
       "label": "Context {{used}} of {{window}} ({{percent}}); shortens at {{compact}}",
       "labelBare": "Context {{used}} of {{window}} ({{percent}})",
       "open": "Show what fills the context ({{label}})",
+      "labelUsed": "Context {{used}} used; no window reported",
       "modelLabel": "{{model}}: {{context}}"
     },
     "panel": {
@@ -9874,7 +9867,11 @@
         "right": "Hide the right bar",
         "bottom": "Hide the bottom"
       },
-      "pin": "Keep open as a bar"
+      "pin": "Keep open as a bar",
+      "peek": {
+        "title": "Bars",
+        "label": "Show hidden bars on hover: {{state}}"
+      }
     },
     "sash": {
       "left": "Width of the left bar",
@@ -9941,9 +9938,10 @@
       "shellsHint": "Your shells in this environment. Open Terminal.",
       "connecting": "Connecting…",
       "connectingHint": "Connecting to live updates.",
-      "reconnectingSince": "Reconnecting… · {{time}}",
       "reconnecting": "Reconnecting…",
       "reconnectingHint": "What is on screen stays and can be read. Approving and steering wait for the connection; typing does not.",
+      "noLive": "No live updates · {{time}}",
+      "noLiveHint": "Live updates cannot connect, so this page reads again every few seconds. If this stays, ask whoever runs this system to check that the HTTPS front passes WebSocket upgrades for /api/v1/ws; orchctl doctor --url shows it as edge-ws.",
       "slow": "Slow connection · {{ms}} ms",
       "slowHint": "Sending, saving and shells take longer. Nothing you type waits."
     },
@@ -12694,23 +12692,35 @@
       },
       "orch": "Orch tool {{tool}}"
     },
-    "work": {
-      "read_one": "read {{count}} file",
-      "read_other": "read {{count}} files",
-      "searched_one": "searched {{count}} time",
-      "searched_other": "searched {{count}} times",
-      "ran_one": "ran {{count}} command",
-      "ran_other": "ran {{count}} commands",
-      "edited_one": "edited {{count}} file",
-      "edited_other": "edited {{count}} files",
-      "fetched_one": "fetched {{count}} page",
-      "fetched_other": "fetched {{count}} pages",
-      "subagents_one": "started {{count}} sub-agent",
-      "subagents_other": "started {{count}} sub-agents",
-      "tools_one": "used {{count}} other tool",
-      "tools_other": "used {{count}} other tools",
-      "separator": ", ",
-      "nothing": "Worked"
+    "group": {
+      "working": "Working",
+      "workedFor": "Worked for {{time}}",
+      "worked": "Worked",
+      "failedAfter": "Failed after {{time}}",
+      "failed": "Failed",
+      "stoppedAfter": "Stopped after {{time}}",
+      "stopped": "Stopped",
+      "stoppedBy": "by {{name}}",
+      "commands_one": "{{count}} command",
+      "commands_other": "{{count}} commands",
+      "edited_one": "{{count}} file edited",
+      "edited_other": "{{count}} files edited",
+      "read_one": "{{count}} file read",
+      "read_other": "{{count}} files read",
+      "searched_one": "{{count}} search",
+      "searched_other": "{{count}} searches",
+      "fetched_one": "{{count}} page fetched",
+      "fetched_other": "{{count}} pages fetched",
+      "subagents_one": "{{count}} sub-agent",
+      "subagents_other": "{{count}} sub-agents",
+      "tools_one": "{{count}} other tool call",
+      "tools_other": "{{count}} other tool calls"
+    },
+    "figures": {
+      "title": "Turn {{ordinal}}",
+      "input": "Input {{tokens}}",
+      "cached": "Cached input {{tokens}}",
+      "output": "Output {{tokens}}"
     },
     "command": {
       "in": "Ran in {{directory}}",
@@ -12779,9 +12789,7 @@
       "empty": "No child activity has been reported yet.",
       "unavailable": "This sub-agent is no longer available here.",
       "panelTitle": "Sub-agent",
-      "panelAbout": "The sub-agent’s reported activity, read-only.",
-      "running": "Running sub-agents",
-      "jump": "Show {{name}}'s activity"
+      "panelAbout": "The sub-agent’s reported activity, read-only."
     },
     "raw": {
       "tool": "Tool",
@@ -12800,11 +12808,9 @@
       "noOutput": "No output was recorded."
     },
     "status": {
-      "compacting": "Compacting the conversation for {{time}}",
-      "starting": "Starting {{name}} for {{time}}",
-      "waitingApproval": "Waiting for an answer for {{time}}",
       "retrying": "Retrying the model call",
-      "retryingAttempt": "Retrying the model call · attempt {{attempt}}"
+      "retryingAttempt": "Retrying the model call · attempt {{attempt}}",
+      "silent": "Nothing new from {{name}} for {{time}}"
     },
     "footer": {
       "failed": "Failed",
@@ -12816,9 +12822,14 @@
       "tokens_other": "{{tokens}} tokens",
       "effort": "Effort: {{effort}}",
       "effortDefault": "Default effort",
-      "changed_one": "{{count}} file changed (+{{added}} −{{removed}})",
-      "changed_other": "{{count}} files changed (+{{added}} −{{removed}})",
+      "changed_one": "{{count}} file changed +{{added}} −{{removed}}",
+      "changed_other": "{{count}} files changed +{{added}} −{{removed}}",
       "retry": "Retry this turn"
+    },
+    "start": {
+      "line": "Started with {{agent}} on {{provider}}",
+      "created": "Created by {{by}}",
+      "open": "Show how this thread began"
     },
     "catchup": {
       "title": "Since you were last here",
@@ -13503,25 +13514,17 @@
       "approvalFor": "Waiting for approval: {{target}}",
       "running": "Running {{command}}",
       "writing": "Writing {{path}}",
-      "thinking": "Thinking",
+      "thinking": "Thinking…",
       "answering": "Writing the answer",
       "starting": "Starting the turn",
       "working": "Working",
-      "approvals_one": "{{count}} approval waiting",
-      "approvals_other": "{{count}} approvals waiting"
+      "needsInput": "Needs your input"
     },
     "viewModes": {
       "label": "Detail",
-      "focused": "Focused",
-      "full": "Full",
-      "live": "Live",
-      "focusedAbout": "Keep inputs, answers and waiting approvals visible; fold the other work.",
-      "fullAbout": "Show the work step by step, with tool output closed until opened.",
-      "liveAbout": "Open current tool output as it arrives and follow the latest work until you scroll up.",
-      "toolCalls_one": "{{count}} tool call",
-      "toolCalls_other": "{{count}} tool calls",
-      "files_one": "{{count}} file changed",
-      "files_other": "{{count}} files changed"
+      "normal": "Normal",
+      "verbose": "Verbose",
+      "diagnostics": "Diagnostics"
     },
     "agent": {
       "context": "Context {{percent}} % used"
@@ -13566,6 +13569,7 @@
     "starting": {
       "none": "Starting",
       "environment": "Waking the environment",
+      "environmentMaking": "Its environment is being made",
       "source": "Preparing the source",
       "files": "Preparing the environment",
       "provider": "Starting {{provider}}'s runtime",
@@ -13632,7 +13636,6 @@
     "header": {
       "shareThread": "Share thread",
       "label": "Thread",
-      "quickActions": "Thread actions",
       "importedHistory": "Imported history",
       "needsSetup": "Needs setup",
       "chooseAgentProvider": "Choose agent and provider…",
@@ -13702,6 +13705,47 @@
     "passive": {
       "more_one": "Show {{count}} more",
       "more_other": "Show {{count}} more"
+    },
+    "frame": {
+      "changesCounts": "Changes: {{added}} lines added, {{removed}} removed"
+    },
+    "sent": {
+      "waiting": "Sent, waiting for the agent to take it",
+      "attachments_one": "{{count}} attachment",
+      "attachments_other": "{{count}} attachments"
+    },
+    "messages": {
+      "title": "Messages",
+      "keys": "Previous or next message",
+      "arrows": "Move between messages",
+      "previous": "Previous message",
+      "next": "Next message",
+      "noEarlier": "No earlier message",
+      "noLater": "No later message",
+      "goTo": "Go to the message: {{line}}",
+      "place": "{{at}} of {{total}}",
+      "search": "Search the messages",
+      "list": "The people’s messages",
+      "none": "Nobody has written yet",
+      "noMatch": "No message matches"
+    },
+    "agents": {
+      "title": "Agents",
+      "count_one": "{{count}} agent",
+      "count_other": "{{count}} agents",
+      "main": "Main",
+      "active": "Active",
+      "done": "Done",
+      "tokens": "{{value}} tokens out",
+      "dot": {
+        "waiting": "Needs a person",
+        "working": "Working",
+        "failed": "One failed"
+      },
+      "backTo": "Back to {{name}}",
+      "open": "Open conversation",
+      "readOnly": "Read-only: {{name}}",
+      "backToMain": "Back to Main"
     }
   },
   "implicitAvailability": {
@@ -23396,6 +23440,9 @@
       "moveOut": "Move to another org",
       "moveOutReason": "Moves with its main thread · Keep it to move it alone"
     },
+    "slash": {
+      "about": "Ask a question on the side, without disturbing the turn"
+    },
     "ask": {
       "title": "Side thread",
       "about": "Starts from {{thread}}'s conversation. Replies stay in this aside.",
@@ -24417,6 +24464,9 @@
     "runtimeCount_other": "{{number}} runtimes",
     "offInBuild": "Off in this version: {{feature}}",
     "caseUnavailable": "Unavailable",
+    "checkedPending_one": "Checked · {{number}} check pending",
+    "checkedPending_other": "Checked · {{number}} checks pending",
+    "casesPending": "Not verified yet: {{names}}",
     "notChecked": "This version has not been checked",
     "checkFailed": "Compatibility check failed · review its results",
     "policySummary": "{{name}}: {{choice}}",
@@ -26192,6 +26242,8 @@
     "resultsRootPending": "The results’ organization cannot be opened",
     "model": "Model summarizer",
     "details": "Summary details",
+    "hide": "Hide summary",
+    "show": "Show summary",
     "inputFacts": "Source items: {{included}} included · {{shortened}} shortened · {{omitted}} omitted",
     "baseRates": "Configured model base rates",
     "noRates": "No base rates reported",
