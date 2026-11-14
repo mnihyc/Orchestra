@@ -73,6 +73,8 @@ impl Whom {
 /// The models and efforts a person asks to use a provider with.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AskedOptions {
+    /// The requested work purposes.
+    pub purposes: Option<Vec<orch_access_contract::permissions::ProviderUsePurpose>>,
     /// The models.
     pub models: Option<Vec<String>>,
     /// The enabled service offerings.
@@ -86,6 +88,9 @@ impl AskedOptions {
     #[must_use]
     pub fn to_json(&self) -> Json {
         let mut members = serde_json::Map::new();
+        if let Some(purposes) = &self.purposes {
+            members.insert("purposes".to_owned(), serde_json::json!(purposes));
+        }
         if let Some(models) = &self.models {
             members.insert("models".to_owned(), serde_json::json!(models));
         }
@@ -106,6 +111,12 @@ impl AskedOptions {
             }
         };
         Some(Self {
+            purposes: value
+                .get("purposes")
+                .filter(|value| !value.is_null())
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .ok()?,
             models: words("models")?,
             services: words("services")?,
             efforts: words("efforts")?,
@@ -451,6 +462,7 @@ pub async fn givers_for(
             // names the models, services and efforts that were asked for, and no type and no
             // place: the givers are those who could write that entry, as the approval holds them.
             let writes = orch_access_contract::permissions::ProviderUse {
+                purposes: options.and_then(|options| options.purposes.clone()),
                 models: options.and_then(|options| options.models.clone()),
                 services: options.and_then(|options| options.services.clone()),
                 efforts: options.and_then(|options| options.efforts.clone()),
@@ -838,6 +850,7 @@ fn options_given(asked: &Asked, chosen: Option<&Json>) -> Result<Json, GrantErro
         )
     })?;
     let Options::ProviderUse(ProviderUse {
+        purposes,
         models,
         services,
         efforts,
@@ -871,9 +884,24 @@ fn options_given(asked: &Asked, chosen: Option<&Json>) -> Result<Json, GrantErro
         asked.options.as_ref().and_then(|o| o.efforts.as_ref()),
         "efforts",
     )?;
+    if let (Some(given), Some(wanted)) = (
+        purposes,
+        asked
+            .options
+            .as_ref()
+            .and_then(|options| options.purposes.as_ref()),
+    ) && given.iter().any(|purpose| !wanted.contains(purpose))
+    {
+        return Err(unfit("options", "purposes reach beyond what was asked for"));
+    }
     // What the approver left out stays as asked: an option that was asked for is not dropped.
     let mut written = parsed.to_json();
     if let (Json::Object(members), Some(wanted)) = (&mut written, &asked.options) {
+        if purposes.is_none()
+            && let Some(purposes) = &wanted.purposes
+        {
+            members.insert("purposes".to_owned(), serde_json::json!(purposes));
+        }
         if models.is_none()
             && let Some(models) = &wanted.models
         {
@@ -893,7 +921,7 @@ fn options_given(asked: &Asked, chosen: Option<&Json>) -> Result<Json, GrantErro
     // The types and the places are not asked for, so none is held to what was asked. What the
     // approver writes is held to what they hold when the change is made, as for any entry: a
     // type in which the credential leaves, or a place, is theirs to give only if they hold it.
-    let _ = (arrangements, r#where);
+    let _ = (purposes, arrangements, r#where);
     Ok(written)
 }
 
@@ -988,6 +1016,34 @@ pub async fn grant(
 mod service_option_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn approving_ask_use_keeps_its_purpose_and_cannot_widen_it_to_turns() {
+        use orch_access_contract::permissions::ProviderUsePurpose;
+        let asked = Asked {
+            label: None,
+            object: ObjectRef {
+                kind: ObjectKind::Provider,
+                id: orch_types::new_id(),
+            },
+            permissions: vec![Permission::ProviderUse],
+            options: Some(AskedOptions {
+                purposes: Some(vec![ProviderUsePurpose::Ask]),
+                models: Some(vec!["shared-model".into()]),
+                ..AskedOptions::default()
+            }),
+            whom: Whom::Requester,
+            reason: "Answer questions".into(),
+        };
+        let expected = json!({"models":["shared-model"],"purposes":["ask"]});
+        assert_eq!(options_given(&asked, None).unwrap(), expected);
+        assert_eq!(options_given(&asked, Some(&json!({}))).unwrap(), expected);
+        assert!(options_given(&asked, Some(&json!({"purposes":["ask","work"]}))).is_err());
+        assert_eq!(
+            AskedOptions::from_json(&expected).unwrap().to_json(),
+            expected
+        );
+    }
 
     #[test]
     fn granting_service_use_preserves_an_omitted_limit_and_refuses_a_wider_selection() {

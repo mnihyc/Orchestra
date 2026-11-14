@@ -6,6 +6,7 @@
  * written. A screen that reads the few settings it explains itself by (the rules an org gives its
  * invitations) uses the same list as the editor, under the same key.
  */
+import { RELEASE_READ } from '@/api/freshness';
 import { joinedDefaultsRegistry } from '@/api/defaultsOpening';
 import { ADMIN_QUERY } from '@/api/queryAuthority';
 import { queryOptions } from '@tanstack/react-query';
@@ -51,7 +52,6 @@ export const settingsQuery = (nodeId: string) =>
     queryKey: settingsKey(nodeId),
     queryFn: (): Promise<ResolvedSetting[]> =>
       ok(api.GET('/nodes/{id}/settings', { params: { path: { id: nodeId } } })),
-    staleTime: Infinity,
   });
 
 /** Every key there is, with its words, the schema of its value, its class, where it can be set and how scopes combine. It changes with a release. */
@@ -59,7 +59,7 @@ export const registryQuery = queryOptions({
   queryKey: ['settings-registry'] as const,
   queryFn: async ({ signal, client: cache }): Promise<SettingDef[]> =>
     await joinedDefaultsRegistry(cache, ['settings-registry'], signal) ?? ok(api.GET('/settings/registry', { signal })),
-  staleTime: Number.POSITIVE_INFINITY,
+  ...RELEASE_READ,
 });
 
 /** The settings in effect at any target. */
@@ -210,7 +210,7 @@ export const notifiersKey = ['notifiers'] as const;
 export const notifiersQuery = queryOptions({
   queryKey: notifiersKey,
   queryFn: ({ signal }): Promise<Notifier[]> => ok(api.GET('/notifiers', { signal })),
-  staleTime: Number.POSITIVE_INFINITY,
+  ...RELEASE_READ,
 });
 
 export const channelsKey = (orgId: string) => ['channels', orgId] as const;

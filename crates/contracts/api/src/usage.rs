@@ -1148,27 +1148,8 @@ pub enum UsageOrigin {
     Orch,
 }
 
-/// What a ledger row was spent on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum UsagePurpose {
-    /// A turn of an agent.
-    Turn,
-    /// The summary of a topic.
-    Summary,
-    /// Vectors of an org's text, or of a query, for search by meaning.
-    Embeddings,
-    /// An agent permission review, accounted apart from its generation.
-    Review,
-    /// A native or selected service web search.
-    WebSearch,
-    /// A native or selected service page fetch.
-    PageFetch,
-    /// Image generation by the selected offering.
-    ImageGeneration,
-    /// A question explicitly issued by a person.
-    Ask,
-}
+/// The purpose of provider work, shared with its Use entry and factual ledger.
+pub use orch_access_contract::permissions::ProviderPurpose as UsagePurpose;
 
 /// What a ledger row counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]

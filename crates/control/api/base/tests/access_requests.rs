@@ -729,6 +729,7 @@ async fn an_approver_may_give_fewer_permissions_narrower_options_and_an_end() {
         .id;
     let mut wanted = item("provider", provider, &["provider.use"]);
     wanted.options = Some(AccessOptions {
+        purposes: None,
         models: Some(vec!["gpt-a".to_owned(), "gpt-b".to_owned()]),
         services: None,
         efforts: Some(vec!["high".to_owned()]),

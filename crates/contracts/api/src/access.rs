@@ -1216,6 +1216,9 @@ pub struct ResourceAccess {
 /// The least of a provider's models and efforts that would do, and where the work was to run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AccessOptions {
+    /// The purposes the work needs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purposes: Option<Vec<orch_access_contract::permissions::ProviderUsePurpose>>,
     /// The models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<String>>,

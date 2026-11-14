@@ -40,6 +40,7 @@ import { SchemaInput } from '@/features/resources/templates/SchemaForm';
 import { ThreadRules } from '@/features/approvals/ThreadRules';
 import { ThreadLinks } from '@/features/source/Links';
 import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
+import { RequestOptionsDisclosure } from '@/features/models/RequestOptions';
 
 import { ThreadPanel } from './ThreadPanel';
 import { CapabilityRoutes } from './CapabilityRoutes';
@@ -124,11 +125,10 @@ export function ParameterRow({ parameter, access, writable, runs, manageReason =
   const shownValue = typeof current === 'string' || typeof current === 'number' ? String(current) : '';
   const constraint = typeof definition.provider_constraint === 'object' && definition.provider_constraint !== null ? definition.provider_constraint as Record<string, unknown> : null;
   const isSwitch = constraint === null && (info.type === 'bool' || info.type === 'boolean');
-  return (
-    <li className="flex min-w-0 flex-col gap-1 border-b border-border px-3 py-2 last:border-b-0" data-testid="parameter-row" data-provider-interface={providerInterface ?? undefined}>
+  const content = <>
       <div className="flex flex-wrap items-center gap-2">
         {isSwitch ? <Switch className="min-w-0 flex-1" label={info.title} checked={current === true} disabled={!can || set.isPending} onCheckedChange={(on) => set.mutate(on)} />
-          : <span className="min-w-0 flex-1 text-sm font-medium text-text">{info.title}</span>}
+          : providerInterface === null && <span className="min-w-0 flex-1 text-sm font-medium text-text">{info.title}</span>}
         {!providerFixed && <Provenance source={parameter.source} />}
         {providerFixed && <span className="text-xs text-text-muted">{t('providerOptions.fixedByProvider')}</span>}
         {locked && (
@@ -182,8 +182,10 @@ export function ParameterRow({ parameter, access, writable, runs, manageReason =
       </p>
       {set.error !== null && <ErrorAlert error={set.error} />}
       {reset.error !== null && <ErrorAlert error={reset.error} />}
-    </li>
-  );
+  </>;
+  return <li className="flex min-w-0 flex-col gap-1 border-b border-border px-3 py-2 last:border-b-0" data-testid="parameter-row" data-provider-interface={providerInterface ?? undefined}>
+    {providerInterface === null ? content : <RequestOptionsDisclosure label={info.title} value={current} reveal={set.error !== null || reset.error !== null}>{content}</RequestOptionsDisclosure>}
+  </li>;
 }
 
 /** The inspector reads the composer's choices and edits only the other native parameters. */

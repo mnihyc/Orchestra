@@ -182,6 +182,7 @@ impl native::Stored for Reader {
 
 impl native::StoredRead for Reader {
     type Reply = SummaryOptionsView;
+    const REPEATS: bool = true;
     fn render<'a>(
         _: &'a Ctx,
         conn: &'a mut Conn,

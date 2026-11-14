@@ -11,8 +11,8 @@ use orch_link::commands::{CommandIssuer, Progress};
 use orch_link::machine::{MachineConfig, MachineLink};
 use orch_link_contract::backplane::DownFrame;
 use orch_link_contract::commands::{
-    Cmd, CommandError, CommandKind, ErrorCode, Reference, SerialKey, SessionClose,
-    resolve_references,
+    Cmd, Command, CommandError, CommandKind, CommandResult, ErrorCode, ProviderDiscoverModels,
+    ProviderDiscoverModelsResult, Reference, SerialKey, SessionClose, resolve_references,
 };
 use orch_link_contract::session::{Arch, Os, Platform, Role};
 use orch_link_contract::version::Limits;
@@ -92,6 +92,58 @@ async fn a_command_that_is_sent_again_after_a_reconnect_runs_once_and_gets_one_r
     rig.machine.handler.release();
     let ended = within(30, rig.controller.wait_command(id)).await;
     assert!(matches!(ended, Progress::Succeeded(_)), "{ended:?}");
+    assert_eq!(rig.machine.handler.runs_of(id), 1);
+}
+
+#[tokio::test]
+async fn a_large_model_catalogue_and_its_request_cross_the_default_link_without_configuration() {
+    let rig = rig();
+    rig.machine.link.connected().await;
+    let text = "Model details 模型资料 ".repeat(40_000);
+    let mut request = ProviderDiscoverModels {
+        provider_id: new_id(),
+        models: Some(Default::default()),
+    };
+    request
+        .models
+        .as_mut()
+        .unwrap()
+        .config
+        .insert("description".into(), json!(text));
+    let expected = ProviderDiscoverModelsResult {
+        source: None,
+        suggestions: (0..96)
+            .map(|index| {
+                orch_link_contract::foreign::ModelSuggestion::named(
+                    &format!("model-{index}"),
+                    Some(&format!("Model {index} {}", "details 资料 ".repeat(700))),
+                )
+            })
+            .collect(),
+    };
+    let sent_request = request.clone();
+    let sent_result = expected.clone();
+    rig.machine
+        .handler
+        .on(CommandKind::ProviderDiscoverModels, move |command| {
+            let Command::ProviderDiscoverModels(received) = command else {
+                panic!("the native model request arrives");
+            };
+            assert_eq!(
+                received, &sent_request,
+                "the whole request arrives unchanged"
+            );
+            Ok(CommandResult::ProviderDiscoverModels(sent_result.clone()))
+        });
+    let id = rig
+        .controller
+        .issue(&SerialKey::None, deadline(&rig.clock, 300), &request);
+    let ended = within(15, rig.controller.wait_command(id)).await;
+    let Progress::Succeeded(result) = ended else {
+        panic!("the model catalogue should arrive: {ended:?}");
+    };
+    let received: ProviderDiscoverModelsResult = serde_json::from_value(result).unwrap();
+    assert_eq!(received, expected);
     assert_eq!(rig.machine.handler.runs_of(id), 1);
 }
 
@@ -222,7 +274,7 @@ async fn commands_with_one_key_run_one_at_a_time_in_the_order_they_came_and_othe
 }
 
 #[tokio::test]
-async fn a_command_whose_deadline_passed_before_its_turn_is_not_started() {
+async fn a_short_command_that_waited_in_line_behind_a_long_one_still_runs_when_its_turn_comes() {
     let rig = rig();
     rig.machine.link.connected().await;
     rig.machine.handler.hold(CommandKind::SessionClose);
@@ -232,21 +284,23 @@ async fn a_command_whose_deadline_passed_before_its_turn_is_not_started() {
         deadline(&rig.clock, 600),
         &SessionClose { thread_id: thread },
     );
-    let late = rig.controller.issue(
+    // Thirty seconds of work, asked while the line is held by a long one.
+    let short = rig.controller.issue(
         &SerialKey::Thread(thread),
         deadline(&rig.clock, 30),
         &SessionClose { thread_id: thread },
     );
     within(10, rig.machine.handler.started(blocker)).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // The line stays held for far longer than the short command's thirty seconds.
     rig.clock.advance(chrono::Duration::seconds(60));
     rig.machine.handler.release();
-    let ended = within(10, rig.controller.wait_command(late)).await;
-    let Progress::Failed(error) = ended else {
-        panic!("{ended:?}")
-    };
-    assert_eq!(error.code, ErrorCode::Timeout.as_str());
-    assert_eq!(rig.machine.handler.runs_of(late), 0);
+    let ended = within(10, rig.controller.wait_command(short)).await;
+    assert!(
+        matches!(ended, Progress::Succeeded(_)),
+        "the time spent waiting is not the command's own: {ended:?}"
+    );
+    assert_eq!(rig.machine.handler.runs_of(short), 1);
 }
 
 #[tokio::test]
@@ -748,4 +802,43 @@ async fn a_locally_suppressed_acknowledged_resend_retires_its_ack_timer() {
         assert_eq!(handle.progress(), Progress::Succeeded(result));
         assert!(issuer.answered(original.id));
     }
+}
+
+#[tokio::test]
+async fn a_stop_reaches_the_machine_while_the_threads_ordinary_command_is_still_running() {
+    use orch_link_contract::commands::{KeyKind, TurnInterrupt};
+    let rig = rig();
+    rig.machine.link.connected().await;
+    rig.machine.handler.hold(CommandKind::SessionClose);
+    let thread = new_id();
+    let slow = rig.controller.issue(
+        &SerialKey::Thread(thread),
+        deadline(&rig.clock, 600),
+        &SessionClose { thread_id: thread },
+    );
+    within(10, rig.machine.handler.started(slow)).await;
+    assert_eq!(
+        CommandKind::TurnInterrupt.key(),
+        KeyKind::None,
+        "Stop has no ordinary command queue"
+    );
+    let stop = rig.controller.issue(
+        &SerialKey::None,
+        deadline(&rig.clock, 30),
+        &TurnInterrupt {
+            thread_id: thread,
+            turn_id: new_id(),
+        },
+    );
+    within(10, rig.machine.handler.started(stop)).await;
+    assert!(matches!(
+        within(10, rig.controller.wait_command(stop)).await,
+        Progress::Succeeded(_)
+    ));
+    assert!(!matches!(
+        rig.controller.progress(slow),
+        Some(Progress::Succeeded(_))
+    ));
+    rig.machine.handler.release();
+    within(10, rig.controller.wait_command(slow)).await;
 }

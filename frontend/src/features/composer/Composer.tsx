@@ -33,17 +33,21 @@ import { DraftMark } from '@/features/composer/DraftMark';
 import { ComposerControls } from '@/features/composer/Controls';
 import { ReferencePicker, type ReferenceKind } from '@/features/composer/Mentions';
 import { addToMessage } from '@/features/files/AddToMessage';
-import { useAskOnSide } from '@/features/side-threads/ask';
+import { asideUnconfirmed, openSideAsk, useAskOnSide } from '@/features/side-threads/ask';
 import { sideReadingAvailable, sideRefusal } from '@/features/side-threads/availability';
 import { composerWriter, steerRefusedFor, submitInput, useAttachmentParts, useBox, useComposerStore, useDraftSync } from '@/features/composer/Draft';
 import { ModelEffort } from '@/features/composer/ModelEffort';
 import { ViewerAccessLine } from '@/features/composer/ViewerAccessLine';
 import { needsPlanDefault, planningFor } from '@/features/composer/planning';
 import { PlanSwitch } from '@/features/composer/PlanSwitch';
-import type { Kind } from '@/features/composer/modelState';
-import { contextStart, statesOf } from '@/features/composer/modelState';
+import { type ControlName, contextStart, statesOf } from '@/features/composer/modelState';
 import { useModelCommands, useSlashMenu } from '@/features/composer/SlashMenu';
+import { openChange } from '@/features/change/target';
+import { openGoalEditor } from '@/features/goal/editor';
+import { goalActionReason, isLive } from '@/features/goal/model';
 import { useGoalCommand } from '@/features/goal/slash';
+import { threadCapabilities } from '@/features/thread/cached';
+import { openWhere } from '@/features/thread/openWhere';
 import { StopFeedback, useStop } from '@/features/composer/StopControl';
 import { isApplePlatform, isComposing } from '@/lib/shortcuts';
 import { holds } from '@/lib/permissions';
@@ -57,6 +61,7 @@ import { currentTurnOver, runningTurn, turnsRevision, useThreadPart } from '@/re
 import { cx } from '@/ui/cx';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { LimitPrompt } from '@/ui/LimitPrompt';
+import type { MenuEntry } from '@/ui/Menu';
 import { Textarea } from '@/ui/Textarea';
 import { Button } from '@/ui/Button';
 import { programNameIn } from '@/features/resources/programNames';
@@ -103,8 +108,8 @@ function ThreadComposer({ thread, onSent }: { thread: Thread; onSent?: () => voi
   const [prompt, setPrompt] = useState<Delivery | null>(null);
   const [blockedSend, setBlockedSend] = useState<Delivery | null>(null);
   const [reference, setReference] = useState<{ kind: ReferenceKind; query: string } | null>(null);
-  // The model control, opened by a command of the box on the choice it names.
-  const [control, setControl] = useState<{ open: boolean; section: Kind | null }>({ open: false, section: null });
+  // The control whose list is open, where a command of the box opens it.
+  const [control, setControl] = useState<ControlName | null>(null);
 
   const turn = useThreadPart(threadId, runningTurn);
   const over = useThreadPart(threadId, currentTurnOver);
@@ -124,9 +129,8 @@ function ThreadComposer({ thread, onSent }: { thread: Thread; onSent?: () => voi
   const meta = useQuery({ ...metaQuery, enabled: shown }).data;
   const maxChars = meta?.limits.max_input_chars ?? null;
 
-  const settings = useQuery({ ...settingsQuery(threadId), enabled: mayDrive && shown });
-  const configured = settings.data?.find((setting) => setting.key === 'collab.default_delivery')?.value;
-  const pasteShare = settings.data?.find((setting) => setting.key === 'composer.paste_inline_context_share')?.value;
+  const configured = parameters?.composer?.default_delivery;
+  const pasteShare = parameters?.composer?.paste_inline_context_share;
   const inlineShare = typeof pasteShare === 'number' ? pasteShare : DEFAULT_PASTE_INLINE_CONTEXT_SHARE;
   const pasteOption = parameters?.model.options.find((option) => option.model_name === model);
   const pasteModel = pasteOption?.parameters;
@@ -138,8 +142,8 @@ function ThreadComposer({ thread, onSent }: { thread: Thread; onSent?: () => voi
   const needsPasteFacts = parts.some((part) => part.type === 'pasted_text' && (part.delivery === undefined || part.delivery === null));
   const contextState = useQuery({ ...threadContextQuery(threadId, 'kept', contextRevision), enabled: mayDrive && shown && hasPastedText });
   const context = contextState.data;
-  const pasteFactsReady = settings.isSuccess && (inlineShare === 0 || inlineShare === 100 || parametersState.isSuccess && contextState.isSuccess);
-  const pasteFactsError = hasPastedText ? parametersState.error ?? settings.error ?? contextState.error : null;
+  const pasteFactsReady = parametersState.isSuccess && (inlineShare === 0 || inlineShare === 100 || contextState.isSuccess);
+  const pasteFactsError = hasPastedText ? parametersState.error ?? contextState.error : null;
   const attachmentsWaiting = uploads.blocked || pastes.blocked || fileDrops.blocked || needsPasteFacts && !pasteFactsReady;
   const pasteUsage = useMemo(() => pasteContext(thread.usage, context?.fill), [thread.usage, context?.fill]);
   const pasteDelivery = useMemo(() => {
@@ -160,8 +164,13 @@ function ThreadComposer({ thread, onSent }: { thread: Thread; onSent?: () => voi
   const planUnavailable = program?.build?.check?.off.includes('plan_mode') === true
     ? featureReason('plan_mode') : undefined;
   const chosenPlan = useComposerStore((held) => held.planning[threadId]);
-  const planning = planningFor(thread, chosenPlan, settings.data);
-  const planPending = needsPlanDefault(thread, chosenPlan) && !settings.isSuccess;
+  const needsPlan = needsPlanDefault(thread, chosenPlan);
+  const compactDefaults = parameters?.composer;
+  const planSettings = useQuery({ ...settingsQuery(threadId), enabled: mayDrive && shown && needsPlan && parametersState.isSuccess && (compactDefaults === null || compactDefaults === undefined) });
+  const planDefaultsKnown = compactDefaults !== null && compactDefaults !== undefined || planSettings.isSuccess;
+  const planning = planningFor(thread, chosenPlan, compactDefaults === null || compactDefaults === undefined ? planSettings.data : [{ key: 'thread.plan_first', value: compactDefaults.plan_first }]);
+  const planPending = needsPlan && !planDefaultsKnown;
+  const planReadError = parametersState.error ?? planSettings.error;
 
   const state: DeliveryState = { active, starting, live, ...(planPending ? { inputReason: t('composer.plan.checking') } : {}), cannotSteer: noSteer, agent, ...(buildOff.includes('steer') ? { steerUnavailable: featureReason('steer') } : {}) };
   // The usual way, unless it cannot be used now.
@@ -169,7 +178,7 @@ function ThreadComposer({ thread, onSent }: { thread: Thread; onSent?: () => voi
 
 
   const limits = useQuery({ ...limitsQuery(threadId), enabled: mayDrive && shown });
-  const stop = useStop(threadId, turn?.id ?? null, live);
+  const stop = useStop(threadId, over ? null : activeTurnId, live, starting);
   const draft = useDraftSync(threadId, mayDrive, main, shown);
 
   // Text and cell-width changes use the same existing twelve-line bound.
@@ -196,20 +205,44 @@ function ThreadComposer({ thread, onSent }: { thread: Thread; onSent?: () => voi
   }, [text]);
 
   const fileReason = thread.environment === null ? t('composer.plus.noEnvironment') : !thread.environment_permissions.includes('files.view') ? t('composer.plus.noFileAccess') : false;
+  // `/side` is listed as `/goal` is: always, and disabled with the reason where this thread has no verified way to answer without acting (the thread's `sides`), exactly as the entry of the Send menu is. Words after it are the question; none opens the dialog that asks it.
+  const sideOff = sideRefusal(thread, t);
   const commands = [
-    ...useModelCommands(thread, (section) => setControl({ open: true, section })),
-    ...useGoalCommand(thread),
+    ...useModelCommands(thread, (name) => setControl(name)),
+    ...useGoalCommand(thread, planning),
+    ...['side', 'btw'].map((name) => ({ name, about: t('side.slash.about'), off: sideOff === false ? null : sideOff,
+      run: (question: string) => {
+        if (aside.isPending) return t('side.ask.sending');
+        if (question === '') { openSideAsk({ threadId, threadName: thread.name, toTurn: null, text: '', read }); return null; }
+        const written = text;
+        aside.mutate({ text: question, toTurn: null }, { onError: (error) => { if (!asideUnconfirmed(error)) setText(written); } });
+        return null;
+      } })),
+    // Plan mode is entered by a command as well as by its chip; the words after it are the task, left in the box to be sent.
+    ...(planOffered || planUnavailable !== undefined ? [{ name: 'plan', about: t('composer.plan.slash'), off: !mayDrive ? t('composer.row.readOnly') : planUnavailable ?? null,
+      run: (task: string) => { composerWriter.setPlanning(threadId, true); if (task !== '') requestAnimationFrame(() => setText(task)); return null; } }] : []),
+    ...(threadCapabilities(thread)?.fork === true && thread.side_of === null && !thread.archived ? [{ name: 'fork', about: t('composer.slash.fork'), off: !mayDrive ? t('composer.row.readOnly') : null,
+      run: () => { openChange({ kind: 'thread', id: threadId, name: thread.name }, { kind: 'fork' }); return null; } }] : []),
+    ...(thread.binding !== null && thread.side_of === null && !thread.archived ? [{ name: 'directory', about: t('composer.slash.directory'), off: holds(thread.access, 'thread.manage') ? thread.lock !== null ? t('threadMove.jobMustEnd') : null : t('composer.row.bindingReadOnly', { who: thread.owner.display_name }),
+      run: () => { openWhere(thread); return null; } }] : []),
     ...(['file', 'document'] as const).map((kind) => ({ name: kind, about: t(kind === 'file' ? 'composer.plus.file' : 'composer.plus.document'), off: !mayDrive ? t('composer.row.readOnly') : kind === 'file' && fileReason !== false ? fileReason : null,
       run: (query: string) => { setReference({ kind, query }); return null; } })),
   ];
   const slash = useSlashMenu(text, commands, () => setText(''));
+  // The same acts as the commands, from the plus: a goal, and a question on the side (what is written, or the dialog that asks it).
+  const goalSet = thread.goal ?? null;
+  const actEntries: MenuEntry[] = [
+    { id: 'goal', label: t(goalSet !== null && (isLive(goalSet) || goalSet.status === 'stopped') ? 'goals.act.edit' : 'goals.menu.set'), disabled: goalActionReason(thread, t) ?? false, onSelect: () => openGoalEditor(threadId) },
+    ...(thread.side_of === null && sideReadingAvailable(thread) ? [{ id: 'side', label: t('side.menu.ask'), disabled: !mayDrive ? t('composer.row.readOnly') : sideOff === false ? false : sideOff,
+      onSelect: () => { if (text.trim() === '') openSideAsk({ threadId, threadName: thread.name, toTurn: null, text: '', read }); else askOnSide(); } } satisfies MenuEntry] : []),
+  ];
 
   const tooLong = maxChars !== null && text.length > maxChars;
   const empty = text.trim() === '' && parts.length === 0;
   const reached = limits.data?.reached.some((limit) => !(limit.cap === null && limit.provider_limit !== null)) === true;
   const inputReason = inputUnavailable(state, { mayDrive, empty, tooLong, attachmentsWaiting }, t);
   const blockedReason = blockedSend === null || empty ? false : inputReason || whyNot(blockedSend, state, t);
-  const schedule = useScheduleComposer(thread, mayDrive && shown, inputUnavailable({ ...state, inputReason: undefined }, { mayDrive, empty, tooLong, attachmentsWaiting }, t));
+  const schedule = useScheduleComposer(thread, mayDrive && shown, inputUnavailable(state, { mayDrive, empty, tooLong, attachmentsWaiting }, t), { plan: planning, delivery: preferred });
 
   const sharing = useLinkSharing({ origin: { kind: 'thread_input', thread_id: threadId }, placeId: threadId, sender: null,
     agent: { id: threadId, kind: 'thread', name: thread.name, redacted: false }, version: JSON.stringify([read.key, agentId, planning]) },
@@ -304,8 +337,8 @@ function ThreadComposer({ thread, onSent }: { thread: Thread; onSent?: () => voi
       <UploadChips queue={mayDrive ? uploads : { ...uploads, retryReason: t('composer.row.readOnly') }} />
       {fileDrops.progress}
       <UploadChips queue={pasteQueue} />
-      {mayDrive && needsPasteFacts && !pasteFactsReady && (pasteFactsError === null ? <span role="status" className="text-sm text-text-muted">{t('uploads.readingPasteDelivery')}</span> : <ErrorAlert error={pasteFactsError} action={<Button size="sm" onClick={() => { void Promise.all([parametersState.refetch(), settings.refetch(), contextState.refetch()]); }}>{t('common.tryAgain')}</Button>} />)}
-      {mayDrive ? <AttachmentChips parts={parts} onRemove={removePart} imageIncompatible={imagesUnsupported} imageReason={buildOff.includes('input_images') ? featureReason('input_images') : undefined} onChangeModel={buildOff.includes('input_images') ? undefined : () => setControl({ open: true, section: null })}
+      {mayDrive && needsPasteFacts && !pasteFactsReady && (pasteFactsError === null ? <span role="status" className="text-sm text-text-muted">{t('uploads.readingPasteDelivery')}</span> : <ErrorAlert error={pasteFactsError} action={<Button size="sm" onClick={() => { void Promise.all([parametersState.refetch(), contextState.refetch()]); }}>{t('common.tryAgain')}</Button>} />)}
+      {mayDrive ? <AttachmentChips parts={parts} onRemove={removePart} imageIncompatible={imagesUnsupported} imageReason={buildOff.includes('input_images') ? featureReason('input_images') : undefined} onChangeModel={buildOff.includes('input_images') ? undefined : () => setControl('model')}
         readPaste={pastes.read} pastedIdentity={pastes.identity} onPasteAsText={pastes.asText} onPasteDirty={pastes.markDirty} editText={pastes.editText} editing={pastes.editing} pasteQueue={pastes.queue} onPasteDelivery={pastes.delivery}
         onEditPaste={(index, words) => { const part = parts[index]; if (part?.type === 'pasted_text') pastes.edit(part, words); }}
         pasteMode={(part) => part.delivery !== undefined && part.delivery !== null || pasteFactsReady && (pasteEstimateKnown || inlineShare === 0 || inlineShare === 100) ? pasteDelivery.get(part) : undefined} pasteTokens={(part) => pastedPartTokens(part, pasteEstimate)}
@@ -340,12 +373,13 @@ function ThreadComposer({ thread, onSent }: { thread: Thread; onSent?: () => voi
           fieldClassName="w-full"
         />
         <ComposerControls thread={thread}
-          notices={mayDrive ? <DraftMark status={draft} /> : undefined}
+          notices={mayDrive ? <DraftMark status={draft} threadId={threadId} /> : undefined}
           access={mayDrive ? undefined : <ViewerAccessLine thread={thread} />}
-          attachment={<AttachButton onPress={() => fileInput.current?.click()} disabled={!mayDrive} onFile={() => setReference({ kind: 'file', query: '' })} onDocument={() => setReference({ kind: 'document', query: '' })} fileReason={fileReason} />}
-          model={thread.program?.id === 'orch' ? undefined : <ModelEffort thread={thread} variant="composer" compact readOnly={!mayDrive} open={control.open} onOpenChange={(open) => setControl((held) => ({ open, section: open ? held.section : null }))} section={control.section} />}
-          delivery={<DeliveryControl state={state} stop={stop} turnId={turn?.id ?? null} mayDrive={mayDrive} empty={empty} tooLong={tooLong} attachmentsWaiting={attachmentsWaiting || sharing.blocked} onSend={send} onSchedule={schedule.open} scheduleUnavailable={schedule.reason} onAskOnSide={thread.side_of === null && sideReadingAvailable(thread) ? askOnSide : undefined} sideUnavailable={asideRefusal} />}
-          plan={planOffered || planUnavailable !== undefined ? <PlanSwitch on={planning} defaulted={needsPlanDefault(thread, chosenPlan) && settings.isSuccess} onChange={(on) => composerWriter.setPlanning(threadId, on)} unavailable={!mayDrive ? t('composer.row.readOnly') : planUnavailable ?? (planPending ? t('composer.plan.checking') : undefined)} /> : undefined}
+          attachment={<AttachButton onPress={() => fileInput.current?.click()} disabled={!mayDrive} onFile={() => setReference({ kind: 'file', query: '' })} onDocument={() => setReference({ kind: 'document', query: '' })} fileReason={fileReason} extras={actEntries} />}
+          contextOpen={control === 'context'} onContextOpenChange={(open) => setControl((held) => open ? 'context' : held === 'context' ? null : held)}
+          model={thread.program?.id === 'orch' ? undefined : <ModelEffort thread={thread} variant="composer" compact readOnly={!mayDrive} open={control === 'context' ? null : control} onOpenChange={setControl} />}
+          delivery={<DeliveryControl state={state} stop={stop} mayDrive={mayDrive} empty={empty} tooLong={tooLong} attachmentsWaiting={attachmentsWaiting || sharing.blocked} onSend={send} onSchedule={schedule.open} scheduleUnavailable={schedule.reason} onAskOnSide={undefined} />}
+          plan={planOffered || planUnavailable !== undefined ? <PlanSwitch on={planning} defaulted={needsPlan && planDefaultsKnown} onChange={(on) => composerWriter.setPlanning(threadId, on)} unavailable={!mayDrive ? t('composer.row.readOnly') : planUnavailable ?? (planPending ? t('composer.plan.checking') : undefined)} /> : undefined}
         />
         {mayDrive && active && live && <p className="px-2 text-xs text-text-muted" data-delivery-hint>{t(noSteer ? 'composer.runningQueueHint' : isApplePlatform() ? 'composer.runningHintMac' : 'composer.runningHint')}</p>}
         {mayDrive && ((maxChars !== null && text.length >= maxChars * COUNTER_FROM) || stop.armed || stop.stop.error !== null) && <div className="flex flex-wrap items-center gap-2" aria-live="polite">
@@ -362,7 +396,7 @@ function ThreadComposer({ thread, onSent }: { thread: Thread; onSent?: () => voi
       {mayDrive && <LinkSharing sharing={sharing} />}
       {mayDrive && slash.problem}
       {mayDrive && blockedReason !== false && <p role="status" className="text-sm text-text-muted">{blockedReason}</p>}
-      {mayDrive && planPending && settings.error !== null && <ErrorAlert error={settings.error} action={<Button size="sm" onClick={() => void settings.refetch()}>{t('common.tryAgain')}</Button>} />}
+      {mayDrive && planPending && planReadError !== null && <ErrorAlert error={planReadError} action={<Button size="sm" onClick={() => { void (parametersState.isSuccess ? planSettings.refetch() : parametersState.refetch()); }}>{t('common.tryAgain')}</Button>} />}
       {mayDrive && refusal !== undefined && refusal !== null && <ErrorAlert error={refusal} />}
       {mayDrive && (asideWaiting ? <div className="flex flex-wrap items-center gap-2 text-sm text-text-muted"><p className="min-w-0 flex-1" role="status">{t('side.ask.unconfirmedDraft')}</p><Button size="sm" pending={aside.isPending} onClick={() => { if (aside.variables !== undefined && !aside.isPending) aside.mutate(aside.variables); }}>{t('side.ask.retry')}</Button></div> : aside.isPending ? <p role="status" className="text-xs text-text-muted">{t('side.ask.sending')}</p> : aside.error !== null && <ErrorAlert error={aside.error} />)}
       {mayDrive && reference !== null && <ReferencePicker thread={thread} initialKind={reference.kind} initialQuery={reference.query}

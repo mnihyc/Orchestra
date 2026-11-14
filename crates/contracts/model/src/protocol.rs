@@ -46,16 +46,36 @@ pub const OPENAI_CHAT: &str = "openai-chat";
 pub const ANTHROPIC_MESSAGES: &str = "anthropic-messages";
 /// The name of the Embeddings format of OpenAI, which many servers of embedding models speak.
 pub const OPENAI_EMBEDDINGS: &str = "openai-embeddings";
+/// The native Gemini Interactions interface.
+pub const GOOGLE_INTERACTIONS: &str = "google-interactions";
 /// The protocol that makes vectors, by what it does and not by whose format it is.
 pub const EMBEDDINGS: &str = OPENAI_EMBEDDINGS;
 
 /// Every wire protocol a provider may be declared with, in the order the constraint catalogue lists them.
-pub const SUPPORTED: [&str; 4] = [
+pub const SUPPORTED: [&str; 5] = [
     OPENAI_CHAT,
     OPENAI_RESPONSES,
     ANTHROPIC_MESSAGES,
     OPENAI_EMBEDDINGS,
+    GOOGLE_INTERACTIONS,
 ];
+
+/// Additional fields owned by an interface's request builder, independent of option values.
+pub(crate) fn owned_members(protocol: &str, member: &str) -> Vec<&'static str> {
+    static DATA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    DATA.get_or_init(|| {
+        serde_json::from_str(include_str!("../../../../shared/protocol-options.json"))
+            .unwrap_or(serde_json::Value::Null)
+    })
+    .get("protocols")
+    .and_then(|all| all.get(protocol))
+    .and_then(|format| format.get(member))
+    .and_then(serde_json::Value::as_array)
+    .into_iter()
+    .flatten()
+    .filter_map(serde_json::Value::as_str)
+    .collect()
+}
 
 /// The parameter field declarations of a wire format. Generic option resolution
 /// consumes these alongside the request allowlists rather than selecting a vendor.
@@ -103,6 +123,12 @@ pub(crate) fn parameter_format(protocol: &str) -> ParameterFormat {
             program: Some(("access_programs", "cyber", "standard")),
             omit_ordinary_program: true,
             tier_aliases: &[("priority", "fast")],
+            ..Default::default()
+        },
+        GOOGLE_INTERACTIONS => ParameterFormat {
+            web_search: Some("web_search"),
+            effort: Some(("generation_config", Some("thinking_level"))),
+            tier: Some(("service_tier", "standard")),
             ..Default::default()
         },
         OPENAI_CHAT => ParameterFormat {
@@ -298,6 +324,16 @@ pub fn model_candidates(
     Ok(names)
 }
 
+/// Why a completion ended before its answer was whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionStop {
+    /// The upstream's own word for it: a Responses `incomplete_details.reason`, a Messages `stop_reason`, a chat
+    /// `finish_reason`.
+    pub reason: String,
+    /// Whether the answer ran into its output allowance, the reasoning the model did before it answered included.
+    pub output_limit: bool,
+}
+
 /// One implementation per wire protocol, used by the provider role.
 pub trait WireProtocol: Send + Sync + 'static {
     /// Its name, such as `openai-responses`.
@@ -454,6 +490,13 @@ pub trait WireProtocol: Send + Sync + 'static {
         Err(WireError::Internal(
             "this protocol cannot read a text completion".to_owned(),
         ))
+    }
+
+    /// Why the upstream stopped a completion before its answer was whole, in the upstream's own word, read
+    /// from a reply that `completion_text` refused. `None` when the reply is not an answer that was cut short.
+    fn completion_stopped(&self, body: &[u8]) -> Option<CompletionStop> {
+        let _ = body;
+        None
     }
 
     /// Tool-capable dialogue generation. Protocols without generation, including

@@ -8,6 +8,10 @@ summary: Connect a machine with the roles, folders and gateway you intend to use
 
 # Connect a machine
 
+Use the API, gateway and connector builds from the same update. An incompatible
+framing version is reported before a session opens. Large model catalogues and
+conversation history transfer automatically in parts.
+
 ## 1. Choose what runs here
 
 Open **Resources → Machines → Add**, then choose its roles. **Environment** uses folders

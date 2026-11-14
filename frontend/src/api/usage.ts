@@ -9,9 +9,10 @@
  * A cap that is made carries the key of the act, so that a second attempt after a lost answer makes nothing
  * twice; a change names the revision the person saw.
  */
+import { supersededRead } from '@/api/reads';
 import { scheduledReads, suppliedRead } from '@/api/readScheduler';
 import { ADMIN_QUERY } from '@/api/queryAuthority';
-import { CancelledError, infiniteQueryOptions, type QueryClient, queryOptions } from '@tanstack/react-query';
+import { infiniteQueryOptions, type QueryClient, queryOptions } from '@tanstack/react-query';
 
 import { api, client, done, ok, repeatable } from '@/api/client';
 import type {
@@ -128,7 +129,6 @@ function filterQuery(filters: UsageFilters): UsageFilters {
 export const healthQuery = (providerId: string) => queryOptions({
   queryKey: ['usage', 'health', providerId] as const,
   queryFn: ({ signal }): Promise<UsageDegradation> => ok(api.GET('/usage/health', { params: { query: { provider_id: providerId } }, signal })),
-  staleTime: 10_000,
 });
 
 /** The figures of a span: the totals, the series and a breakdown for each dimension asked for. */
@@ -163,20 +163,19 @@ export const usageQuery = (params: UsageParams) =>
         },
       })).then((data) => ({ ok: true as const, data }), (error: unknown) => ({ ok: false as const, error }));
       const current = cache.getQueryState<UsageAnalytics>(key);
-      if (!scheduledReads.current(cut) || reader !== client.session.getState().readerVersion) throw new CancelledError({ silent: true });
+      if (!scheduledReads.current(cut) || reader !== client.session.getState().readerVersion) throw supersededRead();
       if (current !== undefined && scheduledReads.owns(key)
         && (current.dataUpdateCount !== before?.dataUpdateCount || current.error !== before.error)) {
         // Settle the cache flight with the newer native outcome, including its idle
         // fetch status. A silent cancellation without a replacement would leave it busy.
         if (current.status === 'success' && current.data !== undefined) return current.data;
         if (current.status === 'error' && current.error !== null) throw current.error;
-        throw new CancelledError({ silent: true });
+        throw supersededRead();
       }
       if (!result.ok) throw result.error;
       return result.data;
     },
     // A span that ended before today does not change, and today's changes with every turn: a minute is a fair wait.
-    staleTime: 60_000,
     // The screen keeps what it showed while the next span is on its way, dimmed.
     placeholderData: (before, previous) => previous?.queryKey[2].scope === params.scope ? before : undefined,
   });
@@ -217,7 +216,6 @@ export const eventsQuery = (params: EventParams, pageSize: number = EVENTS_PAGE)
       ),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.next_cursor,
-    staleTime: 60_000,
   });
 
 /** The series of a span as a file of CSV, one line for each point. */
@@ -308,7 +306,6 @@ export const catalogueQuery = (match: string | null = null) =>
     queryKey: usageKeys.catalogue(match),
     queryFn: ({ signal }): Promise<RateCatalogue | null> =>
       ok(api.GET('/usage/catalogue', { params: { query: match === null || match === '' ? {} : { q: match } }, signal })),
-    staleTime: 5 * 60_000,
   });
 
 /** Replaces the catalogue in force: a file, whatever the address of the setting gives, or the one the release came with. */
@@ -345,7 +342,6 @@ export const orgGroupsQuery = (orgId: string) =>
   queryOptions({
     queryKey: ['org-groups', orgId] as const,
     queryFn: ({ signal }): Promise<Group[]> => ok(api.GET('/orgs/{id}/groups', { params: { path: { id: orgId } }, signal })),
-    staleTime: 60_000,
   });
 
 /** Everything that bounds work at a place, with the caller's share of what is counted per person. */
@@ -354,7 +350,6 @@ export const placeLimitsQuery = (nodeId: string, userId: string | null = null) =
     queryKey: usageKeys.limits(nodeId, userId),
     queryFn: ({ signal }): Promise<Limits> =>
       ok(api.GET('/usage/limits', { params: { query: { node_id: nodeId, ...(userId === null ? {} : { user_id: userId }) } }, signal })),
-    staleTime: 10_000,
   });
 
 /** The caps defined on a place, a provider or the system, with how each stands. */
@@ -376,14 +371,12 @@ export const capsQuery = (where: CapPlace) =>
           signal,
         }),
       ),
-    staleTime: 10_000,
   });
 
 /** The caller's own share of every cap counted per person that covers them, wherever it is defined. */
 export const myLimitsQuery = queryOptions({
   queryKey: usageKeys.mine,
   queryFn: ({ signal }): Promise<CapStatus[]> => ok(api.GET('/me/limits', { signal })),
-  staleTime: 10_000,
 });
 
 /** What waits for room in a cap on turns running at once, in the order it will run. */
@@ -391,7 +384,6 @@ export const waitingQuery = (capId: string) =>
   queryOptions({
     queryKey: usageKeys.waiting(capId),
     queryFn: ({ signal }): Promise<UsageCapWaitingListReply> => ok(api.GET('/usage/caps/{id}/waiting', { params: { path: { id: capId } }, signal })),
-    staleTime: 5_000,
   });
 
 /** Makes a cap. `key` is made once, when the person acts. */

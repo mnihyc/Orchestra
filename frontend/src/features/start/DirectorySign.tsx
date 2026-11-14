@@ -29,7 +29,6 @@ export function DirectorySign({ environmentId, directory }: { environmentId: str
     queryFn: ({ signal }) => statFile({ environmentId: environmentId ?? '', threadId: null }, settled, signal),
     enabled: asked,
     retry: false,
-    staleTime: 10_000,
   });
   if (!asked || settled !== directory) return null;
   if (found.isPending) return <span role="status" className="text-sm text-text-muted" data-directory-sign="checking">{t('start.where.directoryChecking')}</span>;

@@ -23,6 +23,13 @@ const OFFERED_ONLY: ModelParameters = {
 };
 
 describe("a model's entry as a form", () => {
+  it('keeps unknown image support unknown and saves an explicit off choice as false', () => {
+    expect(formOf({}).images).toBeNull();
+    expect(parametersOf(formOf({}), {}).input_images).toBeUndefined();
+    const known = { input_images: true };
+    expect(parametersOf({ ...formOf(known), images: false }, known).input_images).toBe(false);
+  });
+
   it('keeps what the source offered and switches nothing on by itself', () => {
     const saved = parametersOf(formOf(OFFERED_ONLY), OFFERED_ONLY);
     expect(saved.offered).toEqual(OFFERED_ONLY.offered);

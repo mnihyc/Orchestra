@@ -190,6 +190,9 @@ impl ResourceAccess for AuthzAccess {
         conn: &mut Conn,
         ask: &ProviderUse<'_>,
     ) -> Result<Answer, AccessFault> {
+        if ask.purpose != orch_access_contract::permissions::ProviderPurpose::Turn {
+            return self.background_provider_use(conn, ask).await;
+        }
         let principal = self.principal(conn, ask.person).await?;
         let policies = Self::policies(conn, ask.provider).await?;
         let place = Self::place(conn, ask.runs_in).await?;
@@ -358,7 +361,7 @@ impl ResourceAccess for AuthzAccess {
                     ..orch_authz::options::Wanted::default()
                 };
                 // One entry has to allow the model, the effort and the place together.
-                let allowing = granted.allowing(&wanted);
+                let allowing = granted.allowing_for(&wanted, ask.purpose.permission_use());
                 if allowing.is_empty() {
                     return Ok(Answer::Refused(Vec::new()));
                 }

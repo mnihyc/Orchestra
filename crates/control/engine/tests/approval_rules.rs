@@ -35,6 +35,59 @@ fn asked_with_rule(turn: Id, request_ref: &str) -> Event {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lasting_allowance_is_kept_even_if_its_one_native_request_ends_before_settlement() {
+    let world = World::new().await;
+    let thread = world.thread("Keep the lasting choice").await;
+    let (start, _) = world.running_turn(thread, "Begin").await;
+    world
+        .say(thread, asked_with_rule(start.turn_id, "ending-request"))
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    let mut holder = world.pool.begin().await.unwrap();
+    orch_db::queries::threads::lock(&mut holder, thread)
+        .await
+        .unwrap();
+    world
+        .engine()
+        .decide_approval(
+            &Caller::session(world.ada),
+            approval,
+            &ApprovalDecision::Option(HarnessOptionDecision {
+                option_id: "allow_thread".to_owned(),
+                note: None,
+            }),
+        )
+        .await
+        .unwrap();
+    // The native delivery can fail before the separate settlement worker takes this row.
+    sqlx::query("UPDATE approvals SET state='cancelled' WHERE id=$1")
+        .bind(approval)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+    common::eventually("the recorded lasting choice is applied", || async {
+        world
+            .scalar::<i64>(
+                "SELECT count(*) FROM thread_approval_rules WHERE approval_id=$1",
+                approval,
+            )
+            .await
+            == 1
+    })
+    .await;
+    assert_eq!(
+        world
+            .scalar::<String>("SELECT state FROM approvals WHERE id=$1", approval)
+            .await,
+        "cancelled"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_action_allowed_for_a_thread_answers_the_same_request_once_until_it_is_taken_back() {
     let world = World::new().await;
     let thread = world.thread("Tests").await;
@@ -58,6 +111,7 @@ async fn an_action_allowed_for_a_thread_answers_the_same_request_once_until_it_i
         )
         .await
         .unwrap();
+    world.wait_state(thread, "running").await;
     let rule: Id = world
         .scalar(
             "SELECT id FROM thread_approval_rules WHERE thread_id = $1 AND revoked_at IS NULL",

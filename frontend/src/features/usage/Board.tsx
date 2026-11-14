@@ -18,12 +18,11 @@ import { useStore } from 'zustand';
 
 import { client } from '@/api/client';
 import { usageQuery, type UsageParams } from '@/api/usage';
-import type { UsageAnalytics, UsageDimension, UsageFigures } from '@/generated/api-types';
+import type { UsageAnalytics, UsageFigures } from '@/generated/api-types';
 import { creditsState, decimal, ESTIMATE_MARK, formatCredits, isEmpty, measureOf } from '@/features/usage/figures';
 import { keyId, keyLabel } from '@/features/usage/keys';
-import { spanOf, today, type UsageSearch } from '@/features/usage/search';
+import type { UsageSearch } from '@/features/usage/search';
 import { useFormatContext } from '@/lib/appearance';
-import { DAY_MS } from '@/lib/time';
 import { formatNumber, formatPercent, formatTokens } from '@/lib/format';
 import { boxClasses, Section } from '@/shell/Page';
 import { Button } from '@/ui/Button';
@@ -33,49 +32,14 @@ import { Skeleton } from '@/ui/Skeleton';
 import { UserChip } from '@/ui/UserChip';
 import { UsageVisibility } from './Visibility';
 import { serviceUnitsWords } from './services';
-
-/** The periods the board offers. */
-export const BOARD_PERIODS = ['day', 'week', 'last_week', 'month', 'year', 'all'] as const;
-export type BoardPeriod = (typeof BOARD_PERIODS)[number];
-
-/** What a board opens on: this week. */
-const DEFAULT_PERIOD: BoardPeriod = 'week';
-
-/** The other ways the board divides the same total. */
-const OTHER_WAYS = ['model','offering','purpose', 'provider', 'agent', 'environment'] as const satisfies readonly UsageDimension[];
-type OtherWay = (typeof OTHER_WAYS)[number];
+import { BOARD_PERIODS, DEFAULT_PERIOD, OTHER_WAYS, PEOPLE_ASKED, boardSpan, type BoardPeriod, type OtherWay } from './boardParameters';
+export { BOARD_PERIODS, boardSpan, type BoardPeriod } from './boardParameters';
 
 /** How many people the board lists before "Show all". */
 const PEOPLE_SHOWN = 5;
 
-/** How many rows it asks for: the ten who used most. */
-const PEOPLE_ASKED = 10;
-
 /** How many of the other way's members the line names before it says "other". */
 const OTHER_NAMED = 3;
-
-/** The days a period covers, as of today, in UTC. */
-export function boardSpan(period: BoardPeriod, now: number): { from: string; to: string } {
-  const to = today(now);
-  const midnight = Date.parse(`${to}T00:00:00Z`);
-  const date = new Date(midnight);
-  switch (period) {
-    case 'day':
-      return { from: to, to };
-    case 'week':
-      return { from: new Date(midnight - ((date.getUTCDay() + 6) % 7) * DAY_MS).toISOString().slice(0, 10), to };
-    case 'last_week': {
-      const span=spanOf({range:'last_week'},now);
-      return {from:span.from,to:span.to};
-    }
-    case 'month':
-      return { from: `${to.slice(0, 8)}01`, to };
-    case 'year':
-      return { from: `${to.slice(0, 4)}-01-01`, to };
-    case 'all':
-      return { from: '2020-01-01', to };
-  }
-}
 
 /** How many buckets a period has once it is over, so that the bars of one still going stand in their places and the days to come are empty. */
 export function boardSlots(period: BoardPeriod, now: number): number | undefined {

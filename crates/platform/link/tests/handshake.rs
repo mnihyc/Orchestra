@@ -243,31 +243,44 @@ async fn an_old_gateway_gets_no_auxiliary_authentication() {
     let f = fixture(false);
     let mut identity = f.client("0.1.0", None);
     identity.purpose = orch_link_contract::gateways::SessionPurpose::Tunnel;
-    let (machine, mut old_gateway) = f.pair(None, HOST, HOST);
-    let hello = orch_link_contract::session::Hello {
-        capabilities: Vec::new(),
-        protocol: orch_link_contract::version::ProtocolRange { min: 1, max: 1 },
-        nonce: orch_link_contract::session::encode_nonce(&[1; 32]),
-        server_time: f.clock.time(),
-        gateway_id: "gw".into(),
-        tls: orch_link_contract::session::TlsMode::Server,
-    };
-    old_gateway
-        .sink
-        .send(Message::Text(
-            frames::encode(&Frame::Hello(hello), 262_144).unwrap(),
-        ))
-        .await
-        .unwrap();
-    assert!(matches!(
-        connect(machine, &identity, &f.clock).await,
-        Err(HandshakeError::Malformed(_))
-    ));
-    assert_eq!(
-        old_gateway.source.recv().await.unwrap(),
-        None,
-        "no auth that an old gateway could mistake for a primary"
-    );
+    for protocol in [
+        orch_link_contract::version::ProtocolRange { min: 1, max: 1 },
+        orch_link_contract::version::ProtocolRange::SUPPORTED,
+    ] {
+        let (machine, mut old_gateway) = f.pair(None, HOST, HOST);
+        let hello = orch_link_contract::session::Hello {
+            capabilities: Vec::new(),
+            protocol,
+            nonce: orch_link_contract::session::encode_nonce(&[1; 32]),
+            server_time: f.clock.time(),
+            gateway_id: "gw".into(),
+            tls: orch_link_contract::session::TlsMode::Server,
+        };
+        old_gateway
+            .sink
+            .send(Message::Text(
+                frames::encode(&Frame::Hello(hello), 262_144).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let result = connect(machine, &identity, &f.clock).await;
+        if protocol == orch_link_contract::version::ProtocolRange::SUPPORTED {
+            assert!(
+                matches!(result, Err(HandshakeError::Malformed(_))),
+                "a compatible gateway must still advertise tunnel-only attachments"
+            );
+        } else {
+            assert!(matches!(
+                result,
+                Err(HandshakeError::ProtocolUnsupported { min: 1, max: 1 })
+            ));
+        }
+        assert_eq!(
+            old_gateway.source.recv().await.unwrap(),
+            None,
+            "no authentication that the gateway could mistake for a primary"
+        );
+    }
 }
 
 #[tokio::test]
@@ -389,7 +402,7 @@ fn proof_auth(f: &Fixture, nonce: &str, sent_at: Time) -> Auth {
         endpoints: None,
         hosted_endpoints: None,
         machine_id: f.identity.machine_id,
-        protocol_version: 1,
+        protocol_version: orch_link_contract::version::PROTOCOL_VERSION,
         connector_version: "0.1.0".to_owned(),
         platform: Platform {
             os: Os::Linux,
@@ -605,6 +618,20 @@ async fn a_connector_older_than_the_system_accepts_is_told_to_update_and_a_newer
     };
     assert_eq!(reject.code, RejectCode::ProtocolUnsupported);
     assert!(serving.await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn a_connector_that_has_to_update_is_told_which_version_it_has_and_which_it_needs() {
+    let f = fixture(false);
+    let old = f.client("0.0.9", None);
+    let (_, connected) = f.run(None, &old, &f.clock, (HOST, HOST)).await;
+    let Err(HandshakeError::Rejected(reject)) = connected else {
+        panic!("an old connector was admitted")
+    };
+    assert_eq!(reject.code, RejectCode::UpgradeRequired);
+    assert!(reject.detail.contains("0.0.9"), "{}", reject.detail);
+    assert!(reject.detail.contains("0.1.0"), "{}", reject.detail);
+    assert!(reject.detail.contains("update"), "{}", reject.detail);
 }
 
 #[tokio::test(start_paused = true)]

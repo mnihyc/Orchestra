@@ -154,6 +154,25 @@ impl HttpOrigin {
     }
 }
 impl HttpCommand {
+    pub(crate) fn summary_source(&self) -> Option<&crate::summaries::resource::command::Authority> {
+        match &self.native {
+            Native::Channel(source) => source.summary_source(),
+            Native::Source(_) => None,
+        }
+    }
+    pub(crate) fn reads_before_fence(&self) -> bool {
+        matches!(&self.native, Native::Channel(source) if source.reads_before_fence())
+    }
+    pub(crate) async fn refused_without_fence(
+        &self,
+        conn: &mut Conn,
+        command: &CommandRow,
+    ) -> Result<bool, EngineError> {
+        match &self.native {
+            Native::Channel(source) => Box::pin(source.refused_without_fence(conn, command)).await,
+            Native::Source(_) => Ok(false),
+        }
+    }
     /// Accepted native mkdir coordinates, without restoring its original sender.
     pub(crate) fn file_mkdir_receipt(
         &self,
@@ -294,11 +313,24 @@ impl HttpCommand {
         id: orch_types::Id,
         deadline: DateTime<Utc>,
     ) -> Result<(HttpOrigin, Option<Json>), EngineError> {
+        self.retained_with_lock(conn, id, deadline, true).await
+    }
+    async fn retained_with_lock(
+        &self,
+        conn: &mut Conn,
+        id: orch_types::Id,
+        deadline: DateTime<Utc>,
+        lock: bool,
+    ) -> Result<(HttpOrigin, Option<Json>), EngineError> {
         let mut origin = self
             .original
             .intersect(&self.accepted)
             .map_err(|_| closed())?;
-        let old = link::lock_command_with_authority(conn, id).await?;
+        let old = if lock {
+            link::lock_command_with_authority(conn, id).await?
+        } else {
+            link::command_with_authority(conn, id).await?
+        };
         let Some(old) = old else {
             return Ok((origin, None));
         };
@@ -357,11 +389,18 @@ impl HttpCommand {
         {
             return Ok(None);
         }
-        let (origin, previous) = self.retained(conn, command.id, command.deadline_at).await?;
-        let raw = match origin.current(conn, clock).await {
-            Ok(raw) => raw,
-            Err(continuing::Error::Refused) => return Ok(None),
-            Err(error) => return Err(EngineError::BeforeEffect(Box::new(error))),
+        let read_first = self.reads_before_fence();
+        let (origin, mut previous) = self
+            .retained_with_lock(conn, command.id, command.deadline_at, !read_first)
+            .await?;
+        let raw = if read_first {
+            None
+        } else {
+            match origin.current(conn, clock).await {
+                Ok(raw) => Some(raw),
+                Err(continuing::Error::Refused) => return Ok(None),
+                Err(error) => return Err(EngineError::BeforeEffect(Box::new(error))),
+            }
         };
         let current = match stored {
             Some(row) => {
@@ -377,6 +416,26 @@ impl HttpCommand {
         };
         let Some(mut callers) = current else {
             return Ok(None);
+        };
+        let raw = match raw {
+            Some(raw) => raw,
+            None => {
+                // The native frame now holds the source and raw identity. Take the command row
+                // in that order and check that its retained restrictions did not move during the read.
+                let (fresh, saved) = self.retained(conn, command.id, command.deadline_at).await?;
+                if fresh != origin {
+                    return Err(orch_db::DbError::Retry.into());
+                }
+                // Another first writer may have inserted this same immutable command while its
+                // source was read. Equal restrictions need no new source admission; retain the
+                // actual locked receipt for the narrowing CAS below.
+                previous = saved;
+                match origin.current(conn, clock).await {
+                    Ok(raw) => raw,
+                    Err(continuing::Error::Refused) => return Ok(None),
+                    Err(error) => return Err(EngineError::BeforeEffect(Box::new(error))),
+                }
+            }
         };
         let mut accepted = origin.clone();
         let mut primary = false;

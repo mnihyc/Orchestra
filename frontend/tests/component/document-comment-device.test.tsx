@@ -1,11 +1,13 @@
 /** The real device controls retire exactly the records they successfully erase, including mounted writers. */
 import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { QueryClient } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Auth from '@/api/auth';
 import type * as Personal from '@/api/personal';
 import { client } from '@/api/client';
+import { meStateKey } from '@/api/personal';
 import { getCommentDrafts, forgetCommentDraftDeviceData, retireCommentDraftSession, setCommentText, commentSlotKey } from '@/features/documents/commentDrafts';
 import { InterfaceSettings } from '@/features/settings/personal/Interface';
 import { i18n, setLocale } from '@/i18n';
@@ -15,17 +17,36 @@ import { show } from './support';
 
 vi.mock('@/features/settings/PersonalFrame', () => ({ PersonalFrame: ({ children }: { children: ReactNode }) => <main>{children}</main> }));
 vi.mock('@/features/settings/personal/Profile', () => ({ LookRows: () => null }));
-vi.mock('@/api/personal', async (load) => ({ ...await load<typeof Personal>(), meStateQuery: { queryKey: ['device-personal'], queryFn: () => Promise.resolve({}) } }));
+const writes = vi.hoisted(() => vi.fn<(key: string, value: unknown) => Promise<void>>());
+vi.mock('@/api/personal', async (load) => ({ ...await load<typeof Personal>(), setMeState: writes, meStateQuery: { queryKey: ['device-personal'], queryFn: () => Promise.resolve({}) } }));
 vi.mock('@/api/auth', async (load) => ({ ...await load<typeof Auth>(), meQuery: { queryKey: ['device-me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada')) } }));
 const session = client.session.getState(), person = 'device-comment-person';
 const target = { kind: 'reply' as const, discussion: 'original-discussion' };
-beforeEach(() => { localStorage.clear(); client.session.setState({ status: 'signed_in', userId: person, readerVersion: (session.readerVersion ?? 0) + 1 }); });
+beforeEach(() => { writes.mockReset().mockResolvedValue(undefined); localStorage.clear(); client.session.setState({ status: 'signed_in', userId: person, readerVersion: (session.readerVersion ?? 0) + 1 }); });
 afterEach(async () => { cleanup(); vi.restoreAllMocks(); forgetCommentDraftDeviceData(person, null); forgetViewChoiceDeviceData(person, null); retireCommentDraftSession(); localStorage.clear(); client.session.setState(session); await setLocale('en'); });
 
 function OpenPageChoice() {
   const [choice] = useViewChoice('page', 'state', 'Default filters', 'screen-0');
   return <output aria-label="Mounted page filters">{choice}</output>;
 }
+
+it('saves reading choices under their own native key and preserves other interface and layout choices', async () => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const named = { review: { title: 'Review' } };
+  cache.setQueryData(meStateKey, { layouts: { named }, interface: { otherChoice: 'kept' } });
+  const view = show(<InterfaceSettings />, cache);
+  try {
+    const recent = await screen.findByLabelText(i18n.t('settings.interface.reading.recent'));
+    const delay = screen.getByLabelText(i18n.t('settings.interface.reading.delay'));
+    await userEvent.clear(recent); await userEvent.type(recent, '27');
+    await userEvent.clear(delay); await userEvent.type(delay, '333');
+    const section = screen.getByRole('heading', { name: i18n.t('settings.interface.reading.title') }).closest('section');
+    if (section === null) throw new Error('Reading choices need their own section.');
+    await userEvent.click(within(section).getByRole('button', { name: i18n.t('common.save') }));
+    await waitFor(() => expect(writes).toHaveBeenCalledWith('interface', { otherChoice: 'kept', kept_closed_tabs: 27, progress_delay_ms: 333 }));
+    expect(cache.getQueryData(meStateKey)).toMatchObject({ layouts: { named }, interface: { otherChoice: 'kept', kept_closed_tabs: 27, progress_delay_ms: 333 } });
+  } finally { view.unmount(); cache.clear(); }
+});
 
 it.each([['en', 'List filters and tabs'], ['zh-CN', '列表筛选和标签']] as const)('names one page-choice group and clears its real mounted values without touching another kind or person in %s', async (locale, label) => {
   await setLocale(locale);

@@ -1425,7 +1425,7 @@ impl Engine {
         let command = crate::commands::Outgoing::new(
             crate::ids::derived("background.interrupt", &[input.id.as_bytes()]),
             machine,
-            orch_link_contract::commands::SerialKey::Thread(thread.node_id),
+            orch_link_contract::commands::SerialKey::None,
             &orch_link_contract::commands::TurnInterrupt {
                 thread_id: thread.node_id,
                 turn_id: wake.origin_turn,
