@@ -1,0 +1,10 @@
+# n41-settings, second round: the compile repair, the access program offered at shipped settings, pickers for the model, the call rule's model and the tree's order, named switches for agent features, Save beside an unsaved draft.
+fmt
+clippy
+test -p orch-settings-contract --lib
+test -p orch-engine --test summary_targets --test model_parameters --test call_recovery
+test -p orch-settings --test matrix_inheritance
+test -p orch-api-core --test settings --test threads_settings
+web typecheck
+web lint
+web test -- tests/component/settings-drafts.test.tsx tests/component/setting-inherit.test.tsx tests/component/summarizer-editor.test.tsx tests/component/agent-features-setting.test.tsx tests/component/agent-features-editor.test.tsx tests/component/agent-model-setting.test.tsx tests/component/calls-rule-model.test.tsx tests/component/navigation-order-setting.test.tsx tests/component/machine-policy.test.tsx tests/component/settings-thing-choices.test.tsx tests/component/semantic-fields.test.tsx tests/component/managed-provider-settings.test.tsx tests/component/program-versions.test.tsx tests/component/agent-access-setting.test.tsx tests/component/resource-setting-choices.test.tsx tests/component/ask-models-setting.test.tsx tests/component/settings-policy-narrowing.test.tsx tests/unit/resources.test.ts

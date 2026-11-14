@@ -24,7 +24,9 @@ export function AskModelChoice({ root, value, disabled, onChange }: { root: stri
     defaultChoice: { label: t('ask.defaultModel'), value: options.data?.default_model ?? null }, state,
     renderParameters: (entry, selected, change, readOnly) => {
       const schema = options.data?.models.find((configured) => configured.selection.provider_id === entry.value.provider_id && configured.selection.model === entry.value.model)?.request_option_schema;
-      return schema === null || schema === undefined ? null : <RequestOptions schema={schema} value={selected.params ?? {}} disabled={readOnly} onChange={change} managedEffort />;
+      // A model that offers no request option gets no row for them: an empty box said nothing.
+      const offered = schema !== null && typeof schema === 'object' && 'properties' in schema && schema.properties !== null && typeof schema.properties === 'object' ? Object.keys(schema.properties).length : 0;
+      return schema === null || schema === undefined || offered === 0 ? null : <RequestOptions schema={schema} value={selected.params ?? {}} disabled={readOnly} onChange={change} managedEffort hideHeading />;
     },
   }} />;
 }
