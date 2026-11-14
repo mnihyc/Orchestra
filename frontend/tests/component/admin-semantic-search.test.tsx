@@ -7,7 +7,7 @@ import { SemanticSearch } from '@/features/admin/SemanticSearch';
 import type { SemanticSearchOrg, SemanticSearchOverview } from '@/generated/api-types';
 import { currentLocale, i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
-import { formatBytes, formatTokens } from '@/lib/format';
+import { formatBytes, formatNumber, formatTokens } from '@/lib/format';
 import { formatSpan } from '@/lib/time';
 import { show } from './support';
 
@@ -30,7 +30,7 @@ vi.mock('@/api/settings', () => ({ settingsKey: (id: string) => ['settings', id]
 vi.mock('@/features/settings/Editor', () => ({ SettingsEditor: () => <div data-testid="settings-editor" /> }));
 
 vi.mock('@/features/resources/providers/AddProvider', () => ({AddProviderDialog: (props: {initialHome: string; initialPreset: string}) => <div role="dialog" aria-label={props.initialPreset}>{props.initialHome}</div>}));
-vi.mock('@/api/resources', () => ({providerQuery: (id: string) => ({queryKey: ['provider', id], queryFn: () => Promise.resolve({runtime_config: calls.templateId === null ? {} : {'runtime.template_id': calls.templateId}})}), templateQuery: (id: string) => ({queryKey: ['template', id], queryFn: () => Promise.resolve({id, name: 'Local embeddings'})})}));
+vi.mock('@/api/resources', async (loadOriginal) => ({ ...await loadOriginal<object>(),providerQuery: (id: string) => ({queryKey: ['provider', id], queryFn: () => Promise.resolve({runtime_config: calls.templateId === null ? {} : {'runtime.template_id': calls.templateId}})}), templateQuery: (id: string) => ({queryKey: ['template', id], queryFn: () => Promise.resolve({id, name: 'Local embeddings'})})}));
 
 afterEach(() => { calls.templateId = null; vi.clearAllMocks(); });
 
@@ -81,6 +81,46 @@ const overview = (available = true): SemanticSearchOverview => ({
     }),
     org('0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a03', 'Cafe', { state: 'not_named', provider_id: null, model_name: null, dimensions: null }),
   ],
+});
+
+it.each(['en', 'zh-CN'] as const)('names the configured and current index models with known partial coverage in %s', async (locale) => {
+  const previous = currentLocale(); await setLocale(locale);
+  calls.overview.mockResolvedValue(overview());
+  const view = show(<SemanticSearch />);
+  try {
+    const row = await screen.findByRole('row', { name: /Acme/ });
+    const { locale: formatting } = useAppearance.getState();
+    expect(row).toHaveTextContent(i18n.t('admin.semantic.modelComparison', {
+      selected: `embeddinggemma-2 · ${formatNumber(256, formatting)}`, current: `old-model · ${formatNumber(256, formatting)}`,
+    }));
+    expect(row).toHaveTextContent(i18n.t('admin.semantic.indexedOf', {
+      indexed: formatTokens(3_000, formatting), total: formatTokens(4_000, formatting),
+    }));
+    const waiting = screen.getByRole('row', { name: /Bureau/ });
+    expect(waiting).toHaveTextContent(locale === 'en' ? 'Space for both indexes required' : '需要足够空间保留两个索引');
+    expect(row).not.toHaveTextContent(active.id);
+  } finally { view.unmount(); await setLocale(previous); }
+});
+
+it.each(['en', 'zh-CN'] as const)('keeps the current index explicit when its model name matches or search is off in %s', async (locale) => {
+  const previous = currentLocale(); await setLocale(locale);
+  const data = overview();
+  const named = data.orgs[0]!;
+  const matching = { ...active, provider_id: named.provider_id!, model_name: named.model_name!, dimensions: 128 };
+  calls.overview.mockResolvedValue({ ...data, orgs: [
+    { ...named, state: 'idle', active: matching },
+    { ...data.orgs[1]!, enabled: false, state: 'off', provider_id: null, model_name: null, active },
+  ] });
+  const view = show(<SemanticSearch />);
+  try {
+    const { locale: formatting } = useAppearance.getState();
+    expect(await screen.findByRole('row', { name: /Acme/ })).toHaveTextContent(i18n.t('admin.semantic.modelComparison', {
+      selected: `embeddinggemma-2 · ${formatNumber(256, formatting)}`, current: `embeddinggemma-2 · ${formatNumber(128, formatting)}`,
+    }));
+    expect(screen.getByRole('row', { name: /Bureau/ })).toHaveTextContent(i18n.t('admin.semantic.modelComparison', {
+      selected: i18n.t('admin.semantic.notSet'), current: `old-model · ${formatNumber(256, formatting)}`,
+    }));
+  } finally { view.unmount(); await setLocale(previous); }
 });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const tokens of [0, 4000]) it.each(['provider_disabled', 'provider_removed'] as const)(`keeps the reason and known progress during a provider pause (%s, ${locale}, ${tokens} tokens)`, async (reason) => {
