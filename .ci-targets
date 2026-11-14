@@ -1,0 +1,25 @@
+# b42b: the assembly branch with plain words, the container-unit reads, settings, composer and models, the link's messages of any size, where a thread runs, Ask, the seams between them and the cache writer's repair: every case of the merged lanes together, the whole web suite and the build
+fmt
+clippy
+contracts
+test -p orch-agent-contract --lib
+test -p orch-settings-contract --lib
+test -p orch-link-contract --lib
+test -p orch-link-contract --test largest_messages
+test -p orch-config --lib
+test -p orch-link --lib
+test -p orch-link --test large_messages --test handshake --test streams --test spool --test refusals_are_told --test raw_spool_restart --test commands
+test -p orch-gateway-core --test large_messages --test sessions
+test -p orch-connector-core --lib
+test -p orch-connector-core --test provider_role
+test -p orch-db --test machine_names
+test -p orch-engine --lib
+test -p orch-engine --test preflight --test summary_targets --test model_parameters --test call_recovery
+test -p orch-settings --test matrix_inheritance
+test -p orch-api-base --lib
+test -p orch-api-core --test container_units --test everything_resources --test realtime_diagnostics --test kfix_binding --test settings --test threads_settings --test model_entries --test provider_models --test ask --test binding_options --test binding_readiness --test component_updates
+test -p orch-xtask
+web typecheck
+web lint
+web test
+web build
