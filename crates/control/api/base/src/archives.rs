@@ -59,6 +59,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use std::time::Instant;
+mod paging;
+pub use paging::{ArchiveRead, ArchiveReads};
+
 /// How long the reading of a compressed archive runs before it says it stopped short: the same
 /// twenty seconds a machine gives itself.
 pub const READ_TIME: Duration = Duration::from_secs(20);
@@ -100,6 +103,14 @@ const ZIP64_END: [u8; 4] = *b"PK\x06\x06";
 /// Why an archive was not looked into.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ArchiveError {
+    /// A continuation no longer names this selection.
+    #[error(
+        "the archive continuation expired or belongs to another selection; restart this folder"
+    )]
+    Stale,
+    /// Existing readers retain the metadata allowance until their actual work ends.
+    #[error("the archive metadata allowance is in use; try again when a reader finishes")]
+    Busy,
     /// The file is not an archive of a format that can be looked into.
     #[error("this file is not an archive that can be looked into")]
     NotAnArchive,
@@ -147,6 +158,7 @@ struct Source {
     position: u64,
     window_start: u64,
     window: Bytes,
+    cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl Source {
@@ -159,6 +171,7 @@ impl Source {
             position: 0,
             window_start: 0,
             window: Bytes::new(),
+            cancel: None,
         }
     }
 
@@ -171,13 +184,17 @@ impl Source {
             end: i64::try_from(end).unwrap_or(i64::MAX),
         };
         let (store, hash) = (Arc::clone(&self.store), self.hash);
-        let bytes = self
-            .runtime
-            .block_on(async move {
-                let read = store.get(&hash, Some(range)).await?;
-                read_all(read.body).await
-            })
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let cancel = self.cancel.clone();
+        let bytes = self.runtime.block_on(async move {
+            let read = async {
+                let read = store.get(&hash, Some(range)).await.map_err(|error| std::io::Error::other(error.to_string()))?;
+                read_all(read.body).await.map_err(|error| std::io::Error::other(error.to_string()))
+            };
+            match cancel {
+                Some(cancel) => tokio::select! { biased; () = cancel.cancelled() => Err(std::io::Error::other("archive read cancelled")), result = read => result },
+                None => read.await,
+            }
+        })?;
         self.window_start = start;
         self.window = bytes;
         Ok(())
@@ -186,6 +203,13 @@ impl Source {
 
 impl Read for Source {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+        {
+            return Err(std::io::Error::other("archive read cancelled"));
+        }
         if self.position >= self.size || buffer.is_empty() {
             return Ok(0);
         }
@@ -618,6 +642,7 @@ pub async fn list(
         };
         let (entries, over_limit) = children.finish();
         Ok(ArchiveListing {
+            next_cursor: None,
             format,
             compression,
             entries,
@@ -1000,6 +1025,101 @@ pub mod tests {
     }
 
     const TIME: Duration = Duration::from_secs(20);
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_completed_archive_page_does_not_take_the_next_readers_only_slot() {
+        let blobs = Blobs::in_memory();
+        let meta = stored(
+            &blobs,
+            zip_of(
+                &[("one", b"one"), ("two", b"two")],
+                zip::CompressionMethod::Stored,
+            ),
+        )
+        .await;
+        let reads = ArchiveReads::default();
+        let policy = orch_link_contract::commands::WorkspaceLimits {
+            directory_slots: 1,
+            ..Default::default()
+        };
+        let request = ArchiveRead {
+            meta,
+            inside: None,
+            query: Some("one".to_owned()),
+            cursor: None,
+            limit: 100,
+        };
+        assert!(
+            reads
+                .list(&blobs, request.clone(), &policy)
+                .await
+                .unwrap()
+                .next_cursor
+                .is_none()
+        );
+        let next = reads
+            .list(
+                &blobs,
+                ArchiveRead {
+                    query: Some("two".to_owned()),
+                    ..request
+                },
+                &policy,
+            )
+            .await
+            .unwrap();
+        assert_eq!(next.entries[0].path, "two");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stored_archive_replays_each_page_and_keeps_every_member_reachable() {
+        let blobs = Blobs::in_memory();
+        let names: Vec<_> = (0..17).map(|n| format!("member-{n:02}")).collect();
+        let files: Vec<_> = names
+            .iter()
+            .map(|name| (name.as_str(), b"x".as_slice()))
+            .collect();
+        let meta = stored(&blobs, zip_of(&files, zip::CompressionMethod::Stored)).await;
+        let reads = ArchiveReads::default();
+        let policy = orch_link_contract::commands::WorkspaceLimits::default();
+        let mut request = ArchiveRead {
+            meta,
+            inside: None,
+            query: None,
+            cursor: None,
+            limit: 3,
+        };
+        let mut found = std::collections::BTreeSet::new();
+        loop {
+            let page = reads.list(&blobs, request.clone(), &policy).await.unwrap();
+            if request.cursor.is_some() {
+                assert_eq!(
+                    page,
+                    reads.list(&blobs, request.clone(), &policy).await.unwrap()
+                );
+            }
+            found.extend(page.entries.into_iter().map(|entry| entry.path));
+            request.cursor = page.next_cursor;
+            if request.cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(found.len(), 17);
+        let filtered = reads
+            .list(
+                &blobs,
+                ArchiveRead {
+                    query: Some("member-16".to_owned()),
+                    cursor: None,
+                    ..request
+                },
+                &policy,
+            )
+            .await
+            .unwrap();
+        assert_eq!(filtered.entries.len(), 1);
+        assert_eq!(filtered.entries[0].path, "member-16");
+    }
 
     #[cfg(any(test, feature = "test-support"))]
     async fn one_entry_of_a_large_zip_is_read_by_asking_the_store_for_a_small_part_of_it() {

@@ -7,7 +7,7 @@
 //! holds the query with where in the line it does.
 //!
 //! It is held to bounds on every side and says when it stopped short: at most the number of
-//! matches asked for (never more than a thousand), within twenty seconds, with a pattern whose
+//! matches asked for, within its configured time slice, with a pattern whose
 //! compiled form is bounded (the pattern language has no backtracking, so no pattern can take
 //! longer than the text it is run on), and only the first 400 characters around a match of a long
 //! line are returned.
@@ -21,7 +21,7 @@ use std::time::Instant;
 use ::ignore::Match;
 use ::ignore::gitignore::{Gitignore, GitignoreBuilder};
 use globset::{GlobBuilder, GlobMatcher};
-use orch_api_contract::workspace::{FILE_MATCH_TEXT_CHARS, FILE_SEARCH_LIMIT_MAX, FileMatch};
+use orch_api_contract::workspace::{FILE_MATCH_TEXT_CHARS, FileMatch};
 use regex::{Regex, RegexBuilder};
 
 use crate::error::{HostError, Result};
@@ -75,7 +75,7 @@ pub struct SearchResult {
     pub searched: i64,
 }
 
-fn compile(request: &SearchRequest) -> Result<Regex> {
+pub(crate) fn compile(request: &SearchRequest) -> Result<Regex> {
     if request.query.is_empty() {
         return Err(HostError::Unsupported(
             "a search needs something to look for".to_owned(),
@@ -100,12 +100,12 @@ fn compile(request: &SearchRequest) -> Result<Regex> {
         .map_err(|error| HostError::Unsupported(format!("that pattern is not accepted: {error}")))
 }
 
-struct Glob {
+pub(crate) struct Glob {
     matcher: GlobMatcher,
     on_path: bool,
 }
 
-fn compile_glob(text: &str) -> Result<Glob> {
+pub(crate) fn compile_glob(text: &str) -> Result<Glob> {
     if text.chars().count() > QUERY_MAX_CHARS {
         return Err(HostError::Unsupported(format!(
             "a glob has at most {QUERY_MAX_CHARS} characters"
@@ -122,13 +122,13 @@ fn compile_glob(text: &str) -> Result<Glob> {
 }
 
 /// The `.gitignore` files that apply at each directory of the search, from the workspace root down.
-struct GitIgnores<'a> {
+pub(crate) struct GitIgnores<'a> {
     workspace: &'a Workspace,
     chains: HashMap<RelPath, Rc<Vec<(RelPath, Gitignore)>>>,
 }
 
 impl<'a> GitIgnores<'a> {
-    fn new(workspace: &'a Workspace) -> Self {
+    pub(crate) fn new(workspace: &'a Workspace) -> Self {
         Self {
             workspace,
             chains: HashMap::new(),
@@ -180,7 +180,7 @@ impl<'a> GitIgnores<'a> {
     }
 
     /// Whether a `.gitignore` leaves out `path`, which lies directly in `dir`.
-    fn leaves_out(&mut self, path: &RelPath, is_dir: bool, dir: &Dir) -> bool {
+    pub(crate) fn leaves_out(&mut self, path: &RelPath, is_dir: bool, dir: &Dir) -> bool {
         let Some(parent) = path.parent() else {
             return false;
         };
@@ -226,6 +226,66 @@ fn excerpt(line: &str, found: &[(usize, usize)]) -> (String, Vec<(u32, u32)>) {
         .map(|&(s, e)| ((s - begin) as u32, (e - begin) as u32))
         .collect();
     (text, ranges)
+}
+
+/// Streams matches of one selected text file; the caller owns continuation and cancellation.
+pub(crate) fn stream_file(
+    files: &Files,
+    path: &RelPath,
+    start: &RelPath,
+    pattern: &Regex,
+    glob: Option<&Glob>,
+    cancel: &tokio_util::sync::CancellationToken,
+    emit: &mut dyn FnMut(FileMatch) -> Result<()>,
+) -> Result<bool> {
+    if let Some(glob) = glob {
+        let matched = if glob.on_path {
+            path.strip_prefix(start)
+                .is_some_and(|below| glob.matcher.is_match(below.as_str()))
+        } else {
+            path.file_name()
+                .is_some_and(|name| glob.matcher.is_match(name))
+        };
+        if !matched {
+            return Ok(false);
+        }
+    }
+    let opened = files.open_regular(path)?;
+    let maximum = files.limits().preview_bytes;
+    if opened.meta.size > maximum {
+        return Ok(false);
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut &*opened.file)
+        .take(maximum.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| HostError::io(format!("searching {path}"), error))?;
+    if bytes.len() as u64 > maximum || !is_text(&bytes[..bytes.len().min(SNIFF_BYTES)]) {
+        return Ok(false);
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Ok(false);
+    };
+    for (number, line) in text.lines().enumerate() {
+        if cancel.is_cancelled() {
+            return Err(HostError::Cancelled);
+        }
+        let spans: Vec<_> = pattern
+            .find_iter(line)
+            .map(|hit| (hit.start(), hit.end()))
+            .collect();
+        if spans.is_empty() {
+            continue;
+        }
+        let (text, ranges) = excerpt(line, &spans);
+        emit(FileMatch {
+            path: path.to_string(),
+            line: i64::try_from(number + 1).unwrap_or(i64::MAX),
+            text,
+            ranges,
+        })?;
+    }
+    Ok(true)
 }
 
 struct Run<'a> {
@@ -320,7 +380,7 @@ impl Files {
     pub fn search(&self, path: &RelPath, request: &SearchRequest) -> Result<SearchResult> {
         let pattern = compile(request)?;
         let glob = request.glob.as_deref().map(compile_glob).transpose()?;
-        let limit = request.limit.clamp(1, FILE_SEARCH_LIMIT_MAX as usize);
+        let limit = request.limit.max(1);
         let workspace = self.root();
         let located = workspace.locate(path, Locate::THROUGH)?;
         let meta = located

@@ -393,6 +393,53 @@ pub struct ThreadEffortParameter {
     pub supported: bool,
 }
 
+/// The three choices of a thread that a model's entry opens, and that a thread's agent may not offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WithheldChoice {
+    /// A speed beside the ordinary one.
+    Speed,
+    /// An access program.
+    Access,
+    /// A context larger than the model's own window.
+    Context,
+}
+
+/// Why a choice that a manager of the provider switched on for the model is not one this thread can make.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "why", rename_all = "snake_case")]
+pub enum WithheldReason {
+    /// The thread's agent takes no such choice.
+    Agent,
+    /// The choice needs another way of reaching the model: the credential has to stay with the provider.
+    Access,
+    /// The choice needs the other kind of environment: one Orch manages, or a person's own machine.
+    Placement,
+    /// The choice needs the other kind of provider: a subscription or a key.
+    ProviderKind,
+    /// A feature of agents that is off where the thread runs, as `agent.features` says.
+    Feature {
+        /// The feature, as `agent.features` names it.
+        feature: String,
+    },
+    /// The provider's own rule for the model leaves the choice out.
+    Provider,
+    /// Another condition the agent declares for the choice does not hold.
+    Condition,
+}
+
+/// A choice that a model's managers opened and that this thread cannot make, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct WithheldParameter {
+    /// Which choice it is.
+    pub choice: WithheldChoice,
+    /// The key of the agent's parameter that stands for it; none where the agent declares no such parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Why the thread cannot make it.
+    pub reason: WithheldReason,
+}
+
 /// Limits over the harness's own sub-agents. The places of a thread resolve them independently of its model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -436,6 +483,9 @@ pub struct ThreadParameters {
     pub effort: ThreadEffortParameter,
     /// The other parameters that are eligible and enabled.
     pub parameters: Vec<ParameterView>,
+    /// The speeds, access programs and context sizes that the model's managers opened and that this thread cannot use, each with why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withheld: Vec<WithheldParameter>,
     /// The resolved native permission mode, independent of boundary requests.
     pub approval_mode: String,
     /// Modes offered by this harness, the place's policy and the current confinement; absent on older servers.

@@ -28,6 +28,161 @@ use crate::files::Files;
 use crate::paths::RelPath;
 use crate::platform::read_at;
 
+/// Format information available before an archive's live entry stream begins.
+#[derive(Clone, Copy)]
+pub(crate) struct ArchiveInfo {
+    pub(crate) format: ArchiveFormat,
+    pub(crate) compression: Option<ArchiveCompression>,
+    pub(crate) encrypted: bool,
+}
+
+fn live_child(
+    inside: &str,
+    raw: &str,
+    kind: ArchiveEntryKind,
+    size: Option<i64>,
+    modified_at: Option<Time>,
+) -> Option<ArchiveEntry> {
+    let raw = clean(raw);
+    let below = if inside.is_empty() {
+        raw
+    } else {
+        raw.strip_prefix(inside)?.strip_prefix('/')?
+    };
+    if below.is_empty() {
+        return None;
+    }
+    let (name, deeper) = below
+        .split_once('/')
+        .map_or((below, false), |(name, _)| (name, true));
+    if name.is_empty() {
+        return None;
+    }
+    let path = if inside.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{inside}/{name}")
+    };
+    let kind = if deeper { ArchiveEntryKind::Dir } else { kind };
+    Some(ArchiveEntry {
+        path,
+        kind,
+        size: if kind == ArchiveEntryKind::Dir {
+            None
+        } else {
+            size
+        },
+        modified_at: if deeper { None } else { modified_at },
+    })
+}
+
+impl Files {
+    /// Keeps the decompressor/file open across bounded result handoffs; no prefix is reread.
+    pub(crate) fn stream_archive(
+        &self,
+        path: &RelPath,
+        inside: Option<&str>,
+        cancel: &tokio_util::sync::CancellationToken,
+        metadata: &mut dyn FnMut(ArchiveInfo) -> Result<()>,
+        emit: &mut dyn FnMut(ArchiveEntry) -> Result<()>,
+    ) -> Result<()> {
+        let opened = self.open_regular(path)?;
+        let before = opened.meta.identity();
+        let inside = inside.map(clean).unwrap_or("");
+        match shape_of(&opened.file)? {
+            Shape::Zip => {
+                let mut archive = zip::ZipArchive::new(Positional {
+                    file: Arc::clone(&opened.file),
+                    offset: 0,
+                })
+                .map_err(unreadable)?;
+                let mut encrypted = false;
+                for index in 0..archive.len() {
+                    if cancel.is_cancelled() {
+                        return Err(HostError::Cancelled);
+                    }
+                    encrypted |= archive.by_index_raw(index).map_err(unreadable)?.encrypted();
+                }
+                metadata(ArchiveInfo {
+                    format: ArchiveFormat::Zip,
+                    compression: None,
+                    encrypted,
+                })?;
+                for index in 0..archive.len() {
+                    if cancel.is_cancelled() {
+                        return Err(HostError::Cancelled);
+                    }
+                    let entry = archive.by_index_raw(index).map_err(unreadable)?;
+                    let Ok(name) = entry.name() else {
+                        continue;
+                    };
+                    let kind = if entry.is_dir() {
+                        ArchiveEntryKind::Dir
+                    } else if entry.is_symlink() {
+                        ArchiveEntryKind::Link
+                    } else {
+                        ArchiveEntryKind::File
+                    };
+                    if let Some(entry) = live_child(
+                        inside,
+                        &name,
+                        kind,
+                        i64::try_from(entry.size()).ok(),
+                        entry.last_modified().and_then(time_of_dos),
+                    ) {
+                        emit(entry)?;
+                    }
+                }
+            }
+            Shape::Tar(compression) => {
+                metadata(ArchiveInfo {
+                    format: ArchiveFormat::Tar,
+                    compression,
+                    encrypted: false,
+                })?;
+                let mut archive = tar::Archive::new(decompress(&opened.file, compression)?);
+                for entry in archive.entries().map_err(unreadable)? {
+                    if cancel.is_cancelled() {
+                        return Err(HostError::Cancelled);
+                    }
+                    let entry = entry.map_err(unreadable)?;
+                    let header = entry.header();
+                    let kind = match header.entry_type() {
+                        tar::EntryType::Directory => ArchiveEntryKind::Dir,
+                        tar::EntryType::Symlink | tar::EntryType::Link => ArchiveEntryKind::Link,
+                        tar::EntryType::Regular
+                        | tar::EntryType::Continuous
+                        | tar::EntryType::GNUSparse => ArchiveEntryKind::File,
+                        _ => continue,
+                    };
+                    let raw = entry
+                        .path()
+                        .map_err(unreadable)?
+                        .to_string_lossy()
+                        .into_owned();
+                    if let Some(entry) = live_child(
+                        inside,
+                        &raw,
+                        kind,
+                        header.size().ok().and_then(|size| i64::try_from(size).ok()),
+                        header.mtime().ok().and_then(time_of_unix),
+                    ) {
+                        emit(entry)?;
+                    }
+                }
+            }
+        }
+        let after = crate::platform::file_meta(&opened.file)
+            .map_err(|error| HostError::io("checking the observed archive", error))?;
+        if after.identity() != before {
+            return Err(HostError::Changed(
+                "the archive changed during its observation".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The size of a tar header block, which also settles whether a stream is a tar.
 const TAR_BLOCK_BYTES: usize = 512;
 
@@ -59,6 +214,25 @@ impl Read for Positional {
         let count = read_at(&self.file, buffer, self.offset)?;
         self.offset += count as u64;
         Ok(count)
+    }
+}
+
+impl Seek for Positional {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        let offset = match position {
+            std::io::SeekFrom::Start(offset) => i128::from(offset),
+            std::io::SeekFrom::Current(offset) => i128::from(self.offset) + i128::from(offset),
+            std::io::SeekFrom::End(offset) => {
+                i128::from(self.file.metadata()?.len()) + i128::from(offset)
+            }
+        };
+        self.offset = u64::try_from(offset).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "archive position is outside its file",
+            )
+        })?;
+        Ok(self.offset)
     }
 }
 
@@ -367,6 +541,7 @@ impl Files {
         };
         let (entries, over_limit) = children.finish();
         Ok(ArchiveListing {
+            next_cursor: None,
             format,
             compression,
             entries,

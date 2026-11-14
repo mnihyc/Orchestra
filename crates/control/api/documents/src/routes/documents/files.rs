@@ -59,10 +59,6 @@ use orch_api_contract::documents::DocumentFileGet;
 
 use orch_api_contract::documents::DocumentFileGetQuery;
 
-use orch_api_contract::workspace::ARCHIVE_LIST_LIMIT_DEFAULT;
-
-use orch_api_contract::workspace::ARCHIVE_LIST_LIMIT_MAX;
-
 use orch_api_contract::workspace::ArchiveListing;
 
 use orch_blob_contract::range::BlobMeta;
@@ -167,6 +163,10 @@ async fn get(ctx: Ctx, query: DocumentFileGetQuery, _: Body) -> ApiResult<Respon
 /// What went wrong in looking into an archive, as the problem a client acts on.
 fn archive_problem(error: ArchiveError) -> ApiError {
     match &error {
+        ArchiveError::Stale => {
+            ApiError::new(ErrorCode::ConflictStaleRevision, error.to_string()).with("restart", true)
+        }
+        ArchiveError::Busy => ApiError::new(ErrorCode::EnvironmentUnavailable, error.to_string()),
         ArchiveError::NotFound(_) => ApiError::not_found(),
         ArchiveError::TooLarge { limit, .. } => {
             ApiError::new(ErrorCode::RequestTooLarge, error.to_string()).with("limit", limit)
@@ -199,26 +199,43 @@ async fn archive_list(
     let result = async {
         let (id, file) = (ctx.id("id")?, ctx.id("file_id")?);
         let held = held(&ctx, id, file).await?;
-        let limit = match query.limit {
-            None => ARCHIVE_LIST_LIMIT_DEFAULT,
-            Some(0) => return Err(ApiError::invalid("limit", "must be at least 1")),
-            Some(limit) => limit.min(ARCHIVE_LIST_LIMIT_MAX),
-        };
+        let mut conn = ctx.app.db.acquire().await?;
+        let document = live(&mut conn, id).await?;
+        let policy = orch_engine::environments::workspace_limits_at(
+            &mut conn,
+            orch_settings::Place::Node(document.node_id),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+        drop(conn);
+        let limit = query
+            .limit
+            .unwrap_or(u32::try_from(policy.archive_results).unwrap_or(u32::MAX));
+        if limit == 0 {
+            return Err(ApiError::invalid("limit", "must be at least 1"));
+        }
         let inside = query
             .inside
             .as_deref()
             .map(|inside| inside.trim_matches('/'))
             .filter(|inside| !inside.is_empty());
         read_operation::current(&ctx).await?;
-        archives::list(
-            &ctx.app.blobs,
-            meta_of(&held),
-            inside,
-            usize::try_from(limit).unwrap_or(usize::MAX),
-            archives::READ_TIME,
-        )
-        .await
-        .map_err(archive_problem)
+        ctx.app
+            .cache
+            .archive_reads()
+            .list(
+                &ctx.app.blobs,
+                archives::ArchiveRead {
+                    meta: meta_of(&held),
+                    inside: inside.map(str::to_owned),
+                    query: query.q,
+                    cursor: query.cursor,
+                    limit: usize::try_from(limit).unwrap_or(usize::MAX),
+                },
+                &policy,
+            )
+            .await
+            .map_err(archive_problem)
     }
     .await;
     read_operation::current(&ctx).await?;

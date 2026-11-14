@@ -529,16 +529,44 @@ pub(crate) async fn serve_completed(
             )
                 .into_response());
         }
-        let list = crate::archives::list(
-            &ctx.app.blobs,
-            meta,
-            query.inside.as_deref(),
-            usize::try_from(orch_api_contract::workspace::ARCHIVE_LIST_LIMIT_DEFAULT)
-                .unwrap_or(usize::MAX),
-            crate::archives::READ_TIME,
-        )
-        .await
-        .map_err(|error| ApiError::new(ErrorCode::CapabilityUnsupported, error.to_string()))?;
+        let mut conn = ctx.app.db.acquire().await?;
+        let policy =
+            orch_engine::environments::workspace_limits_at(&mut conn, orch_settings::Place::System)
+                .await
+                .map_err(ApiError::internal)?;
+        drop(conn);
+        let limit = query
+            .limit
+            .unwrap_or(u32::try_from(policy.archive_results).unwrap_or(u32::MAX));
+        if limit == 0 {
+            return Err(ApiError::invalid("limit", "must be at least 1"));
+        }
+        let list = ctx
+            .app
+            .cache
+            .archive_reads()
+            .list(
+                &ctx.app.blobs,
+                crate::archives::ArchiveRead {
+                    meta,
+                    inside: query.inside.clone(),
+                    query: query.q.clone(),
+                    cursor: query.cursor.clone(),
+                    limit: usize::try_from(limit).unwrap_or(usize::MAX),
+                },
+                &policy,
+            )
+            .await
+            .map_err(|error| match error {
+                crate::archives::ArchiveError::Stale => {
+                    ApiError::new(ErrorCode::ConflictStaleRevision, error.to_string())
+                        .with("restart", true)
+                }
+                crate::archives::ArchiveError::Busy => {
+                    ApiError::new(ErrorCode::EnvironmentUnavailable, error.to_string())
+                }
+                _ => ApiError::new(ErrorCode::CapabilityUnsupported, error.to_string()),
+            })?;
         return json_reply(StatusCode::OK, &list);
     }
     if query.preview == Some(true) {

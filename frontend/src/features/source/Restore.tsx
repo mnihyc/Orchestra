@@ -231,6 +231,7 @@ function PlanBody({ plan, overwrite, chooseOverwrite }: {
           {plan.form.whole_unavailable !== 'touched_restore' && <> — {t('source.restore.fallback', { reason: wholeUnavailableReason(t, plan.form.whole_unavailable) })}</>}
         </> : t('source.restore.whole')}
       </p>
+      <p className="text-xs text-text-muted">{t('source.restore.gitignore')}</p>
       {plan.form.kind === 'touched_files' && <InlineAlert tone="warning">{t('source.restore.toolCoverage')}</InlineAlert>}
       {plan.writers.map((writer, index) => (
         <InlineAlert key={writer.thread?.id ?? `hidden-${index}`} tone={writer.active ? 'warning' : 'info'}>
