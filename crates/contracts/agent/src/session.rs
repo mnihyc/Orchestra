@@ -336,6 +336,8 @@ pub struct SessionSettings {
     /// Whether completion of owned background work may continue the conversation.
     #[serde(default = "background_wake_default")]
     pub background_wake: bool,
+    /// Seconds before a native web action without an end is closed with its reason.
+    pub web_action_wait_secs: u64,
     /// A native image-generation override; absent keeps the program's own default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_generation: Option<bool>,
@@ -1126,7 +1128,7 @@ mod tests {
           "directory": "/workspace/web", "cwd": "/workspace/web/api",
           "mounts": [ { "name": "src", "path": "/data/src", "read_only": true } ],
           "model": "gpt-6-sol", "effort": "high", "params": {}, "approval_mode": "on_request", "sandbox_mode": "workspace",
-          "available_models": [], "subagent_limits": {"at_once":8,"depth":1}, "background_wake": true, "side_reading": null, "workspace_configuration": null,
+          "available_models": [], "subagent_limits": {"at_once":8,"depth":1}, "web_action_wait_secs": 120, "background_wake": true, "side_reading": null, "workspace_configuration": null,
           "instructions": "You are working inside Orch.",
           "memory": { "directory": "/workspace/web/.orch/memory", "kept_by": "harness" },
           "arrangement": "separated",
