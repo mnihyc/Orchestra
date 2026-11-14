@@ -1,7 +1,8 @@
 /** Resource confirmations wait for complete effects, retain emergency-stop intent and keep switching separate. */
+import { QueryClient } from '@tanstack/react-query';
 import tokenDensity from '../../../crates/control/engine/data/token-density.json' with {type:'json'};
 import type * as ResourceApi from '@/api/resources';
-import { cleanup, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { DeleteProviderDialog, DisableProviderDialog } from '@/features/resources/providers/DangerZone';
@@ -14,8 +15,8 @@ import { show } from './support';
 const calls = vi.hoisted(() => ({ read: vi.fn<(target: FactTarget) => Promise<ResourceImpact>>(), disable: vi.fn(), remove: vi.fn(), updateModel:vi.fn(),removeModel:vi.fn(), switch: vi.fn() }));
 vi.mock('@/api/resource-impact', () => ({ resourceImpactQuery: (target: FactTarget) => ({ queryKey: ['pause-dialog', target], queryFn: () => calls.read(target), retry: false }) }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<typeof ResourceApi>(), disableProvider: calls.disable, deleteProvider: calls.remove,updateModel:calls.updateModel,deleteModel:calls.removeModel }));
-vi.mock('@/features/change/target', () => ({ openChange: calls.switch }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/change/target', async (loadOriginal) => ({ ...await loadOriginal<object>(), openChange: calls.switch }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const provider = planProvider();
 const model:ProviderModel={id:'model',model_name:'route-model',display_name:'Research model',enabled:true,source:'manual',groups:[],parameters:{},token_estimate:{...tokenDensity.unmeasured,measured:false}};
@@ -103,4 +104,38 @@ it('a model deletion requires its exact current name before ending its membershi
   await user.type(screen.getByRole('textbox',{name:i18n.t('resourceImpact.typeName',{name:model.display_name})}),model.display_name);
   await user.click(submit);
   await waitFor(()=>expect(calls.removeModel).toHaveBeenCalledExactlyOnceWith(provider.id,model.id));
+});
+
+it.each(['en', 'zh-CN'] as const)('provider operations keep notification off until this operation is chosen (%s)', async (locale) => {
+  await setLocale(locale);
+  const user = userEvent.setup({delay:null});
+  calls.read.mockResolvedValue(Object.assign(impact(), {notification: {preview_id: 'reviewed-people', people: 2, default_on: false}}));
+  show(<DisableProviderDialog provider={provider} open onClose={vi.fn()} />);
+  const choice = await screen.findByRole('checkbox', {name: i18n.t('operation.notify', {count:2,number:'2'})});
+  expect(choice).not.toBeChecked();
+  await user.click(choice);
+  await user.click(screen.getByRole('button', {name:i18n.t('providers.danger.disableConfirm', {name:provider.name})}));
+  await waitFor(() => expect(calls.disable).toHaveBeenCalledExactlyOnceWith(provider.id, undefined, {notify:true,notification_review:'reviewed-people'}));
+});
+
+it('a changed reviewed audience requires the person to choose notification again', async()=>{
+  const user=userEvent.setup({delay:null});
+  calls.read.mockResolvedValue(Object.assign(impact(),{notification:{preview_id:'first-cohort',people:2,default_on:false}}));
+  const client=new QueryClient({defaultOptions:{queries:{retry:false}}});
+  show(<DisableProviderDialog provider={provider} open onClose={vi.fn()}/>,client);
+  const choice=await screen.findByRole('checkbox',{name:i18n.t('operation.notify',{count:2,number:'2'})});
+  await user.click(choice);
+  expect(choice).toBeChecked();
+  calls.read.mockResolvedValue(Object.assign(impact(),{notification:{preview_id:'second-cohort',people:3,default_on:false}}));
+  await act(async()=>{await client.invalidateQueries({queryKey:['pause-dialog']});});
+  expect(await screen.findByRole('checkbox',{name:i18n.t('operation.notify',{count:3,number:'3'})})).not.toBeChecked();
+});
+
+it('leaves notification off when confirming without choosing its reviewed audience',async()=>{
+  const user=userEvent.setup({delay:null});
+  calls.read.mockResolvedValue(Object.assign(impact(),{notification:{preview_id:'off-cohort',people:2,default_on:false}}));
+  show(<DisableProviderDialog provider={provider} open onClose={vi.fn()}/>);
+  expect(await screen.findByRole('checkbox',{name:i18n.t('operation.notify',{count:2,number:'2'})})).not.toBeChecked();
+  await user.click(screen.getByRole('button',{name:i18n.t('providers.danger.disableConfirm',{name:provider.name})}));
+  await waitFor(()=>expect(calls.disable).toHaveBeenCalledExactlyOnceWith(provider.id));
 });

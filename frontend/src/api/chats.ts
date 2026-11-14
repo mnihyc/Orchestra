@@ -241,7 +241,6 @@ export const peopleQuery = (orgId: string | null, q: string) =>
     queryKey: peopleKey(orgId, q),
     queryFn: ({ signal }): Promise<UserRef[]> =>
       ok(api.GET('/users/search', { params: { query: { q, ...(orgId === null ? {} : { org_id: orgId }) } }, signal })),
-    staleTime: 60_000,
   });
 
 /** An item of a thread, as a quote shows it. A reader who may not read the timeline is refused, and that is final. */
@@ -252,7 +251,6 @@ export const quotedItemQuery = (threadId: string, itemId: string) =>
     queryFn: ({ signal }): Promise<Item> =>
       ok(api.GET('/threads/{id}/items/{item_id}', { params: { path: { id: threadId, item_id: itemId } }, signal })),
     retry: false,
-    staleTime: 5 * 60_000,
   });
 
 // ---------------------------------------------------------------- writing in a chat

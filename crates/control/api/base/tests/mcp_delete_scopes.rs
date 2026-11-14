@@ -580,3 +580,78 @@ async fn mcp_delete_serializes_its_actual_secret_footprint_before_any_deletion_o
         }
     }
 }
+
+#[tokio::test]
+async fn mcp_and_mount_deletion_tell_their_reviewed_people_only_for_a_chosen_operation() {
+    use orch_access_contract::permissions::ObjectKind;
+    use orch_api_contract::mounts::MountDelete;
+    use orch_api_contract::resource_facts::{
+        FactTarget, ResourceImpactRead, ResourceNotificationQuery,
+    };
+    let world = World::new().await;
+    let company = resources::company(&world).await;
+    for kind in [ObjectKind::McpServer, ObjectKind::Mount] {
+        for notify in [false, true] {
+            let id = if kind == ObjectKind::McpServer {
+                server(&world, company.boss.id(), None, None).await
+            } else {
+                let id = fixtures::insert_resource(
+                    &mut *world.conn().await,
+                    "mount",
+                    Some(company.boss.id()),
+                    None,
+                    "Shared data",
+                )
+                .await
+                .unwrap();
+                start(&world, ResourceKind::Mount, id, company.boss.id()).await;
+                id
+            };
+            let permission = if kind == ObjectKind::McpServer {
+                "mcp.manage"
+            } else {
+                "mount.manage"
+            };
+            resources::name_person(&world, kind.as_str(), id, permission, company.admin.id()).await;
+            let impact = world
+                .app
+                .call(ResourceImpactRead, &[])
+                .token(&company.boss.token)
+                .body(&FactTarget {
+                    object: ObjectRef { kind, id },
+                    model_id: None,
+                })
+                .send()
+                .await
+                .ok();
+            let plan = impact.notification.unwrap();
+            assert!(!plan.default_on);
+            assert_eq!(plan.people, 2);
+            let choice = ResourceNotificationQuery {
+                notify: Some(notify),
+                notification_review: plan.preview_id,
+            };
+            if kind == ObjectKind::McpServer {
+                world
+                    .app
+                    .call(McpServerDelete, &[&id])
+                    .token(&company.boss.token)
+                    .query(&choice)
+                    .send()
+                    .await
+                    .ok();
+            } else {
+                world
+                    .app
+                    .call(MountDelete, &[&id])
+                    .token(&company.boss.token)
+                    .query(&choice)
+                    .send()
+                    .await
+                    .ok();
+            }
+            let receivers:Vec<Id>=sqlx::query_scalar("SELECT user_id FROM notifications WHERE kind='environment.attention' AND data->'resource_ids' @> $1 ORDER BY user_id").bind(json!([[kind.as_str(),id]])).fetch_all(&world.db.pool).await.unwrap();
+            assert_eq!(receivers.len(), if notify { 2 } else { 0 });
+        }
+    }
+}
