@@ -76,7 +76,8 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await page.reload();
     await page.locator('html').evaluate((element, value) => { element.setAttribute('data-theme', value); }, theme);
     await expect.poll(() => audience.reads).toBeGreaterThan(beforeReload);
-    await page.locator('[data-thread-header]').getByRole('button', { name: words.thread.header.shareThread, exact: true }).click();
+    await page.locator('[data-thread-header] [data-thread-more]').click();
+    await page.getByRole('menuitem', { name: words.thread.header.shareThread, exact: true }).click();
     await expect(sharing).toContainText(reader.display_name);
     await expect(line).toHaveCount(0);
     // An Escape can go first to a layer inside the dialog (it stayed open in every variant); its own Close ends it.

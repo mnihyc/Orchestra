@@ -26292,6 +26292,46 @@
               "minimum": 0,
               "description": "Source points, default THREAD_SYNC_DEFAULT_LIMIT and at most THREAD_SYNC_MAX_LIMIT."
             }
+          },
+          {
+            "name": "selection",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/OutlineSelection"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A compact list selection; omission reads ordinary conversation points."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Literal text or sender search across this selected history, independently of pages already loaded."
+            }
+          },
+          {
+            "name": "include_changes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Include whole-turn line counts for message lists; navigation can omit these optional facts."
+            }
           }
         ]
       }
@@ -36955,7 +36995,7 @@
             }
           }
         },
-        "x-orch-rule": "node.view on the job's thread, any permission on its environment, or provider.manage on its provider; an export's maker, or current access to a measurement's subject",
+        "x-orch-rule": "node.view on the job's thread, any permission on its environment, or provider.manage on its provider; an export or thread move-out's maker, or current access to a measurement's subject",
         "security": [
           {
             "bearer": []
@@ -77441,6 +77481,18 @@
             }
           },
           {
+            "name": "stream",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Only items of this conversation stream, applied before matching and paging."
+            }
+          },
+          {
             "name": "kinds",
             "in": "query",
             "required": false,
@@ -77855,6 +77907,18 @@
               ],
               "format": "uuid",
               "description": "A node: only what lies in it and below it. Everything the caller can read when left out."
+            }
+          },
+          {
+            "name": "stream",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Only items of this conversation stream, applied before matching and paging."
             }
           },
           {
@@ -112617,6 +112681,25 @@
             ],
             "description": "What a starting thread is waiting for."
           },
+          "starting_since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the step it is waiting for began."
+          },
+          "starting_work": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StartingWork"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The command that step waits for, and what holds it up; none while it waits for nothing in particular."
+          },
           "blocked": {
             "anyOf": [
               {
@@ -113256,6 +113339,11 @@
           },
           {
             "type": "string",
+            "const": "recording",
+            "description": "The files of the directory, recorded before the turn so that they can be put back."
+          },
+          {
+            "type": "string",
             "const": "files",
             "description": "Its files."
           },
@@ -113266,6 +113354,27 @@
           }
         ],
         "description": "What a starting thread is waiting for."
+      },
+      "StartingWork": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The kind of command the step waits for, such as `fs.mkdir`, `git.prepare` or `fs.record`."
+          },
+          "behind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The kind of command of other work, on the same machine and in the same line, that it waits behind."
+          }
+        },
+        "required": [
+          "command",
+          "behind"
+        ],
+        "description": "The command a starting thread's step waits for, and the other work that holds it up."
       },
       "ThreadBlocked": {
         "type": "object",
@@ -135235,6 +135344,13 @@
             },
             "description": "The other parameters that are eligible and enabled."
           },
+          "withheld": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WithheldParameter"
+            },
+            "description": "The speeds, access programs and context sizes that the model's managers opened and that this thread cannot use, each with why."
+          },
           "approval_mode": {
             "type": "string",
             "description": "The resolved native permission mode, independent of boundary requests."
@@ -135668,6 +135784,152 @@
           }
         ],
         "description": "When a changed parameter takes effect."
+      },
+      "WithheldParameter": {
+        "type": "object",
+        "properties": {
+          "choice": {
+            "$ref": "#/components/schemas/WithheldChoice",
+            "description": "Which choice it is."
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The key of the agent's parameter that stands for it; none where the agent declares no such parameter."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/WithheldReason",
+            "description": "Why the thread cannot make it."
+          }
+        },
+        "required": [
+          "choice",
+          "reason"
+        ],
+        "description": "A choice that a model's managers opened and that this thread cannot make, with the reason."
+      },
+      "WithheldChoice": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "speed",
+            "description": "A speed beside the ordinary one."
+          },
+          {
+            "type": "string",
+            "const": "access",
+            "description": "An access program."
+          },
+          {
+            "type": "string",
+            "const": "context",
+            "description": "A context larger than the model's own window."
+          }
+        ],
+        "description": "The three choices of a thread that a model's entry opens, and that a thread's agent may not offer."
+      },
+      "WithheldReason": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "agent"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The thread's agent takes no such choice."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "access"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs another way of reaching the model: the credential has to stay with the provider."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "placement"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs the other kind of environment: one Orch manages, or a person's own machine."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "provider_kind"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs the other kind of provider: a subscription or a key."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "feature": {
+                "type": "string",
+                "description": "The feature, as `agent.features` names it."
+              },
+              "why": {
+                "type": "string",
+                "const": "feature"
+              }
+            },
+            "required": [
+              "why",
+              "feature"
+            ],
+            "description": "A feature of agents that is off where the thread runs, as `agent.features` says."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "provider"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The provider's own rule for the model leaves the choice out."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "condition"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "Another condition the agent declares for the choice does not hold."
+          }
+        ],
+        "description": "Why a choice that a manager of the provider switched on for the model is not one this thread can make."
       },
       "ApprovalReviewer": {
         "type": "object",
@@ -154440,6 +154702,14 @@
             "format": "uuid",
             "description": "The complete or explicitly unavailable recorded files before this turn."
           },
+          "files_changed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many included files the turn changed, whoever changed them: the difference of the files recorded\nbefore it and the files observed at its end. `null` while either is missing (the files were not\nrecorded, or the end has not been observed yet)."
+          },
           "model": {
             "type": "string",
             "description": "The model's routing name."
@@ -155596,6 +155866,14 @@
             "type": "integer",
             "format": "int64",
             "description": "The coherent conversation sequence of this page."
+          },
+          "total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Complete child count for the selected history; absent for ordinary conversation points."
           }
         },
         "required": [
@@ -155645,6 +155923,28 @@
               "null"
             ],
             "description": "A goal input's bounded condition; its label is made in the reader's language."
+          },
+          "message": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutlineMessage"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Facts of a human or agent message, independent of the held item window."
+          },
+          "agent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutlineAgent"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Compact child-agent facts for the agent selection."
           }
         },
         "required": [
@@ -155672,6 +155972,11 @@
             "type": "string",
             "const": "agent_message",
             "description": "What the agent said in the main stream."
+          },
+          {
+            "type": "string",
+            "const": "subagent",
+            "description": "A sub-agent's recorded starting point and compact current facts."
           },
           {
             "type": "string",
@@ -155705,6 +156010,182 @@
           }
         ],
         "description": "What kinds of line the outline of a thread holds."
+      },
+      "OutlineMessage": {
+        "type": "object",
+        "properties": {
+          "author": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UserRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Its actual author, when still available."
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The native input source; absent on an agent's message."
+          },
+          "turn_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The turn it belongs to."
+          },
+          "added": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Admitted line changes across that whole turn; unknown without a turn."
+          },
+          "removed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Admitted lines removed across that whole turn."
+          },
+          "phase": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The program's own commentary/final mark, when it supplies one."
+          },
+          "last_agent_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The last nonempty agent message of this turn in the selected history."
+          },
+          "last_final_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The last explicitly final agent message of this turn."
+          },
+          "last_work_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The last work step of this turn in the selected history."
+          },
+          "ended": {
+            "type": "boolean",
+            "description": "Whether this recorded turn has ended."
+          }
+        },
+        "required": [
+          "author",
+          "source",
+          "turn_id",
+          "added",
+          "removed",
+          "phase",
+          "last_agent_seq",
+          "last_final_seq",
+          "last_work_seq",
+          "ended"
+        ],
+        "description": "The message facts needed without loading a historical item body."
+      },
+      "OutlineAgent": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "type": "string",
+            "description": "Its own stream."
+          },
+          "turn_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Its source turn."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its supplied name."
+          },
+          "state": {
+            "$ref": "#/components/schemas/SubagentState",
+            "description": "Its reported state; current native observations may supersede it."
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When it started, where recorded."
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Its reported duration."
+          },
+          "tokens_out": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Its recorded output tokens, where reported separately."
+          },
+          "result": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The first line of its last reported result."
+          },
+          "recorded": {
+            "type": "boolean",
+            "description": "A running observation belongs to an ended recording rather than a live child."
+          },
+          "updated_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The source item's last change, to compare with live observations."
+          }
+        },
+        "required": [
+          "stream",
+          "turn_id",
+          "name",
+          "state",
+          "started_at",
+          "duration_ms",
+          "tokens_out",
+          "result",
+          "recorded",
+          "updated_seq"
+        ],
+        "description": "One child's discoverable facts, without its prompt or tool/output bodies."
       },
       "OverviewPart6": {
         "oneOf": [
@@ -156859,9 +157340,54 @@
             "format": "uint32",
             "minimum": 0,
             "description": "Source points, default THREAD_SYNC_DEFAULT_LIMIT and at most THREAD_SYNC_MAX_LIMIT."
+          },
+          "selection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutlineSelection"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A compact list selection; omission reads ordinary conversation points."
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Literal text or sender search across this selected history, independently of pages already loaded."
+          },
+          "include_changes": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Include whole-turn line counts for message lists; navigation can omit these optional facts."
           }
         },
         "description": "One outline neighborhood or older page, never the entire historical payload table."
+      },
+      "OutlineSelection": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "conversation",
+            "description": "The ordinary conversation outline."
+          },
+          {
+            "type": "string",
+            "const": "messages",
+            "description": "Only human prompts, with their sender and turn-change facts."
+          },
+          {
+            "type": "string",
+            "const": "agents",
+            "description": "Child agents, including records outside the current item window."
+          }
+        ],
+        "description": "The existing conversation outline, only human prompts, or only child-agent records."
       },
       "ThreadHistoryListQuery": {
         "type": "object",
@@ -159427,6 +159953,17 @@
             "$ref": "#/components/schemas/EnvironmentDefault",
             "description": "What a new thread does about its environment unless told."
           },
+          "default_environment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BindingDefaultEnvironment"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The environment the nearest setting names as the default, wherever it is set, and why the caller cannot use\nit when they cannot; absent when no setting names one and when rebinding an existing thread."
+          },
           "source": {
             "$ref": "#/components/schemas/BindingSource",
             "description": "Safe resolved repository settings and the place supplying the repository address."
@@ -160019,7 +160556,7 @@
           },
           "is_default": {
             "type": "boolean",
-            "description": "Whether it is the topic's default."
+            "description": "Whether it is the default of the threads started here: the environment the nearest setting of\n`env.default_id` names (the topic's own, else its project's, else its org's), and the caller may use it."
           },
           "used": {
             "$ref": "#/components/schemas/EnvironmentUse",
@@ -160101,6 +160638,40 @@
           }
         ],
         "description": "What `env.thread_default` resolves to."
+      },
+      "BindingDefaultEnvironment": {
+        "type": "object",
+        "properties": {
+          "environment": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The environment the setting names."
+          },
+          "from": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NodeRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The place whose setting it is, when that is not the place asked about itself: a project or org above it."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the caller cannot start a thread in it, when they cannot: the reason of its row among the environments,\nor `environment_not_seen` when it is not among those the caller may see."
+          }
+        },
+        "required": [
+          "environment",
+          "from",
+          "reason"
+        ],
+        "description": "The environment that the nearest setting of `env.default_id` names for the threads started here, whoever may use it."
       },
       "BindingSource": {
         "type": "object",
@@ -178560,7 +179131,7 @@
         "required": [
           "model_names"
         ],
-        "description": "Accepts models that discovery suggested. Each is added with what its suggestion says of it,\nexcept that the service tiers and access programs it lists and a context larger than the usual\none become `parameters.offered`, and none of them is enabled."
+        "description": "Accepts models that discovery suggested. Each is added with what its suggestion says of it, and what\nthe organization chose to switch on (`models.add_switches_on`) is enabled: by default every effort, the\nwindow, every context size, speed and access program it lists. Whatever is left off stays under\n`parameters.offered`, and what a thread starts with is never taken from a suggestion."
       },
       "ProviderModelSuggestionAcceptResponse": {
         "anyOf": [
@@ -191765,6 +192336,13 @@
             ],
             "format": "uuid",
             "description": "A node: only what lies in it and below it. Everything the caller can read when left out."
+          },
+          "stream": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only items of this conversation stream, applied before matching and paging."
           },
           "kinds": {
             "type": [

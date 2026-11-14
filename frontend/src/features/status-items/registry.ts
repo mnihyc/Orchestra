@@ -66,17 +66,30 @@ function cost(context: StatusContext, of: 'turn' | 'thread'): StatusValue | null
   ] };
 }
 
-function tokens(context: StatusContext): StatusValue | null {
+/** How full the context is, as the share of its window; where the harness named no window, the tokens alone. */
+function contextFill(c: StatusContext): StatusValue | null {
+  const used = c.turn?.context?.used ?? c.thread.usage?.context_used, window = c.turn?.context?.window ?? c.thread.usage?.context_window;
+  if (used === null || used === undefined) return null;
+  const mark = c.turn?.context?.count === 'orch' || c.turn?.context?.count === 'estimated' ? '≈' : '';
+  if (window === null || window === undefined || window <= 0) return { text: c.t('statusItems.context', { value: `${mark}${formatTokens(used, c.locale)}` }), details: [{ name: c.t('resourceFacts.context'), value: formatTokens(used, c.locale) }] };
+  return { text: c.t('statusItems.context', { value: `${mark}${formatPercent(used / window, c.locale)}` }), details: [{ name: c.t('resourceFacts.context'), value: `${formatTokens(used, c.locale)} / ${formatTokens(window, c.locale)}` }] };
+}
+function usageBreakdown(context: StatusContext): StatusValue | null {
   if (!currentTurn(context) || context.turn === null) return null;
   const usage = context.turn.usage;
-  if (usage !== null && usage.output_tokens > 0) return { text: context.t('statusItems.tokens', { value: formatTokens(usage.total_tokens, context.locale) }), details: [
-    { name: context.t('statusItems.input'), value: formatTokens(usage.input_tokens, context.locale) },
-    { name: context.t('statusItems.output'), value: formatTokens(usage.output_tokens, context.locale) },
-  ] };
+  const models = (context.turn.usage_detail?.models ?? []).filter((model) => model.tokens_reported !== false);
+  const fields = (name: string | null, counts: Pick<NonNullable<Turn['usage']>, 'input_tokens' | 'cached_input_tokens' | 'output_tokens'>): { name: string; value: string }[] => [
+    { name: [name, context.t('statusItems.input')].filter((part) => part !== null).join(' · '), value: formatTokens(counts.input_tokens, context.locale) },
+    { name: [name, context.t('statusItems.cached')].filter((part) => part !== null).join(' · '), value: formatTokens(counts.cached_input_tokens, context.locale) },
+    { name: [name, context.t('statusItems.output')].filter((part) => part !== null).join(' · '), value: formatTokens(counts.output_tokens, context.locale) },
+  ];
+  if (models.length > 0) return { text: context.t('statusItems.usage'), details: models.flatMap((model) => fields(model.model, model.tokens)) };
+  if (usage !== null && usage.output_tokens > 0) return { text: context.t('statusItems.usage'), details: fields(null, usage) };
   const output = estimatedOutput(context);
-  if (output === null || output === 0) return usage === null ? null : { text: context.t('statusItems.tokens', { value: formatTokens(usage.total_tokens, context.locale) }) };
-  return { hint: context.t('statusItems.textEstimateHint'), text: usage === null ? `≈${context.t('statusItems.outputTokens', { value: formatTokens(output, context.locale) })}` : `≈${context.t('statusItems.tokens', { value: formatTokens(usage.input_tokens + output, context.locale) })}`, details: [
+  if (output === null || output === 0) return usage === null ? null : { text: context.t('statusItems.usage'), details: fields(null, usage) };
+  return { hint: context.t('statusItems.textEstimateHint'), text: context.t('statusItems.usage'), details: [
     { name: context.t('statusItems.input'), value: usage === null ? context.t('usagePerf.dash') : formatTokens(usage.input_tokens, context.locale) },
+    { name: context.t('statusItems.cached'), value: usage === null ? context.t('usagePerf.dash') : formatTokens(usage.cached_input_tokens, context.locale) },
     { name: context.t('statusItems.output'), value: `≈${formatTokens(output, context.locale)}` },
   ] };
 }
@@ -84,16 +97,16 @@ const everyPlace: readonly StatusPlace[] = STATUS_PLACES;
 export const STATUS_ITEMS = [
   { id: 'phase', title: 'statusItems.items.phase', places: everyPlace, place: 'live', shown: true,
     read: (c: StatusContext): StatusValue | null => generating(c) ? { text: c.activeLabel ?? c.t('statusItems.generating') } : null },
-  { id: 'speed', title: 'statusItems.items.speed', places: everyPlace, place: 'live', shown: true,
+  { id: 'speed', title: 'statusItems.items.speed', places: everyPlace, place: 'live', shown: false,
     read: (c: StatusContext): StatusValue | null => { const value = outputSpeed(c); return value === null ? null : { ...(value.estimated ? { hint: c.t('statusItems.textEstimateHint') } : {}), text: `${value.estimated ? '≈' : ''}${c.t('statusItems.speed', { value: formatNumber(value.speed, c.locale, { maximumFractionDigits: 1 }) })}`, details: [{ name: c.t('statusItems.source'), value: c.t(value.estimated ? 'statusItems.streamEstimate' : 'statusItems.reported') }] }; } },
   { id: 'elapsed', title: 'statusItems.items.elapsed', places: everyPlace, place: 'live', shown: true,
     read: (c: StatusContext): StatusValue | null => { const elapsed = c.turn === null ? null : turnActiveMs(c.turn, c.now); return currentTurn(c) && elapsed !== null ? { text: formatSpan(elapsed, c) } : null; } },
-  { id: 'tokens', title: 'statusItems.items.tokens', places: everyPlace, place: 'live', shown: true,
-    read: tokens },
+  { id: 'usage', title: 'statusItems.items.usage', places: everyPlace, place: 'live', shown: false,
+    read: usageBreakdown },
   { id: 'turn_cost', title: 'statusItems.items.turn_cost', places: everyPlace, place: 'bar', shown: false, read: (c: StatusContext) => cost(c, 'turn') },
   { id: 'thread_cost', title: 'statusItems.items.thread_cost', places: everyPlace, place: 'bar', shown: false, read: (c: StatusContext) => cost(c, 'thread') },
   { id: 'context', title: 'statusItems.items.context', places: everyPlace, place: 'bar', shown: true,
-    read: (c: StatusContext): StatusValue | null => { const used = c.turn?.context?.used ?? c.thread.usage?.context_used, window = c.turn?.context?.window ?? c.thread.usage?.context_window; return used === null || used === undefined || window === null || window === undefined || window <= 0 ? null : { text: c.t('statusItems.context', { value: `${c.turn?.context?.count === 'orch' || c.turn?.context?.count === 'estimated' ? '≈' : ''}${formatPercent(used / window, c.locale)}` }), details: [{ name: c.t('resourceFacts.context'), value: `${formatTokens(used, c.locale)} / ${formatTokens(window, c.locale)}` }] }; } },
+    read: contextFill },
   { id: 'provider_window', title: 'statusItems.items.provider_window', places: everyPlace, place: 'bar', shown: true,
     read: (c: StatusContext): StatusValue | null => { if (c.provider === undefined) return null; const hint = providerHint(c.provider, c, 'window'); return hint.text === '' ? null : { text: hint.text, warning: hint.warning, subject: { kind: 'provider', provider: c.provider } }; } },
   { id: 'provider_running', title: 'statusItems.items.provider_running', places: everyPlace, place: 'bar', shown: false,

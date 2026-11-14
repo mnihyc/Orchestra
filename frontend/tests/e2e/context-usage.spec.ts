@@ -86,16 +86,14 @@ test('the ring beside the model says how full the context is, and one click open
   await expect(panel.getByText('exec_command')).toBeVisible();
 });
 
-test('a turn’s footer has the bar of what its tokens were, with the numbers under the pointer, and its details one click away', async ({ page }) => {
+test('the time on a turn’s answer has the figures of the turn under the pointer, and its details one click away', async ({ page }) => {
   await open(page);
-  const footer = page.getByRole('button', { name: /^Show what the turn used: 12\.3k tokens/ });
-  const target = await footer.boundingBox();
+  const figures = page.locator('[data-turn-figures="t1"]');
+  await expect(figures).toHaveCount(1);
+  const target = await figures.boundingBox();
   expect(target).not.toBeNull();
   expect(target!.height).toBeGreaterThanOrEqual(24);
-  expect(target!.width).toBeGreaterThanOrEqual(24);
-  await expect(footer).toBeVisible();
-  await expect(footer.locator('[data-part="subagents"]')).toHaveCount(1);
-  await footer.click();
+  await figures.click();
   const details = page.locator('[data-turn-cost="t1"]');
   await expect(details.getByText('By sub-agent')).toBeVisible();
   await expect(details.getByText(/credits/)).toBeVisible();

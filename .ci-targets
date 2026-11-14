@@ -1,0 +1,3 @@
+fmt
+clippy
+test -p orch-api-core --test forks -- moving_routes::an_owner_thread_move_uses_native_history_and_fresh_defaults_then_ends_the_original_once

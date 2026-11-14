@@ -456,9 +456,9 @@ impl Engine {
         as_file: bool,
         selected: Option<&orch_db::queries::search::CandidateSet>,
     ) -> Result<Result<LocatedPath, Refusal>, EngineError> {
-        let Some(named) = tree::parse_path(asked) else {
+        let Some(named) = tree::parse_address(asked, &self.inner.config.public_origins) else {
             return Ok(Err(Refusal::invalid(
-                "A path is a path of the tree, from \"/\" or from your own topic, or id: and an identifier.",
+                "A path is a path of the tree, from \"/\" or your own topic, id: and an identifier, or a document link on this Orch.",
             )));
         };
         let Some(asking) = self.asking(conn, thread).await? else {

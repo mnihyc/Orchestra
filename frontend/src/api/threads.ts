@@ -34,6 +34,7 @@ import type {
   LimitBypassRequest,
   NodeSettingSetBody,
   ThreadOutlinePage,
+  OutlineSelection,
   ThreadSegmentPage,
   ThreadTurnPage,
   ResolvedSetting,
@@ -203,10 +204,17 @@ export const catchupQuery = (target: ThreadReadTarget, since: number) => {
   });
 };
 
-export const outlineQuery = (target: ThreadReadTarget) => {
+export interface OutlineOptions {
+  selection?: OutlineSelection;
+  q?: string;
+}
+
+export const outlineQuery = (target: ThreadReadTarget, options: OutlineOptions = {}) => {
   const ref = threadReadTarget(target);
   const id = ref.threadId;
-  const reading = threadQueryRead(ref, ['thread-outline', id]);
+  const selected = options.selection ?? 'conversation';
+  const q = options.q?.trim() ?? '';
+  const reading = threadQueryRead(ref, ['thread-outline', id, ...(selected === 'conversation' && q === '' ? [] : [selected, q])]);
   return infiniteQueryOptions({
     queryKey: reading.key,
     enabled: reading.enabled,
@@ -215,6 +223,7 @@ export const outlineQuery = (target: ThreadReadTarget) => {
       const captured = await reading.capture(signal, pageParam !== null);
       const page = await readInThread(captured, (readSignal) => ok(api.GET('/threads/{id}/outline', {
         params: { path: { id }, query: { limit: TAIL_ITEMS, ...threadReadSelector(captured),
+          ...(selected === 'conversation' ? {} : { selection: selected }), ...(q === '' ? {} : { q }),
           ...(pageParam === null ? {} : { before: pageParam }) } }, signal: readSignal,
       })), signal);
       const accepted = receiveThreadRead(captured, page.projection, signal);
@@ -224,6 +233,16 @@ export const outlineQuery = (target: ThreadReadTarget) => {
     staleTime: Infinity,
   });
 };
+
+/** The anchor and its immediate human neighbors; three positions express the neighborhood, not a history limit. */
+export async function fetchMessageNeighbors(target: ThreadReadTarget, around: string, signal?: AbortSignal): Promise<ThreadOutlinePage> {
+  const captured = captureThreadRead(target);
+  const page = await readInThread(captured, (readSignal) => ok(api.GET('/threads/{id}/outline', {
+    params: { path: { id: captured.threadId }, query: { selection: 'messages', around, limit: 3, include_changes: false, ...threadReadSelector(captured) } }, signal: readSignal,
+  })), signal);
+  const accepted = receiveThreadRead(captured, page.projection, signal);
+  return stampThreadReceipt(page, accepted);
+}
 
 /** Historical references remain explicitly pageable, even for turns with no timeline items. */
 export const segmentsQuery = (target: ThreadReadTarget) => {

@@ -9,14 +9,15 @@ import { FilesChoice } from '@/features/change/Files';
 import { HistoryChoices } from '@/features/change/History';
 import { Options } from '@/features/change/Options';
 import { HostChoices, Where } from '@/features/change/Where';
-import type { EnvironmentRef, ForkPlan, ForkPlanHistory, Place, PlaceEnvironment, PlaceHost, Thread, UserRef } from '@/generated/api-types';
+import type { EnvironmentRef, ForkPlan, ForkPlanHistory, Item, Place, PlaceEnvironment, PlaceHost, Thread, Turn, UserRef } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 
 import { host as hostPlace, placeEnvironment } from '../unit/start-fixtures';
+import { turn, userMessage } from '../doubles/thread-rows';
 import { show } from './support';
 
-const fixture = vi.hoisted(() => ({ places: [] as Place[], summary: true, history: 'carry' }));
+const fixture = vi.hoisted(() => ({ places: [] as Place[], summary: true, history: 'carry', turns: [] as Turn[], items: [] as Item[] }));
 vi.mock('@/api/forks', async (original) => ({ ...await original<object>(), placesQuery: (topic: string) => ({
   queryKey: ['compact-places', topic], initialData: fixture.places, queryFn: () => Promise.resolve(fixture.places),
 }) }));
@@ -26,7 +27,7 @@ vi.mock('@/api/settings', async (original) => ({ ...await original<object>(), se
   ]),
 }) }));
 vi.mock('@/realtime/stores/thread', async (original) => ({ ...await original<object>(), useThreadView: () => ({
-  order: [], items: new Map(), turns: new Map(),
+  order: fixture.items.map((item) => item.id), items: new Map(fixture.items.map((item) => [item.id, item])), turns: new Map(fixture.turns.map((turn) => [turn.id, turn])),
 }) }));
 
 const owner: UserRef = { id: 'owner', kind: 'human', username: 'owner', display_name: 'Other Owner', avatar: { color: 1, text: 'O' } };
@@ -43,6 +44,24 @@ beforeEach(() => {
   fixture.places = [declared];
   fixture.summary = true;
   fixture.history = 'carry';
+  fixture.turns = []; fixture.items = [];
+});
+
+it.each(['en', 'zh-CN'] as const)('finds a held turn by its prompt and preserves its native ordinal in the history choice in %s', async (locale) => {
+  await setLocale(locale);
+  fixture.turns = Array.from({ length: 12 }, (_, at) => turn(`turn-${at}`, { ordinal: at + 1, state: 'completed', inputId: `input-${at}` }));
+  fixture.items = fixture.turns.map((turn, at) => userMessage(`message-${at}`, `Question ${at}`, { turn: turn.id, author: owner }));
+  const initial = initialChoices('new');
+  const choices: Choices = { ...initial, history: { ...initial.history, mode: 'upto', toTurn: 1 } };
+  const changed = vi.fn();
+  show(<HistoryChoices threadId="thread" choices={choices} onChange={changed} />);
+  const picker = screen.getByRole('combobox', { name: i18n.t('change.history.upTo') });
+  await userEvent.click(picker);
+  await userEvent.type(picker, 'Question 11');
+  expect(changed).not.toHaveBeenCalled();
+  expect(screen.queryByRole('option', { name: /Question 10/ })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole('option', { name: /Question 11/ }));
+  expect(changed).toHaveBeenCalledExactlyOnceWith({ history: { ...choices.history, toTurn: 12 } });
 });
 const appearance = useAppearance.getState();
 afterEach(async () => { useAppearance.setState(appearance); await setLocale('en'); });
@@ -212,7 +231,7 @@ it('keeps host capacity and policy refusals inside the open picker without weake
   const option = screen.getByRole('option', { name: 'Build host' });
   expect(option).toHaveAttribute('aria-disabled', 'true');
   expect(option).toHaveAccessibleDescription(/Machine policy forbids writes/);
-  expect(screen.getByRole('meter', { name: '2 of 8 GB declared' })).toBeVisible();
+  expect(screen.getByRole('meter', { name: '7 GiB free of 8 GiB memory' })).toBeVisible();
   await userEvent.click(option);
   expect(changed).not.toHaveBeenCalled();
 });

@@ -1,8 +1,8 @@
 /** What the reader opened or closed by hand in a conversation, kept for as long as the screen is open.
  *
- * How much of the agent's work is open by itself is a setting of the reader's (Work detail); what
- * they then open or close by hand holds while the screen is open, and is forgotten with it: a step,
- * the folded work of a turn, and the raw call under a step.
+ * How much of the agent's work is open by itself follows the way the thread is read and whether its turn is
+ * still at it; what they then open or close by hand holds while the screen is open, and is forgotten with it: a
+ * step, the group of work that holds steps, and the raw call under a step.
  */
 import { create } from 'zustand';
 import { client } from '@/api/client';
@@ -12,17 +12,15 @@ import { useMemo } from 'react';
 import { keepPresentation, readPresentation } from '@/features/workbench/presentation';
 
 interface ThreadUi {
-  /** Steps the reader opened (`true`) or closed (`false`), against what the depth says. */
+  /** Steps and groups of work the reader opened (`true`) or closed (`false`), against what they are drawn as by themselves. */
   steps: ReadonlyMap<string, boolean>;
-  /** Turns whose folded work is open. */
-  folds: ReadonlySet<string>;
   /** Steps whose raw call is shown in place of their display. */
   raw: ReadonlySet<string>;
   /** The newest explicit request to reveal an aside, consumed once its start marker is held. */
   sideFocus?: { id: string; request: number };
 }
 
-const NOTHING: ThreadUi = { steps: new Map(), folds: new Set(), raw: new Set() };
+const NOTHING: ThreadUi = { steps: new Map(), raw: new Set() };
 
 function keptUi(target: ThreadReadTarget): ThreadUi {
   const read = typeof target === 'string' ? defaultThreadRead(target) : target;
@@ -30,7 +28,7 @@ function keptUi(target: ThreadReadTarget): ThreadUi {
   if (typeof value !== 'object' || value === null || !('version' in value) || value.version !== 1) return NOTHING;
   const strings = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
   const steps = 'steps' in value && Array.isArray(value.steps) ? value.steps.filter((entry): entry is [string, boolean] => Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string' && typeof entry[1] === 'boolean') : [];
-  return { steps: new Map(steps), folds: new Set(strings('folds' in value ? value.folds : null)), raw: new Set(strings('raw' in value ? value.raw : null)) };
+  return { steps: new Map(steps), raw: new Set(strings('raw' in value ? value.raw : null)) };
 }
 
 interface TimelineUi {
@@ -55,7 +53,7 @@ function change(target: ThreadReadTarget, make: (ui: ThreadUi) => ThreadUi): voi
     const next = make(state.byThread.get(threadId) ?? keptUi(target));
     byThread.set(threadId, next);
     const read = typeof target === 'string' ? defaultThreadRead(target) : target;
-    if (read.key.kind === 'result') keepPresentation(read.key.owner, `timeline:${read.threadId}`, { version: 1, steps: [...next.steps], folds: [...next.folds], raw: [...next.raw] });
+    if (read.key.kind === 'result') keepPresentation(read.key.owner, `timeline:${read.threadId}`, { version: 1, steps: [...next.steps], raw: [...next.raw] });
     return { byThread };
   });
 }
@@ -75,20 +73,17 @@ export const timelineUi = {
   openSide(threadId: ThreadReadTarget, sideId: string): void {
     change(threadId, (ui) => ({ ...ui, steps: new Map(ui.steps).set(sideLaneKey(sideId), true), sideFocus: { id: sideId, request: (ui.sideFocus?.request ?? 0) + 1 } }));
   },
-  /** A running child's header chip opens its turn and its own step before the timeline scrolls there. */
-  revealStep(threadId: ThreadReadTarget, itemId: string, turnId: string | null): void {
+  /** A running child's header chip opens its own step before the timeline scrolls there, which opens the group that holds it. */
+  revealStep(threadId: ThreadReadTarget, itemId: string): void {
     change(threadId, (ui) => {
       const raw = new Set(ui.raw);
       raw.delete(itemId);
-      return { ...ui, steps: new Map(ui.steps).set(itemId, true), folds: turnId === null ? ui.folds : new Set(ui.folds).add(turnId), raw };
+      return { ...ui, steps: new Map(ui.steps).set(itemId, true), raw };
     });
   },
   /** Opens or closes a step, to the opposite of how it is shown now. */
   setStep(threadId: ThreadReadTarget, itemId: string, open: boolean): void {
     change(threadId, (ui) => ({ ...ui, steps: new Map(ui.steps).set(itemId, open) }));
-  },
-  toggleFold(threadId: ThreadReadTarget, turnId: string): void {
-    change(threadId, (ui) => ({ ...ui, folds: toggled(ui.folds, turnId) }));
   },
   toggleRaw(threadId: ThreadReadTarget, itemId: string): void {
     change(threadId, (ui) => ({ ...ui, raw: toggled(ui.raw, itemId) }));

@@ -26,6 +26,7 @@ import { featureName } from '@/features/resources/agents/buildChecks';
 import { useThreadView } from '@/realtime/stores/thread';
 import { Input } from '@/ui/Input';
 import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
 
 /** The few words a turn is told by: what the person asked in it. */
 function turnLabel(turn: Turn, text: string, t: TFunction, whole = false): string {
@@ -53,7 +54,8 @@ function TurnPick({ label, turns, value, onChange }: { label: string; turns: { t
     return <Input label={label} type="number" min={1} inputMode="numeric" value={value === null ? '' : String(value)} onChange={(event) => onChange(event.target.value === '' ? null : Math.max(1, Number(event.target.value)))} fieldClassName="w-(--field-narrow)" />;
   }
   return (
-    <Select
+    <ResourcePicker
+      pickerKey="change.history.turn"
       label={label}
       value={value === null ? '' : String(value)}
       onValueChange={(next) => onChange(next === '' ? null : Number(next))}

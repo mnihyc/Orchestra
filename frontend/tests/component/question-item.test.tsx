@@ -18,7 +18,7 @@ import { show } from './support';
 
 const server = vi.hoisted(() => ({ read: vi.fn<() => Promise<Approval>>(), decide: vi.fn<(id: string, decision: unknown) => Promise<Approval>>() }));
 vi.mock('@/api/approvals', async (load) => ({ ...await load<typeof ApprovalsApi>(), approvalQuery: (id: string) => ({ queryKey: ['approval', id], queryFn: server.read }), decideApproval: server.decide }));
-const context: TimelineContext = { threadId: 'question-thread', threadName: 'Login', detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: 'question-thread', threadName: 'Login', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: true, canManage: true, live: true, lit: null, selection: NOT_PICKING };
 function request(canDecide = true, title = 'Choose scope'): Approval {
   return harnessApproval('question-1', { threadId: context.threadId, itemId: 'question-item', title, requester: userRef(me(1, 'ada', 'Ada')), canDecide,

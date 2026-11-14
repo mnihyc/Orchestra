@@ -22,10 +22,12 @@ import { defaultThreadRead } from '@/realtime/threadScope';
 import type * as Screen from '@/shell/screen';
 import { ACME, meta } from '../doubles/fixtures';
 import { World } from '../doubles/world';
+import { threadInput } from '../doubles/thread-rows';
 import { CATALOGUE } from '../unit/general-access-fixtures';
 import { A, B, projection, snapshot } from '../unit/continuation-fixtures';
 import { show } from './support';
 
+const pending = vi.hoisted(() => ({ edit: vi.fn<typeof ThreadsApi.updateInput>(), remove: vi.fn<typeof ThreadsApi.cancelInput>() }));
 const calls = vi.hoisted(() => ({ request: vi.fn<typeof AccessApi.requestAccess>(), reload: vi.fn(), submit: vi.fn<typeof Draft.submitInput>(), draft: vi.fn<typeof Draft.useDraftSync>() }));
 vi.mock('@/features/composer/Draft', async original => ({ ...await original<typeof Draft>(), submitInput: calls.submit, useDraftSync: (...args: Parameters<typeof Draft.useDraftSync>) => calls.draft(...args) }));
 vi.mock('@/realtime/live', async original => ({ ...await original<typeof Live>(), useThreadFeed: () => undefined, useOrgTreeFeed: () => undefined, useSocketStatus: () => ({ phase: 'ready' }), reloadThread: calls.reload }));
@@ -48,6 +50,7 @@ vi.mock('@/features/usage/context/ContextRing', () => ({ ContextRing: () => <spa
 vi.mock('@/api/auth', async original => ({ ...await original<typeof AuthApi>(), metaQuery: { queryKey: ['viewer-meta'], queryFn: () => Promise.resolve(meta()) } }));
 vi.mock('@/api/settings', async original => ({ ...await original<typeof SettingsApi>(), settingsQuery: (id: string) => ({ queryKey: ['viewer-settings', id], queryFn: () => Promise.resolve([]), staleTime: Infinity }) }));
 vi.mock('@/api/threads', async original => ({ ...await original<typeof ThreadsApi>(),
+  updateInput: pending.edit, cancelInput: pending.remove,
   parametersQuery: (id: string) => ({ queryKey: ['viewer-parameters', id], queryFn: () => Promise.resolve(parameters), staleTime: Infinity }),
   limitsQuery: (id: string) => ({ queryKey: ['viewer-limits', id], queryFn: () => Promise.resolve(limits), staleTime: Infinity }),
 }));
@@ -127,8 +130,10 @@ describe.each(modes)('a live viewer at $width px in $theme', mode => {
     const controls = within(screen.getByRole('group', { name: i18n.t('composer.row.label') }));
     expect(controls.getByRole('button', { name: i18n.t('composer.plus.label') })).toBeDisabled();
     expect(view.container.querySelector('input[type="file"]')).toBeDisabled();
-    const model = controls.getByRole('button', { name: i18n.t('composer.model.current', { model: 'Reasoner (High)' }) });
-    expect(model).toBeDisabled(); expect(model).toHaveTextContent('Reasoner (High)');
+    const model = controls.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.chip'), value: 'Reasoner' }) });
+    expect(model).toBeDisabled(); expect(model).toHaveTextContent('Reasoner');
+    const effort = controls.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.effort.title'), value: 'High' }) });
+    expect(effort).toBeDisabled(); expect(effort).toHaveTextContent('High');
     const send = controls.getByRole('button', { name: i18n.t('composer.send') });
     expect(send).toBeVisible(); expect(send).toBeDisabled();
     expect(controls.getByRole('button', { name: i18n.t('composer.deliveryMenu') })).toBeDisabled();
@@ -210,11 +215,82 @@ it.each(['archived', 'inspection'] as const)('retains the existing %s exclusion 
   if (state === 'archived') expect(screen.getByText(i18n.t('thread.archived.lineAnonymous'))).toBeVisible();
 });
 
+it.each(['archived', 'inspection'] as const)('keeps context in the %s dock even before a native agent is bound', state => {
+  const view = draw(modes[0], { ...native, binding: null, environment: null, usage: null, model: null, model_display: null, archived: state === 'archived', archived_by: null }, state === 'inspection');
+  const context = view.container.querySelector('[data-runs-line] [data-readonly-chip="context"]');
+  expect(context).toHaveTextContent('Context');
+  expect(view.container.querySelector('[data-thread-dock]')).toContainElement(context as HTMLElement);
+  expect(view.container.querySelector('[data-readonly-chip="agent"]')).toBeNull();
+});
+
 it.each(['en', 'zh-CN'] as const)('shows the disabled placeholder, model, effort and access action in %s', async locale => {
   await setLocale(locale); draw();
   expect(screen.getByRole('textbox', { name: i18n.t('composer.label') })).toHaveAttribute('placeholder', i18n.t('thread.watching.title'));
-  const value = `Reasoner (${i18n.t('choiceCatalog.effort.high.name')})`;
-  const model = screen.getByRole('button', { name: i18n.t('composer.model.current', { model: value }) });
-  expect(model).toBeDisabled(); expect(model).toHaveTextContent(value);
+  const high = i18n.t('choiceCatalog.effort.high.name');
+  const model = screen.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.chip'), value: 'Reasoner' }) });
+  expect(model).toBeDisabled(); expect(model).toHaveTextContent('Reasoner');
+  const effort = screen.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.effort.title'), value: high }) });
+  expect(effort).toBeDisabled(); expect(effort).toHaveTextContent(high);
   expect(screen.getByRole('button', { name: i18n.t('access.request.title') })).toBeEnabled();
+});
+
+describe.each(modes)('the thread dock at $width px in $theme', mode => {
+  it('keeps where the thread runs with its composer controls as the conversation scrolls', () => {
+    const view = draw(mode);
+    const where = view.container.querySelector('[data-where-chip]');
+    expect(where).not.toBeNull();
+    expect(view.container.querySelectorAll('[data-where-chip]')).toHaveLength(1);
+    expect(view.container.querySelector('[data-composer-controls]')).toContainElement(where as HTMLElement);
+    expect(view.container.querySelector('[data-thread-dock]')).toContainElement(where as HTMLElement);
+    expect(view.container.querySelector('[data-scroll-area]')).not.toContainElement(where as HTMLElement);
+    expect(view.container.querySelector('header')).not.toContainElement(where as HTMLElement);
+    expect(where).toHaveTextContent(native.environment?.name ?? '');
+    if (native.directory !== '') expect(where).toHaveTextContent(native.directory);
+    expect(view.container.querySelector('[data-runs-line]')).toBeNull();
+  });
+
+  it.each(['archived', 'inspection'] as const)('keeps one read-only set of run facts and location in the %s dock', state => {
+    const view = draw(mode, { ...native, archived: state === 'archived', archived_by: null }, state === 'inspection');
+    expect(view.container.querySelector('[data-composer]')).toBeNull();
+    const runs = screen.getByRole('group', { name: i18n.t('composer.row.runsWith') });
+    expect(view.container.querySelectorAll('[data-runs-line]')).toHaveLength(1);
+    expect(view.container.querySelector('[data-thread-dock]')).toContainElement(runs);
+    expect(view.container.querySelector('[data-scroll-area]')).not.toContainElement(runs);
+    expect(runs.querySelector('[data-readonly-chip="agent"]')).toHaveTextContent(native.binding?.agent.name ?? '');
+    expect(runs.querySelector('[data-readonly-chip="model"]')).toHaveTextContent('Reasoner');
+    expect(runs.querySelector('[data-readonly-chip="effort"]')).toHaveTextContent('High');
+    const where = runs.querySelector('[data-where-chip]');
+    expect(where).not.toBeNull();
+    expect(view.container.querySelectorAll('[data-where-chip]')).toHaveLength(1);
+    expect(where).toHaveAttribute('aria-disabled', 'true');
+    expect(where).toHaveTextContent(native.environment?.name ?? '');
+    expect(where).toHaveAttribute('aria-description', expect.stringContaining(native.environment?.name ?? ''));
+    if (native.directory !== '') expect(where).toHaveAttribute('aria-description', expect.stringContaining(native.directory));
+    expect(where).toHaveAttribute('aria-description', expect.stringContaining(i18n.t('composer.row.readOnly')));
+  });
+});
+
+it('lets the author correct and withdraw an accepted message before its idle thread takes it', async () => {
+  client.session.setState({ userId: native.owner.id });
+  const permitted: Thread = { ...native, access: { ...native.access, permissions: ['thread.view', 'thread.interact', 'thread.manage'] }, input_access: { allowed: true, missing: [] } };
+  const input = threadInput('pending-first', 'Check the redirect', { author: native.owner, position: '1' });
+  const edited = { ...input, content: [{ type: 'text' as const, text: 'Check the redirect and logout' }], seq_updated: input.seq_updated + 1 };
+  pending.edit.mockReset().mockResolvedValue({ input: edited, inputs: [] });
+  pending.remove.mockReset().mockResolvedValue({ ...edited, state: 'cancelled', seq_updated: edited.seq_updated + 1 });
+  const view = draw(modes[0], permitted);
+  act(() => threadWriter.apply(native.id, { inputs: [input] }));
+  const sent = view.container.querySelector('[data-sent-message]');
+  expect(sent).not.toBeNull();
+  expect(view.container.querySelector('[data-queue]')).toBeNull();
+  const user = userEvent.setup();
+  await user.click(within(sent as HTMLElement).getByRole('button', { name: i18n.t('composer.queue.editRow', { number: 1 }) }));
+  const field = within(sent as HTMLElement).getByRole('textbox', { name: i18n.t('composer.queue.editLabel') });
+  await user.clear(field);
+  await user.type(field, 'Check the redirect and logout');
+  await user.click(within(sent as HTMLElement).getByRole('button', { name: i18n.t('composer.queue.save') }));
+  await waitFor(() => expect(pending.edit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), input.id, { content: edited.content }));
+  await waitFor(() => expect(sent).toHaveTextContent('Check the redirect and logout'));
+  await user.click(within(sent as HTMLElement).getByRole('button', { name: i18n.t('composer.queue.removeRow', { number: 1 }) }));
+  await waitFor(() => expect(pending.remove).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), input.id));
+  await waitFor(() => expect(view.container.querySelector('[data-sent-message]')).toBeNull());
 });

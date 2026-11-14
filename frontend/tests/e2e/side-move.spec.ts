@@ -33,7 +33,8 @@ for (const [locale, label, reason] of [
   });
   await page.goto(`/thread/${MAIN}`);
   await screenReady(page, locale, 'light');
-  await page.locator('[data-thread-header]').getByRole('button', { name: words('side.menu.ask'), exact: true }).click();
+  await page.locator('[data-thread-header] [data-thread-more]').click();
+  await page.getByRole('menuitem', { name: words('side.menu.ask'), exact: true }).click();
   const ask = page.getByRole('dialog', { name: words('side.ask.title'), exact: true });
   await ask.getByRole('textbox', { name: words('side.ask.label'), exact: true }).fill('A question to keep on the side');
   const made = arrived(page.waitForResponse((response) => response.request().method() === 'POST'
