@@ -6184,7 +6184,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "auto.summarizer",
     "title": "Summarizer",
-    "description": "Which summarizer is used, and its configuration.",
+    "description": "Summarizer and model token allowances. Target character counts are separate.",
     "group": "automation",
     "schema": {
       "type": "object",
@@ -6568,6 +6568,34 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": [],
     "display": {
       "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "summary.read_repeats",
+    "title": "Summary read repeats",
+    "description": "Unpaid source rereads and prompt rebuilds before the first model call. A changing read or rebuild loop uses this limit; 0 makes no repeat. A source change after a model call never creates a paid retry.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 3,
+    "example": 5,
+    "text_key": "day100.builtin.summary.read_repeats",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
       "zero": null
     }
   },
@@ -8976,6 +9004,29 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": [],
     "display": {
       "unit": "hours",
+      "zero": null
+    }
+  },
+  {
+    "key": "api.read_repeats",
+    "title": "Repeated reads",
+    "description": "How many times a read is made again, in place of being refused, when what it showed has moved while it was being answered; 0 makes no repeat.",
+    "group": "system",
+    "schema": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 3,
+    "example": 5,
+    "text_key": "day100.builtin.api.read_repeats",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
       "zero": null
     }
   },
