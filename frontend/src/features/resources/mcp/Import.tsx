@@ -1,8 +1,8 @@
 /** Discoveries are reviewed and imported through their actual environment; private definitions stay on the machine. */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { environmentKey, environmentMcpKey, environmentMcpQuery, environmentsQuery, importEnvironmentMcp } from '@/api/environments';
+import { environmentKey, environmentMcpKey, environmentMcpPageQuery, environmentsQuery, importEnvironmentMcp } from '@/api/environments';
 import { mcpKey } from '@/api/resource-tools';
 import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
 import type { EnvironmentMcp, EnvironmentRef, McpFound } from '@/generated/api-types';
@@ -15,7 +15,10 @@ import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { Input } from '@/ui/Input';
-import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
+import { useCollectionSearch } from '@/lib/collectionSearch';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Switch } from '@/ui/Switch';
 import { Table, type Column } from '@/ui/Table';
@@ -81,12 +84,12 @@ export function ImportMcp({ environment, found, right, onClose, onImported, mach
 
 export function FoundMcp({ environment, machineId }: { environment: Pick<EnvironmentRef, 'id' | 'name'>; machineId?: string }) {
   const { t } = useTranslation();
-  const current = useQuery(environmentMcpQuery(environment.id));
+  const search = useCollectionSearch('mcp-found:' + environment.id);
+  const current = useInfiniteQuery(environmentMcpPageQuery(environment.id, 'found', search.q));
   const [chosen, setChosen] = useState<McpFound | null>(null);
   const state = useImportState(environment.id, machineId ?? null);
-  if (current.isError) return <ErrorState compact error={current.error} retrying={current.isRefetching} onRetry={() => void current.refetch()} />;
-  if (current.data === undefined) return <SkeletonRows rows={3} />;
-  const { found, import: right } = current.data;
+  const found = current.data?.pages.flatMap((page) => page.found) ?? [];
+  const right = current.data?.pages.at(-1)?.import ?? { allowed: false, reason: null };
   const reason = right.allowed ? undefined : t(right.reason === 'not_owner' ? 'mcpImport.notOwner' : right.reason === 'policy' ? 'mcpImport.policyOff' : 'mcpImport.unavailable');
   const imported = (row: McpFound) => row.imported ?? state.accepted[discoveryKey(row)] ?? null;
   const columns: Column<McpFound>[] = [
@@ -102,7 +105,9 @@ export function FoundMcp({ environment, machineId }: { environment: Pick<Environ
   ];
   return <section className="flex min-w-0 flex-col gap-3" aria-label={t('mcpImport.found')}>
     <h3 className="font-medium">{t('mcpImport.found')}</h3>
-    {found.length === 0 ? <EmptyState compact title={t(right.reason === 'policy' ? 'mcpImport.policyOff' : 'mcpImport.empty')} /> : <Table label={t('mcpImport.found')} columns={columns} rows={found} rowKey={discoveryKey} />}
+    <CollectionSearch name={t('mcpImport.found')} {...search} />
+    {current.isPending ? <SkeletonRows read={current} rows={3} /> : current.isError && !current.isFetchNextPageError ? <ErrorState compact error={current.error} onRetry={() => void current.refetch()} /> : found.length === 0 ? <EmptyState compact title={t(right.reason === 'policy' ? 'mcpImport.policyOff' : 'mcpImport.empty')} /> : <Table label={t('mcpImport.found')} columns={columns} rows={found} rowKey={discoveryKey} virtual windowKey={search.q} />}
+    <Pagination hasMore={current.hasNextPage} loading={current.isFetchingNextPage} error={current.isFetchNextPageError ? current.error : null} onMore={() => void current.fetchNextPage()} />
     {chosen !== null && <ImportMcp environment={environment} machineId={machineId} found={chosen} right={right} onClose={() => setChosen(null)}
       onImported={(id) => state.acknowledge(chosen, id)} />}
   </section>;
@@ -118,7 +123,7 @@ export function ImportFromMachine({ onClose }: { onClose: () => void }) {
     <div className="flex min-w-0 flex-col gap-4">
       {environments.isPending ? <SkeletonRows rows={3} /> : environments.isError ? <ErrorState compact error={environments.error} onRetry={() => void environments.refetch()} />
         : rows.length === 0 ? <EmptyState compact title={t('mcpImport.noEnvironment')} /> : <>
-          <Select label={t('mcpImport.environment')} value={environment?.id ?? NO_ENVIRONMENT} onValueChange={setSelected}
+          <ResourcePicker pickerKey="mcp-import.environment" label={t('mcpImport.environment')} value={environment?.id ?? NO_ENVIRONMENT} onValueChange={setSelected}
             options={[{ value: NO_ENVIRONMENT, label: t('mcpImport.chooseEnvironment'), disabled: true }, ...rows.map((row) => ({ value: row.id, label: `${row.machine?.name ?? ''} / ${row.name}` }))]} />
           {environment !== undefined && <FoundMcp key={environment.id} environment={environment} machineId={environment.machine?.id} />}
         </>}

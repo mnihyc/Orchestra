@@ -7,6 +7,9 @@
  * before it does it. What a reader may not do stays in the menu, greyed, with what it takes. An org
  * that takes no members says so, and what to do instead.
  */
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Tooltip } from '@/ui/Tooltip';
 import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query';
 import { Ellipsis, MailPlus, MoveRight, Pause, Play, Search, ShieldCheck, UserMinus, Users } from 'lucide-react';
 import { useState } from 'react';
@@ -18,7 +21,7 @@ import { useStore } from 'zustand';
 import { changeRole, rolesQuery } from '@/api/access';
 import { ApiError, client } from '@/api/client';
 import { membersQuery, resumeMember, suspendMember, suspensionsQuery } from '@/api/directory';
-import { invitationsQuery, revokeInvitation } from '@/api/users';
+import { invitationsPageQuery, revokeInvitation } from '@/api/users';
 import { INVITED_ROLES, InviteDialog } from '@/features/org/Invite';
 import { EndMembership } from '@/features/settings/org/EndMembership';
 import { InvitationRules } from '@/features/settings/org/Invite';
@@ -151,9 +154,11 @@ function Suspend({ org, member, onClose }: { org: Org; member: Member; onClose: 
 }
 
 /** The invitations still good, each with its form, whom it is for, its role, how often it was used, when it ends, and Revoke. */
-function Invitations({ org }: { org: Org }) {
+export function Invitations({ org }: { org: Org }) {
   const { t } = useTranslation();
-  const list = useQuery(invitationsQuery(org.id));
+  const search = useCollectionSearch("invitations:" + org.id);
+  const list = useInfiniteQuery(invitationsPageQuery(org.id, search.q));
+  const rows = list.data?.pages.flatMap((page) => page.items) ?? [];
   const [revoking, setRevoking] = useState<Invitation | null>(null);
   const now = useNow();
   const revoke = useMutation({
@@ -162,10 +167,7 @@ function Invitations({ org }: { org: Org }) {
       setRevoking(null);
     },
   });
-  const pending = (list.data ?? []).filter((invitation) => isPending(invitation, now));
-  if (list.isPending) return <SkeletonRows read={list} rows={2} />;
-  if (list.isError) return <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />;
-  if (pending.length === 0) return <EmptyState compact title={t('places.members.noInvitations')} />;
+  const pending = rows.filter((invitation) => isPending(invitation, now));
   const columns: Column<Invitation>[] = [
     {
       id: 'for',
@@ -174,6 +176,7 @@ function Invitations({ org }: { org: Org }) {
         <span className="flex flex-col">
           <span className="font-medium wrap-anywhere text-text">{invitation.form === 'email' ? invitation.email : t('places.members.sharedLink')}</span>
           <span className="text-sm text-text-muted">{t(`places.invite.forms.${invitation.form}`)}</span>
+          {invitation.note !== '' && <Tooltip content={invitation.note}><span tabIndex={0} className="max-w-full truncate text-sm text-text-muted">{invitation.note}</span></Tooltip>}
         </span>
       ),
     },
@@ -194,7 +197,11 @@ function Invitations({ org }: { org: Org }) {
   ];
   return (
     <>
-      <Table label={t('places.members.pending')} columns={columns} rows={pending} rowKey={(invitation) => invitation.id} />
+      <CollectionSearch name={t('places.members.pending')} {...search} />
+      {list.isPending ? <SkeletonRows read={list} rows={2} /> : list.isError && rows.length === 0 ? <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
+        : pending.length === 0 ? <EmptyState compact title={t('places.members.noInvitations')} />
+        : <Table label={t('places.members.pending')} columns={columns} rows={pending} virtual rowKey={(invitation) => invitation.id} />}
+      <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
       <ConfirmDialog
         open={revoking !== null}
         onOpenChange={(next) => !next && setRevoking(null)}

@@ -574,7 +574,8 @@ async fn group_cycles_and_a_sixth_level_are_refused_without_changing_any_members
         .token(&t.owner.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(members.is_empty());
 }
 

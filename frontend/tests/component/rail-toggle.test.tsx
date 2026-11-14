@@ -115,3 +115,12 @@ it.each(['navigation', 'resource-navigation'])('docks %s when its edge peek was 
   expect(useWorkbench.getState().layout.left).toMatchObject({ open: true, active: view });
   expect(useWorkbench.getState().overlay).toBeNull();
 });
+
+
+it('keeps Ask visually distinct from Help on the navigation rail', () => {
+  showRail();
+  const ask = screen.getByRole('button', { name: i18n.t('ask.open') });
+  const help = screen.getByRole('link', { name: i18n.t('screens.help.title') });
+  expect(ask.querySelector('svg.lucide-sparkles')).not.toBeNull();
+  expect(help.querySelector('svg.lucide-circle-question-mark')).not.toBeNull();
+});

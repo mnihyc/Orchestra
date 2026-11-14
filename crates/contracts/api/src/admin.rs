@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::access::{PageChange, PagePreview, PermissionPage, Role};
 use crate::auth::SignInProof;
-use crate::common::{Page, PageQuery};
+use crate::common::{CollectionQuery, Page, PageQuery};
 use crate::documents::DeletedFilter;
 use crate::environment::{EnvironmentRef, NetworkState, TemplateRef};
 use crate::nodes::OrgType;
@@ -1025,6 +1025,30 @@ pub struct AdminRuntimeListQuery {
     /// Only those of this kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<UnitKind>,
+    /// Words of the visible unit, resource or template name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries in this page; 50 by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::common::query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// Continue the same host, kind and name search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl AdminRuntimeListQuery {
+    /// Its named collection page, with the existing unit selectors kept separately.
+    #[must_use]
+    pub fn collection(&self) -> CollectionQuery {
+        CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
 }
 
 /// Which stored series to read. A span inside `[retention] metrics_fine_days` is answered from the
@@ -1436,13 +1460,13 @@ crate::endpoints! {
     AdminDefaultsPreview: POST "/admin/defaults/preview", Session, none, json PageChange, json PagePreview, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists every host on the system; hosts themselves are managed through their own requests.
-    AdminHostList: GET "/admin/hosts", Session, none, none, json Vec<Host>, 200,
+    AdminHostList: GET "/admin/hosts", Session, query CollectionQuery, none, json Page<Host>, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Object(K::Host)], Target::ResolvedCollection("results")),
             Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Environment)], Target::ResolvedCollection("names")),
         ]);
     /// Lists the runtimes of both pools, whoever's they are.
-    AdminRuntimeList: GET "/admin/runtimes", Session, query AdminRuntimeListQuery, none, json Vec<Runtime>, 200,
+    AdminRuntimeList: GET "/admin/runtimes", Session, query AdminRuntimeListQuery, none, json Page<Runtime>, 200,
         operation Op::facets(&[
             Facet::required(Manage, &[Object(K::Environment),Object(K::Provider)], Target::ResolvedCollection("results")),
             Facet::required(Manage, &[Object(K::Host),Object(K::Machine),Object(K::Template)], Target::ResolvedCollection("references")),
@@ -1455,7 +1479,7 @@ crate::endpoints! {
     AdminAgentCreate: POST "/admin/agents", Session, none, json OrgAgentCreateBody, json crate::resources::OrgAgentCreateResponse, 200,
         operation Op::receipt(&Op::facets(&crate::agent_sources::SYSTEM_CREATE_FACETS));
     /// Lists the external implementations loaded anywhere, with how they fare.
-    AdminPluginList: GET "/admin/plugins", Session, none, none, json Vec<AdminPlugin>, 200,
+    AdminPluginList: GET "/admin/plugins", Session, query CollectionQuery, none, json Page<AdminPlugin>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists the definitions of capabilities.
     AdminCapabilityList: GET "/admin/capabilities", Session, none, none, json Vec<CapabilityDef>, 200,
@@ -1546,7 +1570,7 @@ crate::endpoints! {
             Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Document),Object(K::DocumentContainer)],Target::ResolvedCollection("names")),
         ]));
     /// Lists the identity providers.
-    AdminIdentityProviderList: GET "/admin/identity-providers", Session, none, none, json Vec<IdentityProvider>, 200,
+    AdminIdentityProviderList: GET "/admin/identity-providers", Session, query CollectionQuery, none, json Page<IdentityProvider>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Adds an identity provider.
     AdminIdentityProviderCreate: POST "/admin/identity-providers", Session, none, json IdentityProviderInput, json IdentityProviderCreateResponse, 200,
