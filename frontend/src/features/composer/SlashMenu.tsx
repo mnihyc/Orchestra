@@ -2,17 +2,17 @@
  *
  * What a person types after a slash at the start of the box: the list of commands that begin with what was
  * typed, to be walked with the arrow keys and run with Enter or Tab, or a command written out with its
- * argument. The commands here set up the model a thread runs on: `/model` and `/effort` open the model
- * control, and `/speed`, `/access` and `/context` open it on that choice or, written with what to choose
- * (`/speed fast`, `/access none`, `/context 400k`), make it, each only where the thread's model has it
- * open. A command that this reader may not use is listed disabled, with the reason. A message that begins
+ * argument. The commands here set up the model a thread runs on: each opens the list of its own control
+ * (`/model`, `/effort`, and `/speed`, `/access` and `/context`) or, written with what to choose
+ * (`/speed fast`, `/access none`, `/context 400k`), makes the choice, the last three only where the thread's
+ * model has it open. A command that this reader may not use is listed disabled, with the reason. A message that begins
  * with a slash and is no command goes as a message. The commands of a side thread and a fork are added to
  * the list by the screens that have them.
  */
 import { type KeyboardEvent, type ReactNode, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { contextFits, forceLabel, type Kind, type State } from '@/features/composer/modelState';
+import { type ControlName, contextFits, forceLabel, type SpeedOrAccess, type State } from '@/features/composer/modelState';
 import { useRunsWith } from '@/features/composer/runsWith';
 import { appliesWords } from '@/features/composer/SpeedAndAccess';
 import { formatContext } from '@/features/models/context';
@@ -54,7 +54,7 @@ export function readSize(text: string): number | null {
 }
 
 /** The commands of the model control, as this reader meets them on this thread. */
-export function useModelCommands(thread: Thread, openControl: (section: Kind | null) => void): SlashCommand[] {
+export function useModelCommands(thread: Thread, openControl: (name: ControlName) => void): SlashCommand[] {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
   const runs = useRunsWith(thread, false);
@@ -68,8 +68,8 @@ export function useModelCommands(thread: Thread, openControl: (section: Kind | n
   // A thread that is bound to nothing has no model to set up.
   if (thread.binding === null) return [];
   const commands: SlashCommand[] = [
-    { name: 'model', about: t('composer.model.slash.model'), off, run: () => (openControl(null), null) },
-    { name: 'effort', about: t('composer.model.slash.effort'), off, run: () => (openControl(null), null) },
+    { name: 'model', about: t('composer.model.slash.model'), off, run: () => (openControl('model'), null) },
+    { name: 'effort', about: t('composer.model.slash.effort'), off, run: () => (openControl('effort'), null) },
   ];
   for (const state of runs.states) {
     const name = state.kind;
@@ -106,6 +106,20 @@ export function useModelCommands(thread: Thread, openControl: (section: Kind | n
         if (found === null) return t('composer.model.slash.notOpen', { what: t(`composer.model.${name}.title`), given: argument, list: [...(state.allowNone === false ? [] : [none]), ...state.open.map((one) => one.label)].join(', ') });
         runs.choose(state, found.id);
         return say(state, found.id === null ? none : (forceLabel({ ...state, force: found.id }) ?? found.label));
+      },
+    });
+  }
+  // `/fast` flips the second speed on and off, where the model has one: the toggle of the box, written out.
+  const speed = runs.states.find((state): state is SpeedOrAccess => state.kind === 'speed');
+  if (speed !== undefined && speed.open.length > 0) {
+    commands.push({
+      name: 'fast',
+      about: t('composer.model.slash.fast'),
+      off: off ?? (speed.providerFixed === true ? t('providerOptions.fixedByProvider') : !speed.writable ? t('providerOptions.unavailable') : null),
+      run: () => {
+        const next = speed.force === null ? (speed.open.find((one) => one.id === 'fast') ?? speed.open[0])?.id ?? null : null;
+        runs.choose(speed, next);
+        return say(speed, next === null ? t('composer.model.speed.standard') : (forceLabel({ ...speed, force: next }) ?? next));
       },
     });
   }

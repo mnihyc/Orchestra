@@ -1,0 +1,15 @@
+fmt
+clippy
+contracts
+test -p orch-api-contract --lib
+test -p orch-agent-contract --lib
+test -p orch-link-contract --lib
+test -p orch-link --test large_messages
+test -p orch-settings-contract --lib
+test -p orch-adapter-fake --lib
+test -p orch-adapter-claude-code --lib
+test -p orch-connector-core --lib
+test -p orch-engine --lib -- credentials::
+test -p orch-engine --lib -- tools::source::tests::image_services::
+test -p orch-engine --test provider_runtime --test provider_updates --test credentials --test provider_sign_in --test provider_fact_reads
+test -p orch-api-core --test provider_managed --test hosted_environments --test provider_services --test provider_setup --test provider_setup_scopes --test provider_models --test kfix_provider_facts_view --test everything_resources

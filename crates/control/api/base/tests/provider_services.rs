@@ -45,6 +45,106 @@ fn sources() -> BuiltinSources {
 }
 
 #[tokio::test]
+async fn an_installed_image_service_is_available_to_enable_without_enabling_an_unknown_transport() {
+    let mut sources = sources();
+    sources.register_capabilities("fixture-images", Declarations {
+        interfaces: ["image-api", "uninstalled-codec"].into_iter().map(|implementation| (
+            implementation.into(), Interface {
+                kind: "images".into(), implementation: implementation.into(),
+                shape: Binding { request: json!({"method":"POST","path":"/images/generations","body":{"prompt":{"from_input":"/prompt"}}}), ..Binding::default() },
+                ..Interface::default()
+            }
+        )).collect(),
+        endpoint_rules: vec![EndpointRule {
+            when: json!({"required":["host"],"properties":{"host":{"const":"api.example.invalid"}}}),
+            endpoints: ["image-api", "uninstalled-codec"].into_iter().map(|implementation| (
+                implementation.into(), Endpoint { interface: implementation.into(), address: "https://api.example.invalid".into(), ..Endpoint::default() }
+            )).collect(),
+            offerings: ["image-api", "uninstalled-codec"].into_iter().map(|implementation| (
+                implementation.into(), Offering {
+                    endpoint: implementation.into(), kind: "service".into(),
+                    capabilities: BTreeMap::from([("image_generation".into(), Support { enabled: true, ..Support::default() })]),
+                    ..Offering::default()
+                }
+            )).collect(),
+            ..EndpointRule::default()
+        }],
+        ..Declarations::default()
+    }).unwrap();
+    let world = World::with_builtin_sources(Arc::new(sources)).await;
+    let firm = resources::company(&world).await;
+    let made = world
+        .app
+        .call(ProviderCreate, &[])
+        .token(&firm.boss.token)
+        .body(&CreateProvider::Api {
+            runtime_machine_id: None,
+            name: "Image services".into(),
+            home_id: firm.acme,
+            access: None,
+            arrangements: None,
+            runtime_config: None,
+            upstreams: vec![Upstream {
+                protocol: "openai-responses".into(),
+                base_url: "https://api.example.invalid".into(),
+                options: json!({"auth":"none"}),
+            }],
+            api_key: None,
+            secrets: None,
+            key_machine_id: None,
+            sources: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap()
+        .provider;
+    let catalogue = made.service_catalogue.as_ref().unwrap();
+    let image = catalogue
+        .iter()
+        .find(|service| service.id == "image-api")
+        .unwrap();
+    assert!(
+        image.available,
+        "the keeping runtime supports the declared image codec"
+    );
+    assert_eq!(image.capabilities, ["image_generation"]);
+    assert!(
+        !image.enabled,
+        "discovery does not opt a provider into paid services"
+    );
+    assert!(
+        !catalogue
+            .iter()
+            .find(|service| service.id == "uninstalled-codec")
+            .unwrap()
+            .available
+    );
+
+    let id = made.base.id.to_string();
+    let updated = world.app.call(ProviderUpdate, &[&id]).token(&firm.boss.token)
+        .raw_body(&json!({"expected_revision":made.revision,"service_offerings":{"image-api":{"enabled":true}}}))
+        .send().await.ok().into_full().unwrap().provider;
+    let read = world
+        .app
+        .call(ProviderGet, &[&id])
+        .token(&firm.boss.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(read.service_offerings, updated.service_offerings);
+    let image = read
+        .service_catalogue
+        .as_ref()
+        .unwrap()
+        .iter()
+        .find(|service| service.id == "image-api")
+        .unwrap();
+    assert!(image.available && image.enabled);
+}
+
+#[tokio::test]
 async fn declared_services_start_disabled_and_only_the_manager_can_store_explicit_choices() {
     let world = World::with_builtin_sources(Arc::new(sources())).await;
     let firm = resources::company(&world).await;
