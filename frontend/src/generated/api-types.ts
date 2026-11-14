@@ -48963,6 +48963,8 @@ export interface components {
             provider?: components["schemas"]["Provider"] | null;
             /** @description Native sub-agent limits; absent on an older server. */
             subagent_limits?: components["schemas"]["ThreadSubagentLimits"] | null;
+            /** @description The speeds, access programs and context sizes that the model's managers opened and that this thread cannot use, each with why. */
+            withheld?: components["schemas"]["WithheldParameter"][];
         };
         /** @description One pending agent continuation visible beside the thread's timeline. */
         ThreadPendingAgentSchedule: {
@@ -52697,6 +52699,42 @@ export interface components {
             /** @description What kind of place it is. */
             kind: components["schemas"]["WhereKind"];
         };
+        /** @description The three choices of a thread that a model's entry opens, and that a thread's agent may not offer. */
+        WithheldChoice: "speed" | "access" | "context";
+        /** @description A choice that a model's managers opened and that this thread cannot make, with the reason. */
+        WithheldParameter: {
+            /** @description Which choice it is. */
+            choice: components["schemas"]["WithheldChoice"];
+            /** @description The key of the agent's parameter that stands for it; none where the agent declares no such parameter. */
+            key?: string | null;
+            /** @description Why the thread cannot make it. */
+            reason: components["schemas"]["WithheldReason"];
+        };
+        /** @description Why a choice that a manager of the provider switched on for the model is not one this thread can make. */
+        WithheldReason: {
+            /** @constant */
+            why: "agent";
+        } | {
+            /** @constant */
+            why: "access";
+        } | {
+            /** @constant */
+            why: "placement";
+        } | {
+            /** @constant */
+            why: "provider_kind";
+        } | {
+            /** @description The feature, as `agent.features` names it. */
+            feature: string;
+            /** @constant */
+            why: "feature";
+        } | {
+            /** @constant */
+            why: "provider";
+        } | {
+            /** @constant */
+            why: "condition";
+        };
         /** @description One selected file, including the upload session that proves how many bytes arrived. */
         WorkspaceUploadAttempt: {
             /** @description Its completed bytes, where upload finished before its workspace write failed. */
@@ -55478,6 +55516,9 @@ export type WebSearchResult = components['schemas']['WebSearchResult'];
 export type WhenFull = components['schemas']['WhenFull'];
 export type WhereKind = components['schemas']['WhereKind'];
 export type WhereName = components['schemas']['WhereName'];
+export type WithheldChoice = components['schemas']['WithheldChoice'];
+export type WithheldParameter = components['schemas']['WithheldParameter'];
+export type WithheldReason = components['schemas']['WithheldReason'];
 export type WorkspaceUploadAttempt = components['schemas']['WorkspaceUploadAttempt'];
 export type WorkspaceUploadOutcome = components['schemas']['WorkspaceUploadOutcome'];
 export type WorktreeChoice = components['schemas']['WorktreeChoice'];

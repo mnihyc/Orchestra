@@ -1,0 +1,7 @@
+fmt
+clippy
+contracts
+test -p orch-agent-contract --lib
+test -p orch-settings-contract --lib
+test -p orch-api-core --lib
+test -p orch-api-core --test model_entries --test provider_models --test threads_settings

@@ -111,7 +111,7 @@ can make in its full form. A document offers View, Edit and Manage.
 
 For example, choose **Everyone in Fix login can view** to let its topic's
 role holders watch while owners and people added keep the higher lines.
-**Let them into the environment** gives read-only looking at files, terminal
+**Viewers can open the environment** gives read-only looking at files, terminal
 and screens up to the selected level; it never gives Use. Its provider,
 environment, documents and chats keep their own permission pages.
 

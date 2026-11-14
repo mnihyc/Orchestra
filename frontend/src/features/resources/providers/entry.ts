@@ -303,6 +303,18 @@ export function refusedAt(error: unknown): { faults: Faults; rest: boolean } {
   return { faults, rest: !placed };
 }
 
+/**
+ * The window a model's source reports: what its catalogue entry gives as its own window, else the largest context
+ * the source says it takes, else what that source last offered on the entry the provider already holds. None where
+ * nothing reported a size; an unknown size may stay unknown.
+ */
+export function reportedWindow(catalogue: ModelParameters | null | undefined, held?: ModelParameters | null): number | null {
+  for (const size of [catalogue?.context_window, catalogue?.offered?.context_max, catalogue?.context_max, held?.offered?.context_max]) {
+    if (size !== undefined && size !== null && size >= 1) return size;
+  }
+  return null;
+}
+
 /** What the entry has of each list that is switched on, to say at a glance. */
 export function switchedOn(parameters: ModelParameters): { speeds: string[]; programs: string[]; largest: number | null } {
   return {
