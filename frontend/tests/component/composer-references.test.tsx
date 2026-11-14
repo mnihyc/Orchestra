@@ -26,7 +26,7 @@ const thread = { id: 'thread-1', environment: { id: 'env-1' }, directory: 'src',
 beforeEach(() => {
   for (const call of [calls.directory, calls.search, calls.export, calls.file, calls.document, calls.close, calls.upload, calls.pickFile, calls.pickDocument]) call.mockReset();
   calls.directory.mockResolvedValue({ path: 'src', entries: [file, { ...file, type: 'dir', name: 'tests', path: 'src/tests' }], as_of: file.mtime, mount: null, source: 'live', truncated: false });
-  calls.search.mockResolvedValue([{ ...file, path: 'src/auth/login.ts' }]);
+  calls.search.mockResolvedValue({ entries: [{ ...file, path: 'src/auth/login.ts' }], next_cursor: null, source: 'live', searched: 1, as_of: file.mtime, observed_from: file.mtime });
   calls.export.mockResolvedValue({ name: 'login-design.md', blob: new Blob(['# Login design\nUse redirects.'], { type: 'text/markdown' }), losses: [] });
 });
 
@@ -63,7 +63,7 @@ it('searches a typed file name and uses the returned path instead of inventing a
   show(<ReferencePicker thread={thread} initialKind="file" initialQuery="login" onFile={calls.file} onDocument={calls.document} onClose={calls.close} />);
   const choice = await screen.findByRole('button', { name: 'src/auth/login.ts' });
   await waitFor(() => expect(choice).toBeEnabled());
-  expect(calls.search).toHaveBeenCalledWith({ environmentId: 'env-1', threadId: thread.id }, 'login', expect.any(AbortSignal));
+  expect(calls.search).toHaveBeenCalledWith({ environmentId: 'env-1', threadId: thread.id }, 'login', expect.any(AbortSignal), undefined);
   await userEvent.click(choice);
   expect(calls.file).toHaveBeenCalledExactlyOnceWith('src/auth/login.ts');
 });

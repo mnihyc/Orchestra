@@ -504,6 +504,8 @@ enum Mirrored {
     Queued,
     Sent,
     Accepted,
+    Running,
+    Released,
     Over,
 }
 
@@ -513,6 +515,8 @@ impl Mirrored {
             Progress::Queued => Self::Queued,
             Progress::Sent => Self::Sent,
             Progress::Accepted => Self::Accepted,
+            Progress::Running => Self::Running,
+            Progress::Released => Self::Released,
             Progress::Succeeded(_)
             | Progress::Failed(_)
             | Progress::Expired
@@ -1266,7 +1270,11 @@ impl Link {
         });
         for row in open {
             let progress = if row.state == "accepted" {
-                Progress::Accepted
+                match row.key_phase {
+                    1 => Progress::Running,
+                    2 => Progress::Released,
+                    _ => Progress::Accepted,
+                }
             } else {
                 Progress::Queued
             };
@@ -2135,6 +2143,11 @@ impl Link {
             }
             match allowed {
                 Ok(false) => {
+                    // A unit that enrolled before its environment names it is not another machine: nothing
+                    // is answered, so that it sends the report again once the environment names it.
+                    if self.awaits_its_environment(machine, &stream).await {
+                        return;
+                    }
                     // A node can still send its own work after discarding another host's report.
                     // Keep consecutive refusals in the link's acknowledgement order, with no DB
                     // cursor. Whole foreign streams and gaps are discarded before ordering.
@@ -2297,6 +2310,7 @@ impl Link {
                     if !matches!(allowed, Ok::<_, DbError>(true)) {
                         if matches!(allowed, Ok(false))
                             && let Ok(stream) = eph.stream.parse::<Stream>()
+                            && !self.awaits_its_environment(entry.id, &stream).await
                         {
                             self.record_report_refusal(entry.id, &stream, 1).await;
                         }
@@ -2346,6 +2360,7 @@ impl Link {
         enum Taken {
             Applied(Option<crate::realtime::raw_traffic::Boundary>),
             Refused,
+            Waits,
             CursorMismatch,
         }
         let stream = delivery.stream.to_string();
@@ -2376,6 +2391,16 @@ impl Link {
             )
             .await?
             {
+                if let Stream::Env { environment_id } = delivery.stream
+                    && orch_db::queries::machine_reports::awaits_attachment(
+                        &mut tx,
+                        machine,
+                        environment_id,
+                    )
+                    .await?
+                {
+                    return Ok(Taken::Waits);
+                }
                 return Ok(Taken::Refused);
             }
             if delivery
@@ -2492,6 +2517,14 @@ impl Link {
                     tracing::debug!(%error, "committed diagnostic or sign-in events could not be forwarded");
                 }
                 true
+            }
+            Ok(Taken::Waits) => {
+                tracing::debug!(
+                    %machine, stream,
+                    "the report of a unit waits until its environment names it; it is sent again"
+                );
+                controller.abandoned(&delivery);
+                false
             }
             Ok(Taken::Refused) => {
                 if let Some(entry) = self.loaded_entry(machine) {
@@ -2736,8 +2769,10 @@ impl Link {
                 state.discarded_through.remove(&stream);
             }
             Ok(false) => {
-                self.record_report_refusal(entry.id, &notice.stream, 1)
-                    .await;
+                if !self.awaits_its_environment(entry.id, &notice.stream).await {
+                    self.record_report_refusal(entry.id, &notice.stream, 1)
+                        .await;
+                }
                 return;
             }
             Err(error) => {
@@ -2877,7 +2912,9 @@ impl Link {
             if progress.as_ref().is_some_and(Progress::is_final) {
                 return Ok(false);
             }
-            let accepted = matches!(progress, Some(Progress::Accepted));
+            let accepted = progress
+                .as_ref()
+                .is_some_and(|progress| progress.key_phase().is_some());
             if !accepted
                 && callers.iter().any(|(caller, source_deadline)| {
                     caller.as_ref().is_some_and(|caller| {
@@ -3530,7 +3567,11 @@ impl Link {
                 for row in open {
                     if matches!(row.kind.as_str(), "watch.set" | "fs.list" | "fs.unwatch") {
                         let progress = if row.state == "accepted" {
-                            Progress::Accepted
+                            match row.key_phase {
+                                1 => Progress::Running,
+                                2 => Progress::Released,
+                                _ => Progress::Accepted,
+                            }
                         } else {
                             Progress::Queued
                         };
@@ -3649,8 +3690,9 @@ pub(crate) async fn write_progress(
         }
         // Handing over is written from the hand-overs the link keeps ([`Link::sync_commands`]).
         Progress::Sent => {}
-        Progress::Accepted => {
-            queries::mark_accepted(conn, id, now).await?;
+        Progress::Accepted | Progress::Running | Progress::Released => {
+            let phase = progress.key_phase().map_or(0, |phase| phase as i16);
+            queries::mark_accepted_phase(conn, id, phase, now).await?;
         }
         Progress::Succeeded(result) => {
             queries::finish_command(conn, id, &queries::Ending::Succeeded(result), now).await?;

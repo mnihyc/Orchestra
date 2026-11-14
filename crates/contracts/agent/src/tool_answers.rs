@@ -6,7 +6,6 @@
 use serde_json::{Value, json};
 
 pub const DEFAULT_BYTES: usize = 20_000;
-pub const MAX_BYTES: usize = 40_000;
 
 /// An explicit failed domain outcome, retaining structured facts such as a helper and a reset.
 /// Ordinary application content or an incomplete marker cannot manufacture a tool error.
@@ -31,7 +30,6 @@ pub fn max_bytes(arguments: &Value) -> usize {
         .and_then(Value::as_u64)
         .and_then(|bytes| usize::try_from(bytes).ok())
         .unwrap_or(DEFAULT_BYTES)
-        .min(MAX_BYTES)
 }
 
 /// Authored bytes stay in their source; they cannot introduce one of Orch's frames at delivery.
@@ -124,7 +122,7 @@ pub fn bounded(tool: &str, arguments: &Value, value: &Value) -> Result<Value, &'
         || matches!(tool, "list_ports" | "list_port_connections")
     {
         return Err(
-            "The complete answer does not fit max_bytes. Narrow the paths or filters, or request more max_bytes (at most 40000). No confirmation word is offered.",
+            "The complete answer does not fit max_bytes. Narrow the paths or filters, or request more max_bytes. No confirmation word is offered.",
         );
     }
     let mut omitted = 0usize;
@@ -133,7 +131,7 @@ pub fn bounded(tool: &str, arguments: &Value, value: &Value) -> Result<Value, &'
         return Err("The complete answer does not fit max_bytes. Request a larger bound.");
     };
     fields.insert("truncated".to_owned(), json!(true));
-    fields.insert("left_out".to_owned(), json!("Some detail records were omitted to fit max_bytes; the reported outcome is unchanged. Read the affected paths, or list with narrower filters or more max_bytes (at most 40000)."));
+    fields.insert("left_out".to_owned(), json!("Some detail records were omitted to fit max_bytes; the reported outcome is unchanged. Read the affected paths, or list with narrower filters or more max_bytes."));
     for key in [
         "tabs",
         "watch",
@@ -205,6 +203,14 @@ pub fn bounded(tool: &str, arguments: &Value, value: &Value) -> Result<Value, &'
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_explicit_read_window_preserves_complete_results_beyond_the_shipped_default() {
+        let arguments = json!({"max_bytes":80000});
+        let value = json!({"text":"x".repeat(60000)});
+        assert_eq!(max_bytes(&arguments), 80000);
+        assert_eq!(bounded("read", &arguments, &value).unwrap(), value);
+    }
 
     #[test]
     fn personal_reads_keep_complete_citations_and_never_apply_effect_result_trimming() {
