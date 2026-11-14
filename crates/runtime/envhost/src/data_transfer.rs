@@ -19,6 +19,7 @@ const RECORDED_PARTS: &[&str] = &[
     "git",
     "roots",
     "manifests",
+    "object-maps",
     "journals",
     "plans",
     "results",

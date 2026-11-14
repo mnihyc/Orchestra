@@ -47,6 +47,8 @@ async fn a_managed_environment_uses_the_workspace_and_attached_variables_and_sec
         .send_as(
             attach,
             &EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: None,
                 data_sources: None,

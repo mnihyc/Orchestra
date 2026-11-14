@@ -154,6 +154,8 @@ impl Machine {
             &SerialKey::Environment(environment),
             Time::new(app.clock.now() + chrono::Duration::minutes(5)),
             &EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: Some(i64::from(generation)),
                 storage: None,

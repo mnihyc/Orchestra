@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-node --lib -- file_state_volume::
+test -p orch-api-core --test workspace_looking

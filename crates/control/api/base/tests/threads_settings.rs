@@ -835,6 +835,164 @@ async fn a_threads_parameters_list_only_what_exists_for_its_model_and_carry_the_
     );
 }
 
+#[tokio::test]
+async fn an_access_program_a_manager_enabled_for_the_model_is_offered_in_a_thread_at_shipped_settings()
+ {
+    let s = Scene::new().await;
+    let id = s.thread().await.base.id;
+    // The adapter puts its access program behind its own feature, as Codex does.
+    let mut parameters = declared();
+    parameters[1]["feature"] = json!("codex.cyber_access");
+    sqlx::query("UPDATE agents SET descriptor = jsonb_set(descriptor, '{parameters}', $1)")
+        .bind(parameters)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE provider_models SET parameters = $1 WHERE model_name = $2")
+        .bind(json!({ "access_programs": ["blue"], "default_access_program": "blue" }))
+        .bind(MODEL)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let shown = || async {
+        s.rig
+            .world
+            .app
+            .call(ThreadParameterGet, &[&id])
+            .token(&s.ada.token)
+            .send()
+            .await
+            .ok()
+            .parameters
+            .into_iter()
+            .map(|view| view.key)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        shown().await.contains(&"access_program".to_owned()),
+        "nobody switched the feature on, and the program is there"
+    );
+    // A place that does not want it offered under it says so.
+    s.rig
+        .world
+        .set_at(
+            Target::Node(s.tree.org.base.id),
+            "agent.features",
+            json!({ "codex.cyber_access": false }),
+        )
+        .await;
+    assert!(
+        !shown().await.contains(&"access_program".to_owned()),
+        "switched off under the org, it is not offered"
+    );
+}
+
+#[tokio::test]
+async fn a_threads_parameters_name_each_choice_the_models_managers_opened_that_it_cannot_use_and_why()
+ {
+    use orch_api_contract::settings::{WithheldChoice, WithheldParameter, WithheldReason};
+
+    let s = Scene::new().await;
+    let id = s.thread().await.base.id;
+    // An agent that publishes no speed, and whose access program waits for a feature of agents.
+    let mut defs = declared();
+    let list = defs.as_array_mut().unwrap();
+    list.retain(|def| def["key"] != "service_tier");
+    for def in list.iter_mut().filter(|def| def["key"] == "access_program") {
+        def["feature"] = json!("codex.cyber_access");
+    }
+    sqlx::query("UPDATE agents SET descriptor = jsonb_set(descriptor, '{parameters}', $1)")
+        .bind(defs)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let entry = |parameters: serde_json::Value| {
+        let pool = s.rig.db.pool();
+        async move {
+            sqlx::query("UPDATE provider_models SET parameters = $1 WHERE model_name = $2")
+                .bind(parameters)
+                .bind(MODEL)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    };
+    let read = || async {
+        s.rig
+            .world
+            .app
+            .call(ThreadParameterGet, &[&id])
+            .token(&s.ada.token)
+            .send()
+            .await
+            .ok()
+    };
+    let keys = |read: &orch_api_contract::settings::ThreadParameters| {
+        read.parameters
+            .iter()
+            .map(|view| view.key.clone())
+            .collect::<Vec<_>>()
+    };
+
+    // A speed, a program and a larger context are open on the model.
+    entry(json!({
+        "service_tiers": [{ "id": "fast", "label": "Fast" }], "access_programs": ["blue"],
+        "context_window": 272_000, "context_max": 1_000_000
+    }))
+    .await;
+    let first = read().await;
+    assert_eq!(
+        keys(&first),
+        ["context", "verbosity"],
+        "the program is behind a feature that is off, and the agent has no speed"
+    );
+    assert_eq!(
+        first.withheld,
+        [
+            WithheldParameter {
+                choice: WithheldChoice::Speed,
+                key: None,
+                reason: WithheldReason::Agent
+            },
+            WithheldParameter {
+                choice: WithheldChoice::Access,
+                key: Some("access_program".to_owned()),
+                reason: WithheldReason::Feature {
+                    feature: "codex.cyber_access".to_owned()
+                }
+            },
+        ]
+    );
+
+    // Switching the feature on shows the program; the speed is still the agent's to take.
+    s.rig
+        .world
+        .set_at(
+            Target::System,
+            "agent.features",
+            json!({ "codex.cyber_access": true }),
+        )
+        .await;
+    let second = read().await;
+    assert_eq!(keys(&second), ["access_program", "context", "verbosity"]);
+    assert_eq!(
+        second
+            .withheld
+            .iter()
+            .map(|one| one.choice)
+            .collect::<Vec<_>>(),
+        [WithheldChoice::Speed]
+    );
+
+    // A speed and a program that are only on offer are nobody's to ask for: nothing is listed.
+    entry(json!({
+        "offered": { "service_tiers": [{ "id": "fast", "label": "Fast" }], "access_programs": ["blue"] },
+        "context_window": 272_000
+    }))
+    .await;
+    assert!(read().await.withheld.is_empty());
+}
+
 #[path = "threads_settings/prompt_cache_ttl.rs"]
 mod prompt_cache_ttl;
 
