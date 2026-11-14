@@ -28,6 +28,7 @@ it.each(['en', 'zh-CN'] as const)('creates an explicit one-recipient group with 
   await setLocale(locale); const user = userEvent.setup(); draw();
   await user.click(await screen.findByRole('button', { name: /Grace Hopper/ }));
   await user.click(screen.getByRole('switch', { name: i18n.t('chat.new.asGroup') }));
+  expect(screen.getAllByRole('textbox')[0]).toBe(screen.getByRole('textbox', { name: groupName() }));
   await user.type(screen.getByRole('textbox', { name: groupName() }), 'Review');
   await user.click(screen.getByRole('button', { name: 'studio:threads:Studio' }));
   await user.click(screen.getByRole('combobox', { name: i18n.t('chat.group.visibility') }));

@@ -1,0 +1,8 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-api-base --lib -- collection::
+test -p orch-api-resources --lib -- routes::resources::models::tests::unlisted_suggestion_pages_exclude_saved_models_before_search_and_paging
+test -p orch-db --lib -- queries::documents::tests::
+test -p orch-api-core --test documents --test directory --test schedule_operation_scopes

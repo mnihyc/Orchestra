@@ -8,6 +8,7 @@ import type * as Router from '@tanstack/react-router';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ApiError } from '@/api/client';
 import type * as SkillsApi from '@/api/skills';
+import { AddSkill } from '@/features/resources/skills/SkillDialog';
 import { SkillScreen } from '@/features/resources/skills/Skill';
 import { SkillsSettingChoice, SkillsSummary } from '@/features/settings/SkillsChoice';
 import type { ResourceAccess, Skill, SkillDraft, SkillVersion, SkillVersionInfo } from '@/generated/api-types';
@@ -162,4 +163,19 @@ it.each(['en', 'zh-CN'] as const)('switches a skill on at its latest version, pi
 
   await user.click(screen.getByRole('button', { name: i18n.t('settings.skills.remove', { name: 'report-writer' }) }));
   expect(changes.at(-1)).toEqual({ other: 'latest' });
+});
+
+
+it('puts a skill name first and identifies the manifest source until a new name is authored', async () => {
+  show(<AddSkill onClose={vi.fn()} />);
+  const source = screen.getByRole('radiogroup', { name: i18n.t('resourceDetails.skill.form.from') });
+  let name = screen.getByRole('textbox', { name: i18n.t('resources.edit.name') });
+  expect(name).toHaveAttribute('readonly');
+  expect(name).toHaveAttribute('placeholder', i18n.t('resourceDetails.skill.form.sourceName'));
+  expect(name.compareDocumentPosition(source) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  await userEvent.click(screen.getByRole('radio', { name: i18n.t('resourceDetails.skill.form.new') }));
+  name = screen.getByRole('textbox', { name: i18n.t('resources.edit.name') });
+  expect(name).not.toHaveAttribute('readonly');
+  await userEvent.type(name, 'report-writer');
+  expect(name).toHaveValue('report-writer');
 });
