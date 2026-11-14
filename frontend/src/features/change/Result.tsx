@@ -18,11 +18,12 @@ import { errorText } from '@/ui/errorText';
 import { StateLine } from '@/ui/StateLine';
 
 /** The reason a job failed, in words of the page; the server's own sentence stands where there are none for its code. */
-export function reasonWords(job: Job, t: TFunction, minutes: number): string {
+export function reasonWords(job: Job, t: TFunction, minutes: number | null): string {
   const error = job.error;
   if (error === null) return job.state === 'failed' ? t('ui.error.operationFailed') : '';
   const own = `change.failure.${error.code}`;
   const fallback = errorText(error, t, { locale: i18n.resolvedLanguage ?? 'en' }).message;
+  if (minutes === null && error.code === 'wait_timeout') return fallback;
   return t(own, { defaultValue: fallback, minutes, message: error.code === 'binding_incompatible' ? error.message : fallback });
 }
 
@@ -33,7 +34,7 @@ export interface ResultProps {
   /** What the failure leaves out of "as it was": "The turn that was running was stopped, as you asked." */
   stoppedTurn: boolean;
   /** Minutes the wait for a turn was given, for the sentence of a wait that ran out. */
-  waited: number;
+  waited: number | null;
   /** What is "as it was": "This thread", "Main", "Team Pro". */
   subject: string;
   children?: ReactNode;
