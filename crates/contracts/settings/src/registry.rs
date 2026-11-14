@@ -2255,6 +2255,8 @@ registry! {
         "Allowed services", "Patterns naming enabled provider services that may be used here; every scope that sets a list must admit the service.";
     PROVIDERS_ALLOWED = "providers.allowed", Models, Policy, SYSTEM_TO_TOPIC, Intersect, UNSET, list(&TEXT),
         "Allowed providers", "Patterns over providers' Orch addresses; every scope that sets a list must admit the provider used for work here.";
+    MODELS_ADD_SWITCHES_ON = "models.add_switches_on", Models, Parameter, SYSTEM_ORG, Replace, value("\"all\""), choice(&["all", "basic", "nothing"]),
+        "Switched on when added", "What a model starts with when it is added from its provider's catalogue: everything it offers (all), only its efforts and context sizes (basic), or only its window and efforts (nothing). A manager can switch on the rest afterwards.";
     COLLAB_ATTRIBUTION = "collab.attribution", Collaboration, Parameter, ORG_TO_THREAD, Replace, value("\"auto\""), choice(&["auto", "always", "never"]),
         "Attribution", "Whether Orch's composed input, stop, denial and forwarded text names people: auto once a second person's words are delivered, always, or never (a person/an approver, with source, time and notes kept). Authored chats and documents retain their writers.";
     COLLAB_DEFAULT_DELIVERY = "collab.default_delivery", Collaboration, Parameter, ORG_TO_THREAD, Replace, value("\"queue\""), choice(&["queue", "steer"]),
@@ -2747,6 +2749,24 @@ registry! {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_model_that_is_added_starts_with_everything_it_offers_unless_an_organization_narrows_it() {
+        use super::*;
+        use serde_json::json;
+        let setting = get(keys::MODELS_ADD_SWITCHES_ON).unwrap();
+        assert_eq!(setting.default_value(), Some(json!("all")));
+        assert!(matches!(setting.merge, Merge::Replace));
+        assert!(setting.set_at(Scope::System) && setting.set_at(Scope::Org));
+        assert!(!setting.set_at(Scope::Topic));
+        for word in ["all", "basic", "nothing"] {
+            assert!(
+                validate(keys::MODELS_ADD_SWITCHES_ON, &json!(word)).is_ok(),
+                "{word}"
+            );
+        }
+        assert!(validate(keys::MODELS_ADD_SWITCHES_ON, &json!("some")).is_err());
+    }
+
     #[test]
     fn messaging_defaults_keep_wake_explicit_and_hourly_budgets_separate() {
         use super::*;

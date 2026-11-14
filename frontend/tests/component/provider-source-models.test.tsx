@@ -5,17 +5,20 @@ import { act,cleanup,screen,waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach,expect,it,vi } from 'vitest';
 import type * as Resources from '@/api/resources';
-import { acceptSuggestions,providerKey } from '@/api/resources';
+import { acceptSuggestions,createModel,updateModel,providerKey } from '@/api/resources';
 import { answerChanges } from '@/api/actAnswers';
 import { applyChanges } from '@/api/acts';
+import { AddModelDialog, ModelEditorDialog } from '@/features/resources/providers/ModelEditor';
 import { ProviderModels } from '@/features/resources/providers/Models';
 import { ProviderSetupNotice } from '@/features/resources/providers/SetupNotice';
 import type { Provider,ProviderModel,ProviderModelSuggestionAcceptReply } from '@/generated/api-types';
 import { i18n,setLocale } from '@/i18n';
+import { formatNumber } from '@/lib/format';
 import { planProvider,SOURCE_DESCRIPTOR } from '../unit/provider-plan-fixtures';
 import { show } from './support';
 
-vi.mock('@/api/resources',async(load)=>({...await load<typeof Resources>(),acceptSuggestions:vi.fn()}));
+vi.mock('@/features/resources/providers/Caps', () => ({ ModelLimits: () => null }));
+vi.mock('@/api/resources',async(load)=>({...await load<typeof Resources>(),acceptSuggestions:vi.fn(),createModel:vi.fn(),updateModel:vi.fn()}));
 const read=vi.fn<()=>Promise<Provider>>();
 function Page({initial}:{initial:Provider}) {
   const query=useQuery({queryKey:providerKey(initial.id),queryFn:read,initialData:initial,staleTime:Infinity});
@@ -66,4 +69,82 @@ it('keeps an actual models-source failure visible on its recovery panel',()=>{
   show(<Page initial={provider}/>);
   expect(screen.getByRole('alert')).toBeVisible();
   expect(screen.queryByText(i18n.t('providers.phrase.needsModel'))).not.toBeInTheDocument();
+});
+
+it('says that adding switches on what a model offers, and offers the suggestions as what they offer', async () => {
+  const provider=sourceProvider();
+  provider.facts.models=[{model_name:'gpu-small',display_name:'GPU Small',listed:true,parameters:{context_window:32768,offered:{service_tiers:[{id:'fast',label:'Fast'}]}}}];
+  show(<Page initial={provider}/>);
+  expect(await screen.findByText(i18n.t('models.list.suggestionsOffer'))).toBeVisible();
+  expect(screen.getByText(i18n.t('models.list.offers',{list:'Fast'}))).toBeVisible();
+  expect(screen.queryByText(/Offered, not switched on/)).not.toBeInTheDocument();
+});
+
+it('shows what an added model has switched on in its row, with nothing left offered', () => {
+  const provider=sourceProvider();
+  const model:ProviderModel={...MODEL_ESTIMATE,id:'gpu-small',model_name:'gpu-small',display_name:'GPU Small',groups:[],enabled:true,source:'suggested',
+    parameters:{context_window:272000,context_max:1000000,default_context:272000,service_tiers:[{id:'fast',label:'Fast'}],access_programs:['early'],efforts:['low','high'],
+      offered:{context_max:1000000,service_tiers:[{id:'fast',label:'Fast'}],access_programs:['early']}}};
+  show(<Page initial={{...provider,models:[model]}}/>);
+  const row=screen.getAllByRole('row').find((one)=>one.textContent.includes('GPU Small'));
+  if(row===undefined)throw new Error('The added model has a row');
+  expect(row).toHaveTextContent('Fast');expect(row).toHaveTextContent('early');
+  expect(row).not.toHaveTextContent('Offered, not switched on');
+});
+
+for(const locale of ['en','zh-CN'] as const)it(`keeps an unknown window optional and shows the catalogue fallback when one is known (${locale})`,async()=>{
+  await setLocale(locale);
+  const user=userEvent.setup();const provider=sourceProvider();const onClose=vi.fn();
+  vi.mocked(createModel).mockResolvedValue({...MODEL_ESTIMATE,id:'gpu-small',model_name:'gpu-small',display_name:'GPU Small',groups:[],enabled:true,source:'manual',parameters:{}});
+  const view=show(<AddModelDialog provider={provider} onClose={onClose}/>);
+  const optional=i18n.t('ui.field.optional'),window=i18n.t('models.editor.context.window'),routing=screen.getByLabelText(i18n.t('providers.models.routingName'));
+  // An unknown window remains unknown; adding does not require a guessed fact.
+  await user.type(routing,'unlisted');
+  expect(screen.getByLabelText(`${window} ${optional}`)).toBeInTheDocument();
+  expect(screen.getByLabelText(`${i18n.t('providers.models.effortsLabel')} ${optional}`)).toHaveAttribute('placeholder',i18n.t('models.editor.none'));
+  await user.click(screen.getByRole('button',{name:i18n.t('providers.models.addSubmit')}));
+  await waitFor(()=>expect(createModel).toHaveBeenCalledExactlyOnceWith(provider.id,{model_name:'unlisted'}));
+  view.unmount();vi.mocked(createModel).mockClear();
+  show(<AddModelDialog provider={provider} onClose={onClose}/>);
+  // A name the catalogue lists reports its window, which fills what is left empty.
+  await user.type(screen.getByLabelText(i18n.t('providers.models.routingName')),'gpu-small');
+  const field=screen.getByLabelText(`${window} ${optional}`);
+  expect(field).toHaveAttribute('placeholder',i18n.t('models.editor.fromCatalogue',{value:formatNumber(32768,locale)}));
+  await user.click(screen.getByRole('button',{name:i18n.t('providers.models.addSubmit')}));
+  await waitFor(()=>expect(createModel).toHaveBeenCalledExactlyOnceWith(provider.id,{model_name:'gpu-small'}));
+  await waitFor(()=>expect(onClose).toHaveBeenCalled());
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`saves efforts and rates without inventing an unknown window (${locale})`, async () => {
+  await setLocale(locale);
+  const provider = sourceProvider();
+  const model: ProviderModel = { ...MODEL_ESTIMATE, id: 'unknown', model_name: 'unknown', display_name: 'Unknown window', enabled: true, source: 'suggested', groups: [], parameters: {} };
+  vi.mocked(updateModel).mockResolvedValue(model);
+  const user = userEvent.setup();
+  show(<ModelEditorDialog provider={provider} model={model} onClose={vi.fn()} />);
+  await user.type(screen.getByLabelText(new RegExp(`^${i18n.t('providers.models.effortsLabel')}`)), 'low, high');
+  for (const key of ['rateInput', 'rateCached', 'rateOutput']) await user.type(screen.getByLabelText(new RegExp(`^${i18n.t(`providers.models.${key}`)}`)), '1.25');
+  await user.click(screen.getByRole('button', { name: i18n.t('providers.models.save') }));
+  await waitFor(() => expect(updateModel).toHaveBeenCalledExactlyOnceWith(provider.id, model.id, { groups: [], parameters: {
+    efforts: ['low', 'high'], rate: { input_per_mtok: '1.25', cached_input_per_mtok: '1.25', output_per_mtok: '1.25' },
+  } }));
+});
+
+it('uses the catalogue window for an inherited context start after clearing model facts', async () => {
+  const provider = sourceProvider();
+  provider.facts.models = [{ model_name: 'gpu-small', display_name: 'GPU Small', listed: true,
+    parameters: { context_window: 272000, efforts: ['low', 'high'], offered: { context_max: 1000000 } } }];
+  const model: ProviderModel = { ...MODEL_ESTIMATE, id: 'small', model_name: 'gpu-small', display_name: 'GPU Small', enabled: true, source: 'manual', groups: [],
+    parameters: { context_window: 400000, context_max: 1000000, default_context: 400000, efforts: ['low'], offered: { context_max: 1000000 } } };
+  vi.mocked(updateModel).mockResolvedValue(model);
+  const user = userEvent.setup();
+  show(<ModelEditorDialog provider={provider} model={model} onClose={vi.fn()} />);
+  const window = screen.getByLabelText(new RegExp(`^${i18n.t('models.editor.context.window')}`));
+  await user.clear(window);
+  await user.clear(screen.getByLabelText(new RegExp(`^${i18n.t('providers.models.effortsLabel')}`)));
+  expect(window).toHaveAttribute('placeholder', i18n.t('models.editor.fromCatalogue', { value: formatNumber(272000, 'en') }));
+  await user.click(screen.getByRole('button', { name: i18n.t('providers.models.save') }));
+  await waitFor(() => expect(updateModel).toHaveBeenCalledExactlyOnceWith(provider.id, model.id, { groups: [], parameters: {
+    context_max: 1000000, default_context: 272000, offered: { context_max: 1000000 },
+  } }));
 });

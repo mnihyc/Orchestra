@@ -20,6 +20,7 @@ const PEOPLE_PROJECTIONS = new Set([
   'node-chat-opening', 'org-overview', 'children', 'names', 'activity', 'outside-port-openings',
   // A private reference is an independent authorized projection; a reconnect can change its reach.
   'reference-preview',
+  'start-options', 'thread-binding-options',
 ]);
 
 // These admin projections contain people, membership counts or member choices.

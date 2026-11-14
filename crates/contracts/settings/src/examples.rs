@@ -102,6 +102,7 @@ pub const SUMMARY_TARGETS: &str = r#"{"thread":{"automatic":true,"on":["turn_com
 pub const SUMMARY_FOLLOW_INTERVAL_SECS: &str = "5";
 pub const SUMMARY_READ_BATCH_SIZE: &str = "100";
 pub const PROVIDERS_ALLOWED: &str = r#"["acme.*"]"#;
+pub const MODELS_ADD_SWITCHES_ON: &str = r#""basic""#;
 pub const COLLAB_ATTRIBUTION: &str = r#""always""#;
 pub const COLLAB_DEFAULT_DELIVERY: &str = r#""queue""#;
 pub const COMPOSER_PASTE_INLINE_CONTEXT_SHARE: &str = "25";
