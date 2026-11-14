@@ -365,6 +365,9 @@ section! {
         dead_after_secs: u64 = 60,
         /// The largest frame.
         max_frame_bytes: u64 = 262_144,
+        /// The largest message of any kind, in bytes: one over a frame travels in parts that the
+        /// receiver puts together, and one over this is refused by its sender, who is told.
+        max_message_bytes: u64 = 16_777_216,
         /// How much of a tunnel may be on its way unacknowledged.
         tunnel_window_bytes: u64 = 1_048_576,
         /// How long a tunnel whose session dropped may be taken up again.
@@ -764,8 +767,6 @@ section! {
     Limits {
         /// Recent visits kept for each person.
         recents_per_user: u32 = 50,
-        /// Text indexed for search, per item and per chat message.
-        search_text_chars: u32 = 20_000,
         /// The largest text shown inline in the file viewer.
         preview_bytes: u64 = 2_097_152,
         /// Workspace listings kept in memory for machines that are offline.
@@ -983,6 +984,15 @@ impl Validate for ServerConfig {
                 "link.dead_after_secs",
                 "must be longer than link.heartbeat_secs",
             ));
+        }
+        if self.link.max_message_bytes < self.link.max_frame_bytes {
+            return Err(invalid(
+                "link.max_message_bytes",
+                "must be at least link.max_frame_bytes",
+            ));
+        }
+        if u32::try_from(self.link.max_message_bytes).is_err() {
+            return Err(invalid("link.max_message_bytes", "must be less than 4 GiB"));
         }
 
         if !matches!(self.log.format.as_str(), "text" | "json") {

@@ -23,9 +23,7 @@
 //! to name their sender, who sent the words before that named nobody
 //! ([`attribution_started_block`]).
 //!
-//! **What is left out**, because it needs a part that is not built, is
-//! listed with each text (`left_out`): the mounts beside the workspace. The
-//! files of an input are written into the workspace before its text is made
+//! The files of an input are written into the workspace before its text is made
 //! ([`crate::delivery`]); where they were written the text names the path,
 //! and where they were not it says so. The instruction file of the directory
 //! is the agent's to read, and is not passed on.
@@ -174,6 +172,8 @@ pub struct Place<'a> {
     /// What it runs on and under, with the limits that touch what it has or can be given; none where its driver has
     /// no runtimes to tell apart.
     pub isolation: Option<&'a orch_driver_contract::isolation::RuntimeIsolation>,
+    /// The environment's mounts, with the machine's observed path, mode and attachment state.
+    pub mounts: &'a [orch_api_contract::mounts::EnvMount],
     /// The tools of the `orch` server the agent has.
     pub tools: &'a [OrchTool],
     /// What runs a browser there and where its profiles are kept, as one line; empty where browsers are not offered.
@@ -789,6 +789,7 @@ pub fn context_lines(place: &Place<'_>) -> Vec<(&'static str, String)> {
     if let Some(isolation) = place.isolation {
         lines.push(("runtime", crate::isolation::agent_line(isolation)));
     }
+    lines.push(("mounts", mounts_line(place.mounts)));
     lines.push(("documents", "- Document access comes from current shares. Private and restricted sources require their own grants; actions also need their offered tools.".to_owned()));
     // The specification fixes five context paths; the ordinary shared tree holds the full list.
     const FIRST_PATHS_IN_CONTEXT: usize = 5;
@@ -835,6 +836,54 @@ pub fn context_lines(place: &Place<'_>) -> Vec<(&'static str, String)> {
         ));
     }
     lines
+}
+
+fn mounts_line(mounts: &[orch_api_contract::mounts::EnvMount]) -> String {
+    use orch_api_contract::mounts::{
+        EnvMountReason as Reason, EnvMountState as State, MountMode as Mode,
+    };
+    let mut descriptions: Vec<_> = mounts
+        .iter()
+        .map(|mount| {
+            let mode = match mount.mode {
+                Mode::ReadOnly if !mount.enforced => {
+                    "read-only through sandbox or file permissions"
+                }
+                Mode::ReadOnly => "read-only",
+                Mode::Shared => "shared writable",
+                Mode::Private => "private writable view",
+            };
+            let state = match mount.state {
+                State::Attached => "attached",
+                State::Pending => "pending attachment",
+                State::Unavailable => "unavailable",
+            };
+            let reason = match mount.reason {
+                None => "",
+                Some(Reason::NoLocation) => "; no location on this machine",
+                Some(Reason::Driver) => "; the environment driver cannot attach it",
+                Some(Reason::Missing) => "; the source is missing",
+                Some(Reason::Refused) => "; the machine refused it",
+                Some(Reason::TargetConflict) => "; another attachment uses the target",
+            };
+            let path = mount
+                .path
+                .as_ref()
+                .map_or_else(String::new, |path| format!(" at {}", escape_body(path)));
+            format!(
+                "{}{} ({state}; {mode}{reason})",
+                escape_body(&mount.mount.name),
+                path
+            )
+        })
+        .collect();
+    descriptions.sort();
+    let body = if descriptions.is_empty() {
+        "none".to_owned()
+    } else {
+        descriptions.join(", ")
+    };
+    format!("- Mounts beside the workspace: {body}.")
 }
 
 /// T3 with these lines, in an Orch block.
@@ -959,8 +1008,7 @@ pub fn session_instructions(
 ) -> Text {
     Text {
         text: session_core(place, standing, messages),
-        // Each of these is a line T3 has, and waits for the part that knows what it would say.
-        left_out: vec!["the mounts attached beside the workspace"],
+        left_out: Vec::new(),
     }
 }
 
@@ -1409,6 +1457,7 @@ mod tests {
             notes,
             capabilities: None,
             isolation: None,
+            mounts: &[],
             tools: &[],
             browsers: "",
             rates: ToolRates::default(),
@@ -1736,6 +1785,53 @@ mod tests {
     }
 
     #[test]
+    fn mount_changes_arrive_with_the_next_input_and_a_removed_mount_is_withdrawn() {
+        use orch_api_contract::mounts::{EnvMount, EnvMountState, MountMode, MountRef};
+        let mut here = place(&[], None);
+        let initial = context_record(&context_lines(&here));
+        let mounts = [EnvMount {
+            mount: MountRef {
+                id: orch_types::new_id(),
+                name: "Sources".into(),
+                address: "Team/Sources".into(),
+            },
+            state: EnvMountState::Attached,
+            reason: None,
+            path: Some("/mnt/source".into()),
+            mode: MountMode::ReadOnly,
+            asked: MountMode::Private,
+            enforced: true,
+            from: None,
+        }];
+        here.mounts = &mounts;
+        let current = context_lines(&here);
+        let changed = context_changes(&current, &initial).unwrap();
+        assert!(
+            changed.contains("Sources")
+                && changed.contains("/mnt/source")
+                && changed.contains("read-only"),
+            "{changed}"
+        );
+        assert!(
+            !changed.contains("Topic \""),
+            "unchanged place facts are not repeated"
+        );
+        let given = context_record(&current);
+        assert_eq!(context_changes(&current, &given), None);
+        let removed = context_changes(&context_lines(&place(&[], None)), &given).unwrap();
+        assert!(
+            removed.contains("Mounts beside the workspace: none"),
+            "{removed}"
+        );
+        assert!(
+            !session_instructions(&here, &[], &BTreeMap::new())
+                .text
+                .contains("/mnt/source"),
+            "mount facts belong to the recorded input, not the session preamble"
+        );
+    }
+
+    #[test]
     fn context_refresh_retires_a_line_that_stopped_applying_once_without_resending_unchanged_lines()
     {
         let with_notes = place(&[], Some(NoteKeeper::Agent));
@@ -1847,7 +1943,10 @@ mod tests {
             preamble(&system),
             format!("{INTRODUCTION}\n\nOnly Orch makes <orch> and <relayed>.\n\n{FILES}")
         );
-        assert!(!plain.left_out.is_empty(), "what is not built is said");
+        assert!(
+            plain.left_out.is_empty(),
+            "all current place facts have a supplier"
+        );
     }
 
     #[test]

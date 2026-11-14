@@ -27,6 +27,7 @@ import { agentsQuery, providersQuery } from '@/api/resources';
 import { Blockers } from '@/features/change/Blockers';
 import { type Choices, changedOptions, changesSomething, initialThreadChoices, requestOf, withFate, withPick } from '@/features/change/choices';
 import { MountFates } from '@/features/change/MountFates';
+import { ModelSettingChange } from '@/features/change/ModelSettingChange';
 import { Depends } from '@/features/change/Depends';
 import { Frame, type View } from '@/features/change/Frame';
 import { HistoryChoices } from '@/features/change/History';
@@ -42,6 +43,7 @@ import { Result } from '@/features/change/Result';
 import { agentFor, automaticProfileFor, hasReported, movesRuns, profilesFor, RunsOn, useModelFor } from '@/features/change/RunsOn';
 import { Time } from '@/features/change/Time';
 import { Where } from '@/features/change/Where';
+import { useChangeHost } from '@/features/change/target';
 import type { CopyDestinationJudgement } from '@/api/copyDestinations';
 import { CopyPlacePicker } from '@/features/duplicate/CopyPlacePicker';
 import { CreationAgentAccess } from '@/features/start/AgentAccess';
@@ -70,6 +72,8 @@ export interface ThreadChangeProps {
   kind: 'switch' | 'fork';
   toTurn: number | null;
   focus: 'provider' | 'environment' | null;
+  /** What a list named for the thread to run on, to be chosen once the lists are read. */
+  chosen?: { provider: string | null; agent: string | null; model: string | null };
   /** A job that was started already, whose progress is the first view. */
   job: string | null;
   say: string | null;
@@ -101,7 +105,7 @@ function ThreadChangeContent(props: ThreadChangeProps) {
   return <Body {...props} thread={thread} />;
 }
 
-function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadChangeProps & { thread: Thread }) {
+function Body({ thread, kind, toTurn, focus, chosen, job, say, open, onClose }: ThreadChangeProps & { thread: Thread }) {
   const { t } = useTranslation();
   const format = useFormatContext();
   const navigate = useNavigate();
@@ -115,8 +119,9 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
   const reasonId = useId();
   // A side thread that is forked is kept as a thread of the topic.
   const keeping = fork && thread.side_of !== null;
+  const placement = useChangeHost((state) => state.current?.target.kind === 'thread' && state.current.target.id === thread.id ? state.current.options.placement : undefined);
 
-  const [choices, setChoices] = useState<Choices>(() => initialThreadChoices(thread, fork ? 'new' : 'replace', toTurn));
+  const [choices, setChoices] = useState<Choices>(() => ({ ...initialThreadChoices(thread, fork ? 'new' : 'replace', toTurn), ...placement }));
   const patch = (next: Partial<Choices>) => setChoices((current) => ({ ...current, ...next }));
   // A provider-blocked thread starts with the next usable provider, with every picker directly available.
   const blockedReason = thread.state === 'blocked' && thread.blocked !== null ? thread.blocked.reason : null;
@@ -142,7 +147,20 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
     if (next !== undefined) setChoices((current) => ({ ...current, providerId: next.id, agentId: agentFor(next, agents.data, thread), automaticRuns: automaticProfileFor(next, agents.data, thread) }));
   }
 
-  const models = useModelFor(thread, choices, patch, picking);
+  // What a list named is chosen once, as soon as the lists are here: the provider with the agent that goes with it, or the agent alone.
+  const [named, setNamed] = useState(false);
+  if (!named && !fork && chosen !== undefined && (chosen.provider !== null || chosen.agent !== null) && jobId === null && usable.data !== undefined && agents.data !== undefined) {
+    setNamed(true);
+    const provider = chosen.provider === null ? undefined : usable.data.find((candidate: Provider) => candidate.id === chosen.provider);
+    if (provider !== undefined && provider.id !== thread.binding?.provider.id) {
+      setChoices((current) => ({ ...current, providerId: provider.id, agentId: chosen.agent !== null && profilesFor(provider, agents.data).some((agent) => agent.id === chosen.agent && hasReported(agent)) && chosen.agent !== thread.binding?.agent.id ? chosen.agent : agentFor(provider, agents.data, thread),
+        automaticRuns: automaticProfileFor(provider, agents.data, thread) }));
+    } else if (chosen.agent !== null && chosen.agent !== thread.binding?.agent.id) {
+      setChoices((current) => ({ ...current, agentId: chosen.agent }));
+    }
+  }
+
+  const models = useModelFor(thread, choices, patch, picking, chosen?.model ?? null);
 
   // The plan, asked for once the choices have rested, and kept: a plan is a statement of what would happen now.
   const request: ForkRequest = useMemo(() => ({ ...requestOf(choices, fork ? destination?.id ?? null : null), ...(fork && agentSelection.chosen !== null ? { agent_access: agentSelection.chosen } : {}) }), [choices, fork, destination?.id, agentSelection.chosen]);
@@ -151,7 +169,9 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
   const runtimeReady = builtin ? choices.providerId !== null && choices.agentId !== null && choices.model !== null : !movesRuns(choices) || choices.model !== null;
   const environmentReady = !builtin || choices.where.kind === 'new' || choices.where.kind === 'use' && choices.where.id !== '';
   const settled = runtimeReady && environmentReady;
-  const wanted = picking && settled && (fork || changesSomething(choices));
+  const modelOnly = !fork && !builtin && !movesRuns(choices) && choices.arrangement === null && choices.where.kind === 'same'
+    && choices.directory === null && choices.model !== null && choices.model !== thread.model;
+  const wanted = picking && settled && !modelOnly && (fork || changesSomething(choices));
   const plan = useQuery({
     queryKey: ['change-plan', thread.id, rested],
     queryFn: ({ signal }) => planFork(thread.id, JSON.parse(rested) as ForkRequest, signal),
@@ -351,6 +371,8 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
       </Frame>
     );
   }
+
+  if (modelOnly) return <ModelSettingChange thread={thread} choices={choices} onChange={patch} simple={simple} open={open} onClose={onClose} />;
 
   const confirmLabel = keeping ? t('change.confirm.keep') : t(fork ? 'change.confirm.fork' : 'change.confirm.switch');
   return (

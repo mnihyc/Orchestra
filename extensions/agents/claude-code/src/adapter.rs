@@ -801,6 +801,27 @@ impl AgentAdapter for ClaudeCodeAdapter {
             .await?
     }
 
+    fn interrupt_handle(&self) -> Option<orch_agent_contract::adapter::Interrupt> {
+        self.started.as_ref()?;
+        let handles: HashMap<_, _> = self
+            .sessions
+            .iter()
+            .map(|(thread, session)| (*thread, session.handle.clone()))
+            .collect();
+        Some(Arc::new(move |thread, turn| {
+            let handle = handles.get(&thread).cloned();
+            Box::pin(async move {
+                handle
+                    .ok_or_else(|| AdapterError::SessionNotFound(thread.to_string()))?
+                    .ask(|reply| Command::Interrupt {
+                        turn_id: turn,
+                        reply,
+                    })
+                    .await?
+            })
+        }))
+    }
+
     async fn interrupt(&mut self, thread: ThreadId, turn: TurnId) -> Result<(), AdapterError> {
         let handle = self.session(thread)?.handle.clone();
         handle
