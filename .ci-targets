@@ -1,0 +1,3 @@
+fmt
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::

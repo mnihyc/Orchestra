@@ -25,6 +25,19 @@ for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const)
       expect(requests.filter((request) => request === `GET /api/v1/orgs/${ACME.org}/tree`)).toEqual([]);
     }
     await expect(selected).toHaveText(width === 400 ? 'Main thread' : qualifiedCaption);
+    const longCaption = await selected.locator('[data-view-tab-title]').evaluate((element) => {
+      const previous = element.textContent;
+      try {
+        element.textContent = 'A very long readable title '.repeat(20);
+        const whole = element.parentElement?.parentElement;
+        if (whole === undefined || whole === null) throw new Error('The caption belongs to its tab');
+        return { width: whole.getBoundingClientRect().width, maximum: 16 * Number.parseFloat(getComputedStyle(document.documentElement).fontSize),
+          shortened: element.scrollWidth > element.clientWidth, overflow: getComputedStyle(element).textOverflow };
+      } finally { element.textContent = previous; }
+    });
+    expect(longCaption.width).toBeLessThanOrEqual(longCaption.maximum + 1);
+    expect(longCaption.shortened).toBe(true);
+    expect(longCaption.overflow).toBe('ellipsis');
     const identity = await selected.getAttribute('id');
     if (identity === null) throw new Error('The actual thread tab must have its stable identity');
     const tab = page.locator(`[role="tab"][id="${identity}"]`);

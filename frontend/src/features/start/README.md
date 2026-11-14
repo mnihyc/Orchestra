@@ -18,7 +18,16 @@ to keep the choice as the default of the topic, the project or the org, the wide
 agent whose harness has not reported what it can do is waited for, with nothing offered that cannot run, and the box comes alive by itself
 when the report arrives.
 
-The dialog uses ordinary shared selects for Provider, Agent, Model and Where it runs. Human audience and the exact Agent access
+The dialog uses ordinary shared selects for Provider, Agent and Model. Where it runs is one field (`PlacePicker`): "New environment…" is
+its first row and opens a small form where the host (the one with the most room unless one is picked) and the template are chosen,
+beside the starting files and who manages it; the environments follow one to a line with the host or machine quietly after the name and
+a state only where it is not ready, and those that ask for access or cannot be used come last in groups with their reasons. A search
+narrows the list and the list scrolls inside its own frame. The default environment is the one the nearest place that sets it names (the
+topic, else its project, else its org); a line under the field says where it was set when that is above the topic, why it is passed over
+when it cannot be used, and that the place's New threads setting gives every thread an environment of its own when that is why it does
+not stand. When the profile the person wanted cannot run in the environment that stands, a line says why in plain words (a version of
+the machine's program apart from the agent's, or a program nobody confirmed, each with its own act), and what runs instead.
+Human audience and the exact Agent access
 choice stay visible before creation. Agent access uses the inherited creation preset and preserves Documents-only Custom choices;
 Nothing makes no owner contribution. Effort, arrangement, directory/source override, naming, first message and environment
 creation/registration stay under Options. A missing arrangement opens
