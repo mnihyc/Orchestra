@@ -66,6 +66,11 @@ it('shows the before-Orch band for a failed adoption even when no earlier items 
   expect(rows.filter((row) => row.kind === 'before')).toHaveLength(1);
 });
 
+it('keeps a successful empty adoption free of an empty before-Orch band', () => {
+  const adopted = marker('adopted-empty', { marker: 'adopted', data: { by: ADA, native_session_ref: 'native-empty', turns: 0, items: 0, history_missing: null, history_error: null, session_model: null, model_reason: 'not_reported' } });
+  expect(buildRows(viewOf([adopted]), options({ hideHistory: true })).some((row) => row.kind === 'before')).toBe(false);
+});
+
 /** Two turns with work in each, and an answer: the first is over, the second is the last. */
 function twoTurns(second: Turn['state'] = 'completed'): ThreadView {
   return viewOf(

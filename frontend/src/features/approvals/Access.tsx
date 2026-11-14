@@ -18,6 +18,8 @@ import { AccessBatch } from '@/features/approvals/AccessBatch';
 import { decisionReason } from '@/features/approvals/current';
 import { usePermissionName } from '@/features/access/names';
 import { RequestedEnd } from '@/features/access/RequestEnd';
+import { durationMinutes, MinuteDuration, type MinuteUnit } from '@/features/access/MinuteDuration';
+import { purposeNames } from '@/features/access/purposes';
 import type { Approval } from '@/generated/api-types';
 import { actionName } from '@/ui/actions';
 import { Button } from '@/ui/Button';
@@ -29,7 +31,7 @@ import { Select } from '@/ui/Select';
 import { Textarea } from '@/ui/Textarea';
 import { UserChip } from '@/ui/UserChip';
 import { useFormatContext } from '@/lib/appearance';
-import { formatSpan, useNow } from '@/lib/time';
+import { formatSpan, MINUTE_MS, useNow } from '@/lib/time';
 
 export type AccessApproval = Extract<Approval, { kind: 'access' }>;
 
@@ -60,7 +62,7 @@ export function reachOf(permissions: Iterable<string>): ReachKey[] {
 
 /** When what is given ends, by how long from the moment of the decision. */
 const ENDS = { never: null, day: 1, week: 7, month: 30 } as const;
-type Ends = keyof typeof ENDS | 'custom' | 'requested';
+type Ends = keyof typeof ENDS | 'custom' | 'requested' | 'length';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** The same one-click duration decisions in the Inbox, permission page and reference card. */
@@ -137,10 +139,15 @@ function AccessRow({ approval, live, onSettled }: { approval: AccessApproval; li
   const [pickedEfforts, setPickedEfforts] = useState<ReadonlySet<string>>(() => new Set(efforts));
   const [ends, setEnds] = useState<Ends>(() => requestedEnd === null ? 'never' : 'requested');
   const [customEnd,setCustomEnd]=useState('');
+  const [amount, setAmount] = useState('');
+  const [unit, setUnit] = useState<MinuteUnit>('minutes');
+  const minutes = durationMinutes(amount, unit);
   const now=useNow();
   const customTime=Date.parse(customEnd);
   const requestedTime = requestedEnd === null ? NaN : Date.parse(requestedEnd);
-  const validEnd=ends==='requested' ? Number.isFinite(requestedTime) && requestedTime > now : ends!=='custom'||Number.isFinite(customTime)&&customTime>now;
+  const validEnd=ends==='requested' ? Number.isFinite(requestedTime) && requestedTime > now
+    : ends === 'length' ? minutes !== null && Number.isFinite(new Date(now + minutes * MINUTE_MS).getTime())
+      : ends!=='custom'||Number.isFinite(customTime)&&customTime>now;
   const [note, setNote] = useState('');
   const [other, setOther] = useState(requestedEnd !== null);
   const may = approval.can_decide && live;
@@ -151,13 +158,15 @@ function AccessRow({ approval, live, onSettled }: { approval: AccessApproval; li
   const narrowed = given.size !== asked.length;
   const optionsNarrowed = pickedModels.size !== models.length || pickedEfforts.size !== efforts.length;
   const approve = () => {
-    const days = ends==='custom'||ends==='requested'?null:ENDS[ends];
+    const days = ends==='custom'||ends==='requested'||ends==='length'?null:ENDS[ends];
+    const instant = ends === 'custom' ? customTime : ends === 'length' ? Date.now() + (minutes ?? NaN) * MINUTE_MS
+      : days === null ? null : Date.now() + days * DAY_MS;
     decision.decide(
       {
         approve: true,
         ...(narrowed ? { permissions: asked.filter((permission) => given.has(permission)) } : {}),
         ...(optionsNarrowed ? { options: { models: models.filter((model) => pickedModels.has(model)), efforts: efforts.filter((effort) => pickedEfforts.has(effort)) } } : {}),
-        ...(ends==='requested'&&requestedEnd !== null?{expires_at:requestedEnd}:ends==='custom'?{expires_at:new Date(customTime).toISOString()}:days === null ? {} : { expires_at: new Date(Date.now() + days * DAY_MS).toISOString() }),
+        ...(ends==='requested'&&requestedEnd !== null?{expires_at:requestedEnd}:instant === null ? {} : { expires_at: new Date(Math.floor(instant / MINUTE_MS) * MINUTE_MS).toISOString() }),
         ...(note.trim() === '' ? {} : { note: note.trim() }),
       },
       t('approvals.approve'),
@@ -180,6 +189,7 @@ function AccessRow({ approval, live, onSettled }: { approval: AccessApproval; li
         {holder.kind === 'node' && holder.node.name !== null && <p className="text-sm text-text-muted">{t('approvals.access.holderNode', { place: holder.node.name })}</p>}
         {holder.kind === 'agents' && holder.node.name !== null && <p className="text-sm text-text-muted">{t('approvals.access.holderAgents', { place: holder.node.name })}</p>}
         {request.reason !== '' && <p className="text-sm wrap-anywhere text-text-muted">{request.reason}</p>}
+        {request.options?.purposes !== undefined && request.options.purposes !== null && <p className="text-sm text-text-muted">{t('access.options.purposes')}{': '}{purposeNames(t, request.options.purposes)}</p>}
         <RequestedEnd at={request.expires_at} />
       </div>
 
@@ -233,9 +243,11 @@ function AccessRow({ approval, live, onSettled }: { approval: AccessApproval; li
             { value: 'day', ...choiceOption(t, 'accessExpiry.day') },
             { value: 'week', ...choiceOption(t, 'accessExpiry.week') },
             { value: 'month', ...choiceOption(t, 'accessExpiry.month') },
+            { value: 'length', label: t('access.request.customLength') },
             {value:'custom',label:t('approvals.access.customEnd')},
           ]}
         />
+        {ends === 'length' && <MinuteDuration amount={amount} unit={unit} onAmount={setAmount} onUnit={setUnit} />}
         {ends==='custom'&&<Input type="datetime-local" label={t('approvals.access.endsOn')} hideLabel value={customEnd} onChange={(event)=>setCustomEnd(event.target.value)} />}
         <Textarea label={t('approvals.note')} rows={2} value={note} disabled={busy} onChange={(event) => setNote(event.target.value)} />
       </>

@@ -39,6 +39,8 @@ interface Content {
 export type SaveState = 'idle' | 'saving' | 'saved' | 'failed';
 
 export interface Draft extends Content {
+  /** The current reader's saved draft has arrived before an external intent is appended. */
+  ready?: boolean;
   setText: (text: string) => void;
   setReplyTo: (messageId: string | null) => void;
   addQuotes: (quotes: readonly Quote[]) => void;
@@ -47,6 +49,7 @@ export interface Draft extends Content {
   removeAttachment: (at: number) => void;
   replaceAttachment?: (original: PastedTextPart, part: ChatPart) => void;
   addMention?: (mention: NamedMention, at?: number) => void;
+  appendMention?: (mention: NamedMention) => void;
   restore?: (parts: ChatPart[], replyTo: string | null, mentions: NamedMention[]) => void;
   /** Empties it, for a message that was sent. */
   clear: () => void;
@@ -249,11 +252,16 @@ export function useDraft(chatId: string, writable: boolean, reading = true): Dra
   const clear = useCallback(() => change(() => EMPTY), [change]);
   const addAttachment = useCallback((part: ChatPart) => change((before) => ({ ...before, attachments: [...before.attachments, part] })), [change]);
   const addMention = useCallback((mention: NamedMention, at = Number.MAX_SAFE_INTEGER) => change((before) => ({ ...before, mentions:insertedMentionName(before.text, at, mention, before.mentions ?? []) })), [change]);
+  const appendMention = useCallback((mention: NamedMention) => change((before) => ({
+    ...before,
+    text: `${before.text}${before.text === '' || /\s$/u.test(before.text) ? '' : ' '}@${mention.name} `,
+    mentions: insertedMentionName(before.text, before.text.length, mention, before.mentions ?? []),
+  })), [change]);
   const removeAttachment = useCallback((at: number) => change((before) => ({ ...before, attachments: before.attachments.filter((_, index) => index !== at) })), [change]);
   const replaceAttachment = useCallback((original: PastedTextPart, part: ChatPart) => change((before) => ({ ...before, attachments: before.attachments.map((held) => held.type === 'pasted_text' && pasteKey(held) === pasteKey(original) ? part : held) })), [change]);
   const restore = useCallback((parts: ChatPart[], replyTo: string | null, mentions: NamedMention[]) => change(() => contentOf({ parts, reply_to:replyTo, mention_names:mentions, updated_at:new Date().toISOString() })), [change]);
 
   // A draft with nothing in it has no save to tell of: that line goes when the message is sent, not a second later,
   // so the room of the list above does not change under a reader who is already acting on a row. A failure stays.
-  return { ...content, saving: saving !== 'failed' && isEmpty(content) ? 'idle' : saving, retry: () => { if (writable) void flush(latest.current); }, setText, setReplyTo, addQuotes, removeQuote, addAttachment, removeAttachment, replaceAttachment, addMention, restore, clear };
+  return { ...content, ready: draft.isSuccess, saving: saving !== 'failed' && isEmpty(content) ? 'idle' : saving, retry: () => { if (writable) void flush(latest.current); }, setText, setReplyTo, addQuotes, removeQuote, addAttachment, removeAttachment, replaceAttachment, addMention, appendMention, restore, clear };
 }

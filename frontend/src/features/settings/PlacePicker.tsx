@@ -48,11 +48,13 @@ export function placesOfTree(rows: readonly TreeNode[], separator: string, inclu
   const byId = new Map(rows.map((row) => [row.id, row]));
   const pathOf = (row: TreeNode): string => {
     const names: string[] = [];
-    for (let at: TreeNode | undefined = row, steps = 0; at !== undefined && steps < 64; steps += 1) {
-      names.unshift(at.name);
+    const seen = new Set<string>();
+    for (let at: TreeNode | undefined = row; at !== undefined && !seen.has(at.id);) {
+      seen.add(at.id);
+      names.push(at.name);
       at = at.parent_id === null ? undefined : byId.get(at.parent_id);
     }
-    return names.join(separator);
+    return names.reverse().join(separator);
   };
   return rows
     .filter((row) => !row.deleted && (includeThreads || row.kind !== 'thread'))
@@ -126,7 +128,7 @@ export function PlacePicker({ label, hint, value, onChange, disabled = false, ro
       label: t('settings.place.group'),
       options: found.map((place) => ({
         value: place.id,
-        label: <span className="flex min-w-0 items-center gap-2"><span>{place.path}</span><AsAdminMark of={place.adminAccess?.place} /></span>,
+        label: <span className="flex min-w-0 items-center gap-2"><span className="min-w-0 truncate" title={place.path}>{place.path}</span><AsAdminMark of={place.adminAccess?.place} /></span>,
         text: place.path,
         icon: <NodeIcon kind={place.folder ? 'folder' : place.kind} color={place.color} own={place.custom_color} />,
         description: optionDescription?.(place) ?? t(`settings.place.kinds.${place.kind}`),
@@ -142,7 +144,7 @@ export function PlacePicker({ label, hint, value, onChange, disabled = false, ro
         <span className="text-sm font-medium text-text">{label}</span>
         <div className="flex items-center gap-2 rounded-lg border border-border bg-bg-subtle px-3 py-2">
           <NodeIcon kind={value.folder ? 'folder' : value.kind} color={value.color} own={value.custom_color} className="size-4" />
-          <span className="min-w-0 flex-1 text-base wrap-anywhere text-text">{value.path}</span>
+          <span className="min-w-0 flex-1 truncate text-base text-text" title={value.path}>{value.path}</span>
           <AsAdminMark of={value.adminAccess?.place} />
           <IconButton size="sm" label={t('settings.place.clear', { path: value.path })} icon={<X aria-hidden />} disabled={disabled} onClick={() => onChange(null)} />
         </div>

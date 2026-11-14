@@ -50,7 +50,7 @@ fn invitation(node: Id, role: Role) -> InvitationCreateBody {
         permissions: None,
         email: None,
         max_uses: None,
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: None,
     }
 }
@@ -65,7 +65,7 @@ fn org_invitation(org: Id, role: Role) -> InvitationCreateBody {
         permissions: None,
         email: None,
         max_uses: None,
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: None,
     }
 }
@@ -154,7 +154,7 @@ async fn a_node_invitation_can_offer_only_the_permissions_its_maker_can_give() {
         permissions,
         email: None,
         max_uses: None,
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: None,
     };
     let too_much = world
@@ -245,7 +245,7 @@ async fn a_scoped_token_cannot_invite_an_outsider_into_a_row_it_cannot_give() {
         permissions: Some(vec!["project.manage".to_owned()]),
         email: None,
         max_uses: None,
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: None,
     };
     let problem = world
@@ -312,7 +312,7 @@ async fn a_multi_use_node_link_rechecks_the_makers_row_authority_for_every_perso
         permissions: Some(vec!["project.view".into()]),
         email: None,
         max_uses: Some(3),
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: None,
     };
     let invitation = world
@@ -398,8 +398,8 @@ async fn a_changed_external_lifetime_refuses_the_grant_without_naming_a_hidden_p
     world
         .set_at(
             orch_settings::Target::Node(project.base.id),
-            "sharing.external_max_days",
-            serde_json::json!(7),
+            "sharing.external_max_minutes",
+            serde_json::json!(10080),
         )
         .await;
     let problem = world
@@ -447,7 +447,7 @@ async fn a_multi_use_group_link_does_not_add_a_person_when_its_maker_leaves_duri
             permissions: None,
             email: None,
             max_uses: Some(3),
-            expires_in_hours: None,
+            expires_in_minutes: None,
             note: None,
         })
         .send()
@@ -567,7 +567,7 @@ async fn an_invitation_that_expires_while_its_capacity_lock_is_held_is_not_used(
         permissions: None,
         email: None,
         max_uses: Some(2),
-        expires_in_hours: Some(1),
+        expires_in_minutes: Some(60),
         note: None,
     };
     let invitation = world
@@ -627,7 +627,7 @@ async fn a_malformed_system_offer_carrying_a_role_is_never_used() {
         permissions: None,
         email: None,
         max_uses: None,
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: None,
     };
     let made = world
@@ -747,7 +747,7 @@ async fn a_makers_timed_chat_membership_is_rechecked_after_waiting_for_the_chat_
         permissions: None,
         email: None,
         max_uses: Some(2),
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: None,
     };
     let invitation = room

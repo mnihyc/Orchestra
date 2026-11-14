@@ -7,13 +7,14 @@
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 
+import { useFormatContext } from '@/lib/appearance';
 import { settingsQuery } from '@/api/settings';
 import { useDefaultsOpening } from '@/features/settings/defaultsOpening';
 import { durationLabel, invitationRules } from '@/features/org/Invite';
 import type { Org, ResolvedSetting } from '@/generated/api-types';
 
 /** The keys of the rules an org gives its invitations. */
-const RULE_KEYS = ['invitations.forms', 'invitations.default_hours', 'invitations.max_hours', 'invitations.max_uses'] as const;
+const RULE_KEYS = ['invitations.forms', 'invitations.default_minutes', 'invitations.max_minutes', 'invitations.max_uses'] as const;
 
 /** The names of the places the rules come from, each once, without the shipped defaults. */
 export function ruleSources(settings: readonly ResolvedSetting[] | undefined): string[] {
@@ -29,6 +30,7 @@ export function ruleSources(settings: readonly ResolvedSetting[] | undefined): s
 /** The rules in force for the invitations of an org, in a sentence or two. */
 export function InvitationRules({ org }: { org: Org }) {
   const { t } = useTranslation();
+  const format = useFormatContext();
   const opening = useDefaultsOpening(org.id);
   const settings = useQuery({ ...settingsQuery(org.id), enabled: !opening.waiting });
   if (settings.data === undefined) return null;
@@ -40,8 +42,8 @@ export function InvitationRules({ org }: { org: Org }) {
       <p>{forms.length === 0 ? t('settings.members.rules.noForms') : t('settings.members.rules.forms', { forms: forms.join(t('startFlow.separator')) })}</p>
       <p>
         {t('settings.members.rules.lives', {
-          default: durationLabel(rules.defaultHours, t),
-          most: durationLabel(rules.maxHours, t),
+          default: durationLabel(rules.defaultMinutes, format),
+          most: durationLabel(rules.maxMinutes, format),
           uses: rules.maxUses,
         })}
       </p>

@@ -13,7 +13,7 @@ vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/settings', async (original) => ({ ...await original<object>(), targetSettingsQuery: () => ({ queryKey: ['help-source'], queryFn: () => Promise.reject(new Error('Access was removed')) }) }));
 
 const expiry: SettingDef = {
-  key: 'requests.expiry_hours', title: 'Request expiry', description: 'How long an agent boundary request waits.', group: 'confinement', class: 'policy', scopes: ['system', 'org', 'project', 'topic'], merge: 'min',
+  key: 'requests.expiry_minutes', title: 'Request expiry', description: 'How long an agent boundary request waits.', group: 'confinement', class: 'policy', scopes: ['system', 'org', 'project', 'topic'], merge: 'min',
   default: 24, example: 12, schema: { type: 'integer', minimum: 1, maximum: 168 }, text_key: null, keywords: [],
 };
 

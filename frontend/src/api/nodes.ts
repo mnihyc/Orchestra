@@ -298,6 +298,11 @@ export const deletedQuery = (id: string) =>
  */
 export async function fetchTree(orgId: string, since: number | null, signal?: AbortSignal): Promise<TreeReply> {
   const reader = client.session.getState().readerVersion;
+  const current = () => {
+    signal?.throwIfAborted();
+    if (client.session.getState().readerVersion !== reader) throw new DOMException('The tree reader changed', 'AbortError');
+  };
+  current();
   let reply: OrgTreeGetReply = await ok(
     api.GET('/orgs/{id}/tree', {
       params: { path: { id: orgId }, query: since === null ? {} : { since } },
@@ -305,8 +310,7 @@ export async function fetchTree(orgId: string, since: number | null, signal?: Ab
     }),
   );
   const seq = reply.seq;
-  signal?.throwIfAborted();
-  if (client.session.getState().readerVersion !== reader) throw new DOMException('The tree reader changed', 'AbortError');
+  current();
   // Prime an absent observer only. A setting already supplied by a newer live/native read wins.
   if (reply.settings !== undefined && reply.settings !== null && queryClient.getQueryData(settingsKey(orgId)) === undefined) {
     queryClient.setQueryData(settingsKey(orgId), reply.settings);
@@ -317,6 +321,7 @@ export async function fetchTree(orgId: string, since: number | null, signal?: Ab
       params: { path: { id: orgId }, query: { cursor: reply.next_cursor } },
       ...(signal ? { signal } : {}),
     }));
+    current();
     rows.push(...reply.nodes);
   }
   return { ...reply, seq, ...splitListed(rows) };

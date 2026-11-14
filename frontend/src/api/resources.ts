@@ -73,7 +73,7 @@ export const providerKey = (id: string) => ['provider', id] as const;
 export const providerSetupKey = (orgId: string, providerId?: string) => providerId === undefined ? ['provider-setup', orgId] as const : ['provider-setup', orgId, providerId] as const;
 export const providerSettingsKey = (id: string) => ['provider-settings', id] as const;
 export const providerModelsKey = (id: string) => ['provider-models', id] as const;
-export const providerSuggestionsKey = (id: string) => ['provider-suggestions', id] as const;
+export const providerFactsModelsKey = (id: string, at: string | null) => ['provider-facts-models', id, at] as const;
 export const providerThreadsKey = (id: string) => ['provider-threads', id] as const;
 export const agentsKey = ['agents'] as const;
 export const agentKey = (id: string) => ['agent', id] as const;
@@ -226,15 +226,17 @@ export const providerModelsQuery = (id: string) =>
       ok(api.GET('/providers/{id}/models', { params: { path: { id } }, signal })),
   });
 
-/** The models the provider's endpoint or harness names that are not listed yet. It fails where the provider cannot be asked. */
-export const providerSuggestionsQuery = (id: string) =>
+/**
+ * The models the provider's endpoint or harness last listed, as it kept them: a provider's view says only how many.
+ * `at` is when that list was read (`facts.field_times.models`): a list read anew is another key, so it is asked for again.
+ */
+export const providerFactsModelsQuery = (id: string, at: string | null) =>
   queryOptions({
-    queryKey: providerSuggestionsKey(id),
+    queryKey: providerFactsModelsKey(id, at),
     queryFn: ({ signal }): Promise<ModelSuggestion[]> =>
-      ok(api.GET('/providers/{id}/models/suggestions', { params: { path: { id } }, signal })),
-    // A discovery is a question put to the vendor: it is asked when the reader asks, not on every visit.
-    staleTime: 5 * 60_000,
-    retry: false,
+      ok(api.GET('/providers/{id}/facts/models', { params: { path: { id } }, signal })),
+    // A list read at one time never changes: a list read anew is another key.
+    staleTime: Infinity,
   });
 
 /** The threads bound to a provider that the caller may view, a page at a time. */
@@ -371,10 +373,11 @@ export const agentQuery = (id: string) =>
     queryFn: ({ signal }): Promise<Agent> => ok(api.GET('/agents/{id}', { params: { path: { id } }, signal })),
   });
 
-/** The harnesses the system has an adapter for, with the builds there are. */
+/** The harnesses the system has an adapter for, with the builds there are. It changes with a release or an administrator's own act, which says so: it is read once. */
 export const harnessKindsQuery = queryOptions({
   queryKey: harnessKindsKey,
   queryFn: ({ signal }): Promise<HarnessKindInfo[]> => ok(api.GET('/harness-kinds', { signal })),
+  staleTime: Number.POSITIVE_INFINITY,
 });
 
 /** Makes a profile for a harness in an org. */
@@ -468,6 +471,7 @@ export const templateQuery = (id: string) =>
 export const driversQuery = queryOptions({
   queryKey: driversKey,
   queryFn: ({ signal }): Promise<DriverInfo[]> => ok(api.GET('/drivers', { signal })),
+  staleTime: Number.POSITIVE_INFINITY,
 });
 
 /** What an environment may be granted beyond the ordinary, each with its risk. */

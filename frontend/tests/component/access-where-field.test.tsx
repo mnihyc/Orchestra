@@ -69,6 +69,30 @@ afterEach(async () => {
 
 const where = () => within(screen.getByRole('group', { name: i18n.t('access.options.where') }));
 
+it.each(['en', 'zh-CN'] as const)('keeps an Ask-only provider grant explicit in the sharing editor and request in %s', async (locale) => {
+  await setLocale(locale);
+  const written = open({ purposes: ['ask'], models: ['gpt-x'] });
+  expect(screen.getByRole('combobox', { name: i18n.t('access.options.purposes') })).toHaveTextContent(i18n.t('access.options.purpose.ask'));
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('access.options.save') }));
+  await waitFor(() => expect(written).toHaveLength(1));
+  expect(saved(written)).toMatchObject({ purposes: ['ask'], models: ['gpt-x'] });
+  expect(askedOptions({ purposes: ['turn'], models: ['gpt-x'] })).toEqual({ purposes: ['turn'], models: ['gpt-x'] });
+});
+
+it('keeps a cleared purpose list as no purpose and names that result in the preview', async () => {
+  const written = open({ purposes: ['ask'] });
+  await userEvent.click(screen.getByRole('combobox', { name: i18n.t('access.options.purposes') }));
+  await userEvent.click(screen.getByRole('option', { name: i18n.t('access.options.customPurposes') }));
+  const group = within(screen.getByRole('group', { name: i18n.t('access.options.purposes') }));
+  await userEvent.click(group.getByRole('checkbox', { name: i18n.t('access.options.purpose.ask') }));
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('access.options.save') }));
+  await waitFor(() => expect(written).toHaveLength(1));
+  expect(saved(written)).toEqual({ purposes: [] });
+  cleanup();
+  show(<EntryOptionFacts options={{ purposes: [] }} word={(text) => text} />);
+  expect(screen.getByText('No purposes', { exact: false })).toBeVisible();
+});
+
 async function add(user: ReturnType<typeof userEvent.setup>, name: string) {
   await user.click(screen.getByRole('combobox', { name: i18n.t('access.options.whereAdd', { what: i18n.t('access.options.where') }) }));
   await user.click(await screen.findByRole('option', { name: new RegExp(name) }));

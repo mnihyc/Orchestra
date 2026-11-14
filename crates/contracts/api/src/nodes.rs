@@ -1674,14 +1674,18 @@ pub struct NodeAuditListQuery {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OrgTreeGetQuery {
+    /// Only the direct children of this node within the root organization. Omitted reads the full tree.
+    /// A branch snapshot cannot be combined with `since`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<Id>,
     /// Only the nodes that changed after this tree sequence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<Seq>,
     /// Continue a full load; cannot be combined with `since`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
-    /// Nodes scanned in a full-load page, from 1 to [`TREE_SYNC_MAX_CHANGES`].
-    /// Omitted means that maximum. A delta always uses the change bound.
+    /// Positive page size. A branch defaults to navigation.tree_page_size; a full tree defaults
+    /// to the ordinary sync batch size. An explicit size may be larger. A delta uses its change bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }

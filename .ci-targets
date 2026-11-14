@@ -1,0 +1,15 @@
+fmt
+clippy
+contracts
+test -p orch-types --lib
+test -p orch-access-contract --lib
+test -p orch-settings-contract --lib
+test -p orch-authz --lib
+test -p orch-authz --test requests --test kfix_entry_narrowing --test use_where --test depends --test external_lifetime --test reach
+test -p orch-db --test migration_progress --test released_migrations
+test -p orch-api-core --test users --test access_requests --test ports_core --test thread_environment_readers --test invitation_roles --test invitation_operation_scopes --test invitation_authority_after --test ask --test thread_access --test page_dependencies --test nodes_lists --test hierarchy_native_scopes --test group_join_requests --test request_intent_scopes --test threads_settings --test thread_opening_scopes --test input_schedules --test schedule_operation_scopes
+test -p orch-engine --test orch_capabilities --test approval_review --test resource_summaries --test summary_options --test orch_tools
+test -p orch-engine --lib -- tools::source::tests::
+web typecheck
+web lint
+web test -- tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/settings.test.ts tests/unit/help-settings.test.ts tests/unit/general-access.test.ts tests/unit/discuss-session.test.ts tests/unit/access-model.test.ts tests/unit/places.test.ts tests/unit/node-paging.test.ts tests/unit/agent-schedule-requests.test.ts tests/component/share-add-options.test.tsx tests/component/access-where-field.test.tsx tests/component/general-access.test.tsx tests/component/access-request-duration.test.tsx tests/component/invite-default.test.tsx tests/component/viewer-composer.test.tsx tests/component/chat-draft-requests.test.tsx tests/component/team-chat-shortcut.test.tsx tests/component/place-picker-reads.test.tsx tests/component/resource-sharing-summary.test.tsx tests/component/model-picker-rows.test.tsx tests/component/thread-opening.test.tsx tests/component/send-later.test.tsx tests/component/agent-schedules.test.tsx tests/component/program-thread-preparation.test.tsx tests/component/timeline-accessibility.test.tsx tests/component/before-orch-history.test.tsx

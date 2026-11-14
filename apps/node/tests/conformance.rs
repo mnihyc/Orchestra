@@ -108,3 +108,67 @@ readline.on('line', line => {
         .unwrap();
     assert!(units.is_empty(), "the runner leaves no owned unit behind");
 }
+
+#[tokio::test]
+async fn an_unavailable_check_image_is_named_without_hiding_a_daemon_failure() {
+    use axum::Router;
+    use axum::http::{StatusCode, Uri};
+    use std::sync::{Arc, Mutex};
+    for status in [StatusCode::NOT_FOUND, StatusCode::SERVICE_UNAVAILABLE] {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let requests = Arc::clone(&seen);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().fallback(move |uri: Uri| {
+            requests.lock().unwrap().push(uri.path().to_owned());
+            async move {
+                (
+                    status,
+                    axum::Json(serde_json::json!({"message": "check daemon unavailable"})),
+                )
+            }
+        });
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let docker = bollard::Docker::connect_with_http(
+            &format!("http://{address}"),
+            2,
+            bollard::API_DEFAULT_VERSION,
+        )
+        .unwrap();
+        let config = DockerConfig {
+            conformance_image: Some("checks.example/native:missing".to_owned()),
+            ..Default::default()
+        };
+        let request = NodeToolConformance {
+            name: "codex".to_owned(),
+            version: "1.0.0".to_owned(),
+            programs: vec!["codex".to_owned()],
+            case_timeout_secs: 5,
+            timeout_secs: 60,
+        };
+        let failure = orch_node::conformance_unit::run(
+            &docker,
+            &config,
+            &request,
+            std::path::Path::new("unused-program"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        let detail = failure.to_string();
+        assert!(detail.contains("checks.example/native:missing"), "{detail}");
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            assert!(detail.contains("check daemon unavailable"), "{detail}");
+            assert!(!detail.contains("need the preloaded image"), "{detail}");
+        }
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .all(|path| path.contains("/images/"))
+        );
+        task.abort();
+    }
+}
