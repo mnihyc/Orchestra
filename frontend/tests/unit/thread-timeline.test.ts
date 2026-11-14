@@ -33,6 +33,28 @@ const options = (more: Partial<RowOptions> = {}): RowOptions => ({ detail: 'step
 
 const kinds = (rows: Row[]): string[] => rows.map((row) => row.kind);
 
+it.each([false, true])('keeps equal progress reports around separate tool steps (diagnostics=%s)', (diagnostics) => {
+  const view = viewOf([
+    agentMessage('first-report', 'Running tests now', { turn: 'reports', phase: 'commentary' }),
+    command('first-check', { command: 'run unit checks', turn: 'reports' }),
+    agentMessage('second-report', 'Running tests now', { turn: 'reports', phase: 'commentary' }),
+    command('second-check', { command: 'run integration checks', turn: 'reports' }),
+    agentMessage('reports-answer', 'Both checks passed', { turn: 'reports' }),
+  ], [turn('reports', { ordinal: 1, state: 'completed', inputId: 'reports-input' })]);
+  const drawn = buildRows(view, options({ diagnostics })).filter((row) => row.kind === 'item').map((row) => row.id);
+  expect(drawn).toContain('first-report');
+  expect(drawn).toContain('second-report');
+});
+
+it('keeps both original messages of an adjacent final echo in Diagnostics', () => {
+  const view = viewOf([
+    agentMessage('before-final', 'The checks passed', { turn: 'echo', phase: 'commentary' }),
+    agentMessage('final-echo', 'The checks passed', { turn: 'echo' }),
+  ], [turn('echo', { ordinal: 1, state: 'completed', inputId: 'echo-input' })]);
+  const drawn = buildRows(view, options({ diagnostics: true })).filter((row) => row.kind === 'item').map((row) => row.id);
+  expect(drawn).toEqual(expect.arrayContaining(['before-final', 'final-echo']));
+});
+
 it('folds reasoning-only work in Focused while preserving the native inputs, answers and pending question', () => {
   const pending = approvalItem('pending-question', 'question', { turn: 'focus-turn' });
   const view = viewOf([userMessage('focus-input', 'Explain this', { author: ADA, turn: 'focus-turn' }), reasoning('only-reasoning', 'Working it out', { turn: 'focus-turn' }),

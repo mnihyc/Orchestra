@@ -448,6 +448,7 @@ impl native::Selected for Preview {
     type Query = DuplicateBody;
     type Value = Prepared;
     type Reply = MoveOutDeletePlan;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::TEMPLATE_MOVE_PREVIEW;
     const WATCH_ORDINARY: bool = true;
     fn select<'a>(

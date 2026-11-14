@@ -27,6 +27,7 @@ import { BeforeOrchHeading } from '@/features/timeline/items/BeforeOrch';
 import { ApprovalCard } from '@/features/timeline/items/Approval';
 import { ErrorRow } from '@/features/timeline/items/Error';
 import { MarkerLine } from '@/features/timeline/items/Marker';
+import { StartLine } from '@/features/timeline/items/StartLine';
 import { Plan } from '@/features/timeline/items/Plan';
 import { Reasoning } from '@/features/timeline/items/Reasoning';
 import { ToolCallRow } from '@/features/timeline/items/ToolCall';
@@ -73,7 +74,7 @@ function StoredHistory({ snapshot, read }: { snapshot: ThreadSync; read: ThreadR
     threadWriter.reset(read, snapshot, snapshot.has_older);
     return () => threadWriter.evict(read);
   }, [read, snapshot]);
-  const rows = buildRows(view, { detail: preferences.detail, hideHistory: preferences.hideHistory, foldOpened: ui.folds, meId: null }).filter((row) => row.kind !== 'divider' && row.kind !== 'status');
+  const rows = buildRows(view, { detail: preferences.detail, hideHistory: preferences.hideHistory, foldOpened: ui.folds, meId: null, diagnostics: preferences.diagnostics }).filter((row) => row.kind !== 'divider' && row.kind !== 'status');
   const context: TimelineContext = { threadId: key, threadName: snapshot.thread.name,
     inspection: { threadId: snapshot.thread.id, ...(snapshot.projection === undefined || snapshot.projection === null ? {} : { continuationId: snapshot.projection.viewed_continuation_id }) },
     detail: preferences.detail, recent: recentTurns(view.turns), layout: preferences.layout, setLayout: preferences.setLayout, meId: null, canInteract: false, canManage: false, live: false, lit: null, selection: NOT_PICKING };
@@ -163,10 +164,10 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
   const sideRevealed = useRef<{ threadId: string; request: number } | null>(null);
 
   const rows = useMemo<Row[]>(
-    () => buildRows(view, { detail: preferences.detail, hideHistory: preferences.hideHistory, foldOpened: ui.folds, meId }),
+    () => buildRows(view, { detail: preferences.detail, hideHistory: preferences.hideHistory, foldOpened: ui.folds, meId, diagnostics: preferences.diagnostics }),
     // The rows depend on these parts of the view and on nothing else.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [view.order, view.items, view.turns, view.thread, view.read, view.openedReadSeq, view.openedSeq, preferences.detail, preferences.hideHistory, ui.folds, meId],
+    [view.order, view.items, view.turns, view.thread, view.read, view.openedReadSeq, view.openedSeq, preferences.detail, preferences.hideHistory, preferences.diagnostics, ui.folds, meId],
   );
   const recent = useMemo(() => recentTurns(view.turns), [view.turns]);
   if (positionRead === 'waiting' && restored?.item !== null && restored?.item !== undefined && view.items.has(restored.item)) setPositionRead('done');
@@ -375,7 +376,7 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
           onAtEnd={setAtEnd}
           onPosition={(position) => {
             const row = rows.find((row) => row.key === position.key);
-            const item = row?.kind === 'item' || row?.kind === 'side' ? row.id : row?.kind === 'fold' || row?.kind === 'markers' ? row.ids[0] ?? null : null;
+            const item = row?.kind === 'item' || row?.kind === 'side' ? row.id : row?.kind === 'fold' || row?.kind === 'markers' || row?.kind === 'start' ? row.ids[0] ?? null : null;
             keepTimelinePosition(read, view.read?.selection ?? null, { ...position, item });
           }}
           onRange={(first, last) => {
@@ -458,5 +459,7 @@ function RowView({ row }: { row: Row }) {
       return <StatusLine />;
     case 'before':
       return <BeforeOrchHeading />;
+    case 'start':
+      return <StartLine ids={row.ids} />;
   }
 }

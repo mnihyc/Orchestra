@@ -319,6 +319,10 @@ fn frame_error(error: Error) -> EngineError {
     }
 }
 
+fn matches_body(expected: Hash, body: &serde_json::Value) -> Result<bool, EngineError> {
+    Ok(crate::jobs::command_identity::hash(body)? == expected)
+}
+
 /// One canonical generated query, in the existing server-private durable command channel.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -362,10 +366,7 @@ impl QueryAuthority {
             return Ok(None);
         }
         // PostgreSQL can reorder object members when storing a command in JSONB.
-        // Also recognize the old digest when the exact serialized body still matches.
-        if crate::jobs::command_identity::hash(&command.body)? != self.body
-            && Hash::of(&serde_json::to_vec(&command.body)?) != self.body
-        {
+        if !matches_body(self.body, &command.body)? {
             return Ok(None);
         }
         let call: Option<(Id, Id, Option<Id>)> = sqlx::query_as("SELECT node_id,provider_id,person_id FROM summary_calls WHERE id=$1 AND purpose='embeddings' AND cancel_reason IS NULL")
@@ -438,6 +439,29 @@ impl QueryAuthority {
         let caller = parts.principal.caller().clone();
         let end = caller.grant().and_then(orch_authz::TokenGrant::expires_at);
         Ok(Some(vec![(Some(caller), end)]))
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn a_query_accepts_only_the_canonical_identity_of_its_command_body() -> Result<(), EngineError>
+    {
+        let body = serde_json::json!({"z":{"long_key":1,"a":2},"a":3});
+        let canonical = crate::jobs::command_identity::hash(&body)?;
+        let order_sensitive = Hash::of(&serde_json::to_vec(&body)?);
+        assert_ne!(
+            canonical, order_sensitive,
+            "this body exposes member order in its old digest"
+        );
+        assert!(
+            !matches_body(order_sensitive, &body)?,
+            "a replaced digest is not another admitted representation"
+        );
+        assert!(matches_body(canonical, &body)?);
+        Ok(())
     }
 }
 

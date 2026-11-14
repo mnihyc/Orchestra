@@ -343,9 +343,15 @@ async fn read_view(
         cache_read::producer(conn, &principal, plan, cache.as_ref(), slots[2]).await?;
     let manual = if policy.producer.is_none() {
         Some(
-            resource::manual_default(conn, &principal, identity.place(), ctx.app.clock.time())
-                .await
-                .map_err(ApiError::engine)?,
+            resource::manual_default(
+                conn,
+                &principal,
+                identity.place(),
+                resource::field_for(target),
+                ctx.app.clock.time(),
+            )
+            .await
+            .map_err(ApiError::engine)?,
         )
     } else {
         None
@@ -400,10 +406,25 @@ async fn read_view(
     )
     .await?;
     let failed = latest.as_ref().is_some_and(|row| row.state == "failed");
+    let changed = latest.as_ref().is_some_and(|row| {
+        matches!(
+            row.problem
+                .as_ref()
+                .and_then(|problem| problem.get("reason"))
+                .and_then(Json::as_str),
+            Some("source_changed" | "content_changing" | "settings_changed")
+        )
+    });
     let state = if follow.scheduled {
         SummaryState::Scheduled
     } else if follow.updating {
         SummaryState::Updating
+    } else if changed {
+        if cache.as_ref().and_then(|row| row.text.as_ref()).is_some() {
+            SummaryState::Stale
+        } else {
+            SummaryState::Empty
+        }
     } else if failed {
         SummaryState::Failed
     } else if policy.producer.is_none() && manual_producer.is_none() {
@@ -451,11 +472,34 @@ async fn read_view(
             .and_then(|row| row.completed_at)
             .map(Into::into),
         route,
-        problem: (failed && !follow.updating).then(|| {
-            Problem::new(
-                ErrorCode::ProviderUnavailable,
-                "The summary could not be refreshed. The previous paragraph is kept.",
-            )
+        problem: ((failed || changed) && !follow.updating).then(|| {
+            // What the failed request stored: the thing that stopped it, by a stable word the page
+            // keys its sentence by, and that sentence in English for readers that know no word.
+            let stored = latest.as_ref().and_then(|row| row.problem.as_ref());
+            let reason = stored
+                .and_then(|problem| problem.get("reason"))
+                .and_then(Json::as_str);
+            let message = stored
+                .and_then(|problem| problem.get("message"))
+                .and_then(Json::as_str)
+                .unwrap_or("The summary could not be refreshed.");
+            let detail = if cache.as_ref().is_some_and(|row| row.text.is_some()) {
+                format!("{message} The previous paragraph is kept.")
+            } else {
+                message.to_owned()
+            };
+            let problem = Problem::new(
+                if changed {
+                    ErrorCode::ConflictStaleRevision
+                } else {
+                    ErrorCode::ProviderUnavailable
+                },
+                detail,
+            );
+            match reason {
+                Some(reason) => problem.with("reason", reason),
+                None => problem,
+            }
         }),
     };
     Ok(View {
@@ -467,12 +511,92 @@ async fn read_view(
     })
 }
 
+/// What of two views of one summary differs, by the name of the member. The wait for a request that is due
+/// at a time counts down with the clock: it moves with the time of the read, not with the summary, and is
+/// the same wait while the time it ends at is the same.
+fn moved(old: &View, fresh: &View) -> Vec<&'static str> {
+    let (old_snapshot, fresh_snapshot) = (&old.snapshot, &fresh.snapshot);
+    let counting_down = old_snapshot
+        .wait
+        .as_ref()
+        .zip(fresh_snapshot.wait.as_ref())
+        .is_some_and(|(old, fresh)| old.until.is_some() && old.until == fresh.until);
+    [
+        ("identity", old.identity.fact() != fresh.identity.fact()),
+        ("target", old_snapshot.target != fresh_snapshot.target),
+        ("inputs", old.inputs != fresh.inputs),
+        ("providers", old.providers != fresh.providers),
+        ("policy", old.policy != fresh.policy),
+        ("state", old_snapshot.state != fresh_snapshot.state),
+        ("revision", old_snapshot.revision != fresh_snapshot.revision),
+        ("text", old_snapshot.text != fresh_snapshot.text),
+        ("wait", old_snapshot.wait != fresh_snapshot.wait),
+        (
+            "poll_after_ms",
+            !counting_down && old_snapshot.poll_after_ms != fresh_snapshot.poll_after_ms,
+        ),
+        (
+            "updated_at",
+            old_snapshot.updated_at != fresh_snapshot.updated_at,
+        ),
+        ("route", old_snapshot.route != fresh_snapshot.route),
+        ("producer", old_snapshot.producer != fresh_snapshot.producer),
+        ("problem", old_snapshot.problem != fresh_snapshot.problem),
+        ("input", old_snapshot.input != fresh_snapshot.input),
+        (
+            "manual_problem",
+            old_snapshot.manual_problem != fresh_snapshot.manual_problem,
+        ),
+        (
+            "inspecting",
+            old_snapshot.inspecting != fresh_snapshot.inspecting,
+        ),
+        (
+            "root",
+            old_snapshot.root_org_id != fresh_snapshot.root_org_id,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(member, differs)| differs.then_some(member))
+    .collect()
+}
+
+/// Whether a read shows what the one before it showed. A difference is a summary that moved while it was
+/// read (a request taken up or finished, a paragraph written, a source that has grown); the read is then
+/// made again. It says nothing about who may read what: that is `same_sources`.
 fn same_view(old: &View, fresh: &View) -> bool {
-    old.identity.fact() == fresh.identity.fact()
-        && old.inputs == fresh.inputs
-        && old.providers == fresh.providers
-        && old.policy == fresh.policy
-        && old.snapshot == fresh.snapshot
+    let differing = moved(old, fresh);
+    if differing.is_empty() {
+        return true;
+    }
+    tracing::debug!(
+        target_kind = ?old.snapshot.target,
+        moved = ?differing,
+        "a summary read moved between its read and its check"
+    );
+    false
+}
+
+/// Whether everything that the earlier read was made from may still be read by the reader, whatever else
+/// about the summary has moved: the same target in the same root, read in the same way, and every source
+/// and provider that the paragraph was made from still among those the reader may read. A paragraph made
+/// from a source the reader can no longer read is never given.
+fn same_sources(old: &View, fresh: &View) -> bool {
+    let held = old.identity.fact() == fresh.identity.fact()
+        && old.snapshot.root_org_id == fresh.snapshot.root_org_id
+        && (old.snapshot.inspecting || !fresh.snapshot.inspecting)
+        && old.inputs.iter().all(|input| fresh.inputs.contains(input))
+        && old
+            .providers
+            .iter()
+            .all(|provider| fresh.providers.contains(provider));
+    if !held {
+        tracing::info!(
+            target_kind = ?old.snapshot.target,
+            "a summary read is refused: what it was made from can no longer be read by the person who asked"
+        );
+    }
+    held
 }
 
 struct Reader;
@@ -484,6 +608,7 @@ impl native::Selected for Reader {
     type Reply = SummarySnapshot;
     const DECLARATION: &'static Declaration<Role> = &declarations::RESOURCE_READ;
     const WATCH_ORDINARY: bool = true;
+    const MOVES: native::Moves = native::Moves::Publish;
     fn select<'a>(
         ctx: &'a Ctx,
         conn: &'a mut Conn,
@@ -524,6 +649,16 @@ impl native::Selected for Reader {
         fresh: &'a View,
     ) -> BoxFuture<'a, ApiResult<bool>> {
         Box::pin(async move { Ok(same_view(old, fresh)) })
+    }
+    fn access_held<'a>(
+        _: &'a Ctx,
+        _: &'a mut Conn,
+        _: &'a Principal,
+        _: &'a SummaryReadQuery,
+        old: &'a View,
+        fresh: &'a View,
+    ) -> BoxFuture<'a, ApiResult<bool>> {
+        Box::pin(async move { Ok(same_sources(old, fresh)) })
     }
     fn after_read<'a>(
         ctx: &'a Ctx,
@@ -639,6 +774,14 @@ impl effects::Effect for Refresher {
                         "Use an ordered range inside this chat",
                     ));
                 }
+                if range.after == range.through {
+                    // Unread material is already known to be empty. It needs no model proposal,
+                    // provider permission, request row or paid completion.
+                    return Err(ApiError::new(
+                        ErrorCode::SummaryNothingNew,
+                        "There is nothing new to summarize",
+                    ));
+                }
             }
             if let Some(model) = &body.model
                 && (model.model.trim().is_empty()
@@ -663,6 +806,7 @@ impl effects::Effect for Refresher {
                     conn,
                     &principal,
                     identity.place(),
+                    resource::field_for(target),
                     ctx.app.clock.time(),
                 )
                 .await
@@ -695,6 +839,14 @@ impl effects::Effect for Refresher {
             )
             .await
             .map_err(ApiError::engine)?;
+            // A source with nothing in it is answered here, with its own code: no request is made, no
+            // model is asked and nothing is booked, where it would only end as a request that failed.
+            if selected.material.activity.is_empty() {
+                return Err(ApiError::new(
+                    ErrorCode::SummaryNothingNew,
+                    "There is nothing new to summarize",
+                ));
+            }
             let facts = selected.facts();
             Ok((Refresh { selected, body }, facts))
         })

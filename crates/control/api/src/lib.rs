@@ -572,6 +572,12 @@ pub mod backplane {
         async fn a_runtime_network_report_obeys_the_runtime_hosts_source_binding() {
             orch_api_base::backplane::machine_report_tests::__api_run_a_runtime_network_report_obeys_the_runtime_hosts_source_binding().await
         }
+        #[cfg(test)]
+        #[tokio::test]
+        async fn the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted()
+         {
+            orch_api_base::backplane::machine_report_tests::__api_run_the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted().await
+        }
     }
     #[cfg(test)]
     pub(crate) mod command_admission_tests {
@@ -6748,6 +6754,8 @@ pub mod testing {
     pub use orch_api_base::testing::machine_request_handler;
 
     pub use orch_api_base::testing::advance_component_updates;
+
+    pub use orch_api_base::testing::admit_stored_command;
 
     pub use orch_api_base::testing::authorize_machine;
 

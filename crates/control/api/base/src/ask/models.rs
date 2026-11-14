@@ -54,6 +54,7 @@ impl Selected for Models {
     type Query = api::AskModelsQuery;
     type Value = api::AskModelsReply;
     type Reply = api::AskModelsReply;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &SOURCES;
     const WATCH_ORDINARY: bool = true;
 

@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-engine --lib -- summaries::budget::
+test -p orch-engine --test document_summaries
+test -p orch-api-core --test summaries
