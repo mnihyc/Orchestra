@@ -318,15 +318,26 @@ pub fn validate(value: &Json) -> Result<Vec<Rule>, String> {
     Ok(rules)
 }
 
+/// Where neutral or documented protocol options name an effort.
+const EFFORT_PATHS: [&str; 4] = [
+    "/effort",
+    "/reasoning/effort",
+    "/reasoning_effort",
+    "/output_config/effort",
+];
+
+/// Whether the options name an effort at all, even to leave it to the model (`null`).
+#[must_use]
+pub fn names_effort(params: &Json) -> bool {
+    EFFORT_PATHS
+        .iter()
+        .any(|path| params.pointer(path).is_some())
+}
+
 /// The one effort requested by neutral or documented protocol options, checked before current use.
 pub fn requested_effort(params: &Json) -> Result<Option<&str>, &'static str> {
     let mut selected: Option<Option<&str>> = None;
-    for path in [
-        "/effort",
-        "/reasoning/effort",
-        "/reasoning_effort",
-        "/output_config/effort",
-    ] {
+    for path in EFFORT_PATHS {
         let Some(value) = params.pointer(path) else {
             continue;
         };
