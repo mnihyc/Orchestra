@@ -51,6 +51,20 @@ async function start(initial?: SearchParams, pageSize = 2, windowSecs = OPEN_WIN
   await send({type: 'options', page_size: pageSize, reorder_window_secs: windowSecs, meaning_pause_ms: 800}, source('words', 'running'), source('meaning', 'running'));
   return view;
 }
+it.each(['en', 'zh-CN'] as const)('describes indexed fields and the effective allowance before claiming an empty search in %s', async (locale) => {
+  const previous = currentLocale(); await setLocale(locale);
+  try {
+    await start();
+    await send({ type: 'coverage', conversation_chars: 24_000 }, source('words'), source('meaning'), { type: 'cursor', cursor: null });
+    const coverage = screen.getByRole('button', { name: i18n.t('search.coverage.label') });
+    expect(coverage).toBeVisible();
+    expect(screen.getByText(i18n.t('search.state.nothingIndexed', { query: 'release' }))).toBeVisible();
+    expect(screen.queryByText(i18n.t('search.state.nothing', { query: 'release' }))).not.toBeInTheDocument();
+    fireEvent.click(coverage);
+    expect(screen.getByText(i18n.t('search.coverage.about', { number: '24,000' }))).toBeVisible();
+    expect(screen.getByText(i18n.t('search.coverage.omitted'))).toBeVisible();
+  } finally { cleanup(); await setLocale(previous); }
+});
 it('starts a linked search through strict-mode remounts and cancels it when the view closes', async () => {
   const view = show(<StrictMode><Page /></StrictMode>);
   await waitFor(() => expect(calls.requests.length).toBeGreaterThan(0));

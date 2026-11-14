@@ -20,7 +20,7 @@ import { AdminReachNotice } from '@/features/access/AdminReachNotice';
 import { useStore } from 'zustand';
 
 import { client } from '@/api/client';
-import { describeDocument, markSeen, renameDocument, versionQuery } from '@/api/documents';
+import { describeDocument, renameDocument, versionQuery } from '@/api/documents';
 import { documentLinksQuery } from '@/api/links';
 import { nodeQuery } from '@/api/nodes';
 import { openAccess } from '@/features/access/AccessDialog';
@@ -31,8 +31,9 @@ import { printPage } from '@/features/documents/pdf';
 import { openExport, requestExportAccess } from '@/features/export/ExportHost';
 import { exportEntries } from '@/features/export/menu';
 import { useTreeEntry } from '@/features/documents/useTreeEntry';
+import { useDocumentSeen } from '@/features/documents/useDocumentSeen';
 import { documentMetadataRefused, documentWithPlacement } from '@/features/documents/placementView';
-import { useViewShown } from '@/features/workbench/viewOpening';
+import { useViewShown, useViewWork } from '@/features/workbench/viewOpening';
 import { DocumentLocation } from '@/features/documents/DocumentLocation';
 import { FilesDialog } from '@/features/documents/Files';
 import { HistoryDrawer, useHistoryDot } from '@/features/documents/History';
@@ -62,7 +63,7 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { cx } from '@/ui/cx';
 import { actionName } from '@/ui/actions';
 import { EmptyState } from '@/ui/EmptyState';
-import { ErrorState } from '@/ui/ErrorState';
+import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { IconButton } from '@/ui/IconButton';
 import { LockBadge } from '@/ui/LockBadge';
 import { Menu, type MenuEntry } from '@/ui/Menu';
@@ -78,8 +79,6 @@ import { AuthorChip } from '@/ui/AuthorChip';
 const RENAME_AFTER_MS = 700;
 /** The most characters of a description: what the server keeps. */
 const DESCRIPTION_MAX_CHARS = 4_000;
-/** How long a document must have been on screen before it counts as having been looked at. */
-const SEEN_AFTER_MS = 3_000;
 
 export interface DocumentPageProps {
   documentId: string;
@@ -145,6 +144,10 @@ export function DocumentPage({ documentId, block, file, line, endLine, onFileClo
   // The places of the document's org: where it can be moved to, and what a link in its text can name.
   useOrgTreeFeed(doc?.path[0]?.redacted === false ? doc.path[0].id : null);
   const [editor, setEditor] = useState<EditorApi | null>(null);
+  const [titleSave, setTitleSave] = useState<SavePhase>('saved');
+  const [descriptionSave, setDescriptionSave] = useState<SavePhase>('saved');
+  const fieldSave = titleSave === 'failed' || descriptionSave === 'failed' ? 'failed'
+    : titleSave !== 'saved' || descriptionSave !== 'saved' ? 'saving' : 'saved';
   const enterBody = useRef(false);
   const editorReady = useCallback((api: EditorApi | null) => {
     setEditor(api);
@@ -175,14 +178,7 @@ export function DocumentPage({ documentId, block, file, line, endLine, onFileClo
   // The words of each open discussion are marked in the page, whether or not the panel is open.
   useCommentAnchors(documentId);
 
-  // The page is looked at once it has been on screen for a moment.
-  useEffect(() => {
-    if (doc === null || doc.deleted || version !== undefined) return;
-    const timer = setTimeout(() => void markSeen(doc.id, doc.seq).catch(() => undefined), SEEN_AFTER_MS);
-    return () => clearTimeout(timer);
-    // Only the first whole load starts the wait: a document that others are writing in is not "seen" again at every row.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doc?.id, version]);
+  useDocumentSeen(state.ended === null ? doc : null, version);
 
   // Scoped marks belong to the view and survive a narrow switch to Comments. The unscoped
   // fallback is shared, so it must still be cleared when this page goes away.
@@ -272,16 +268,16 @@ export function DocumentPage({ documentId, block, file, line, endLine, onFileClo
 
   return (
     <PersonThingProvider thing={{ kind: 'document', id: doc.id }}><div ref={root} tabIndex={-1} className="flex h-full min-h-0 flex-col" data-screen="document">
-      <PageBar doc={doc} editor={editable ? editor : null} onHistory={() => setHistory(true)} onFind={version === undefined && !doc.deleted ? find.show : null} onDialog={setDialog} me={me} place={place} />
+      <PageBar doc={doc} editor={editable ? editor : null} fieldSave={fieldSave} onHistory={() => setHistory(true)} onFind={version === undefined && !doc.deleted ? find.show : null} onDialog={setDialog} me={me} place={place} />
       {find.bar}
       <div className="flex min-h-0 flex-1">
         <div className="min-w-0 flex-1 overflow-y-auto" data-document-scroll="">
           <article data-document={doc.id} className="mx-auto w-full max-w-(--doc-column) px-4 py-6 sm:pr-(--doc-gutter-end) sm:pl-(--doc-gutter-start)">
             <DocumentLocation metadata={metadata.data} error={metadata.error} onRetry={() => void metadata.retry()} />
-            <TitleField key={`title-${doc.id}`} doc={doc} editable={editable} fresh={fresh} onOffered={onOffered}
+            <TitleField key={`title-${doc.id}`} doc={doc} editable={editable} fresh={fresh} onOffered={onOffered} onSavePhase={setTitleSave}
               onEnter={() => { if (editor !== null) editor.editor.commands.focus('start'); else enterBody.current = true; }} />
             {version === undefined && !doc.deleted && <ResourceSummary target={{ kind: 'document', id: doc.id }} reference={`/doc/${doc.id}`} className="mb-3" />}
-            <DescriptionField key={`description-${doc.id}`} doc={doc} editable={editable}
+            <DescriptionField key={`description-${doc.id}`} doc={doc} editable={editable} onSavePhase={setDescriptionSave}
               onEnter={() => { if (editor !== null) editor.editor.commands.focus('start'); else enterBody.current = true; }} />
             <LineUnderTitle doc={doc} />
             <Notices doc={doc} canEdit={canEdit} owner={owner} version={version} onVersion={onVersion} />
@@ -347,6 +343,7 @@ const share = (doc: Document): void => openAccess({ kind: 'document', id: doc.id
 interface PageBarProps {
   doc: Document;
   editor: EditorApi | null;
+  fieldSave: SavePhase;
   onHistory: () => void;
   onFind: (() => void) | null;
   onDialog: (dialog: 'move' | 'private' | 'delete' | 'files' | 'duplicate' | 'links' | 'summary-options') => void;
@@ -355,7 +352,7 @@ interface PageBarProps {
   place: Node | undefined;
 }
 
-function PageBar({ doc, editor, onHistory, onFind, onDialog, me, place }: PageBarProps) {
+function PageBar({ doc, editor, fieldSave, onHistory, onFind, onDialog, me, place }: PageBarProps) {
   const { t } = useTranslation();
   const state = useDocumentState(doc.id);
   const dot = useHistoryDot(doc);
@@ -401,7 +398,7 @@ function PageBar({ doc, editor, onHistory, onFind, onDialog, me, place }: PageBa
       <PresenceStack users={state.presence} without={me} />
       {!doc.deleted && <DiscussionBell doc={doc} />}
       {onFind !== null && <IconButton label={t('search.find.document')} icon={<Search aria-hidden />} onClick={onFind} />}
-      <SaveState editor={editor} />
+      <SaveState editor={editor} fieldSave={fieldSave} />
       <span className="relative">
         <IconButton label={t('documents.page.history')} icon={<HistoryIcon aria-hidden />} onClick={onHistory} />
         {dot && <span aria-hidden className="absolute top-1 right-1 size-2 rounded-full bg-accent" data-testid="history-dot" />}
@@ -415,14 +412,16 @@ function PageBar({ doc, editor, onHistory, onFind, onDialog, me, place }: PageBa
 }
 
 /** "Saved", "Saving…", or "Not saved yet · reconnecting": what has become of what was typed. */
-function SaveState({ editor }: { editor: EditorApi | null }) {
+function SaveState({ editor, fieldSave }: { editor: EditorApi | null; fieldSave: SavePhase }) {
   const { t } = useTranslation();
   const sync = editor?.sync ?? null;
   const save = useStore(sync?.save ?? fallbackSave);
-  if (sync === null) return null;
-  const words = save.phase === 'saved' ? t('documents.page.saved') : save.phase === 'saving' ? t('documents.page.saving') : save.phase === 'offline' ? t('documents.page.offline') : t('documents.page.failed');
+  if (sync === null && fieldSave === 'saved') return null;
+  const phase = save.phase === 'failed' || fieldSave === 'failed' ? 'failed'
+    : save.phase === 'offline' ? 'offline' : save.phase === 'saving' || fieldSave === 'saving' ? 'saving' : 'saved';
+  const words = phase === 'saved' ? t('documents.page.saved') : phase === 'saving' ? t('documents.page.saving') : phase === 'offline' ? t('documents.page.offline') : t('documents.page.failed');
   return (
-    <span role="status" aria-live="polite" data-save={save.phase} className={cx('flex items-center gap-1 text-sm', save.phase === 'failed' ? 'text-danger-text' : 'text-text-muted')}>
+    <span role="status" aria-live="polite" data-save={phase} className={cx('flex items-center gap-1 text-sm', phase === 'failed' ? 'text-danger-text' : 'text-text-muted')}>
       <Clock aria-hidden className="size-4" />
       {words}
     </span>
@@ -434,11 +433,11 @@ const fallbackSave = createStore(() => ({ phase: 'saved' as const, error: null }
 
 // ---------------------------------------------------------------- title and the line under it
 
-export function TitleField({ doc, editable, fresh = false, onOffered, onEnter }: { doc: Pick<Document, 'id' | 'title'>; editable: boolean; fresh?: boolean; onOffered?: (() => void) | undefined; onEnter: () => void }) {
+export function TitleField({ doc, editable, fresh = false, onOffered, onEnter, onSavePhase }: { doc: Pick<Document, 'id' | 'title'>; editable: boolean; fresh?: boolean; onOffered?: (() => void) | undefined; onEnter: () => void; onSavePhase?: (phase: SavePhase) => void }) {
   const { t } = useTranslation();
-  const [text, setText] = useState(doc.title);
-  const sent = useRef(doc.title);
-  const field = useFittedHeight(text);
+  const write = useCallback((text: string) => renameDocument(doc.id, text), [doc.id]);
+  const save = useDocumentField(doc.title, editable, true, write, onSavePhase);
+  const { text, field } = save;
   const offered = useRef(onOffered);
   const focused = useRef(false);
   useEffect(() => { offered.current = onOffered; }, [onOffered]);
@@ -449,24 +448,8 @@ export function TitleField({ doc, editable, fresh = false, onOffered, onEnter }:
     field.current.select();
     offered.current?.();
   }, [fresh, editable, field]);
-  // A title that others changed arrives; one the person is typing stays.
-  useEffect(() => {
-    if (document.activeElement !== field.current && doc.title !== sent.current) {
-      sent.current = doc.title;
-      setText(doc.title);
-    }
-  }, [doc.title, field]);
-  useEffect(() => {
-    if (!editable || text.trim() === '' || text === sent.current) return;
-    const timer = setTimeout(() => {
-      sent.current = text;
-      void renameDocument(doc.id, text.trim()).catch(() => {
-        sent.current = doc.title;
-      });
-    }, RENAME_AFTER_MS);
-    return () => clearTimeout(timer);
-  }, [text, editable, doc.id, doc.title]);
   return (
+    <>
     <textarea
       ref={field}
       data-content-role="document"
@@ -477,7 +460,7 @@ export function TitleField({ doc, editable, fresh = false, onOffered, onEnter }:
       placeholder={t('documents.page.untitled')}
       maxLength={200}
       className="-mx-3 mb-1 block w-[calc(100%+1.5rem)] resize-none overflow-hidden rounded-none border-x-0 border-t-0 border-b border-control-border bg-transparent px-3 py-1 text-3xl leading-9 font-semibold text-text placeholder:text-text-subtle"
-      onChange={(event) => setText(event.target.value.replace(/\n/g, ' '))}
+      onChange={(event) => save.change(event.target.value.replace(/\n/g, ' '))}
       onKeyDown={(event) => {
         if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
           event.preventDefault();
@@ -485,7 +468,59 @@ export function TitleField({ doc, editable, fresh = false, onOffered, onEnter }:
         }
       }}
     />
+    <FieldSaveState save={save} editable={editable} showPending={onSavePhase === undefined} message={t('documents.page.titleFailed')} />
+    </>
   );
+}
+
+/** Keep local text until the server acknowledges it; later typing waits for the preceding write. */
+function useDocumentField(value: string, editable: boolean, trim: boolean, write: (text: string) => Promise<unknown>, onSavePhase?: (phase: SavePhase) => void) {
+  const [text, setText] = useState(value);
+  const [acknowledged, setAcknowledged] = useState(value);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const incoming = useRef(value);
+  const latest = useRef(value);
+  const writing = useRef(false);
+  const field = useFittedHeight(text);
+  const normalized = trim ? text.trim() : text;
+  const dirty = normalized !== acknowledged;
+  useLayoutEffect(() => { latest.current = normalized; }, [normalized]);
+  useViewWork(dirty || pending);
+  useEffect(() => {
+    if (incoming.current === value) return;
+    incoming.current = value;
+    if (!dirty && !pending && document.activeElement !== field.current) {
+      setAcknowledged(value);
+      setText(value);
+    }
+  }, [value, dirty, pending, field]);
+  const send = useCallback(() => {
+    if (!editable || writing.current || !dirty || (trim && normalized === '')) return;
+    writing.current = true;
+    setPending(true);
+    setError(null);
+    void write(normalized).then(() => setAcknowledged(normalized)).catch((failure: unknown) => {
+      // Newer typing has its own next save; an earlier failure must not stall it.
+      if (latest.current === normalized) setError(failure);
+    }).finally(() => { writing.current = false; setPending(false); });
+  }, [editable, dirty, trim, normalized, write]);
+  useEffect(() => {
+    if (pending || error !== null || !dirty || !editable) return;
+    const timer = setTimeout(send, RENAME_AFTER_MS);
+    return () => clearTimeout(timer);
+  }, [send, pending, error, dirty, editable]);
+  const phase: SavePhase = error !== null ? 'failed' : dirty || pending ? 'saving' : 'saved';
+  useEffect(() => { onSavePhase?.(phase); }, [onSavePhase, phase]);
+  return { text, field, dirty, pending, error, phase, retry: send,
+    change: (next: string) => { setError(null); setText(next); } };
+}
+
+function FieldSaveState({ save, editable, showPending, message }: { save: ReturnType<typeof useDocumentField>; editable: boolean; showPending: boolean; message: string }) {
+  const { t } = useTranslation();
+  if (save.error !== null) return <ErrorAlert className="mb-2" error={save.error} message={message}
+    action={<Button size="sm" disabled={!editable} pending={save.pending} onClick={save.retry}>{t('common.tryAgain')}</Button>} />;
+  return showPending && save.phase === 'saving' ? <span role="status" className="mb-2 block text-sm text-text-muted">{t('documents.page.saving')}</span> : null;
 }
 
 /** A field as tall as its text: it grows when the text does, and when its column narrows without the text changing.
@@ -526,43 +561,28 @@ function useFittedHeight(text: string): RefObject<HTMLTextAreaElement | null> {
 /** What the document is about, under its title: written in place by whoever may edit it and sent as it rests, as the
  * title is; Enter goes on to the text, Shift+Enter starts another line. Its first line is what lists show beside the
  * title. A reader sees it as written, and nothing where there is none. */
-export function DescriptionField({ doc, editable, onEnter }: { doc: Pick<Document, 'id' | 'description'>; editable: boolean; onEnter: () => void }) {
+export function DescriptionField({ doc, editable, onEnter, onSavePhase }: { doc: Pick<Document, 'id' | 'description'>; editable: boolean; onEnter: () => void; onSavePhase?: (phase: SavePhase) => void }) {
   const { t } = useTranslation();
-  const [text, setText] = useState(doc.description);
-  const sent = useRef(doc.description);
-  const field = useFittedHeight(text);
-  // A description that others changed arrives; one the person is typing stays.
-  useEffect(() => {
-    if (document.activeElement !== field.current && doc.description !== sent.current) {
-      sent.current = doc.description;
-      setText(doc.description);
-    }
-  }, [doc.description, field]);
-  useEffect(() => {
-    if (!editable || text === sent.current) return;
-    const timer = setTimeout(() => {
-      sent.current = text;
-      void describeDocument(doc.id, text).catch(() => {
-        sent.current = doc.description;
-      });
-    }, RENAME_AFTER_MS);
-    return () => clearTimeout(timer);
-  }, [text, editable, doc.id, doc.description]);
-  if (!editable) {
+  const write = useCallback((text: string) => describeDocument(doc.id, text), [doc.id]);
+  const save = useDocumentField(doc.description, editable, false, write, onSavePhase);
+  const { text, field } = save;
+  if (!editable && !save.dirty) {
     return doc.description.trim() === '' ? null : <p data-content-role="document" data-document-description className="mb-2 text-md whitespace-pre-line text-text-muted wrap-anywhere">{doc.description}</p>;
   }
   return (
+    <>
     <textarea
       ref={field}
       data-content-role="document"
       rows={1}
       value={text}
+      readOnly={!editable}
       aria-label={t('documents.page.descriptionLabel')}
       placeholder={t('documents.page.descriptionPlaceholder')}
       maxLength={DESCRIPTION_MAX_CHARS}
       data-document-description
       className="-mx-3 mb-2 block w-[calc(100%+1.5rem)] resize-none overflow-hidden rounded-none border-x-0 border-t-0 border-b border-control-border bg-transparent px-3 py-0.5 text-md text-text-muted placeholder:text-text-subtle"
-      onChange={(event) => setText(event.target.value)}
+      onChange={(event) => save.change(event.target.value)}
       onKeyDown={(event) => {
         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
           event.preventDefault();
@@ -570,6 +590,8 @@ export function DescriptionField({ doc, editable, onEnter }: { doc: Pick<Documen
         }
       }}
     />
+    <FieldSaveState save={save} editable={editable} showPending={onSavePhase === undefined} message={t('documents.page.descriptionFailed')} />
+    </>
   );
 }
 

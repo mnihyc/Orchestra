@@ -1,0 +1,7 @@
+fmt
+clippy
+contracts
+test -p orch-settings-contract --lib
+test -p orch-engine --lib
+test -p orch-engine --test search_projections
+test -p orch-api-core --test search_content

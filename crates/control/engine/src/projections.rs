@@ -32,8 +32,6 @@ use std::{
     sync::OnceLock,
 };
 
-/// The most characters stored for a conversation item, regardless of script.
-pub const SEARCH_TEXT_MAX_CHARS: usize = 20_000;
 /// At most ten MiB of four-byte text per repair batch, before source payloads.
 const REPAIR_BATCH: i64 = 128;
 
@@ -159,22 +157,22 @@ fn raw_item(kind: &str, payload: &Json) -> Option<String> {
     }
 }
 
-fn cut(text: Option<String>) -> Option<String> {
+fn cut(text: Option<String>, chars: usize) -> Option<String> {
     text.filter(|text| !text.is_empty())
-        .map(|text| text.chars().take(SEARCH_TEXT_MAX_CHARS).collect())
+        .map(|text| text.chars().take(chars).collect())
 }
 
 /// The unmasked plain-text fields of an item, for callers whose source was
 /// already masked. Raw calls, command output and hidden reasoning are excluded.
 #[must_use]
 pub fn plain_item(kind: &str, payload: &Json) -> Option<String> {
-    cut(raw_item(kind, payload))
+    raw_item(kind, payload).filter(|text| !text.is_empty())
 }
 
 #[derive(Debug)]
 enum Projector {
     Hidden,
-    Ready(Redactor),
+    Ready { masking: Redactor, chars: usize },
 }
 
 impl Projector {
@@ -217,7 +215,13 @@ impl Projector {
                 }
             }
         }
-        Ok(Self::Ready(Redactor::new(&patterns, values)))
+        let chars: u64 = orch_settings::get(conn, Place::System, keys::SEARCH_TEXT_CHARS)
+            .await?
+            .unwrap_or_default();
+        Ok(Self::Ready {
+            masking: Redactor::new(&patterns, values),
+            chars: usize::try_from(chars).unwrap_or(usize::MAX),
+        })
     }
 
     async fn text(
@@ -227,7 +231,7 @@ impl Projector {
         kind: &str,
         payload: &Json,
     ) -> Result<Option<String>, EngineError> {
-        let Self::Ready(masking) = self else {
+        let Self::Ready { masking, chars } = self else {
             return Ok(None);
         };
         let raw = if kind == "approval" {
@@ -242,7 +246,7 @@ impl Projector {
         } else {
             raw_item(kind, payload)
         };
-        Ok(cut(raw.map(|text| masking.mask(&text))))
+        Ok(cut(raw.map(|text| masking.mask(&text)), *chars))
     }
 }
 
@@ -738,9 +742,10 @@ mod tests {
     #[test]
     fn unicode_is_truncated_by_characters_after_secrets_have_been_masked() {
         let masking = Redactor::new(&[], vec!["sensitive-value".to_owned()]);
-        let text = format!("{}sensitive-value", "界".repeat(SEARCH_TEXT_MAX_CHARS - 2));
-        let projected = cut(Some(masking.mask(&text))).unwrap();
-        assert_eq!(projected.chars().count(), SEARCH_TEXT_MAX_CHARS);
+        let chars = 100;
+        let text = format!("{}sensitive-value", "界".repeat(chars - 2));
+        let projected = cut(Some(masking.mask(&text)), chars).unwrap();
+        assert_eq!(projected.chars().count(), chars);
         assert!(!projected.ends_with("se"));
     }
 }

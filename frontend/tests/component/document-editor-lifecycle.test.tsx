@@ -4,6 +4,7 @@ import { Activity, useCallback, useState, useSyncExternalStore } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Documents from '@/api/documents';
 import { BlockEditor, type EditorApi } from '@/features/documents/Editor';
+import { useDocumentSeen } from '@/features/documents/useDocumentSeen';
 import { DocumentMarksProvider, retireDocumentMarks } from '@/features/documents/marks';
 import { clearViewOpenings, showViewOpening, ViewOpening } from '@/features/workbench/viewOpening';
 import type { Document, DocumentBlock } from '@/generated/api-types';
@@ -11,10 +12,10 @@ import { documentWriter } from '@/realtime/stores/document';
 import { World } from '../doubles/world';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ send: vi.fn<typeof Documents.postOps>(), list: vi.fn<() => Promise<{ items: never[]; next_cursor: null }>>() }));
+const calls = vi.hoisted(() => ({ seen: vi.fn<typeof Documents.markSeen>(), send: vi.fn<typeof Documents.postOps>(), list: vi.fn<() => Promise<{ items: never[]; next_cursor: null }>>() }));
 vi.mock('@/api/documents', async (load) => {
   const actual = await load<typeof Documents>();
-  return { ...actual, postOps: calls.send,
+  return { ...actual, postOps: calls.send, markSeen: calls.seen,
     documentsOfNodeQuery: (...args: Parameters<typeof actual.documentsOfNodeQuery>) => ({
       ...actual.documentsOfNodeQuery(...args), queryFn: calls.list,
     }),
@@ -51,6 +52,7 @@ async function settleHiddenEditor() {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2)); });
 }
 beforeEach(() => {
+  calls.seen.mockReset().mockResolvedValue(undefined);
   ready.mockClear(); calls.send.mockReset(); calls.list.mockReset(); calls.list.mockResolvedValue({ items: [], next_cursor: null }); documentWriter.clear();
   const world = new World(), person = world.people.get('ada');
   const stored = [...world.documents.docs.values()].find((value) => value.title === 'Rollout plan');
@@ -61,7 +63,52 @@ beforeEach(() => {
   block = { ...paragraph, parent_id: null, position: '1', content: [{ type: 'text', text: 'Saved passage' }] };
   documentWriter.reset(doc.id, { document: doc, blocks: [block], discussions: [] }, doc.seq);
 });
-afterEach(() => { cleanup(); retireDocumentMarks(); documentWriter.clear(); clearViewOpenings(); });
+afterEach(() => { cleanup(); retireDocumentMarks(); documentWriter.clear(); clearViewOpenings(); vi.useRealTimers(); vi.restoreAllMocks(); });
+
+function SeenReader({ version, current = doc }: { version?: number | undefined; current?: Document }) {
+  useDocumentSeen(current, version);
+  return null;
+}
+function SeenPane({ version, current = doc }: { version?: number | undefined; current?: Document }) {
+  // Pending work keeps effects mounted even when this retained view has no visible slot.
+  return <ViewOpening view="seen-document" route="seen-route" hold><SeenReader version={version} current={current} /></ViewOpening>;
+}
+
+it('keeps a retained document unread while hidden and starts a fresh visible reading interval on return', async () => {
+  vi.useFakeTimers();
+  let release = showViewOpening('seen-document', 'seen-route');
+  show(<SeenPane />);
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_000); release(); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+  expect(calls.seen).not.toHaveBeenCalled();
+  await act(async () => { release = showViewOpening('seen-document', 'seen-route'); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_999); });
+  expect(calls.seen).not.toHaveBeenCalled();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(calls.seen).toHaveBeenCalledExactlyOnceWith(doc.id, doc.seq);
+  release();
+});
+
+it('cancels reading time in a hidden browser tab and never marks a version or deleted page seen', async () => {
+  vi.useFakeTimers();
+  const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  const view = show(<SeenReader />);
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+  act(() => { visibility.mockReturnValue('hidden'); document.dispatchEvent(new Event('visibilitychange')); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+  expect(calls.seen).not.toHaveBeenCalled();
+  act(() => { visibility.mockReturnValue('visible'); document.dispatchEvent(new Event('visibilitychange')); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_999); });
+  expect(calls.seen).not.toHaveBeenCalled();
+  view.rerender(<SeenReader version={1} />);
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+  view.rerender(<SeenReader current={{ ...doc, deleted: true }} />);
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+  expect(calls.seen).not.toHaveBeenCalled();
+  view.rerender(<SeenReader />);
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(calls.seen).toHaveBeenCalledExactlyOnceWith(doc.id, doc.seq);
+});
 
 it.each([false, true])('restores the real editor after two hidden lifetimes (fixed snapshot: %s)', async (fixed) => {
   const drawn = show(<Pane mode="visible" fixed={fixed} editable={!fixed} />);
