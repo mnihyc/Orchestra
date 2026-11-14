@@ -177,7 +177,7 @@ export function AskComposer({ scope, root, draftKey: givenKey, conversationId, a
           <AttachButton disabled={disabled || pending} onPress={() => input.current?.click()} />
           <IconButton size="sm" label={t('ask.resources')} disabled={disabled || pending} icon={<AtSign aria-hidden />} onClick={() => setReference(true)} />
           <AskModelChoice root={root} value={model} disabled={disabled || pending} onChange={onModel} />
-          <span className="ml-auto flex items-center gap-1"><DraftMark status={saved} />{active ? <Button size="sm" pending={pending} disabled={!canStop && !pending} icon={<Square aria-hidden />} onClick={() => { void runAction({ kind: 'stop', run: stop }); }}>{t('composer.stop')}</Button>
+          <span className="ml-auto flex items-center gap-1"><DraftMark status={saved} threadId={conversationId} storeKey={draftKey} />{active ? <Button size="sm" pending={pending} disabled={!canStop && !pending} icon={<Square aria-hidden />} onClick={() => { void runAction({ kind: 'stop', run: stop }); }}>{t('composer.stop')}</Button>
             : <Button size="sm" variant="primary" pending={pending} disabled={disabled || uploads.blocked || drops.blocked || text.trim() === '' && parts.length === 0} icon={<Send aria-hidden />} onClick={() => void sendNow()}>{t('composer.send')}</Button>}</span>
         </ComposerControlRow>
       </ComposerFrame>

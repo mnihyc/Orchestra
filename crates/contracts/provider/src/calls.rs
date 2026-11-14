@@ -326,6 +326,7 @@ pub fn requested_effort(params: &Json) -> Result<Option<&str>, &'static str> {
         "/reasoning/effort",
         "/reasoning_effort",
         "/output_config/effort",
+        "/generation_config/thinking_level",
     ] {
         let Some(value) = params.pointer(path) else {
             continue;

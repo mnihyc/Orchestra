@@ -47,6 +47,10 @@ export async function openLayoutRoute(page: Page, row: LayoutRoute): Promise<voi
   if (row.fixture === 'thread-options-allowed' || row.fixture === 'thread-options-fixed') {
     await showWorkbenchView(page, 'Parameters');
     const parameters = page.getByTestId('parameters-panel');
+    for (const row of await parameters.locator('[data-provider-interface]').all()) {
+      const heading = row.locator(':scope > details > summary');
+      if (await heading.count() > 0 && await heading.locator('..').getAttribute('open') === null) await heading.click();
+    }
     await expect(parameters.getByRole('combobox', { name: words('webSearch.title'), exact: true })).toHaveValue(words('choiceCatalog.webSearch.live.name'));
     if (row.fixture === 'thread-options-fixed') {
       await expect(parameters.getByRole('textbox', { name: 'Verbosity', exact: true })).toBeDisabled();
@@ -59,6 +63,8 @@ export async function openLayoutRoute(page: Page, row: LayoutRoute): Promise<voi
       await page.getByRole('menuitem', { name: words('models.list.edit'), exact: true }).click();
       const editor = page.getByRole('dialog', { name: words('models.editor.title'), exact: true });
       await expect(editor.getByRole('group', { name: words('webSearch.title'), exact: true }).getByRole('switch', { name: words('webSearch.modeSwitch').replace('{{mode}}', words('choiceCatalog.webSearch.live.name')), exact: true })).toBeChecked();
+      const heading = editor.locator('summary').filter({ hasText: words('providerOptions.schemaTitle') });
+      if (await heading.locator('..').getAttribute('open') === null) await heading.click();
       const raw = editor.locator('[data-option-schema-editor] details').filter({ hasText: words('providerFields.raw') });
       if (await raw.getAttribute('open') === null) await raw.locator('summary').click();
       await expect(editor.getByRole('textbox', { name: words('providerFields.raw'), exact: true })).toHaveValue(/"native"/u);

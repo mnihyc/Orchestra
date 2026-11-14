@@ -8,7 +8,7 @@
  * value, the values hidden for a secret map. A field that declares no help has no line under it.
  */
 import { Plus, Trash2, X } from 'lucide-react';
-import { type ReactNode, useId, useRef } from 'react';
+import { type ReactNode, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { Field as FieldDeclaration } from '@/generated/api-types';
@@ -19,6 +19,7 @@ import { Checkbox } from '@/ui/Checkbox';
 import { cx } from '@/ui/cx';
 import { IconButton } from '@/ui/IconButton';
 import { Input, PasswordInput } from '@/ui/Input';
+import { SavedSecret, SecretField } from '@/ui/SecretField';
 import { DateField } from '@/ui/DateField';
 import { ChoiceLocator } from '@/ui/ChoiceLocator';
 import { Textarea } from '@/ui/Textarea';
@@ -43,6 +44,12 @@ export interface FieldFormProps {
    * the line that would stand under the field. A field that declares no help is given nothing to draw.
    */
   helpFor?: (field: FieldDeclaration) => ReactNode;
+  /** The secret fields that already hold a saved value: each is shown as a field of dots that is set, with Replace, and never as an empty box. */
+  secretsSet?: readonly string[] | undefined;
+  /** The secret fields whose saved value is to be taken away with the next save. */
+  secretsRemoved?: readonly string[] | undefined;
+  /** Remove or keep a saved secret; where this is not given, a saved secret can only be replaced. */
+  onSecretAct?: ((name: string, act: 'remove' | 'keep') => void) | undefined;
 }
 
 const asText = (value: FormValue | undefined): string => (typeof value === 'string' ? value : '');
@@ -206,8 +213,11 @@ function SecretText({
   disabled,
   error,
   help,
+  saved = false,
 }: {
   help?: ReactNode;
+  /** A text is saved already: it shows as dots that are set, until it is replaced. */
+  saved?: boolean;
   field: FieldDeclaration;
   value: string;
   onChange: (value: string) => void;
@@ -218,7 +228,9 @@ function SecretText({
   const locale = useAppearance((state) => state.locale);
   const file = useRef<HTMLInputElement>(null);
   const id = useId();
+  const [replacing, setReplacing] = useState(false);
   const size = new TextEncoder().encode(value).length;
+  if (saved && value === '' && !replacing) return <SavedSecret label={field.label} optional={!field.required} help={help} error={error} disabled={disabled} onReplace={() => setReplacing(true)} />;
   const tooLarge = field.max_bytes !== null && size > field.max_bytes;
   if (value !== '') {
     return (
@@ -281,7 +293,7 @@ function SecretText({
   );
 }
 
-export function FieldForm({ fields, values, onChange, errors = {}, disabled = false, className, helpFor }: FieldFormProps) {
+export function FieldForm({ fields, values, onChange, errors = {}, disabled = false, className, helpFor, secretsSet = [], secretsRemoved = [], onSecretAct }: FieldFormProps) {
   const { t } = useTranslation();
   return (
     <div className={cx('flex flex-col gap-4', className)}>
@@ -332,7 +344,7 @@ export function FieldForm({ fields, values, onChange, errors = {}, disabled = fa
             );
           case 'secret':
             return (
-              <PasswordInput
+              <SecretField
                 key={field.name}
                 label={field.label}
                 optional={!field.required}
@@ -341,8 +353,10 @@ export function FieldForm({ fields, values, onChange, errors = {}, disabled = fa
                 error={error}
                 value={asText(value)}
                 disabled={disabled}
-                onChange={(event) => onChange(field.name, event.target.value)}
-                autoComplete="off"
+                onValueChange={(next) => onChange(field.name, next)}
+                set={secretsSet.includes(field.name)}
+                removed={secretsRemoved.includes(field.name)}
+                {...(onSecretAct === undefined ? {} : { onRemove: () => onSecretAct(field.name, 'remove'), onKeep: () => onSecretAct(field.name, 'keep') })}
               />
             );
           case 'secret_text':
@@ -350,6 +364,7 @@ export function FieldForm({ fields, values, onChange, errors = {}, disabled = fa
               <SecretText
                 key={field.name}
                 help={aside}
+                saved={secretsSet.includes(field.name) && !secretsRemoved.includes(field.name)}
                 field={field}
                 value={asText(value)}
                 disabled={disabled}

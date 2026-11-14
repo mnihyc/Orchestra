@@ -875,6 +875,9 @@ async fn judge_provider(
         at,
     } = *judging;
     let wanted_options = MissingOptions {
+        purposes: Some(vec![
+            orch_access_contract::permissions::ProviderPurpose::Turn,
+        ]),
         services: None,
         models: Some(vec![chosen.model.to_owned()]),
         efforts: chosen.effort.map(|effort| vec![effort.to_owned()]),

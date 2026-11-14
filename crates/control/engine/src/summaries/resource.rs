@@ -236,6 +236,7 @@ pub async fn model_entry(
         orch_provider_contract::calls::requested_effort(&config.params).map_err(|_| refused())?;
     // One entry has to allow the model and the effort together.
     if !usable.allows(&orch_authz::options::Wanted {
+        purpose: Some(orch_access_contract::permissions::ProviderPurpose::Summary),
         model: Some((&config.model_name, &model.groups)),
         effort,
         ..orch_authz::options::Wanted::default()

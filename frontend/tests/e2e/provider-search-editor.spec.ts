@@ -17,10 +17,12 @@ for (const mode of SCREEN_PRESENTATIONS) {
     await openLayoutRoute(page, row);
     const words = mode.locale === 'en' ? english : chinese;
     const dialog = page.getByRole('dialog', { name: words.models.editor.title, exact: true });
+    await expect(dialog.locator('[data-option-schema-editor]')).toBeVisible();
     const raw = dialog.locator('[data-option-schema-editor] details').filter({ hasText: words.providerFields.raw });
-    await expect(raw).toHaveAttribute('open', '');
+    if (await raw.getAttribute('open') === null) await raw.locator('summary').click();
+    await expect(dialog.getByRole('textbox', { name: words.providerFields.raw, exact: true })).toHaveValue(/"native"/u);
     await raw.locator('summary').click();
-    await expect(dialog.getByRole('textbox', { name: words.providerFields.raw, exact: true })).toHaveCount(0);
+    await expect(dialog.getByRole('textbox', { name: words.providerFields.raw, exact: true })).not.toBeVisible();
     await raw.locator('summary').click();
     await expect(dialog.getByRole('textbox', { name: words.providerFields.raw, exact: true })).toHaveValue(/"native"/u);
     await expect(dialog.getByRole('group', { name: words.webSearch.title, exact: true }).getByRole('switch', {

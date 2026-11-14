@@ -1497,12 +1497,44 @@ pub enum EntryMember {
     Models,
     /// The service offerings.
     Services,
+    /// The purposes the work may serve.
+    Purposes,
     /// The reasoning efforts.
     Efforts,
     /// The arrangement types.
     Arrangements,
     /// The places work may run in.
     Where,
+}
+
+/// What a ledger row was spent on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename = "UsagePurpose")]
+pub enum ProviderPurpose {
+    /// A turn of an agent.
+    Turn,
+    /// The summary of a topic.
+    Summary,
+    /// Vectors of an org's text, or of a query, for search by meaning.
+    Embeddings,
+    /// An agent permission review, accounted apart from its generation.
+    Review,
+    /// A native or selected service web search.
+    WebSearch,
+    /// A native or selected service page fetch.
+    PageFetch,
+    /// Image generation by the selected offering.
+    ImageGeneration,
+    /// A question explicitly issued by a person.
+    Ask,
+}
+
+impl std::str::FromStr for ProviderPurpose {
+    type Err = serde_json::Error;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        serde_json::from_value(Json::String(value.to_owned()))
+    }
 }
 
 /// What an entry in the Use row of a provider lets its holder run. A member
@@ -1512,6 +1544,9 @@ pub enum EntryMember {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderUse {
+    /// The purposes the holder may use the provider for; left out, every purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purposes: Option<Vec<ProviderPurpose>>,
     /// The models the holder may run, by name; left out, every enabled model
     /// of the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1638,6 +1673,7 @@ impl Options {
         };
         let parsed = match permission {
             Permission::ProviderUse => Self::ProviderUse(ProviderUse {
+                purposes: reader.words::<ProviderPurpose>("purposes"),
                 models: reader.texts("models"),
                 services: reader.texts("services"),
                 efforts: reader.texts("efforts"),
@@ -1863,6 +1899,7 @@ impl ProviderUse {
     #[must_use]
     pub fn or(&self, other: &Self) -> Self {
         Self {
+            purposes: either(self.purposes.as_ref(), other.purposes.as_ref()),
             models: either(self.models.as_ref(), other.models.as_ref()),
             services: either(self.services.as_ref(), other.services.as_ref()),
             efforts: either(self.efforts.as_ref(), other.efforts.as_ref()),
@@ -1872,6 +1909,14 @@ impl ProviderUse {
             ),
             r#where: either(self.r#where.as_ref(), other.r#where.as_ref()),
         }
+    }
+
+    /// Whether this entry allows work for this purpose.
+    #[must_use]
+    pub fn allows_purpose(&self, purpose: ProviderPurpose) -> bool {
+        self.purposes
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(&purpose))
     }
 
     /// Whether the entry lets its holder run `model`.
@@ -1944,6 +1989,9 @@ impl ProviderUse {
             }
         }
         let mut beyond = Vec::new();
+        if !names_within(self.purposes.as_ref(), other.purposes.as_ref()) {
+            beyond.push(EntryMember::Purposes);
+        }
         if !names_within(self.models.as_ref(), other.models.as_ref()) {
             beyond.push(EntryMember::Models);
         }
@@ -3000,6 +3048,7 @@ mod tests {
     #[test]
     fn several_entries_combine_permissively() {
         let one = ProviderUse {
+            purposes: None,
             models: Some(vec!["a".into()]),
             services: Some(vec!["search".into()]),
             efforts: Some(vec!["low".into()]),
@@ -3007,6 +3056,7 @@ mod tests {
             r#where: None,
         };
         let other = ProviderUse {
+            purposes: None,
             models: Some(vec!["b".into(), "a".into()]),
             services: Some(vec!["fetch".into()]),
             efforts: None,

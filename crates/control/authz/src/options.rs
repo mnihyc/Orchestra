@@ -99,8 +99,10 @@ pub fn of_provider(options: &Options) -> ProviderUse {
 
 /// What a person wants to do through a provider, as far as it is known. What is not known does not
 /// narrow: a question that carries no model asks about the entries that allow the place, and so on.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct Wanted<'a> {
+    /// Actual work purpose; unknown only for a purpose-independent inventory.
+    pub purpose: Option<orch_access_contract::permissions::ProviderPurpose>,
     /// The model, as the provider names it, with the groups of the provider's models it is in.
     pub model: Option<(&'a str, &'a [String])>,
     /// The reasoning effort.
@@ -114,14 +116,30 @@ pub struct Wanted<'a> {
     pub at: Option<&'a Whereabouts>,
 }
 
+impl Default for Wanted<'_> {
+    fn default() -> Self {
+        Self {
+            purpose: Some(orch_access_contract::permissions::ProviderPurpose::Turn),
+            model: None,
+            effort: None,
+            service: None,
+            arrangement: None,
+            at: None,
+        }
+    }
+}
+
 /// Whether one entry's options allow all of what is wanted together. This is the one decider of
 /// whether somebody may do something through a provider: an entry is one grant, so what is
 /// allowed is what a single entry allows, never what several allow member by member.
 #[must_use]
 pub fn entry_allows(options: &ProviderUse, wanted: &Wanted<'_>) -> bool {
     wanted
-        .model
-        .is_none_or(|(model, groups)| allows_model(options, model, groups))
+        .purpose
+        .is_none_or(|purpose| options.allows_purpose(purpose))
+        && wanted
+            .model
+            .is_none_or(|(model, groups)| allows_model(options, model, groups))
         && wanted.service.is_none_or(|(service, groups)| {
             options
                 .services
@@ -546,6 +564,44 @@ mod tests {
             };
             assert!(one_allows(&entries, &wanted), "anywhere");
         }
+    }
+
+    #[test]
+    fn an_ask_only_entry_cannot_be_combined_with_another_models_turn_grant() {
+        use orch_access_contract::permissions::ProviderPurpose;
+        let entries = [
+            provider_use(json!({"models":["small"],"purposes":["ask"]})),
+            provider_use(json!({"models":["big"],"purposes":["turn"]})),
+        ];
+        assert!(one_allows(
+            &entries,
+            &Wanted {
+                purpose: Some(ProviderPurpose::Ask),
+                ..in_model("small")
+            }
+        ));
+        assert!(
+            !one_allows(&entries, &in_model("small")),
+            "a normal turn cannot borrow Ask permission"
+        );
+        assert!(
+            !one_allows(
+                &entries,
+                &Wanted {
+                    purpose: Some(ProviderPurpose::Ask),
+                    ..in_model("big")
+                }
+            ),
+            "the model and purpose belong to one grant"
+        );
+        assert!(one_allows(&entries, &in_model("big")));
+        assert!(entry_allows(
+            &ProviderUse::unlimited(),
+            &Wanted {
+                purpose: Some(ProviderPurpose::Ask),
+                ..in_model("small")
+            }
+        ));
     }
 
     #[test]

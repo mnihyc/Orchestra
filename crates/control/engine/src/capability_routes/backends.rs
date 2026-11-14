@@ -114,6 +114,15 @@ async fn allowed(
             // One entry has to allow the model and the effort together, and an entry that names
             // efforts needs one to be asked for.
             let wanted = orch_authz::options::Wanted {
+                purpose: Some(match capability.0 {
+                    "summary" => orch_access_contract::permissions::ProviderPurpose::Summary,
+                    "web_search" => orch_access_contract::permissions::ProviderPurpose::WebSearch,
+                    "page_fetch" => orch_access_contract::permissions::ProviderPurpose::PageFetch,
+                    "image_generation" => {
+                        orch_access_contract::permissions::ProviderPurpose::ImageGeneration
+                    }
+                    _ => orch_access_contract::permissions::ProviderPurpose::Turn,
+                }),
                 model: Some((&reference.offering, groups)),
                 effort,
                 at: at.as_ref(),
@@ -128,6 +137,15 @@ async fn allowed(
             }
         } else {
             let wanted = orch_authz::options::Wanted {
+                purpose: Some(match capability.0 {
+                    "summary" => orch_access_contract::permissions::ProviderPurpose::Summary,
+                    "web_search" => orch_access_contract::permissions::ProviderPurpose::WebSearch,
+                    "page_fetch" => orch_access_contract::permissions::ProviderPurpose::PageFetch,
+                    "image_generation" => {
+                        orch_access_contract::permissions::ProviderPurpose::ImageGeneration
+                    }
+                    _ => orch_access_contract::permissions::ProviderPurpose::Turn,
+                }),
                 service: Some((&reference.offering, groups)),
                 at: at.as_ref(),
                 ..orch_authz::options::Wanted::default()

@@ -20,6 +20,8 @@ it.each(['en', 'zh-CN'] as const)('edits one request property and round-trips un
   await setLocale(locale);
   const original = { native: { properties: { effort: { const: 'high' } } }, vendor: { custom: 'keep' }, 'openai-responses': { type: 'object', properties: { untouched: { pattern: '^authored$' } } } };
   const view = show(<Editor initial={JSON.stringify(original)} />), user = userEvent.setup();
+  screen.getAllByRole('combobox').forEach((control) => expect(control).not.toBeVisible());
+  await user.click(screen.getByText(i18n.t('providerOptions.schemaTitle'), { selector: 'summary span' }));
   const field = view.container.querySelector('[data-option-field="text.verbosity"]');
   if (!(field instanceof HTMLElement)) throw new Error('The documented verbosity field is visible');
   await user.click(within(field).getByRole('combobox', { name: i18n.t('providerFields.ruleFor', { name: i18n.t('providerFields.fields.verbosity') }) }));
@@ -40,8 +42,29 @@ it.each(['en', 'zh-CN'] as const)('preserves malformed and custom drafts and dis
   expect(screen.getByRole('textbox', { name: i18n.t('providerFields.raw') })).toHaveValue('{unfinished');
   expect(screen.getByRole('alert')).toBeVisible(); expect(changed).not.toHaveBeenCalled();
   cleanup(); show(<Editor disabled initial={JSON.stringify({ 'openai-responses': { properties: { text: { $ref: '#/$defs/text' } } } })} />);
+  await userEvent.click(screen.getByText(i18n.t('providerOptions.schemaTitle'), { selector: 'summary span' }));
   expect(screen.getAllByRole('combobox').every((field) => field.hasAttribute('disabled'))).toBe(true);
   expect(changed).not.toHaveBeenCalled();
+});
+
+it.each(['en', 'zh-CN'] as const)('keeps request rules closed until opened and preserves a filtered draft across closing in %s', async (locale) => {
+  await setLocale(locale);
+  show(<Editor initial={JSON.stringify({ native: { properties: { effort: { const: 'high' } } } })} />);
+  const user = userEvent.setup();
+  const heading = screen.getByText(i18n.t('providerOptions.schemaTitle'), { selector: 'summary span' });
+  expect(screen.getByText(i18n.t('providerOptions.formatsSet', { figure: '1' }))).toBeVisible();
+  screen.getAllByRole('combobox').forEach((control) => expect(control).not.toBeVisible());
+  await user.click(heading);
+  await user.type(screen.getByRole('textbox', { name: i18n.t('providerFields.find') }), 'verbosity');
+  expect(document.querySelectorAll('[data-option-field]')).toHaveLength(1);
+  const rule = screen.getByRole('combobox', { name: i18n.t('providerFields.ruleFor', { name: i18n.t('providerFields.fields.verbosity') }) });
+  await user.click(rule);
+  await user.click(screen.getByRole('option', { name: i18n.t('providerFields.block') }));
+  await user.click(heading);
+  screen.getAllByRole('combobox').forEach((control) => expect(control).not.toBeVisible());
+  await user.click(heading);
+  expect(rule).toHaveTextContent(i18n.t('providerFields.block'));
+  expect(changed).toHaveBeenCalledTimes(1);
 });
 
 it.each(['en', 'zh-CN'] as const)('edits the existing case-insensitive public header map without losing custom headers in %s', async (locale) => {

@@ -1,6 +1,6 @@
 /** A page supplies context; each conversation retains one root org for its entire life. */
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
-import { History, Plus, Bookmark, Download } from 'lucide-react';
+import { History, Plus, Bookmark, Download, ChevronRight } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
@@ -15,9 +15,9 @@ import { Composer } from '@/features/composer/Composer';
 import { allocatedAskDraft, askCreationIntent, askDraftKey, askSendIntent, completeAskSendIntent, newAskDraft, registerAskDraft } from '@/features/composer/askDrafts';
 import { openHelpReading, useHelpOpener } from '@/features/help/open';
 import { AdminModeEnableAction, useAdminMode } from '@/features/access/AdminMode';
-import { openAskConversation } from './open';
+import { closeAsk, openAskConversation } from './open';
 import { applyAskDraftSeed, askSeed } from './seed';
-import { useAskRoot } from './useAskRoot';
+import { askPageRoot, useAskRoot } from './useAskRoot';
 import { KnownNodeChip, TypedChip } from '@/features/people/NamedChip';
 import { contentAddress } from '@/features/workbench/contentAddress';
 import { findTab, setTabTarget } from '@/features/workbench/layout';
@@ -35,7 +35,7 @@ import { IconButton } from '@/ui/IconButton';
 import { StateLine } from '@/ui/StateLine';
 import { UserChip } from '@/ui/UserChip';
 import { HelpHint } from '@/ui/HelpHint';
-import { AskMessageRow } from './Conversation';
+import { AskMessageRow, readOnlyStep } from './Conversation';
 import { AskHistory } from './History';
 import { KeepAsk } from './Keep';
 import { useConversation } from './useConversation';
@@ -63,8 +63,7 @@ function AskPanel({ tab }: Pick<ViewProps, 'tab'>) {
   const page = frame.activeContent === null ? null : findTab(frame.layout, frame.activeContent)?.tab;
   const pageAddress = page === null || page === undefined ? undefined : contentAddress(page) ?? undefined;
   const seed = useStore(askSeed, (state) => state.seed);
-  const selectedOrg = orgs.find((org) => org.id === selected);
-  const pageRoot = path.orgId ?? heading?.path?.find((part) => part.kind === 'org')?.id ?? selectedOrg?.org_id ?? selected ?? orgs.find((org) => org.org_kind === 'personal')?.id ?? null;
+  const pageRoot = askPageRoot({ own: path.orgId, heading: heading?.path?.find((part) => part.kind === 'org')?.id }, selected, orgs);
   const [chosenRoot, chooseRoot] = useAskRoot(pageRoot, seed);
   const [selections, setSelections] = useState<Record<string, string | null>>({});
   const history = useInfiniteQuery({ ...askHistoryQuery(chosenRoot ?? ''), enabled: shown && chosenRoot !== null && tab.of?.conversation === undefined });
@@ -187,7 +186,7 @@ function AskPanel({ tab }: Pick<ViewProps, 'tab'>) {
   const composer = (available: boolean) => <Composer ask={{ scope, draftKey, root: root ?? '', conversationId: currentId, model, active, disabled: disabled || !available,
     canStop: !inspecting && header !== undefined && header.can.stop && !header.inspecting && !stopping, ensure, send,
     onModel: (model) => setModels((before) => ({ ...before, [draftKey]: model })), stop }} />;
-  return <ViewWindow name="ask" tabId={tab.id} title={title} onClose={() => frame.close({ kind: 'tab', tab: tab.id })}
+  return <ViewWindow name="ask" tabId={tab.id} title={title} onClose={closeAsk}
     status={header === undefined ? undefined : <AskStatus conversation={header} stopped={isStopped} />}
     actions={<><HelpHint term={t('ask.title')} what={t('ask.helpWhat')} which={t('ask.helpChoice')} guide={{ article: 'ask', heading: 'open-ask' }} more={{ label: t('ask.guide'), onOpen: () => {
       if (document.querySelector('[data-view-window="ask"][data-floating="true"]') !== null) openHelpReading('ask', 'open-ask');
@@ -202,13 +201,16 @@ function AskPanel({ tab }: Pick<ViewProps, 'tab'>) {
       }} />
       <IconButton size="sm" label={t('ask.keep')} icon={<Bookmark aria-hidden />} blocked={keepReason !== undefined} reason={keepReason}
         onClick={() => { if (keepReason === undefined) setKeepOpen(true); }} /></>}>
-    <div className="flex shrink-0 flex-col gap-1 border-b border-border px-3 py-2 text-sm text-text-muted">
-      <div className="flex min-w-0 flex-wrap items-center gap-2"><span>{t('ask.scope')}</span>{root === null ? <span>{t('ask.noOrg')}</span> : rootName === undefined ? <TypedChip reference={{ kind: 'node', id: root, label: t('ask.organization') }} /> : <KnownNodeChip node={{ kind: 'org', id: root, name: rootName, redacted: false }} />}
-        {context !== undefined && <span className="min-w-0 truncate" title={heading?.title}>{t('ask.pageContext', { name: heading?.title ?? '' })}</span>}</div>
+    <details className="group shrink-0 border-b border-border px-3 py-1 text-sm text-text-muted" data-ask-details>
+      <summary className="focus-inset flex min-w-0 cursor-default list-none items-center gap-2 rounded-md py-1 select-none [&::-webkit-details-marker]:hidden">
+        <ChevronRight className="shrink-0 text-text-subtle transition-transform group-open:rotate-90" size={14} aria-hidden /><span className="shrink-0">{t('ask.scope')}</span>{root === null ? <span>{t('ask.noOrg')}</span> : rootName === undefined ? <TypedChip reference={{ kind: 'node', id: root, label: t('ask.organization') }} /> : <KnownNodeChip node={{ kind: 'org', id: root, name: rootName, redacted: false }} />}
+        {context !== undefined && <span className="min-w-0 truncate" title={heading?.title}>{t('ask.pageContext', { name: heading?.title ?? '' })}</span>}</summary>
+      <div className="flex min-w-0 flex-col gap-1 pb-1 pl-[22px]">
       {header !== undefined && <AskGovernance conversation={header} />}
       {header?.payer_id !== undefined && header.payer_id !== null && <div className="flex items-center gap-2"><span>{t('ask.paidBy')}</span>{me?.id === header.payer_id ? <UserChip user={me} size={24} /> : <span>{t(header.payer_id === header.user_id ? 'ask.conversationOwner' : 'ask.settingOwner')}</span>}</div>}
       {header === undefined && <span>{t('ask.readOnlyTools')}</span>}
-    </div>
+      </div>
+    </details>
     <div ref={transcript} className="min-h-0 flex-1 overflow-y-auto px-3" data-ask-transcript aria-label={t('ask.conversation')}
       onScroll={(event) => { const node = event.currentTarget; following.current = node.scrollHeight - node.clientHeight - node.scrollTop <= 32; }}>
       {!admitted && <StateLine title={t('ask.inspectEnable')} action={<AdminModeEnableAction />} />}
@@ -216,6 +218,8 @@ function AskPanel({ tab }: Pick<ViewProps, 'tab'>) {
         <AskEmptyState loading={history.isLoading || currentId !== null && conversation.isLoading} error={error} deleted={conversation.deleted} retry={() => { void history.refetch(); void conversation.refetch(); }} fresh={fresh} /> : <>
           {snapshot.previous_cursor !== null && <Button size="sm" pending={loadingOlder} onClick={() => void older()}>{t('ask.older')}</Button>}
           <ol>{snapshot.messages.map((message, index) => {
+            // A step that only read sources is not an answer: the answer after it carries the same sources.
+            if (readOnlyStep(message) && snapshot.messages[index + 1]?.role === 'assistant') return null;
             const input = snapshot.messages.slice(0, index).findLast((one) => one.role === 'user');
             return <AskMessageRow key={message.id} message={message} threadId={snapshot.conversation.id} {...(me !== undefined && me.id === header?.user_id ? { owner: me } : {})} canRetry={header?.can.message === true && !disabled && !active && !retrying && input !== undefined}
               onRetry={() => { if (input !== undefined) retryAnswer(message.id, input.content); }} />;

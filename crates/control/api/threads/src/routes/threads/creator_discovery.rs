@@ -310,6 +310,7 @@ async fn checked(
             .provider_use(
                 conn,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person: caller.user(),
                     node: topic,
                     provider,

@@ -5,6 +5,7 @@ import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 import type { BindingOptions } from '../../src/generated/api-types';
 import { ACME, scenario } from './support';
 import { signInScreenRoute } from '../../e2e/layout-fixtures';
+import { dropdownShown, expectRoomKept } from './dropdown-geometry';
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440] as const) {
   test(`resource access groups ${locale}/${theme}/${width}`, async ({ page }, info) => {
@@ -23,14 +24,27 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
         { ...original, environment: { ...original.environment, id: '00000000-0000-4000-8000-000000000092', name: 'Requestable environment' }, usable: false, reason: 'environment_use_required', is_default: false, used: 'topic' as const },
         { ...original, environment: { ...original.environment, id: '00000000-0000-4000-8000-000000000093', name: 'Blocked environment' }, usable: false, reason: 'disabled', is_default: false, used: 'topic' as const },
       ];
-      await route.fulfill({ response, json: { ...offered, environments } });
+      const home = { id: '00000000-0000-4000-8000-000000000094', kind: 'project' as const, name: 'Regional team · shared source workspace', redacted: false };
+      const otherHome = { ...home, id: '00000000-0000-4000-8000-000000000095', name: 'Other team · independent workspace' };
+      const longRows = Array.from({ length: 24 }, (_, at) => ({ ...original,
+        environment: { ...original.environment, id: `00000000-0000-4000-8000-${String(at + 100).padStart(12, '0')}`, name: `Regional environment ${at} · shared source workspace with a long directory name` },
+        usable: true, reason: null, is_default: false, used: 'topic' as const,
+      }));
+      environments.push(...longRows);
+      const grouped = environments.map((entry) => ({
+        ...entry,
+        home: entry.usable ? home : otherHome, home_path: [entry.usable ? home : otherHome],
+        origin_machine: { id: '00000000-0000-4000-8000-000000000096', name: 'Shared host · regional source workspace machine' }, availability: [],
+      }));
+      await route.fulfill({ response, json: { ...offered, environments: grouped } });
     });
     await page.goto(`/topic/${ACME.fixLogin}`);
     const starter = page.locator('[data-quick-start]');
     await starter.getByRole('textbox').fill('Keep this first message');
     await starter.getByRole('button', { name: words.start.quick.change, exact: true }).click();
     const form = page.getByRole('dialog', { name: words.start.title.replace('{{parent}}', 'Fix login'), exact: true });
-    await form.getByRole('combobox', { name: words.start.where.title, exact: true }).click();
+    const field = form.getByRole('combobox', { name: words.start.where.title, exact: true });
+    await field.click();
     const canUse = page.getByRole('group', { name: words.start.where.canUse, exact: true });
     const ask = page.getByRole('group', { name: words.start.where.askAccess, exact: true });
     await expect(canUse).toBeVisible();
@@ -39,9 +53,19 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await expect(ask.getByRole('option', { name: 'Requestable environment', exact: true })).toBeEnabled();
     await expect(page.getByRole('option', { name: 'Blocked environment', exact: true })).toHaveAttribute('aria-disabled', 'true');
     await expect(ask.getByRole('option', { name: 'Blocked environment', exact: true })).toHaveCount(0);
+    await expectRoomKept(field, `${locale}/${theme}/${width} grouped environments`);
+    await field.press('ArrowDown'); await field.press('End');
+    expect((await dropdownShown(field)).active).toBe(true);
+    await field.press('Home');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await info.attach(`resource-access-${locale}-${theme}-${width}`, { body: await page.screenshot(), contentType: 'image/png' });
     // EN: New thread → Where → Can use / Ask for access, with a refused row kept outside the request group.
     // 中文：新建线程 → 运行位置 → 可以使用／申请使用，确认禁用选项未混入申请分组。
+    await field.fill('Regional environment 17');
+    await expect(page.getByRole('option', { name: /^Regional environment 17 /u })).toBeVisible();
+    await expect(page.getByRole('option')).toHaveCount(1);
+    await expectRoomKept(field, `${locale}/${theme}/${width} filtered environments`);
+    await info.attach(`resource-filtered-${locale}-${theme}-${width}`, { body: await page.screenshot(), contentType: 'image/png' });
     await page.keyboard.press('Escape');
     await form.getByRole('button', { name: words.common.cancel, exact: true }).click();
     await expect(starter.getByRole('textbox')).toHaveValue('Keep this first message');

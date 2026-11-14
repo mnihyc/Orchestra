@@ -749,7 +749,7 @@ async fn machine_row(db: &Db, machine: Id, name: &str, roles: &[String]) {
             platform_os: "linux",
             platform_arch: "x86_64",
             connector_version: "0.1.0",
-            protocol_version: 1,
+            protocol_version: i32::try_from(orch_link_contract::version::PROTOCOL_VERSION).unwrap(),
             cert_serial: &serial,
             cert_fingerprint: &fingerprint,
             cert_not_after: Utc::now() + chrono::Duration::days(300),

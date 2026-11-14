@@ -9,12 +9,13 @@ use orch_api_core::registry::Registry;
 use std::collections::BTreeSet;
 
 /// The requests of the threads part that this part serves, by the step of the work they came in.
-const SERVED: [&str; 67] = [
+const SERVED: [&str; 68] = [
     "ThreadCreate",
     "ThreadSyncGet",
     "ThreadOpeningGet",
     "ThreadItemList",
     "ThreadItemGet",
+    "ThreadItemRawGet",
     "ThreadItemOutputGet",
     "ThreadOutlineGet",
     "ThreadSegmentList",

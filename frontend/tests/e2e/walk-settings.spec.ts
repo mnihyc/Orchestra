@@ -52,7 +52,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     });
     // The backend deciding case exercises native scheduling/admission; here the browser consumes
     // exactly its public four-field projection, without installing a full topic snapshot.
-    await page.route(`**/threads/${ACME.mainThread}/opening?**`, async (route) => {
+    await page.route(`**/threads/${ACME.mainThread}/opening**`, async (route) => {
       await route.fulfill({ status: 200, json: { ...native, pending_agent_schedules: { status: 'ready', data: {
         seq, items: cancelled ? [] : [{ id: schedule, name: 'Check the CI run', state: 'active', next_run_at: '2030-01-01T21:30:00Z' }],
       } } } });
@@ -66,7 +66,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await expect(pending.getByText('Check the CI run', { exact: true })).toBeVisible();
     await expect(pending.getByText(words.agentSchedules.continueAt, { exact: true })).toBeVisible();
     await page.waitForLoadState('networkidle');
-    expect(reads.filter((path) => path.startsWith(`/api/v1/threads/${ACME.mainThread}/opening?`))).toHaveLength(1);
+    expect(reads.filter((path) => path.startsWith(`/api/v1/threads/${ACME.mainThread}/opening`))).toHaveLength(1);
     expect(reads.filter((path) => path.startsWith(`/api/v1/topics/${ACME.fixLogin}/sync`))).toEqual([]);
     expect(traffic.length, traffic.join('\n')).toBeLessThanOrEqual(8);
     await info.attach('native-pending-continuation', { body: await page.screenshot(), contentType: 'image/png' });
@@ -130,7 +130,6 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await page.goto(`/topic/${ACME.fixLogin}`);
     await page.locator('[data-quick-start]').getByRole('button', { name: words.start.quick.change, exact: true }).click();
     const dialog = page.getByRole('dialog', { name: words.start.title.replace('{{parent}}', 'Fix login'), exact: true });
-    await dialog.getByRole('radio', { name: words.start.where.useExisting, exact: true }).click();
     await dialog.getByRole('combobox', { name: words.start.where.title, exact: true }).click();
     const main = page.getByRole('option', { name: 'Failed Main', exact: true });
     await expect(main).toHaveAttribute('aria-disabled', 'true');
@@ -195,16 +194,16 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
       await expect(start).toBeEnabled();
       await composer.getByRole('button', { name: words.start.quick.change, exact: true }).click();
       const dialog = page.getByRole('dialog', { name: words.start.title.replace('{{parent}}', 'Fix login'), exact: true });
-      await expect(dialog.getByRole('combobox', { name: words.start.agent.title, exact: true })).toHaveValue('Codex');
+      await expect(dialog.getByRole('button', { name: new RegExp(`^${words.composer.row.agentName}`) })).toContainText('Codex');
       expect(reads).toHaveLength(1);
       await dialog.getByRole('button', { name: words.start.options.title, exact: true }).click();
       const draft = dialog.getByRole('textbox', { name: words.start.message.title, exact: true });
       await expect(draft).toHaveValue('Keep the first paint and this draft');
-      await dialog.getByRole('combobox', { name: words.start.where.moreTitle, exact: true }).click();
+      await dialog.getByRole('combobox', { name: words.start.where.title, exact: true }).click();
       await page.getByRole('option', { name: 'Sandbox', exact: true }).click();
       await expect.poll(() => reads.length).toBe(2);
       expect(reads[1]?.searchParams.get('environment_id')).toBe(RUNS_ON.sandbox);
-      await expect(dialog.getByRole('combobox', { name: words.start.agent.title, exact: true })).toHaveValue('Codex');
+      await expect(dialog.getByRole('button', { name: new RegExp(`^${words.composer.row.agentName}`) })).toContainText('Codex');
       await expect(draft).toHaveValue('Keep the first paint and this draft');
       await expect(dialog.getByRole('button', { name: words.start.create, exact: true })).toBeDisabled();
       await info.attach('topic-binding-change', { body: await page.screenshot(), contentType: 'image/png' });
@@ -274,12 +273,12 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await page.locator('[data-quick-start]').getByRole('button', { name: words.start.quick.change, exact: true }).click();
     const dialog = page.getByRole('dialog', { name: words.start.title.replace('{{parent}}', 'Fix login'), exact: true });
     await expect(dialog.getByRole('combobox', { name: words.start.where.title, exact: true })).toHaveValue('Workspace');
-    const agent = dialog.getByRole('combobox', { name: words.start.agent.title, exact: true });
-    await expect(agent).toHaveValue('Codex');
+    const agent = dialog.getByRole('button', { name: new RegExp(`^${words.composer.row.agentName}`) });
+    await expect(agent).toContainText('Codex');
     await agent.click();
-    await expect(page.getByRole('option', { name: 'Codex', exact: true })).not.toHaveAttribute('aria-disabled', 'true');
+    await expect(page.getByRole('menuitemradio', { name: /^Codex/ })).toBeEnabled();
     await page.keyboard.press('Escape');
-    await expect(agent).toHaveValue('Codex');
+    await expect(agent).toContainText('Codex');
     expect(judged).toContain(RUNS_ON.workspace);
     await info.attach('reported-agent-selected', { body: await page.screenshot(), contentType: 'image/png' });
     await dialog.getByRole('button', { name: words.start.create, exact: true }).click();

@@ -7,6 +7,8 @@ CREATE TABLE input_schedules (
     name text NOT NULL,
     target jsonb NOT NULL,
     content jsonb NOT NULL,
+    plan boolean NOT NULL,
+    delivery text NOT NULL,
     native_action jsonb,
     definition_authority jsonb,
     timing jsonb NOT NULL,
@@ -18,6 +20,7 @@ CREATE TABLE input_schedules (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone,
     CONSTRAINT input_schedules_name_check CHECK (((char_length(name) >= 1) AND (char_length(name) <= 80))),
+    CONSTRAINT input_schedules_delivery_check CHECK (delivery IN ('queue','steer','interrupt')),
     CONSTRAINT input_schedules_state_check CHECK ((state = ANY (ARRAY['active'::text, 'paused'::text, 'finished'::text, 'deleted'::text]))),
     CONSTRAINT input_schedules_pkey PRIMARY KEY (id),
     CONSTRAINT input_schedules_author_id_fkey FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -515,6 +518,9 @@ CREATE TABLE threads (
     blocked_reason text,
     blocked_detail text,
     starting_step text,
+    starting_step_at timestamp with time zone,
+    starting_command text,
+    starting_behind text,
     agent_id uuid,
     provider_id uuid,
     arrangement text,
@@ -547,7 +553,8 @@ CREATE TABLE threads (
     CONSTRAINT threads_execution_revision_check CHECK ((execution_revision > 0)),
     CONSTRAINT threads_pending_notice_preview_bounded CHECK (((jsonb_typeof(pending_notices) = 'array'::text) AND (jsonb_array_length(pending_notices) <= 64))),
     CONSTRAINT threads_side_reading_check CHECK ((side_reading = ANY (ARRAY['read_only'::text, 'approval_gated'::text, 'no_tools'::text]))),
-    CONSTRAINT threads_starting_step_check CHECK ((starting_step = ANY (ARRAY['environment'::text, 'source'::text, 'provider'::text, 'harness'::text, 'credential'::text, 'session'::text, 'files'::text, 'turn'::text]))),
+    CONSTRAINT threads_starting_step_check CHECK ((starting_step = ANY (ARRAY['environment'::text, 'source'::text, 'provider'::text, 'harness'::text, 'credential'::text, 'session'::text, 'recording'::text, 'files'::text, 'turn'::text]))),
+    CONSTRAINT threads_starting_work_check CHECK (starting_step IS NOT NULL OR (starting_step_at IS NULL AND starting_command IS NULL AND starting_behind IS NULL)),
     CONSTRAINT threads_state_check CHECK ((state = ANY (ARRAY['idle'::text, 'starting'::text, 'running'::text, 'waiting_approval'::text, 'blocked'::text]))),
     CONSTRAINT threads_pkey PRIMARY KEY (node_id),
     CONSTRAINT threads_agent_fk FOREIGN KEY (agent_id) REFERENCES agents(id),
@@ -558,6 +565,23 @@ CREATE TABLE threads (
     CONSTRAINT threads_side_of_fkey FOREIGN KEY (side_of) REFERENCES threads(node_id) ON DELETE CASCADE,
     CONSTRAINT threads_topic_id_fkey FOREIGN KEY (topic_id) REFERENCES nodes(id)
 );
+-- When a starting thread's step began, kept by the database for every writer: a step that changes starts its
+-- clock again and forgets the command and the wait noted for the step before; no step, nothing noted.
+CREATE FUNCTION orch_thread_starting_step() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.starting_step IS NULL THEN
+        NEW.starting_step_at := NULL;
+        NEW.starting_command := NULL;
+        NEW.starting_behind := NULL;
+    ELSIF OLD.starting_step IS DISTINCT FROM NEW.starting_step THEN
+        NEW.starting_step_at := now();
+        NEW.starting_command := NULL;
+        NEW.starting_behind := NULL;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER threads_starting_step BEFORE UPDATE OF starting_step ON threads FOR EACH ROW EXECUTE FUNCTION orch_thread_starting_step();
 
 CREATE INDEX thread_display_topic_page_idx ON threads USING btree (topic_id, node_id);
 
@@ -809,11 +833,10 @@ CREATE TABLE thread_goal_reports (
     outcome text,
     checked_by text,
     reason text,
-    attempts integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     decided_at timestamp with time zone,
-    CONSTRAINT thread_goal_reports_checked_by_check CHECK ((checked_by = ANY (ARRAY['helper'::text, 'agent'::text]))),
-    CONSTRAINT thread_goal_reports_outcome_check CHECK ((outcome = ANY (ARRAY['noted'::text, 'met'::text, 'not_yet'::text, 'blocked'::text]))),
+    CONSTRAINT thread_goal_reports_checked_by_check CHECK ((checked_by = ANY (ARRAY['helper'::text, 'person'::text]))),
+    CONSTRAINT thread_goal_reports_outcome_check CHECK ((outcome = ANY (ARRAY['noted'::text, 'met'::text, 'not_yet'::text, 'blocked'::text, 'unchecked'::text]))),
     CONSTRAINT thread_goal_reports_status_check CHECK ((status = ANY (ARRAY['working'::text, 'met'::text, 'blocked'::text]))),
     CONSTRAINT thread_goal_reports_pkey PRIMARY KEY (id),
     CONSTRAINT thread_goal_reports_thread_id_fkey FOREIGN KEY (thread_id) REFERENCES threads(node_id) ON DELETE CASCADE
@@ -856,7 +879,7 @@ CREATE TABLE thread_goals (
     CONSTRAINT thread_goals_max_minutes_check CHECK (((max_minutes IS NULL) OR (max_minutes >= 0))),
     CONSTRAINT thread_goals_max_turns_check CHECK (((max_turns IS NULL) OR (max_turns >= 0))),
     CONSTRAINT thread_goals_objective_check CHECK ((btrim(objective) <> ''::text)),
-    CONSTRAINT thread_goals_reason_check CHECK ((reason = ANY (ARRAY['person'::text, 'interrupted'::text, 'blocked'::text, 'failed'::text, 'turns'::text, 'minutes'::text, 'credits'::text, 'access'::text, 'archived'::text]))),
+    CONSTRAINT thread_goals_reason_check CHECK ((reason = ANY (ARRAY['person'::text, 'interrupted'::text, 'blocked'::text, 'failed'::text, 'turns'::text, 'minutes'::text, 'credits'::text, 'access'::text, 'archived'::text, 'unchecked'::text]))),
     CONSTRAINT thread_goals_retry_attempts_check CHECK ((retry_attempts >= 0)),
     CONSTRAINT thread_goals_status_check CHECK ((status = ANY (ARRAY['active'::text, 'paused'::text, 'met'::text, 'stopped'::text, 'cleared'::text]))),
     CONSTRAINT thread_goals_pkey PRIMARY KEY (id),
@@ -1339,6 +1362,7 @@ CREATE TABLE turns (
     end_manifest_blob bytea,
     files_work_pending boolean DEFAULT false NOT NULL,
     files_end_manifest jsonb,
+    files_changed integer CHECK (files_changed >= 0),
     files_end_due boolean DEFAULT false NOT NULL,
     model text NOT NULL,
     effort text,
