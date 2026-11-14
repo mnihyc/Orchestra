@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-api-core --lib
+test -p orch-api-core --test interactive_ticket_scopes --test api_surface_tickets

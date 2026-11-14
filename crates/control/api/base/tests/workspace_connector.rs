@@ -923,6 +923,7 @@ async fn recording_and_restore(root_alias: bool) {
                 environment_id: site.environment,
                 snapshot_id: snapshot,
                 directory: "web".into(),
+                wait_for_indexing: true,
                 kind: RecordKind::Turn,
                 record_days: days,
                 max_bytes,
@@ -1001,6 +1002,8 @@ async fn recording_and_restore(root_alias: bool) {
     // The original native result is good, but old server validation could freeze only a
     // generic unavailable fallback. Reading it must revalidate that original, never recapture.
     let fallback = FsRecordResult {
+        indexing: None,
+
         state: RecordState::Unavailable,
         tree_ref: None,
         repository_head: None,
@@ -1172,7 +1175,7 @@ async fn an_empty_full_index_reaches_the_server_and_file_name_search_answers_an_
         .await
         .ok();
     assert!(
-        matches!(answer, EnvironmentFileSearchReply::Names(entries) if entries.is_empty()),
+        matches!(answer, EnvironmentFileSearchReply::Names(page) if page.entries.is_empty()),
         "an indexed empty tree answers no matches, not a missing-list failure"
     );
 }
