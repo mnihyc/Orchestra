@@ -166,6 +166,70 @@ pub async fn find(
     Ok(pick(&notifier.describe(), existing, name))
 }
 
+/// Makes the system's browser channel in the caller's transaction once push is
+/// available and an administrator exists. Existing choices, including a disabled
+/// channel, stay as saved. This makes no route, subscription or delivery.
+/// The same channel lock is used by ordinary channel creation.
+pub async fn ensure_system_push(
+    conn: &mut Conn,
+    created_by: Id,
+    now: DateTime<Utc>,
+) -> Result<Option<ChannelRow>, DbError> {
+    rows::lock_system_channels(conn, "push").await?;
+    if rows::system_channel(conn, "push").await?.is_some() {
+        return Ok(None);
+    }
+    let channel = rows::insert_channel(
+        conn,
+        &NewChannel {
+            id: orch_types::new_id(),
+            org_id: None,
+            user_id: None,
+            kind: "push",
+            name: "Web Push",
+            config: &json!({}),
+            templates: &json!({}),
+            enabled: true,
+            created_by,
+            at: now,
+        },
+    )
+    .await?;
+    let action = AuditAction::ChannelCreated;
+    let mut entry = Entry::new(
+        Actor::System,
+        action.as_str(),
+        action.object_kind().unwrap_or("channel"),
+        Some(channel.id),
+        "the system's browser notification channel was set up",
+    );
+    entry.history = action.is_history_line();
+    entry.details = json!({ "kind": "push", "automatic": true });
+    audit::append(conn, &entry, &Origin::default(), now).await?;
+    Ok(Some(channel))
+}
+
+/// Provisions browser notifications at service start when the deployment's
+/// push notifier is usable. First setup provisions in its own transaction
+/// instead, since no administrator exists when a fresh service starts.
+pub async fn ensure_default_push(
+    db: &Db,
+    notifiers: &Notifiers,
+    now: DateTime<Utc>,
+) -> Result<Option<ChannelRow>, DbError> {
+    if notifiers.get("push").is_none() {
+        return Ok(None);
+    }
+    let mut tx = db.begin().await?;
+    orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+    let Some(created_by) = orch_db::queries::identity::first_system_admin(&mut tx).await? else {
+        return Ok(None);
+    };
+    let made = ensure_system_push(&mut tx, created_by, now).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(made)
+}
+
 /// Puts a channel of the system: looks at the fields, then makes the channel or
 /// replaces the one there is, with its secrets, and writes its line in the
 /// audit trail, in one transaction. The look at the far side is made before

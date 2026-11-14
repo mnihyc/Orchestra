@@ -63,7 +63,7 @@ const ORG_SECTIONS = [
   ['audit', 'channels', 'destinations'],
 ] as const;
 const SECTION_NAMES: Readonly<Record<string, string>> = { general: 'General', departments: 'Departments', members: 'Members', groups: 'Groups',
-  roles: 'Roles and access', defaults: 'Defaults', tags: 'Tags', 'service-accounts': 'Service accounts', audit: 'Audit', channels: 'Outside Orch', destinations: 'Outside Orch' };
+  roles: 'Roles and access', defaults: 'Defaults', tags: 'Tags', 'service-accounts': 'Service accounts', audit: 'Audit', channels: 'Email and channels', destinations: 'Email and channels' };
 
 /** The current section is the visible locator value in a narrow pane and a current link in a wide pane. */
 async function expectCurrentSection(page: Page, place: string, section: string): Promise<void> {

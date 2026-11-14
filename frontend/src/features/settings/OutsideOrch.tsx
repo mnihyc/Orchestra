@@ -8,7 +8,7 @@ import { Section } from '@/shell/Page';
 
 export function OutsideOrch({ node }: { node: Org | Project | Topic }) {
   const { t } = useTranslation();
-  return <Section id="outside-orch" title={t('day100.names.outside')}>
+  return <Section id="outside-orch" title={t(node.kind === 'org' ? 'settings.org.sectionNames.channels' : 'day100.names.outside')}>
     {node.kind === 'org' && <Channels org={node} level={3} />}
     <Destinations node={node} level={3} />
   </Section>;
