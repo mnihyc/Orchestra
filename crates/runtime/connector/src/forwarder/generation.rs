@@ -7,6 +7,11 @@ use orch_link_contract::commands::{
 use orch_model_contract::generation::{GenerationDelta, GenerationOutput};
 use serde_json::Value as Json;
 
+/// A captured native result larger than this is kept as content, uploaded for its command, and the answer
+/// names it, so that the answer stays small in the journal and in the system's rows. It is a choice of where
+/// the result is kept; what a message may be is the link's to say.
+const INLINE_NATIVE_RESULT_BYTES: usize = 128 * 1024;
+
 pub(super) struct OwnReply {
     pub status: StatusCode,
     pub headers: HeaderMap,
@@ -163,7 +168,7 @@ impl Forwarder {
                     "the captured native result could not be encoded",
                 ))
             })?;
-            if bytes.len() > orch_link_contract::version::MAX_FRAME_BYTES as usize / 2 {
+            if bytes.len() > INLINE_NATIVE_RESULT_BYTES {
                 let directory = self.services.content.directory_of(command_id);
                 tokio::fs::create_dir_all(&directory).await.map_err(|_| {
                     failed_capture(CommandError::new(
@@ -200,38 +205,6 @@ impl Forwarder {
             timing,
             request_ref: usage.request_ref,
         };
-        let encoded_failure = |code, detail: &str| {
-            measured_failure(
-                CommandError::new(code, detail),
-                request,
-                answer.usage,
-                &answer.timing,
-                answer.request_ref.as_deref(),
-            )
-        };
-        let frame = orch_link_contract::frames::Frame::from(
-            orch_link_contract::commands::CmdRes::ok(command_id, &answer).map_err(|_| {
-                encoded_failure(
-                    ErrorCode::Internal,
-                    "generation result could not be encoded",
-                )
-            })?,
-        );
-        if serde_json::to_vec(&frame)
-            .map_err(|_| {
-                encoded_failure(
-                    ErrorCode::Internal,
-                    "generation result could not be encoded",
-                )
-            })?
-            .len()
-            > orch_link_contract::version::MAX_FRAME_BYTES as usize
-        {
-            return Err(encoded_failure(
-                ErrorCode::TooLarge,
-                "the generation result exceeds the machine reply budget",
-            ));
-        }
         Ok(answer)
     }
 
@@ -338,7 +311,6 @@ impl Forwarder {
         let mut received = 0usize;
         let mut offset = 0i64;
         let mut first_output = None;
-        let mut visible_bytes = 0usize;
         while let Some(frame) = tokio::time::timeout(IDLE_TIMEOUT, body.frame())
             .await
             .map_err(|_| UpstreamError::TimedOut("continue generation"))?
@@ -366,12 +338,6 @@ impl Forwarder {
                 .map_err(|_| UpstreamError::Http("the generation stream was invalid".into()))?
             {
                 let GenerationDelta::Text { text } = delta;
-                visible_bytes = visible_bytes.saturating_add(text.len());
-                if visible_bytes > orch_link_contract::version::MAX_FRAME_BYTES as usize / 2 {
-                    return Err(UpstreamError::Http(
-                        "generation text exceeds the machine reply budget".into(),
-                    ));
-                }
                 if text.is_empty() {
                     continue;
                 }
@@ -650,11 +616,6 @@ fn read_generation(body: &[u8], capture: bool) -> Result<GenerationOutput, &'sta
         serde_json::from_slice(body).map_err(|_| "the generation step could not be read")?;
     if !capture {
         output.native_result = serde_json::Value::Null;
-        let normalized =
-            serde_json::to_vec(&output).map_err(|_| "the generation step could not be encoded")?;
-        if normalized.len() > orch_link_contract::version::MAX_FRAME_BYTES as usize / 2 {
-            return Err("the generated step exceeds the machine reply budget");
-        }
     }
     Ok(output)
 }
@@ -828,10 +789,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uncaptured_native_metadata_cannot_reduce_the_existing_dialogue_reply_allowance() {
-        let limit = orch_link_contract::version::MAX_FRAME_BYTES as usize / 2;
+    fn an_uncaptured_native_result_is_dropped_and_a_large_reply_is_not_refused_for_its_size() {
+        let size = 2 * INLINE_NATIVE_RESULT_BYTES;
         let mut output = GenerationOutput {
-            native_result: serde_json::json!({"response":{"native_data":"x".repeat(limit+1)},"frames":[]}),
+            native_result: serde_json::json!({"response":{"native_data":"x".repeat(size)},"frames":[]}),
             message: orch_model_contract::generation::GenerationMessage {
                 role: orch_model_contract::generation::GenerationRole::Assistant,
                 content: vec![orch_model_contract::generation::GenerationPart::Text {
@@ -842,7 +803,7 @@ mod tests {
             stop: orch_model_contract::generation::GenerationStop::Complete,
         };
         let bytes = serde_json::to_vec(&output).unwrap();
-        assert!(bytes.len() > limit);
+        assert!(bytes.len() > size);
         let ordinary = read_generation(&bytes, false).unwrap();
         assert!(ordinary.native_result.is_null());
         assert_eq!(ordinary.message, output.message);
@@ -850,13 +811,12 @@ mod tests {
             read_generation(&bytes, true).unwrap().native_result,
             output.native_result
         );
+        // What the model wrote is carried however long it is: the link states how large a message may be.
         output.message.content = vec![orch_model_contract::generation::GenerationPart::Text {
-            text: "x".repeat(limit + 1),
+            text: "x".repeat(size + 1),
         }];
-        assert!(
-            read_generation(&serde_json::to_vec(&output).unwrap(), false).is_err(),
-            "ordinary output still keeps its actual prior bound"
-        );
+        let long = read_generation(&serde_json::to_vec(&output).unwrap(), false).unwrap();
+        assert_eq!(long.message, output.message);
     }
 
     #[test]
@@ -986,6 +946,28 @@ mod tests {
             .is_err(),
             "a closed model ceiling still refuses before any HTTP call"
         );
+    }
+
+    #[test]
+    fn a_models_live_web_search_cannot_join_the_tools_a_caller_declared_but_a_disabled_one_leaves_them()
+     {
+        let protocol = orch_protocol_openai_responses::OpenAiResponses;
+        let mut request = request();
+        request.protocol = "openai-responses".into();
+        request.model_parameters.web_search = Some(vec!["live".into()]);
+        request.model_parameters.default_web_search = Some("live".into());
+        request.params = Some(json!({"web_search":{"mode":"live"}}));
+        assert!(
+            build_generation(&protocol, &EndpointOptions::default(), &request).is_err(),
+            "a selected hosted search would add a tool the caller did not declare"
+        );
+        request.params = Some(json!({"web_search":{"mode":"disabled"}}));
+        let (_, _, body) =
+            build_generation(&protocol, &EndpointOptions::default(), &request).unwrap();
+        let body: Json = serde_json::from_slice(&body).unwrap();
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1, "only the declared read tool: {tools:?}");
+        assert!(tools.iter().all(|tool| tool["type"] != "web_search"));
     }
 
     #[test]
