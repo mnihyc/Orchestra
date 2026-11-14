@@ -24,7 +24,8 @@ import { nodeQuery } from '@/api/nodes';
 import { agentsQuery, providerModelsQuery, providersQuery } from '@/api/resources';
 import { Blockers } from '@/features/change/Blockers';
 import { Frame, type View } from '@/features/change/Frame';
-import { effortLabel, modelLabel } from '@/features/change/modelLabel';
+import { modelLabel } from '@/features/change/modelLabel';
+import { effortDisplayName } from '@/features/models/names';
 import { addedResourcesOf, keptResourcesOf, rangeWords, removedResourcesOf } from '@/features/change/plan';
 import { PlanLists } from '@/features/change/Lists';
 import { useRefreshWhenOver } from '@/features/change/refresh';
@@ -43,7 +44,6 @@ import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Meter } from '@/ui/Meter';
 import { JobActivityLine } from '@/features/change/Progress';
-import { Select } from '@/ui/Select';
 import { SkeletonRows, type SkeletonRead } from '@/ui/Skeleton';
 import { ThreadStateIcon } from '@/ui/ThreadState';
 import type { ThreadDisplay } from '@/generated/api-types';
@@ -306,7 +306,8 @@ export function BatchChange({ source, batch, open, onClose }: BatchChangeProps) 
             onValueChange={(next) => setAgentId(next === '' ? null : next)}
             options={[{ value: '', name: t('change.batch.keepOwn') }, ...offered.map((agent) => ({ value: agent.id, name: agent.name, ...resourceChoice({ kind: 'agent', agent, provider, models: listed }) }))]}
           />
-          <Select
+          <ResourcePicker
+            pickerKey="change.batch.model"
             label={t('change.runs.model')}
             value={model ?? ''}
             disabled={providerId === null}
@@ -316,7 +317,7 @@ export function BatchChange({ source, batch, open, onClose }: BatchChangeProps) 
             }}
             options={[{ value: '', name: t('change.batch.keepOwn') }, ...listed.map((candidate) => ({ value: candidate.model_name, name: modelLabel(candidate.model_name, listed, null, t), ...resourceChoice({ kind: 'model', model: candidate, providerId: providerId ?? '', usage: provider?.choice_usage, effort: effortUsed }) }))]}
           />
-          {model !== null && efforts.length > 0 && <Select label={t('change.runs.effort')} value={effortUsed ?? ''} onValueChange={(next) => setEffort(next)} options={efforts.map((value) => ({ value, name: effortLabel(value, t) ?? '' }))} />}
+          {model !== null && efforts.length > 0 && <ResourcePicker pickerKey="change.batch.effort" label={t('change.runs.effort')} value={effortUsed ?? ''} onValueChange={(next) => setEffort(next)} options={efforts.map((value) => ({ value, name: effortDisplayName(value, t) }))} />}
         </div>
       </section>
 

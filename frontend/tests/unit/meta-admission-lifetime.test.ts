@@ -1,5 +1,5 @@
 /** Real Query observers/client restoration, with explicitly released transport replies and no timing sleeps. */
-import { CancelledError, QueryObserver } from '@tanstack/react-query';
+import { QueryObserver } from '@tanstack/react-query';
 import { isRedirect } from '@tanstack/react-router';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '@/api/client';
@@ -200,10 +200,9 @@ it.each(['cancel', 'sign out'] as const)('preserves explicit cancellation despit
     await client.signOut();
     expect(queryClient.getQueryData(['private-old-reader'])).toBeUndefined();
   }
-  const result = await admission;
-  expect(result.ok).toBe(false);
-  if (result.ok) throw new Error('Explicit cancellation was swallowed.');
-  expect(result.error).toBeInstanceOf(CancelledError); expect(initial.request.signal.aborted).toBe(true);
+  // Somebody signed in was admitted at the session, without waiting for Meta: the cancelled read is not an admission matter,
+  // and the lease that stood beside it does not keep it from being cancelled.
+  expect(await admission).toEqual({ ok: true }); expect(initial.request.signal.aborted).toBe(true);
   await oldFreshness; expect(reads).toHaveLength(1); expect(observers()).toBe(0);
   client.adopt(grant(second));
   const next = nativeAdmission(); await read(2);
@@ -213,16 +212,14 @@ it.each(['cancel', 'sign out'] as const)('preserves explicit cancellation despit
   expect(queryClient.getQueryData<Meta>(metaKey)?.may_create_org).toBe(false); expect(reads).toHaveLength(2);
 });
 
-it('releases the admission observer and keeps a real Meta refusal as that same error', async () => {
+it('releases the admission observer and keeps a real Meta refusal as that same error, without it stopping somebody signed in', async () => {
   const admission = nativeAdmission(); const initial = await read(1), detach = observeFrame(); refreshOnSignIn(detach);
   await restoreAs();
   initial.reply.resolve(Response.json({ type: 'orch:error:internal', code: 'internal', title: 'Failed', detail: '', status: 500, request_id: 'meta-read' }, { status: 500 }));
-  const result = await admission;
-  expect(result.ok).toBe(false);
-  if (result.ok) throw new Error('The Meta refusal was swallowed.');
-  expect(result.error).toBeInstanceOf(ApiError);
+  // The person is signed in: the route is let in, and the refusal stays where Meta is held, for whoever shows it.
+  expect(await admission).toEqual({ ok: true });
   await Promise.all(freshness); expect(reads).toHaveLength(1); expect(observers()).toBe(0);
-  expect(queryClient.getQueryState(metaKey)?.error).toBe(result.error);
+  expect(queryClient.getQueryState(metaKey)?.error).toBeInstanceOf(ApiError);
 });
 
 it.each([false, true])('releases admission when restoration fails while Meta is pending, preserving another legitimate observer (%s)', async (keepFrame) => {
@@ -245,7 +242,10 @@ it.each([false, true])('releases admission when restoration fails while Meta is 
 });
 
 it('keeps the native setup gate and releases its retained reader before redirecting', async () => {
-  const admission = nativeAdmission(); await read(1); await restoreAs();
+  const admission = nativeAdmission(); await read(1);
+  // A system with no user has nobody signed in: the session answers that there is none.
+  await restoreStarted.promise;
+  restoreReply.resolve(Response.json({ type: 'orch:error:auth.invalid_token', code: 'auth.invalid_token', title: 'Sign in', detail: '', status: 401, request_id: 'no-session' }, { status: 401 }));
   await answer(1, meta({ needs_setup: true, may_create_org: false }));
   const result = await admission;
   expect(result.ok).toBe(false);
