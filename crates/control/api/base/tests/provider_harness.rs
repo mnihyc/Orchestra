@@ -27,6 +27,7 @@ use orch_types::Id;
 use places::{Who, missing_permissions};
 use rig::{MODEL, Scene};
 use serde_json::{Value, json};
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------- the setting
 
@@ -364,7 +365,7 @@ async fn refresh(s: &Scene, by: &Who) -> orch_api_core::testing::Reply<Provider>
 }
 
 #[tokio::test]
-async fn refresh_returns_new_model_suggestions_without_accepting_them_and_dates_the_current_catalogue()
+async fn refresh_reads_new_model_suggestions_without_accepting_them_and_dates_the_current_catalogue()
  {
     let s = Scene::new().await;
     the_machine_says(&s, "ready", "pro");
@@ -376,7 +377,17 @@ async fn refresh_returns_new_model_suggestions_without_accepting_them_and_dates_
             ]
         })).unwrap()))
     });
-    let first = refresh(&s, &s.ada).await.ok();
+    refresh(&s, &s.ada).await.ok();
+    // The list is read on after the answer, and stored when its read ends.
+    let first = the_provider_when(&s, "the first list of models is stored", |provider| {
+        provider
+            .facts
+            .models
+            .as_ref()
+            .is_some_and(|models| models.iter().any(|model| model.model_name == "new-model"))
+    })
+    .await;
+    the_model_read_has_ended(&s).await;
     let suggestions = first.facts.models.as_ref().unwrap();
     assert!(
         suggestions
@@ -403,7 +414,16 @@ async fn refresh_returns_new_model_suggestions_without_accepting_them_and_dates_
             "suggestions":[{"model_name":"new-model","display_name":"New model","parameters":{},"listed":true}]
         })).unwrap()))
     });
-    let next = refresh(&s, &s.ada).await.ok();
+    refresh(&s, &s.ada).await.ok();
+    let next = the_provider_when(&s, "the second list of models is stored", |provider| {
+        provider
+            .facts
+            .field_times
+            .get("models")
+            .is_some_and(|at| *at > observed)
+    })
+    .await;
+    the_model_read_has_ended(&s).await;
     assert!(next.facts.field_times["models"] > observed);
     assert!(
         !next
@@ -430,7 +450,18 @@ async fn refresh_returns_new_model_suggestions_without_accepting_them_and_dates_
                 "the model list is unavailable",
             ))
         });
-    let unavailable = refresh(&s, &s.ada).await.ok();
+    let asked = model_lists_the_unit_was_asked_for(&s);
+    refresh(&s, &s.ada).await.ok();
+    let scene = &s;
+    rig::eventually(
+        "the unit refuses the list and the read ends",
+        || async move {
+            model_lists_the_unit_was_asked_for(scene) == asked + 1
+                && !the_models_lease_stands(scene).await
+        },
+    )
+    .await;
+    let unavailable = the_provider(&s).await;
     assert_eq!(unavailable.facts.models, next.facts.models);
     assert_eq!(
         unavailable.facts.field_times["models"], next.facts.field_times["models"],
@@ -771,13 +802,112 @@ fn the_harness_holds(s: &Scene, native: &'static [&'static str]) {
 }
 
 async fn sessions(s: &Scene, by: &Who) -> orch_api_core::testing::Reply<Vec<NativeSession>> {
-    s.rig
+    let reply = s
+        .rig
         .world
         .app
         .call(ProviderHarnessSessionList, &[&s.on.provider, &s.on.agent])
         .token(&by.token)
         .send()
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|page| page.items),
+    }
+}
+
+#[tokio::test]
+async fn a_thousand_native_sessions_are_searched_and_paged_from_one_captured_discovery() {
+    use orch_api_contract::resources::NativeSessionListQuery;
+    let s = Scene::new().await;
+    let mut descriptor = rig::descriptor();
+    descriptor["capabilities"]["discover_sessions"] = json!(true);
+    s.rig.machine.handler.on(CommandKind::AgentStart, move |_| {
+        Ok(CommandResult::AgentStart(AgentStartResult {
+            reused: false,
+            harness_version: "1.0.0".to_owned(),
+            descriptor: serde_json::from_value(descriptor.clone()).unwrap(),
+        }))
+    });
+    s.rig.machine.handler.on(CommandKind::AgentDiscoverSessions, |_| Ok(CommandResult::AgentDiscoverSessions(AgentDiscoverSessionsResult {
+        sessions: serde_json::from_value(json!((0..1_001).map(|id| json!({"native_session_ref":format!("native-{id:04}"),"title":format!("Session {id:04}"),"cwd":"/work","updated_at":"2026-10-12T08:00:00.000Z"})).collect::<Vec<_>>())).unwrap(),
+    })));
+    s.thread().await;
+    let first = s
+        .rig
+        .world
+        .app
+        .call(ProviderHarnessSessionList, &[&s.on.provider, &s.on.agent])
+        .token(&s.ada.token)
+        .query(&NativeSessionListQuery {
+            limit: Some(37),
+            ..Default::default()
+        })
+        .send()
         .await
+        .ok();
+    assert_eq!(first.items.len(), 37);
+    let found = s
+        .rig
+        .world
+        .app
+        .call(ProviderHarnessSessionList, &[&s.on.provider, &s.on.agent])
+        .token(&s.ada.token)
+        .query(&NativeSessionListQuery {
+            source: Some(first.source),
+            q: Some("Session 1000".into()),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(found.items.len(), 1);
+    assert_eq!(found.items[0].title.as_deref(), Some("Session 1000"));
+    let foreign = s
+        .rig
+        .world
+        .app
+        .call(ProviderHarnessSessionList, &[&s.on.provider, &s.on.agent])
+        .token(&s.eve.token)
+        .query(&NativeSessionListQuery {
+            source: Some(first.source),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(foreign.code, ErrorCode::RequestInvalid);
+    let mut seen: std::collections::HashSet<_> = first
+        .items
+        .into_iter()
+        .map(|row| row.native_session_ref)
+        .collect();
+    let mut cursor = first.next_cursor;
+    while cursor.is_some() {
+        let page = s
+            .rig
+            .world
+            .app
+            .call(ProviderHarnessSessionList, &[&s.on.provider, &s.on.agent])
+            .token(&s.ada.token)
+            .query(&NativeSessionListQuery {
+                source: Some(first.source),
+                cursor,
+                limit: Some(137),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        for row in page.items {
+            assert!(seen.insert(row.native_session_ref));
+        }
+        cursor = page.next_cursor;
+    }
+    assert_eq!(seen.len(), 1_001);
+    assert_eq!(s.rig.commands.issued_of("agent.discover_sessions"), 1);
 }
 
 #[tokio::test]
@@ -1120,4 +1250,253 @@ async fn inline_key_creation_commits_before_its_first_vendor_read_and_returns_cu
         .await
         .unwrap();
     assert!(stored);
+}
+
+// ---------------------------------------------------------------- a read that the unit is slow to answer
+
+/// Whether the lease of a read of the provider's facts stands in the table.
+async fn the_facts_lease_stands(s: &Scene) -> bool {
+    let held: i64 = sqlx::query_scalar("SELECT count(*) FROM job_leases WHERE name = $1")
+        .bind(format!("provider.facts:{}", s.on.provider))
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    held > 0
+}
+
+/// Whether the lease of a read of the provider's model list stands in the table.
+async fn the_models_lease_stands(s: &Scene) -> bool {
+    let held: i64 = sqlx::query_scalar("SELECT count(*) FROM job_leases WHERE name = $1")
+        .bind(format!("provider.models:{}", s.on.provider))
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    held > 0
+}
+
+/// How many times the unit was asked to look at the credential.
+fn looks_the_unit_was_asked_for(s: &Scene) -> usize {
+    asks_of(s, CommandKind::ProviderRefresh)
+}
+
+/// How many times the unit was asked to list the models the vendor offers.
+fn model_lists_the_unit_was_asked_for(s: &Scene) -> usize {
+    asks_of(s, CommandKind::ProviderDiscoverModels)
+}
+
+fn asks_of(s: &Scene, kind: CommandKind) -> usize {
+    s.rig
+        .machine
+        .handler
+        .executions()
+        .iter()
+        .filter(|run| run.kind == kind)
+        .count()
+}
+
+async fn the_provider(s: &Scene) -> Provider {
+    s.rig
+        .world
+        .app
+        .call(ProviderGet, &[&s.on.provider])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok()
+}
+
+/// The provider as it is stored once `holds` is true of it: what a read that goes on after an answer comes to.
+async fn the_provider_when(s: &Scene, what: &str, holds: impl Fn(&Provider) -> bool) -> Provider {
+    let began = Instant::now();
+    loop {
+        let now = the_provider(s).await;
+        if holds(&now) {
+            return now;
+        }
+        assert!(
+            began.elapsed() < rig::PATIENCE,
+            "gave up waiting for: {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Waits until the read of the model list has freed its lease: a refresh asked for before that would find it standing
+/// and read nothing.
+async fn the_model_read_has_ended(s: &Scene) {
+    rig::eventually("the model read frees its lease", || async move {
+        !the_models_lease_stands(s).await
+    })
+    .await;
+}
+
+fn the_machine_lists_a_model(s: &Scene, name: &'static str) {
+    s.rig
+        .machine
+        .handler
+        .on(CommandKind::ProviderDiscoverModels, move |_| {
+            Ok(CommandResult::ProviderDiscoverModels(
+                serde_json::from_value::<ProviderDiscoverModelsResult>(json!({
+                    "suggestions": [
+                        { "model_name": name, "display_name": name, "parameters": {}, "listed": true }
+                    ]
+                }))
+                .unwrap(),
+            ))
+        });
+}
+
+#[tokio::test]
+async fn a_refresh_the_unit_is_slow_to_answer_gives_the_provider_as_stored_and_the_read_ends_by_itself()
+ {
+    let s = Scene::new().await;
+    the_machine_says(&s, "ready", "slow-plan");
+    the_machine_lists_a_model(&s, "late-model");
+    // The unit does not answer until the case lets it, longer than a request waits for it.
+    s.rig.machine.handler.hold(CommandKind::ProviderRefresh);
+    // A third of the engine's wait for a start (twenty seconds of sixty in a deployment; here of six): what a request may wait.
+    let wait = rig::engine_config().start_timeout / 3;
+    let began = Instant::now();
+    let stored = refresh(&s, &s.ada).await.ok();
+    let took = began.elapsed();
+    assert!(
+        took >= wait,
+        "the request waits for the read as long as it may: {took:?}"
+    );
+    assert!(
+        took < wait * 3,
+        "and answers instead of waiting on: {took:?}"
+    );
+    assert_ne!(
+        stored.facts.plan.as_deref(),
+        Some("slow-plan"),
+        "what it answers is what was stored: the unit has not said it yet"
+    );
+    assert!(
+        the_facts_lease_stands(&s).await,
+        "the read is still being made"
+    );
+    // A second refresh meanwhile answers at once with what is stored and does not ask the unit again.
+    let asked = Instant::now();
+    let again = refresh(&s, &s.ada).await.ok();
+    assert!(
+        asked.elapsed() < wait,
+        "it answers at once: {:?}",
+        asked.elapsed()
+    );
+    assert_eq!(
+        again.facts_at, stored.facts_at,
+        "no read was made for it: the facts are of the same time"
+    );
+    assert_eq!(looks_the_unit_was_asked_for(&s), 1);
+    // The unit answers: the read ends by itself, stores its facts and its models, and frees its lease.
+    s.rig.machine.handler.release();
+    let scene = &s;
+    rig::eventually(
+        "the held read ends and stores what it read",
+        || async move {
+            let now = the_provider(scene).await;
+            now.facts.plan.as_deref() == Some("slow-plan")
+                && now.facts.models.as_ref().is_some_and(|models| {
+                    models.iter().any(|model| model.model_name == "late-model")
+                })
+                && !the_facts_lease_stands(scene).await
+        },
+    )
+    .await;
+    assert_ne!(
+        the_provider(&s).await.facts_at,
+        stored.facts_at,
+        "and the page can tell it from the stored answer"
+    );
+}
+
+#[tokio::test]
+async fn a_refresh_whose_connection_is_dropped_mid_read_ends_in_the_same_state() {
+    let s = Scene::new().await;
+    the_machine_says(&s, "ready", "dropped-plan");
+    the_machine_lists_a_model(&s, "dropped-model");
+    s.rig.machine.handler.hold(CommandKind::ProviderRefresh);
+    // The page gives up before the read has: its connection goes, and the request with it.
+    let gone = tokio::time::timeout(Duration::from_millis(500), refresh(&s, &s.ada)).await;
+    assert!(
+        gone.is_err(),
+        "the request was still waiting when it was dropped"
+    );
+    let scene = &s;
+    rig::eventually("the unit was asked once", || async move {
+        looks_the_unit_was_asked_for(scene) == 1
+    })
+    .await;
+    s.rig.machine.handler.release();
+    rig::eventually(
+        "the read ends and stores what it read, with its lease freed",
+        || async move {
+            let now = the_provider(scene).await;
+            now.facts.plan.as_deref() == Some("dropped-plan")
+                && now.facts.models.as_ref().is_some_and(|models| {
+                    models
+                        .iter()
+                        .any(|model| model.model_name == "dropped-model")
+                })
+                && !the_facts_lease_stands(scene).await
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_refresh_answers_when_the_facts_are_read_though_the_unit_never_answers_the_model_list() {
+    let s = Scene::new().await;
+    // The unit tells its plan at once and does not answer the list of models at all.
+    the_machine_says(&s, "ready", "quick-plan");
+    s.rig
+        .machine
+        .handler
+        .hold(CommandKind::ProviderDiscoverModels);
+    let before = the_provider(&s).await;
+    // What a request may wait: a third of the engine's wait for a start.
+    let wait = rig::engine_config().start_timeout / 3;
+    let began = Instant::now();
+    let answered = refresh(&s, &s.ada).await.ok();
+    let took = began.elapsed();
+    assert!(
+        took < wait,
+        "the request answers when the facts are read, not when the model list is: {took:?} of {wait:?}"
+    );
+    assert_eq!(
+        answered.facts.plan.as_deref(),
+        Some("quick-plan"),
+        "with the facts the unit has just given"
+    );
+    assert_ne!(
+        answered.facts_at, before.facts_at,
+        "and the page can tell them from the facts it had"
+    );
+    // The model list is read on its own: the unit is asked once, and the read stands in its lease.
+    let scene = &s;
+    rig::eventually(
+        "the model list is being read, held at the unit",
+        || async move {
+            model_lists_the_unit_was_asked_for(scene) == 1 && the_models_lease_stands(scene).await
+        },
+    )
+    .await;
+    // It ends by itself when the engine's own wait for the unit is over, and frees its lease.
+    rig::eventually(
+        "the model read gives up by itself and frees its lease",
+        || async move { !the_models_lease_stands(scene).await },
+    )
+    .await;
+    assert_eq!(
+        model_lists_the_unit_was_asked_for(&s),
+        1,
+        "and the unit was not asked again"
+    );
+    assert_eq!(
+        the_provider(&s).await.facts.plan.as_deref(),
+        Some("quick-plan"),
+        "a model read that gave up does not take back the facts"
+    );
+    s.rig.machine.handler.release();
 }
