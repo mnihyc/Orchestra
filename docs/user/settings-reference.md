@@ -61,6 +61,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:models.allowed` | **Allowed models** — Patterns naming the models that may be used here at all; a model has to be named by every scope that sets a list. |
 | `setting:services.allowed` | **Allowed services** — Patterns naming enabled provider services that may be used here; every scope that sets a list must admit the service. |
 | `setting:providers.allowed` | **Allowed providers** — Patterns over providers' Orch addresses; every scope that sets a list must admit the provider used for work here. |
+| `setting:models.add_switches_on` | **Switched on when added** — What a model starts with when it is added from its provider's catalogue: everything it offers (all), only its efforts and context sizes (basic), or only its window and efforts (nothing). A manager can switch on the rest afterwards. |
 | `setting:collab.attribution` | **Attribution** — Whether Orch's composed input, stop, denial and forwarded text names people: auto once a second person's words are delivered, always, or never (a person/an approver, with source, time and notes kept). Authored chats and documents retain their writers. |
 | `setting:collab.default_delivery` | **Default delivery** — What an input does when a turn is running, unless its sender says otherwise: wait for the next turn, or steer the running one. |
 | `setting:composer.paste_inline_context_share` | **Pasted text in the message** — The default share of remaining context for pasted text. 0 always sends it as a file; 100 always sends it in the message. The sender can choose for each paste. |
@@ -112,6 +113,9 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:orch_tools.enabled` | **Orch tools** — Which of Orch's own tools an agent is offered. |
 | `setting:orch_tools.owner_reads` | **Personal read tools** — Off as shipped. Let the thread use its owner’s current read access, including when shared. Its audience banner shows who can see or act and warns that personal reads are visible to them. Sharing earlier results still requires informed confirmation. |
 | `setting:orch_tools.calls_per_minute` | **Tool calls a minute** — How many calls of Orch's tools one thread's agent may make in a minute. A lower scope can only reduce this limit; it cannot remove a limit set above. |
+| `setting:orch_tools.read_bytes` | **Shared read bytes** — Default UTF-8 bytes in a shared read or tool answer; explicit positive byte windows can differ. |
+| `setting:orch_tools.list_depth` | **Shared listing depth** — Default levels in a shared listing; continuation retains the remaining entries. |
+| `setting:orch_tools.list_rows` | **Shared listing rows** — Default rows in a shared listing page; explicit positive windows can differ. |
 | `setting:orch_tools.search_query_chars` | **Shared search query budget** — The query character budget advertised to this thread's agent and used by shared search. Defaults to 1000; increase it for longer queries. |
 | `setting:orch_tools.search_results` | **Shared search result budget** — The result budget advertised to this thread's agent and used by shared search. Defaults to 200; byte and time budgets still produce a continuation. |
 | `setting:orch_tools.search_context` | **Shared search context budget** — The surrounding-line budget advertised to this thread's agent and used by shared-search snippets. Defaults to 5; increase it for wider context. |
@@ -133,13 +137,28 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:export.keep_hours` | **Archives are kept** — For how many hours a finished archive is kept for its person to fetch before it is removed. |
 | `setting:import.max_bytes` | **Import size limit** — The expanded bytes allowed in one import. When unset, the place's export size limit applies. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:import.max_items` | **Import item limit** — The objects allowed in one import. When unset, the place's export item limit applies. A lower scope can only reduce this limit; it cannot remove a limit set above. |
-| `setting:workspace.ignore` | **Ignored paths** — Patterns, written as in a gitignore file, for what the index of a workspace leaves out. |
-| `setting:workspace.index` | **Index** — Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online. |
+| `setting:workspace.ignore` | **Ignored paths** — Patterns, written as in a gitignore file, for paths to hide in a workspace: they are absent from its file lists, search, listings of the tree and recorded turn files, and cannot be read or written through Orch. It is for what a person wants hidden, never for speed: a large tree needs no list. |
+| `setting:workspace.index` | **Index** — Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online. An online workspace is listed one directory at a time from its machine either way, however large the tree. |
+| `setting:workspace.index_entries` | **Cached file entries** — Path metadata kept in the incremental working set; larger directories remain browsable and searchable live. |
+| `setting:workspace.index_scan_secs` | **Indexing slice** — Seconds of initial indexing before retaining incremental coverage and continuing with live reads. |
+| `setting:workspace.ignore_max_bytes` | **Exclusion parsing** — Bytes allowed when parsing one local exclusion file; a file that cannot be applied reports its source and never exposes an unknown scope. |
+| `setting:workspace.ignore_cache_bytes` | **Cached exclusion rules** — Source bytes and record metadata retained for parsed exclusion rules; older parses are read again when needed. |
+| `setting:workspace.directory_idle_secs` | **Folder continuation idle time** — Seconds an unused folder observation is kept before transparent renewal when the folder is unchanged. |
+| `setting:workspace.directory_slots` | **Folder observations** — Folder observations retained on one machine; unused observations are evicted before admitting another reader. |
+| `setting:workspace.directory_cache_bytes` | **Folder metadata cache** — Bytes of temporary folder metadata retained on one machine; this contains no file contents. |
+| `setting:workspace.directory_builds` | **Folder metadata reads** — Concurrent folder metadata builds on one machine; waiting readers retain their place. |
+| `setting:workspace.directory_page_bytes` | **Folder page bytes** — Default metadata bytes in one folder page; continuation retains all remaining entries. |
+| `setting:workspace.directory_entries` | **Folder rows** — Default rows in one page; an explicit window can differ and continuation keeps the rest. |
+| `setting:workspace.search_results` | **File search rows** — Default rows in one page; an explicit window can differ and continuation keeps the rest. |
+| `setting:workspace.archive_results` | **Archive rows** — Default rows in one page; an explicit window can differ and continuation keeps the rest. |
+| `setting:workspace.search_slice_secs` | **File search slice** — Seconds of work in one file-search page; continuation resumes the remaining search. |
+| `setting:workspace.git_diff_bytes` | **Diff bytes** — Default bytes in one diff read; continuation retains the rest of the selected diff. |
 | `setting:source.repository_url` | **Repository** — The repository prepared only when the thread's directory is missing; an existing directory keeps its own files. |
 | `setting:source.branch` | **Source branch** — The branch to prepare; unset, use the repository's advertised default branch. |
 | `setting:source.secret_name` | **Source secret** — The name of an existing HTTPS Git reading secret; its value is sealed only to the preparation command. |
 | `setting:workspace.record_days` | **Keep turn files** — Days to keep complete turn and restore undo files in the environment; zero disables recording. |
 | `setting:workspace.record_max_bytes` | **Largest recorded directory** — The included file and link bytes eligible for whole-state recording; larger directories use per-file undo. |
+| `setting:workspace.record_wait_secs` | **Wait for turn files** — Seconds to wait for a whole recording before a turn. The shipped default skips initial indexing; choosing a wait also waits for indexing. Changed files can still be restored individually when whole recording is not ready. |
 | `setting:broadcast.delivery` | **Announcement delivery** — How an announcement reaches a thread whose turn is running: it interrupts, steers, or waits for the next turn. |
 | `setting:broadcast.fallback` | **When steering is impossible** — What is done instead when an announcement is to steer an agent that cannot be steered. |
 | `setting:broadcast.wake_idle` | **Allow waking idle threads** — Whether a send may wake an idle thread here; on as shipped. Each announcement or thread message chooses wake explicitly, false when omitted. |

@@ -723,6 +723,24 @@ impl crate::Engine {
                     .await?;
                 }
             }
+            keys::WORKSPACE_IGNORE
+            | keys::WORKSPACE_INDEX
+            | keys::WORKSPACE_INDEX_ENTRIES
+            | keys::WORKSPACE_INDEX_SCAN_SECS
+            | keys::WORKSPACE_IGNORE_MAX_BYTES
+            | keys::WORKSPACE_IGNORE_CACHE_BYTES
+            | keys::WORKSPACE_DIRECTORY_IDLE_SECS
+            | keys::WORKSPACE_DIRECTORY_SLOTS
+            | keys::WORKSPACE_DIRECTORY_CACHE_BYTES
+            | keys::WORKSPACE_DIRECTORY_BUILDS
+            | keys::WORKSPACE_DIRECTORY_PAGE_BYTES
+            | keys::WORKSPACE_DIRECTORY_ENTRIES
+            | keys::WORKSPACE_SEARCH_RESULTS
+            | keys::WORKSPACE_ARCHIVE_RESULTS
+            | keys::WORKSPACE_SEARCH_SLICE_SECS
+            | keys::WORKSPACE_GIT_DIFF_BYTES => {
+                self.workspace_scope_changed(change.node).await?;
+            }
             keys::AUTH_SECOND_STEP => {
                 let mut conn = self.db().acquire().await?;
                 let held = orch_db::queries::threads::threads_held_for_second_step(&mut conn, None)

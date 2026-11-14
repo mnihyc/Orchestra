@@ -1231,7 +1231,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_difference_longer_than_the_bound_is_cut_and_says_so() {
+    async fn a_streamed_difference_reaches_the_tail_without_the_old_capture_cut() {
         // The command deadline guards hanging; this test proves byte truncation.
         const GIT_PATIENCE: std::time::Duration = std::time::Duration::from_secs(300);
         let dir = repo();
@@ -1246,8 +1246,9 @@ mod tests {
             .git_diff(&GitTool::discover(), None, false)
             .await
             .unwrap();
-        assert!(diff.truncated);
-        assert!(diff.text.len() <= 1000);
+        assert!(!diff.truncated);
+        assert!(diff.text.len() > 1000);
+        assert!(diff.text.ends_with("+line\n"));
     }
 
     #[tokio::test]

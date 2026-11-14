@@ -68,7 +68,6 @@ use crate::paths::{Locate, RelPath, Workspace};
 use crate::platform::{self, Dir};
 use crate::processes::{Processes, ScopeKind};
 use crate::resources::Sampler;
-use crate::search::SearchRequest;
 use crate::snapshot::{NoProgress, Progress};
 use crate::terminal::{Attachment, OpenSpec, Purpose, TerminalLinks, Terminals, find_shell};
 use crate::watch::{Change, WatchConfig, WatchMode, Watcher};
@@ -95,9 +94,6 @@ pub const DEFAULT_MAX_BLOB_BYTES: i64 = 8 * 1024 * 1024 * 1024;
 /// The most bytes of a text, or of an entry of an archive, that are read to be shown
 /// (`[limits] preview_bytes`): two mebibytes.
 pub const DEFAULT_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
-
-/// Above this many entries a workspace is not indexed (`[envhost] index_max_entries`).
-pub const DEFAULT_INDEX_MAX_ENTRIES: u64 = 250_000;
 
 /// How often a tree is walked again where watching falls short (`[envhost] rescan_secs`).
 pub const DEFAULT_RESCAN: Duration = Duration::from_secs(60);
@@ -133,10 +129,6 @@ pub struct Limits {
     pub max_blob_bytes: i64,
     /// The most bytes of a text or of an entry of an archive that are read to be shown.
     pub preview_bytes: u64,
-    /// Above this many entries a workspace is not indexed.
-    pub index_max_entries: u64,
-    /// The longest one whole-tree scan is allowed before the index gives up.
-    pub index_scan_max: Duration,
     /// How often a tree is walked again where watching falls short.
     pub rescan: Duration,
     /// How often a manifest is published while files keep changing.
@@ -158,8 +150,6 @@ impl Default for Limits {
         Self {
             max_blob_bytes: DEFAULT_MAX_BLOB_BYTES,
             preview_bytes: DEFAULT_PREVIEW_BYTES,
-            index_max_entries: DEFAULT_INDEX_MAX_ENTRIES,
-            index_scan_max: crate::index::DEFAULT_SCAN_MAX,
             rescan: DEFAULT_RESCAN,
             manifest_interval: DEFAULT_MANIFEST_INTERVAL,
             search_time: DEFAULT_SEARCH_TIME,
@@ -602,6 +592,7 @@ pub struct Environment {
     mcp_host: Arc<McpHost>,
     git: GitTool,
     file_states: Option<Arc<crate::file_states::FileStates>>,
+    workspace_limits: orch_link_contract::commands::WorkspaceLimits,
     facts: Mutex<EnvironmentFacts>,
     variables: BTreeMap<String, String>,
     browsers: Arc<crate::browsers::Browsers>,
@@ -612,6 +603,12 @@ pub struct Environment {
     reporters: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
+/// How often a recording that waits for its baseline looks again.
+const FILE_STATES_POLL: Duration = Duration::from_millis(100);
+
+/// How often a pass over a whole tree looks at whether the line of its progress has moved a tenth.
+const INDEXING_LOOK: Duration = Duration::from_secs(2);
+
 impl std::fmt::Debug for Environment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Environment")
@@ -619,6 +616,19 @@ impl std::fmt::Debug for Environment {
             .field("root", &self.files.root().root_path())
             .finish_non_exhaustive()
     }
+}
+
+fn exclusion_problem(
+    rules: &IgnoreRules,
+    workspace: &Workspace,
+) -> Option<orch_link_contract::events::ExclusionProblem> {
+    rules
+        .root_problem(workspace)
+        .map(|problem| orch_link_contract::events::ExclusionProblem {
+            path: problem.path,
+            line: problem.line.map(|line| line as u64),
+            reason: problem.reason.to_owned(),
+        })
 }
 
 fn os() -> Os {
@@ -717,6 +727,12 @@ impl Environment {
     #[must_use]
     pub fn mcp_host(&self) -> &Arc<McpHost> {
         &self.mcp_host
+    }
+
+    /// Resolved working allowances for this attachment.
+    #[must_use]
+    pub fn workspace_limits(&self) -> &orch_link_contract::commands::WorkspaceLimits {
+        &self.workspace_limits
     }
 
     /// Its index.
@@ -890,6 +906,16 @@ impl Environment {
         facts.index = self.index.state().mode();
         facts.index_reason = self.index.state().reason();
         facts.index_entry_limit = self.index.state().entry_limit();
+        facts.indexing = self
+            .file_states
+            .as_ref()
+            .and_then(|states| states.indexing())
+            .map(|(done, total)| orch_link_contract::events::IndexingProgress { done, total });
+        facts.recording = self
+            .file_states
+            .as_ref()
+            .and_then(|states| states.scope_recording(&RelPath::root()));
+        facts.exclusion_problem = exclusion_problem(&self.rules, self.files.root());
         facts.mounts = self.mounts.facts();
         facts.clone()
     }
@@ -914,6 +940,10 @@ impl Environment {
         let Ok(host) = self.inner() else { return };
         match change {
             Change::Paths(paths) => {
+                self.index.observe(paths);
+                if let Some(states) = &self.file_states {
+                    states.changed(paths);
+                }
                 let mut rules = false;
                 for path in paths
                     .iter()
@@ -927,6 +957,10 @@ impl Environment {
                     .invalidate(self.id, self.directory_attachment, paths, rules);
             }
             Change::Rescan | Change::Unavailable => {
+                self.index.lost_events();
+                if let Some(states) = &self.file_states {
+                    states.invalidate("not_ready");
+                }
                 self.rules.forget_all();
                 host.directory_pages
                     .invalidate(self.id, self.directory_attachment, &[], true);
@@ -937,17 +971,20 @@ impl Environment {
     /// Turns what the watch says into the state of the index, the ignore rules and the directories
     /// somebody has open.
     async fn changed(self: &Arc<Self>, change: Change) {
+        // Until the baselines are brought up to date for this batch, a recording waits for it.
+        let refreshing = self.file_states.as_ref().map(|states| states.begin_work());
         let directory_loss = matches!(&change, Change::Rescan | Change::Unavailable);
         let (paths, mut rescan) = match change {
             Change::Paths(paths) => (paths, false),
             Change::Rescan => {
+                self.scanned.store(false, Ordering::SeqCst);
                 self.index.lost_events();
                 self.invalidate_directory_views().await;
                 (Vec::new(), true)
             }
             Change::Unavailable => {
                 self.invalidate_directory_views().await;
-                self.git_watches.changed(self, &[], true).await;
+                self.git_watches.changed(self, &[], true);
                 if let Some(states) = &self.file_states {
                     states.invalidate("live_tree");
                 }
@@ -958,8 +995,7 @@ impl Environment {
             }
         };
         // Git shares the native batch and only rereads repositories that batch touched.
-        self.git_watches.changed(self, &paths, rescan).await;
-        self.index.observe(&paths);
+        self.git_watches.changed(self, &paths, rescan);
         // A different list of what to leave out can change what any path is: the tree is walked again.
         for path in paths
             .iter()
@@ -968,6 +1004,7 @@ impl Environment {
             self.rules
                 .forget(&path.parent().unwrap_or_else(RelPath::root));
             rescan = true;
+            self.scanned.store(false, Ordering::SeqCst);
             self.index.lost_events();
         }
         // A tree that was never walked to the end has nothing to bring up to date.
@@ -982,9 +1019,6 @@ impl Environment {
             let environment = Arc::clone(self);
             let paths = paths.clone();
             blocking(move || {
-                if !environment.index.state().is_full() {
-                    return Ok(None);
-                }
                 let outcome = if rescan {
                     environment
                         .index
@@ -996,18 +1030,6 @@ impl Environment {
                         &paths,
                     )?
                 };
-                if let Some(states) = &environment.file_states {
-                    let complete = environment
-                        .index
-                        .changes_since(environment.index.revision())
-                        .is_some();
-                    states.refresh(
-                        &environment.files,
-                        &environment.index,
-                        if rescan { None } else { Some(paths.as_slice()) },
-                        complete,
-                    )?;
-                }
                 Ok(Some(outcome))
             })
         };
@@ -1024,43 +1046,148 @@ impl Environment {
             Ok(None) => {}
             Err(error) => tracing::warn!(%error, "the index could not be brought up to date"),
         }
+        // The index has the paths now: the baselines take them in by themselves, in the background,
+        // one path at a time. This handler never waits for them, so the next batch is not held up by
+        // the size of the tree.
+        if let Some(states) = &self.file_states {
+            if !rescan {
+                states.queue(&paths);
+            }
+            self.kick_file_states();
+        }
+        drop(refreshing);
         if !directory_loss {
             self.notify_directories(&paths, rescan).await;
         }
     }
 
-    /// Prepares requested file-state baselines off the path that records or starts a turn.
-    fn seed_file_states(self: &Arc<Self>) {
-        let environment = Arc::clone(self);
-        let task = tokio::spawn(async move {
-            if let Err(error) = environment.prepare_file_states().await {
-                tracing::warn!(%error, environment=%environment.id, "recorded file coverage could not be prepared");
-            }
-        });
-        lock(&self.tasks).push(task);
+    /// Keeps a handle on a task of the environment, forgetting those that ended.
+    fn track(&self, task: tokio::task::JoinHandle<()>) {
+        let mut tasks = lock(&self.tasks);
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(task);
     }
 
-    /// Completes preparation from the existing index, without a directory walk or Git process.
-    async fn prepare_file_states(self: &Arc<Self>) -> Result<()> {
+    /// Starts the one task that brings the baselines up to date, unless it is running. It takes what
+    /// the watch said, path by path, or a pass over everything when a scope owes one, until nothing
+    /// is owed; work that waits for its time is started again when the time comes.
+    fn kick_file_states(self: &Arc<Self>) {
         let Some(states) = self.file_states.clone() else {
-            return Ok(());
+            return;
         };
-        if !self.index.state().is_full() {
-            states.invalidate("live_tree");
-            return Ok(());
+        if !states.claim_worker() {
+            return;
         }
-        if !self.initial_scan_complete() {
-            return Ok(());
-        }
+        let working = states.begin_work();
         let environment = Arc::clone(self);
-        blocking(move || {
-            let complete = environment
-                .index
-                .changes_since(environment.index.revision())
-                .is_some();
-            states.refresh(&environment.files, &environment.index, None, complete)
-        })
-        .await
+        let task = tokio::spawn(async move {
+            let drained = environment.bring_file_states_up_to_date(&states).await;
+            states.release_worker();
+            // Blocked on something else (the first walk of the tree, lost notices): whatever ends that
+            // starts this worker again. Otherwise something may have come between the last look and
+            // the release; the next worker takes its place before this one's mark of work in flight
+            // is dropped, so that a recording that waits never sees a gap between them.
+            if drained && states.has_work() {
+                environment.kick_file_states();
+            } else if drained
+                && let Some(wait) = states.next_due()
+                && states.arm_timer()
+            {
+                let later = Arc::clone(&environment);
+                let waiting = Arc::clone(&states);
+                let timer = tokio::spawn(async move {
+                    tokio::time::sleep(wait.max(FILE_STATES_POLL)).await;
+                    waiting.disarm_timer();
+                    later.kick_file_states();
+                });
+                environment.track(timer);
+            }
+            drop(working);
+        });
+        self.track(task);
+    }
+
+    /// Does what is owed to the baselines, piece by piece. True when nothing is owed any more; false
+    /// when it stopped because it cannot go on until something else has happened.
+    async fn bring_file_states_up_to_date(
+        self: &Arc<Self>,
+        states: &Arc<crate::file_states::FileStates>,
+    ) -> bool {
+        loop {
+            if !self.index.state().is_full() {
+                states.invalidate("live_tree");
+                return false;
+            }
+            // The first walk of a large tree makes the baselines by itself when it ends.
+            if !self.initial_scan_complete() {
+                return false;
+            }
+            let work = states.take_work();
+            if matches!(work, crate::file_states::Work::Nothing) {
+                return true;
+            }
+            let environment = Arc::clone(self);
+            let kept = Arc::clone(states);
+            let pass = blocking(move || {
+                let index = &environment.index;
+                let complete = index.changes_since(index.revision()).is_some();
+                if !complete {
+                    // Lost notices: the index walks the tree again, and the batch that ends that walk
+                    // starts this worker again.
+                    kept.invalidate("not_ready");
+                    return Ok(false);
+                }
+                match work {
+                    crate::file_states::Work::RecordMetadata => {
+                        kept.prepare_recordings(
+                            &environment.files,
+                            environment.facts().generation,
+                            environment.inner()?.clock.time(),
+                        )?;
+                    }
+                    crate::file_states::Work::Paths(paths) => {
+                        kept.refresh(&environment.files, index, Some(paths.as_slice()), true)?;
+                    }
+                    _ => kept.reconcile(&environment.files, index, true)?,
+                }
+                Ok(true)
+            });
+            tokio::pin!(pass);
+            // A pass over a whole tree says how far it has come, a tenth at a time: one line on the
+            // environment, and a handful of reports however large the tree.
+            let mut shown: Option<u64> = None;
+            let outcome = loop {
+                tokio::select! {
+                    done = &mut pass => break done,
+                    () = tokio::time::sleep(INDEXING_LOOK) => {
+                        let step = states.indexing().map(|(done, total)| done.saturating_mul(10) / total);
+                        if step != shown {
+                            shown = step;
+                            self.announce_facts().await;
+                        }
+                    }
+                }
+            };
+            self.announce_facts().await;
+            states.calm();
+            match outcome {
+                Ok(true) => {}
+                Ok(false) => return false,
+                Err(error) => {
+                    tracing::warn!(%error, environment=%self.id, "recorded file coverage could not be brought up to date");
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// Asks for a pass over everything, off the path that records or starts a turn: the baselines are
+    /// looked at again by the background worker, which reads only what differs from what it kept.
+    fn seed_file_states(self: &Arc<Self>) {
+        if let Some(states) = &self.file_states {
+            states.want_everything();
+            self.kick_file_states();
+        }
     }
 
     /// A lost native baseline is an explicit invalidation, without rescanning it or inventing rows.
@@ -1214,9 +1341,10 @@ impl Environment {
         let host = self.inner()?;
         // Changes that arrive while the list is made leave the tree marked as changed.
         self.index.take_dirty();
+        let began = std::time::Instant::now();
         match self.upload_manifest(&host, sink).await {
             Ok(report) => {
-                self.publisher.published();
+                self.publisher.published_taking(began.elapsed());
                 host.reports.say(self.id, Report::Manifest(report)).await;
                 Ok(Some(report))
             }
@@ -1529,6 +1657,9 @@ impl EnvHost {
                 (None, None)
             }
         };
+        self.inner
+            .directory_pages
+            .configure(body.environment_id, &body.workspace);
         start_background(&environment, &settings, first_scan);
         if let Some(start) = start {
             let _ = start.send(());
@@ -1801,9 +1932,9 @@ impl EnvHost {
             path: path.as_str().to_owned(),
         };
         let cursor = requested.and_then(|page| page.cursor.as_deref());
-        let limit = requested
-            .and_then(|page| page.limit)
-            .unwrap_or(orch_link_contract::commands::FS_LIST_MAX_ENTRIES);
+        let limit = requested.and_then(|page| page.limit).unwrap_or(
+            u32::try_from(environment.workspace_limits.directory_entries).unwrap_or(u32::MAX),
+        );
         let page = self
             .inner
             .directory_pages
@@ -1835,6 +1966,9 @@ impl EnvHost {
             }
         }
         page.validate()?;
+        if body.mount.is_none() {
+            environment.index.remember_page(&page.entries);
+        }
         let observation = page.proof();
         let listing = crate::files::Listing {
             truncated: page.next_cursor.is_some(),
@@ -1995,9 +2129,7 @@ impl EnvHost {
         let files = environment.files.clone();
         let path = files.parse(&body.path)?;
         let inside = body.inside.clone();
-        let limit = usize::try_from(body.limit)
-            .unwrap_or(usize::MAX)
-            .min(orch_api_contract::workspace::ARCHIVE_LIST_LIMIT_MAX as usize);
+        let limit = usize::try_from(body.limit).unwrap_or(usize::MAX);
         blocking(move || files.archive_list(&path, inside.as_deref(), limit)).await
     }
 
@@ -2025,20 +2157,17 @@ impl EnvHost {
         let environment = self.environment(body.environment_id)?;
         let files = environment.files.clone();
         let path = files.parse(&body.path)?;
-        let request = SearchRequest {
-            query: body.query.clone(),
-            regex: body.regex,
-            case_sensitive: body.case,
-            glob: body.glob.clone(),
-            limit: usize::try_from(body.limit).unwrap_or(usize::MAX),
+        let binding = crate::directory_pages::Binding {
+            environment: environment.id,
+            attachment: environment.directory_attachment,
+            generation: Some(environment.generation()),
+            mount: None,
+            path: path.to_string(),
         };
-        let found = blocking(move || files.search(&path, &request)).await?;
-        let matches = found.matches.iter().map(wire).collect::<Result<Vec<_>>>()?;
-        Ok(FsSearchResult {
-            matches,
-            truncated: found.truncated,
-            searched: found.searched,
-        })
+        self.inner
+            .directory_pages
+            .search(binding, files, body.clone())
+            .await
     }
 
     /// Refuses a request for the whole of a tree that is not indexed: such a tree is listed, and
@@ -2233,6 +2362,7 @@ impl EnvHost {
             body,
             orch_types::new_id(),
             Time::new(until),
+            Time::new(until),
             tokio_util::sync::CancellationToken::new(),
         )
         .await?
@@ -2240,13 +2370,55 @@ impl EnvHost {
         .await
     }
 
+    /// Waits until `ready_by` for the baseline of `directory` to be ready, as long as background work that
+    /// brings it up to date is going on: when none is left and the baseline is not ready, nothing more is
+    /// coming, and the recording answers what it has.
+    async fn wait_for_file_states(
+        &self,
+        states: &Arc<crate::file_states::FileStates>,
+        environment: &Environment,
+        directory: &RelPath,
+        ready_by: Time,
+        wait_for_indexing: bool,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        while states.needs_preparing(directory) {
+            let scanning = !environment.initial_scan_complete();
+            if !states.work_in_flight() && !scanning {
+                return Ok(());
+            }
+            // A recording before this one already waited out a pass that is still going: this one
+            // would wait the same time for the same answer, and the line of the environment would
+            // hold every start behind it.
+            if !wait_for_indexing
+                && (scanning || states.indexing().is_some() || states.is_impatient())
+            {
+                return Ok(());
+            }
+            if self.inner.clock.time() >= ready_by {
+                states.note_impatient();
+                return Ok(());
+            }
+            tokio::select! {
+                () = cancel.cancelled() => return Err(HostError::Cancelled),
+                () = tokio::time::sleep(FILE_STATES_POLL) => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Seals local state, its immutable upload source and retention before the serial key is released.
     /// The command owner signals cancellation and joins this future; it must not detach blocking work.
+    ///
+    /// A baseline that is not ready is never walked or hashed here: the pass that makes it ready runs in
+    /// the background, and this waits for it only until `ready_by`, then answers that the files are not
+    /// ready. `until` is the end of the protection of what is captured.
     pub async fn fs_record_capture(
         &self,
         body: &orch_link_contract::source::FsRecord,
         operation: Id,
         until: Time,
+        ready_by: Time,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<crate::file_states::CapturedState> {
         if cancel.is_cancelled() {
@@ -2262,6 +2434,8 @@ impl EnvHost {
         };
         if !environment.index.state().is_full() {
             states.invalidate("live_tree");
+        } else if !environment.initial_scan_complete() {
+            states.invalidate("indexing");
         } else if environment
             .index
             .changes_since(environment.index.revision())
@@ -2274,7 +2448,19 @@ impl EnvHost {
         let generation = environment.facts().generation;
         let request = body.clone();
         let kept = states.clone();
-        let cached = blocking(move || kept.store().recorded_reply(&request)).await?;
+        let cursor = environment.file_changes_cursor();
+        let attachment = environment.directory_attachment;
+        let cursor_directory = directory.to_string();
+        let cached = blocking(move || {
+            kept.store().remember_changes(
+                request.snapshot_id,
+                &cursor_directory,
+                attachment,
+                cursor,
+            )?;
+            kept.store().recorded_reply(&request)
+        })
+        .await?;
         if cancel.is_cancelled() {
             return Err(HostError::Cancelled);
         }
@@ -2287,14 +2473,30 @@ impl EnvHost {
             {
                 // A new directory and a re-enabled policy need their indexed baseline before
                 // this immutable identity is answered. Otherwise a scheduling race permanently
-                // freezes not_ready even though the worker completes a moment later.
+                // freezes not_ready even though the worker completes a moment later. The pass that
+                // makes it ready runs in the background (this command only waits for it, up to
+                // `ready_by`), so a large directory never holds the turn or the environment's line.
+                let scope = directory.clone();
                 let kept = states.clone();
                 let policy = crate::state_store::RecordPolicy {
                     record_days: body.record_days,
                     max_bytes: body.max_bytes,
                 };
                 blocking(move || kept.store().keep_policy(&directory, policy)).await?;
-                environment.prepare_file_states().await?;
+                if needs_seed {
+                    environment.seed_file_states();
+                } else {
+                    environment.kick_file_states();
+                }
+                self.wait_for_file_states(
+                    &states,
+                    &environment,
+                    &scope,
+                    ready_by,
+                    body.wait_for_indexing,
+                    &cancel,
+                )
+                .await?;
             }
         }
         if cancel.is_cancelled() {
@@ -2673,38 +2875,78 @@ impl EnvHost {
         }
     }
 
-    /// `workspace.observe`: returns end hashes from a complete watcher baseline only.
+    /// `workspace.observe`: reads the change journal independently of whole-recording coverage.
     pub async fn workspace_observe(
         &self,
         body: &orch_link_contract::source::WorkspaceObserve,
         sink: &dyn BlobSink,
     ) -> Result<orch_link_contract::source::WorkspaceObserveResult> {
         let environment = self.environment(body.environment_id)?;
+        let directory = environment.files.parse(&body.directory)?;
+        let Some(states) = environment.file_states.clone() else {
+            return Ok(orch_link_contract::source::WorkspaceObserveResult {
+                end_manifest_blob: None,
+                changed_paths: None,
+            });
+        };
+        let snapshot = body.before_snapshot_id;
+        let scope = directory.clone();
+        let watched = environment.clone();
+        let kept = states.clone();
+        let changed_paths = blocking(move || {
+            let Some(snapshot) = snapshot else {
+                return Ok(None);
+            };
+            let Some(cursor) = kept.store().changes_cursor(
+                snapshot,
+                scope.as_str(),
+                watched.directory_attachment,
+            )?
+            else {
+                return Ok(None);
+            };
+            Ok(watched.file_changes_since(cursor).map(|paths| {
+                paths
+                    .into_iter()
+                    .filter(|path| !path.has_component(".git"))
+                    .filter(|path| {
+                        !watched.rules.is_ignored(
+                            watched.files.root(),
+                            path,
+                            watched
+                                .index
+                                .get(path)
+                                .is_some_and(|entry| entry.kind == platform::Kind::Dir),
+                        )
+                    })
+                    .filter_map(|path| {
+                        path.strip_prefix(&scope)
+                            .filter(|relative| !relative.is_root())
+                            .map(|relative| relative.to_string())
+                    })
+                    .collect()
+            }))
+        })
+        .await?;
+        let mut result = orch_link_contract::source::WorkspaceObserveResult {
+            end_manifest_blob: None,
+            changed_paths,
+        };
         if !environment.index.state().is_full()
             || environment
                 .index
                 .changes_since(environment.index.revision())
                 .is_none()
         {
-            return Ok(orch_link_contract::source::WorkspaceObserveResult {
-                end_manifest_blob: None,
-            });
+            return Ok(result);
         }
-        let Some(states) = environment.file_states.clone() else {
-            return Ok(orch_link_contract::source::WorkspaceObserveResult {
-                end_manifest_blob: None,
-            });
-        };
         let files = environment.files.clone();
-        let directory = files.parse(&body.directory)?;
         let generation = environment.facts().generation;
         let now = self.inner.clock.time();
         let observed =
             blocking(move || states.observe(&files, &directory, generation, now)).await?;
         let Some(manifest) = observed else {
-            return Ok(orch_link_contract::source::WorkspaceObserveResult {
-                end_manifest_blob: None,
-            });
+            return Ok(result);
         };
         let size = i64::try_from(manifest.bytes.len())
             .map_err(|_| HostError::Unsupported("an end manifest is too large".to_owned()))?;
@@ -2713,9 +2955,8 @@ impl EnvHost {
         sink.put(hash, size, &mut reader)
             .await
             .map_err(|error| HostError::Content(error.to_string()))?;
-        Ok(orch_link_contract::source::WorkspaceObserveResult {
-            end_manifest_blob: Some(hash),
-        })
+        result.end_manifest_blob = Some(hash);
+        Ok(result)
     }
 
     // ------------------------------------------------------------------ git
@@ -3811,33 +4052,55 @@ async fn attach(
         let (configured, allowed) = (configured.clone(), settings.allowed_roots.clone());
         blocking(move || open_workspace(&configured, allowed.as_deref())).await?
     };
-    let rules = Arc::new(IgnoreRules::new(&body.ignore, case_sensitive));
-    for rejected in rules.rejected() {
-        tracing::warn!(pattern = %rejected, "an ignore pattern is not a pattern and is left out");
+    let rules = Arc::new(IgnoreRules::with_limits(
+        &body.ignore,
+        case_sensitive,
+        body.workspace.ignore_max_bytes,
+        body.workspace.ignore_cache_bytes,
+    ));
+    if !rules.rejected().is_empty() {
+        tracing::warn!(
+            count = rules.rejected().len(),
+            "configured exclusions are invalid; their scope remains unavailable"
+        );
     }
+    let mut file_limits = settings.limits.clone();
+    file_limits.search_time = Duration::from_secs(body.workspace.search_slice_secs);
+    file_limits.git_diff_max_bytes =
+        usize::try_from(body.workspace.git_diff_bytes).map_err(|_| {
+            HostError::Unsupported(
+                "the selected diff allowance cannot be represented on this machine".to_owned(),
+            )
+        })?;
     let files = Files::workspace(
         workspace,
         Arc::clone(&rules),
         Arc::new(HashCache::new()),
-        settings.limits.clone(),
+        file_limits,
         Arc::clone(&host.gates),
     );
 
     // The tree: indexed, or listed live. A walk that outlasts the wait goes on by itself.
     let index = Arc::new(Index::with_scan_limit(
         body.index,
-        settings.limits.index_max_entries,
-        settings.limits.index_scan_max,
+        body.workspace.index_entries,
+        Duration::from_secs(body.workspace.index_scan_secs),
     ));
     let mut first_scan = None;
     if index.state().is_full() {
-        let (index, files, rules) = (Arc::clone(&index), files.clone(), Arc::clone(&rules));
-        let mut walk = tokio::task::spawn_blocking(move || index.scan(files.root(), &rules));
+        let (scanning, files, rules) = (Arc::clone(&index), files.clone(), Arc::clone(&rules));
+        let mut walk = tokio::task::spawn_blocking(move || scanning.scan(files.root(), &rules));
         match tokio::time::timeout(ATTACH_SCAN_WAIT, &mut walk).await {
             Ok(finished) => {
-                finished.map_err(|error| {
+                match finished.map_err(|error| {
                     HostError::Internal(format!("a task of the host failed: {error}"))
-                })??;
+                })? {
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "initial workspace coverage is unavailable; live file acts remain available");
+                        index.give_up(crate::index::LiveReason::Unreadable);
+                    }
+                }
             }
             Err(_) => first_scan = Some(walk),
         }
@@ -4124,6 +4387,9 @@ async fn attach(
         index: index.state().mode(),
         index_reason: index.state().reason(),
         index_entry_limit: index.state().entry_limit(),
+        indexing: None,
+        recording: None,
+        exclusion_problem: exclusion_problem(&rules, files.root()),
         mounts: mounts.facts(),
         private_views: false,
         suspend: platform::CAN_SUSPEND,
@@ -4195,6 +4461,7 @@ async fn attach(
         mcp_host,
         git,
         file_states,
+        workspace_limits: body.workspace.clone(),
         facts: Mutex::new(facts),
         variables,
         browsers,
@@ -4252,10 +4519,7 @@ fn start_background(
     }
     *lock(&environment.watcher) = Some(watcher);
     if !environment.git_watches.is_empty() {
-        let current = Arc::clone(environment);
-        lock(&environment.tasks).push(tokio::spawn(async move {
-            current.git_watches.changed(&current, &[], true).await;
-        }));
+        environment.git_watches.changed(environment, &[], true);
     }
     if first_scan.is_none() {
         environment.seed_file_states();

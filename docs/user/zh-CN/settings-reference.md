@@ -62,6 +62,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:models.allowed` | **允许的模型** — 填写在此处允许使用的模型名称模式。 |
 | `setting:services.allowed` | **允许的服务** — 指定此处允许使用的已启用供应商服务名称模式；设置列表的每一层范围都必须允许该服务。 |
 | `setting:providers.allowed` | **允许的提供者** — 用提供者的 Orch 地址匹配规则限制选择；每个设置了列表的位置都必须允许此处工作所用的提供者。 |
+| `setting:models.add_switches_on` | **添加时开启的内容** — 从提供方的目录添加模型时，模型一开始带有什么：它提供的全部内容（全部）、只有强度和上下文大小（基本），或只有它自己的窗口和强度（无）。其余内容之后可由管理者开启。 |
 | `setting:collab.attribution` | **署名** — Orch 编写的输入、停止、拒绝和转发说明是否点名：自动在第二个人的话实际送达后署名、始终署名，或永不署名。永不署名时写作某人或审批人，仍保留来源、时间和备注；聊天和文档中的作者署名不变。 |
 | `setting:collab.default_delivery` | **消息发送方式** — 线程忙碌时，消息排队、送入当前运行，或中断后优先发送。 |
 | `setting:composer.paste_inline_context_share` | **消息中的粘贴文本** — 粘贴文本默认占用剩余上下文的比例。0 表示始终作为文件，100 表示始终放入消息。发送者可以逐次选择。 |
@@ -113,6 +114,9 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:orch_tools.enabled` | **Orch 工具** — 允许提供给代理的 Orch 工具。 |
 | `setting:orch_tools.owner_reads` | **个人读取工具** — 默认关闭。允许会话使用所有者当前的读取权限，共享后仍保持启用。受众提示条显示谁可查看或操作，并说明个人读取内容对他们可见。共享先前结果前仍需知情确认。 |
 | `setting:orch_tools.calls_per_minute` | **每分钟工具调用** — 一个线程的智能体每分钟最多调用多少次 Orch 工具。 下级只能降低此上限，不能取消上级设定的限制。 |
+| `setting:orch_tools.read_bytes` | **共享读取字节数** — 共享读取或工具回复的默认 UTF-8 字节数；请求可选择其他正数字节窗口。 |
+| `setting:orch_tools.list_depth` | **共享列表深度** — 共享列表的默认层级；续读保留其余条目。 |
+| `setting:orch_tools.list_rows` | **共享列表行数** — 共享列表每页的默认行数；请求可选择其他正数窗口。 |
 | `setting:orch_tools.search_query_chars` | **共享搜索查询预算** — 向本线程智能体公布并供共享搜索使用的查询字符预算。默认为 1000，可调大以支持更长的查询。 |
 | `setting:orch_tools.search_results` | **共享搜索结果预算** — 向本线程智能体公布并供共享搜索使用的结果预算。默认为 200；达到字节或时间预算时仍提供续查游标。 |
 | `setting:orch_tools.search_context` | **共享搜索上下文预算** — 向本线程智能体公布并供共享搜索摘要使用的前后行数预算。默认为 5，可调大以查看更广的上下文。 |
@@ -134,13 +138,28 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:export.keep_hours` | **导出保留时间** — 完成的导出保留多少小时供发起人下载，然后移除。 |
 | `setting:import.max_bytes` | **导入大小限额** — 单次导入允许的展开后字节数。未设置时沿用此位置的导出大小限额。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:import.max_items` | **导入项目限额** — 单次导入允许的对象数量。未设置时沿用此位置的导出项目限额。 下级只能降低此上限，不能取消上级设定的限制。 |
-| `setting:workspace.ignore` | **忽略的路径** — 工作区索引不包含的路径模式。 |
-| `setting:workspace.index` | **工作区索引** — 是否为整个工作区建立索引以便离线使用，还是只在环境在线时列出文件。 |
+| `setting:workspace.ignore` | **忽略的路径** — 按 gitignore 写法填写、要在工作区中隐藏的路径模式：它们不会出现在文件列表、搜索、目录树列表和轮次文件记录中，也不能通过 Orch 读取或写入。这是为了隐藏想隐藏的内容，不是为了提速：大型目录不需要这份列表。 |
+| `setting:workspace.index` | **工作区索引** — 是否为整个工作区建立索引以便离线使用，还是只在环境在线时列出文件。无论目录树多大，在线的工作区都按目录逐层从其机器上列出。 |
+| `setting:workspace.index_entries` | **缓存文件条目** — 增量工作集中保留的路径元数据条目数；更大的目录仍可实时浏览和搜索。 |
+| `setting:workspace.index_scan_secs` | **索引时间片** — 首次索引使用的秒数；之后保留增量覆盖并继续实时读取。 |
+| `setting:workspace.ignore_max_bytes` | **排除规则解析** — 解析单个本地排除规则文件时允许读取的字节数；无法应用时会说明来源，并且不会暴露覆盖情况未知的内容。 |
+| `setting:workspace.ignore_cache_bytes` | **排除规则缓存** — 已解析排除规则的源文本和记录元数据缓存字节数；需要时会重新读取较旧的规则。 |
+| `setting:workspace.directory_idle_secs` | **文件夹续读空闲时间** — 未使用的文件夹观测保留的秒数；文件夹未变化时会自动续读。 |
+| `setting:workspace.directory_slots` | **文件夹观测** — 单台机器上保留的文件夹观测数量；接纳新读取前会先淘汰未使用的观测。 |
+| `setting:workspace.directory_cache_bytes` | **文件夹元数据缓存** — 单台机器上临时保留的文件夹元数据字节数，不包含文件内容。 |
+| `setting:workspace.directory_builds` | **文件夹元数据读取** — 单台机器上同时进行的文件夹元数据构建数；等待的读取会保留其位置。 |
+| `setting:workspace.directory_page_bytes` | **文件夹分页字节数** — 单个文件夹页面默认返回的元数据字节数；其余条目可继续读取。 |
+| `setting:workspace.directory_entries` | **文件夹行数** — 每页默认行数；请求可选择其他大小，续读保留其余结果。 |
+| `setting:workspace.search_results` | **文件搜索行数** — 每页默认行数；请求可选择其他大小，续读保留其余结果。 |
+| `setting:workspace.archive_results` | **归档行数** — 每页默认行数；请求可选择其他大小，续读保留其余结果。 |
+| `setting:workspace.search_slice_secs` | **文件搜索时间片** — 单个文件搜索页面使用的秒数；续读会继续其余搜索。 |
+| `setting:workspace.git_diff_bytes` | **差异读取字节数** — 单次差异读取的默认字节数；其余所选差异可继续读取。 |
 | `setting:source.repository_url` | **源代码仓库** — 仅在线程目录尚不存在时准备的仓库；已有目录保留自己的文件。 |
 | `setting:source.branch` | **源代码分支** — 准备哪个分支；未指定时使用仓库公布的默认分支。 |
 | `setting:source.secret_name` | **源代码读取机密** — 现有 HTTPS Git 读取机密的名称；其值仅密封发送给准备命令。 |
 | `setting:workspace.record_days` | **工作轮次文件保留时间** — 在环境中保留完整轮次文件和恢复撤销文件的天数；零表示关闭记录。 |
 | `setting:workspace.record_max_bytes` | **最大记录目录** — 允许进行完整状态记录的文件和链接总字节数；更大的目录使用逐文件撤销。 |
+| `setting:workspace.record_wait_secs` | **等待轮次文件** — 轮次开始前等待整体记录的秒数。内置默认值不等待首次索引；主动设置等待时间也会等待索引。整体记录尚未就绪时，仍可逐个还原更改的文件。 |
 | `setting:broadcast.delivery` | **公告送达方式** — 公告如何送达正在运行的线程：中断、在当前轮次中引导，或等待下一轮。 |
 | `setting:broadcast.fallback` | **无法引导时** — 公告原本需要引导当前轮次，但智能体不支持引导时采用的替代方式。 |
 | `setting:broadcast.wake_idle` | **允许唤醒空闲线程** — 此处是否允许发送者唤醒空闲线程，出厂开启。每条公告或线程消息单独选择唤醒，省略时为 false。 |
