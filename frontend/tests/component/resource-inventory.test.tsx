@@ -1,18 +1,23 @@
 import { unjudgedProvenance } from '../doubles/resource-grouping';
 /** Resource lists keep rich columns, owners and admin marks while the shared query pages and filters first. */
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient } from '@tanstack/react-query';
 import userEvent from '@testing-library/user-event';
 import { Server } from 'lucide-react';
 import { useState } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { client } from '@/api/client';
+import type * as Access from '@/api/access';
+import { applyChanges } from '@/api/acts';
 import type { EverythingFilter } from '@/api/everything';
 import { ResourceList } from '@/features/resources/ResourceList';
 import { resourceReaders } from '@/features/resources/inventory';
 import type { EverythingRow, Host } from '@/generated/api-types';
-import { inventoryRow } from '../doubles/everything-row';
+import { resourceInventoryRow as inventoryRow } from '../doubles/everything-row';
 import { me, userRef } from '../doubles/fixtures';
 import { show, skipOverflowFallback, tableDataRows } from './support';
+import { CATALOGUE, pageFor } from '../unit/general-access-fixtures';
+import { detailHome } from './resource-detail-fixtures';
 
 skipOverflowFallback();
 
@@ -22,6 +27,8 @@ const owner = userRef(me(2, 'dora', 'Dora'));
 const reach = { place: { id: 'org', kind: 'org' as const, name: 'Research', redacted: false }, private: false };
 const requests: { parent: string | null; filter: EverythingFilter; cursor: string | null }[] = [];
 let failNext = false;
+let failRefresh = false;
+let withSharing = false;
 
 function host(id: string, name: string, native = false): Host {
   return { ...unjudgedProvenance(), id, name, address: `team.${id}`, owner, org_id: null, home: null,
@@ -37,13 +44,16 @@ const first = host('first', 'Build host');
 const later = host('later', 'Later host', true);
 const row = (value: Host): EverythingRow => inventoryRow({ id: value.id, kind: 'host', name: value.name, parent_id: 'resources',
   owner: value.owner, participating: value.access.participating, admin_access: value.access.admin_access,
-  resource: { kind: 'host', value } });
+  ...(withSharing ? { home_path: [detailHome], sharing: { home_id: detailHome.id, rows: pageFor('host').rows, problem: null } } : {}),
+  resource: { kind: 'host', value: withSharing ? { ...value, home: detailHome } : value } });
 
-vi.mock('@/api/auth', () => ({ meQuery: { queryKey: ['resource-reader'], initialData: () => reader, queryFn: () => Promise.resolve(reader) } }));
+vi.mock('@/api/auth', async (loadOriginal) => ({ ...await loadOriginal<object>(), meQuery: { queryKey: ['resource-reader'], initialData: () => reader, queryFn: () => Promise.resolve(reader) } }));
+vi.mock('@/api/access', async (load) => ({ ...await load<typeof Access>(), permissionsQuery: { queryKey: ['inventory-permissions'], initialData: CATALOGUE.reply, queryFn: () => Promise.resolve(CATALOGUE.reply) } }));
 vi.mock('@/api/everything', () => ({ everythingQuery: (person: string, parent: string | null, filter: EverythingFilter) => ({
   queryKey: ['everything', person, parent, filter], initialPageParam: null as string | null,
   queryFn: ({ pageParam }: { pageParam: string | null }) => {
     requests.push({ parent, filter, cursor: pageParam });
+    if (pageParam === null && failRefresh) throw new Error('The current sharing read failed.');
     if (pageParam !== null && failNext) { failNext = false; throw new Error('The next page is unavailable.'); }
     // These are served pages, including a match which was never in the first browser page.
     if (filter.q !== '') return Promise.resolve({ items: [row(later)], next_cursor: null });
@@ -54,7 +64,7 @@ vi.mock('@/api/everything', () => ({ everythingQuery: (person: string, parent: s
 }) }));
 vi.mock('@/features/resources/trail', () => ({ rememberList: vi.fn(), useResourceHeading: vi.fn() }));
 vi.mock('@/features/resources/ResourceNav', () => ({ ResourceNav: () => null }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (place: { name: string | null }) => place.name }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabel: () => (place: { name: string | null }) => place.name }));
 
 function List() {
   const [text, setText] = useState('');
@@ -67,7 +77,7 @@ function List() {
     empty={{ icon: <Server />, title: 'No hosts' }} noMatch="No matching hosts" />;
 }
 
-beforeEach(() => { requests.length = 0; failNext = false; localStorage.clear();client.session.setState({userId:reader.id}); });
+beforeEach(() => { requests.length = 0; failNext = false; failRefresh = false; withSharing = false; localStorage.clear();client.session.setState({userId:reader.id}); });
 afterEach(()=>{client.session.setState(originalSession);localStorage.clear();});
 
 it('loads one page on demand and preserves rich columns, the owner and native-only mark', async () => {
@@ -76,7 +86,7 @@ it('loads one page on demand and preserves rich columns, the owner and native-on
   expect(await screen.findByRole('link', { name: 'Build host' })).toBeVisible();
   expect(screen.queryByRole('link', { name: 'Later host' })).not.toBeInTheDocument();
   expect(requests).toHaveLength(1);
-  expect(requests[0]).toMatchObject({ parent: 'resources', cursor: null, filter: { kinds: ['host'], resource: { state: 'open', details: true } } });
+  expect(requests[0]).toMatchObject({ parent: 'resources', cursor: null, filter: { kinds: ['host'], resource: { state: 'open', rows: true } } });
   expect(within(screen.getByRole('table')).getByText('Docker')).toBeVisible();
   expect(screen.getByText('1 environments · 2 providers')).toBeVisible();
   await user.click(screen.getByRole('button', { name: 'Show more' }));
@@ -120,7 +130,7 @@ it('asks the server for a match outside the loaded page instead of filtering the
   await user.type(screen.getByRole('searchbox', { name: 'Search hosts' }), 'Later');
   expect(await screen.findByRole('link', { name: 'Later host' })).toBeVisible();
   expect(screen.queryByRole('link', { name: 'Build host' })).not.toBeInTheDocument();
-  expect(requests.at(-1)).toMatchObject({ cursor: null, filter: { q: 'Later', resource: { state: 'open', details: true } } });
+  expect(requests.at(-1)).toMatchObject({ cursor: null, filter: { q: 'Later', resource: { state: 'open', rows: true } } });
 });
 
 it('keeps loaded rows on a continuation failure and lets the same pager retry', async () => {
@@ -133,4 +143,28 @@ it('keeps loaded rows on a continuation failure and lets the same pager retry', 
   expect(screen.getByRole('link', { name: 'Build host' })).toBeVisible();
   await user.click(screen.getByRole('button', { name: 'Try again' }));
   expect(await screen.findByRole('link', { name: 'Later host' })).toBeVisible();
+});
+
+it('keeps loaded rows and retries a withdrawn group audience after its exact sharing refresh fails', async () => {
+  withSharing = true;
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  const view = show(<List />, cache);
+  try {
+    await screen.findByRole('link', { name: 'Build host' });
+    await waitFor(() => expect(view.container.querySelector('[data-resource-sharing]')).toBeVisible());
+    failRefresh = true;
+    await act(async () => { await applyChanges([{ key: ['defaults'], id: detailHome.id }], cache); });
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(screen.getByRole('link', { name: 'Build host' })).toBeVisible();
+    expect(view.container.querySelector('[data-resource-sharing]')).not.toBeInTheDocument();
+    const group = view.container.querySelector('[data-resource-group]');
+    if (!(group instanceof HTMLElement)) throw new Error('The loaded home heading must remain visible');
+    const error = await within(group).findByRole('alert');
+    failRefresh = false;
+    await userEvent.click(within(error).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(requests).toHaveLength(3));
+    await waitFor(() => expect(view.container.querySelector('[data-resource-sharing]')).toBeVisible());
+    expect(within(group).queryByRole('alert')).not.toBeInTheDocument();
+    expect(requests.every((request) => request.cursor === null)).toBe(true);
+  } finally { view.unmount(); cache.clear(); }
 });
