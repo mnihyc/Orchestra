@@ -20,10 +20,10 @@ use orch_api_contract::goals::ThreadGoal;
 use orch_api_contract::nodes::{JobRef, NodeBase, NodeRef};
 use orch_api_contract::threads::continuations::ThreadReadSelector;
 use orch_api_contract::threads::{
-    BlockedReason, Item, RecordedCost, Segment, SideReading, StartingStep, THREAD_SYNC_ENDED_TURNS,
-    THREAD_SYNC_MAX_CHANGES, Thread, ThreadBinding, ThreadBlocked, ThreadCan, ThreadCosts,
-    ThreadInput, ThreadInputAccess, ThreadKind, ThreadMemory, ThreadQueue, ThreadSides,
-    ThreadState, ThreadSync, ThreadUsage, Turn, TurnRecordedCost,
+    BlockedReason, Item, RecordedCost, Segment, SideReading, StartingStep, StartingWork,
+    THREAD_SYNC_ENDED_TURNS, THREAD_SYNC_MAX_CHANGES, Thread, ThreadBinding, ThreadBlocked,
+    ThreadCan, ThreadCosts, ThreadInput, ThreadInputAccess, ThreadKind, ThreadMemory, ThreadQueue,
+    ThreadSides, ThreadState, ThreadSync, ThreadUsage, Turn, TurnRecordedCost,
 };
 use orch_api_contract::users::UserRef;
 use orch_blob_contract::range::ByteRange;
@@ -39,10 +39,6 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use unicode_segmentation::UnicodeSegmentation;
-
-/// The most characters of an item's plain-text projection that are kept for
-/// search.
-pub const SEARCH_TEXT_MAX_CHARS: usize = crate::projections::SEARCH_TEXT_MAX_CHARS;
 
 /// The time as the wire writes it.
 #[must_use]
@@ -127,7 +123,7 @@ async fn machine_ref_json(conn: &mut Conn, machine: Id) -> Result<Json, EngineEr
         .map_or(Json::Null, |row| {
             json!({
                 "id": row.id, "name": row.name, "online": row.online,
-                "platform_os": row.platform_os, "placement": row.placement,
+                "platform_os": row.platform_os, "placement": row.placement, "host_id": row.host_id,
             })
         }))
 }
@@ -371,14 +367,17 @@ pub fn source_approval(row: &ItemRow) -> Option<Id> {
 #[must_use]
 pub fn item_view(row: &ItemRow, people: &People) -> Item {
     let mut item = record_item_view(row, people);
-    // Complete file images belong to the guarded restore supplier. Human
-    // timeline readers and written exports expose the tool's bounded diff.
-    if let orch_api_contract::threads::ItemPayload::ToolCall(call) = &mut item.payload
-        && let orch_api_contract::threads::ToolPayload::FileChange { changes } = &mut call.tool
-    {
-        for change in changes {
-            change.before = None;
-            change.after = None;
+    if let orch_api_contract::threads::ItemPayload::ToolCall(call) = &mut item.payload {
+        // The call as its harness made it repeats the typed call and is as long: the timeline leaves it out,
+        // and `item_raw_in` reads it when a person opens it.
+        call.raw = None;
+        // Complete file images belong to the guarded restore supplier. Human
+        // timeline readers and written exports expose the tool's bounded diff.
+        if let orch_api_contract::threads::ToolPayload::FileChange { changes } = &mut call.tool {
+            for change in changes {
+                change.before = None;
+                change.after = None;
+            }
         }
     }
     item
@@ -473,6 +472,9 @@ pub fn turn_view(row: &TurnRow, display: &str, people: &People) -> Result<Turn, 
                     .unwrap_or("internal"),
             );
             object.insert("message".to_owned(), Json::String(message));
+            // An error stored without this member (Ask's failures before 0.1.3 were) must not make the
+            // whole turn, and with it the thread, unreadable: it is read as not worth trying again.
+            object.entry("retryable").or_insert(Json::Bool(false));
         }
         error
     });
@@ -487,6 +489,7 @@ pub fn turn_view(row: &TurnRow, display: &str, people: &People) -> Result<Turn, 
             "id": row.id, "thread_id": row.thread_id, "segment_id": row.segment_id, "ordinal": row.ordinal,
             "state": row.state, "input_id": row.input_id, "model": row.model,
             "before_snapshot_id": row.before_snapshot_id,
+            "files_changed": row.files_changed.map(i64::from),
             "model_display": display,
             "effort": row.effort, "params": row.params, "error": error, "usage": row.usage,
             // What the harness reported beyond the totals, and what filled the context: a record of another
@@ -651,6 +654,10 @@ pub struct ThreadFacts {
     pub side_reading: Option<SideReading>,
     /// What a starting thread waits for.
     pub starting_step: Option<StartingStep>,
+    /// When that step began.
+    pub starting_since: Option<orch_types::Time>,
+    /// The command the step waits for, and what holds it up.
+    pub starting_work: Option<StartingWork>,
     /// Why it cannot go on.
     pub blocked: Option<ThreadBlocked>,
     /// What a person's Stop holds of its queue.
@@ -943,6 +950,8 @@ impl ThreadSyncData {
                 sides: frame.sides,
                 side_reading: facts.side_reading,
                 starting_step: facts.starting_step,
+                starting_since: facts.starting_since,
+                starting_work: facts.starting_work,
                 blocked: frame.blocked,
                 queue: facts.queue,
                 binding: frame.binding,
@@ -1072,6 +1081,19 @@ pub struct ItemsPage {
     pub has_older: bool,
     /// Whether newer ones exist.
     pub has_newer: bool,
+}
+
+/// A complete text page, including at most the remainder of its final UTF-8 character.
+fn output_text(bytes: &[u8], mut first: usize, mut end: usize) -> Result<String, ReadError> {
+    while first < bytes.len() && bytes[first] & 0xc0 == 0x80 {
+        first += 1;
+    }
+    while end < bytes.len() && bytes[end] & 0xc0 == 0x80 {
+        end += 1;
+    }
+    Ok(std::str::from_utf8(&bytes[first.min(end)..end])
+        .map_err(EngineError::unreadable)?
+        .to_owned())
 }
 
 /// A stretch of a command's output.
@@ -1657,6 +1679,11 @@ async fn thread_facts(
                 .as_deref()
                 .map(|step| read::<StartingStep>(Json::String(step.to_owned()), "a starting step"))
                 .transpose()?,
+            starting_since: row.starting_step_at.map(orch_types::Time::new),
+            starting_work: row.starting_command.clone().map(|command| StartingWork {
+                command,
+                behind: row.starting_behind.clone(),
+            }),
             blocked: blocked_of(conn, row).await?,
             queue,
             environment: environment_ref,
@@ -1881,15 +1908,14 @@ impl Engine {
         self.item_view_in(conn, thread, item, None, None).await
     }
 
-    /// A direct known-item link resolves its actual owner unless a prefix view was explicitly chosen.
-    pub async fn item_view_in(
-        &self,
+    /// The row of an item that a direct link names: its actual owner, unless a prefix view was explicitly chosen.
+    async fn item_row_in(
         conn: &mut Conn,
         thread: Id,
         item: Id,
         continuation: Option<Id>,
         revision: Option<i64>,
-    ) -> Result<Item, ReadError> {
+    ) -> Result<ItemRow, ReadError> {
         let owner = match continuation {
             Some(owner) => owner,
             None => history_rows::item_owner(conn, thread, item)
@@ -1904,9 +1930,41 @@ impl Engine {
                 crate::continuations::projection::scope(&projection),
             ));
         }
-        let row = history_rows::item(conn, thread, owner, item)
+        history_rows::item(conn, thread, owner, item)
             .await?
-            .ok_or(ReadError::NotFound)?;
+            .ok_or(ReadError::NotFound)
+    }
+
+    /// A tool call exactly as its harness made it, which `item_view` leaves out of the thread's timeline: found
+    /// the way the item itself is, and an item that is no tool call has none.
+    pub async fn item_raw_in(
+        &self,
+        conn: &mut Conn,
+        thread: Id,
+        item: Id,
+        continuation: Option<Id>,
+        revision: Option<i64>,
+    ) -> Result<orch_api_contract::threads::RawCall, ReadError> {
+        let row = Self::item_row_in(conn, thread, item, continuation, revision).await?;
+        if row.kind != "tool_call" {
+            return Err(ReadError::NotFound);
+        }
+        row.payload
+            .get("raw")
+            .and_then(|raw| serde_json::from_value(raw.clone()).ok())
+            .ok_or(ReadError::NotFound)
+    }
+
+    /// A direct known-item link resolves its actual owner unless a prefix view was explicitly chosen.
+    pub async fn item_view_in(
+        &self,
+        conn: &mut Conn,
+        thread: Id,
+        item: Id,
+        continuation: Option<Id>,
+        revision: Option<i64>,
+    ) -> Result<Item, ReadError> {
+        let row = Self::item_row_in(conn, thread, item, continuation, revision).await?;
         let people = People::load(conn, [row.author_id, row.pinned_by].into_iter().flatten())
             .await?
             .with_approvals(conn, source_approval(&row))
@@ -2202,7 +2260,7 @@ impl Engine {
         let to = usize::try_from((offset.max(0).saturating_add(limit.max(0))).clamp(0, total))
             .unwrap_or(bytes.len());
         Ok(OutputPage {
-            text: String::from_utf8_lossy(&bytes[from.min(to)..to]).into_owned(),
+            text: output_text(&bytes, from.min(to), to)?,
             total_len: total,
         })
     }
@@ -2229,7 +2287,7 @@ impl Engine {
                     hash,
                     Some(ByteRange::Between {
                         start,
-                        end: end - 1,
+                        end: end.saturating_add(3).min(total) - 1,
                     }),
                 )
                 .await
@@ -2237,7 +2295,13 @@ impl Engine {
             let bytes = orch_blob_contract::store::read_all(read.body)
                 .await
                 .map_err(EngineError::unreadable)?;
-            String::from_utf8_lossy(&bytes).into_owned()
+            output_text(
+                &bytes,
+                0,
+                usize::try_from(end - start)
+                    .unwrap_or(bytes.len())
+                    .min(bytes.len()),
+            )?
         } else {
             String::new()
         };
@@ -2453,10 +2517,11 @@ mod tests {
             Some("hello")
         );
         assert_eq!(search_text("marker", &json!({})), None);
-        let long = json!({ "text": "x".repeat(SEARCH_TEXT_MAX_CHARS + 5) });
+        // Extraction keeps the source whole; the masked writer applies the effective allowance.
+        let long = json!({ "text": "x".repeat(20_005) });
         assert_eq!(
             search_text("agent_message", &long).map(|text| text.chars().count()),
-            Some(SEARCH_TEXT_MAX_CHARS)
+            Some(20_005)
         );
     }
 }

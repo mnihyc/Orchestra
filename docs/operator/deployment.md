@@ -176,6 +176,23 @@ enrolls on a start after that, which takes up to a minute or two, and `orchctl d
 docker compose exec api /opt/orchctl/orchctl doctor
 ```
 
+## Email
+
+In Management → Email and channels, choose **New channel… → Email** to enter the SMTP server,
+user name, password and sender. A root org can set its own server in **Settings → Email and channels**.
+Port **587** normally uses **STARTTLS**; port **465** uses **TLS** from the first byte. Save the channel,
+then use **Test** with a recipient address to check delivery and see the server's answer.
+
+The same fields can be supplied as a JSON object, with the password in `password`, from a file readable
+only by its owner. From the deployment directory:
+
+```sh
+docker compose exec -T api /opt/orchctl/orchctl channel put email --file /dev/stdin < email.json
+docker compose exec api /opt/orchctl/orchctl channel test email --to you@example.org
+```
+
+Secrets are sealed when saved and are never read back by the form or command.
+
 ## What is on disk
 
 | Path | What it holds |

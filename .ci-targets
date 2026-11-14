@@ -1,0 +1,2 @@
+test -p orch-api-core --features test-observers --lib
+test -p orch-engine --lib -- --skip history_pages::

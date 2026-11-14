@@ -497,6 +497,8 @@ mod tests {
 
     fn ctx() -> ToolContext<'static> {
         ToolContext {
+            outputs: None,
+            output_capture_bytes: orch_agent_contract::output::DEFAULT_CAPTURE_BYTES,
             directory: "/workspace/web",
             cwd: "/workspace/web",
         }
