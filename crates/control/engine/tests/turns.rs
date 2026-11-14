@@ -1185,3 +1185,6 @@ async fn a_person_who_may_not_use_the_provider_cannot_send_any_kind_of_input() {
 
 #[path = "turns/prompt_cache_ttl.rs"]
 mod prompt_cache_ttl;
+
+#[path = "turns/native_diff.rs"]
+mod native_diff;

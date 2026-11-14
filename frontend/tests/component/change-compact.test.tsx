@@ -212,7 +212,7 @@ it('keeps host capacity and policy refusals inside the open picker without weake
   const option = screen.getByRole('option', { name: 'Build host' });
   expect(option).toHaveAttribute('aria-disabled', 'true');
   expect(option).toHaveAccessibleDescription(/Machine policy forbids writes/);
-  expect(screen.getByRole('meter', { name: '2 of 8 GB declared' })).toBeVisible();
+  expect(screen.getByRole('meter', { name: '7 GiB free of 8 GiB memory' })).toBeVisible();
   await userEvent.click(option);
   expect(changed).not.toHaveBeenCalled();
 });

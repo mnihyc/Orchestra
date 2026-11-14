@@ -42,6 +42,9 @@ pub struct Delay {
     /// What the option is when the profile does not set it, in milliseconds.
     #[serde(default)]
     pub default_ms: u64,
+    /// System registry setting supplying this default in milliseconds, where the program declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_setting: Option<String>,
 }
 
 /// An option the profile did not set that took less than its default, because the time left no more.
@@ -101,6 +104,9 @@ impl TurnEndDelays {
                         bound_ms,
                     });
                 }
+                None if delay.default_setting.is_some() => {
+                    put(config, &delay.pointer, delay.default_ms);
+                }
                 None => {}
             }
         }
@@ -144,8 +150,24 @@ mod tests {
                 pointer: "/child_usage_wait_ms".into(),
                 also_ms: 8_000,
                 default_ms: 1_000,
+                default_setting: None,
             }],
         }
+    }
+
+    #[test]
+    fn a_registry_default_is_carried_to_the_program_and_still_fits_the_interrupt_window() {
+        let mut declared = declared();
+        declared.delays[0].default_setting = Some("agents.native_result_wait_ms".into());
+        declared.delays[0].default_ms = 3_000;
+        let mut config = json!({});
+        declared.fit(&mut config, Duration::from_secs(30)).unwrap();
+        assert_eq!(config["child_usage_wait_ms"], 3_000);
+        let mut config = json!({});
+        declared
+            .fit(&mut config, Duration::from_millis(8_500))
+            .unwrap();
+        assert_eq!(config["child_usage_wait_ms"], 500);
     }
 
     #[test]

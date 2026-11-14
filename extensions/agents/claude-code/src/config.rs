@@ -121,6 +121,7 @@ pub fn turn_end_delays() -> Json {
             pointer: "/child_usage_wait_ms".to_owned(),
             also_ms: u64::try_from(EXIT_GRACE.as_millis()).unwrap_or(u64::MAX),
             default_ms: DEFAULT_CHILD_USAGE_WAIT_MS,
+            default_setting: None,
         }],
     })
     .unwrap_or(Json::Null)

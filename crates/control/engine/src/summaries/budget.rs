@@ -45,7 +45,7 @@ pub(super) async fn context_tokens(
 }
 
 /// The window taken for a model whose entry does not say: what every model that does this work has.
-pub(crate) const UNKNOWN_WINDOW_TOKENS: i64 = 32_000;
+const UNKNOWN_WINDOW_TOKENS: i64 = 32_000;
 
 /// The share the setting ships with, for a place where it does not read.
 pub(crate) const DEFAULT_SHARE: i64 = 50;

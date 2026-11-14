@@ -43,6 +43,10 @@ pub const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// minutes and a turn that has run out is not worth a quarter of a minute more.
 pub const WATCH_EVERY: Duration = Duration::from_secs(1);
 
+/// A small local evidence read must not hold back every session's event stream.
+/// The registry supplies this default, and a profile can replace it within the interrupt window.
+pub(crate) const DEFAULT_NATIVE_RESULT_WAIT_MS: u64 = 2_000;
+
 /// How long the host waits for the harness to take the interrupt of a turn it has given up on.
 const INTERRUPT_WAIT: Duration = Duration::from_secs(10);
 
@@ -155,6 +159,7 @@ pub struct Shared {
     ended_commands: Mutex<std::collections::HashSet<String>>,
     /// How long a turn is waited for.
     patience: Patience,
+    native_result_wait: Duration,
     /// The sign-in that runs, and what is known of who is signed in.
     pub login: LoginTracker,
 }
@@ -254,6 +259,8 @@ pub struct ProcessParts {
     pub exit: Arc<watch::Sender<Option<String>>>,
     /// How long a turn is waited for.
     pub patience: Patience,
+    /// Combined evidence wait before the turn's end, also bounding individual history reads.
+    pub native_result_wait: Duration,
 }
 
 impl Shared {
@@ -314,6 +321,7 @@ impl Shared {
             version,
             exit,
             patience,
+            native_result_wait,
         } = parts;
         Arc::new(Self {
             sink,
@@ -335,6 +343,7 @@ impl Shared {
             windows: Mutex::new(None),
             ended_commands: Mutex::new(std::collections::HashSet::new()),
             patience,
+            native_result_wait,
             login: LoginTracker::default(),
         })
     }
@@ -477,10 +486,19 @@ impl Shared {
     pub async fn on_notification(self: &Arc<Self>, method: &str, params: &Json) {
         let _gate = self.event_gate.lock().await;
         self.flush_events().await;
-        if method == "warning"
-            && thread_of(params).is_none()
-            && crate::failure::row_name(params) == "credential_refused"
-        {
+        if method == "warning" && thread_of(params).is_none() {
+            let credential_refused = crate::failure::row_name(params) == "credential_refused";
+            if !credential_refused
+                && let Some(message) = params
+                    .get("message")
+                    .and_then(Json::as_str)
+                    .filter(|message| !message.trim().is_empty())
+            {
+                self.stage_event(AdapterEvent::Status(
+                    self.status(HarnessState::Online, Some(message.into())),
+                ));
+                self.flush_events().await;
+            }
             let mut after = None;
             loop {
                 let next = {
@@ -492,7 +510,7 @@ impl Shared {
                     state
                         .sessions
                         .range(range)
-                        .find(|(_, record)| record.mapper.turn_in_progress())
+                        .find(|(_, record)| !credential_refused || record.mapper.turn_in_progress())
                         .map(|(id, record)| (*id, record.mapper.native_thread().to_owned()))
                 };
                 let Some((id, native)) = next else { break };
@@ -504,8 +522,17 @@ impl Shared {
             }
         } else {
             if method == "turn/completed" {
-                Box::pin(self.finish_viewed_images(params)).await;
-                Box::pin(self.finish_web_results(params)).await;
+                let work = async {
+                    Box::pin(self.finish_viewed_images(params)).await;
+                    Box::pin(self.finish_web_results(params)).await;
+                };
+                if tokio::time::timeout(self.native_result_wait, work)
+                    .await
+                    .is_err()
+                {
+                    self.unavailable_native_results(params, "native_result_timed_out");
+                    self.flush_events().await;
+                }
             }
             self.stage_on_notification(method, params);
             self.flush_events().await;
@@ -539,12 +566,15 @@ impl Shared {
         };
         let mut cancelled = crate::native_history::CancelOnDrop(Some(work.cancellation()));
         let outputs = self.outputs.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let worker = tokio::task::spawn_blocking(move || {
             let mut work = work;
             let values = prepare(&mut work, &keys, &outputs);
             (work, values)
-        })
-        .await;
+        });
+        let result = match tokio::time::timeout(self.native_result_wait, worker).await {
+            Ok(result) => result,
+            Err(_) => return Err("native_result_timed_out"),
+        };
         cancelled.disarm();
         match result {
             Ok((work, values)) => {
@@ -663,6 +693,37 @@ impl Shared {
             }
         }
         self.flush_events().await;
+    }
+
+    fn unavailable_native_results(&self, params: &Json, reason: &'static str) {
+        let Some(native) = thread_of(params) else {
+            return;
+        };
+        let Some(turn) = params.pointer("/turn/id").and_then(Json::as_str) else {
+            return;
+        };
+        let mut state = lock(&self.state);
+        let Some(owner) = state.by_native.get(native).copied() else {
+            return;
+        };
+        let Some(record) = state.sessions.get_mut(&owner) else {
+            return;
+        };
+        let views = record
+            .mapper
+            .pending_view_keys(native, turn)
+            .into_iter()
+            .map(|key| (key, Err(reason)))
+            .collect();
+        let mut events = record.mapper.complete_view_results(views);
+        let web = record
+            .mapper
+            .pending_web_results(native, turn)
+            .into_keys()
+            .map(|key| (key, (crate::native_web::Proof::unavailable(reason), None)))
+            .collect();
+        events.extend(record.mapper.complete_web_results(web));
+        self.emit_mapped(&mut record.mapper, events);
     }
 
     pub(crate) async fn image_results(
@@ -1247,6 +1308,11 @@ impl Shared {
                     "this native build does not offer exact background command control",
                 ));
             }
+            Err(RpcError::Shape { .. }) => {
+                return Ok(NativeBackground::unsupported(
+                    crate::native_schema::FORM_UNKNOWN,
+                ));
+            }
             Err(error) => return Err(crate::map_rpc(error)),
         };
         let mut items = Vec::new();
@@ -1314,10 +1380,17 @@ impl Shared {
                 reason: None,
             });
         }
-        let (terminals, _) = self
-            .background_terminals(&native)
-            .await
-            .map_err(crate::map_rpc)?;
+        let terminals = match self.background_terminals(&native).await {
+            Ok((terminals, _)) => terminals,
+            Err(RpcError::Shape { .. }) => {
+                return Ok(NativeBackgroundEnd {
+                    id: id.to_owned(),
+                    state: BackgroundEndState::Unknown,
+                    reason: Some(crate::native_schema::FORM_UNKNOWN.into()),
+                });
+            }
+            Err(error) => return Err(crate::map_rpc(error)),
+        };
         let Some(terminal) = terminals.into_iter().find(|terminal| {
             command_identity(&native, &terminal.item_id, &terminal.process_id) == id
         }) else {
@@ -1762,6 +1835,8 @@ impl Shared {
                     let id = *id;
                     let windows = lock(&self.windows).clone();
                     let ctx = Context { clock: self.clock.as_ref(), outputs: &self.outputs, windows: windows.as_ref() };
+                    let expired = record.mapper.expire_silent_web_actions(self.clock.time());
+                    self.emit_mapped(&mut record.mapper, expired);
                     let asking = record.approvals.values().any(|asked| !asked.pending.answered && !asked.pending.closed);
                     let exhausted = record.mapper.give_up_if_tired(&ctx, &self.patience, asking);
                     if let Some((native_turn, events)) = exhausted {
@@ -1851,3 +1926,73 @@ pub async fn pump(
 
 /// The tools of the protocol module, for the code that connects.
 pub use protocol::connect;
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "a test fails by panicking")]
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_blocked_native_result_read_releases_its_wait_and_cancels_the_worker() {
+        let (sink, _events) = EventSink::channel();
+        let (rpc, _incoming) = protocol::connect(tokio::io::empty(), tokio::io::sink(), None);
+        let directory = tempfile::tempdir().unwrap();
+        let shared = Shared::new(ProcessParts {
+            background_control: false,
+            sink,
+            clock: Arc::new(orch_types::SystemClock),
+            outputs: OutputStore::new(directory.path().join("outputs")),
+            rpc,
+            raw: Arc::new(Mutex::new(HashMap::new())),
+            version: "0.167.2".into(),
+            exit: Arc::new(watch::channel(None).0),
+            patience: Patience::default(),
+            native_result_wait: Duration::from_secs(3),
+        });
+        let thread = Id::from_u128(1);
+        let segment = Id::from_u128(2);
+        lock(&shared.state).sessions.insert(
+            thread,
+            SessionRecord {
+                mapper: Mapper::new(crate::events::MapperConfig {
+                    thread_id: thread,
+                    segment_id: segment,
+                    native_thread: "native".into(),
+                    directory: "/workspace".into(),
+                }),
+                directory: "/workspace".into(),
+                cwd: "/workspace".into(),
+                workspace_root: "/workspace".into(),
+                instruction_root_marker: false,
+                workspace_configuration: None,
+                instructions_notice: None,
+                mounts: Vec::new(),
+                remote: None,
+                approvals: HashMap::new(),
+                planning: false,
+                approval_mode: orch_agent_contract::descriptor::ApprovalMode::Bypass,
+            },
+        );
+        let (started, began) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let worker = tokio::spawn(async move {
+            shared
+                .native_result_work(
+                    thread,
+                    segment,
+                    "native",
+                    Vec::new(),
+                    move |source, _, _| {
+                        let _ = started.send(source.cancellation());
+                        blocked.recv().unwrap();
+                    },
+                )
+                .await
+        });
+        let cancelled = began.await.unwrap();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(worker.await.unwrap(), Err("native_result_timed_out"));
+        assert!(cancelled.load(Ordering::Acquire));
+        release.send(()).unwrap();
+    }
+}

@@ -617,6 +617,14 @@ impl CodexAdapter {
             version: version.clone(),
             exit: Arc::clone(&exit),
             patience: self.patience,
+            native_result_wait: Duration::from_millis(
+                start
+                    .profile
+                    .config
+                    .get("native_result_wait_ms")
+                    .and_then(Json::as_u64)
+                    .unwrap_or(runtime::DEFAULT_NATIVE_RESULT_WAIT_MS),
+            ),
         });
         if let Some(home) = harness_home.as_deref().filter(|_| managed) {
             let (method, expires_at) = provider::read_login_note(home);
@@ -1009,6 +1017,7 @@ impl CodexAdapter {
             directory: settings.directory.clone(),
         })
         .with_native_web_results(true)
+        .with_web_action_wait(Duration::from_secs(settings.web_action_wait_secs))
         .with_external_images(
             spec.exec.executor.is_some()
                 || settings.arrangement

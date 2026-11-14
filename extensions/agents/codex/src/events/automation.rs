@@ -4,6 +4,92 @@ use orch_api_contract::threads::MarkerHarnessChanged;
 use orch_api_contract::usage::UsageMeasurement;
 
 impl Mapper {
+    pub(super) fn runtime_warning(
+        &mut self,
+        params: &Json,
+        out: &mut Vec<SessionEvent>,
+        ctx: &Context<'_>,
+    ) {
+        let thread = text(params, "threadId");
+        let Some(stream) = self.stream_of(thread) else {
+            return;
+        };
+        let message = text(params, "message");
+        if message.trim().is_empty() {
+            return;
+        }
+        let turn = self.turn_for(thread);
+        let Some((serial, data)) = self.native_settings.state(
+            thread,
+            "warning",
+            None,
+            json!({"message":message}),
+            turn,
+            ctx.clock.time(),
+        ) else {
+            return;
+        };
+        let parent = self
+            .children
+            .get(thread)
+            .and_then(|child| child.parent_item.clone());
+        self.emit_harness_change(serial, &stream, parent, data, None, out);
+    }
+
+    pub(super) fn turn_diff_updated(
+        &mut self,
+        params: &Json,
+        out: &mut Vec<SessionEvent>,
+        ctx: &Context<'_>,
+    ) {
+        let thread = text(params, "threadId");
+        let native = text(params, "turnId");
+        let Some(stream) = self.stream_of(thread) else {
+            return;
+        };
+        let Some(turn) = self.reported_turn(thread, native) else {
+            return;
+        };
+        let Some(diff) = params.get("diff").and_then(Json::as_str) else {
+            return;
+        };
+        let hash = Hash::of(diff.as_bytes());
+        if self
+            .turn_diffs
+            .get(thread)
+            .is_some_and(|(old_turn, old_hash)| old_turn == native && *old_hash == hash)
+        {
+            return;
+        }
+        let Some(changes) = super::turn_diff::changes(diff, &self.config.directory) else {
+            self.runtime_warning(&json!({"threadId":thread,"message":"Codex reported a turn diff in a format Orch could not read. Earlier changed files are kept."}), out, ctx);
+            return;
+        };
+        self.turn_diffs.insert(thread.into(), (native.into(), hash));
+        let data = MarkerHarnessChanged {
+            program: "Codex".into(),
+            change: "turn_diff".into(),
+            subject: None,
+            previous: UsageMeasurement::Unsupported,
+            expected: UsageMeasurement::Unsupported,
+            value: json!({"changes":changes}),
+            changed: true,
+            diverged: false,
+            next_turn: false,
+            turn_id: Some(turn),
+            reported_at: ctx.clock.time(),
+        };
+        let reference = format!(
+            "turn-diff-{}",
+            Hash::of(json!([thread, native]).to_string().as_bytes())
+        );
+        let parent = self
+            .children
+            .get(thread)
+            .and_then(|child| child.parent_item.clone());
+        self.emit_harness_observation(reference, &stream, parent, data, None, out);
+    }
+
     fn reported_turn(&self, thread: &str, native: &str) -> Option<TurnId> {
         if native.is_empty() {
             return None;

@@ -35,6 +35,7 @@ import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { IconButton } from '@/ui/IconButton';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
+import { SecretField } from '@/ui/SecretField';
 import { Menu } from '@/ui/Menu';
 import { Select } from '@/ui/Select';
 import { SkeletonRows } from '@/ui/Skeleton';
@@ -79,6 +80,7 @@ function ProviderForm({ provider, onClose }: FormProps) {
       client_secret: (value) => (provider === null && value === '' ? t('admin.idp.secretRule') : null),
     },
   );
+  const clientSecret = form.field('client_secret');
   const [autoRegister, setAutoRegister] = useState(provider?.auto_register ?? false);
   const [enabled, setEnabled] = useState(provider?.enabled ?? true);
   const [org, setOrg] = useState(provider?.default_org_id ?? NO_ORG);
@@ -142,12 +144,15 @@ function ProviderForm({ provider, onClose }: FormProps) {
         <Input label={t('admin.idp.issuer')} hint={t('admin.idp.issuerHint')} autoComplete="off" autoCapitalize="none" mono {...form.field('issuer')} />
         <div className="grid gap-4 sm:grid-cols-2">
           <Input label={t('admin.idp.clientId')} autoComplete="off" mono {...form.field('client_id')} />
-          <Input
+          <SecretField
             label={t('admin.idp.secret')}
-            type="password"
-            autoComplete="new-password"
-            hint={provider?.client_secret_set === true ? t('admin.idp.secretKept') : t('admin.idp.secretHint')}
-            {...form.field('client_secret')}
+            set={provider?.client_secret_set === true}
+            hint={provider?.client_secret_set === true ? undefined : t('admin.idp.secretHint')}
+            value={form.values.client_secret}
+            error={clientSecret.error}
+            onBlur={clientSecret.onBlur}
+            fieldRef={clientSecret.ref}
+            onValueChange={(next) => form.set('client_secret', next)}
           />
         </div>
         <Input label={t('admin.idp.scopes')} hint={t('admin.idp.scopesHint')} autoComplete="off" mono {...form.field('scopes')} />

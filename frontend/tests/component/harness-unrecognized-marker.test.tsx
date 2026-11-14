@@ -6,6 +6,16 @@ import { i18n, setLocale } from '@/i18n';
 import { formatNumber } from '@/lib/format';
 
 afterEach(async () => { await setLocale('en'); });
+for (const locale of ['en', 'zh-CN'] as const) it(`shows a native warning's actual words in ${locale}`, async () => {
+  await setLocale(locale);
+  const message = 'The model changed. <script>plain text</script>';
+  const payload: MarkerPayload = { marker: 'harness_changed', data: {
+    program: 'Codex', change: 'warning', subject: null, previous: { state: 'unsupported' },
+    expected: { state: 'unsupported' }, value: { message }, changed: false, diverged: false,
+    next_turn: false, turn_id: null, reported_at: '2026-11-14T08:00:00Z',
+  } };
+  expect(markerSentence(payload, i18n.t, { locale })).toBe(i18n.t('harnessChanges.warning', { program: 'Codex', message }));
+});
 for (const locale of ['en', 'zh-CN'] as const) for (const program of ['Codex', 'Claude Code', 'DeepSeek Harness', 'Fourth program']) it(`names a counted unknown ${program} event in ${locale}`, async () => {
   await setLocale(locale);
   for (const count of [1, 1000]) {
