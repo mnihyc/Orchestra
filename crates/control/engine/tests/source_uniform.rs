@@ -841,6 +841,16 @@ async fn a_terminal_source_failure_blocks_without_retrying_and_explicit_retry_ke
                 "workspace.source_failed"
             })
         );
+        // The sentence the thread is blocked with names the reason the source keeps, for the page to explain.
+        let blocked = world.sync(thread).await.thread.blocked.unwrap();
+        assert!(
+            blocked
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains(&format!("({})", shown.reason.as_deref().unwrap())),
+            "{blocked:?}"
+        );
         let job_id = shown.job.unwrap().id;
         assert_eq!(hosting::wait_over(&world, job_id).await.0, "failed");
         assert_eq!(

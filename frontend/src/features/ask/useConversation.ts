@@ -51,6 +51,8 @@ export function useConversation(id: string | null, visible: boolean, inspect = f
           attempts = 0;
           if (event.data.kind === 'error' && event.data.code === 'ask_context_no_room') setNotice(t('ask.contextNoRoom'));
           else if (event.data.kind === 'error' && event.data.code === 'ask_context_too_long' && 'model' in event.data && typeof event.data.model === 'string') setNotice(t('ask.contextTooLong', { model: event.data.model }));
+          else if (event.data.kind === 'error' && event.data.code === 'ask_window_no_room' && 'model' in event.data && typeof event.data.model === 'string') setNotice(t('ask.windowNoRoom', { model: event.data.model }));
+          else if (event.data.kind === 'error' && event.data.code === 'ask_window_unknown' && 'model' in event.data && typeof event.data.model === 'string') setNotice(t('ask.windowUnknown', { model: event.data.model }));
           else if (event.data.kind === 'notice' || event.data.kind === 'error') setNotice(event.data.message);
           if (!acceptsAskEvent(current, event)) return;
           if (event.data.kind === 'deleted') { stopped = true; setDeleted(true); queryClient.removeQueries({ queryKey: askKey(id, inspect), exact: true }); return; }

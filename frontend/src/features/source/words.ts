@@ -10,10 +10,30 @@ import type { DirectoryWork, RestorePlan, ReviewComment, Snapshot, ThreadAttenti
 import { graphemeCount } from '@/lib/grapheme';
 import { fencedCode } from '@/lib/fencedCode';
 
-/** Source writes obey the machine's policy; protocol codes never become the explanation. */
+/** Why a source could not be prepared, in the reader's words and with the act that fits. Source writes obey the machine's
+ * policy; a protocol code never becomes the explanation: each code the preparation can fail with has its own sentence, and a
+ * code that has none gets the general one. */
 export function sourceFailure(t: TFunction, reason: string): string {
-  return reason === 'workspace.remote_write_disabled' || reason === 'policy.remote_write_disabled'
-    ? t('source.prepare.writeDisabled') : t('source.prepare.failureReason');
+  switch (reason) {
+    case 'workspace.remote_write_disabled':
+    case 'policy.remote_write_disabled':
+      return t('source.prepare.writeDisabled');
+    case 'timeout': return t('source.prepare.reasons.timeout');
+    case 'busy': return t('source.prepare.reasons.busy');
+    case 'not_found': return t('source.prepare.reasons.notFound');
+    case 'workspace.source_conflict': return t('source.prepare.reasons.conflict');
+    case 'workspace.restore_unavailable': return t('source.prepare.reasons.restoreUnavailable');
+    case 'offline_peer': return t('source.prepare.reasons.offline');
+    case 'too_large': return t('source.prepare.reasons.tooLarge');
+    case 'credential_unusable':
+    case 'login_required':
+      return t('source.prepare.reasons.credential');
+    case 'changed': return t('source.prepare.reasons.changed');
+    case 'internal': return t('source.prepare.reasons.internal');
+    case 'expired': return t('source.prepare.reasons.expired');
+    case 'unsupported': return t('source.prepare.reasons.unsupported');
+    default: return t('source.prepare.failureReason');
+  }
 }
 
 /** Whether a recorded state is one a whole directory can be put back to: complete, nothing missing. */
@@ -48,6 +68,8 @@ export function wholeUnavailableReason(t: TFunction, reason: string): string {
       return t('source.restore.why.liveTree');
     case 'not_ready':
       return t('source.restore.why.notReady');
+    case 'timeout':
+      return t('source.restore.why.timeout');
     case 'store_unavailable':
       return t('source.restore.why.storeUnavailable');
     case 'too_large':

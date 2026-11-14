@@ -1,0 +1,16 @@
+# n41-turn-start: a command's deadline counts from the start of its work; the recording waits a bounded time and never does a whole-directory pass before a turn; every wait at a start named with its clock; a failed preparation says its reason; a turn's changed files from its recordings; ignored paths sent to the machine; first compile.
+fmt
+clippy
+contracts
+test -p orch-settings-contract --lib
+test -p orch-link --lib
+test -p orch-link --test commands --test streams
+test -p orch-envhost --lib
+test -p orch-envhost --test environment
+test -p orch-db --test commands_in_line
+test -p orch-engine --lib
+test -p orch-engine --test source_uniform --test environments
+test -p orch-api-core --test threads_start_source
+web typecheck
+web lint
+web test -- tests/unit/waiting-start-steps.test.ts tests/unit/waiting-environment-making.test.ts
