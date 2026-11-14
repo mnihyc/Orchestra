@@ -82,6 +82,7 @@
     "noModels": "此处没有可用的 API 模型",
     "modelUnavailable": "此模型在这里不可用",
     "sources": "来源",
+    "noAnswer": "没有写出回答。请重试。",
     "sourceUnavailable": "来源已不可用",
     "copy": "复制回答",
     "retry": "重新回答",
@@ -91,7 +92,6 @@
     "noHistory": "暂无对话",
     "retention": "最后一条消息发出后保留 {{days}} 天",
     "expires": "到期时间",
-    "adminNotice": "此组织的管理员可以查看并导出此对话",
     "inspection": "管理员只读查看",
     "readOnlyTools": "使用你的权限读取 · 标注来源 · 不作修改",
     "paidBy": "付费方",
@@ -99,8 +99,8 @@
     "privateThread": "在此组织中创建永久保留的私有会话",
     "destination": "目标话题",
     "defaultDestination": "使用当前页面的话题或有权限的默认位置",
-    "contextNoRoom": "扣除 ask.max_output_tokens 和 ask.turn_tool_bytes 的预留空间后，ask.context_tokens 已无空间容纳对话历史。请提高 ask.context_tokens，或降低上述预留值。",
-    "contextTooLong": "这段对话超出了 {{model}} 的上下文容量；请新建对话，或将它保留为线程。"
+    "contextTooLong": "这段对话超出了 {{model}} 的上下文容量；请新建对话，或将它保留为线程。",
+    "turnTooLong": "这个问题及其读取的内容超出了 {{model}} 的上下文容量；请缩小问题范围，或从更少的来源开始。"
   },
   "viewWindow": {
     "floating": "已在浮动窗口中打开",
@@ -4739,21 +4739,29 @@
         "title": "Ask 每轮读取操作数",
         "description": "每个问题允许的读取操作数，达到后请提问者缩小问题范围。"
       },
-      "tool_bytes": {
-        "title": "Ask 单个来源大小",
-        "description": "交给模型的单次读取结果的最大字节数，并提供指向完整来源的标准链接。"
+      "docs_hits": {
+        "title": "Ask 每次搜索的指南页数",
+        "description": "Ask 每次搜索帮助时交给模型的指南页面数上限；中英文同时匹配时交替给出。"
       },
-      "turn_tool_bytes": {
-        "title": "Ask 每轮来源总量",
-        "description": "回答一个问题时提供给模型的读取结果总字节数。"
+      "docs_excerpt_tokens": {
+        "title": "Ask 指南摘录大小",
+        "description": "Ask 搜索帮助时交给模型的单个指南页面的最大令牌数，并附上该页面的链接。"
+      },
+      "max_operations": {
+        "title": "Ask 每次搜索的操作数",
+        "description": "Ask 每次搜索读取目录时返回的读取操作数上限。"
+      },
+      "max_links": {
+        "title": "Ask 每个来源的链接数",
+        "description": "Ask 在一次读取中保留的标准来源链接数上限。"
       },
       "max_output_tokens": {
         "title": "Ask 回答令牌数",
-        "description": "每次 Ask 模型请求允许的最大输出令牌数，也会在安排对话上下文前预留。系统和组织设置中的最小值生效。"
+        "description": "每次 Ask 模型请求允许的最大输出令牌数。请求按窗口减去此值来安排，且回答最多占窗口的一半。系统和组织设置中的最小值生效。"
       },
       "context_tokens": {
         "title": "Ask 上下文令牌数",
-        "description": "未设置时使用所选模型的上下文窗口。设置后仅对 Ask 取较小值，仍需留足输出和工具结果空间。系统和组织设置中的最小值生效。"
+        "description": "未设置时使用所选模型的上下文窗口；未记录窗口的模型不会被当作小窗口。设置后仅对 Ask 取较小值。窗口不超过回答令牌数两倍时，回答占其一半。系统和组织设置中的最小值生效。"
       }
     },
     "services": {
@@ -5010,6 +5018,7 @@
       "label": "上下文共 {{window}}，已用 {{used}}（{{percent}}），在 {{compact}} 处压缩",
       "labelBare": "上下文共 {{window}}，已用 {{used}}（{{percent}}）",
       "open": "查看上下文的组成（{{label}}）",
+      "labelUsed": "上下文已用 {{used}}；未报告窗口大小",
       "modelLabel": "{{model}}：{{context}}"
     },
     "panel": {
@@ -8610,6 +8619,26 @@
     "authz": {
       "denied": "你没有这项权限。请联系管理它的人。"
     },
+    "ask": {
+      "not_in_list": "该模型不在本组织的 Ask 模型列表中。请从列表中选择模型。",
+      "model_disabled": "该模型已关闭。请选择其他模型。",
+      "provider_unavailable": "该模型的提供方当前不可用。请选择其他模型，或联系管理该提供方的人。",
+      "no_interface": "该模型的提供方不提供对话方式。请选择其他模型。",
+      "options_refused": "所选的模型选项不被允许。请修改，或使用模型的默认选项。",
+      "model_not_allowed": "本组织的策略不允许使用该模型。请选择其他模型。",
+      "provider_not_allowed": "本组织的策略不允许使用该模型的提供方。请选择其他模型。",
+      "payer_unset": "Ask 设为由写入该设置的人付费，而此人已无法确认。请联系管理员重新设置付费方。",
+      "no_use": "你不能在本组织使用该模型的提供方。请联系管理它的人为你开放。",
+      "identity_not_usable": "你对该提供方的使用权限不包含此模型的默认选项。请选择其他模型。",
+      "use_excludes": "你对该提供方的使用权限不包含此模型或推理强度。请选择其他项。",
+      "payer_no_use": "为本组织 Ask 付费的人不能使用该提供方。请联系管理员。",
+      "payer_excludes": "为本组织 Ask 付费的人不能使用此模型或推理强度。请选择其他项。",
+      "no_keeper": "该提供方没有保管密钥的机器。请联系管理它的人设置。",
+      "keeper_offline": "保管该提供方密钥的机器已离线。请稍后重试，或选择其他模型。",
+      "cap_reached": "已达到 Ask 的用量上限。请在额度重置后重试，或联系管理员。",
+      "other_organization": "此页面属于另一个组织。请在该组织中提问。",
+      "root_refused": "你本人无法打开这个组织。Ask 以你本人的身份回答，而不是以管理员身份，因此“以管理员身份”不能打开它。请使用你所属的组织。"
+    },
     "org": {
       "suspended": "你在这个组织的访问已被暂停。请联系它的管理员。",
       "too_deep": "组织的嵌套层数已达上限。请选择更接近顶层的位置。",
@@ -9874,7 +9903,11 @@
         "right": "隐藏右栏",
         "bottom": "隐藏底栏"
       },
-      "pin": "固定为侧栏"
+      "pin": "固定为侧栏",
+      "peek": {
+        "title": "栏",
+        "label": "悬停时显示已隐藏的栏：{{state}}"
+      }
     },
     "sash": {
       "left": "左栏的宽度",
@@ -9941,9 +9974,10 @@
       "shellsHint": "你在此环境中的 Shell。打开终端。",
       "connecting": "正在连接…",
       "connectingHint": "正在连接实时更新。",
-      "reconnectingSince": "正在重新连接… · {{time}}",
       "reconnecting": "正在重新连接…",
       "reconnectingHint": "页面上的内容仍然可以阅读。审批和干预需要等连接恢复，输入不受影响。",
+      "noLive": "没有实时更新 · {{time}}",
+      "noLiveHint": "实时更新连接不上，所以这个页面每隔几秒重新读取一次。如果一直如此，请让运行这套系统的人检查 HTTPS 前端是否放行 /api/v1/ws 的 WebSocket 升级；orchctl doctor --url 会把它标为 edge-ws。",
       "slow": "连接较慢 · {{ms}} 毫秒",
       "slowHint": "发送、保存和终端会慢一些。你的输入不会被耽搁。"
     },
@@ -10701,7 +10735,8 @@
         "services": "这个入口允许的服务比你的任何一个入口都多。",
         "efforts": "这个入口允许的思考强度比你的任何一个入口都多。",
         "arrangements": "这个入口允许的部署方式比你的任何一个入口都多。",
-        "where": "这个入口允许的运行位置比你的任何一个入口都多。"
+        "where": "这个入口允许的运行位置比你的任何一个入口都多。",
+        "purposes": "允许的用途超出了你持有的任何单个授权条目。"
       },
       "gone": "（已不存在）",
       "leavesOther": "登录凭据会离开它的保管位置。",
@@ -10713,7 +10748,13 @@
         "environment": "环境",
         "host": "主机",
         "machine": "机器"
-      }
+      },
+      "purposes": "用途",
+      "purposeNames": {
+        "ask": "Ask",
+        "work": "其他工作"
+      },
+      "noUses": "无"
     },
     "who": {
       "title": "谁可以使用它",
@@ -14213,6 +14254,29 @@
     }
   },
   "settings": {
+    "summarizer": {
+      "choose": "选择摘要器",
+      "modelKind": "API 模型",
+      "none": "没有可用的摘要器",
+      "unavailable": "此摘要器不可用",
+      "provider": "API 提供方",
+      "model": "模型",
+      "providerFirst": "请先选择提供方",
+      "chooseModel": "选择模型",
+      "modelUnavailable": "此模型不可用",
+      "options": "选项",
+      "instructions": "自定义{{field}}指令",
+      "fields": {
+        "context_tokens": "输入令牌",
+        "max_output_tokens": "回答令牌",
+        "title": "标题",
+        "description": "描述",
+        "tags": "标签",
+        "rollup": "话题状态",
+        "handoff": "交接",
+        "summary": "摘要"
+      }
+    },
     "sectionUnavailable": "设置部分不可用",
     "chooseSection": "请选择设置部分",
     "resourceChoice": {
@@ -23396,6 +23460,9 @@
       "moveOut": "移到其他组织",
       "moveOutReason": "随主会话一起移动 · 保留后可单独移动"
     },
+    "slash": {
+      "about": "在旁路会话中提问，不打扰正在进行的轮次"
+    },
     "ask": {
       "title": "旁路会话",
       "about": "从“{{thread}}”的对话开始，答复只留在此旁路会话中。",
@@ -24417,6 +24484,9 @@
     "runtimeCount_other": "{{number}} 个运行时",
     "offInBuild": "此版本已关闭：{{feature}}",
     "caseUnavailable": "不可用",
+    "checkedPending_one": "已检查 · 另有 {{number}} 项检查待运行",
+    "checkedPending_other": "已检查 · 另有 {{number}} 项检查待运行",
+    "casesPending": "尚未验证：{{names}}",
     "notChecked": "此版本尚未检查",
     "checkFailed": "兼容性检查失败 · 请查看结果",
     "policySummary": "{{name}}：{{choice}}",
@@ -26192,6 +26262,8 @@
     "resultsRootPending": "无法打开结果所属组织",
     "model": "模型摘要器",
     "details": "摘要详情",
+    "hide": "隐藏摘要",
+    "show": "显示摘要",
     "inputFacts": "源条目：纳入 {{included}} 条 · 缩短 {{shortened}} 条 · 未纳入 {{omitted}} 条",
     "baseRates": "所选模型基础费率",
     "noRates": "未提供基础费率",

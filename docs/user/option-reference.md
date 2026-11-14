@@ -19,6 +19,7 @@ An option is offered only where its interface or program declares it. Provider l
 | `option:AccessOptions.services` | Enabled provider services this Use grant allows, by name, family or group. Omitted permits every enabled service; this list is independent of generation models. |
 | `option:AccessOptions.efforts` | The efforts. |
 | `option:AccessOptions.where` | The environment, or the host or machine of one that is to be made, that a refused use was asked for; it tells where the provider's entry does not reach. |
+| `option:ProviderUse.purposes` | The purposes of one provider Use entry: `ask` permits Ask; `work` permits ordinary threads, summaries and services. Omission permits both; an empty list permits neither. The same entry must also permit the model and effort. A giver cannot widen a purpose they do not hold. |
 | `option:BindingOptions.viewer_default` | The current creation default and its permitted provenance; absent when rebinding an existing thread. |
 | `option:BindingOptions.environment_readers` | The exact prospective page's View offer on the selected existing environment. A new environment is checked in the creator transaction before the thread is made. |
 | `option:BindingOptions.defaults` | What settings choose. |

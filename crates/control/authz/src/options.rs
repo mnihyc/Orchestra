@@ -18,7 +18,7 @@
 
 use orch_access_contract::pages::{Entry, Holder};
 use orch_access_contract::permissions::{
-    Arrangement, HostUse, Options, Permission, ProviderUse, TemplateUse,
+    Arrangement, HostUse, Options, Permission, ProviderUse, ProviderUsePurpose, TemplateUse,
 };
 use orch_access_contract::whereabouts::Whereabouts;
 use orch_agent_contract::discovery::ModelPattern;
@@ -119,9 +119,20 @@ pub struct Wanted<'a> {
 /// allowed is what a single entry allows, never what several allow member by member.
 #[must_use]
 pub fn entry_allows(options: &ProviderUse, wanted: &Wanted<'_>) -> bool {
-    wanted
-        .model
-        .is_none_or(|(model, groups)| allows_model(options, model, groups))
+    entry_allows_for(options, wanted, ProviderUsePurpose::Work)
+}
+
+/// One entry must allow the requested use and all its model, effort, service and place limits together.
+#[must_use]
+pub fn entry_allows_for(
+    options: &ProviderUse,
+    wanted: &Wanted<'_>,
+    purpose: ProviderUsePurpose,
+) -> bool {
+    options.allows_purpose(purpose)
+        && wanted
+            .model
+            .is_none_or(|(model, groups)| allows_model(options, model, groups))
         && wanted.service.is_none_or(|(service, groups)| {
             options
                 .services
@@ -520,6 +531,44 @@ mod tests {
             model: Some((name, &[])),
             ..Wanted::default()
         }
+    }
+
+    #[test]
+    fn an_ask_only_entry_does_not_authorize_an_ordinary_model_request() {
+        let ask_only =
+            provider_use(serde_json::json!({"purposes":["ask"],"models":["allowed-model"]}));
+        assert!(!entry_allows(&ask_only, &in_model("allowed-model")));
+        assert!(!entry_allows(&ask_only, &in_model("another-model")));
+        assert!(entry_allows_for(
+            &ask_only,
+            &in_model("allowed-model"),
+            ProviderUsePurpose::Ask
+        ));
+        assert!(!entry_allows_for(
+            &ask_only,
+            &in_model("another-model"),
+            ProviderUsePurpose::Ask
+        ));
+    }
+
+    #[test]
+    fn a_model_and_a_purpose_from_different_entries_do_not_form_a_wider_grant() {
+        let entries = [
+            provider_use(json!({"purposes":["ask"],"models":["ask-model"]})),
+            provider_use(json!({"purposes":["work"],"models":["work-model"]})),
+        ];
+        assert!(entries.iter().any(|entry| entry_allows_for(
+            entry,
+            &in_model("ask-model"),
+            ProviderUsePurpose::Ask
+        )));
+        assert!(!entries.iter().any(|entry| entry_allows_for(
+            entry,
+            &in_model("work-model"),
+            ProviderUsePurpose::Ask
+        )));
+        assert!(!one_allows(&entries, &in_model("ask-model")));
+        assert!(one_allows(&entries, &in_model("work-model")));
     }
 
     fn at(environment: Id) -> Whereabouts {

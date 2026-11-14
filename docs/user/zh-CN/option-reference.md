@@ -20,6 +20,7 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 | `option:AccessOptions.services` | 此使用授权允许的已启用提供方服务，可按名称、系列或分组指定。省略时允许所有已启用服务；它与生成模型列表相互独立。 |
 | `option:AccessOptions.efforts` | 此使用权限涵盖的思考强度。 |
 | `option:AccessOptions.where` | 被拒绝的使用所针对的环境，或将要创建的环境所在的主机或机器；它说明提供方的条目没有覆盖到哪里。 |
+| `option:ProviderUse.purposes` | 提供方单个使用条目的用途：`ask` 允许 Ask，`work` 允许普通线程、摘要和服务。省略时两者都允许，空列表则都不允许。同一条目还须允许所选模型和推理强度；授权者不能扩大自己未持有的用途。 |
 | `option:BindingOptions.viewer_default` | 新建线程的当前查看者默认值及允许公开的来源；重新绑定现有线程时可缺省。 |
 | `option:BindingOptions.environment_readers` | 选定已有环境对预期线程查看者的开放情况；新环境在创建事务中检查。 |
 | `option:BindingOptions.defaults` | 设置决定的默认值。 |

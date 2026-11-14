@@ -16,6 +16,27 @@ A failed action keeps its human explanation and available recovery. These stable
 | `error:request.invalid` | Something in this request is not valid. Check what you entered and try again. |
 | `error:request.value_refused` | A value in this request is not one that can be kept. Check what you entered and try again. |
 | `error:admin.risk_not_acknowledged` | This change carries a risk that has to be acknowledged first. Tick the acknowledgement and try again. |
+| `error:ask.not_in_list` | This model is not on this organization’s Ask list. Choose one of the listed models. |
+| `error:ask.model_disabled` | This model is switched off. Choose another model. |
+| `error:ask.provider_unavailable` | This model’s provider is not available. Choose another model or ask whoever manages the provider. |
+| `error:ask.no_interface` | This model’s provider offers no way to hold a conversation. Choose another model. |
+| `error:ask.options_refused` | The options chosen for this model are not allowed. Change them or use the model’s defaults. |
+| `error:ask.model_not_allowed` | This organization’s policy does not allow this model. Choose another model. |
+| `error:ask.provider_not_allowed` | This organization’s policy does not allow this model’s provider. Choose another model. |
+| `error:ask.payer_unset` | Ask is set to be paid for by whoever set it, and that person is no longer known. Ask an administrator to set who pays. |
+| `error:ask.no_use` | You may not use this model’s provider in this organization. Ask whoever manages it to let you. |
+| `error:ask.identity_not_usable` | Your access to this provider does not cover this model’s default options. Choose another model. |
+| `error:ask.use_excludes` | Your access to this provider leaves out this model or effort. Choose another. |
+| `error:ask.payer_no_use` | The person who pays for Ask here may not use this provider in this organization. Ask an administrator. |
+| `error:ask.payer_excludes` | The person who pays for Ask here may not use this model or effort. Choose another. |
+| `error:ask.no_keeper` | This provider has no machine that keeps its key. Ask whoever manages it to set one. |
+| `error:ask.keeper_offline` | The machine that keeps this provider’s key is offline. Try again shortly or choose another model. |
+| `error:ask.cap_reached` | A usage limit for Ask has been reached. Try again after it resets, or ask an administrator. |
+| `error:ask.other_organization` | This page belongs to another organization. Ask in that organization. |
+| `error:ask.root_refused` | You cannot open this organization as yourself. Ask answers as you are here, not as an administrator, so As admin does not open it. Use an organization you belong to. |
+| `error:ask_context_too_long` | The conversation cannot fit even after folding whole older turns. Choose a larger allowed model, start a new conversation or keep it as a thread; the originals remain in history. |
+| `error:ask_turn_too_long` | The current question and what it read cannot fit by themselves. Ask a narrower question or choose a model with more room; summarizing older messages cannot make this turn smaller. |
+| `error:ask_unavailable` | The question could not finish. Read its current explanation and use the offered retry when available; a later question can continue the conversation. |
 | `error:environment.none_usable` | There is no environment you can use for this thread, and you may not create one. Ask somebody who manages one to let you in. |
 | `error:auth.required` | You are not signed in. Sign in and try again. |
 | `error:auth.invalid_token` | Your session is no longer valid. Sign in again. |
