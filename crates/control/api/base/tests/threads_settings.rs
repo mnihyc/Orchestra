@@ -835,8 +835,104 @@ async fn a_threads_parameters_list_only_what_exists_for_its_model_and_carry_the_
     );
 }
 
+#[tokio::test]
+async fn an_access_program_a_manager_enabled_for_the_model_is_offered_in_a_thread_at_shipped_settings()
+ {
+    let s = Scene::new().await;
+    let id = s.thread().await.base.id;
+    // The adapter puts its access program behind its own feature, as Codex does.
+    let mut parameters = declared();
+    parameters[1]["feature"] = json!("codex.cyber_access");
+    sqlx::query("UPDATE agents SET descriptor = jsonb_set(jsonb_set(descriptor, '{parameters}', $1), '{features}', $2)")
+        .bind(parameters)
+        .bind(json!({"codex.cyber_access":true}))
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE provider_models SET parameters = $1 WHERE model_name = $2")
+        .bind(json!({ "access_programs": ["blue"], "default_access_program": "blue" }))
+        .bind(MODEL)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let shown = || async {
+        s.rig
+            .world
+            .app
+            .call(ThreadParameterGet, &[&id])
+            .token(&s.ada.token)
+            .send()
+            .await
+            .ok()
+            .parameters
+            .into_iter()
+            .map(|view| view.key)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        shown().await.contains(&"access_program".to_owned()),
+        "nobody switched the feature on, and the program is there"
+    );
+    // A place that does not want it offered under it says so.
+    s.rig
+        .world
+        .set_at(
+            Target::Node(s.tree.org.base.id),
+            "agent.features",
+            json!({ "codex.cyber_access": false }),
+        )
+        .await;
+    assert!(
+        !shown().await.contains(&"access_program".to_owned()),
+        "switched off under the org, it is not offered"
+    );
+}
+
 #[path = "threads_settings/prompt_cache_ttl.rs"]
 mod prompt_cache_ttl;
 
 #[path = "threads_settings/provider_options.rs"]
 mod provider_options;
+
+#[tokio::test]
+async fn a_place_can_choose_larger_subagent_defaults_without_claiming_unsupported_native_controls()
+{
+    use orch_api_contract::settings::{NodeSettingSet, NodeSettingSetBody};
+    let s = Scene::new().await;
+    let id = s.thread().await.base.id;
+    for (key, count) in [
+        ("agents.subagents_at_once", 65),
+        ("agents.subagent_depth", 6),
+    ] {
+        let accepted = s
+            .rig
+            .world
+            .app
+            .call(NodeSettingSet, &[&id, &key])
+            .token(&s.ada.token)
+            .body(&NodeSettingSetBody {
+                value: json!(count),
+                locked: None,
+                expected_revision: None,
+            })
+            .send()
+            .await
+            .ok()
+            .into_full()
+            .unwrap();
+        assert_eq!(accepted.value, Some(json!(count)));
+    }
+    let read = s
+        .rig
+        .world
+        .app
+        .call(ThreadParameterGet, &[&id])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let limits = read.subagent_limits.unwrap();
+    assert_eq!((limits.limits.at_once, limits.limits.depth), (65, 6));
+    assert!(limits.supported.is_empty());
+    assert_eq!(s.rig.commands.issued_of("turn.start"), 0);
+}

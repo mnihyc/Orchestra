@@ -38,6 +38,21 @@ Anthropic Messages uses `speed: "fast"`, with any required beta header in the en
 headers. Compatible Gemini, DeepSeek and other endpoints use their documented fields;
 choosing a format does not grant a model a speed it does not offer.
 
+Gemini's [OpenAI-compatible API](https://ai.google.dev/gemini-api/docs/openai)
+uses **openai-chat**. Its documented Priority and Flex tiers use the IDs `priority`
+and `flex`; enable the tiers the model offers and choose its default in the same
+model form. Effort uses `reasoning_effort`. Gemini-specific options, such as
+`extra_body.google.cached_content`, use the same nested request-option rules,
+defaults and per-use form as any other declared option.
+
+DeepSeek's [Chat Completions API](https://api-docs.deepseek.com/api/create-chat-completion/)
+also uses **openai-chat**. Its documented effort and `thinking.type` options can
+have model defaults and per-use overrides. Its API does not declare an inference
+tier selector: a model rule with `service_tier: false` leaves that field out.
+There is no need to invent a Fast tier. New documented fields use the existing
+request-option schema and its `default` values; endpoint defaults, model defaults
+and explicit use choices keep the same precedence for every provider.
+
 In a provider's Settings, open **Where its details come from**. Facts
 and Models have their own choices. **Default** explains the actual
 reader: the native adapter for a sign-in, the known OpenRouter or

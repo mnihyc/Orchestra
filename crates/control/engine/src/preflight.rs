@@ -2201,6 +2201,7 @@ pub(crate) fn sessions_params(
     use orch_agent_contract::descriptor::Placement;
     use orch_agent_contract::parameters::{Eligibility, sendable};
     let _ = arrangement;
+    let features = descriptor.feature_values(&settings.features);
     // The options of the profile that hold back the end of a turn must fit under the time an unanswered interrupt is
     // given: the program declares which they are, and the engine knows the time.
     if let Some(delays) = declared_turn_end_delays(descriptor) {
@@ -2228,7 +2229,7 @@ pub(crate) fn sessions_params(
     let sent = sendable(
         &descriptor.parameters,
         &context,
-        &settings.features,
+        &features,
         &settings.params,
     );
     let params = Json::Object(sent.values.into_iter().collect());
@@ -2242,7 +2243,7 @@ pub(crate) fn sessions_params(
         bindings.validate(
             agent.profile.get("config").unwrap_or(&Json::Null),
             parameters,
-            &settings.features,
+            &features,
         )?
     } else {
         std::collections::BTreeMap::new()
@@ -2259,7 +2260,7 @@ pub(crate) fn sessions_params(
         object.remove(orch_agent_contract::parameters::MODEL_WINDOW_KEY);
         for def in &descriptor.parameters {
             if def.chooses_none()
-                && def.is_shown(&context, &settings.features)
+                && def.is_shown(&context, &features)
                 && !object.contains_key(&def.key)
             {
                 object.insert(def.key.clone(), Json::Null);

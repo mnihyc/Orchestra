@@ -11723,6 +11723,80 @@
         ]
       }
     },
+    "/settings/parameters/form": {
+      "post": {
+        "operationId": "SettingParameterFormResolve",
+        "summary": "Resolves supplied native declarations with the same model constraints as thread parameter controls; reads no resource or credential.",
+        "x-orch-access": "user",
+        "x-orch-tokens": true,
+        "x-orch-legacy-access-tokens": true,
+        "x-orch-operation": {
+          "operation_id": "SettingParameterFormResolve",
+          "method": "POST",
+          "path": "/settings/parameters/form",
+          "title": "Resolves supplied native declarations with the same model constraints as thread parameter controls; reads no resource or credential.",
+          "delegation": "business",
+          "variants": [
+            {
+              "legacy_tokens": true,
+              "operation": "SettingParameterFormResolve",
+              "name": "",
+              "selector": "",
+              "facets": [
+                {
+                  "action": "read",
+                  "resources": [
+                    "system"
+                  ],
+                  "target": {
+                    "kind": "system"
+                  },
+                  "usage": "required"
+                }
+              ]
+            }
+          ]
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem, with a code a client can act on.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingParameterFormBody"
+              }
+            }
+          }
+        }
+      }
+    },
     "/nodes/{id}/settings": {
       "get": {
         "operationId": "NodeSettingList",
@@ -131342,6 +131416,11 @@
             "additionalProperties": true,
             "description": "Effective provider option schemas, including declared tier/program lists; keyed by protocol."
           },
+          "parameter_forms": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Declared per-thread option forms, keyed by outgoing interface, shared by thread and place defaults."
+          },
           "token_estimate": {
             "$ref": "#/components/schemas/TokenEstimate",
             "description": "What its tokenizer comes to, for the estimates where nobody counted."
@@ -131823,6 +131902,11 @@
             "type": "object",
             "additionalProperties": true,
             "description": "Effective provider option schemas, including declared tier/program lists; keyed by protocol."
+          },
+          "parameter_forms": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Declared per-thread option forms, keyed by outgoing interface, shared by thread and place defaults."
           },
           "token_estimate": {
             "$ref": "#/components/schemas/TokenEstimate",
@@ -134989,6 +135073,64 @@
           }
         ],
         "description": "What a zero of a setting means, where it means something else than none of what it counts."
+      },
+      "SettingParameterFormBody": {
+        "type": "object",
+        "properties": {
+          "definitions": {
+            "type": "array",
+            "items": true,
+            "description": "Native parameter declarations from the selected profile's descriptor."
+          },
+          "model": {
+            "$ref": "#/components/schemas/ModelParameters",
+            "description": "The selected model's enabled options and effective native constraints."
+          },
+          "feature_defaults": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "description": "The selected program's declared shipped feature states.",
+            "default": {}
+          },
+          "features": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "description": "Explicit features set at the place, overlaid on the program's declaration.",
+            "default": {}
+          },
+          "provider_kind": {
+            "$ref": "#/components/schemas/ProviderKind",
+            "description": "The selected provider's kind, independently of any future runtime arrangement."
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Restrict to declarations that can be written at this scope; absent lists all scopes."
+          },
+          "harness_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The selected profile's reported program version, when known."
+          }
+        },
+        "required": [
+          "definitions",
+          "model",
+          "feature_defaults",
+          "features",
+          "provider_kind",
+          "scope",
+          "harness_version"
+        ],
+        "description": "Public declarations already read by a place editor, resolved without starting or binding a thread."
       },
       "SettingReach": {
         "type": "object",
@@ -210343,6 +210485,13 @@
               "instruction_root_marker": false,
               "skills": "none"
             }
+          },
+          "features": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "description": "Optional features declared by this program and whether each ships enabled.\nResolved settings override these values without changing the declaration."
           },
           "parameters": {
             "type": "array",

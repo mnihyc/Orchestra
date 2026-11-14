@@ -1,0 +1,8 @@
+fmt
+test -p orch-xtask
+clippy
+contracts
+test -p orch-agent-contract --lib
+test -p orch-engine --test model_parameters
+test -p orch-api-core --test settings --test threads_settings
+test -p orch-adapter-codex --lib -- descriptor::tests::
