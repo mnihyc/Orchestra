@@ -432,14 +432,14 @@ export const hostRuntimesQuery = (id: string) =>
     queryFn: ({ signal }): Promise<Runtime[]> => ok(api.GET('/hosts/{id}/runtimes', { params: { path: { id } }, signal })),
   });
 
-/** Stops a unit on a host, interrupting the turns that run in it only when asked to. */
-export function stopHostRuntime(hostId: string, runtimeId: string, interrupt: boolean): Promise<Runtime> {
-  return ok(api.POST('/hosts/{id}/runtimes/{runtime_id}/stop', { params: { path: { id: hostId, runtime_id: runtimeId } }, body: { interrupt } }));
+/** Stops a unit on a host, interrupting the turns that run in it only when asked to; by force it is settled although its host does not confirm. */
+export function stopHostRuntime(hostId: string, runtimeId: string, interrupt: boolean, force = false): Promise<Runtime> {
+  return ok(api.POST('/hosts/{id}/runtimes/{runtime_id}/stop', { params: { path: { id: hostId, runtime_id: runtimeId } }, body: { interrupt, ...(force ? { force } : {}) } }));
 }
 
-/** Takes a unit away from a host after naming it; its volumes go too only when asked to. */
-export function removeHostRuntime(hostId: string, runtimeId: string, confirm: string, volumes: boolean): Promise<void> {
-  return done(api.DELETE('/hosts/{id}/runtimes/{runtime_id}', { params: { path: { id: hostId, runtime_id: runtimeId }, query: { confirm, ...(volumes ? { volumes } : {}) } } }));
+/** Takes a unit away from a host after naming it; its volumes go too only when asked to, and a job that works on it is ended only by force. */
+export function removeHostRuntime(hostId: string, runtimeId: string, confirm: string, volumes: boolean, force = false): Promise<void> {
+  return done(api.DELETE('/hosts/{id}/runtimes/{runtime_id}', { params: { path: { id: hostId, runtime_id: runtimeId }, query: { confirm, ...(volumes ? { volumes } : {}), ...(force ? { force } : {}) } } }));
 }
 
 // ---------------------------------------------------------------- templates, drivers, capabilities

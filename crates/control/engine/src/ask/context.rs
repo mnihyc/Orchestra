@@ -1,7 +1,7 @@
 //! Ask's own reserves over the chosen model's measured text and image estimate.
 
 use crate::context_fill::{self, Family, TextKind};
-use crate::error::EngineError;
+use crate::error::{AskNoRoom, EngineError};
 use orch_model_contract::generation::{GenerationInput, GenerationMessage, GenerationPart};
 use orch_provider_contract::models::ModelParameters;
 
@@ -14,11 +14,18 @@ pub struct Budget {
     pub output: i64,
     /// Tokens reserved for this turn's read-tool results.
     pub tools: i64,
+    /// The bytes of read-tool results one turn may hold for this model: what `tools` stands for, and never more
+    /// than the configured bytes.
+    pub tool_bytes: usize,
     family: Family,
 }
 
 impl Budget {
     /// Resolve only Ask's numeric fitting policy; model selection stays with the caller.
+    ///
+    /// The answer's reserve comes off the window first. Of what is left, a turn's tool results may take half at
+    /// most, and never more than the configured bytes stand for, so that a window that states nothing, or a small
+    /// one, still leaves the conversation its share instead of refusing every question.
     pub fn new(
         parameters: &ModelParameters,
         model: &str,
@@ -26,24 +33,45 @@ impl Budget {
         output: i64,
         tool_bytes: usize,
     ) -> Result<Self, EngineError> {
-        let window = parameters
-            .context_window
-            .filter(|window| *window > 0)
-            .unwrap_or(crate::summaries::UNKNOWN_WINDOW_TOKENS);
-        let window = context.map_or(window, |limit| window.min(limit));
+        let stated = parameters.context_window.filter(|window| *window > 0);
+        let own = stated.unwrap_or(crate::summaries::UNKNOWN_WINDOW_TOKENS);
+        let window = context.map_or(own, |limit| own.min(limit));
+        if output <= 0 || window <= output {
+            // The model is the cause when its own window leaves nothing, whatever the setting says.
+            return Err(EngineError::AskContextNoRoom(if own <= output {
+                AskNoRoom::Window {
+                    model: model.to_owned(),
+                    window: own,
+                    output,
+                    assumed: stated.is_none(),
+                }
+            } else {
+                AskNoRoom::Setting { window, output }
+            }));
+        }
         let family = crate::token_density::of(model);
-        let tools = context_fill::estimate_bytes(
+        let configured = context_fill::estimate_bytes(
             i64::try_from(tool_bytes).unwrap_or(i64::MAX),
             family,
             TextKind::Structured,
         );
-        if output <= 0 || window.saturating_sub(output).saturating_sub(tools) <= 0 {
-            return Err(EngineError::AskContextNoRoom);
-        }
+        let tools = configured.min((window - output) / 2);
+        let held = if tools >= configured {
+            tool_bytes
+        } else {
+            usize::try_from(context_fill::bytes_within_tokens(
+                tools,
+                family,
+                TextKind::Structured,
+            ))
+            .unwrap_or(0)
+            .min(tool_bytes)
+        };
         Ok(Self {
             window,
             output,
             tools,
+            tool_bytes: held,
             family,
         })
     }
@@ -183,24 +211,134 @@ mod tests {
         assert_eq!(model.context_window, Some(200000));
     }
 
+    fn window_of(tokens: Option<i64>) -> ModelParameters {
+        serde_json::from_value(match tokens {
+            Some(tokens) => json!({ "context_window": tokens }),
+            None => json!({}),
+        })
+        .unwrap()
+    }
+
     #[test]
-    fn a_window_equal_to_its_reserves_names_the_setting_instead_of_calling_a_provider() {
-        let model: ModelParameters =
-            serde_json::from_value(json!({"context_window":200000})).unwrap();
-        let error = Budget::new(
-            &model,
-            MODEL,
-            Some(4096 + tokens(MODEL, 262144)),
-            4096,
-            262144,
-        )
-        .unwrap_err();
-        assert!(matches!(error, EngineError::AskContextNoRoom));
+    fn a_model_whose_window_is_not_recorded_gets_a_budget_with_every_value_as_shipped() {
+        // A model added to a provider by name states no window: Ask takes the assumed one.
+        let budget = Budget::new(&window_of(None), MODEL, None, 4096, 262144)
+            .expect("the shipped values leave room in the assumed window");
+        assert_eq!(budget.window, crate::summaries::UNKNOWN_WINDOW_TOKENS);
+        let after_answer = budget.window - budget.output;
+        assert!(
+            budget.tools <= after_answer / 2,
+            "tool results take half at most"
+        );
+        assert!(
+            after_answer - budget.tools >= after_answer / 2,
+            "and the history keeps at least the other half"
+        );
+    }
+
+    #[test]
+    fn any_window_above_the_answers_reserve_gets_a_budget_and_the_reserve_is_a_share_of_it() {
+        for window in [
+            4097, 6000, 8000, 16000, 32000, 64000, 128000, 200000, 1_000_000,
+        ] {
+            let budget = Budget::new(&window_of(Some(window)), MODEL, None, 4096, 262144)
+                .unwrap_or_else(|error| panic!("a window of {window} tokens: {error}"));
+            let after_answer = window - 4096;
+            assert!(
+                budget.tools <= (after_answer / 2).max(0),
+                "{window}: the tool reserve {} is more than half of {after_answer}",
+                budget.tools
+            );
+            assert!(
+                budget.tools <= tokens(MODEL, 262144),
+                "{window}: and never more than the configured bytes stand for"
+            );
+            assert!(
+                after_answer - budget.tools > 0,
+                "{window}: the history keeps some room"
+            );
+        }
+    }
+
+    #[test]
+    fn a_turns_tool_bytes_are_its_reserve_in_that_models_density_and_never_above_the_configured_ones()
+     {
+        for window in [4097, 8000, 16000, 32000, 64000, 128000, 200000, 400_000] {
+            let budget = Budget::new(&window_of(Some(window)), MODEL, None, 4096, 262144).unwrap();
+            assert!(budget.tool_bytes <= 262144, "{window}");
+            assert!(
+                tokens(MODEL, budget.tool_bytes) <= budget.tools,
+                "{window}: a turn that holds {} bytes holds no more than its {} tokens",
+                budget.tool_bytes,
+                budget.tools
+            );
+        }
+        let small = Budget::new(&window_of(None), MODEL, None, 4096, 262144).unwrap();
+        assert!(
+            small.tool_bytes < 262144,
+            "a small window holds fewer bytes than the configured ones"
+        );
+        let large = Budget::new(&window_of(Some(400_000)), MODEL, None, 4096, 262144).unwrap();
+        assert_eq!(large.tool_bytes, 262144);
+    }
+
+    #[test]
+    fn on_a_large_window_the_reserve_is_what_the_configured_bytes_stand_for() {
+        for window in [400_000, 1_000_000] {
+            let budget = Budget::new(&window_of(Some(window)), MODEL, None, 4096, 262144).unwrap();
+            assert_eq!(budget.tools, tokens(MODEL, 262144), "{window}");
+            assert_eq!(budget.window, window);
+        }
+    }
+
+    #[test]
+    fn a_window_the_answers_reserve_fills_names_the_model_when_the_model_is_the_cause() {
+        let known = Budget::new(&window_of(Some(4096)), MODEL, None, 4096, 262144).unwrap_err();
+        assert!(matches!(
+            known,
+            EngineError::AskContextNoRoom(AskNoRoom::Window { assumed: false, .. })
+        ));
+        let reason = known.to_string();
+        assert!(
+            reason.contains(MODEL) && reason.contains("ask.max_output_tokens"),
+            "{reason}"
+        );
+        assert!(
+            !reason.contains("ask.turn_tool_bytes") && !reason.contains("ask.context_tokens"),
+            "a setting that cannot help is not named: {reason}"
+        );
+        // The window is unknown and assumed: the sentence says so.
+        let assumed = Budget::new(&window_of(None), MODEL, None, 40_000, 262144).unwrap_err();
+        assert!(matches!(
+            assumed,
+            EngineError::AskContextNoRoom(AskNoRoom::Window { assumed: true, .. })
+        ));
+        let reason = assumed.to_string();
+        assert!(
+            reason.contains(MODEL)
+                && reason.contains("not recorded")
+                && reason.contains("ask.max_output_tokens"),
+            "{reason}"
+        );
+        assert!(!reason.contains("ask.context_tokens"), "{reason}");
+    }
+
+    #[test]
+    fn a_window_the_answers_reserve_fills_names_the_setting_when_ask_context_tokens_is_the_cause() {
+        let error =
+            Budget::new(&window_of(Some(200_000)), MODEL, Some(4096), 4096, 262144).unwrap_err();
+        assert!(matches!(
+            error,
+            EngineError::AskContextNoRoom(AskNoRoom::Setting { .. })
+        ));
         let reason = error.to_string();
         assert!(
-            reason.contains("ask.context_tokens")
-                && reason.contains("ask.max_output_tokens")
-                && reason.contains("ask.turn_tool_bytes")
+            reason.contains("ask.context_tokens") && reason.contains("ask.max_output_tokens"),
+            "{reason}"
+        );
+        assert!(
+            !reason.contains("ask.turn_tool_bytes") && !reason.contains(MODEL),
+            "{reason}"
         );
     }
 

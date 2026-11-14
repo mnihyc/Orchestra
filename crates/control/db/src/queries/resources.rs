@@ -6073,8 +6073,15 @@ pub mod provider_runtime {
     pub const STOPPED_IDLE: &str = "provider_idle_stop";
     /// A person asked the runtime to stay stopped.
     pub const STOPPED_PERSON: &str = "provider_person_stop";
+    /// A person stopped the runtime by force: it reads as stopped, and its host has not yet said that it stopped it.
+    pub const STOPPED_FORCED: &str = "provider_forced_stop";
+    /// The unit an update made beside the provider's was left when the update was ended where it stood; its host is
+    /// to stop and remove it.
+    pub const UPDATE_ENDED: &str = "provider_update_ended";
+    /// A unit that read as being made, that no work made any more, and that its host reported.
+    pub const UNFINISHED: &str = "provider_unit_unfinished";
     /// Shared by scheduled candidate, admission and start guards.
-    pub const INTENTIONAL_STOP_DETAILS: [&str; 2] = [STOPPED_IDLE, STOPPED_PERSON];
+    pub const INTENTIONAL_STOP_DETAILS: [&str; 3] = [STOPPED_IDLE, STOPPED_PERSON, STOPPED_FORCED];
 
     /// Whether this unit is being or has been stopped deliberately.
     #[must_use]
@@ -6475,6 +6482,21 @@ pub mod provider_runtime {
               ORDER BY updated_at, id LIMIT $2"
         )))
         .bind(before)
+        .bind(limit)
+        .fetch_all(conn)
+        .await?)
+    }
+
+    /// The units of providers that a person stopped by force and whose hosts are online: the hosts have not yet said
+    /// that they stopped them.
+    pub async fn forced_stops(conn: &mut Conn, limit: i64) -> Result<Vec<RuntimeFull>, DbError> {
+        Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {RUNTIME_COLUMNS} FROM runtimes
+              WHERE kind = 'provider' AND state = 'stopped' AND state_detail = $1
+                AND host_id IN (SELECT h.id FROM hosts h JOIN machines m ON m.id = h.machine_id WHERE m.online)
+              ORDER BY updated_at, id LIMIT $2"
+        )))
+        .bind(STOPPED_FORCED)
         .bind(limit)
         .fetch_all(conn)
         .await?)

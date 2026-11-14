@@ -1,0 +1,5 @@
+fmt
+clippy
+contracts
+test -p orch-api-contract --lib
+test -p orch-engine --test provider_runtime
