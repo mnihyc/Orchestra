@@ -33,7 +33,7 @@ import { repairResource, type ResourceRepair } from '@/api/resourceRepair';
 import { queryClient } from '@/api/query';
 import { devicesKey, outsideStatusKey, routesKey } from '@/api/away';
 import { capturePeopleHint, readAuthority, repairPeople } from '@/api/peopleChanges';
-import type { BindingOptions, TreeNode } from '@/generated/api-types';
+import type { TreeNode } from '@/generated/api-types';
 import { queryFeed } from '@/realtime/queryFeeds';
 import { queryAuthorityAllows } from '@/api/queryAuthority';
 import { reachKeys, refreshReach } from '@/api/adminReach';
@@ -138,7 +138,7 @@ const placeAccess = (): Change[] => [
   { relatedViews: true },
   ...kinds('page', 'page-people', 'page-effective', 'page-history', 'defaults', 'roles', 'preview', 'agent-shares'),
   ...kinds('thread-shared', 'thread-shared-tree', 'environment-reach', AGENT_REACH, 'access-requests', 'holder-search', 'node', 'members'),
-  ...kinds('copy-destinations', 'holdings', 'first-steps', 'usage', 'start-options', 'shared-with-me', 'outside-port-openings'),
+  ...kinds('copy-destinations', 'holdings', 'first-steps', 'usage', 'start-options', 'thread-binding-options', 'shared-with-me', 'outside-port-openings'),
   ...kinds('thread-instructions', 'model-inputs', 'model-input-block', 'user-shares'),
   TREES,
 ];
@@ -150,9 +150,9 @@ const placeMoved = (): Change[] => [...placeLists(), ...placeAccess(), ...kinds(
 const THING_VIEWS: Readonly<Record<string, readonly string[]>> = {
   documents: ['document', 'documents', 'readme'],
   chats: ['chat', 'chats', 'chat-states'],
-  providers: ['provider', 'providers', 'provider-setup', 'provider-threads', 'start-options', 'usage'],
-  agents: ['agent', 'agents', 'start-options'],
-  environments: ['environment', 'environments', 'environment-reach', AGENT_REACH, 'environment-ports', 'start-options', 'mounts', 'machine-environment-data'],
+  providers: ['provider', 'providers', 'provider-setup', 'provider-threads', 'start-options', 'thread-binding-options', 'usage'],
+  agents: ['agent', 'agents', 'start-options', 'thread-binding-options'],
+  environments: ['environment', 'environments', 'environment-reach', AGENT_REACH, 'environment-ports', 'start-options', 'thread-binding-options', 'mounts', 'machine-environment-data'],
   hosts: ['host', 'host-settings', 'hosts', 'host-runtimes', 'mounts', 'machine-environment-data'],
   machines: ['machine', 'machines'],
   templates: ['template', 'templates'],
@@ -182,7 +182,7 @@ const access = (object: string, id: string, homed = true): Change[] => {
 
 /** Settings resolve down the tree: what a place sets is what every place, thread and resource inside it reads. */
 const settings = (): Change[] =>
-  kinds('copy-destinations', 'settings', 'secrets', 'thread-parameters', 'thread-limits', 'start-options', 'usage', 'usage-caps', 'first-steps', 'page', 'defaults', 'preview', 'provider-settings', 'environment-settings', 'host-settings', AGENT_REACH, 'environment-ports', 'notifiers', 'channels');
+  kinds('copy-destinations', 'settings', 'secrets', 'thread-parameters', 'thread-limits', 'start-options', 'thread-binding-options', 'usage', 'usage-caps', 'first-steps', 'page', 'defaults', 'preview', 'provider-settings', 'environment-settings', 'host-settings', AGENT_REACH, 'environment-ports', 'notifiers', 'channels');
 
 const relatedSettings = (key: string): Change[] => key.startsWith('related.') || key.startsWith('search.semantic.') ? [{ relatedViews: true }] : [];
 /** A saved identity list omits each viewer/root's resolved model eligibility and default. Repair shown Ask reads only. */
@@ -234,7 +234,7 @@ export function threadRowChanges(id: string): Change[] {
 }
 
 /** Threads were made, moved or changed where they run: the threads, their places and the trees. */
-const threads = (): Change[] => [...kinds('node', 'topics', 'thread-sides', 'provider-threads', 'environments', 'environment', 'environment-reach', AGENT_REACH, 'start-options', 'thread-parameters', 'job', 'fork-batch'), TREES];
+const threads = (): Change[] => [...kinds('node', 'topics', 'thread-sides', 'provider-threads', 'environments', 'environment', 'environment-reach', AGENT_REACH, 'start-options', 'thread-binding-options', 'thread-parameters', 'job', 'fork-batch'), TREES];
 
 /** A document's own views: its blocks by its feed, and what is read of it beside. */
 const doc = (id: string): Change[] => [blocks(id), ...ones(id, 'document', 'document-versions', 'document-changes', 'document-readers'), ...kinds('documents', 'readme')];
@@ -244,7 +244,7 @@ const environment = (id: string): Change[] => [
   every('machine-environment-data'),
   every('mounts'),
   ...ones(id, 'environment', 'environment-settings', 'environment-reach', AGENT_REACH, 'environment-ports', 'terminals', 'processes', 'resources'),
-  ...kinds('environments', 'start-options', 'host', 'host-runtimes', 'hosts', 'trace-deleted', 'deleted-inspection'),
+  ...kinds('environments', 'start-options', 'thread-binding-options', 'host', 'host-runtimes', 'hosts', 'trace-deleted', 'deleted-inspection'),
 ];
 
 /** The files of an environment's workspace, by every view of them. The bytes of a file are keyed by its hash and never change. */
@@ -253,13 +253,13 @@ const files = (id: string): Change[] => [...ones(id, 'workspace-stat', 'workspac
 /** One provider, with what its pages and every chooser of a provider read. */
 const provider = (id: string): Change[] => [
   ...ones(id, 'provider', 'provider-settings', 'provider-models', 'provider-suggestions', 'provider-threads', 'provider-caps', 'provider-login', 'settings'),
-  ...kinds('providers', 'provider-setup', 'start-options', 'usage', 'thread-parameters', AGENT_REACH),
+  ...kinds('providers', 'provider-setup', 'start-options', 'thread-binding-options', 'usage', 'thread-parameters', AGENT_REACH),
 ];
 
-const agent = (id: string): Change[] => [one(id, 'agent'), ...kinds('agents', 'start-options', 'harness-kinds')];
+const agent = (id: string): Change[] => [one(id, 'agent'), ...kinds('agents', 'start-options', 'thread-binding-options', 'harness-kinds')];
 const host = (id: string): Change[] => [...ones(id, 'host', 'host-settings', 'host-runtimes'), ...kinds('hosts', 'environments', 'admin', 'mounts')];
-const template = (id: string): Change[] => [one(id, 'template'), ...kinds('templates', 'start-options', 'provider-setup')];
-const machine = (id: string): Change[] => [...ones(id, 'machine', 'machine-policy'), ...kinds('machines', 'providers', 'agents', 'environments', 'start-options', 'provider-setup', 'mounts', 'machine-environment-data')];
+const template = (id: string): Change[] => [one(id, 'template'), ...kinds('templates', 'start-options', 'thread-binding-options', 'provider-setup')];
+const machine = (id: string): Change[] => [...ones(id, 'machine', 'machine-policy'), ...kinds('machines', 'providers', 'agents', 'environments', 'start-options', 'thread-binding-options', 'provider-setup', 'mounts', 'machine-environment-data')];
 const mcp = (id: string): Change[] => [one(id, 'mcp-server'), every('mcp-servers')];
 const mount = (id: string): Change[] => [...ones(id, 'mount', 'mount-uses'), ...kinds('mounts', AGENT_REACH)];
 const skill = (id: string): Change[] => [...ones(id, 'skill', 'skill-versions', 'skill-draft'), ...kinds('skills', 'skill-version', 'skill-version-file', 'skill-draft-file')];
@@ -288,7 +288,7 @@ const usage = (): Change[] => kinds('usage', 'usage-caps', 'provider-caps', 'thr
 /** What a job that changes where work runs reaches: environments, providers, hosts, the threads bound to them. */
 const placement = (): Change[] => [
   ...kinds('environment', 'environments', 'environment-reach', AGENT_REACH, 'host', 'hosts', 'host-runtimes', 'provider', 'providers', 'job', 'fork-batch'),
-  ...kinds('thread-parameters', 'start-options', 'node', 'thread-sides', 'change-plan', 'change-env-plan', 'change-batch-plan', 'recycle-dry-run'),
+  ...kinds('thread-parameters', 'start-options', 'thread-binding-options', 'node', 'thread-sides', 'change-plan', 'change-env-plan', 'change-batch-plan', 'recycle-dry-run'),
   TREES,
 ];
 
@@ -354,7 +354,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /ask/conversations/{id}/stop': (p) => askConversation(p('id')),
   'POST /ask/conversations/{id}/keep': (p) => askConversation(p('id')),
 
-  'PUT /{object}/{id}/home': (p) => [...access(p('object'), p('id')), ...kinds('everything', 'names', 'start-options'), TREES],
+  'PUT /{object}/{id}/home': (p) => [...access(p('object'), p('id')), ...kinds('everything', 'names', 'start-options', 'thread-binding-options'), TREES],
 
   'POST /hosts/{id}/move-out/preview': () => NOTHING,
   'POST /hosts/{id}/move-out': (p) => [...access('hosts', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
@@ -380,14 +380,14 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /copy-destinations/judge': () => NOTHING,
 
   // -- native duplicates create fresh identities; their sources are not updated
-  'POST /providers/{id}/duplicate': () => kinds('providers', 'provider-setup', 'start-options', 'everything', 'names', 'trace'),
-  'POST /agents/{id}/duplicate': () => kinds('agents', 'start-options', 'everything', 'names', 'trace'),
+  'POST /providers/{id}/duplicate': () => kinds('providers', 'provider-setup', 'start-options', 'thread-binding-options', 'everything', 'names', 'trace'),
+  'POST /agents/{id}/duplicate': () => kinds('agents', 'start-options', 'thread-binding-options', 'everything', 'names', 'trace'),
   'POST /templates/{id}/duplicate': () => kinds('templates', 'everything', 'names', 'trace'),
   'POST /mounts/{id}/duplicate': () => kinds('mounts', 'everything', 'names', 'trace'),
   'POST /mcp-servers/{id}/duplicate': () => kinds('mcp-servers', 'environment-mcp', 'everything', 'names', 'trace'),
   'POST /skills/{id}/duplicate': () => kinds('skills', 'everything', 'names', 'trace'),
   'POST /skills/{id}/draft/duplicate': () => kinds('skills', 'everything', 'names', 'trace'),
-  'POST /environments/{id}/duplicate': () => [...kinds('environments', 'start-options', 'job', 'everything', 'names', 'trace'), TREES],
+  'POST /environments/{id}/duplicate': () => [...kinds('environments', 'start-options', 'thread-binding-options', 'job', 'everything', 'names', 'trace'), TREES],
   'POST /chats/{id}/duplicate': () => [...kinds('chats', 'everything', 'names', 'trace'), TREES],
   'POST /chats/{id}/duplicate/preview': () => NOTHING,
 
@@ -456,7 +456,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /admin/messages': () => [{ missing: [only('admin-messages', 'system')] }, { missing: [only('admin', 'settings')] }, { meta: true }],
   'PATCH /tags/{id}': () => tagged(),
   'DELETE /tags/{id}': () => tagged(),
-  'PUT /topics/{id}/default-environment': (p) => [...place(p('id')), ...kinds('start-options', 'environments')],
+  'PUT /topics/{id}/default-environment': (p) => [...place(p('id')), ...kinds('start-options', 'thread-binding-options', 'environments')],
   'POST /nodes/{id}/transfer': (p) => [...place(p('id')), ...placeAccess(), every('admin')],
 
   // -- access: pages, defaults, roles, requests, agents' shares
@@ -656,8 +656,8 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /imports/{id}/undo': (p) => [...ones(p('id'), 'imports'), ...kinds('job')],
 
   // -- environments and what is in them
-  'POST /environments': () => [...kinds('environments', 'start-options', 'hosts', 'host', 'host-runtimes', 'job', 'first-steps'), TREES],
-  'POST /machines/{id}/environments': (p) => [...machine(p('id')), ...kinds('environments', 'start-options', 'first-steps')],
+  'POST /environments': () => [...kinds('environments', 'start-options', 'thread-binding-options', 'hosts', 'host', 'host-runtimes', 'job', 'first-steps'), TREES],
+  'POST /machines/{id}/environments': (p) => [...machine(p('id')), ...kinds('environments', 'start-options', 'thread-binding-options', 'first-steps')],
   'PATCH /environments/{id}': (p) => [...environment(p('id')), ...settings()],
   'DELETE /environments/{id}': (p) => [...ended(environment(p('id')), p('id')), ...kinds('trace-deleted', 'trace'), TREES],
   'POST /environments/{id}/restore': (p) => [...environment(p('id')), ...kinds('trace-deleted', 'trace', 'job')],
@@ -732,8 +732,8 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'DELETE /environments/{id}/capabilities/{key}': (p) => [...environment(p('id')), every('port-requests')],
 
   // -- providers and how agents run on them
-  'POST /providers': () => [...kinds('providers', 'provider-setup', 'start-options', 'first-steps'), TREES],
-  'POST /machines/{id}/providers': (p) => [...machine(p('id')), ...kinds('providers', 'provider-setup', 'start-options', 'first-steps')],
+  'POST /providers': () => [...kinds('providers', 'provider-setup', 'start-options', 'thread-binding-options', 'first-steps'), TREES],
+  'POST /machines/{id}/providers': (p) => [...machine(p('id')), ...kinds('providers', 'provider-setup', 'start-options', 'thread-binding-options', 'first-steps')],
   'PATCH /providers/{id}': (p) => [...provider(p('id')), ...settings()],
   'DELETE /providers/{id}': (p) => [...ended(provider(p('id')), p('id')), every('thread-parameters')],
   'POST /providers/{id}/enable': (p) => provider(p('id')),
@@ -760,10 +760,10 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /providers/runtime/updates': () => placement(),
 
   // -- agent profiles
-  'POST /orgs/{id}/agents': () => [...kinds('agents', 'start-options', 'first-steps'), TREES],
-  'POST /machines/{id}/agents': (p) => [...machine(p('id')), ...kinds('agents', 'start-options', 'first-steps')],
+  'POST /orgs/{id}/agents': () => [...kinds('agents', 'start-options', 'thread-binding-options', 'first-steps'), TREES],
+  'POST /machines/{id}/agents': (p) => [...machine(p('id')), ...kinds('agents', 'start-options', 'thread-binding-options', 'first-steps')],
   'PATCH /agents/{id}': (p) => agent(p('id')),
-  'DELETE /agents/{id}': (p) => [gone(p('id'), 'agent'), ...kinds('agents', 'start-options', 'thread-parameters')],
+  'DELETE /agents/{id}': (p) => [gone(p('id'), 'agent'), ...kinds('agents', 'start-options', 'thread-binding-options', 'thread-parameters')],
 
   // -- machines a person connected
   'POST /machines/enrollment-tokens': () => kinds('machines'),
@@ -782,13 +782,13 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'PATCH /hosts/{id}': (p) => host(p('id')),
   'PUT /hosts/{id}/settings/{key}': (p) => host(p('id')),
   'DELETE /hosts/{id}/settings/{key}': (p) => host(p('id')),
-  'DELETE /hosts/{id}': (p) => [gone(p('id'), 'host'), gone(p('id'), 'host-runtimes'), ...kinds('hosts', 'machines', 'environments', 'admin', 'start-options')],
+  'DELETE /hosts/{id}': (p) => [gone(p('id'), 'host'), gone(p('id'), 'host-runtimes'), ...kinds('hosts', 'machines', 'environments', 'admin', 'start-options', 'thread-binding-options')],
   'POST /hosts/{id}/runtimes/{runtime_id}/stop': (p) => [...host(p('id')), ...kinds('provider', 'environment', 'job')],
   'DELETE /hosts/{id}/runtimes/{runtime_id}': (p) => [...host(p('id')), ...kinds('provider', 'environment', 'environments', 'providers')],
-  'POST /templates': () => kinds('templates', 'start-options', 'provider-setup'),
+  'POST /templates': () => kinds('templates', 'start-options', 'thread-binding-options', 'provider-setup'),
   'POST /templates/check': () => NOTHING,
   'PATCH /templates/{id}': (p) => template(p('id')),
-  'DELETE /templates/{id}': (p) => [gone(p('id'), 'template'), ...kinds('templates', 'start-options', 'provider-setup')],
+  'DELETE /templates/{id}': (p) => [gone(p('id'), 'template'), ...kinds('templates', 'start-options', 'thread-binding-options', 'provider-setup')],
 
   // -- tools: MCP servers and mounts
   'POST /mcp-servers': () => kinds('mcp-servers'),
@@ -845,7 +845,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /harnesses/{kind}/{version}/fetch': () => [only('program-builds'), ...kinds('admin', 'harness-kinds')],
   'POST /admin/harnesses/channels': () => kinds('admin', 'harness-kinds'),
   'POST /admin/harnesses/{kind}/{version}/check': () => kinds('admin', 'harness-kinds'),
-  'POST /admin/agents': () => kinds('admin', 'agents', 'start-options'),
+  'POST /admin/agents': () => kinds('admin', 'agents', 'start-options', 'thread-binding-options'),
   'POST /admin/identity-providers': () => kinds('admin', 'meta'),
   'PATCH /admin/identity-providers/{id}': () => kinds('admin', 'meta'),
   'DELETE /admin/identity-providers/{id}': () => kinds('admin', 'meta'),
@@ -1142,16 +1142,11 @@ async function repairApprovalViews(cache: QueryClient, current: () => boolean): 
   }));
 }
 
-/** A newly reported agent changes computed arrangements, which its native row cannot supply. */
-async function repairAgentChoices(cache: QueryClient, row: RowChange['row'], current: () => boolean): Promise<void> {
-  if (row.kind !== 'agent' || row.value === null || !record(row.value.descriptor)) return;
-  const reported = Object.keys(row.value.descriptor).length > 0;
-  const waiting = cache.getQueryCache().getAll().filter((query) => {
-    if (query.queryKey[0] !== 'start-options') return false;
-    const choices = query.state.data as BindingOptions | undefined;
-    return choices?.providers.some((provider) => provider.agents.some((agent) => agent.agent.id === row.id
-      && (reported ? agent.reason === 'harness_unreported' : agent.reason !== 'harness_unreported' && agent.reason !== 'disabled'))) === true;
-  });
+/** Resource rows omit the computed model and arrangement choices of each open thread or starter. */
+async function repairBindingChoices(cache: QueryClient, kind: string, current: () => boolean): Promise<void> {
+  if (kind !== 'provider' && kind !== 'agent') return;
+  const waiting = cache.getQueryCache().getAll().filter((query) =>
+    query.queryKey[0] === 'start-options' || query.queryKey[0] === 'thread-binding-options');
   await Promise.all(waiting.map(async (query) => {
     if (!query.isActive()) { cache.removeQueries({ queryKey: query.queryKey, exact: true }); return; }
     const pending = startRepairs.get(query);
@@ -1202,6 +1197,8 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
   const directoryHints = changes.filter((change): change is Extract<Change, { people: true }> => 'people' in change);
   const directoryCut = directoryHints.length === 0 ? undefined : Math.max(...directoryHints.map((change) => change.cut ?? capturePeopleHint(cache)));
   const readerVersion = client.session.getState().readerVersion;
+  const repairsBindings = changes.some((change) => 'missing' in change && change.missing.some((hint) => hint.key[0] === 'thread-binding-options')
+    || 'key' in change && change.key[0] === 'thread-binding-options');
   const left: Stale[] = [];
   // Each change is taken once, however many entries or frames name it: a moved subtree names the same kinds for every row.
   const seen = new Set<string>();
@@ -1255,7 +1252,7 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
       }
       if(projection!==null) await cache.refetchQueries({queryKey:projection,exact:true});
       if (client.session.getState().readerVersion !== readerVersion) return;
-      await repairAgentChoices(cache, change.row, () => client.session.getState().readerVersion === readerVersion);
+      if (!repairsBindings) await repairBindingChoices(cache, kind, () => client.session.getState().readerVersion === readerVersion);
     }
     else if ('adminCredentials' in change) {
       await refreshReach(cache, change.adminCredentials.kind === 'tokens' ? reachKeys.tokens : reachKeys.sessions(change.adminCredentials.person));
@@ -1308,7 +1305,10 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
         else cache.removeQueries({queryKey:query.queryKey,exact:true});
       }
     }
-    else if ('repair' in change) await repairResource(cache, change.repair);
+    else if ('repair' in change) {
+      await repairResource(cache, change.repair);
+      if (!repairsBindings) await repairBindingChoices(cache, change.repair.kind, () => client.session.getState().readerVersion === readerVersion);
+    }
     else if ('enrollment' in change) {
       await cache.cancelQueries({ queryKey: enrollmentProgressKey(change.enrollment.receipt), exact: true });
       if (client.session.getState().readerVersion !== readerVersion) return;
@@ -1351,9 +1351,12 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
   const isGone = (query: Query): boolean => left.some((change) => covers(change, query.queryKey));
   if (left.length > 0) cache.removeQueries({ predicate: (query) => query.getObserversCount() === 0 && isGone(query) });
   if (stale.length === 0) return;
+  // Binding choices are derived without a native feed; a live dependency hint repairs each displayed owner.
+  const bindings = stale.filter((change) => change.key[0] === 'start-options' || change.key[0] === 'thread-binding-options');
+  if (bindings.length > 0) await applyChanges([{ missing: bindings, allObserved: true, cancelPending: true }], cache);
   // Legacy invalidations received without a row never refresh a whole kind or a list. Exact
   // missing projections are the only reads allowed; inactive entries wait until they are shown.
-  const exact = stale.filter((change) => change.exact === true || change.id !== undefined);
+  const exact = stale.filter((change) => !bindings.includes(change) && (change.exact === true || change.id !== undefined));
   const missing = cache.getQueryCache().getAll().filter((query) => !isGone(query) && query.isActive() && exact.some((change) => covers(change, query.queryKey)));
   await Promise.all(missing.map((query) => cache.invalidateQueries({ queryKey: query.queryKey, exact: true, refetchType: 'active' })));
 }
@@ -1463,14 +1466,14 @@ export function userEventChanges(what: string, data: Readonly<Record<string, unk
 
 /** The lists of each kind of resource, as the person's news names the kind. */
 const RESOURCE_LISTS: Readonly<Record<string, readonly string[]>> = {
-  provider: ['providers', 'provider-setup', 'start-options'],
-  agent: ['agents', 'start-options'],
+  provider: ['providers', 'provider-setup', 'start-options', 'thread-binding-options'],
+  agent: ['agents', 'start-options', 'thread-binding-options'],
   host: ['hosts'],
-  template: ['templates', 'start-options'],
+  template: ['templates', 'start-options', 'thread-binding-options'],
   mcp_server: ['mcp-servers'],
   mount: ['mounts'],
   skill: ['skills'],
-  environment: ['environments', 'start-options'],
+  environment: ['environments', 'start-options', 'thread-binding-options'],
   machine: ['machines'],
 };
 

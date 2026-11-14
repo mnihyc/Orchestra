@@ -20,11 +20,13 @@ import { inputScheduleQuery, inputScheduleRunsQuery, topicSchedulesQuery } from 
 import { documentLinksQuery } from '@/api/links';
 import { moveOutPath, supportsMoveOut } from '@/api/moveOut';
 import { portsKey } from '@/api/ports';
+import { repairPeople } from '@/api/peopleChanges';
 import { documentSummaryOptionsKey, resourceSummaryKey } from '@/api/summaries';
 import type { DocumentLinks, MachinePrograms, TreeNode } from '@/generated/api-types';
 import type { HomeMoveKind } from '@/features/duplicate/move';
 import { me, org, userRef } from '../doubles/fixtures';
 import { inputSchedule } from '../doubles/input-schedules';
+import { agent as bindingAgent, options as bindingOptions, provider as bindingProvider } from './start-fixtures';
 
 const sourceRoot = resolve(import.meta.dirname, '../../src');
 /** Parsing all source once takes seconds on the shared builder; this bounds the scan. */
@@ -38,6 +40,31 @@ const moveFamilies: Record<HomeMoveKind, unknown> = { ...duplicateObjects, host:
 const movePaths = [...new Set((Object.keys(moveFamilies) as HomeMoveKind[])
   .filter(supportsMoveOut)
   .flatMap((kind) => [false, true].map((draft) => moveOutPath({ kind, id: ANY, draft }))))];
+
+it.each(['model enabled', 'agent reported', 'provider access granted', 'model policy changed', 'binding hint', 'reach changed'])('refreshes every open thread choice after %s and retires hidden choices', async (event) => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const before = bindingOptions({ providers: [bindingProvider('p1', { agents: [bindingAgent('a1', { reason: 'harness_unreported' })] })] });
+  const after = bindingOptions();
+  const keys = [['start-options', 'topic', ''], ['thread-binding-options', 'one'], ['thread-binding-options', 'two']];
+  const reads = keys.map(() => vi.fn(() => Promise.resolve(after)));
+  const hidden = ['thread-binding-options', 'hidden'];
+  cache.setQueryData(hidden, before);
+  const stops = keys.map((key, at) => {
+    cache.setQueryData(key, before);
+    return new QueryObserver(cache, { queryKey: key, queryFn: reads[at]!, staleTime: Infinity }).subscribe(() => undefined);
+  });
+  try {
+    const changes = event === 'model enabled' ? resourceChanges('provider', 'p1', { row: { id: 'p1', models: [] } })
+      : event === 'agent reported' ? resourceChanges('agent', 'a1', { row: { id: 'a1', descriptor: { kind: 'codex' } } })
+      : event === 'provider access granted' ? findAct('PATCH', '/providers/p1/permissions', { answer: {} })?.changes ?? []
+      : event === 'binding hint' ? ACTS['PATCH /providers/{id}']?.(() => 'p1') ?? []
+      : findAct('PUT', '/nodes/topic/settings/models.allowed', { answer: { key: 'models.allowed', value: [] } })?.changes ?? [];
+    if (event === 'reach changed') await repairPeople(cache);
+    else await applyChanges(changes, cache);
+    keys.forEach((key, at) => { expect(cache.getQueryData(key)).toEqual(after); expect(reads[at]).toHaveBeenCalledTimes(1); });
+    expect(cache.getQueryState(hidden)).toBeUndefined();
+  } finally { stops.forEach((stop) => stop()); cache.clear(); }
+});
 
 it.each(['PUT', 'DELETE'])('repairs visible native parameters omitted by a %s setting receipt without reading another thread', async (method) => {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
