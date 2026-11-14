@@ -678,7 +678,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "merge": "map",
     "default": {},
     "example": {
-      "vision": true
+      "optional.tools": false
     },
     "text_key": "day100.builtin.agent.features",
     "keywords": []
@@ -1028,8 +1028,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "group": "agent",
     "schema": {
       "type": "integer",
-      "minimum": 1,
-      "maximum": 64
+      "minimum": 1
     },
     "class": "parameter",
     "scopes": [
@@ -1056,8 +1055,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "group": "agent",
     "schema": {
       "type": "integer",
-      "minimum": 1,
-      "maximum": 5
+      "minimum": 1
     },
     "class": "parameter",
     "scopes": [
@@ -4069,7 +4067,6 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "schema": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 168,
       "x-unit": "hours"
     },
     "class": "policy",
@@ -5960,7 +5957,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "group": "switching",
     "schema": {
       "type": "integer",
-      "minimum": 10,
+      "minimum": 1,
       "x-unit": "seconds"
     },
     "class": "parameter",
@@ -6525,7 +6522,54 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "thread"
     ],
     "merge": "map",
-    "default": {},
+    "default": {
+      "thread": {
+        "automatic": false,
+        "on": [
+          "turn_completed",
+          "milestone"
+        ],
+        "min_interval_secs": 120,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "topic": {
+        "automatic": false,
+        "on": [
+          "child_changed"
+        ],
+        "min_interval_secs": 900,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "document": {
+        "automatic": false,
+        "on": [
+          "content_changed"
+        ],
+        "min_interval_secs": 300,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "chat": {
+        "automatic": false,
+        "on": [
+          "message_posted"
+        ],
+        "min_interval_secs": 300,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "chat_title": {
+        "automatic": false,
+        "on": [
+          "message_posted"
+        ],
+        "min_interval_secs": 300,
+        "context_tokens": 32000,
+        "output_chars": 80
+      }
+    },
     "example": {
       "thread": {
         "automatic": true,
@@ -8642,7 +8686,6 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "schema": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 365,
       "x-unit": "days"
     },
     "class": "policy",
@@ -8920,7 +8963,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "schema": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 1000
+      "maximum": 2147483647
     },
     "class": "policy",
     "scopes": [

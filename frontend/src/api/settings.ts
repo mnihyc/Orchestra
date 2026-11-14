@@ -15,7 +15,7 @@ import { environmentQuery } from '@/api/environments';
 import { queryClient } from '@/api/query';
 import { hostKey, providerQuery } from '@/api/resources';
 import { sameValue } from '@/features/settings/settingsModel';
-import type { Destination, NotificationChannel, NotificationTestReply, Notifier, ResolvedSetting, SecretInfo, SettingDef } from '@/generated/api-types';
+import type { Destination, NotificationChannel, NotificationTestReply, Notifier, ResolvedSetting, SecretInfo, SettingDef, SettingParameterFormBody } from '@/generated/api-types';
 
 /** Where settings are read and written: a node (an org, a project, a topic), an environment, a managed provider's runtime, or the system. */
 export type SettingsTarget =
@@ -60,6 +60,13 @@ export const registryQuery = queryOptions({
   queryFn: async ({ signal, client: cache }): Promise<SettingDef[]> =>
     await joinedDefaultsRegistry(cache, ['settings-registry'], signal) ?? ok(api.GET('/settings/registry', { signal })),
   staleTime: Number.POSITIVE_INFINITY,
+});
+
+/** Resolve public native declarations with the same projection the thread controls use. */
+export const parameterFormQuery = (body: SettingParameterFormBody) => queryOptions({
+  queryKey: ['settings-parameter-form', body] as const,
+  queryFn: ({ signal }): Promise<unknown[]> => ok(api.POST('/settings/parameters/form', { body, signal })),
+  staleTime: Infinity,
 });
 
 /** The settings in effect at any target. */

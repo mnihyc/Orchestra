@@ -57,12 +57,12 @@ const readerScope = defaultProviderReader;
 const refused = (error: unknown) => error instanceof ApiError && [401, 403, 404].includes(error.status);
 
 /** The parent's revision/lock/autosave machinery remains the only writer of the setting. */
-export function ProviderDefaultChoice(props: ValueControlProps & { size?: 'sm' | 'md' }) {
+export function ProviderDefaultChoice(props: ValueControlProps & { size?: 'sm' | 'md'; providerKind?: Provider['kind'] }) {
   const reader = useStore(client.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
   return <ReaderChoice key={reader} {...props} reader={reader} />;
 }
 
-function ReaderChoice({ value, label, onChange, onEdited, error, disabled = false, placeholder, reader, showLabel, size = 'sm' }: ValueControlProps & { reader: string; size?: 'sm' | 'md' }) {
+function ReaderChoice({ value, label, onChange, onEdited, error, disabled = false, placeholder, reader, showLabel, size = 'sm', providerKind, inheritance }: ValueControlProps & { reader: string; size?: 'sm' | 'md'; providerKind?: Provider['kind'] }) {
   const { t } = useTranslation();
   const cache = useQueryClient();
   const known = useKnownPlaces({ trees: false });
@@ -102,7 +102,7 @@ function ReaderChoice({ value, label, onChange, onEdited, error, disabled = fals
     const provider = item.resource?.kind === 'provider' ? item.resource.value : undefined;
     if (provider === undefined) return [];
     return item.kind === 'provider' && item.my_access !== 'path_only' && item.name !== null && item.id === provider.id
-      && provider.status !== 'disabled' && holds(provider.access, 'provider.view') && holds(provider.access, 'provider.use')
+      && provider.status !== 'disabled' && holds(provider.access, 'provider.view') && holds(provider.access, 'provider.use') && (providerKind === undefined || provider.kind === providerKind)
       && !(provider.id === selected && (currentError !== null || currentMissing)) ? [[provider.id, provider] as const] : [];
   })).values()];
   const labels = providerLabels([...new Map([...(current === undefined ? [] : [current]), ...rows].map((row) => [row.id, row])).values()], known);
@@ -171,7 +171,7 @@ function ReaderChoice({ value, label, onChange, onEdited, error, disabled = fals
     void list.refetch({ cancelRefetch: false });
   };
   return <div ref={frame} className="flex min-w-0 flex-col gap-2" data-provider-default onKeyDownCapture={press}>
-    <ResourcePickerLookup pickerKey="provider-default" id={session} size={size} label={label} hideLabel={showLabel !== true} disabled={disabled} error={error} fieldClassName="min-w-0"
+    <ResourcePickerLookup inheritance={inheritance} pickerKey="provider-default" id={session} size={size} label={label} hideLabel={showLabel !== true} disabled={disabled} error={error} fieldClassName="min-w-0"
       hint={current === undefined ? undefined : <ResourceName subject={{ kind: 'provider', provider: current }} hint={false} wrap><ResourceHint subject={{ kind: 'provider', provider: current }} wrap /></ResourceName>}
       query={typed} onQueryChange={type} displayValue={shown} initialActiveValue={selected} placeholder={placeholder ?? t('places.providerDefault.choose')}
       open={open} onOpenChange={changedOpen} loading={busy} empty={listError !== null ? undefined : t('ui.combobox.empty')}

@@ -15,12 +15,12 @@
 import { useCompactControls } from '@/features/workbench/Narrow';
 import { useMutation } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
-import { Check, ChevronDown, Lock } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Lock } from 'lucide-react';
 import { type KeyboardEvent, type ReactNode, type Ref, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { ContextAvailability } from '@/features/composer/ContextAvailability';
-import { ContextChoice } from '@/features/composer/ContextChoice';
+import { ModelParameterChoice } from '@/features/composer/ModelParameterChoice';
 import { type Dropped, forceLabel, type Kind, type State, speedStart, programStart } from '@/features/composer/modelState';
 import { useChoicePerformance } from '@/features/usage/PerformancePlaces';
 import { ResourceHint, ResourceName, resourcePreview } from '@/features/resource-facts/ResourceFacts';
@@ -28,7 +28,6 @@ import { modelResource } from '@/features/resource-facts/facts';
 import { changeModelChoice, isSettingConflict, useRunsWith } from '@/features/composer/runsWith';
 import { SettingConflict } from '@/features/composer/SettingConflict';
 import { SettingHelpGroup } from '@/features/help/SettingHelpGroup';
-import { AccessChoice, SpeedChoice } from '@/features/composer/SpeedAndAccess';
 import { formatContext } from '@/features/models/context';
 import { accessProgramDisplayName, effortDisplayName, modelDisplayName } from '@/features/models/names';
 import type { ModelOption, Thread } from '@/generated/api-types';
@@ -193,8 +192,16 @@ function ControlledModelEffort({ choice, open: controlledOpen, onOpenChange }: C
         })}
       </ul></ChoiceInspection>
       {choice.state}
-      {selected !== undefined && selected.option.allowed && effective !== undefined && effective !== null && choice.renderParameters?.(selected, effective,
-        (params) => { if (!choice.disabled) choice.onChange({ ...effective, params }, selected); }, choice.disabled === true)}
+      {(() => {
+        // Options most people never change stay closed until asked for, so the models keep the room.
+        const parameters = selected !== undefined && selected.option.allowed && effective !== undefined && effective !== null ? choice.renderParameters?.(selected, effective,
+          (params) => { if (!choice.disabled) choice.onChange({ ...effective, params }, selected); }, choice.disabled === true) : null;
+        return parameters === null || parameters === undefined || parameters === false ? null : <details className="group min-w-0 shrink-0">
+          <summary className="focus-inset flex cursor-default list-none items-center gap-2 rounded-md py-1 text-sm text-text-muted select-none hover:bg-bg-subtle [&::-webkit-details-marker]:hidden">
+            <ChevronRight className="shrink-0 text-text-subtle transition-transform group-open:rotate-90" size={14} aria-hidden />{t('providerOptions.title')}</summary>
+          <div className="min-w-0 pt-2">{parameters}</div>
+        </details>;
+      })()}
     </div>
   </Popover>;
 }
@@ -343,15 +350,11 @@ function Choices({ thread, section }: { thread: Thread; section: Kind | null }) 
       {states.length > 0 && (
         <div role="group" aria-label={t('composer.model.runsWith')} className="flex flex-col gap-3 border-t border-border pt-3" data-runs-with-group>
           {states.map((state) => {
-            const chooser = runs.chooser(state.key);
-            const free = may && state.writable;
-            if (state.kind === 'context') return <ContextChoice key={state.key} state={state} writable={free} chooser={chooser} onChoose={(size) => runs.choose(state, size)} />;
-            if (state.kind === 'speed') return <SpeedChoice key={state.key} state={state}
-              writable={mayChange && state.writable && !change.isPending && (runs.ready || runs.choosing)}
-              pending={runs.choosing} chooser={chooser} rate={rate}
-              performance={(value) => model === null ? null : performance(model, parameters.effort.value, value, typeof program === 'string' ? program : null, true)}
+            return <ModelParameterChoice key={state.key} state={state} chooser={runs.chooser(state.key)}
+              writable={state.kind === 'speed' ? mayChange && state.writable && !change.isPending && (runs.ready || runs.choosing) : may && state.writable}
+              pending={runs.choosing} reopen={runs.refusal?.member === state.key} rate={rate}
+              performance={(value) => model === null ? null : performance(model, parameters.effort.value, state.kind === 'speed' ? value : typeof tier === 'string' ? tier : null, state.kind === 'access' ? value : typeof program === 'string' ? program : null, true)}
               onChoose={(value) => runs.choose(state, value)} />;
-            return <AccessChoice key={state.key} state={state} writable={free} chooser={chooser} reopen={runs.refusal?.member === state.key} performance={(value) => model === null ? null : performance(model, parameters.effort.value, typeof tier === 'string' ? tier : null, value, true)} onChoose={(value) => runs.choose(state, value)} />;
           })}
           {runs.chooseError !== null && runs.refusal === null && <ErrorAlert error={runs.chooseError} />}
         </div>

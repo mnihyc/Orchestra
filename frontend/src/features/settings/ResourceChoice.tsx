@@ -40,7 +40,7 @@ function useChosen(key: string, selected: string, initial?: ChosenResource) {
   return template ? entry : host;
 }
 
-export function ResourceSettingChoice({ settingKey, value, label, onChange, onEdited, disabled, error, placeholder }: ValueControlProps & { settingKey: string }) {
+export function ResourceSettingChoice({ settingKey, value, label, onChange, onEdited, disabled, error, placeholder, inheritance }: ValueControlProps & { settingKey: string }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const selected = typeof value === 'string' ? value : '';
@@ -50,7 +50,7 @@ export function ResourceSettingChoice({ settingKey, value, label, onChange, onEd
   // Radix does not accept an empty option value; this sentinel never leaves the control.
   const automatic = '\u0000automatic-host';
   return <div className="flex min-w-0 flex-col gap-2">
-    <ResourcePicker pickerKey="settings.ResourceChoice" label={label} hideLabel size="sm" value={selected === '' && !template ? automatic : selected} open={open && !query.isError && !(template && query.isSuccess && rows?.length === 0)} onOpenChange={setOpen}
+    <ResourcePicker inheritance={inheritance} pickerKey="settings.ResourceChoice" label={label} hideLabel size="sm" value={selected === '' && !template ? automatic : selected} open={open && !query.isError && !(template && query.isSuccess && rows?.length === 0 && inheritance === undefined)} onOpenChange={setOpen}
       valueLabel={selected === '' ? undefined : current?.name ?? chosen.data?.name ?? t(chosen.isError ? 'settings.resourceChoice.unavailable' : 'common.loading')}
       placeholder={open && query.isPending ? t('common.loading') : placeholder ?? t('settings.resourceChoice.choose')}
       disabled={disabled} error={error} loading={query.isFetching}
@@ -65,19 +65,19 @@ export function ResourceSettingChoice({ settingKey, value, label, onChange, onEd
 }
 
 /** A readable name or an honest unavailable state, never a raw identifier or a guessed private name. */
-export function ResourceSettingName({ settingKey, value, example = false }: { settingKey: string; value: unknown; example?: boolean }) {
+export function ResourceSettingName({ settingKey, value, example = false, plain = false }: { settingKey: string; value: unknown; example?: boolean; plain?: boolean }) {
   const { t } = useTranslation();
   return example ? <span>{t(settingKey.endsWith('.template_id') ? 'settings.resourceChoice.templateExample' : 'settings.resourceChoice.hostExample')}</span>
     : value === null || value === undefined || value === '' ? <span>{t(settingKey.endsWith('.host_id') ? 'providerRuntime.autoHost' : 'settings.compact.none')}</span>
-      : <ChosenName settingKey={settingKey} value={value} />;
+      : <ChosenName settingKey={settingKey} value={value} plain={plain} />;
 }
 
-function ChosenName({ settingKey, value }: { settingKey: string; value: unknown }) {
+function ChosenName({ settingKey, value, plain }: { settingKey: string; value: unknown; plain: boolean }) {
   const { t } = useTranslation();
   const query = useChosen(settingKey, typeof value === 'string' ? value : '');
   if (typeof value !== 'string') return <span>{t('settings.resourceChoice.unavailable')}</span>;
   if (query.isError) return <ErrorState compact title={t('settings.resourceChoice.unavailable')} error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
   const resource = query.data;
   return resource === undefined ? <span>{t('common.loading')}</span>
-    : <ResourceChip subject={'capacity' in resource ? { kind: 'host', host: resource } : { kind: 'template', template: resource }} hint={false} />;
+    : plain ? <span>{resource.name}</span> : <ResourceChip subject={'capacity' in resource ? { kind: 'host', host: resource } : { kind: 'template', template: resource }} hint={false} />;
 }

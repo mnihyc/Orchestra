@@ -5,9 +5,9 @@ machine or report one remote pool. Orch does not add the capacities of overlappi
 drivers. A remote pool cannot be combined with another resource authority in the
 same host registration. Register distinct hosts for distinct resource authorities.
 
-The node’s machine policy lives in `config.toml` under its data directory. The
-older driver, storage and hook tables in `orch.toml` are imported once; subsequent
-policy changes use the machine policy. See [node policy import](node-hooks.md).
+The node’s machine policy lives in `config.toml` under its data directory. Configure
+driver permissions, storages, hooks and ports there. Startup reads that canonical
+policy. See [machine hooks](node-hooks.md).
 
 ## Source and execution ceilings
 
@@ -33,9 +33,6 @@ archives = false
 
 Builds and archives also require unrestricted image and registry rules because
 their fetched or loaded image identities cannot all be checked in advance.
-Older `drivers.docker` and `drivers.host` policy keys remain readable, preserving
-their restrictions. Newly written policy uses `images` and `processes`; do not
-supply both spellings for the same section.
 
 ## Driver-owned options
 
@@ -52,8 +49,7 @@ report its schema even when it cannot load; that report does not make the driver
 available for scheduling. An unreported schema is unknown, not a successful check.
 
 The machine file stores each value as JSON text so nulls and nested arrays survive
-a reload. Earlier TOML object tables remain readable. When a drivers policy value
-is handed over, its complete value is likewise JSON text under `policy.values`.
+a reload. When a drivers policy value is handed over, its complete value is likewise JSON text under `policy.values`.
 Link and HTTP policy values remain ordinary JSON objects.
 
 Changing, adding or removing connection options requires reopening the driver.

@@ -82,6 +82,7 @@
     "noModels": "No API models available here",
     "modelUnavailable": "This model is unavailable here",
     "sources": "Sources",
+    "noAnswer": "No answer was written. Try again.",
     "sourceUnavailable": "Source no longer available",
     "copy": "Copy answer",
     "retry": "Retry answer",
@@ -91,7 +92,6 @@
     "noHistory": "No conversations yet",
     "retention": "Kept for {{days}} days after the last message",
     "expires": "Expires",
-    "adminNotice": "This organization’s admins can inspect and export this conversation",
     "inspection": "Read-only admin inspection",
     "readOnlyTools": "Reads as you · cites sources · makes no changes",
     "paidBy": "Paid by",
@@ -99,7 +99,9 @@
     "privateThread": "Creates a Private permanent thread in this organization",
     "destination": "Destination topic",
     "defaultDestination": "Use the page’s topic or an authorized default",
-    "contextNoRoom": "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves.",
+    "contextNoRoom": "ask.context_tokens leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Increase ask.context_tokens or reduce ask.max_output_tokens.",
+    "windowNoRoom": "The context window of {{model}} leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Use a model with a larger window or reduce ask.max_output_tokens.",
+    "windowUnknown": "The context window of {{model}} is not recorded and is assumed to be small, and the answer’s reserve (ask.max_output_tokens) leaves no room for the conversation. Record the model’s context window or reduce ask.max_output_tokens.",
     "contextTooLong": "This conversation is too long for {{model}}; start a new one or keep it as a thread."
   },
   "viewWindow": {
@@ -5010,6 +5012,7 @@
       "label": "Context {{used}} of {{window}} ({{percent}}); shortens at {{compact}}",
       "labelBare": "Context {{used}} of {{window}} ({{percent}})",
       "open": "Show what fills the context ({{label}})",
+      "labelUsed": "Context {{used}} used; no window reported",
       "modelLabel": "{{model}}: {{context}}"
     },
     "panel": {
@@ -7511,7 +7514,6 @@
     "directHelp": "Runtime variables and sealed secrets override the agent profile at the next start or attachment. Commands follow the machine's policy.",
     "configure": "Where it runs",
     "reviewHelp": "Save the desired host and variables, then review the runtime update. Existing sign-ins stay in the persistent volume.",
-    "secretSet": "A value is set; it is never returned.",
     "secretMissing": "No value is set.",
     "autoHost": "Choose a host with room",
     "review": "Review update",
@@ -7760,8 +7762,6 @@
   "providerSources": {
     "needsAdminKey": "Not offered · needs an admin key",
     "adminKeyHelp": "Used only by this facts source. Model calls keep their own credential.",
-    "removeSavedKey": "Remove saved key",
-    "keyWillBeRemoved": "Removed when saved",
     "described": "Described",
     "creationLead": "The defaults follow the credential and endpoints. Choose another registered program or address here when its details come from elsewhere.",
     "defaultModels": "The credential’s keeper or endpoints list models when they offer discovery; models can always be added by name.",
@@ -7796,7 +7796,6 @@
     "auth": {},
     "header": "Header name",
     "secret": "Authorization value",
-    "setReplace": "Set; replace",
     "writeOnly": "Write only; the saved value is never shown again.",
     "sendKey": "Send this provider’s key to this address",
     "noSignIn": "A sign-in stays with its harness and is never sent to an address.",
@@ -8271,6 +8270,9 @@
     "refresh": "Refresh"
   },
   "ui": {
+    "sectionNav": {
+      "search": "Find a section"
+    },
     "read": {
       "retrying": "Taking longer than usual · retrying",
       "failed": "Could not load"
@@ -9874,7 +9876,11 @@
         "right": "Hide the right bar",
         "bottom": "Hide the bottom"
       },
-      "pin": "Keep open as a bar"
+      "pin": "Keep open as a bar",
+      "peek": {
+        "title": "Bars",
+        "label": "Show hidden bars on hover: {{state}}"
+      }
     },
     "sash": {
       "left": "Width of the left bar",
@@ -9941,9 +9947,10 @@
       "shellsHint": "Your shells in this environment. Open Terminal.",
       "connecting": "Connecting…",
       "connectingHint": "Connecting to live updates.",
-      "reconnectingSince": "Reconnecting… · {{time}}",
       "reconnecting": "Reconnecting…",
       "reconnectingHint": "What is on screen stays and can be read. Approving and steering wait for the connection; typing does not.",
+      "noLive": "No live updates · {{time}}",
+      "noLiveHint": "Live updates cannot connect, so this page reads again every few seconds. If this stays, ask whoever runs this system to check that the HTTPS front passes WebSocket upgrades for /api/v1/ws; orchctl doctor --url shows it as edge-ws.",
       "slow": "Slow connection · {{ms}} ms",
       "slowHint": "Sending, saving and shells take longer. Nothing you type waits."
     },
@@ -14286,6 +14293,12 @@
       "readOnly": "Read only",
       "draft": "Unsaved changes",
       "setOn": "Set in {{place}}",
+      "asPlace": "As {{place}} decides",
+      "asSystem": "As the system decides",
+      "asHost": "As the host decides",
+      "asEnvironment": "As the environment decides",
+      "here": "Here",
+      "choiceFor": "Choice for {{name}}",
       "lockedOn": "Locked at {{place}}",
       "hiddenSource": "Set above",
       "editValue": "Edit {{name}}",
@@ -19215,7 +19228,6 @@
         "variables": "Secret variables",
         "variableNames": "Variable names (one per line)",
         "token": "Token",
-        "keepSecret": "Leave blank to keep the saved value",
         "advanced": "Advanced",
         "json": "Definition (JSON)",
         "nameInvalid": "Use 2–32 lowercase letters, digits, - or _, starting with a letter.",
@@ -20000,6 +20012,8 @@
       "off": "Nothing"
     },
     "quiet": {
+      "zoneProblem": "Quiet hours are waiting for a recognized time zone",
+      "invalidZone": "Quiet hours are waiting because “{{zone}}” is not a recognized time zone.",
       "title": "Quiet hours",
       "switch": "Hold what is sent outside Orch during quiet hours",
       "hint": "Every way out holds its messages until the hours end; what was held goes then, together. In your time zone, {{zone}}.",
@@ -20087,7 +20101,6 @@
       "addressWrong": "This is not a web address.",
       "secret": "Secret",
       "secretHint": "Signs what is posted. It is kept and never shown again.",
-      "secretKept": "A secret is set. Leave this empty to keep it, or type a new one.",
       "addConfirm": "Add the webhook",
       "saveConfirm": "Save",
       "added": "Added {{name}}",
@@ -22298,7 +22311,6 @@
       "clientRule": "Give the client id the provider made for this system.",
       "secret": "Client secret",
       "secretHint": "Written here once; it is never shown again.",
-      "secretKept": "One is set. Leave this empty to keep it, or write a new one.",
       "secretRule": "Give the client secret.",
       "scopes": "Scopes",
       "scopesHint": "Separated by spaces. The provider needs to give a name and an address.",
@@ -23396,6 +23408,9 @@
       "moveOut": "Move to another org",
       "moveOutReason": "Moves with its main thread · Keep it to move it alone"
     },
+    "slash": {
+      "about": "Ask a question on the side, without disturbing the turn"
+    },
     "ask": {
       "title": "Side thread",
       "about": "Starts from {{thread}}'s conversation. Replies stay in this aside.",
@@ -24417,6 +24432,9 @@
     "runtimeCount_other": "{{number}} runtimes",
     "offInBuild": "Off in this version: {{feature}}",
     "caseUnavailable": "Unavailable",
+    "checkedPending_one": "Checked · {{number}} check pending",
+    "checkedPending_other": "Checked · {{number}} checks pending",
+    "casesPending": "Not verified yet: {{names}}",
     "notChecked": "This version has not been checked",
     "checkFailed": "Compatibility check failed · review its results",
     "policySummary": "{{name}}: {{choice}}",
@@ -26192,6 +26210,8 @@
     "resultsRootPending": "The results’ organization cannot be opened",
     "model": "Model summarizer",
     "details": "Summary details",
+    "hide": "Hide summary",
+    "show": "Show summary",
     "inputFacts": "Source items: {{included}} included · {{shortened}} shortened · {{omitted}} omitted",
     "baseRates": "Configured model base rates",
     "noRates": "No base rates reported",
@@ -26753,5 +26773,134 @@
     "allowance": "Allowance: {{window}}",
     "resets": "Resets <time/>",
     "example": "A provider and its declared route"
+  },
+  "settingsEditors": {
+    "params": {
+      "chooseModel": "Choose a default provider and model to edit their parameters.",
+      "chooseAgent": "Choose an agent profile to edit its declared parameters.",
+      "other": "Other parameters",
+      "remove": "Remove {{name}}"
+    },
+    "draft": {
+      "discard": "Discard",
+      "nothingToSave": "Nothing has changed.",
+      "fixMarked": "Fix what is marked before it can be saved."
+    },
+    "leave": {
+      "title": "Leave without saving?",
+      "confirm": "Leave",
+      "about": "A setting you were editing has not been saved. Leaving drops it."
+    },
+    "secret": {
+      "set": "Set",
+      "replace": "Replace",
+      "keep": "Keep",
+      "remove": "Remove",
+      "removed": "Removed when saved",
+      "keepSaved": "Keep it"
+    },
+    "targets": {
+      "label": "Summary targets",
+      "automatic": "Automatic",
+      "when": "When",
+      "whenFor": "{{name}}: when to refresh",
+      "defaultEvents": "Default",
+      "useDefault": "Use the default for {{name}}",
+      "min_interval_secs": "At most every (seconds)",
+      "context_tokens": "Reads up to (tokens)",
+      "output_chars": "Writes up to (characters)",
+      "least": "At least {{least}}",
+      "summaryOff": "Not automatic",
+      "summaryOn": "Automatic for {{names}}"
+    },
+    "summarizer": {
+      "none": "None here",
+      "model": "A model",
+      "kind": "Kind",
+      "noneHere": "Nothing is chosen here; what a place above chose applies.",
+      "useForm": "Use the form",
+      "editJson": "Edit as JSON",
+      "provider": "Provider",
+      "modelName": "Model",
+      "chooseProvider": "Choose a provider",
+      "chooseModel": "Choose a model",
+      "providerFirst": "Choose a provider first",
+      "cannotUse": "You cannot use this provider.",
+      "noModels": "This provider has no enabled models.",
+      "modelNotOffered": "This provider does not offer {{model}}.",
+      "atLeastOne": "At least 1",
+      "answerTokens": "Answer tokens",
+      "contextTokens": "Context tokens",
+      "requestOptions": "Request options",
+      "instructions": "Instructions per field",
+      "builtInText": "Empty keeps the built-in text",
+      "summary": "A model · {{provider}} · {{model}}",
+      "fields": {
+        "summary": "Summary",
+        "title": "Title",
+        "description": "Description",
+        "tags": "Tags",
+        "rollup": "Roll-up",
+        "handoff": "Hand-off"
+      }
+    },
+    "thing": {
+      "gone": "No longer exists",
+      "goneAbout": "This {{kind}} no longer exists.",
+      "clear": "Clear",
+      "kinds": {
+        "environment": "environment",
+        "agent": "agent profile"
+      },
+      "needsManage": "You need to manage this environment to choose it.",
+      "needsUse": "You need to use this {{kind}} to choose it.",
+      "attachedAs": "How {{name}} is attached",
+      "remove": "Remove {{name}}",
+      "addMount": "Choose a mount",
+      "addDocument": "Add a document",
+      "searchDocuments": "Search documents by name",
+      "examples": {
+        "environment": "An environment you manage",
+        "agent": "An agent profile you can use",
+        "mount": "A mount and how it is attached",
+        "document": "Documents you can read"
+      }
+    },
+    "features": {
+      "label": "Agent features",
+      "none": "No installed agent program has a feature to switch.",
+      "unknown": "No installed agent program names this feature",
+      "on": "On",
+      "off": "Off",
+      "remove": "Remove {{name}}",
+      "useDefault": "Use the default for {{name}}",
+      "summaryNone": "No feature is set",
+      "summaryOne": "{{name}} ({{state}})",
+      "programDefault": "Program default",
+      "fromHere": "Set here",
+      "fromAbove": "Inherited"
+    },
+    "model": {
+      "use": "Use “{{name}}”",
+      "choose": "Choose a model or type its name",
+      "name": "Type a model name"
+    },
+    "order": {
+      "search": "Find a place",
+      "by": "Order by",
+      "groups": "Arranged groups",
+      "arrange": "Arrange a group",
+      "arrangePlaceholder": "Choose a place whose contents to arrange",
+      "nothingToArrange": "Nothing left to arrange",
+      "add": "Add a place to {{name}}",
+      "addPlaceholder": "Add a place",
+      "gone": "No longer exists",
+      "removeGroup": "Stop arranging {{name}}",
+      "up": "Move {{name}} up in {{group}}",
+      "down": "Move {{name}} down in {{group}}",
+      "remove": "Remove {{name}} from {{group}}",
+      "useForm": "Use the form",
+      "editJson": "Edit as JSON"
+    }
   }
 }

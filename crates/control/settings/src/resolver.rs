@@ -20,14 +20,14 @@ use orch_access_contract::roles::NodeKind;
 use orch_db::Conn;
 use orch_db::queries::hierarchy::{self, NodeRow};
 use orch_db::queries::settings as queries;
-use orch_settings_contract::provenance::{OwnRow, Resolved};
+use orch_settings_contract::provenance::{OwnRow, Resolved, SourceScope};
 use orch_settings_contract::registry::{self, DefaultOf, Scope, SettingDef, Supplier, keys};
 use orch_types::{Id, Json};
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 
 use crate::locks::Here;
-use crate::merge::{Link, OwnValues, Rows, Stack, Supply, resolve_key};
+use crate::merge::{Link, OwnValues, Rows, Stack, Supply, layers};
 use crate::provenance::SettingView;
 use crate::supplied::{self, Supplies};
 use crate::validation::keys_at;
@@ -294,19 +294,23 @@ impl Snapshot {
     /// What `def` resolves to at this place, with where it comes from.
     #[must_use]
     pub fn resolve(&self, def: &'static SettingDef) -> Resolved<Id> {
-        self.resolve_following(def, 0)
+        self.resolve_following(def, 0, None)
     }
 
-    fn resolve_following(&self, def: &'static SettingDef, depth: usize) -> Resolved<Id> {
+    fn resolve_following(
+        &self,
+        def: &'static SettingDef,
+        depth: usize,
+        omit: Option<&str>,
+    ) -> Resolved<Id> {
         let stack = Stack {
             rows: &self.rows,
             chain: &self.chain,
             own: self.own.as_ref(),
         };
         let other = match def.default {
-            DefaultOf::SameAs(name) if depth < SAME_AS_DEPTH => {
-                registry::get(name).and_then(|other| self.resolve_following(other, depth + 1).value)
-            }
+            DefaultOf::SameAs(name) if depth < SAME_AS_DEPTH => registry::get(name)
+                .and_then(|other| self.resolve_following(other, depth + 1, omit).value),
             _ => None,
         };
         let supply = match def.default {
@@ -317,7 +321,16 @@ impl Snapshot {
             DefaultOf::SameAs(_) => other.as_ref().map(Supply::Default),
             DefaultOf::Value(_) | DefaultOf::Unset => None,
         };
-        resolve_key(def, &stack, supply)
+        let mut values = layers(def, &stack, supply);
+        if omit == Some(def.key) {
+            let scope = SourceScope::from(self.scope);
+            let node = match self.place {
+                Place::Node(id) => Some(id),
+                _ => None,
+            };
+            values.retain(|layer| layer.scope != scope || layer.node != node);
+        }
+        orch_settings_contract::merge::resolve(def, &values)
     }
 
     /// The row of `def` at the place itself, or its own value for an
@@ -358,6 +371,7 @@ impl Snapshot {
             self.resolve(def),
             self.own_row(def),
         )
+        .with_inherited(self.resolve_following(def, 0, Some(def.key)))
     }
 
     /// Every key the snapshot was read for, as it holds here, in the order of

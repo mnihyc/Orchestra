@@ -39,6 +39,12 @@ import { newPositionsMemory, treePositions, type TreePositions } from '@/ui/tree
 
 export interface TreeRow<Item> {
   id: string;
+  /** The complete accessible name when the visible row uses a shorter name. */
+  label?: string;
+  /** A short reason or state read alongside the row name. */
+  description?: string;
+  /** An unavailable choice remains reachable so its reason can be read. */
+  disabled?: boolean;
   /** How deep it lies, from 0. */
   depth: number;
   item: Item;
@@ -160,6 +166,9 @@ function RowInner<Item>({
   const element = (
     <div
       role="treeitem"
+      aria-label={row.label}
+      aria-description={row.description}
+      aria-disabled={row.disabled === true ? true : undefined}
       data-tree-row={row.id}
       aria-level={row.depth + 1}
       aria-posinset={position}
@@ -175,14 +184,14 @@ function RowInner<Item>({
           ? undefined
           : (event) => {
               // A press on a link or a button in the row is theirs.
-              if (row.tickLocked === true || (event.target as HTMLElement).closest('a, button') !== null) return;
+              if (row.disabled === true || row.tickLocked === true || (event.target as HTMLElement).closest('a, button') !== null) return;
               if (onPick !== undefined) onPick(row);
               else onTick?.(row, row.tick !== true);
             }
       }
       className={cx(
         'group/row focus-inset relative mx-1 flex h-(--row-height) cursor-default items-center gap-1 rounded-md pr-2 text-base select-none',
-        current ? 'bg-accent-subtle text-text' : 'text-text-muted hover:bg-bg-muted hover:text-text',
+        current ? 'bg-accent-subtle text-text' : row.disabled === true ? 'text-text-disabled' : 'text-text-muted hover:bg-bg-muted hover:text-text',
       )}
       onFocus={(event) => {
         if (event.target === event.currentTarget) onFocusRow(row.id);
@@ -225,6 +234,9 @@ const Row = memo(RowInner, (before, after) => {
     before.row.id === after.row.id &&
     before.row.tick === after.row.tick &&
     before.row.tickLocked === after.row.tickLocked &&
+    before.row.label === after.row.label &&
+    before.row.description === after.row.description &&
+    before.row.disabled === after.row.disabled &&
     before.row.item === after.row.item &&
     before.row.depth === after.row.depth &&
     before.row.expandable === after.row.expandable &&
@@ -258,6 +270,9 @@ function stillSays<Item>(view: RowView<Item>, row: TreeRow<Item>, current: boole
       held.expanded === row.expanded &&
       held.tick === row.tick &&
       held.tickLocked === row.tickLocked &&
+      held.label === row.label &&
+      held.description === row.description &&
+      held.disabled === row.disabled &&
       held.parentId === row.parentId)
   );
 }
@@ -368,7 +383,7 @@ export function Tree<Item>({
   const pick = useRef(onPick);
   useEffect(() => { pick.current = onPick; }, [onPick]);
   const picking = onPick !== undefined;
-  const onChoice = useCallback((row: TreeRow<Item>) => { if (row.tickLocked !== true) pick.current?.(row); }, []);
+  const onChoice = useCallback((row: TreeRow<Item>) => { if (row.disabled !== true && row.tickLocked !== true) pick.current?.(row); }, []);
 
   // Each row as what it is drawn from, the same object as before where nothing about it changed, in runs.
   const [kept] = useState(() => new Map<string, RowView<Item>>());
@@ -488,7 +503,7 @@ export function Tree<Item>({
       case ' ':
         if (picking) onChoice(row);
         else if (row.tick !== undefined && ticking) {
-          if (row.tickLocked !== true) onBox(row, row.tick !== true);
+          if (row.disabled !== true && row.tickLocked !== true) onBox(row, row.tick !== true);
         } else if (row.expandable) onExpandedChange(row.id, !row.expanded);
         done();
         return;

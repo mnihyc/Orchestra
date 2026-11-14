@@ -46,9 +46,9 @@ When the conversation approaches the chosen model’s context window, Ask summar
 
 Summarizing counts as your Ask usage, through the conversation’s current payer and usage caps. It does not choose a separate summary model.
 
-Administrators can set `ask.max_output_tokens` (4096 by default) and the optional `ask.context_tokens` policy at system or organization scope; the lowest value applies. Unset context uses the model’s own window; a configured value can reduce that window for Ask without changing ordinary threads. Fitting reserves the answer’s output tokens and the turn’s tool-result allowance (`ask.turn_tool_bytes`), converted with the chosen model’s measured token estimate. There is no item-count cutoff. If the model’s window has not been recorded, Ask uses the existing conservative handoff estimate; record its context size or reduce the reserves if they do not fit.
+Administrators can set `ask.max_output_tokens` (4096 by default) and the optional `ask.context_tokens` policy at system or organization scope; the lowest value applies. Unset context uses the model’s own window; a configured value can reduce that window for Ask without changing ordinary threads. Fitting reserves the answer’s output tokens first. Of what the window then leaves, the tool results of one turn take half at most, and never more than `ask.turn_tool_bytes` stands for, converted with the chosen model’s measured token estimate; a turn that would read more than that is stopped. There is no item-count cutoff. If the model’s window has not been recorded, Ask assumes 32,000 tokens; record the model’s context size to use its real window.
 
-If the reserves leave no room, the reason names `ask.context_tokens` and the reserves to change. If even a summary cannot fit, Ask says the conversation is too long for the selected model: start a new conversation or **Keep as thread**. No history disappears silently.
+If the answer’s reserve leaves no room, the reason says whether the cause is the model’s own window (and whether that is only assumed because it is not recorded) or `ask.context_tokens`, and which setting to change. If even a summary cannot fit, Ask says the conversation is too long for the selected model: start a new conversation or **Keep as thread**. No history disappears silently.
 
 ## One organization per conversation
 
@@ -66,7 +66,7 @@ Conversations normally live in your personal organization. If personal organizat
 
 Ask reads as you and makes no changes. It can search, open readable sources, read their history and consult the bundled user guide. It does not lend access to another person or instruct a working thread.
 
-The panel states that the conversation's root-organization admins can inspect and export it. An admin inspection is read-only: it cannot send, retry, stop or keep someone else's conversation. Turn on the existing **As admin** switch, open **History**, choose **Inspect this organization’s conversations**, then open a row. **Export conversation** downloads the permitted conversation as JSON.
+The admins of a conversation's root organization can inspect and export it. An admin inspection is read-only: it cannot send, retry, stop or keep someone else's conversation. Turn on the existing **As admin** switch, open **History**, choose **Inspect this organization’s conversations**, then open a row. **Export conversation** downloads the permitted conversation as JSON.
 
 You normally pay for questions you ask, unless the effective Ask setting selects its setting owner's provider use. The panel shows the effective payer. Your organization's applicable per-person and shared usage caps still apply.
 
