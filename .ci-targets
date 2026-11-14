@@ -1,0 +1,8 @@
+fmt
+clippy
+contracts
+test -p orch-adapter-codex --lib -- parameters::tests::
+test -p orch-adapter-codex --lib -- sessions::tests::
+web typecheck
+web lint
+web test -- tests/component/resource-list-layout.test.tsx tests/component/resource-heading-actions.test.tsx tests/component/resource-list-controls.test.tsx tests/component/project-page-selection.test.tsx tests/component/topic-board.test.tsx tests/component/creation-once.test.tsx tests/component/topic-view.test.tsx tests/component/frame-overview-read.test.tsx tests/component/thread-hover-actions.test.tsx tests/component/resource-landing.test.tsx tests/component/resource-navigation-presence.test.tsx tests/component/resource-impact.test.tsx tests/component/resource-names.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts

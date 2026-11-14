@@ -7,9 +7,14 @@
  */
 import { useListChoice } from '@/lib/listState';
 import { MessageSquarePlus, MessagesSquare } from 'lucide-react';
-import { useMemo } from 'react';
+import { type ReactNode, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { useSearchText } from '@/features/resources/ResourceList';
+import { attentionOf, WorkChips } from '@/features/source/Attention';
+import { Input } from '@/ui/Input';
+import { ErrorAlert } from '@/ui/ErrorState';
+import { StateLine } from '@/ui/StateLine';
 import { openNodeDialog } from '@/features/navigation/NodeDialogs';
 import { participates } from '@/features/access/participation';
 import { ParticipationFilter } from '@/features/access/ParticipationFilter';
@@ -47,20 +52,44 @@ export function NewThreadButton({ topic, allowed, owner }: { topic: PlaceRef; al
   );
 }
 
-export interface TopicThreadsProps { orgId: string; topicId: string; topic: PlaceRef; allowed: boolean; owner: Parameters<typeof denial>[3] }
+export interface TopicThreadsProps {
+  orgId: string; topicId: string; topic: PlaceRef; allowed: boolean; owner: Parameters<typeof denial>[3];
+  q?: string | undefined;
+  onQuery?: ((query: string) => void) | undefined;
+  /** An overview already has its inline starter; other entrances retain the ordinary creation act. */
+  creation?: boolean;
+  /** A section puts these same controls on its own heading row. */
+  frame?: (controls: ReactNode, rows: ReactNode) => ReactNode;
+}
 export function TopicThreads(props: TopicThreadsProps) {
+  const { t } = useTranslation();
   const [participating, setParticipating] = useListChoice('threads', 'participating', false);
-  return <div className="flex flex-col gap-3"><FilterBar participation={<ParticipationFilter checked={participating} onCheckedChange={setParticipating} />}
-    action={<NewThreadButton topic={props.topic} allowed={props.allowed} owner={props.owner} />} /><TopicThreadRows {...props} participating={participating} /></div>;
+  const [text, setText] = useSearchText(props.q ?? '', (query) => props.onQuery?.(query));
+  const controls = <FilterBar search={<Input type="search" hideLabel label={t('places.topic.findThreads')} placeholder={t('ui.combobox.search')} value={text} onChange={(event) => setText(event.target.value)} autoComplete="off" />}
+    participation={<ParticipationFilter checked={participating} onCheckedChange={setParticipating} />}
+    action={props.creation === false ? undefined : <NewThreadButton topic={props.topic} allowed={props.allowed} owner={props.owner} />} />;
+  const rows = <TopicThreadRows {...props} text={text} participating={participating} compact={props.frame !== undefined} />;
+  return props.frame === undefined ? <div className="flex flex-col gap-3">{controls}{rows}</div> : props.frame(controls, rows);
 }
 
-function TopicThreadRows({ orgId, topicId, participating }: TopicThreadsProps & { participating: boolean }) {
+function TopicThreadRows({ orgId, topicId, participating, text, compact }: TopicThreadsProps & { participating: boolean; text: string; compact: boolean }) {
   const { t } = useTranslation();
   const tree = useOrgTree(orgId);
-  const threads = useMemo(() => threadsOfTopic(tree.nodes, topicId).filter((thread) => !participating || participates(thread)), [tree.nodes, topicId, participating]);
+  const tokens = text.trim().normalize('NFKC').toLocaleLowerCase().split(/\s+/u).filter(Boolean);
+  const match = tokens.join(' ');
+  const threads = useMemo(() => {
+    const words = match.split(' ').filter(Boolean);
+    return threadsOfTopic(tree.nodes, topicId).filter((thread) => {
+      const name = thread.name.normalize('NFKC').toLocaleLowerCase();
+      return (!participating || participates(thread)) && words.every((word) => name.includes(word));
+    });
+  }, [tree.nodes, topicId, participating, match]);
 
   if (!tree.loaded && tree.error === null) return <SkeletonRows read={tree} rows={3} />;
   if (threads.length === 0) {
+    if (tree.error !== null) return <ErrorAlert error={tree.error} />;
+    if (match !== '') return <StateLine compact title={t('places.topic.noMatchingThreads')} />;
+    if (compact) return <StateLine compact title={t('places.topic.noThreads')} />;
     return (
       <EmptyState
         icon={<MessagesSquare aria-hidden />}
@@ -76,17 +105,20 @@ function TopicThreadRows({ orgId, topicId, participating }: TopicThreadsProps & 
       header: t('places.topics.name'),
       cell: (thread, shown) => {
         const withoutState = !shown.has('state');
+        const withoutApprovals = !shown.has('approvals');
+        const withoutActivity = !shown.has('activity');
         return (
           <div className="flex min-w-0 flex-col gap-1">
             <span className="flex min-w-0 items-center gap-2"><PlaceLink place={thread} className="truncate font-medium text-text hover:underline">
               {thread.name}
-            </PlaceLink><AsAdminMark of={adminAccessOf(thread)?.place} responsive /></span>
-            {withoutState && <ThreadStateChip display={thread.thread?.display} className="self-start" />}
+            </PlaceLink>{withoutApprovals && (thread.thread?.pending_approvals ?? 0) > 0 && <Badge tone="warning" count={thread.thread?.pending_approvals ?? 0} label={t('navigation.approvalsWaiting', { count: thread.thread?.pending_approvals ?? 0 })} />}<AsAdminMark of={adminAccessOf(thread)?.place} responsive /></span>
+            {withoutState && <span className="flex flex-wrap items-center gap-2"><ThreadStateChip display={thread.thread?.display} /><WorkChips attention={attentionOf(thread.thread)} compact context="card" /></span>}
+            {withoutActivity && thread.thread?.last_activity_at !== null && thread.thread?.last_activity_at !== undefined && <span className="text-sm text-text-muted">{t('places.cards.active')} <RelativeTime at={thread.thread.last_activity_at} /></span>}
           </div>
         );
       },
     },
-    { id: 'state', header: t('places.topic.state'), from: 'sm', cell: (thread) => <ThreadStateChip display={thread.thread?.display} /> },
+    { id: 'state', header: t('places.topic.state'), from: 'sm', cell: (thread) => <span className="flex flex-wrap items-center gap-2"><ThreadStateChip display={thread.thread?.display} /><WorkChips attention={attentionOf(thread.thread)} compact context="card" /></span> },
     {
       id: 'approvals',
       header: t('places.topic.approvals'),
@@ -107,7 +139,8 @@ function TopicThreadRows({ orgId, topicId, participating }: TopicThreadsProps & 
 
   return (
     <div className="flex flex-col gap-3">
-      <Table label={t('places.topic.threads')} columns={columns} rows={threads} rowKey={(thread) => thread.id} rowClassName={(thread) => (thread.archived ? 'opacity-60' : undefined)} />
+      {tree.error !== null && <ErrorAlert error={tree.error} />}
+      <Table key={`${participating}:${match}`} virtual boundedIdentity label={t('places.topic.threads')} columns={columns} rows={threads} rowKey={(thread) => thread.id} rowClassName={(thread) => (thread.archived || tree.error !== null ? 'opacity-60' : undefined)} />
     </div>
   );
 }

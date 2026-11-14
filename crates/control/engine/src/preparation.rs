@@ -33,8 +33,46 @@ pub const PREPARING: &str = "files";
 /// them again first.
 pub const FILES_READY: &str = "files_ready";
 
-/// The source panel retains the precise failure and the explicit recovery action.
-pub(crate) const SOURCE_FAILED: &str = "Source preparation failed. Choose Prepare again to retry.";
+/// The step of a thread that records the files of its directory before the turn.
+pub const RECORDING_STEP: &str = "recording";
+
+/// The step an input's preparation is in once its source is ready: writing its files, or, with none to
+/// write, recording the files of the directory before the turn.
+fn files_step(input: Id, content: &[ContentPart]) -> &'static str {
+    if delivery::plan(input, content).is_empty() {
+        RECORDING_STEP
+    } else {
+        delivery::FILES_STEP
+    }
+}
+
+/// The words a thread is blocked with when its source failed to be prepared; the source panel retains the
+/// precise failure and the explicit recovery action, and the page turns the reason named here into words.
+pub(crate) const SOURCE_FAILED: &str = "Source preparation failed";
+
+/// The sentence a thread is blocked with when its source failed for `reason`, the code the source keeps.
+pub(crate) fn source_failed_detail(reason: Option<&str>) -> String {
+    match reason {
+        Some(reason) => format!("{SOURCE_FAILED} ({reason}). Choose Prepare again to retry."),
+        None => format!("{SOURCE_FAILED}. Choose Prepare again to retry."),
+    }
+}
+
+/// Whether a blocked thread's detail is that of a failed source preparation, whatever its reason.
+pub(crate) fn is_source_failed_detail(detail: &str) -> bool {
+    detail.starts_with(SOURCE_FAILED)
+}
+
+/// Why the source of a thread failed to be prepared, as its source keeps it.
+pub(crate) fn source_failure_reason(thread: &ThreadRow) -> Option<String> {
+    thread
+        .source
+        .as_ref()
+        .and_then(|source| {
+            serde_json::from_value::<SourceInfo>(source.get("info").unwrap_or(source).clone()).ok()
+        })
+        .and_then(|info| info.reason)
+}
 
 pub(crate) fn source_failed(thread: &ThreadRow) -> Result<bool, EngineError> {
     thread
@@ -169,7 +207,7 @@ impl Engine {
                 reason: None,
                 detail: None,
                 step: Some(if crate::source::ready(thread)? {
-                    delivery::FILES_STEP
+                    files_step(input.id, &content)
                 } else {
                     "source"
                 }),
@@ -247,6 +285,7 @@ impl Engine {
                 .end_preparation(thread_id, Some(input.id), Prepared::Back)
                 .await;
         };
+        let content: Vec<ContentPart> = serde_json::from_value(input.content.clone())?;
         // The environment as the start of the turn will find it: one decision for both
         // (`Engine::environment_standing`), so that preparation never sends back an input that
         // pre-flight sends here again at once.
@@ -255,7 +294,7 @@ impl Engine {
                 self.set_step(
                     thread_id,
                     if crate::source::ready(&thread)? {
-                        delivery::FILES_STEP
+                        files_step(input.id, &content)
                     } else {
                         "source"
                     },
@@ -283,7 +322,6 @@ impl Engine {
             self.prepare_pending_source(&thread).await?;
             return Ok(());
         }
-        let content: Vec<ContentPart> = serde_json::from_value(input.content.clone())?;
         let directory =
             crate::sessions::absolute_directory(&environment.workspace_root, &thread.workspace_dir);
         let Some(placement) = self
@@ -302,6 +340,8 @@ impl Engine {
         };
         let issues = issues_of(input.id, &content, &placement);
         let prepared = if issues.is_empty() {
+            // Its files are written; the directory is recorded next, and the page says so.
+            self.set_step(thread_id, RECORDING_STEP).await?;
             self.record_before(&thread, &input, &environment).await?;
             Prepared::Ready
         } else {
@@ -344,7 +384,10 @@ impl Engine {
             };
             let blocked = match &prepared {
                 Prepared::Unavailable(why) => Some(("environment_unavailable", why.clone())),
-                Prepared::SourceFailed => Some(("error", SOURCE_FAILED.to_owned())),
+                Prepared::SourceFailed => Some((
+                    "error",
+                    source_failed_detail(source_failure_reason(&thread).as_deref()),
+                )),
                 Prepared::Ready | Prepared::Held(_) | Prepared::Back => None,
             };
             if let Some(row) = &row {
@@ -527,6 +570,24 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_blocked_source_names_its_reason_and_is_still_recognized_without_one() {
+        let detail = source_failed_detail(Some("timeout"));
+        assert_eq!(
+            detail,
+            "Source preparation failed (timeout). Choose Prepare again to retry."
+        );
+        assert!(is_source_failed_detail(&detail));
+        assert!(is_source_failed_detail(&source_failed_detail(None)));
+        assert!(!is_source_failed_detail("the environment failed: files"));
+    }
+
+    #[test]
+    fn an_input_without_files_starts_its_preparation_in_the_recording_step() {
+        let input = orch_types::new_id();
+        assert_eq!(files_step(input, &[]), RECORDING_STEP);
+    }
 
     #[test]
     fn images_are_planned_for_file_delivery_even_without_native_image_input() {
