@@ -63,7 +63,8 @@ it('reviews policy, existing access and gains first; sends frozen revisions and 
   const lost = within(screen.getByText('Lost', { selector: 'span' }).closest('li')!);
   mocks.read.mockResolvedValueOnce(page('Lost', [entry('unknown-writer')], 9));
   await userEvent.click(lost.getByRole('button', { name: 'Read current state' }));
-  expect(await lost.findByText(/revision 9/)).toBeVisible();
+  expect(await lost.findByText(/Current permission page/)).toBeVisible();
+  expect(lost.queryByText(/revision/i)).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole('button', { name: 'Undo successful rows' }));
   await waitFor(() => expect(mocks.change).toHaveBeenCalledTimes(4));
   expect(mocks.change.mock.calls[3]).toEqual([targets[0], { expected_revision: 8, rows: [{ permission: 'topic.view', remove: ['new-entry'], update: [] }] }]);

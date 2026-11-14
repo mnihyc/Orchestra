@@ -129,6 +129,7 @@ A failed action keeps its human explanation and available recovery. These stable
 | `error:import.nothing` | There is nothing here that you may bring into this place. Choose another source or place. |
 | `error:import.invalid` | This is not an Orch package or files that can be imported. Check the file and try again. |
 | `error:import.undone` | This import was taken back already, or is being taken back. |
+| `error:summary.nothing_new` | There is nothing new here to summarize, so no summary was asked for. Try again when something has been written or posted. |
 | `error:gone` | This link was used already or has expired. Ask for a new link. |
 | `error:docs.too_large` | This would take the document past a limit. Remove some content or split it into separate documents. |
 | `error:share.too_large` | This copy is larger than the limit here. Choose less content to share. |
@@ -144,6 +145,14 @@ A failed action keeps its human explanation and available recovery. These stable
 | `error:provider.unavailable` | The provider is not ready at the moment. Try again shortly. |
 | `error:harness.sessions_no_runtime` | This agent has no runtime for this provider yet. Start a thread with this agent, then check its sessions again. |
 | `error:harness.sessions_unavailable` | This agent could not list its sessions. Check its machine and try again. |
+| `error:native_web_no_end` | The native program did not report this web action's end within the resolved wait. Its row closes with the reason while the turn continues. A later real end can still update that row; no manual Stop is required. |
+| `error:native_web_action_unproven` | Native result evidence could not be matched to the exact action, turn, owner, model or supported format. The reported action status is retained and usage remains unknown; a missing proof is not proof of failure. |
+| `error:native_web_action_failed` | The exact retained native result reports failure. The action is marked failed with its original details; this alone does not fail the text turn. |
+| `error:native_result_timed_out` | Evidence reason: the optional retained-result read reached its declared wait. Other sessions continue and the reported action result is retained as unverified. |
+| `error:native_result_buffer_full` | Evidence reason: the waiting session's ordered-input buffer filled. Orch ends optional proof and processes every retained and current frame without dropping input. |
+| `error:native_result_ordering_unknown` | Evidence reason: a retained child introduction must be processed before newly arrived child input can be owned safely. Only that session's optional proof ends; input order is preserved. |
+| `error:native_result_session_closed` | Evidence reason: the owning session closed before optional retained evidence could finish. Late evidence cannot attach to another session. |
+| `error:native_result_session_changed` | Evidence reason: the session, segment, native owner or result source no longer matches the read. The stale proof is discarded instead of updating or charging the replacement. |
 | `error:harness.channels_unavailable` | The release channels could not be read. Check this server's internet access or name a mirror. |
 | `error:provider.reset_stale` | The reset or the number available changed. Refresh and confirm the current reset again. |
 | `error:provider.reset_unavailable` | This provider cannot use a reset now. Refresh its facts or ask its manager. |
