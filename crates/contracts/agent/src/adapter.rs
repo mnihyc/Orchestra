@@ -906,6 +906,29 @@ pub trait AgentAdapter: Send + 'static {
         unsupported("resync")
     }
 
+    /// Reobserves the exact accepted turn after host restart, without submitting input or resuming a lane.
+    /// True means its confirmed terminal history was emitted under `turn_id`; false means its native
+    /// outcome remains unavailable. Unsupported inspection never proves native work was lost.
+    async fn recover_turn(
+        &mut self,
+        source: crate::history::NativePrefixSource,
+        turn_id: orch_types::Id,
+        native_turn_ref: Option<String>,
+        directory: String,
+        cwd: String,
+        output_capture_bytes: u64,
+    ) -> Result<bool, AdapterError> {
+        let _ = (
+            source,
+            turn_id,
+            native_turn_ref,
+            directory,
+            cwd,
+            output_capture_bytes,
+        );
+        unsupported("recover_turn")
+    }
+
     /// Lists the sessions the harness already has (`capabilities.discover_sessions`).
     async fn discover_sessions(&mut self) -> Result<Vec<NativeSession>, AdapterError> {
         unsupported("discover_sessions")

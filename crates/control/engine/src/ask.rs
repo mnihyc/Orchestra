@@ -44,18 +44,15 @@ pub const BUILTIN: Program = Program {
         .requires_native_harness(),
 };
 
-/// Inherited bounds, resolved before a turn starts. Hitting a bound leaves the
+/// Inherited counts, resolved before a turn starts. Hitting one leaves the
 /// retained conversation intact and the person can ask a narrower follow-up.
+/// What a model's window holds is no count: it bounds each request, never a turn.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     /// Model steps in one user turn.
     pub steps: u32,
     /// Total tool invocations in that turn.
     pub tools: u32,
-    /// Bytes from any one tool result.
-    pub tool_bytes: usize,
-    /// Total tool-result bytes sent during that turn.
-    pub turn_tool_bytes: usize,
 }
 
 /// An authorized, retained call prepared using current model, payer and caps.
@@ -79,16 +76,21 @@ pub struct Step {
     pub machine: Id,
     /// Fully constrained model request, without a credential.
     pub request: ProviderGenerate,
+    /// The tokens its model's window leaves after this request and the answer's most, for the answer's own
+    /// tool calls and their results; none where nothing bounds the request.
+    pub room: Option<i64>,
 }
 
 /// A completed tool response; its operation/reference witness is retained by
 /// the host so that every resumed model request checks its source again.
 #[derive(Debug, Clone)]
 pub struct ToolAnswer {
-    /// Bounded untrusted material and canonical source links.
+    /// Untrusted material and canonical source links, as long as the source gave it.
     pub content: String,
     /// Whether the tool was refused or failed.
     pub is_error: bool,
+    /// Where the whole source is, as a canonical link, to say so where the material has to be cut.
+    pub link: Option<String>,
 }
 
 /// The API's request-local authority and durable conversation adapter.
@@ -104,6 +106,11 @@ pub trait TurnHost: Send + Sync {
     async fn prepare(&self, input: &GenerationInput) -> Result<Step, EngineError>;
     /// Stop is checked before every tool as well as before each model step.
     async fn check_active(&self) -> Result<(), EngineError>;
+    /// A provider refused the request of `step` as longer than its model's context. Learn a window below the
+    /// request's size and settle the refused step, so that the next preparation makes the conversation shorter.
+    /// Whether it learned one: false where the request was no larger than a window already learned, so that
+    /// asking again would be asking the same.
+    async fn window_exceeded(&self, step: &Step) -> Result<bool, EngineError>;
     /// Persist the finished assistant step before executing its requested tools.
     async fn assistant(&self, step: &Step, output: &GenerationOutput) -> Result<(), EngineError>;
     /// Retain a visible summary before preparing the next step from the native journal.
@@ -119,24 +126,56 @@ pub trait TurnHost: Send + Sync {
     async fn tool_answer(&self, id: &str, answer: &ToolAnswer) -> Result<Option<Id>, EngineError>;
 }
 
-/// Apply the same UTF-8 byte bound to first delivery and to resumed current
-/// projections, retaining an explicit indication that a narrower read is needed.
-pub fn bound_tool_result(content: &mut String, limit: usize) {
-    if content.len() <= limit {
-        return;
+/// The line a shortened tool result ends in: that it was shortened and where the whole source is.
+fn shortened_note(link: Option<&str>) -> String {
+    match link {
+        Some(link) => format!(
+            "\n[Result shortened to fit the context; the whole source is at {link}. Open it or read a narrower part.]"
+        ),
+        None => "\n[Result shortened to fit the context; read a narrower part.]".to_owned(),
     }
-    const NOTE: &str = "\n[Result shortened; use its canonical link or a narrower read.]";
-    if limit < NOTE.len() {
-        content.clear();
-        content.push_str(&NOTE[..limit]);
-        return;
-    }
-    let mut end = limit - NOTE.len();
+}
+
+/// `content` cut to `limit` bytes, the shortening line included, at a character boundary. A limit the line
+/// itself fills leaves the line alone.
+fn shortened(content: &str, limit: usize, link: Option<&str>) -> String {
+    let note = shortened_note(link);
+    let mut end = limit.saturating_sub(note.len()).min(content.len());
     while !content.is_char_boundary(end) {
         end -= 1;
     }
-    content.truncate(end);
-    content.push_str(NOTE);
+    let mut cut = String::with_capacity(end + note.len());
+    cut.push_str(&content[..end]);
+    cut.push_str(&note);
+    cut
+}
+
+/// Apply the same UTF-8 length bound to first delivery and to resumed current projections, ending a cut in
+/// the line that says so. A bound that is the length of an earlier cut repeats that cut exactly.
+pub fn bound_tool_result(content: &mut String, limit: usize, link: Option<&str>) {
+    if content.len() > limit {
+        *content = shortened(content, limit, link);
+    }
+}
+
+/// Cut a tool result to what `tokens` tokens hold in this model's request, as the longest cut that fits: the
+/// rest of the window is no longer there to carry more. The cut is found by its length, so that a later
+/// refresh of the same source, bounded by the length it was delivered at, gives the same text.
+pub fn fit_tool_result(model: &str, content: &mut String, tokens: i64, link: Option<&str>) {
+    if context::result_tokens(model, content) <= tokens {
+        return;
+    }
+    // `fits` is a length known to fit (the line alone is the least a cut can be); `over` one known to be too long.
+    let (mut fits, mut over) = (0usize, content.len());
+    while over - fits > 1 {
+        let middle = fits + (over - fits) / 2;
+        if context::result_tokens(model, &shortened(content, middle, link)) <= tokens {
+            fits = middle;
+        } else {
+            over = middle;
+        }
+    }
+    bound_tool_result(content, fits, link);
 }
 
 /// Recover a bounded retained dialogue at user-turn boundaries. A stopped turn
@@ -488,15 +527,7 @@ impl Engine {
         mut input: GenerationInput,
         limits: Limits,
     ) -> Result<GenerationStop, EngineError> {
-        if limits.steps == 0
-            || limits.tools == 0
-            || limits.tool_bytes == 0
-            || limits.turn_tool_bytes < limits.tool_bytes
-        {
-            return Err(EngineError::unreadable("the Ask loop limits are invalid"));
-        }
         let mut calls = 0u32;
-        let mut tool_bytes = 0usize;
         for _ in 0..limits.steps {
             host.check_active().await?;
             let step = host.prepare(&input).await?;
@@ -509,19 +540,6 @@ impl Engine {
             }
             let outgoing = Outgoing::new(step.id, step.machine, SerialKey::None, &step.request)
                 .map_err(|error| EngineError::unreadable(error.to_string()))?;
-            let command = orch_link_contract::commands::Cmd::new(
-                step.id,
-                &SerialKey::None,
-                self.inner.clock.time(),
-                &step.request,
-            )?;
-            if serde_json::to_vec(&orch_link_contract::frames::Frame::from(command))?.len()
-                > orch_link_contract::version::MAX_FRAME_BYTES as usize
-            {
-                return Err(EngineError::unreadable(
-                    "the Ask request exceeds the machine message budget",
-                ));
-            }
             host.issue(self, outgoing).await?;
             let outcome = self
                 .inner
@@ -533,6 +551,11 @@ impl Engine {
                 Outcome::Succeeded(value) => serde_json::from_value(value)?,
                 Outcome::Failed(error) => {
                     self.count_failed_ask_step(&step, &error).await?;
+                    // A provider that says the request is longer than its model's context has shown a window
+                    // the estimate did not know: the next preparation makes the conversation shorter.
+                    if is_context_overflow(&error) && host.window_exceeded(&step).await? {
+                        continue;
+                    }
                     return Err(EngineError::unreadable(error.detail));
                 }
                 Outcome::Cancelled => return Err(EngineError::unreadable("Ask was stopped")),
@@ -552,7 +575,9 @@ impl Engine {
                 host.assistant(&step, &answer.output).await?;
             }
             if !may_continue {
-                return Err(EngineError::unreadable("An Ask usage cap has been reached"));
+                return Err(EngineError::unreadable(
+                    "A usage limit for Ask has been reached. Try again after it resets, or ask an administrator.",
+                ));
             }
             if answer.output.stop == GenerationStop::Refused {
                 return Err(EngineError::unreadable("The model refused this question"));
@@ -563,6 +588,15 @@ impl Engine {
             input.messages.push(answer.output.message.clone());
             if answer.output.stop != GenerationStop::Tools {
                 return Ok(answer.output.stop);
+            }
+            let model = step.request.model_name.as_str();
+            // What the window still holds after the request just sent and the reply to it; each result takes
+            // its part, and one that does not fit what is left is cut to it.
+            let mut room = step.room;
+            if let Some(left) = room {
+                room = Some(
+                    left - context::material(model, std::slice::from_ref(&answer.output.message))?,
+                );
             }
             let mut results = Vec::new();
             // Provider call IDs belong to one assistant step; the host journals
@@ -595,12 +629,18 @@ impl Engine {
                     ToolAnswer {
                         content: "This read tool is not available.".into(),
                         is_error: true,
+                        link: None,
                     }
                 };
-                bound_tool_result(&mut result.content, limits.tool_bytes);
-                tool_bytes = tool_bytes.saturating_add(result.content.len());
-                if tool_bytes > limits.turn_tool_bytes {
-                    return Err(EngineError::unreadable("the Ask source budget ended"));
+                if let Some(left) = room {
+                    let overhead = context::result_overhead(model, id)?;
+                    fit_tool_result(
+                        model,
+                        &mut result.content,
+                        left - overhead,
+                        result.link.as_deref(),
+                    );
+                    room = Some(left - overhead - context::result_tokens(model, &result.content));
                 }
                 let witness = host.tool_answer(id, &result).await?;
                 results.push(GenerationPart::ToolResult {
@@ -670,6 +710,8 @@ impl Engine {
             person: call.person_id,
             machine: call.machine_id,
             request,
+            // This step only counts an answer that came after its turn; it holds no tool results.
+            room: None,
         };
         self.count_ask_step_in(conn, &step, &answer)
             .await
@@ -761,6 +803,17 @@ impl Engine {
         };
         self.count_ask_step(step, &answer).await.map(|_| ())
     }
+}
+
+/// Whether a provider answered that the request is longer than the context of its model: the connector
+/// classifies the upstream's answer, whatever words the vendor used, and says so in the failure it reports.
+fn is_context_overflow(error: &orch_link_contract::commands::CommandError) -> bool {
+    error
+        .details
+        .as_ref()
+        .and_then(|details| details.pointer("/failure/code"))
+        .and_then(serde_json::Value::as_str)
+        == Some("context_overflow")
 }
 
 pub(crate) fn failed_answer(
@@ -910,12 +963,66 @@ mod tests {
     }
 
     #[test]
-    fn unicode_tool_results_fit_the_byte_budget_with_the_shortening_note() {
+    fn unicode_tool_results_fit_the_length_with_the_shortening_line() {
         let mut result = "来源😀".repeat(1000);
-        bound_tool_result(&mut result, 128);
-        assert!(result.len() <= 128);
+        bound_tool_result(&mut result, 256, None);
+        assert!(result.len() <= 256);
         assert!(result.starts_with("来源😀"));
-        assert!(result.ends_with("a narrower read.]"));
+        assert!(result.ends_with("read a narrower part.]"));
+    }
+
+    #[test]
+    fn a_result_larger_than_the_room_is_cut_to_it_with_a_line_that_says_where_the_whole_source_is()
+    {
+        let model = "gpt-6-sol";
+        let whole = format!("{{\"data\":\"{}\"}}", "word ".repeat(5000));
+        for tokens in [60, 400, 2000] {
+            let mut cut = whole.clone();
+            fit_tool_result(model, &mut cut, tokens, Some("/topic/1"));
+            assert!(context::result_tokens(model, &cut) <= tokens, "{tokens}");
+            assert!(
+                context::result_tokens(model, &cut) + 16 >= tokens,
+                "{tokens}: it is the longest cut that fits, not a shorter one"
+            );
+            assert!(cut.ends_with("Open it or read a narrower part.]"));
+            assert!(cut.contains("/topic/1"));
+            assert!(cut.starts_with("{\"data\":\"word word"));
+            // A refresh of the same source, bounded by the length the result was delivered at, repeats the cut.
+            let mut again = whole.clone();
+            bound_tool_result(&mut again, cut.len(), Some("/topic/1"));
+            assert_eq!(again, cut, "{tokens}");
+        }
+        let mut short = "short".to_owned();
+        fit_tool_result(model, &mut short, 60, None);
+        assert_eq!(short, "short", "a result that fits is not touched");
+    }
+
+    #[test]
+    fn a_result_is_cut_at_a_character_boundary_and_a_room_of_nothing_leaves_the_line() {
+        let model = "claude-sonnet-5";
+        let whole = "来源😀".repeat(3000);
+        let mut cut = whole.clone();
+        fit_tool_result(model, &mut cut, 300, None);
+        assert!(context::result_tokens(model, &cut) <= 300);
+        assert!(cut.starts_with("来源😀"));
+        let mut none = whole;
+        fit_tool_result(model, &mut none, 0, None);
+        assert!(none.starts_with('\n') && none.ends_with("read a narrower part.]"));
+    }
+
+    #[test]
+    fn a_request_called_too_long_is_told_from_the_failure_the_connector_classified() {
+        use orch_link_contract::commands::{CommandError, ErrorCode};
+        let failure = |code: &str| {
+            CommandError::new(ErrorCode::Internal, "the generation upstream answered 400")
+                .with_details(json!({"failure":{"code":code,"status":400}}))
+        };
+        assert!(is_context_overflow(&failure("context_overflow")));
+        assert!(!is_context_overflow(&failure("rate_limited")));
+        assert!(!is_context_overflow(&CommandError::new(
+            ErrorCode::Internal,
+            "the upstream answered 400"
+        )));
     }
 
     #[test]

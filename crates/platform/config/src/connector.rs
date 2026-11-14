@@ -249,9 +249,9 @@ section! {
 section! {
     /// `[spool]`
     Spool {
-        /// The most bytes it holds.
+        /// Waiting diagnostics give way above this allowance; authoritative events wait for ACK.
         max_bytes: u64 = 268_435_456,
-        /// The oldest event it holds.
+        /// Waiting diagnostics expire at this age; authoritative events wait for ACK.
         max_age_days: u64 = 7,
         /// The size of one of its files.
         segment_bytes: u64 = 8_388_608,
@@ -287,10 +287,6 @@ section! {
 section! {
     /// `[adapter]`
     Adapter {
-        /// Command output kept inline with its item.
-        output_inline_bytes: u64 = 16_384,
-        /// The most output kept for one command.
-        output_max_bytes: u64 = 67_108_864,
         /// How many times a harness that died is started again…
         harness_restarts: u32 = 3,
         /// …within this time, before it is reported failed. The figures of the tool servers.
@@ -418,17 +414,8 @@ impl Validate for ConnectorConfig {
         ) {
             return Err(invalid("policy.values", &error.to_string()));
         }
-        if self.spool.segment_bytes == 0 || self.spool.segment_bytes > self.spool.max_bytes {
-            return Err(invalid(
-                "spool.segment_bytes",
-                "must be more than 0 and at most spool.max_bytes",
-            ));
-        }
-        if self.adapter.output_inline_bytes > self.adapter.output_max_bytes {
-            return Err(invalid(
-                "adapter.output_inline_bytes",
-                "must be at most adapter.output_max_bytes",
-            ));
+        if self.spool.segment_bytes == 0 {
+            return Err(invalid("spool.segment_bytes", "must be more than 0"));
         }
         if self.adapter.harness_restart_window_secs == 0 {
             return Err(invalid(
@@ -564,6 +551,18 @@ mod tests {
 
     fn none(_: &str) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn a_diagnostic_spool_budget_does_not_limit_the_authoritative_segment_size() {
+        let config: ConnectorConfig = load_text(
+            "[spool]\nmax_bytes=1\nsegment_bytes=1048576\n",
+            "test",
+            none,
+        )
+        .unwrap();
+        assert_eq!(config.spool.max_bytes, 1);
+        assert_eq!(config.spool.segment_bytes, 1_048_576);
     }
 
     #[test]

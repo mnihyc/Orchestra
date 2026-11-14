@@ -1183,11 +1183,7 @@ impl Engine {
         }
         let mut eligible = Vec::new();
         let mut wake_held = false;
-        for task in report
-            .tasks
-            .iter()
-            .take(orch_link_contract::background::SNAPSHOT_COMMANDS)
-        {
+        for task in &report.tasks {
             let Some(item) =
                 threads::item_by_native_ref(unit.conn, segment.id, &task.native_item_ref).await?
             else {

@@ -337,7 +337,7 @@ impl Rig {
             "arrangement": "together",
             "provider": { "path": "native", "provider_id": self.provider },
             "exec": { "executor": null, "environment_id": new_id(), "generation": 1 },
-            "mcp": [], "orch_tools": [], "raw_events": false
+            "mcp": [], "orch_tools": [], "output_capture_bytes":67108864, "web_action_wait_secs":120, "raw_events": false
         })
     }
 

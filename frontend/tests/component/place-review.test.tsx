@@ -49,6 +49,7 @@ it('shows every consequence first, applies sequentially, keeps a lost answer unc
   vi.mocked(readNode).mockResolvedValueOnce({ ...place('Lost'), revision: 5, archived: true });
   await userEvent.click(within(lost).getByRole('button', { name: 'Read current state' }));
   expect(await within(lost).findByText(/Current archive state/)).toBeVisible();
+  expect(within(lost).queryByText(/revision/i)).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole('button', { name: 'Undo successful rows' }));
   await waitFor(() => expect(applyArchivePlan).toHaveBeenLastCalledWith(undo));
   expect(vi.mocked(applyArchivePlan).mock.calls.filter(([plan]) => !plan.archiving).map(([plan]) => plan.node.id)).toEqual(['First']);

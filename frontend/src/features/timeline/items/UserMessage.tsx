@@ -150,7 +150,7 @@ function HumanMessage({ item }: { item: UserItem }) {
   const author = item.author;
   if (author === null) return null;
   return (
-    <PersonThingProvider thing={{ kind: 'thread', id: threadId, ...(item.turn_id === null ? {} : { anchor: { turn: item.turn_id } }) }}><ItemFrame item={item} label={t('timeline.user.menu')} extra={mine ? [{ id: 'edit-message', label: t('messageVersions.edit'),
+    <PersonThingProvider thing={{ kind: 'thread', id: threadId, ...(item.turn_id === null ? {} : { anchor: { turn: item.turn_id } }) }}><ItemFrame item={item} label={t('timeline.user.menu')} restoreChanges={fileChanges.files.length > 0} extra={mine ? [{ id: 'edit-message', label: t('messageVersions.edit'),
       icon: <Pencil aria-hidden />, disabled: unavailable ?? false, onSelect: begin }] : []} messageActions={editing ? undefined : <>
         {mine && <IconButton size="sm" label={t('messageVersions.edit')} icon={<Pencil aria-hidden />} blocked={unavailable !== null} reason={unavailable ?? undefined} onClick={begin} />}
         <CopyButton value={itemText(item)} label={t('timeline.actions.copy')} />

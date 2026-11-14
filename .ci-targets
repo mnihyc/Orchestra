@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-adapter-codex --lib --test fake
+test -p orch-adapter-acp --lib
+test -p orch-connector-core --test agent_role --test harness_tools --test direct_machine_programs
+test -p orch-engine --lib -- --skip history_pages::

@@ -1,4 +1,5 @@
 /** A reviewed native set stays fixed through paging and confirmation; a new command belongs to a new review. */
+import { ApiError } from '@/api/client';
 import { fetchBackground } from '@/api/background';
 import type { BackgroundCommand, BackgroundEndReason, BackgroundEndRequest, BackgroundEndResult, BackgroundWork, ThreadBackground } from '@/generated/api-types';
 
@@ -6,6 +7,15 @@ export type BackgroundEndTarget = { task: Pick<BackgroundWork, 'id' | 'item_id' 
 
 /** Reads every page of one snapshot before offering its complete End all count. */
 export async function loadReview(thread: string, signal: AbortSignal): Promise<ThreadBackground> {
+  for (;;) {
+    signal.throwIfAborted();
+    try { return await transferReview(thread, signal); } catch (error) {
+      if (!(error instanceof ApiError) || error.code !== 'conflict.stale_revision') throw error;
+    }
+  }
+}
+
+async function transferReview(thread: string, signal: AbortSignal): Promise<ThreadBackground> {
   const first = await fetchBackground(thread, undefined, signal);
   const captured = { ...first, items: [...first.items] };
   const seen = new Set<string>();

@@ -728,7 +728,7 @@ async fn a_session_open_installs_the_server_raw_floor_before_a_real_connector_re
         "approval_mode": "on_request", "sandbox_mode": "workspace", "instructions": "", "memory": null,
         "arrangement": "separated", "provider": { "path": "native", "provider_id": new_id() },
         "exec": { "executor": "codex-exec-server", "tool_set": null, "environment_id": new_id(), "generation": 1, "ticket": null },
-        "mcp": [], "orch_tools": [], "raw_events": true, "raw_after": FLOOR
+        "mcp": [], "orch_tools": [], "output_capture_bytes":67108864, "raw_events": true, "raw_after": FLOOR
     })).unwrap();
     let deadline = Time::new(
         system.clock.now() + chrono::Duration::seconds(i64::try_from(PATIENCE.as_secs()).unwrap()),
