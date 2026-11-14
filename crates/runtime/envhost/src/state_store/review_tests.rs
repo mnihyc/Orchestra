@@ -42,7 +42,10 @@ impl Capture {
         );
         Ok(Self {
             files,
-            index: Index::new(IndexMode::Full, Limits::default().index_max_entries),
+            index: Index::new(
+                IndexMode::Full,
+                orch_link_contract::commands::WorkspaceLimits::default().index_entries,
+            ),
             states: FileStates::new(store),
             control,
             now: "2026-10-16T00:00:00Z".parse()?,
@@ -55,6 +58,7 @@ impl Capture {
             self.files.ignore().ok_or("ignore rules absent")?,
         )?;
         self.states.refresh(&self.files, &self.index, None, true)?;
+        self.states.prepare_recordings(&self.files, 1, self.now)?;
         Ok(())
     }
     fn request(&self) -> FsRecord {
@@ -62,6 +66,7 @@ impl Capture {
             environment_id: new_id(),
             snapshot_id: new_id(),
             directory: String::new(),
+            wait_for_indexing: true,
             kind: RecordKind::Turn,
             record_days: 1,
             max_bytes: 1024 * 1024,
@@ -562,5 +567,282 @@ fn captured_state_and_crash_pin_reopen_after_abrupt_exit() -> TestResult {
     );
     // This is abrupt process recovery; injected barrier-order tests establish the required fsync
     // calls. It does not simulate loss of the kernel cache or certify non-Unix power loss.
+    Ok(())
+}
+
+#[test]
+fn a_baseline_flushes_its_objects_and_shared_directories_before_a_root_names_them() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    let workspace = capture.files.root().root_path().to_owned();
+    for number in 0..40 {
+        std::fs::write(
+            workspace.join(format!("file-{number}.txt")),
+            format!("the bytes of file {number}"),
+        )?;
+    }
+    capture.index.scan(
+        capture.files.root(),
+        capture.files.ignore().ok_or("ignore rules absent")?,
+    )?;
+    capture.clear();
+    capture
+        .states
+        .refresh(&capture.files, &capture.index, None, true)?;
+    let flushes = capture
+        .events()
+        .iter()
+        .filter(|event| {
+            **event == DirectoryEvent::Sync(capture.states.store().root().join("git/objects"))
+        })
+        .count();
+    assert_eq!(
+        flushes, 1,
+        "the shared object directory is flushed once per batch"
+    );
+    assert_eq!(
+        capture
+            .events()
+            .iter()
+            .filter(|event| matches!(event, DirectoryEvent::FileSynced(_)))
+            .count(),
+        40,
+        "each retained file is flushed without a filesystem-wide barrier"
+    );
+    let store = capture.states.store();
+    assert!(
+        store.deferred_written() >= 40,
+        "every file was read and kept"
+    );
+    assert_eq!(
+        (store.flushes(), store.unsynced_objects()),
+        (1, 0),
+        "one flush for the whole pass"
+    );
+    capture
+        .states
+        .prepare_recordings(&capture.files, 1, capture.now)?;
+    let request = capture.request();
+    let captured = capture.states.capture(
+        &capture.files,
+        &request,
+        1,
+        capture.now,
+        &capture.operation(),
+    )?;
+    assert_eq!(captured.result.files, 40);
+    assert_eq!(
+        (store.flushes(), store.unsynced_objects()),
+        (2, 0),
+        "the trees of the state were flushed once, before its root was kept"
+    );
+    let (root, parsed) = store.load(request.snapshot_id, capture.now)?;
+    assert_eq!(parsed.entries.len(), 40);
+    for entry in parsed
+        .entries
+        .iter()
+        .filter(|entry| entry.t != EntryKind::Dir)
+    {
+        assert_eq!(
+            std::fs::read(store.read_entry(&root, entry)?.path())?,
+            std::fs::read(workspace.join(&entry.p))?
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_heavy_writer_beside_the_store_does_not_join_a_recordings_flush() -> TestResult {
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    let store = capture.states.store();
+    let mut kept = Vec::new();
+    for number in 0..40 {
+        let oid = store.write_object_deferred("blob", format!("saved {number}").as_bytes())?;
+        kept.push(store.object_path(&oid)?);
+    }
+    capture.clear();
+    let stop = AtomicBool::new(false);
+    let writes = AtomicUsize::new(0);
+    let unrelated = dir.path().join("building-beside-the-store");
+    let (ready, writing) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| -> TestResult {
+        let writer = scope.spawn(|| -> TestResult {
+            use std::io::{Seek, SeekFrom};
+            let mut file = File::create(&unrelated)?;
+            let bytes = vec![1u8; 1024 * 1024];
+            file.write_all(&bytes)?;
+            ready.send(())?;
+            let began = Instant::now();
+            while !stop.load(Ordering::SeqCst) && began.elapsed() < PATIENCE {
+                file.seek(SeekFrom::Start(0))?;
+                file.write_all(&bytes)?;
+                writes.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        });
+        let result = (|| -> TestResult {
+            writing.recv_timeout(PATIENCE)?;
+            let began = Instant::now();
+            store.make_durable()?;
+            assert!(
+                began.elapsed() < PATIENCE,
+                "recording waited for the unrelated writer"
+            );
+            let events = capture.events();
+            for path in &kept {
+                assert!(events.contains(&DirectoryEvent::FileSynced(path.clone())));
+            }
+            assert!(
+                events.iter().all(|event| match event {
+                    DirectoryEvent::Sync(path) | DirectoryEvent::FileSynced(path) =>
+                        path.starts_with(store.root()),
+                    _ => true,
+                }),
+                "only the store's own files and directory handles belong to the barrier"
+            );
+            assert_eq!(store.unsynced_objects(), 0);
+            Ok(())
+        })();
+        stop.store(true, Ordering::SeqCst);
+        writer.join().map_err(|_| "the beside writer panicked")??;
+        result
+    })?;
+    Ok(())
+}
+
+#[test]
+fn failed_and_concurrent_flushes_keep_the_same_pending_objects_until_they_are_durable() -> TestResult
+{
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    let store = capture.states.store();
+    let oid = store.write_object_deferred("blob", b"durable after retry")?;
+    let path = store.object_path(&oid)?;
+    capture.refuse(&path);
+    assert!(store.make_durable().is_err());
+    assert_eq!(
+        store.unsynced_objects(),
+        1,
+        "a failed batch never loses its debt"
+    );
+    std::thread::scope(|scope| -> TestResult {
+        let other = scope.spawn(|| store.make_durable());
+        store.make_durable()?;
+        other.join().map_err(|_| "the second flush panicked")??;
+        Ok(())
+    })?;
+    assert_eq!((store.flushes(), store.unsynced_objects()), (1, 0));
+    store.verify_object(
+        &oid,
+        "blob",
+        Some(i64::try_from(b"durable after retry".len())?),
+        Some(Hash::of(b"durable after retry")),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn a_verified_object_is_never_replaced_under_an_existing_recording() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    let store = capture.states.store();
+    let oid = store.write_object_deferred("blob", b"the same retained bytes")?;
+    store.make_durable()?;
+    let path = store.object_path(&oid)?;
+    let before = platform::file_meta(&File::open(&path)?)?;
+    store.write_object_deferred("blob", b"the same retained bytes")?;
+    assert_eq!(
+        platform::file_meta(&File::open(&path)?)?.identity(),
+        before.identity(),
+        "a later baseline cannot replace a durable inode with unflushed identical bytes"
+    );
+    store.make_durable()?;
+    Ok(())
+}
+
+#[test]
+fn a_recording_barrier_flushes_pending_directories_even_when_its_files_are_already_durable()
+-> TestResult {
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    let store = capture.states.store();
+    store.write_object_deferred("blob", b"kept by another capture")?;
+    store.write_object("blob", b"kept by another capture")?;
+    assert_eq!(store.unsynced_objects(), 0);
+    capture.clear();
+    store.make_durable()?;
+    assert!(
+        capture
+            .events()
+            .contains(&DirectoryEvent::Synced(store.root().join("git/objects")))
+    );
+    Ok(())
+}
+
+#[test]
+fn a_ready_turn_capture_reuses_prepared_metadata_without_touching_the_object_tree() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    capture.prepare(b"ready file bytes")?;
+    capture
+        .states
+        .prepare_recordings(&capture.files, 1, capture.now)?;
+    let store = capture.states.store();
+    let written = store.deferred_written();
+    capture.clear();
+    capture.refuse(&store.root().join("git/objects"));
+    let request = capture.request();
+    let captured = capture.states.capture(
+        &capture.files,
+        &request,
+        1,
+        capture.now,
+        &capture.operation(),
+    )?;
+    assert_eq!(captured.result.state, RecordState::Complete);
+    assert_eq!(
+        store.deferred_written(),
+        written,
+        "the turn builds no trees"
+    );
+    assert!(capture.events().iter().all(|event| match event {
+        DirectoryEvent::Sync(path) => !path.starts_with(store.root().join("git/objects")),
+        _ => true,
+    }));
+    drop(captured);
+    let (root, _) = store.load(request.snapshot_id, capture.now)?;
+    assert!(
+        root.objects.contains_key("code.bin"),
+        "explicit reads still get the complete saved namespace"
+    );
+    Ok(())
+}
+
+#[test]
+fn writes_excluded_by_gitignore_keep_the_prepared_turn_recording_ready() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let capture = Capture::at(dir.path())?;
+    std::fs::write(
+        capture.files.root().root_path().join(".gitignore"),
+        "build/\n",
+    )?;
+    capture.prepare(b"included source")?;
+    let path = capture.files.parse("build/output.txt")?;
+    capture.states.changed(&[path]);
+    let result = capture.states.capture(
+        &capture.files,
+        &capture.request(),
+        1,
+        capture.now,
+        &capture.operation(),
+    )?;
+    assert_eq!(
+        result.result.state,
+        RecordState::Complete,
+        "an excluded build output cannot invalidate the included files or force their tree to be rebuilt"
+    );
     Ok(())
 }

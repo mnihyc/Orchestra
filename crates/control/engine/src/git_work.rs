@@ -135,6 +135,21 @@ impl Engine {
             .await
     }
 
+    /// A watch already has its answer: one atomic write replaces the begin/finish pair.
+    /// Turn invalidations keep their own durable replay and never require a scan per report.
+    pub async fn remember_git_report(
+        &self,
+        environment: Id,
+        directory: &str,
+        at: Time,
+        status: &GitStatus,
+    ) -> Result<(), EngineError> {
+        let value = serde_json::to_value(from_status(status, at))?;
+        let mut conn = self.inner.db.acquire().await?;
+        source::remember_work_report(&mut conn, environment, directory, &value, at).await?;
+        Ok(())
+    }
+
     /// A private request identity orders answers independently of a held or coarse clock.
     pub async fn begin_git_read(
         &self,

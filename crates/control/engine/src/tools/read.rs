@@ -3,7 +3,7 @@
 //! An entry is counted in parts: a conversation in turns, a chat in messages, a document in top-level blocks. `from`
 //! and `to` name a range of them, and a negative number counts from the end. Without a range a conversation or a
 //! chat is given from its end, as many of its latest parts as fit, and a document from its beginning. `max_bytes`
-//! bounds the text in bytes of UTF-8: 20 000 unless given, at most 40 000. Parts are given whole; one that is
+//! bounds the text in bytes of UTF-8, using the resolved default unless given. Parts are given whole; one that is
 //! larger than everything asked for is cut, and says so. The answer says which parts it holds and how many there
 //! are, so that what is left is asked for with the next `from`.
 //!
@@ -13,7 +13,7 @@
 
 use crate::engine::Engine;
 use crate::error::EngineError;
-use crate::tools::definitions::{Code, READ_BYTES_MAX, READ_BYTES_MIN, Refusal};
+use crate::tools::definitions::{Code, Refusal};
 use crate::tools::documents;
 use crate::tools::shared::{Resolved, Target, audit_by_agent};
 use crate::tools::{Answer, CallContext};
@@ -328,6 +328,7 @@ impl Engine {
         &'a self,
         call: &'a CallContext,
         thread: &'a ThreadRow,
+        budgets: &'a super::search_budgets::SearchBudgets,
     ) -> BoxFuture<'a, Result<Answer, EngineError>> {
         Box::pin(async move {
             let arguments: Arguments = match serde_json::from_value(call.arguments.clone()) {
@@ -343,12 +344,9 @@ impl Engine {
                     }
                 },
             };
-            let max_bytes = arguments.max_bytes.unwrap_or(READ_BYTES_DEFAULT);
-            if !(READ_BYTES_MIN..=READ_BYTES_MAX).contains(&max_bytes) {
-                return Ok(Refusal::invalid(format!(
-                    "\"max_bytes\" is from {READ_BYTES_MIN} to {READ_BYTES_MAX}."
-                ))
-                .into());
+            let max_bytes = arguments.max_bytes.unwrap_or(budgets.read_bytes);
+            if max_bytes < 1 {
+                return Ok(Refusal::invalid("max_bytes must be positive").into());
             }
             let budget = usize::try_from(max_bytes).unwrap_or(usize::MAX);
             let mut conn = self.inner.db.acquire().await?;
