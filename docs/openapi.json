@@ -59012,7 +59012,7 @@
     "/machines/{id}/update": {
       "post": {
         "operationId": "MachineUpdateNow",
-        "summary": "Requests a verified physical connector update, drained under its local update.auto policy.",
+        "summary": "Requests an explicit verified physical connector update after its active work drains.",
         "x-orch-access": "rule",
         "x-orch-tokens": true,
         "x-orch-legacy-access-tokens": true,
@@ -59020,7 +59020,7 @@
           "operation_id": "MachineUpdateNow",
           "method": "POST",
           "path": "/machines/{id}/update",
-          "title": "Requests a verified physical connector update, drained under its local update.auto policy.",
+          "title": "Requests an explicit verified physical connector update after its active work drains.",
           "delegation": "business",
           "variants": [
             {
@@ -126417,6 +126417,10 @@
       "ComponentUpdate": {
         "type": "object",
         "properties": {
+          "automatic": {
+            "type": "boolean",
+            "description": "The pending request was automatic rather than an explicit Update action."
+          },
           "running_version": {
             "type": "string",
             "description": "Version reported by the currently executing program."
@@ -126442,10 +126446,11 @@
           },
           "command": {
             "type": "string",
-            "description": "The local command, including when local policy refuses the web action."
+            "description": "The explicit local verified update command, available independently of Auto."
           }
         },
         "required": [
+          "automatic",
           "running_version",
           "recommended_version",
           "behind",

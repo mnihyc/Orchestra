@@ -424,12 +424,14 @@ async fn a_machine_that_does_not_acknowledge_a_command_is_asked_once_more_and_th
     let handle = issuer.issue(command(&clock, 3_600));
     assert!(matches!(frames.recv().await, Some(DownFrame::Cmd(_))));
     assert_eq!(handle.progress(), Progress::Sent);
+    issuer.on_cmd_seen(&orch_link_contract::commands::CmdSeen { id: handle.id() });
     tokio::time::advance(Duration::from_secs(31)).await;
     issuer.tick(tokio::time::Instant::now());
     assert!(
         matches!(frames.recv().await, Some(DownFrame::Cmd(_))),
         "sent once more"
     );
+    issuer.on_cmd_seen(&orch_link_contract::commands::CmdSeen { id: handle.id() });
     tokio::time::advance(Duration::from_secs(31)).await;
     issuer.tick(tokio::time::Instant::now());
     let Progress::Failed(error) = handle.progress() else {

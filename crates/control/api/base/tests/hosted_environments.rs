@@ -1187,7 +1187,7 @@ async fn creation_commits_its_owned_environment_and_job_before_a_slow_response_r
     let making = make(&world, &t, &t.c.admin, "Committed before response");
     let inspect = async {
         rig::eventually("the response's blocked component update read", || async {
-            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE 'SELECT machine_id,recommended_version,state,detail,command_id FROM component_updates%')")
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE 'SELECT machine_id,recommended_version,state,detail,command_id%FROM component_updates%')")
                 .fetch_one(&world.db.pool).await.unwrap()
         }).await;
         let committed: (Id, Id) = sqlx::query_as(

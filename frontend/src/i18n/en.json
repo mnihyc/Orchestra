@@ -82,6 +82,7 @@
     "noModels": "No API models available here",
     "modelUnavailable": "This model is unavailable here",
     "sources": "Sources",
+    "noAnswer": "No answer was written. Try again.",
     "sourceUnavailable": "Source no longer available",
     "copy": "Copy answer",
     "retry": "Retry answer",
@@ -91,7 +92,6 @@
     "noHistory": "No conversations yet",
     "retention": "Kept for {{days}} days after the last message",
     "expires": "Expires",
-    "adminNotice": "This organization’s admins can inspect and export this conversation",
     "inspection": "Read-only admin inspection",
     "readOnlyTools": "Reads as you · cites sources · makes no changes",
     "paidBy": "Paid by",
@@ -99,7 +99,9 @@
     "privateThread": "Creates a Private permanent thread in this organization",
     "destination": "Destination topic",
     "defaultDestination": "Use the page’s topic or an authorized default",
-    "contextNoRoom": "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves.",
+    "contextNoRoom": "ask.context_tokens leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Increase ask.context_tokens or reduce ask.max_output_tokens.",
+    "windowNoRoom": "The context window of {{model}} leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Use a model with a larger window or reduce ask.max_output_tokens.",
+    "windowUnknown": "The context window of {{model}} is not recorded and is assumed to be small, and the answer’s reserve (ask.max_output_tokens) leaves no room for the conversation. Record the model’s context window or reduce ask.max_output_tokens.",
     "contextTooLong": "This conversation is too long for {{model}}; start a new one or keep it as a thread."
   },
   "viewWindow": {
@@ -411,13 +413,14 @@
     "hint": "Short address: {{address}}. Use it to find this environment."
   },
   "componentUpdates": {
+    "automatic": "Automatic update pending",
     "available": "Update available",
     "versions": "Update available: {{recommended}} (this machine runs {{running}})",
     "action": "Update now",
     "updating": "Updating…",
     "idle": "Installs the server’s verified build after the last running turn ends, then reconnects. New turns wait until the update finishes.",
     "copyCommand": "Copy the local update command",
-    "offline": "This machine must reconnect before it can be asked to update.",
+    "offline": "Queues the update until this machine next contacts the server.",
     "failed": "The update could not be requested. Try again.",
     "latestRelease": "Latest release",
     "runningServer": "Running server version",
@@ -5010,6 +5013,7 @@
       "label": "Context {{used}} of {{window}} ({{percent}}); shortens at {{compact}}",
       "labelBare": "Context {{used}} of {{window}} ({{percent}})",
       "open": "Show what fills the context ({{label}})",
+      "labelUsed": "Context {{used}} used; no window reported",
       "modelLabel": "{{model}}: {{context}}"
     },
     "panel": {
@@ -9874,7 +9878,11 @@
         "right": "Hide the right bar",
         "bottom": "Hide the bottom"
       },
-      "pin": "Keep open as a bar"
+      "pin": "Keep open as a bar",
+      "peek": {
+        "title": "Bars",
+        "label": "Show hidden bars on hover: {{state}}"
+      }
     },
     "sash": {
       "left": "Width of the left bar",
@@ -9941,9 +9949,10 @@
       "shellsHint": "Your shells in this environment. Open Terminal.",
       "connecting": "Connecting…",
       "connectingHint": "Connecting to live updates.",
-      "reconnectingSince": "Reconnecting… · {{time}}",
       "reconnecting": "Reconnecting…",
       "reconnectingHint": "What is on screen stays and can be read. Approving and steering wait for the connection; typing does not.",
+      "noLive": "No live updates · {{time}}",
+      "noLiveHint": "Live updates cannot connect, so this page reads again every few seconds. If this stays, ask whoever runs this system to check that the HTTPS front passes WebSocket upgrades for /api/v1/ws; orchctl doctor --url shows it as edge-ws.",
       "slow": "Slow connection · {{ms}} ms",
       "slowHint": "Sending, saving and shells take longer. Nothing you type waits."
     },
@@ -23396,6 +23405,9 @@
       "moveOut": "Move to another org",
       "moveOutReason": "Moves with its main thread · Keep it to move it alone"
     },
+    "slash": {
+      "about": "Ask a question on the side, without disturbing the turn"
+    },
     "ask": {
       "title": "Side thread",
       "about": "Starts from {{thread}}'s conversation. Replies stay in this aside.",
@@ -24417,6 +24429,9 @@
     "runtimeCount_other": "{{number}} runtimes",
     "offInBuild": "Off in this version: {{feature}}",
     "caseUnavailable": "Unavailable",
+    "checkedPending_one": "Checked · {{number}} check pending",
+    "checkedPending_other": "Checked · {{number}} checks pending",
+    "casesPending": "Not verified yet: {{names}}",
     "notChecked": "This version has not been checked",
     "checkFailed": "Compatibility check failed · review its results",
     "policySummary": "{{name}}: {{choice}}",
@@ -26192,6 +26207,8 @@
     "resultsRootPending": "The results’ organization cannot be opened",
     "model": "Model summarizer",
     "details": "Summary details",
+    "hide": "Hide summary",
+    "show": "Show summary",
     "inputFacts": "Source items: {{included}} included · {{shortened}} shortened · {{omitted}} omitted",
     "baseRates": "Configured model base rates",
     "noRates": "No base rates reported",

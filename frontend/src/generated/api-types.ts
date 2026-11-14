@@ -5549,7 +5549,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Requests a verified physical connector update, drained under its local update.auto policy. */
+        /** Requests an explicit verified physical connector update after its active work drains. */
         post: operations["MachineUpdateNow"];
         delete?: never;
         options?: never;
@@ -17910,9 +17910,11 @@ export interface components {
         };
         /** @description The running hello version compared with the server's recommendation. */
         ComponentUpdate: {
+            /** @description The pending request was automatic rather than an explicit Update action. */
+            automatic: boolean;
             /** @description True only when the recommendation is a newer semantic version. */
             behind: boolean;
-            /** @description The local command, including when local policy refuses the web action. */
+            /** @description The explicit local verified update command, available independently of Auto. */
             command: string;
             /** @description A machine's refusal or verification failure, in its own words. */
             detail: string | null;

@@ -21,8 +21,9 @@
 //! The streams of providers are applied in `providers` (a provider's status
 //! and facts, the requests a lease counted, the requests it refused).
 //!
-//! **Not done here.** Text is not masked for secrets (redaction is a later
-//! part's); `raw.frame` is kept for diagnosis, masked, by `raw_events`; `usage.updated` records the turn's and the
+//! Native presentation is masked before storage or live delivery. Private observations keep
+//! their original operands. `raw.frame` is kept for diagnosis, masked, by `raw_events`;
+//! `usage.updated` records the turn's and the
 //! thread's figures (the turn's never below what the forwarder counted for it)
 //! and writes no row of the usage ledger, since on the path `forwarded` the
 //! forwarder is the meter; once a delivery has been applied, the usage caps of
@@ -42,6 +43,7 @@ use crate::providers;
 use crate::turns::{InputAfter, TurnEnd, error_json, turn_error_json};
 use crate::unit::Unit;
 use crate::views;
+use orch_chat::redaction::Redactor;
 use orch_db::Conn;
 use orch_db::queries::resources::thread_engine as resources;
 use orch_db::queries::threads::{
@@ -59,6 +61,7 @@ use orch_link_contract::events::{
 use orch_link_contract::streams::{ResetReason, Stream};
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
+use std::sync::Arc;
 
 /// How much of the end of a command's output an item keeps in its row: the
 /// last 16 KiB, which a screen shows at a glance. The whole is kept as a
@@ -122,6 +125,14 @@ pub async fn add_item(
     unit: &mut Unit<'_>,
     spec: &ItemSpec<'_>,
 ) -> Result<Option<ItemRow>, EngineError> {
+    add_captured_item(unit, spec, None).await
+}
+
+async fn add_captured_item(
+    unit: &mut Unit<'_>,
+    spec: &ItemSpec<'_>,
+    capture: Option<(&Engine, &Redactor)>,
+) -> Result<Option<ItemRow>, EngineError> {
     // An item that is there already costs nothing: no number is spent.
     if let Some(native_ref) = spec.native_ref
         && threads::item_by_native_ref(&mut *unit.conn, spec.segment, native_ref)
@@ -136,9 +147,17 @@ pub async fn add_item(
         None
     };
     let payload = observed.as_ref().unwrap_or(spec.payload);
+    let stored = match capture {
+        Some((engine, masker)) => {
+            engine
+                .native_payload(unit.conn, masker, payload, spec.status == "in_progress")
+                .await?
+        }
+        None => payload.clone(),
+    };
     let seq = unit.stamp(spec.thread).await?;
     let now = unit.now();
-    let search = indexed_text(&mut *unit.conn, spec.thread, spec.kind, payload).await?;
+    let search = indexed_text(&mut *unit.conn, spec.thread, spec.kind, &stored).await?;
     let row = threads::insert_item(
         &mut *unit.conn,
         &NewItem {
@@ -151,7 +170,7 @@ pub async fn add_item(
             kind: spec.kind,
             status: spec.status,
             author_id: spec.author,
-            payload,
+            payload: &stored,
             native_ref: spec.native_ref,
             search_text: search.as_deref(),
             at: now,
@@ -160,6 +179,13 @@ pub async fn add_item(
     )
     .await?;
     if let Some(row) = &row {
+        if let Some((_, masker)) = capture {
+            let masker = crate::redaction::remember(unit.conn, row.id, masker).await?;
+            if spec.status == "in_progress" {
+                crate::redaction::seed(unit.conn, row.id, spec.segment, payload, &masker, None)
+                    .await?;
+            }
+        }
         if spec.status == "completed" {
             observations::completed_item(unit, row, payload, None).await?;
         } else {
@@ -696,6 +722,7 @@ impl Engine {
             thread_id,
             frames: crate::raw_events::Keeper::new(&thread, segment.id),
             segment,
+            masking: None,
         };
         let mut decoded = Vec::with_capacity(events.len());
         for event in events {
@@ -717,6 +744,10 @@ impl Engine {
             }
             self.apply_one(unit, &mut batch, event, decoded).await?;
         }
+        if crate::redaction::has_closed(unit.conn, thread_id).await? {
+            self.write_held_of(unit, thread_id).await?;
+            crate::redaction::finish_closed(unit, thread_id).await?;
+        }
         Ok(())
     }
 
@@ -727,6 +758,21 @@ impl Engine {
         raw: &DeliveredEvent,
         event: Event,
     ) -> Result<(), EngineError> {
+        if matches!(
+            &event,
+            Event::SessionTitle(_)
+                | Event::ItemStarted(_)
+                | Event::ItemDelta(_)
+                | Event::ItemUpdated(_)
+                | Event::ItemCompleted(_)
+        ) && batch.masking.is_none()
+        {
+            let thread = self.thread_row(unit, batch.thread_id).await?;
+            batch.masking = Some(Arc::new(
+                crate::redaction::load(unit.conn, &thread, Some(batch.segment.environment_id))
+                    .await?,
+            ));
+        }
         match event {
             Event::SessionOpened(opened) => self.on_session_opened(unit, batch, &opened).await,
             Event::InstructionSources(sources) => {
@@ -920,7 +966,8 @@ impl Engine {
         if mode.as_deref() != Some("harness") {
             return Ok(());
         }
-        let name: String = title.title.trim().chars().take(TITLE_MAX_CHARS).collect();
+        let title = batch.masker()?.mask_native(title.title.trim(), false);
+        let name: String = title.chars().take(TITLE_MAX_CHARS).collect();
         if name.is_empty() {
             return Ok(());
         }
@@ -1597,7 +1644,7 @@ impl Engine {
         } else {
             "in_progress"
         };
-        add_item(
+        add_captured_item(
             unit,
             &ItemSpec {
                 thread: batch.thread_id,
@@ -1611,43 +1658,71 @@ impl Engine {
                 payload: &payload,
                 native_ref: Some(&started.native_ref),
             },
+            Some((self, batch.masker()?)),
         )
         .await?;
         Ok(())
     }
 
-    /// A piece of an item's text: held, and handed to whoever has the thread open, until it is written to the
-    /// item ([`crate::streaming`]); with no interval to hold it for, written to the item at once.
+    /// A streamed stretch is retained in this cursor transaction before being handed to live readers.
+    /// Full item rows are coalesced later; zero interval writes the item immediately.
     async fn on_item_delta(
         &self,
         unit: &mut Unit<'_>,
         batch: &Batch,
         delta: &ItemDelta,
     ) -> Result<(), EngineError> {
+        if delta.offset < 0 || delta.len <= 0 || delta.offset.checked_add(delta.len).is_none() {
+            return Ok(());
+        }
         if self.inner.config.stream_flush.is_zero() {
-            return self.write_delta(unit, batch, delta).await;
+            self.write_held_of(unit, batch.thread_id).await?;
         }
-        let key = (batch.segment.id, delta.native_ref.clone());
-        if self.inner.growing.expects(&key, delta.field).is_none() {
-            let Some(item) = self.item_of(unit, batch, &delta.native_ref).await? else {
-                return Ok(());
-            };
-            if item.status != "in_progress" {
-                return Ok(());
-            }
-            let base = crate::streaming::length_of(&item.payload, delta.field);
-            self.inner.growing.begin(&key, &item, delta.field, base);
-        }
-        // A stretch that was taken in already is skipped; one that skips ahead waits for the completed item, which
-        // carries the whole.
-        let Some(held) = self.inner.growing.add(&key, delta) else {
+        let Some(item) = threads::stream_item(
+            unit.conn,
+            batch.segment.id,
+            &delta.native_ref,
+            crate::streaming::field_name(delta.field),
+        )
+        .await?
+        else {
             return Ok(());
         };
+        if item.status != "in_progress" {
+            return Ok(());
+        }
+        let masker = crate::redaction::remember(unit.conn, item.id, batch.masker()?).await?;
+        let Some(delta) = crate::redaction::delta(
+            unit.conn,
+            item.id,
+            batch.segment.id,
+            item.visible_len,
+            delta,
+            &masker,
+        )
+        .await?
+        else {
+            return Ok(());
+        };
+        if self.inner.config.stream_flush.is_zero() {
+            return self.write_delta(unit, batch, &delta).await;
+        }
+        if !crate::streaming::hold(
+            unit.conn,
+            item.id,
+            batch.segment.id,
+            item.visible_len,
+            &delta,
+        )
+        .await?
+        {
+            return Ok(());
+        }
         self.inner.live.delta(&LiveDelta {
             thread_id: batch.thread_id,
-            item_id: held.item,
-            turn_id: held.turn,
-            stream: held.stream,
+            item_id: item.id,
+            turn_id: item.turn_id,
+            stream: item.stream,
             field: delta.field,
             offset: delta.offset,
             len: delta.len,
@@ -1772,7 +1847,20 @@ impl Engine {
         }
         let mut payload = item.payload.clone();
         merge(&mut payload, &updated.payload);
-        let payload = normalized(&item.kind, &payload);
+        let original = normalized(&item.kind, &payload);
+        let masker = crate::redaction::remember(unit.conn, item.id, batch.masker()?).await?;
+        let payload = self
+            .native_payload(unit.conn, &masker, &original, item.status == "in_progress")
+            .await?;
+        crate::redaction::seed(
+            unit.conn,
+            item.id,
+            batch.segment.id,
+            &original,
+            &masker,
+            Some(&updated.payload),
+        )
+        .await?;
         if payload == item.payload {
             return Ok(());
         }
@@ -1790,7 +1878,7 @@ impl Engine {
             seq,
         )
         .await?;
-        observations::observed_item(unit, &item, &payload, Some(&item.payload)).await?;
+        observations::observed_item(unit, &item, &original, Some(&item.payload)).await?;
         self.subagent_moved(unit, batch, &item, &payload).await
     }
 
@@ -1830,9 +1918,6 @@ impl Engine {
         };
         let complete_payload = serde_json::to_value(&completed.payload)?;
         // The completed item carries its whole text: what is held of it is written by this.
-        self.inner
-            .growing
-            .forget(&(batch.segment.id, completed.native_ref.clone()));
         let existing = self.item_of(unit, batch, &completed.native_ref).await?;
         let Some(kind) = existing
             .as_ref()
@@ -1981,7 +2066,7 @@ impl Engine {
                 } else {
                     None
                 };
-                add_item(
+                add_captured_item(
                     unit,
                     &ItemSpec {
                         thread: batch.thread_id,
@@ -1995,11 +2080,19 @@ impl Engine {
                         payload: &payload,
                         native_ref: Some(&completed.native_ref),
                     },
+                    Some((self, batch.masker()?)),
                 )
                 .await?;
                 Ok(())
             }
             Some(item) => {
+                let original = payload;
+                let masker =
+                    crate::redaction::remember(unit.conn, item.id, batch.masker()?).await?;
+                let payload = self
+                    .native_payload(unit.conn, &masker, &original, false)
+                    .await?;
+                crate::redaction::clear(unit.conn, item.id).await?;
                 if item.status != "in_progress" && item.payload == payload {
                     return Ok(());
                 }
@@ -2020,10 +2113,11 @@ impl Engine {
                 )
                 .await?;
                 if status == "completed" {
-                    observations::completed_item(unit, &item, &payload, Some(&item.payload))
+                    observations::completed_item(unit, &item, &original, Some(&item.payload))
                         .await?;
                 } else {
-                    observations::observed_item(unit, &item, &payload, Some(&item.payload)).await?;
+                    observations::observed_item(unit, &item, &original, Some(&item.payload))
+                        .await?;
                 }
                 // Search: None also clears text that is now excluded; deltas still leave it alone.
                 crate::projections::keep_item_text(
@@ -2065,6 +2159,14 @@ struct Batch {
     segment: SegmentRow,
     /// Keeps the frames of the harness's own protocol that the delivery holds.
     frames: crate::raw_events::Keeper,
+    masking: Option<Arc<Redactor>>,
+}
+impl Batch {
+    fn masker(&self) -> Result<&Redactor, EngineError> {
+        self.masking
+            .as_deref()
+            .ok_or_else(|| EngineError::unreadable("native masking inputs have not been loaded"))
+    }
 }
 
 #[cfg(test)]
