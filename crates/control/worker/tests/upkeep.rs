@@ -1011,3 +1011,26 @@ async fn a_worker_waits_for_the_schema_the_api_applies_and_stops_waiting_when_it
         "and the wait ends, without the schema, when the worker is told to stop"
     );
 }
+
+#[tokio::test]
+async fn diagnostic_retention_keeps_the_requested_days_even_beyond_a_century() {
+    let world = World::new(Notifiers::new()).await;
+    let old = Utc.with_ymd_and_hms(1800, 1, 15, 0, 0, 0).unwrap();
+    let mut conn = world.test.pool.acquire().await.unwrap();
+    migrations::ensure_partitions(&mut conn, old).await.unwrap();
+    sqlx::query("INSERT INTO raw_events (segment_id, n, at, direction, payload) VALUES ($1, 1, $2, 'to_harness', '\\x00')")
+        .bind(new_id()).bind(old).execute(&mut *conn).await.unwrap();
+    sqlx::query("INSERT INTO settings (node_id, key, value) VALUES (NULL, 'diagnostics.retention_days', '100000')")
+        .execute(&mut *conn).await.unwrap();
+    drop(conn);
+    for days in [100_000_i64, i64::MAX] {
+        sqlx::query("UPDATE settings SET value=$1 WHERE node_id IS NULL AND key='diagnostics.retention_days'")
+            .bind(json!(days)).execute(&world.test.pool).await.unwrap();
+        let done = retention::raw_events(&world.db(), &world.clock)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((done.partitions_dropped, done.rows_trimmed), (0, 0));
+        assert_eq!(count(&world, "raw_events").await, 1);
+    }
+}

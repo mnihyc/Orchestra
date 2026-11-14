@@ -1347,3 +1347,22 @@ async fn an_invitation_keeps_its_issuers_explicit_admin_mode_without_elevating_t
         "delegation never adds the issuer as a team member"
     );
 }
+
+#[tokio::test]
+async fn a_shared_invitation_keeps_more_than_a_thousand_uses_when_the_policy_allows_them() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    world.set("invitations.max_uses", json!(i32::MAX)).await;
+    for uses in [1_001, i64::from(i32::MAX)] {
+        let mut body = org_invitation(s.acme);
+        body.max_uses = Some(uses);
+        let made = invite(&world, &s.boss, &body).await.ok();
+        assert_eq!(made.invitation.max_uses, uses);
+        let stored: i32 = sqlx::query_scalar("SELECT max_uses FROM invitations WHERE id=$1")
+            .bind(made.invitation.id)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(i64::from(stored), uses);
+    }
+}

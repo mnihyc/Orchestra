@@ -403,6 +403,37 @@ async fn a_value_that_does_not_fit_and_a_key_that_is_not_there_are_refused() {
 }
 
 #[tokio::test]
+async fn a_provider_that_does_not_exist_is_refused_at_save_with_its_kind_in_the_sentence() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    let missing = orch_types::new_id();
+    for (key, body) in [
+        ("agent.default_provider_id", json!(missing)),
+        (
+            "search.semantic.embeddings",
+            json!({"provider_id": missing, "model_name": "small"}),
+        ),
+    ] {
+        let refused = put(&world, &s.boss, s.acme, key, &value(body))
+            .await
+            .problem();
+        assert_eq!(refused.code, ErrorCode::RequestInvalid, "{key}");
+        let message = refused.extra["errors"][0]["message"].as_str().unwrap();
+        assert!(
+            message.contains("no provider with this identifier exists"),
+            "{key}: {message}"
+        );
+        assert!(
+            refused.extra["errors"][0]["path"]
+                .as_str()
+                .unwrap()
+                .starts_with("value"),
+            "{key}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_setting_is_written_against_the_revision_the_writer_saw_and_taken_back() {
     let world = World::new().await;
     let s = setup(&world).await;
@@ -665,4 +696,105 @@ async fn a_secret_is_written_once_listed_by_name_down_the_hierarchy_and_its_name
         .await
         .problem();
     assert_eq!(missing.code, ErrorCode::NotFound);
+}
+
+#[tokio::test]
+async fn place_parameter_forms_share_thread_provider_constraints_and_feature_rules() {
+    use orch_api_contract::resources::{ModelParameters, ProviderKind};
+    use orch_api_contract::settings::{SettingParameterFormBody, SettingParameterFormResolve};
+    let world = World::new().await;
+    let ada = person(&world, "ada").await;
+    let definition = |key: &str, scopes: Value, feature: Value| {
+        json!({
+            "key":key, "title":key, "description":"A declared parameter.", "group":"model",
+            "type":"boolean", "default":false, "scopes":scopes, "apply":"next_turn", "feature":feature
+        })
+    };
+    let speed = json!({
+        "key":"service_tier", "title":"Speed", "description":"An enabled speed.", "group":"model",
+        "type":"enum", "options":{"from_model":"service_tiers"},
+        "default":{"from_model":"default_service_tier"}, "scopes":["org","thread"], "apply":"next_turn"
+    });
+    let model: ModelParameters = serde_json::from_value(json!({
+        "service_tiers":[{"id":"priority","label":"Fast"},{"id":"flex","label":"Flex"}],
+        "request_options":{"native":{"type":"object","properties":{
+            "service_tier":{"oneOf":[{"const":"priority"}]}, "quiet":false
+        }}}
+    }))
+    .unwrap();
+    let forms = world
+        .app
+        .call(SettingParameterFormResolve, &[])
+        .token(&ada.token)
+        .body(&SettingParameterFormBody {
+            definitions: vec![
+                speed,
+                definition("quiet", json!(["org"]), json!("team.quiet")),
+                definition("gated", json!(["org"]), json!("team.gated")),
+                definition("thread_only", json!(["thread"]), Value::Null),
+            ],
+            model,
+            feature_defaults: std::collections::BTreeMap::from([("team.gated".to_owned(), true)]),
+            features: std::collections::BTreeMap::from([
+                ("team.quiet".to_owned(), true),
+                ("team.gated".to_owned(), false),
+            ]),
+            provider_kind: ProviderKind::Api,
+            scope: Some("org".to_owned()),
+            harness_version: None,
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(forms.len(), 1);
+    assert_eq!(forms[0]["key"], json!("service_tier"));
+    assert_eq!(
+        forms[0]["resolved_options"],
+        json!([{"value":"priority","label":"Fast"}])
+    );
+    assert_eq!(forms[0]["allows_none"], json!(false));
+}
+
+#[tokio::test]
+async fn each_setting_carries_the_exact_inherited_value_without_its_own_contribution() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    world
+        .set_at(
+            orch_settings::Target::Node(s.acme),
+            "agent.model",
+            json!("parent-model"),
+        )
+        .await;
+    world
+        .set_at(
+            orch_settings::Target::Node(s.web),
+            "agent.model",
+            json!("local-model"),
+        )
+        .await;
+    world
+        .set_at(
+            orch_settings::Target::Node(s.acme),
+            "agent.params",
+            json!({"quiet":true}),
+        )
+        .await;
+    world
+        .set_at(
+            orch_settings::Target::Node(s.web),
+            "agent.params",
+            json!({"context":65_536}),
+        )
+        .await;
+    let rows = settings(&world, &s.boss, s.web).await;
+    for (key, expected) in [
+        ("agent.model", json!("parent-model")),
+        ("agent.params", json!({"quiet":true})),
+    ] {
+        let shown = serde_json::to_value(one(&rows, key)).unwrap();
+        assert_eq!(shown["inherited"]["value"], expected);
+        assert_eq!(shown["inherited"]["source"]["node"]["name"], json!("Acme"));
+        assert_eq!(shown["inherited"]["source"]["scope"], json!("org"));
+    }
 }

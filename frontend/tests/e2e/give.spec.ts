@@ -375,7 +375,7 @@ test('somebody named on one thread from elsewhere is let into its environment in
     await shareThread(page);
     await stage(page, 'Zoe Outsider', 'zoe');
     await choose(page, choice);
-    const tick = dialog(page).getByRole('checkbox', { name: 'Let them into the environment', exact: true });
+    const tick = dialog(page).getByRole('checkbox', { name: 'Viewers can open the environment', exact: true });
     await expect(tick).toBeChecked();
     await add(page);
     await expect(line(page, choice)).toContainText('Zoe Outsider');
@@ -395,7 +395,7 @@ test('somebody named on one thread from elsewhere is let into its environment in
   await page.goto(`/thread/${ACME.mainThread}`);
   await shareThread(page);
   await stage(page, 'Zoe Outsider', 'zoe');
-  await dialog(page).getByRole('checkbox', { name: 'Let them into the environment', exact: true }).click();
+  await dialog(page).getByRole('checkbox', { name: 'Viewers can open the environment', exact: true }).click();
   await add(page);
   await expect(line(page, 'Can view')).toContainText('Zoe Outsider');
   // Nothing arrives for the environment: a moment is given for it to, were it going to.

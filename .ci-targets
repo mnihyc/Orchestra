@@ -1,0 +1,5 @@
+test -p orch-agent-contract --lib
+test -p orch-api-core --lib
+test -p orch-settings-contract --lib
+test -p orch-api-core --test settings --test threads_settings --test provider_models --test users --test ports_core
+test -p orch-adapter-codex --lib -- descriptor::tests::

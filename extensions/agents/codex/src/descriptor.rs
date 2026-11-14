@@ -275,11 +275,20 @@ pub fn descriptor(version: &str) -> AgentDescriptor {
             background_commands: crate::native_schema::pinned_background_control(version),
             ..capabilities()
         },
+        features: std::collections::BTreeMap::from([(parameters::CYBER_ACCESS_FEATURE.to_owned(), true)]),
         parameters: parameters::definitions(),
         text: text(),
         extensions: serde_json::from_value(serde_json::json!({
             "x_capability_program": serde_json::from_str::<orch_types::Json>(include_str!("capability-program.json")).unwrap_or(orch_types::Json::Null),
-            "x_profile_parameters": crate::parameters::profile_parameters()
+            "x_profile_parameters": crate::parameters::profile_parameters(),
+            "x_turn_end_delays": {"version":1,"delays":[{
+                "pointer":"/native_result_wait_ms", "also_ms":0,
+                "default_ms":crate::runtime::DEFAULT_NATIVE_RESULT_WAIT_MS,
+                "default_setting":"agents.native_result_wait_ms",
+                "pending_buffer":{"pointer":"/native_result_buffer_bytes",
+                    "default_bytes":crate::runtime::DEFAULT_NATIVE_RESULT_BUFFER_BYTES,
+                    "default_setting":"agents.native_result_buffer_bytes"}
+            }]}
         })).unwrap_or_default(),
     }
 }

@@ -729,7 +729,7 @@ async fn invitation_create(
                 role: role.as_deref(),
                 permissions: &rows,
                 email: email.as_deref(),
-                max_uses: i32::try_from(max_uses).unwrap_or(i32::MAX),
+                max_uses: i32::try_from(max_uses).map_err(|_| invalid("max_uses", "is outside the supported integer range"))?,
                 note: &note,
                 expires_at,
                 by: user,
