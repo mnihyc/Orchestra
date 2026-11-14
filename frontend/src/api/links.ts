@@ -13,9 +13,6 @@ export type { DocumentLinks, LinkGraph, LinkedThing, LinkOccurrence, LinksTab } 
 /** The tabs in the order the section shows them. */
 export const LINKS_TABS: readonly LinksTab[] = ['referenced_by', 'references', 'related', 'graph'];
 
-/** How fresh a list of Links is taken to be without asking again: other documents change it, and no feed says so. */
-const LINKS_STALE_MS = 30_000;
-
 export const linksKey = (document: string) => ['document-links', document] as const;
 
 /** Which tabs a document shows, and whether the caller may change them. */
@@ -23,7 +20,6 @@ export const documentLinksQuery = (document: string) =>
   queryOptions({
     queryKey: [...linksKey(document), 'tabs'] as const,
     queryFn: ({ signal }): Promise<DocumentLinks> => ok(api.GET('/documents/{id}/links', { params: { path: { id: document } }, signal })),
-    staleTime: LINKS_STALE_MS,
     refetchOnWindowFocus: false,
   });
 
@@ -42,7 +38,6 @@ export const referencesQuery = (document: string, direction: LinkDirection) =>
         signal,
       })),
     getNextPageParam: (page) => page.next_cursor,
-    staleTime: LINKS_STALE_MS,
     refetchOnWindowFocus: false,
     retry: false,
   });
@@ -55,7 +50,6 @@ export const mentionsQuery = (document: string, of: string, first: string) =>
     queryFn: ({ pageParam, signal }) =>
       ok(api.GET('/documents/{id}/references', { params: { path: { id: document }, query: { direction: 'in', of, cursor: pageParam } }, signal })),
     getNextPageParam: (page) => page.next_cursor,
-    staleTime: LINKS_STALE_MS,
     refetchOnWindowFocus: false,
     retry: false,
   });
@@ -82,7 +76,6 @@ export const graphQuery = (document: string, options: GraphOptions) =>
         } },
         signal,
       })),
-    staleTime: LINKS_STALE_MS,
     refetchOnWindowFocus: false,
     retry: false,
   });

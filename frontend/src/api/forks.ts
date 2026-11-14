@@ -13,6 +13,7 @@ import { queryOptions } from '@tanstack/react-query';
 
 import { accepted, api, ApiError, ok, repeatable } from '@/api/client';
 import { liveValue } from '@/api/liveValue';
+import { readAgain } from '@/api/readAgain';
 import type {
   AgentAccessChoice,
   ForkBatch,
@@ -99,7 +100,9 @@ export async function startBatch(body: ForkCreateBody, key: string): Promise<For
 export const jobQuery = (id: string) =>
   queryOptions({
     queryKey: forkKeys.job(id),
-    queryFn: ({ signal }): Promise<Job> => liveValue(forkKeys.job(id), signal),
+    queryFn: ({ signal }): Promise<Job> => liveValue(forkKeys.job(id), signal, () => ok(api.GET('/jobs/{id}', { params: { path: { id } }, signal }))),
+    // While the live connection is not up nothing else tells a screen that the job moved.
+    refetchInterval: readAgain<Job>((job) => job === undefined || !isOver(job.state), false),
   });
 
 /** Stops a job before it commits; everything it made is taken away again. */
@@ -127,7 +130,6 @@ export const placesQuery = (nodeId: string, template: string | null = null) =>
     queryKey: forkKeys.places(nodeId, template),
     queryFn: ({ signal }): Promise<Place[]> =>
       ok(api.GET('/nodes/{id}/places', { params: { path: { id: nodeId }, query: template === null ? {} : { template_id: template } }, signal })),
-    staleTime: 30_000,
   });
 
 // ---------------------------------------------------------------- side threads

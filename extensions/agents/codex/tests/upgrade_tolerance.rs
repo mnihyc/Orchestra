@@ -20,8 +20,8 @@ use orch_testkit::harness_corpus::{Observation, assert_unrecognized};
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
 use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 
@@ -33,6 +33,11 @@ struct Rig {
     _home: tempfile::TempDir,
     agent: Id,
     provider: Id,
+    /// The background terminals the fake app server reports, and whether it confirms their end when asked.
+    terminals: Arc<Mutex<Vec<Json>>>,
+    confirms_end: Arc<AtomicBool>,
+    /// What the fake answers `thread/backgroundTerminals/list` with instead of its page, when it is set.
+    list_answer: Arc<Mutex<Option<Json>>>,
 }
 impl Rig {
     async fn new() -> Self {
@@ -43,8 +48,28 @@ impl Rig {
     }
     async fn with_configuration_and_version(config: Json, version: &str) -> Self {
         let count = AtomicUsize::new(0);
-        let fake = Arc::new(FakeLauncher::new(move |method, _| {
+        let terminals: Arc<Mutex<Vec<Json>>> = Arc::default();
+        let confirms_end = Arc::new(AtomicBool::new(true));
+        let list_answer: Arc<Mutex<Option<Json>>> = Arc::default();
+        let (live, confirms, odd) = (
+            Arc::clone(&terminals),
+            Arc::clone(&confirms_end),
+            Arc::clone(&list_answer),
+        );
+        let fake = Arc::new(FakeLauncher::new(move |method, params| {
             Ok(match method {
+                "thread/backgroundTerminals/list" => odd.lock().unwrap().clone().unwrap_or_else(
+                    || json!({"data":live.lock().unwrap().clone(),"nextCursor":null}),
+                ),
+                "thread/backgroundTerminals/terminate" => {
+                    let confirmed = confirms.load(Ordering::SeqCst);
+                    if confirmed {
+                        live.lock()
+                            .unwrap()
+                            .retain(|terminal| terminal["processId"] != params["processId"]);
+                    }
+                    json!({"terminated":confirmed})
+                }
                 "config/read" => json!({"config":config,"origins":{}}),
                 "environment/info" => {
                     serde_json::from_str(include_str!("fixtures/environment-info-0.162.1.json"))
@@ -87,7 +112,18 @@ impl Rig {
             _home: home,
             agent,
             provider,
+            terminals,
+            confirms_end,
+            list_answer,
         }
+    }
+    /// A command of the turn that the app server also reports as a background terminal.
+    async fn retained_command(&mut self, native: &str) {
+        self.fake.state.notify("item/started", json!({"threadId":native,"turnId":"fixture-turn","startedAtMs":0,"item":{
+            "type":"commandExecution","id":"retained-command","command":"fixture command","cwd":"/fixture/work","commandActions":[],"status":"inProgress","processId":"fixture-process"}}));
+        self.through("item.started", 1).await;
+        self.terminals.lock().unwrap().push(json!({
+            "itemId":"retained-command","processId":"fixture-process","command":"fixture command","cwd":"/fixture/work"}));
     }
     async fn through(&mut self, name: &str, count: usize) -> Vec<Observation> {
         let mut rows = vec![];
@@ -446,47 +482,160 @@ async fn absent_and_matching_effective_pins_do_not_claim_a_launch_violation() {
     }
 }
 
+/// The builds the rule starts: the oldest proven one, the shipped one, a later patch, a later line and a far one.
+const STARTED_BUILDS: [&str; 5] = ["0.167.0", "0.167.2", "0.167.3", "0.170.1", "1.0.0"];
+
 #[tokio::test]
-async fn an_unverified_build_cannot_probe_terminal_end_and_interrupt_close_still_work() {
+async fn a_build_newer_than_the_proven_line_lists_and_ends_background_terminals_like_a_proven_one()
+{
     use orch_agent_contract::background::BackgroundEndState;
+    for version in STARTED_BUILDS {
+        let mut rig = Rig::with_configuration_and_version(json!({}), version).await;
+        let (thread, native) = rig.open().await;
+        rig.turn(thread, &native).await;
+        rig.retained_command(&native).await;
+        let background = rig.adapter.background_commands(thread).await.unwrap();
+        assert!(background.supported, "{version}: {:?}", background.reason);
+        assert_eq!(background.items.len(), 1, "{version}");
+        assert_eq!(
+            background.items[0].native_item_ref.as_deref(),
+            Some("retained-command")
+        );
+        assert_eq!(
+            background.items[0].command.as_deref(),
+            Some("fixture command")
+        );
+        let end = rig
+            .adapter
+            .end_background_command(thread, &background.items[0].id)
+            .await
+            .unwrap();
+        assert_eq!(end.state, BackgroundEndState::Ended, "{version}");
+        assert_eq!(
+            rig.fake.state.calls("thread/backgroundTerminals/terminate")[0]["params"]["processId"],
+            "fixture-process"
+        );
+        let again = rig
+            .adapter
+            .end_background_command(thread, &background.items[0].id)
+            .await
+            .unwrap();
+        assert_eq!(again.state, BackgroundEndState::AlreadyEnded, "{version}");
+        rig.adapter.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stop_and_close_work_on_every_started_build_and_an_unconfirmed_end_is_never_a_process_end()
+{
+    for version in STARTED_BUILDS {
+        let mut rig = Rig::with_configuration_and_version(json!({}), version).await;
+        rig.confirms_end.store(false, Ordering::SeqCst);
+        let (thread, native) = rig.open().await;
+        let turn = rig.turn(thread, &native).await;
+        rig.retained_command(&native).await;
+        rig.adapter.interrupt(thread, turn).await.unwrap();
+        rig.fake.state.notify("turn/completed",json!({"threadId":native,"turn":{"id":"fixture-turn","status":"interrupted","items":[],"error":null}}));
+        let rows = rig.through("turn.command_cleanup", 1).await;
+        assert_eq!(
+            rows.last().unwrap().body["result"]["unknown"],
+            1,
+            "{version}"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.name == "item.completed"
+                    && row.body["native_ref"] == "retained-command"),
+            "{version}: an interrupt acknowledgement is no process-end proof"
+        );
+        rig.adapter.close_session(thread).await.unwrap();
+        assert_eq!(rig.fake.state.calls("turn/interrupt").len(), 1);
+        assert_eq!(rig.fake.state.calls("thread/unsubscribe").len(), 1);
+        assert!(
+            !rig.fake
+                .state
+                .calls("thread/backgroundTerminals/list")
+                .is_empty()
+                && !rig
+                    .fake
+                    .state
+                    .calls("thread/backgroundTerminals/terminate")
+                    .is_empty(),
+            "{version}: Stop asks for the terminals of the stopped turn and ends only those"
+        );
+        rig.adapter.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_build_below_the_oldest_proven_one_is_refused_at_the_start_and_never_asked_for_terminals()
+{
+    for version in ["0.166.9", "0.165.0"] {
+        let fake = Arc::new(FakeLauncher::plain());
+        fake.state.set_version(version);
+        let mut adapter = CodexAdapter::with_launcher(fake.clone())
+            .with_clock(Arc::new(orch_testkit::clock::manual()));
+        let home = tempfile::tempdir().unwrap();
+        let (sink, _events) = EventSink::channel();
+        let refused = adapter
+            .start(
+                AgentStart {
+                    provider_kind: None,
+                    provider_id: new_id(),
+                    agent_id: new_id(),
+                    harness_kind: "codex".into(),
+                    profile: AgentProfile::default(),
+                    home: Some(home.path().to_string_lossy().into_owned()),
+                    provider_config: json!({}),
+                    loopback: Loopback::new(41999, Secret::new("fixture-loopback")),
+                    binary: None,
+                },
+                sink,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), "harness_unavailable", "{version}");
+        assert!(refused.to_string().contains(version), "{refused}");
+        assert!(
+            fake.state
+                .calls("thread/backgroundTerminals/list")
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_list_of_terminals_in_a_form_orch_does_not_know_is_a_plain_reason_and_stop_still_works() {
+    use orch_agent_contract::background::BackgroundEndState;
+    const WORDS: &str =
+        "This Codex build answered background terminals in a form Orch does not know.";
     let mut rig = Rig::with_configuration_and_version(json!({}), "0.170.1").await;
+    *rig.list_answer.lock().unwrap() = Some(json!({"terminals":[]}));
     let (thread, native) = rig.open().await;
     let turn = rig.turn(thread, &native).await;
-    rig.fake.state.notify("item/started", json!({"threadId":native,"turnId":"fixture-turn","startedAtMs":0,"item":{
-        "type":"commandExecution","id":"retained-command","command":"fixture command","cwd":"/fixture/work","commandActions":[],"status":"inProgress","processId":"fixture-process"}}));
-    rig.through("item.started", 1).await;
+    rig.retained_command(&native).await;
     let background = rig.adapter.background_commands(thread).await.unwrap();
     assert!(!background.supported);
-    assert_eq!(
-        background.reason.as_deref(),
-        Some("This Codex version cannot end background terminals.")
-    );
+    assert_eq!(background.reason.as_deref(), Some(WORDS));
     let end = rig
         .adapter
-        .end_background_command(thread, "retained-command")
+        .end_background_command(thread, "any-command")
         .await
         .unwrap();
     assert_eq!(end.state, BackgroundEndState::Unknown);
-    assert_eq!(end.reason, background.reason);
-    rig.adapter.interrupt(thread, turn).await.unwrap();
-    rig.fake.state.notify("turn/completed",json!({"threadId":native,"turn":{"id":"fixture-turn","status":"interrupted","items":[],"error":null}}));
-    let rows = rig.through("turn.command_cleanup", 1).await;
-    assert_eq!(rows.last().unwrap().body["result"]["unknown"], 1);
-    assert!(!rows.iter().any(|row|row.name=="item.completed"&&row.body["native_ref"]=="retained-command"),"an interrupt acknowledgement is no process-end proof");
-    rig.adapter.close_session(thread).await.unwrap();
-    assert_eq!(rig.fake.state.calls("turn/interrupt").len(), 1);
-    assert_eq!(rig.fake.state.calls("thread/unsubscribe").len(), 1);
-    assert!(
-        rig.fake
-            .state
-            .calls("thread/backgroundTerminals/list")
-            .is_empty()
-    );
+    assert_eq!(end.reason.as_deref(), Some(WORDS));
     assert!(
         rig.fake
             .state
             .calls("thread/backgroundTerminals/terminate")
-            .is_empty()
+            .is_empty(),
+        "nothing is ended on an answer that cannot be read"
     );
+    rig.adapter.interrupt(thread, turn).await.unwrap();
+    rig.fake.state.notify("turn/completed",json!({"threadId":native,"turn":{"id":"fixture-turn","status":"interrupted","items":[],"error":null}}));
+    let rows = rig.through("turn.command_cleanup", 1).await;
+    assert_eq!(rows.last().unwrap().body["result"]["unknown"], 1);
+    rig.adapter.close_session(thread).await.unwrap();
     rig.adapter.stop().await.unwrap();
 }

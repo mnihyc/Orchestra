@@ -33,6 +33,7 @@ export function apiErrorSentence(code: ErrorCode, status: number, t: TFunction =
 
 /** What the server says of a member of an entry that allows more than the entries of whoever gives it, by the sentence it says it in. */
 const ENTRY_BEYOND = {
+  'allows more uses than any one entry of yours does': 'access.options.beyond.purposes',
   'allows more models than any one entry of yours does': 'access.options.beyond.models',
   'allows more services than any one entry of yours does': 'access.options.beyond.services',
   'allows more efforts than any one entry of yours does': 'access.options.beyond.efforts',

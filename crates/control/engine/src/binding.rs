@@ -1009,6 +1009,11 @@ impl Engine {
         if !place.online || place.deleted_at.is_some() || place.status != "active" {
             return Ok(());
         }
+        // Managed units have no local policy. Their installed-harness report proves which programs
+        // they can run; an adapter alone does not prove that its required binary exists.
+        let unit = orch_db::queries::resources::hosting::host_running(&mut conn, machine)
+            .await?
+            .is_some();
         // A harness the machine could not run is asked again after a pause, not at every report of its
         // machine (several a minute): a repaired installation is noticed within it.
         let retry_before = self.inner.clock.now() - DISCOVERY_RETRY_AFTER;
@@ -1032,6 +1037,9 @@ impl Engine {
                     })
                 });
             if !place.roles.iter().any(|role| role == "agent") || !drives {
+                continue;
+            }
+            if unit && !machine_has_harness(&place, &profile.harness_kind) {
                 continue;
             }
             let key = harnesses::HarnessKey {
@@ -1958,11 +1966,15 @@ pub fn arrangements_of_policy<T: serde::de::DeserializeOwned>(
     policy: Option<&Json>,
 ) -> Option<Vec<T>> {
     let policy = policy.filter(|policy| !policy.is_null())?;
-    let listed = policy.get("provider.arrangements").and_then(Json::as_array);
+    // A policy that does not hold the key says nothing about it: a host's policy has no such key, and
+    // reading its absence as an empty list forbade every way of running on a credential kept in a
+    // container of that host.
+    let listed = policy
+        .get("provider.arrangements")
+        .and_then(Json::as_array)?;
     Some(
         listed
-            .into_iter()
-            .flatten()
+            .iter()
             .filter_map(|word| word.as_str().and_then(parse))
             .collect(),
     )
@@ -3477,6 +3489,28 @@ pub async fn select_rebind_with_access(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_policy_without_the_arrangements_key_sets_no_limit_and_an_empty_list_allows_none() {
+        use serde_json::json;
+        let of = |policy: serde_json::Value| {
+            super::arrangements_of_policy::<ArrangementType>(Some(&policy))
+        };
+        // A host reports a policy of its own keys; it has none for a provider's arrangements.
+        assert_eq!(
+            of(json!({"ports": {"allowed": ["place"]}, "drivers": {}})),
+            None
+        );
+        assert_eq!(super::arrangements_of_policy::<ArrangementType>(None), None);
+        assert_eq!(of(json!({"provider.arrangements": []})), Some(Vec::new()));
+        assert_eq!(
+            of(json!({"provider.arrangements": ["separated", "key_separated"]})),
+            Some(vec![
+                ArrangementType::Separated,
+                ArrangementType::KeySeparated
+            ])
+        );
+    }
+
     use super::*;
 
     #[test]

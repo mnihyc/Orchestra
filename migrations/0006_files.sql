@@ -20,6 +20,8 @@ CREATE INDEX blob_uploads_machine_updated_idx ON blob_uploads USING btree (machi
 CREATE TABLE blobs (
     hash bytea NOT NULL,
     size bigint NOT NULL,
+    text_characters bigint,
+    text_ascii_characters bigint,
     stored_at timestamp with time zone DEFAULT now() NOT NULL,
     last_access_at timestamp with time zone DEFAULT now() NOT NULL,
     pin_count integer DEFAULT 0 NOT NULL,

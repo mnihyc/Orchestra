@@ -4,7 +4,8 @@
  * (`timeline` in what the interface keeps for them); hiding the lines of a thread's history is a
  * choice of the device they are on. Each is shown as chosen at once and put right if the server refuses.
  */
-import { CancelledError, useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
+import { supersededRead } from '@/api/reads';
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { useCallback, useSyncExternalStore } from 'react';
 
 import { meStateKey, meStateQuery, setMeState } from '@/api/personal';
@@ -21,9 +22,11 @@ interface Stored {
   work_detail?: WorkDetail;
   diff_layout?: DiffLayout;
   live_tools?: boolean;
+  diagnostics?: boolean;
+  summary_hidden?: boolean;
 }
 
-export type ThreadViewMode = 'focused' | 'full' | 'live';
+export type ThreadViewMode = 'focused' | 'full' | 'live' | 'diagnostics';
 
 const record = (value: unknown): Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -36,6 +39,8 @@ function readStored(state: Record<string, unknown> | undefined): Stored {
     ...(DETAILS.includes(stored.work_detail as WorkDetail) ? { work_detail: stored.work_detail as WorkDetail } : {}),
     ...(stored.diff_layout === 'one' || stored.diff_layout === 'two' ? { diff_layout: stored.diff_layout } : {}),
     ...(typeof stored.live_tools === 'boolean' ? { live_tools: stored.live_tools } : {}),
+    ...(typeof stored.diagnostics === 'boolean' ? { diagnostics: stored.diagnostics } : {}),
+    ...(typeof stored.summary_hidden === 'boolean' ? { summary_hidden: stored.summary_hidden } : {}),
   };
 }
 
@@ -60,7 +65,7 @@ export function rollbackTimeline(value: unknown, beforeValue: unknown, change: P
   const restore = (value: Record<string, unknown>, previous: Record<string, unknown>) => {
     const next = { ...value };
     let restored = false;
-    for (const key of ['work_detail', 'diff_layout', 'live_tools'] as const) {
+    for (const key of ['work_detail', 'diff_layout', 'live_tools', 'diagnostics', 'summary_hidden'] as const) {
       if (change.value[key] === undefined || value[key] !== change.value[key]) continue;
       if (Object.hasOwn(previous, key)) next[key] = previous[key];
       else Reflect.deleteProperty(next, key);
@@ -90,7 +95,7 @@ function writeTimeline(cache: QueryClient, change: Change): Promise<void> {
   const key = JSON.stringify([change.user, change.reader]);
   const before = writes.get(key) ?? Promise.resolve();
   const pending = before.catch(() => undefined).then(async () => {
-    if (!current(change)) throw new CancelledError({ silent: true });
+    if (!current(change)) throw supersededRead();
     const state = cache.getQueryData<Record<string, unknown>>(meStateKey);
     await setMeState('timeline', changedTimeline(state?.timeline, change));
   });
@@ -124,11 +129,16 @@ export interface TimelinePreferences {
   setDetail: (detail: WorkDetail) => void;
   /** Live changes expansion/following policy while the existing depth still owns folding. */
   liveTools: boolean;
+  /** Whether the harness's own state (session status, MCP server status, collaboration mode, unrecognised events) is drawn too. */
+  diagnostics: boolean;
   setViewMode: (mode: ThreadViewMode) => void;
   layout: DiffLayout;
   setLayout: (layout: DiffLayout) => void;
   hideHistory: boolean;
   setHideHistory: (hide: boolean) => void;
+  /** Whether the summary above a thread's conversation is folded to its title; follows the person to every thread and device. */
+  summaryHidden: boolean;
+  setSummaryHidden: (hidden: boolean) => void;
 }
 
 export function useTimelinePreferences(threadId?: string): TimelinePreferences {
@@ -141,10 +151,10 @@ export function useTimelinePreferences(threadId?: string): TimelinePreferences {
   const save = useMutation({
     mutationFn: (change: Change) => writeTimeline(queryClient, change),
     onMutate: async (change) => {
-      if (!current(change)) throw new CancelledError({ silent: true });
+      if (!current(change)) throw supersededRead();
       // An unopened bag must arrive before a full namespace write can preserve its other fields.
       const before = queryClient.getQueryData<Record<string, unknown>>(meStateKey) ?? await queryClient.query(meStateQuery);
-      if (!current(change)) throw new CancelledError({ silent: true });
+      if (!current(change)) throw supersededRead();
       const next = changedTimeline(before.timeline, change);
       queryClient.setQueryData<Record<string, unknown>>(meStateKey, { ...before, timeline: next });
       return { before, next };
@@ -169,12 +179,15 @@ export function useTimelinePreferences(threadId?: string): TimelinePreferences {
   );
   return {
     detail,
-    setDetail: useCallback((detail) => choose({ work_detail: detail, live_tools: false }, threadId), [choose, threadId]),
+    setDetail: useCallback((detail) => choose({ work_detail: detail, live_tools: false, diagnostics: false }, threadId), [choose, threadId]),
     liveTools: detail !== 'summary' && own.live_tools === true,
-    setViewMode: useCallback((mode) => choose({ work_detail: mode === 'focused' ? 'summary' : 'steps', live_tools: mode === 'live' }, threadId), [choose, threadId]),
+    diagnostics: detail !== 'summary' && own.diagnostics === true,
+    setViewMode: useCallback((mode) => choose({ work_detail: mode === 'focused' ? 'summary' : 'steps', live_tools: mode === 'live', diagnostics: mode === 'diagnostics' }, threadId), [choose, threadId]),
     layout: global.diff_layout ?? 'one',
     setLayout: useCallback((layout) => choose({ diff_layout: layout }), [choose]),
     hideHistory,
     setHideHistory: setHidden,
+    summaryHidden: global.summary_hidden === true,
+    setSummaryHidden: useCallback((hidden) => choose({ summary_hidden: hidden }), [choose]),
   };
 }

@@ -25,6 +25,8 @@ The model chip lists the usable entries in this root organization's **Ask models
 
 Ask models have their own policy list in **Settings → Automation**. At system scope, a person who may edit it can add or remove enabled API models and move them up or down. Entries store the provider and model only. At an organization, the list comes from above: an editor can remove entries to narrow it, but cannot add or reorder them; the order from above is retained. Effort and other parameters stay with your personal choice in the chip. Subscription-only providers are not Ask models. Current organization policy and usage caps apply to every turn.
 
+A provider's **Use** entry can allow **Ask**, **Other work**, or both. To share a provider only for questions, open that entry's options and leave only **Ask** selected under **Uses**. Its model and effort restrictions still apply together. Other work includes ordinary threads, summaries and services. The asking person and the configured payer both need an entry that permits Ask; choosing a payer grants no access.
+
 When the list is unset, empty or has no usable entry, including when model policy excludes every entry, the panel shows the reason and has no message composer. A link to the setting appears only when you may edit it. Otherwise, the explanation remains visible so you can ask an organization admin to configure a usable model.
 
 While an answer runs, **Stop** ends that turn. You can continue with another question. An uncertain send keeps your draft; retrying the unchanged question uses the same input identity. Docking or popping out keeps the draft and pending attachments in place. Drafts save after a pause in typing through the same mechanism as normal threads; the small draft mark shows saving or failure.
@@ -46,9 +48,15 @@ When the conversation approaches the chosen model’s context window, Ask summar
 
 Summarizing counts as your Ask usage, through the conversation’s current payer and usage caps. It does not choose a separate summary model.
 
-Administrators can set `ask.max_output_tokens` (4096 by default) and the optional `ask.context_tokens` policy at system or organization scope; the lowest value applies. Unset context uses the model’s own window; a configured value can reduce that window for Ask without changing ordinary threads. Fitting reserves the answer’s output tokens and the turn’s tool-result allowance (`ask.turn_tool_bytes`), converted with the chosen model’s measured token estimate. There is no item-count cutoff. If the model’s window has not been recorded, Ask uses the existing conservative handoff estimate; record its context size or reduce the reserves if they do not fit.
+What bounds a conversation is the chosen model’s context window, counted in tokens with that model’s measured estimate. Nothing is set aside in advance except the room the answer may take, `ask.max_output_tokens` (4096 by default): a request is fitted to the window less that. Administrators can set it and the optional `ask.context_tokens` at system or organization scope; the lowest value applies. Unset context uses the model’s own window; a configured value can reduce that window for Ask without changing ordinary threads. No pair of settings can make every question fail: an answer takes half of a window that is no larger than twice its most, and the conversation keeps the rest. There is no item-count cutoff and no limit in bytes.
 
-If the reserves leave no room, the reason names `ask.context_tokens` and the reserves to change. If even a summary cannot fit, Ask says the conversation is too long for the selected model: start a new conversation or **Keep as thread**. No history disappears silently.
+When the history does not fit, the oldest messages are summarized as above. Completed reads are fitted before the page in view. A source that cannot fit is shortened in tokens, ends in a line that says so and where the whole source is, and the answer goes on from there; open that link, or ask for a narrower part, to read more. Every later step checks the current source again and fits it to the available tokens, including content added since its first reading.
+
+A model whose window has not been recorded is not given a small one: Ask sends the conversation as it is. If the provider refuses the combined input and answer allowance, Ask retries with a smaller answer allowance first. A refusal even with the smallest answer establishes a smaller window and triggers a summary of the oldest messages; record the model’s context size to avoid extra requests. If even a summary cannot fit, Ask says the conversation is too long for the selected model: start a new conversation or **Keep as thread**. If the question and what it read are too long by themselves, no summary of earlier messages helps, and Ask says so: ask a narrower question or start with fewer sources. No history disappears silently.
+
+The numbers inside the read tools are settings too, each with today’s value as its default: `ask.docs_hits` (5 guide pages per search), `ask.docs_excerpt_tokens` (1,000 tokens of each), `ask.max_operations` (20 operations per catalogue search) and `ask.max_links` (50 links kept from one read). The step and tool counts per question are `ask.max_steps` (16) and `ask.max_tools` (32).
+
+When Ask cannot take a question, the message says why in its own words: the model or provider is not allowed or not ready, a usage limit was reached, or the organization cannot be opened as you. Ask answers as you are in an organization, whatever the **As admin** switch says; an administrator who is not a member of an organization can inspect its conversations but not ask in it.
 
 ## One organization per conversation
 
@@ -66,7 +74,7 @@ Conversations normally live in your personal organization. If personal organizat
 
 Ask reads as you and makes no changes. It can search, open readable sources, read their history and consult the bundled user guide. It does not lend access to another person or instruct a working thread.
 
-The panel states that the conversation's root-organization admins can inspect and export it. An admin inspection is read-only: it cannot send, retry, stop or keep someone else's conversation. Turn on the existing **As admin** switch, open **History**, choose **Inspect this organization’s conversations**, then open a row. **Export conversation** downloads the permitted conversation as JSON.
+The admins of a conversation's root organization can inspect and export it. An admin inspection is read-only: it cannot send, retry, stop or keep someone else's conversation. Turn on the existing **As admin** switch, open **History**, choose **Inspect this organization’s conversations**, then open a row. **Export conversation** downloads the permitted conversation as JSON.
 
 You normally pay for questions you ask, unless the effective Ask setting selects its setting owner's provider use. The panel shows the effective payer. Your organization's applicable per-person and shared usage caps still apply.
 

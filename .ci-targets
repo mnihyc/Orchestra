@@ -1,0 +1,2 @@
+# b42k-c: the same assembly: the API's programs, first half
+test -p orch-api-core --test container_units --test everything_resources --test realtime_diagnostics --test kfix_binding --test settings --test threads_settings --test model_entries --test provider_models --test ask --test binding_options --test binding_readiness 

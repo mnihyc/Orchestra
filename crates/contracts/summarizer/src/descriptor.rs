@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn the_setting_names_the_kind_and_the_rest_is_the_configuration() {
         let setting = json!({
-            "kind": "model", "provider_id": "p1", "model_name": "small", "max_output_tokens": 120,
+            "kind": "model", "provider_id": "p1", "model_name": "small", "answer_max_output_tokens": 1024,
             "context_tokens": 32000, "prompts": { "description": null, "title": null, "tags": null }
         });
         let (kind, config) = split_setting(&setting).unwrap();

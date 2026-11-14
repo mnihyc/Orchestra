@@ -29,7 +29,7 @@ import { show } from './support';
 
 const server = vi.hoisted(() => {
   const limits: ThreadLimits = { reached: [], bypass_all: false };
-  return { submit: vi.fn<typeof Draft.submitInput>(), context: vi.fn<() => Promise<ThreadContext>>(), cancelUpload: vi.fn<() => Promise<void>>(), live: true, limits };
+  return { settingsRead: vi.fn<() => Promise<ResolvedSetting[]>>(), submit: vi.fn<typeof Draft.submitInput>(), context: vi.fn<() => Promise<ThreadContext>>(), cancelUpload: vi.fn<() => Promise<void>>(), live: true, limits };
 });
 vi.mock('@/features/composer/Draft', async (load) => ({ ...await load<typeof Draft>(), useDraftSync: () => 'idle', submitInput: server.submit }));
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useSocketStatus: () => ({ phase: server.live ? 'ready' : 'reconnecting' }) }));
@@ -37,7 +37,7 @@ vi.mock('@/api/threads', async (load) => ({ ...await load<typeof ThreadsApi>(),
   parametersQuery: (id: string) => ({ queryKey: ['keyboard-parameters', id], queryFn: () => Promise.resolve(parameters) }),
   limitsQuery: (id: string) => ({ queryKey: ['keyboard-limits', id], initialData: server.limits, queryFn: () => Promise.resolve(server.limits) }),
 }));
-vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(), settingsQuery: (id: string) => ({ queryKey: ['keyboard-settings', id], queryFn: () => Promise.resolve(settings) }) }));
+vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(), settingsQuery: (id: string) => ({ queryKey: ['keyboard-settings', id], queryFn: server.settingsRead }) }));
 vi.mock('@/api/auth', async (load) => ({ ...await load<typeof AuthApi>(), metaQuery: { queryKey: ['keyboard-meta'], queryFn: () => Promise.resolve(meta()) } }));
 vi.mock('@/api/context', async (load) => ({ ...await load<typeof ContextApi>(), threadContextQuery: (id: string, detail: 'kept' | 'count', revision: number) => ({ queryKey: ['keyboard-context', id, detail, revision], queryFn: () => server.context() }) }));
 vi.mock('@/features/composer/ModelEffort', () => ({ ModelEffort: () => <button>Model</button> }));
@@ -61,6 +61,8 @@ let theme: string | null = null;
 let signedIn: string | null = null;
 beforeEach(() => {
   locale = currentLocale(); theme = document.documentElement.getAttribute('data-theme'); signedIn = client.session.getState().userId;
+  server.settingsRead.mockReset().mockImplementation(() => Promise.resolve(settings));
+  delete parameters.composer;
   server.submit.mockReset(); server.live = true; server.limits = { reached: [], bypass_all: false };
   server.cancelUpload.mockReset().mockResolvedValue(undefined);
   server.context.mockReset(); server.context.mockResolvedValue({ harness_kind: null, harness: null, reports: { tokens: false, context: false, breakdown: false }, fill: null, turn_id: null, shortened: null, can_count: false });
@@ -406,4 +408,42 @@ it('marks the first-message Plan default and retires the mark after an explicit 
     await userEvent.type(screen.getByRole('textbox', { name: i18n.t('composer.label') }), 'Work directly{Enter}');
     expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [{ type: 'text', text: 'Work directly' }], 'queue', undefined, undefined, false);
   } finally { settings.pop(); }
+});
+
+
+it('marks the first-message Plan default from compact composer facts without a settings read', async () => {
+  if (native.binding === null) throw new Error('The fixture needs its reported program');
+  native = { ...native, state: 'idle', current_turn_id: null, usage: null, binding: { ...native.binding, plan_mode: true } };
+  threadWriter.reset(native.id, { thread: native, turns: [] }, false);
+  parameters.composer = { default_delivery: 'queue', paste_inline_context_share: 25, plan_first: true, owner_reads: false };
+  show(<Composer thread={native} />);
+  const plan = () => screen.getByRole('button', { name: i18n.t('composer.plan.label') });
+  await waitFor(() => expect(plan()).toHaveAttribute('aria-pressed', 'true'));
+  expect(within(plan()).getByText(i18n.t('composer.plan.placeDefault'))).toBeVisible();
+  expect(server.settingsRead).not.toHaveBeenCalled();
+  await userEvent.click(plan());
+  expect(plan()).toHaveAttribute('aria-pressed', 'false');
+  expect(within(plan()).queryByText(i18n.t('composer.plan.placeDefault'))).toBeNull();
+});
+
+it('waits for the first-message setting before marking its Plan default', async () => {
+  if (native.binding === null) throw new Error('The fixture needs its reported program');
+  native = { ...native, state: 'idle', current_turn_id: null, usage: null, binding: { ...native.binding, plan_mode: true } };
+  threadWriter.reset(native.id, { thread: native, turns: [] }, false);
+  let finish: ((rows: ResolvedSetting[]) => void) | undefined;
+  const pending = new Promise<ResolvedSetting[]>((resolve) => { finish = resolve; });
+  server.settingsRead.mockReturnValue(pending);
+  show(<Composer thread={native} />);
+  const plan = () => screen.getByRole('button', { name: i18n.t('composer.plan.label') });
+  await waitFor(() => expect(server.settingsRead).toHaveBeenCalledOnce());
+  expect(plan()).toHaveAttribute('aria-pressed', 'false');
+  expect(within(plan()).queryByText(i18n.t('composer.plan.placeDefault'))).toBeNull();
+  const resolve = finish;
+  if (resolve === undefined) throw new Error('The pending setting read is required');
+  await act(async () => {
+    resolve([...settings, { key: 'thread.plan_first', value: true, own: null, source: { scope: 'topic', node: null }, locked_by: null, writable: false, parts: [] }]);
+    await pending;
+  });
+  await waitFor(() => expect(plan()).toHaveAttribute('aria-pressed', 'true'));
+  expect(within(plan()).getByText(i18n.t('composer.plan.placeDefault'))).toBeVisible();
 });

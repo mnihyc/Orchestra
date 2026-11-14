@@ -10,28 +10,28 @@ import type { DocumentDirectory, DocumentTreeItem, DocumentTreePage, DocumentTre
 export interface DocumentDirectoryChange { documentDirectories: readonly DocumentDirectory[] }
 export interface DocumentTreeChange { documentTree: { receipt: DocumentTreeReceipt; input: DocumentTreeOperationRequest } }
 interface Observer { request: DocumentDirectoryRequest; reset: (request: DocumentDirectoryRequest) => void }
-const observers = new WeakMap<QueryClient, Set<Observer>>();
-const entryObservers = new WeakMap<QueryClient, Set<{ item: DocumentTreeItem; reset: () => void }>>();
+const observers = new WeakMap<ReturnType<QueryClient['getQueryCache']>, Set<Observer>>();
+const entryObservers = new WeakMap<ReturnType<QueryClient['getQueryCache']>, Set<{ item: DocumentTreeItem; reset: () => void }>>();
 const identity = (item: DocumentDirectory | DocumentTreeItem) => `${item.kind}:${item.id}`;
 
 /** Only mounted, visible readers register; no directory or cursor history is retained here. */
 export function observeDocumentDirectory(cache: QueryClient, request: DocumentDirectoryRequest, reset: (request: DocumentDirectoryRequest) => void): () => void {
-  let held = observers.get(cache);
-  if (held === undefined) { held = new Set(); observers.set(cache, held); }
+  let held = observers.get(cache.getQueryCache());
+  if (held === undefined) { held = new Set(); observers.set(cache.getQueryCache(), held); }
   const entry = { request, reset }; held.add(entry);
   return () => { held.delete(entry); };
 }
 
 export function observeDocumentEntry(cache: QueryClient, item: DocumentTreeItem, reset: () => void): () => void {
-  let held = entryObservers.get(cache);
-  if (held === undefined) { held = new Set(); entryObservers.set(cache, held); }
+  let held = entryObservers.get(cache.getQueryCache());
+  if (held === undefined) { held = new Set(); entryObservers.set(cache.getQueryCache(), held); }
   const entry = { item, reset }; held.add(entry);
   return () => { held.delete(entry); };
 }
 
 /** Explicit retry restarts the one metadata owner even when a cache-only view supplied the button. */
 export function restartDocumentEntry(cache: QueryClient, item: DocumentTreeItem): void {
-  for (const observer of entryObservers.get(cache) ?? []) if (identity(observer.item) === identity(item)) observer.reset();
+  for (const observer of entryObservers.get(cache.getQueryCache()) ?? []) if (identity(observer.item) === identity(item)) observer.reset();
 }
 
 export function isDocumentDirectory(value: unknown): value is DocumentDirectory {
@@ -69,7 +69,7 @@ export async function repairDocumentDirectories(cache: QueryClient, selected: re
   // Stop older live callbacks and requests before any asynchronous repair. A late old page
   // must not put an item back after a move, deletion or loss of access.
   const active = new Map<string, DocumentDirectoryRequest>();
-  for (const observer of observers.get(cache) ?? []) {
+  for (const observer of observers.get(cache.getQueryCache()) ?? []) {
     if (!directories.has(identity(observer.request.at))) continue;
     const request = { ...observer.request, node: observer.request.at.kind === 'container' ? anchors.get(observer.request.at.id) ?? observer.request.node : observer.request.node, cursor: null };
     observer.reset(request);
@@ -85,7 +85,7 @@ export async function repairDocumentDirectories(cache: QueryClient, selected: re
 export async function applyDocumentTreeChange(cache: QueryClient, { receipt, input }: DocumentTreeChange['documentTree']): Promise<void> {
   const removed = input.command !== 'move_out' ? [] : input.deletion_plan !== null && 'entries' in input.deletion_plan ? input.deletion_plan.entries : [];
   const changed = new Set([...receipt.entries.map((entry) => identity(entry.item)), ...(input.command === 'move_out' ? input.items.map(identity) : []), ...removed.map((entry) => identity(entry.item))]);
-  for (const observer of entryObservers.get(cache) ?? []) if (changed.has(identity(observer.item))) observer.reset();
+  for (const observer of entryObservers.get(cache.getQueryCache()) ?? []) if (changed.has(identity(observer.item))) observer.reset();
   const repairs: Promise<unknown>[] = [];
   for (const query of cache.getQueryCache().getAll()) {
     const [head, kind, id, retained, scope] = query.queryKey;

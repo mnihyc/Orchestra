@@ -43,6 +43,7 @@ impl native::Selected for Message {
     type Query = ();
     type Value = MessageRow;
     type Reply = AdminMessage;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::GET;
     const WATCH_ORDINARY: bool = true;
     fn select<'a>(
@@ -189,6 +190,7 @@ impl<S: Scope> native::Selected for Sent<S> {
     type Query = PageQuery;
     type Value = SentPage;
     type Reply = AdminMessageListResponse;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = S::ROW;
     const WATCH_ORDINARY: bool = true;
     fn select<'a>(

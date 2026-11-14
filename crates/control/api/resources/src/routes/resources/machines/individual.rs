@@ -525,7 +525,7 @@ impl native::Selected for MachineRead {
 
 /// Retain the actual native individual source for ordinary and admitted HTTP publication.
 pub(super) async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Machine> {
-    let rendered = native::selected_read::<MachineRead>(ctx, (), ()).await?;
+    let rendered = native::selected_value::<MachineRead>(ctx, (), ()).await?;
     publication::retain(
         &rendered.ctx,
         &rendered.accepted,
