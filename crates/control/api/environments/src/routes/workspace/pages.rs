@@ -18,8 +18,6 @@ use orch_api_contract::workspace::FileListSource;
 
 use orch_db::queries::environments::workspace::EnvironmentRow;
 
-use orch_link_contract::commands::FS_LIST_MAX_ENTRIES;
-
 #[cfg(any(test, feature = "test-support"))]
 use orch_link_contract::commands::FsListPageResult;
 
@@ -142,7 +140,7 @@ impl Window {
             .transpose()?;
         Ok(Self {
             after,
-            limit: limit.min(FS_LIST_MAX_ENTRIES) as usize,
+            limit: limit as usize,
             bytes: 1,
             rows: BinaryHeap::new(),
             more: false,

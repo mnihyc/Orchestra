@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-envhost --lib -- archive::
+test -p orch-envhost --test environment
+test -p orch-api-base --lib -- archives::
+test -p orch-api-core --test document_containers --test workspace_looking

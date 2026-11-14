@@ -570,3 +570,12 @@ States describe reported facts. Offline can recover; lost means an explicit perm
 | `state:UploadInventoryState.complete` | Verified immutable bytes are in the catalogue. |
 | `state:UploadInventoryState.partial` | The upload is unfinished; this does not claim that a sender is active now. |
 | `state:UploadInventoryState.expired` | The upload session’s completion deadline passed. |
+
+### File preparation
+
+| Reference | Meaning |
+| --- | --- |
+| `state:EnvironmentIndexReason.unreadable` | Some metadata or exclusion rules could not be read; safe live file reads retain their correction path. |
+| `state:CommandKeyPhase.queued` | Accepted and waiting for its place; it does not yet hold the serial line. |
+| `state:CommandKeyPhase.running` | The command is using its serial line now. |
+| `state:CommandKeyPhase.released` | Capture released its line; upload can continue while later work starts. |

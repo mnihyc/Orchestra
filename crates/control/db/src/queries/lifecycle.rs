@@ -85,7 +85,7 @@ pub async fn cancel_delivery(
 /// Pending lifecycle controls, with an interrupt before a close made by the same act.
 pub async fn controls(conn: &mut Conn, limit: i64) -> Result<Vec<CommandRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT id,machine_id,kind,body,serial_key,state,result,error,attempts,deadline_at,created_at,updated_at
+        "SELECT id,machine_id,kind,body,serial_key,state,key_phase,result,error,attempts,deadline_at,created_at,updated_at
          FROM commands c WHERE state IN ('queued','sent','accepted')
           AND (kind IN ('turn.interrupt','lease.close','session.close','session.close.fenced','session.continuation.close','node.runtime.stop','provider.stop','env.detach','mcp.forget')
             OR (kind='approval.resolve' AND EXISTS(SELECT 1 FROM approvals a WHERE a.state='cancelled'

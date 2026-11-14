@@ -12,10 +12,9 @@
 pub use orch_api_base::test_observers;
 
 pub mod archives {
+    pub use orch_api_base::archives::{ArchiveRead, ArchiveReads};
 
     pub use orch_api_base::archives::READ_TIME;
-
-    pub use orch_api_base::archives::ZIP_ENTRIES_MAX;
 
     pub use orch_api_base::archives::ArchiveError;
 
@@ -571,6 +570,12 @@ pub mod backplane {
         #[tokio::test]
         async fn a_runtime_network_report_obeys_the_runtime_hosts_source_binding() {
             orch_api_base::backplane::machine_report_tests::__api_run_a_runtime_network_report_obeys_the_runtime_hosts_source_binding().await
+        }
+        #[cfg(test)]
+        #[tokio::test]
+        async fn the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted()
+         {
+            orch_api_base::backplane::machine_report_tests::__api_run_the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted().await
         }
     }
     #[cfg(test)]
@@ -4749,13 +4754,32 @@ pub mod routes {
                 }
                 #[cfg(test)]
                 #[test]
-                fn what_a_suggestion_lists_is_on_offer_and_none_of_it_is_enabled() {
-                    orch_api_resources::routes::resources::models::tests::__api_run_what_a_suggestion_lists_is_on_offer_and_none_of_it_is_enabled()
+                fn what_a_suggestion_lists_is_on_offer_and_the_organizations_choice_switches_it_on()
+                {
+                    orch_api_resources::routes::resources::models::tests::__api_run_what_a_suggestion_lists_is_on_offer_and_the_organizations_choice_switches_it_on()
                 }
                 #[cfg(test)]
                 #[test]
                 fn search_offers_never_enable_the_tool_or_its_default() {
                     orch_api_resources::routes::resources::models::tests::__api_run_search_offers_never_enable_the_tool_or_its_default()
+                }
+                #[cfg(test)]
+                #[test]
+                fn a_model_without_a_window_of_its_own_has_the_largest_context_its_source_reports()
+                {
+                    orch_api_resources::routes::resources::models::tests::__api_run_a_model_without_a_window_of_its_own_has_the_largest_context_its_source_reports()
+                }
+                #[cfg(test)]
+                #[test]
+                fn a_name_the_catalogue_lists_is_added_with_what_the_catalogue_says_under_what_was_written()
+                 {
+                    orch_api_resources::routes::resources::models::tests::__api_run_a_name_the_catalogue_lists_is_added_with_what_the_catalogue_says_under_what_was_written()
+                }
+                #[cfg(test)]
+                #[test]
+                fn the_organizations_choice_of_what_adding_switches_on_is_read_with_all_as_the_shipped_one()
+                 {
+                    orch_api_resources::routes::resources::models::tests::__api_run_the_organizations_choice_of_what_adding_switches_on_is_read_with_all_as_the_shipped_one()
                 }
             }
         }

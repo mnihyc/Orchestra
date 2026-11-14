@@ -342,11 +342,11 @@ async fn dispatch(app: &App, call: &CallContext) -> ApiResult<Json> {
                 ));
             }
             let limit = args.limit.unwrap_or(20);
-            if !(1..=orch_engine::tools::definitions::PAGE_MAX).contains(&limit) {
-                return Err(ApiError::invalid("limit", "use 1 through 200"));
+            if limit < 1 {
+                return Err(ApiError::invalid("limit", "use a positive row count"));
             }
             let selected:Vec<rows::ScheduleRow>=sqlx::query_as("SELECT * FROM input_schedules WHERE topic_id=$1 AND target->>'kind'='thread' AND target->>'thread_id'=$2 AND definition_authority->>'kind'='agent' AND deleted_at IS NULL AND ($3::uuid IS NULL OR id>$3) ORDER BY id LIMIT $4")
-                .bind(thread.topic_id).bind(thread.node_id.to_string()).bind(args.cursor).bind(limit+1).fetch_all(&mut *tx).await.map_err(DbError::from)?;
+                .bind(thread.topic_id).bind(thread.node_id.to_string()).bind(args.cursor).bind(limit.saturating_add(1)).fetch_all(&mut *tx).await.map_err(DbError::from)?;
             let mut items = Vec::new();
             let mut bytes = 0_usize;
             for row in selected.iter().take(usize::try_from(limit).unwrap_or(0)) {
@@ -356,7 +356,7 @@ async fn dispatch(app: &App, call: &CallContext) -> ApiResult<Json> {
                     .len();
                 // The existing complete-read budget bounds a page, never the schedule's lifetime/count.
                 if bytes.saturating_add(size)
-                    > usize::try_from(orch_engine::tools::definitions::READ_BYTES_MAX).unwrap_or(0)
+                    > orch_agent_contract::tool_answers::max_bytes(&call.arguments)
                 {
                     break;
                 }
