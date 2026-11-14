@@ -586,6 +586,20 @@ fn model_options(
     settings: &Resolved,
     entries: Option<&[&orch_access_contract::permissions::ProviderUse]>,
 ) -> ApiResult<Vec<ModelOption>> {
+    model_options_for(
+        rows,
+        settings,
+        entries,
+        orch_access_contract::permissions::ProviderUsePurpose::Work,
+    )
+}
+
+fn model_options_for(
+    rows: Vec<orch_db::queries::resources::ProviderModelRow>,
+    settings: &Resolved,
+    entries: Option<&[&orch_access_contract::permissions::ProviderUse]>,
+    purpose: orch_access_contract::permissions::ProviderUsePurpose,
+) -> ApiResult<Vec<ModelOption>> {
     rows.into_iter()
         .map(|row| {
             let reason = if !row.enabled {
@@ -598,7 +612,14 @@ fn model_options(
                 Some(ModelOptionReason::ExcludedByPolicy)
             } else if entries.is_some_and(|entries| {
                 !entries.iter().any(|entry| {
-                    orch_authz::options::allows_model(entry, &row.model_name, &row.groups)
+                    orch_authz::options::entry_allows_for(
+                        entry,
+                        &orch_authz::options::Wanted {
+                            model: Some((&row.model_name, &row.groups)),
+                            ..Default::default()
+                        },
+                        purpose,
+                    )
                 })
             }) {
                 Some(ModelOptionReason::ExcludedByEntry)

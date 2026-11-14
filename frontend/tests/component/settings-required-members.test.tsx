@@ -6,10 +6,66 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
 import { shapeOf } from '@/features/settings/settingsModel';
 import { ValueControl } from '@/features/settings/ValueControl';
+import { SummarizerChoice } from '@/features/settings/SummarizerChoice';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 afterEach(async () => { cleanup(); await setLocale('en'); });
+
+for (const locale of ['en', 'zh-CN'] as const) it(`chooses a registered summarizer and edits its fields without writing JSON in ${locale}`, async () => {
+  await setLocale(locale);
+  const user = userEvent.setup(), changed = vi.fn();
+  const schema = { type: 'object', properties: { kind: { type: 'string' } }, additionalProperties: true,
+    'x-summarizers': [{ name: 'rules', title: 'Rule summaries', fields: ['summary'], config_schema: {
+      type: 'object', properties: { prefix: { type: 'string', default: 'Summary:' } }, required: ['prefix'], additionalProperties: false,
+    } }] };
+  function Editor() {
+    const [value, setValue] = useState<unknown>({});
+    const props = { schema, shape: shapeOf(schema), value, label: 'Producer', onChange: (next: unknown) => { changed(next); setValue(next); } };
+    return <SummarizerChoice {...props} />;
+  }
+  show(<Editor />);
+  await user.click(screen.getByRole('combobox', { name: 'Producer' }));
+  await user.click(screen.getByRole('option', { name: 'Rule summaries' }));
+  const prefix = screen.getByRole('textbox', { name: 'Prefix' });
+  expect(prefix).toHaveValue('Summary:');
+  await user.clear(prefix); await user.type(prefix, 'Review:');
+  expect(changed).toHaveBeenLastCalledWith({ kind: 'rules', prefix: 'Review:' });
+  expect(screen.queryByRole('textbox', { name: 'Producer' })).not.toBeInTheDocument();
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`edits a model summarizer's token budgets and instructions in its closed optional section in ${locale}`, async () => {
+  await setLocale(locale);
+  const user = userEvent.setup(), changed = vi.fn();
+  const schema = { type: 'object', 'x-summarizers': [{ name: 'model', title: 'A model', fields: ['summary'], config_schema: {
+    type: 'object', additionalProperties: false, required: ['provider_id', 'model_name'], properties: {
+      provider_id: { type: 'string', format: 'uuid' }, model_name: { type: 'string' }, params: { type: 'object', default: {} },
+      context_tokens: { type: 'integer', minimum: 1, default: 32000 }, max_output_tokens: { type: 'integer', minimum: 1, default: 120 },
+      prompts: { type: 'object', default: {} },
+    },
+  } }] };
+  function Editor() {
+    const [value, setValue] = useState<unknown>({});
+    return <SummarizerChoice schema={schema} shape={shapeOf(schema)} value={value} label="Producer"
+      onChange={(next) => { changed(next); setValue(next); }} />;
+  }
+  const view = show(<Editor />);
+  await user.click(screen.getByRole('combobox', { name: 'Producer' }));
+  await user.click(screen.getByRole('option', { name: i18n.t('settings.summarizer.modelKind') }));
+  expect(screen.getByRole('combobox', { name: i18n.t('settings.summarizer.provider') })).toBeVisible();
+  expect(screen.getByRole('combobox', { name: i18n.t('settings.summarizer.model') })).toBeDisabled();
+  expect(view.container.querySelector('details')).not.toHaveAttribute('open');
+  await user.click(screen.getByText(i18n.t('settings.summarizer.options')));
+  const budget = screen.getByRole('spinbutton', { name: i18n.t('settings.summarizer.fields.context_tokens') });
+  expect(budget).toHaveValue(32000);
+  await user.clear(budget); await user.type(budget, '64000');
+  const instructions = i18n.t('settings.summarizer.instructions', { field: i18n.t('settings.summarizer.fields.summary') });
+  await user.click(screen.getByRole('checkbox', { name: instructions }));
+  await user.type(screen.getByRole('textbox', { name: instructions }), 'Keep the deciding facts.');
+  expect(changed).toHaveBeenLastCalledWith({ kind: 'model', context_tokens: 64000, max_output_tokens: 120,
+    params: {}, prompts: { summary: 'Keep the deciding facts.' } });
+});
+
 for (const locale of ['en', 'zh-CN'] as const) it(`includes the untouched automatic=false member of a new document target in ${locale}`, async () => {
   await setLocale(locale);
   const user = userEvent.setup(), changed = vi.fn();

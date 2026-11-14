@@ -188,6 +188,37 @@ fn lacks(missing: &[MissingAccess]) -> Vec<(ObjectKind, Vec<Permission>)> {
 }
 
 #[tokio::test]
+async fn sharing_a_model_for_ask_does_not_allow_an_ordinary_thread_to_use_it() {
+    let s = Setting::new().await;
+    s.row(
+        "provider",
+        s.provider,
+        "provider.use",
+        &s.bea,
+        json!({"purposes":["ask"],"models":["big"]}),
+    )
+    .await;
+    assert_eq!(
+        lacks(&refused(s.turn(&s.bea, "big", s.thread).await)),
+        [(ObjectKind::Provider, vec![Permission::ProviderUse])]
+    );
+    s.row(
+        "provider",
+        s.provider,
+        "provider.use",
+        &s.bea,
+        json!({"purposes":["work"],"models":["small"]}),
+    )
+    .await;
+    assert_eq!(
+        lacks(&refused(s.turn(&s.bea, "big", s.thread).await)),
+        [(ObjectKind::Provider, vec![Permission::ProviderUse])],
+        "a separate work entry cannot widen the model shared for Ask"
+    );
+    assert!(s.turn(&s.bea, "small", s.thread).await.is_allowed());
+}
+
+#[tokio::test]
 async fn the_owner_and_a_person_named_in_the_use_row_run_a_turn_and_a_stranger_is_refused_with_everything_missing()
  {
     let s = Setting::new().await;

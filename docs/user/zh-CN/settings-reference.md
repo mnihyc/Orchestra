@@ -489,10 +489,12 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:ask.retention_min_days` | **Ask 最短保留时间** — 会话根组织的管理员规定的最短历史保留时间。 下级只能提高此下限。 |
 | `setting:ask.retention_max_days` | **Ask 最长保留时间** — 会话根组织的管理员允许的最长历史保留时间。 |
 | `setting:ask.max_steps` | **Ask 每轮模型步骤数** — 每个问题允许的模型步骤数，达到后请提问者选择继续。 |
-| `setting:ask.max_output_tokens` | **Ask 回答令牌数** — 每次 Ask 模型请求允许的最大输出令牌数，也会在安排对话上下文前预留。系统和组织设置中的最小值生效。 |
-| `setting:ask.context_tokens` | **Ask 上下文令牌数** — 未设置时使用所选模型的上下文窗口。设置后仅对 Ask 取较小值，仍需留足输出和工具结果空间。系统和组织设置中的最小值生效。 |
+| `setting:ask.max_output_tokens` | **Ask 回答令牌数** — 每次 Ask 模型请求允许的最大输出令牌数。请求按窗口减去此值来安排，且回答最多占窗口的一半。系统和组织设置中的最小值生效。 |
+| `setting:ask.context_tokens` | **Ask 上下文令牌数** — 未设置时使用所选模型的上下文窗口；未记录窗口的模型不会被当作小窗口。设置后仅对 Ask 取较小值。窗口不超过回答令牌数两倍时，回答占其一半。系统和组织设置中的最小值生效。 |
 | `setting:ask.max_tools` | **Ask 每轮读取操作数** — 每个问题允许的读取操作数，达到后请提问者缩小问题范围。 |
-| `setting:ask.tool_bytes` | **Ask 单个来源大小** — 交给模型的单次读取结果的最大字节数，并提供指向完整来源的标准链接。 |
-| `setting:ask.turn_tool_bytes` | **Ask 每轮来源总量** — 回答一个问题时提供给模型的读取结果总字节数。 |
+| `setting:ask.docs_hits` | **Ask 每次搜索的指南页数** — Ask 每次搜索帮助时交给模型的指南页面数上限；中英文同时匹配时交替给出。 |
+| `setting:ask.docs_excerpt_tokens` | **Ask 指南摘录大小** — Ask 搜索帮助时交给模型的单个指南页面的最大令牌数，并附上该页面的链接。 |
+| `setting:ask.max_operations` | **Ask 每次搜索的操作数** — Ask 每次搜索读取目录时返回的读取操作数上限。 |
+| `setting:ask.max_links` | **Ask 每个来源的链接数** — Ask 在一次读取中保留的标准来源链接数上限。 |
 | `setting:providers.model_groups_max` | **模型分组数** — 每个模型可加入的分组数，默认 8 个，可提高。设为 0 时不允许新加入分组，已有分组不变。 |
 | `option:usage.rates.*.web_fetch_per_call` | 每次成功网页抓取调用的点数。 |
