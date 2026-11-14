@@ -75,8 +75,10 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     } else await page.locator(`[id=${JSON.stringify(`tab-${tabId}`)}]`).click();
     await expect.poll(() => new URL(page.url()).pathname).toBe(`/thread/${ACME.mainThread}`);
     const fold = page.locator('[data-fold="view-turn"]');
-    if (await fold.count() > 0 && await fold.first().getAttribute('aria-expanded') === 'false') await fold.first().click();
     const step = page.locator('[data-step="viewed-picture"]');
+    // The thread is drawn after its address is; the fold, or the step it holds, is what says the turn has been drawn.
+    await expect(fold.or(step).first()).toBeVisible();
+    if (await fold.count() > 0 && await fold.first().getAttribute('aria-expanded') === 'false') await fold.first().click();
     await step.locator('[data-tool-row] > button[aria-expanded]').click();
     const open = step.getByRole('button', { name: words.fileMedia.openFile.replace('{{name}}', NAME), exact: true });
     await open.focus();
