@@ -269,7 +269,7 @@ impl ScheduleTools for Tools {
 
 fn view(row: &rows::ScheduleRow) -> ApiResult<Json> {
     Ok(
-        json!({"id":row.id,"kind":"agent","name":row.name,"timing":row.timing,
+        json!({"id":row.id,"kind":"agent","name":row.name,"timing":row.timing,"plan":row.plan,"delivery":row.delivery,
         "state":row.state,"next_run_at":row.next_run_at,"agent":metadata(row)?}),
     )
 }
@@ -342,11 +342,11 @@ async fn dispatch(app: &App, call: &CallContext) -> ApiResult<Json> {
                 ));
             }
             let limit = args.limit.unwrap_or(20);
-            if !(1..=orch_engine::tools::definitions::PAGE_MAX).contains(&limit) {
-                return Err(ApiError::invalid("limit", "use 1 through 200"));
+            if limit < 1 {
+                return Err(ApiError::invalid("limit", "use a positive row count"));
             }
             let selected:Vec<rows::ScheduleRow>=sqlx::query_as("SELECT * FROM input_schedules WHERE topic_id=$1 AND target->>'kind'='thread' AND target->>'thread_id'=$2 AND definition_authority->>'kind'='agent' AND deleted_at IS NULL AND ($3::uuid IS NULL OR id>$3) ORDER BY id LIMIT $4")
-                .bind(thread.topic_id).bind(thread.node_id.to_string()).bind(args.cursor).bind(limit+1).fetch_all(&mut *tx).await.map_err(DbError::from)?;
+                .bind(thread.topic_id).bind(thread.node_id.to_string()).bind(args.cursor).bind(limit.saturating_add(1)).fetch_all(&mut *tx).await.map_err(DbError::from)?;
             let mut items = Vec::new();
             let mut bytes = 0_usize;
             for row in selected.iter().take(usize::try_from(limit).unwrap_or(0)) {
@@ -356,7 +356,7 @@ async fn dispatch(app: &App, call: &CallContext) -> ApiResult<Json> {
                     .len();
                 // The existing complete-read budget bounds a page, never the schedule's lifetime/count.
                 if bytes.saturating_add(size)
-                    > usize::try_from(orch_engine::tools::definitions::READ_BYTES_MAX).unwrap_or(0)
+                    > orch_agent_contract::tool_answers::max_bytes(&call.arguments)
                 {
                     break;
                 }
@@ -503,7 +503,7 @@ async fn dispatch(app: &App, call: &CallContext) -> ApiResult<Json> {
                     "the end must include a future occurrence and max_runs must be positive",
                 ));
             }
-            let agent:Id=sqlx::query_scalar("SELECT s.agent_id FROM turns t JOIN segments s ON s.id=t.segment_id WHERE t.id=$1 AND t.thread_id=$2")
+            let (agent, plan):(Id,bool)=sqlx::query_as("SELECT s.agent_id,t.plan FROM turns t JOIN segments s ON s.id=t.segment_id WHERE t.id=$1 AND t.thread_id=$2")
                 .bind(call.turn).bind(thread.node_id).fetch_one(&mut *tx).await.map_err(DbError::from)?;
             let id = orch_engine::ids::derived(
                 "agent-input-schedule",
@@ -542,6 +542,8 @@ async fn dispatch(app: &App, call: &CallContext) -> ApiResult<Json> {
                         thread_id: thread.node_id,
                     })?,
                     content: encode(&vec![ContentPart::Text { text: note.into() }])?,
+                    plan,
+                    delivery: "queue".into(),
                     native_action: None,
                     definition_authority: Some(encode(&definition)?),
                     timing: encode(&timing)?,

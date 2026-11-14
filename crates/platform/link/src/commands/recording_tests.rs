@@ -71,6 +71,8 @@ struct Handler {
 
 fn fallback() -> FsRecordResult {
     FsRecordResult {
+        indexing: None,
+
         state: RecordState::Unavailable,
         tree_ref: None,
         repository_head: None,
@@ -192,6 +194,7 @@ fn record(rig: &Rig, id: Id, environment: Id) -> TestResult<Cmd> {
             environment_id: environment,
             snapshot_id: new_id(),
             directory: String::new(),
+            wait_for_indexing: true,
             kind: RecordKind::Turn,
             record_days: 1,
             max_bytes: 1024,
@@ -490,5 +493,137 @@ async fn publication_cancellation_panic_and_wrong_result_each_finalize_once_and_
         assert_eq!(rig.handler.dropped.load(Ordering::SeqCst), 1);
         assert_eq!(rig.server.publications(), 0);
     }
+    Ok(())
+}
+
+struct Closes(Arc<Mutex<Vec<Id>>>);
+
+#[async_trait]
+impl CommandHandler for Closes {
+    async fn handle(&self, context: CommandContext, command: Command) -> CommandOutcome {
+        lock(&self.0).push(context.id);
+        match command {
+            Command::SessionClose(_) => Ok(CommandResult::SessionClose(Empty {})),
+            _ => Err(CommandError::new(
+                ErrorCode::Unsupported,
+                "the test role takes only closes",
+            )),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_command_whose_write_down_stalls_past_its_deadline_still_runs_when_the_disk_answers()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let now: Time = "2026-10-16T00:00:00Z".parse()?;
+    let clock = ManualClock::new(now.get());
+    let stalled = new_id();
+    let writes = Arc::new(TestWrites::new(stalled, true, 0).accepting());
+    let _release = ReleaseWrites(Arc::clone(&writes));
+    let mut journal = Journal::open(directory.path(), Duration::from_secs(86_400), now)?;
+    journal.terminal_writes(Arc::clone(&writes));
+    let server = CommandServer::new(
+        journal,
+        Arc::new(clock.clone()),
+        ServerOptions {
+            roles: vec![Role::Environment, Role::Agent],
+            connected: true,
+        },
+    );
+    let runs = Arc::new(Mutex::new(Vec::new()));
+    let serving: Arc<dyn CommandHandler> = Arc::new(Closes(Arc::clone(&runs)));
+    server.serve(serving);
+    let thread = new_id();
+    let cmd = Cmd::new(
+        stalled,
+        &SerialKey::Thread(thread),
+        Time::new(now.get() + chrono::Duration::seconds(30)),
+        &SessionClose { thread_id: thread },
+    )?;
+    server.on_cmd(cmd).await;
+    // The disk stalls on writing the command down for far longer than the thirty seconds it was given.
+    tokio::time::timeout(PATIENCE, writes.entered()).await??;
+    clock.advance(chrono::Duration::seconds(90));
+    writes.release();
+    let result = settled(&server, stalled).await?;
+    assert!(
+        result.outcome.is_ok(),
+        "time lost before a command starts is not the command's own: {result:?}"
+    );
+    assert_eq!(lock(&runs).as_slice(), &[stalled]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_accepted_command_keeps_its_queue_time_credit_across_a_connector_restart() -> TestResult
+{
+    let directory = tempfile::tempdir()?;
+    let now: Time = "2026-10-16T00:00:00Z".parse()?;
+    let clock = ManualClock::new(now.get());
+    let thread = new_id();
+    let id = new_id();
+    let cmd = Cmd::new(
+        id,
+        &SerialKey::Thread(thread),
+        Time::new(now.get() + chrono::Duration::seconds(5)),
+        &SessionClose { thread_id: thread },
+    )?;
+    let journal = Journal::open(directory.path(), Duration::from_secs(86_400), now)?;
+    journal
+        .stage_accept(&cmd, now)
+        .ok_or("acceptance absent")?
+        .write()?;
+    drop(journal);
+    clock.advance(chrono::Duration::seconds(90));
+    let server = CommandServer::new(
+        Journal::open(
+            directory.path(),
+            Duration::from_secs(86_400),
+            Time::new(clock.now()),
+        )?,
+        Arc::new(clock),
+        ServerOptions {
+            roles: vec![Role::Agent],
+            connected: true,
+        },
+    );
+    let runs = Arc::new(Mutex::new(Vec::new()));
+    server.serve(Arc::new(Closes(Arc::clone(&runs))));
+    server.on_cmd(cmd).await;
+    assert!(
+        settled(&server, id).await?.outcome.is_ok(),
+        "the accepted command keeps the allowance it had before the restart"
+    );
+    assert_eq!(lock(&runs).as_slice(), &[id]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_recording_reports_its_key_released_while_its_upload_is_still_waiting() -> TestResult {
+    let first = new_id();
+    let rig = rig(first, Ending::Correct, false, None)?;
+    rig.server.on_cmd(record(&rig, first, new_id())?).await;
+    rig.handler.capture.entered().await?;
+    assert_eq!(
+        lock(&rig.server.inner.state)
+            .in_hand
+            .get(&first)
+            .ok_or("command absent")?
+            .key_phase,
+        orch_link_contract::commands::CommandKeyPhase::Running
+    );
+    rig.handler.capture.release();
+    rig.handler.upload.entered().await?;
+    assert_eq!(
+        lock(&rig.server.inner.state)
+            .in_hand
+            .get(&first)
+            .ok_or("command absent")?
+            .key_phase,
+        orch_link_contract::commands::CommandKeyPhase::Released
+    );
+    rig.handler.upload.release();
+    assert!(settled(&rig.server, first).await?.outcome.is_ok());
     Ok(())
 }

@@ -139,6 +139,7 @@ async fn native_recorded() -> (Cluster, Id) {
                 environment_id: site.environment,
                 snapshot_id: id,
                 directory: "web".into(),
+                wait_for_indexing: true,
                 kind: RecordKind::Turn,
                 record_days: registry::get(settings::WORKSPACE_RECORD_DAYS)
                     .unwrap()

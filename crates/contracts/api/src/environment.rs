@@ -831,6 +831,8 @@ pub enum EnvironmentIndexReason {
     Watches,
     /// One scan took too long.
     ScanTime,
+    /// Some workspace metadata or exclusion rules could not be read.
+    Unreadable,
 }
 
 /// An environment. It belongs to a person, who may let others manage it; the threads that

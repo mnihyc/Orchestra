@@ -94,6 +94,14 @@ export const documentsOfNodeQuery = (nodeId: string, options: { under?: boolean;
     getNextPageParam: (page) => page.next_cursor,
   });
 
+/** One native reference page; a caret asks for the next page only when its reader chooses Show more. */
+export const documentReferencePageQuery = (nodeId: string, query: string, cursor: string | null) => queryOptions({
+  queryKey: [...documentsKey(nodeId), true, false, false, 'references', query, cursor] as const,
+  queryFn: ({ signal }) => ok(api.GET('/nodes/{id}/documents', {
+    params: { path: { id: nodeId }, query: { under: true, q: query, limit: DOCUMENTS_PAGE, ...(cursor === null ? {} : { cursor }) } }, signal,
+  })).then(documentPage),
+});
+
 /** One document with what the caller holds on it, which is what the page needs to decide what it may do. */
 export const documentQuery = (id: string) =>
   queryOptions({

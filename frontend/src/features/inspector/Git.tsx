@@ -5,7 +5,7 @@
  * (staged, changed and not yet added). A row opens its difference beneath it; the menu opens it as a tab.
  * Where there is nothing to show it says why: not a repository, Git not installed, or the environment away.
  */
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, ChevronRight, ExternalLink, FileDiff, GitBranch, Link2, MoreHorizontal, RefreshCw } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -77,10 +77,12 @@ function GitRow({ change, group, access, open, onToggle }: { change: GitChange; 
   const mark = letter === '?' ? UNTRACKED_MARK : letter;
   const staged = group === 'staged';
   // The server hands over the difference of the whole repository, which every row of a group shares; a row cuts its file out of it.
-  const diff = useQuery({
+  const diff = useInfiniteQuery({
     queryKey: workspaceKeys.gitDiff(access.door, staged),
-    queryFn: ({ signal }) => gitDiff(access.door, staged, signal),
-    select: (whole) => ({ text: partOfDiff(whole.text, change.path), truncated: whole.truncated }),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ signal, pageParam }) => gitDiff(access.door, staged, signal, pageParam),
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+    select: (whole) => ({ text: partOfDiff(whole.pages.map((page) => page.text).join(''), change.path), truncated: whole.pages.at(-1)?.truncated ?? false }),
     enabled: shown && open && group !== 'untracked',
     staleTime: Number.POSITIVE_INFINITY,
     refetchOnWindowFocus: false,
@@ -134,7 +136,7 @@ function GitRow({ change, group, access, open, onToggle }: { change: GitChange; 
           ) : diff.data === undefined ? (
             <SkeletonRows read={diff} rows={3} />
           ) : (
-            <><ReviewableDiff threadId={access.thread.id} path={change.path} itemId={null} diff={diff.data.text === '' ? null : diff.data.text} truncated={diff.data.truncated} label={t('files.difference.label', { name: change.path })} />{diff.data.truncated && <GitLimit cut />}</>
+            <><ReviewableDiff threadId={access.thread.id} path={change.path} itemId={null} diff={diff.data.text === '' ? null : diff.data.text} truncated={diff.data.truncated} label={t('files.difference.label', { name: change.path })} />{diff.hasNextPage && <Button size="sm" variant="ghost" pending={diff.isFetchingNextPage} onClick={() => void diff.fetchNextPage()}>{t('files.difference.more')}</Button>}</>
           )}
         </div>
       )}

@@ -9,6 +9,7 @@ const PARTS: &[&str] = &[
     "git",
     "roots",
     "manifests",
+    "object-maps",
     "journals",
     "plans",
     "results",
@@ -142,7 +143,7 @@ pub fn run(operation: crate::runtime_helper::Operation) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use orch_envhost::environment::{GateState, Gates, Limits};
-    use orch_envhost::file_states::FileStates;
+    use orch_envhost::file_states::{FileStates, RecordOperation};
     use orch_envhost::files::Files;
     use orch_envhost::ignore::IgnoreRules;
     use orch_envhost::index::{HashCache, Index};
@@ -176,7 +177,10 @@ mod tests {
             &RelPath::root(),
             orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
         );
-        let index = Index::new(IndexMode::Full, Limits::default().index_max_entries);
+        let index = Index::new(
+            IndexMode::Full,
+            orch_link_contract::commands::WorkspaceLimits::default().index_entries,
+        );
         index.scan(files.root(), files.ignore().unwrap()).unwrap();
         states.refresh(&files, &index, None, true).unwrap();
         let at: orch_types::Time = "2026-10-14T10:00:00.000Z".parse().unwrap();
@@ -184,12 +188,27 @@ mod tests {
             environment_id: orch_types::new_id(),
             snapshot_id: orch_types::new_id(),
             directory: String::new(),
+            wait_for_indexing: true,
             kind: RecordKind::Turn,
             record_days: 7,
             max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
         };
-        let recorded = states.record(&files, &request, 17, at).unwrap();
-        assert_eq!(recorded.state, RecordState::Complete);
+        states.prepare_recordings(&files, 17, at).unwrap();
+        let captured = states
+            .capture(
+                &files,
+                &request,
+                17,
+                at,
+                &RecordOperation {
+                    id: orch_types::new_id(),
+                    until: orch_types::Time::new(at.get() + chrono::Duration::minutes(1)),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(captured.result.state, RecordState::Complete);
+        drop(captured);
         let original = states.store().load(request.snapshot_id, at).unwrap().0;
         let secret = root.join("source-credential-interrupted");
         std::fs::create_dir(&secret).unwrap();
