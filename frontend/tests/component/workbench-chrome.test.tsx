@@ -36,7 +36,7 @@ vi.mock('@/ui/Palette', async (original) => {
 });
 
 vi.mock('@/features/navigation/area', () => ({ useAreaNavigation: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => () => undefined }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => () => undefined }));
 vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof Nodes>(), orgsQuery: { queryKey: ['chrome-orgs'], queryFn: () => Promise.resolve([]) } }));
 vi.mock('@/features/finder/sources', async (original) => ({ ...await original<typeof Sources>(),
   useEnv: (showCard: Env['showCard']): Env => ({ t: i18n.t, go: () => undefined, orgSlug: null, exists: () => true, showCard }),
