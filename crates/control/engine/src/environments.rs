@@ -578,13 +578,12 @@ pub async fn start(
     let mode = match state.status.as_str() {
         status::RUNNING => return Ok(Starting::Up),
         status::NONE | status::FAILED => Mode::Make,
-        status::STOPPED => {
-            if rows::live_runtime(conn, environment).await?.is_some() {
-                Mode::Start
-            } else {
-                Mode::Make
-            }
-        }
+        status::STOPPED => match rows::live_runtime(conn, environment).await? {
+            // A unit the host says it does not have cannot be started: it is made again, on the same
+            // volumes.
+            Some(runtime) if !rows::unit_missing(conn, runtime.id).await? => Mode::Start,
+            _ => Mode::Make,
+        },
         status::PROVISIONING => {
             return Ok(
                 match orch_db::queries::jobs::open_of_environment(conn, environment)
@@ -1232,9 +1231,17 @@ impl Engine {
         .await;
         let now = self.inner.clock.now();
         let mut conn = self.inner.db.acquire().await?;
+        // A host that has no such unit has nothing left to stop: the unit is stopped, and the host's word that it
+        // has none is written down, so that the next start makes a unit and does not start one.
+        let missing = matches!(
+            &waited,
+            Ok(Ok(crate::commands::Outcome::Failed(error)))
+                if error.code == orch_link_contract::commands::ErrorCode::NotFound.as_str()
+        );
+        let stopped = missing || matches!(&waited, Ok(Ok(crate::commands::Outcome::Succeeded(_))));
         match waited {
-            Ok(Ok(crate::commands::Outcome::Succeeded(_))) => {
-                rows::set_runtime_state(
+            _ if stopped => {
+                let moved = rows::set_runtime_state(
                     &mut conn,
                     runtime,
                     &[runtime_state::STOPPING],
@@ -1243,6 +1250,9 @@ impl Engine {
                     now,
                 )
                 .await?;
+                if moved && missing {
+                    rows::set_unit_missing(&mut conn, runtime, true).await?;
+                }
                 rows::set_status(
                     &mut conn,
                     environment,
@@ -1268,7 +1278,17 @@ impl Engine {
                 Err(StopError::Host(format!("{}: {}", error.code, error.detail)))
             }
             Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
-                // The host has not said: the unit stands `stopping` and the schedule asks again.
+                // The host has not said: the unit stands `stopping`, dated again so that the next asking is a new
+                // command and not the one that ran out, and the schedule asks again.
+                rows::set_runtime_state(
+                    &mut conn,
+                    runtime,
+                    &[runtime_state::STOPPING],
+                    runtime_state::STOPPING,
+                    row.state_detail.as_deref(),
+                    now,
+                )
+                .await?;
                 Err(StopError::Host(
                     "the host did not answer in time; the stop is tried again".to_owned(),
                 ))

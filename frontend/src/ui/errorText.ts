@@ -36,6 +36,16 @@ function sentence(code: string, t: TFunction, locale: string): string | null {
   return hasErrorSentence(key,locale) ? t(key as TranslationKey) : null;
 }
 
+/** The sentence of a reason an answer names by a word (`reason`), with the work (`work`) and the step (`step`) it names; `null` when the catalogue has no sentence for the word. */
+function reasonSentence(error: ApiError, t: TFunction, locale: string): string | null {
+  const { reason, work, step } = error.problem;
+  if (typeof reason !== 'string' || !hasErrorSentence(`errors.reason.${reason}`, locale)) return null;
+  const doing = typeof work === 'string' && hasErrorSentence(`errors.reasonWork.${work}`, locale) ? t(`errors.reasonWork.${work}` as TranslationKey) : '';
+  const phases = work === 'remove' ? 'providers.runtime.removalPhase' : 'providers.runtime.phase';
+  const where = typeof step !== 'string' ? '' : hasErrorSentence(`${phases}.${step}`, locale) ? t(`${phases}.${step}` as TranslationKey) : step;
+  return t(`errors.reason.${reason}` as TranslationKey, { work: doing, step: where });
+}
+
 /** Puts an error into words. `t` is the catalogue; the time of a "try again at" is said in `context`. */
 export function errorText(
   error: unknown,
@@ -50,8 +60,11 @@ export function errorText(
     const at = error.retryAt === null ? null : formatTimeOfDay(error.retryAt, context);
     const message = invitationIssuerAuthorityLost(error) ? t('auth.invite.issuerAuthorityLost')
       : error.code === 'rate_limited' && at !== null ? t('errorsAt.rate_limited', { time: at }) : apiErrorSentence(error.code, error.status, t, context.locale);
+    // A refusal that names its reason by a word is said from the catalogue below the sentence of its code, in the reader's language.
+    const reason = reasonSentence(error, t, context.locale);
     return {
       message,
+      ...(reason === null ? {} : { diagnostic: reason }),
       code: error.code,
       requestId: error.requestId === '' ? null : error.requestId,
       status: error.status,

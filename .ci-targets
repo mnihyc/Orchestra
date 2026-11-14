@@ -1,0 +1,12 @@
+fmt
+clippy
+contracts
+test -p orch-agent-contract --lib
+test -p orch-settings-contract --lib
+test -p orch-adapter-fake --lib
+test -p orch-connector-core --lib
+test -p orch-engine --lib -- credentials::
+test -p orch-engine --test credentials
+web typecheck
+web lint
+web test -- tests/unit/setting-text.test.ts tests/unit/settings-required-members.test.ts
