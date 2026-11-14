@@ -21,6 +21,7 @@ interface Stored {
   work_detail?: WorkDetail;
   diff_layout?: DiffLayout;
   live_tools?: boolean;
+  summary_hidden?: boolean;
 }
 
 export type ThreadViewMode = 'focused' | 'full' | 'live';
@@ -36,6 +37,7 @@ function readStored(state: Record<string, unknown> | undefined): Stored {
     ...(DETAILS.includes(stored.work_detail as WorkDetail) ? { work_detail: stored.work_detail as WorkDetail } : {}),
     ...(stored.diff_layout === 'one' || stored.diff_layout === 'two' ? { diff_layout: stored.diff_layout } : {}),
     ...(typeof stored.live_tools === 'boolean' ? { live_tools: stored.live_tools } : {}),
+    ...(typeof stored.summary_hidden === 'boolean' ? { summary_hidden: stored.summary_hidden } : {}),
   };
 }
 
@@ -60,7 +62,7 @@ export function rollbackTimeline(value: unknown, beforeValue: unknown, change: P
   const restore = (value: Record<string, unknown>, previous: Record<string, unknown>) => {
     const next = { ...value };
     let restored = false;
-    for (const key of ['work_detail', 'diff_layout', 'live_tools'] as const) {
+    for (const key of ['work_detail', 'diff_layout', 'live_tools', 'summary_hidden'] as const) {
       if (change.value[key] === undefined || value[key] !== change.value[key]) continue;
       if (Object.hasOwn(previous, key)) next[key] = previous[key];
       else Reflect.deleteProperty(next, key);
@@ -129,6 +131,9 @@ export interface TimelinePreferences {
   setLayout: (layout: DiffLayout) => void;
   hideHistory: boolean;
   setHideHistory: (hide: boolean) => void;
+  /** Whether the summary above a thread's conversation is folded to its title; follows the person to every thread and device. */
+  summaryHidden: boolean;
+  setSummaryHidden: (hidden: boolean) => void;
 }
 
 export function useTimelinePreferences(threadId?: string): TimelinePreferences {
@@ -176,5 +181,7 @@ export function useTimelinePreferences(threadId?: string): TimelinePreferences {
     setLayout: useCallback((layout) => choose({ diff_layout: layout }), [choose]),
     hideHistory,
     setHideHistory: setHidden,
+    summaryHidden: global.summary_hidden === true,
+    setSummaryHidden: useCallback((hidden) => choose({ summary_hidden: hidden }), [choose]),
   };
 }

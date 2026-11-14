@@ -101,7 +101,7 @@ it('retires a deleted snapshot and does not immediately fetch it again', async (
   expect(calls.read).toHaveBeenCalledOnce(); expect(calls.deliveries[0]?.signal.aborted).toBe(true);
 });
 
-for (const locale of ['en', 'zh-CN'] as const) it(`keeps both local context refusal reasons readable in ${locale}`, async () => {
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps every local context refusal reason readable in ${locale}`, async () => {
   await setLocale(locale); const t = i18n.getFixedT(locale);
   render(probe()); await waitFor(() => expect(calls.stream).toHaveBeenCalledOnce());
   const noRoom = { kind: 'error' as const, code: 'ask_context_no_room', message: 'Server fallback' };
@@ -110,5 +110,10 @@ for (const locale of ['en', 'zh-CN'] as const) it(`keeps both local context refu
   const tooLong = { kind: 'error' as const, code: 'ask_context_too_long', model: 'Chosen model', message: 'Server fallback' };
   await deliver(tooLong, ASK_ID, 7);
   expect(screen.getByTestId('notice')).toHaveTextContent(t('ask.contextTooLong', { model: 'Chosen model' }));
+  expect(screen.getByTestId('notice')).not.toHaveTextContent('Server fallback');
+  await deliver({ kind: 'error' as const, code: 'ask_window_no_room', model: 'Chosen model', message: 'Server fallback' }, ASK_ID, 8);
+  expect(screen.getByTestId('notice')).toHaveTextContent(t('ask.windowNoRoom', { model: 'Chosen model' }));
+  await deliver({ kind: 'error' as const, code: 'ask_window_unknown', model: 'Chosen model', message: 'Server fallback' }, ASK_ID, 9);
+  expect(screen.getByTestId('notice')).toHaveTextContent(t('ask.windowUnknown', { model: 'Chosen model' }));
   expect(screen.getByTestId('notice')).not.toHaveTextContent('Server fallback');
 });

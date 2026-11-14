@@ -12,6 +12,58 @@ use crate::commands::CommandsError;
 use orch_db::DbError;
 use orch_types::Id;
 
+/// Why Ask's window leaves nothing for the conversation after the answer's reserve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskNoRoom {
+    /// `ask.context_tokens` lowered the window to the answer's reserve or below, or the reserve is not above zero.
+    Setting {
+        /// The window Ask was given.
+        window: i64,
+        /// The reserve for the answer.
+        output: i64,
+    },
+    /// The model's own window is the answer's reserve or less.
+    Window {
+        /// The model.
+        model: String,
+        /// Its window, as stated or as assumed.
+        window: i64,
+        /// The reserve for the answer.
+        output: i64,
+        /// Whether the model states no window and this one is assumed.
+        assumed: bool,
+    },
+}
+
+impl std::fmt::Display for AskNoRoom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Setting { window, output } => write!(
+                f,
+                "ask.context_tokens ({window}) is not larger than ask.max_output_tokens ({output}), so no room is left for the conversation. Increase ask.context_tokens or reduce ask.max_output_tokens."
+            ),
+            Self::Window {
+                model,
+                window,
+                output,
+                assumed: false,
+            } => write!(
+                f,
+                "The context window of {model} ({window} tokens) is not larger than ask.max_output_tokens ({output}), so no room is left for the conversation. Use a model with a larger window or reduce ask.max_output_tokens."
+            ),
+            Self::Window {
+                model,
+                window,
+                output,
+                assumed: true,
+            } => write!(
+                f,
+                "The context window of {model} is not recorded and is taken as {window} tokens, which is not larger than ask.max_output_tokens ({output}), so no room is left for the conversation. Record the model's context window or reduce ask.max_output_tokens."
+            ),
+        }
+    }
+}
+
 /// A part the engine stands on failed, or what it stores does not read.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -21,11 +73,9 @@ pub enum EngineError {
     /// A prepared capability follows an existing call-rule pause without an accepted result.
     #[error("The capability is paused under its current call rules.")]
     CapabilityPaused(Box<crate::tools::capability_service::CapabilityPause>),
-    /// Ask's configured window cannot hold its required reserves.
-    #[error(
-        "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves."
-    )]
-    AskContextNoRoom,
+    /// Ask's window leaves nothing after the answer's reserve.
+    #[error("{0}")]
+    AskContextNoRoom(AskNoRoom),
     /// Even a summary and the current question cannot fit the selected model.
     #[error("This conversation is too long for {0}; start a new one or keep it as a thread.")]
     AskContextTooLong(String),

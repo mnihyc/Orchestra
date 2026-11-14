@@ -473,6 +473,9 @@ pub fn turn_view(row: &TurnRow, display: &str, people: &People) -> Result<Turn, 
                     .unwrap_or("internal"),
             );
             object.insert("message".to_owned(), Json::String(message));
+            // An error stored without this member (Ask's failures before 0.1.3 were) must not make the
+            // whole turn, and with it the thread, unreadable: it is read as not worth trying again.
+            object.entry("retryable").or_insert(Json::Bool(false));
         }
         error
     });

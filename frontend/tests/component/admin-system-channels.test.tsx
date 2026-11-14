@@ -100,7 +100,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     dialog = screen.getByRole('alertdialog', { name: i18n.t('settings.channels.removeTitle', { name: 'Changed relay' }) });
     await user.click(within(dialog).getByRole('button', { name: i18n.t('settings.channels.removeConfirm', { name: 'Changed relay' }) }));
     await waitFor(() => expect(calls.remove).toHaveBeenCalledExactlyOnceWith(original.id));
-    expect(screen.queryByRole('heading', { name: 'Changed relay' })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Changed relay' })).not.toBeInTheDocument());
     expect(calls.read).toHaveBeenCalledOnce(); expect(calls.orgCreate).not.toHaveBeenCalled();
   });
 }

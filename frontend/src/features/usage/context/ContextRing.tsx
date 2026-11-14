@@ -5,12 +5,13 @@
  * "71 % of context · 142k of 200k · shortened at 90 %". Where the harness reports no size, there is no ring.
  */
 import type { TFunction } from 'i18next';
+import { Gauge } from 'lucide-react';
 import type { ComponentPropsWithRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { modelDisplayName } from '@/features/models/names';
 import { ContextPanel } from '@/features/usage/context/ContextPanel';
-import { type ContextTone, type Ring, ringOf, contextModelName } from '@/features/usage/context/fill';
+import { type ContextTone, type Ring, ringOf, contextModelName, usedAlone } from '@/features/usage/context/fill';
 import type { Thread } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { formatPercent, formatTokens } from '@/lib/format';
@@ -73,7 +74,7 @@ export function ringWords(ring: Ring, t: TFunction, locale: string): string {
 }
 
 /** The button the ring is: what a popover and a tooltip hand down reaches the element itself. */
-function RingButton({ ring, words, ...handedDown }: { ring: Ring; words: string } & ComponentPropsWithRef<'button'>) {
+function RingButton({ ring, used, words, ...handedDown }: { ring: Ring | null; used: number; words: string } & ComponentPropsWithRef<'button'>) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
   return (
@@ -82,10 +83,10 @@ function RingButton({ ring, words, ...handedDown }: { ring: Ring; words: string 
       {...handedDown}
       aria-label={t('contextUsage.ring.open', { label: words })}
       className="inline-flex items-center gap-1 rounded-md px-1 py-1 text-xs text-text-muted tabular-nums hover:bg-bg-muted"
-      data-context-ring={ring.tone}
+      data-context-ring={ring === null ? 'unmeasured' : ring.tone}
     >
-      <RingMark ring={ring} />
-      <span aria-hidden>{formatPercent(Math.min(ring.percent, FIGURE_MOST_PERCENT) / 100, locale)}</span>
+      {ring === null ? <Gauge aria-hidden className="size-4 shrink-0" /> : <RingMark ring={ring} />}
+      <span aria-hidden>{ring === null ? formatTokens(used, locale) : formatPercent(Math.min(ring.percent, FIGURE_MOST_PERCENT) / 100, locale)}</span>
     </button>
   );
 }
@@ -94,8 +95,10 @@ export function ContextRing({ thread, side = 'bottom' }: { thread: Thread; side?
   const { t } = useTranslation();
   const { locale } = useFormatContext();
   const ring = ringOf(thread.usage);
-  if (ring === null) return null;
-  const context=ringWords(ring,t,locale);
+  // Where the harness gave the tokens but no window, the tokens stand alone.
+  const used = ring === null ? usedAlone(thread.usage) : ring.used;
+  if (used === null) return null;
+  const context = ring === null ? t('contextUsage.ring.labelUsed', { used: formatTokens(used, locale) }) : ringWords(ring, t, locale);
   const reportedModel=contextModelName(thread);
   const words=reportedModel===null ? context : t('contextUsage.ring.modelLabel',{model:modelDisplayName(reportedModel,t),context});
   return (
@@ -106,7 +109,7 @@ export function ContextRing({ thread, side = 'bottom' }: { thread: Thread; side?
       className="max-h-(--radix-popover-content-available-height) overflow-y-auto"
       trigger={
         <Tooltip content={words}>
-          <RingButton ring={ring} words={words} />
+          <RingButton ring={ring} used={used} words={words} />
         </Tooltip>
       }
     >

@@ -38,6 +38,7 @@ import { type Counters, onUserEvent, tellUserEvent, useUserStore, userWriter } f
 import { outsideQuery } from '@/api/away';
 import { type DurableFeed, FeedRegistry, followFeed, loadWithRetries } from '@/realtime/sync';
 import { installQueryFeeds } from '@/realtime/queryFeeds';
+import { readAgainFollows } from '@/api/readAgain';
 import { clearResourceFollowing, setResourceFollowing } from '@/realtime/resourceFollowing';
 
 export const socket = createRealtimeSocket({
@@ -46,6 +47,9 @@ export const socket = createRealtimeSocket({
   // The session is over on the server: asking for a token finds that out, and the page follows.
   onSuspended: () => void client.renew().catch(() => undefined),
 });
+
+// A wait that only the live connection can end reads again by itself, and reads more often while the connection is not up.
+readAgainFollows(() => socket.status.getState().phase === 'ready');
 
 export const feeds = new FeedRegistry();
 let stopQueryFeeds = installQueryFeeds(socket, queryClient);

@@ -50,6 +50,17 @@ fn recorder_with_summary(s: &Scene, summary: String) -> Arc<Mutex<Vec<ProviderGe
     requests
 }
 
+/// The Ask window that leaves `room` tokens for the conversation: the answer's reserve comes off first, and the tool
+/// results of a turn take half of what is left, or the configured bytes' worth where that is less.
+fn window_leaving(room: i64) -> i64 {
+    let tools = orch_engine::ask::context::tokens(MODEL, 262144);
+    4096 + if room <= tools {
+        2 * room
+    } else {
+        tools + room
+    }
+}
+
 async fn send(s: &Scene, id: Id, client: &str, text: String) -> AskReceipt {
     let receipt = s
         .rig
@@ -111,9 +122,8 @@ async fn a_short_history_is_complete_and_a_smaller_ask_window_compacts_once_then
     );
     // This leaves the first request plus 1000 model-estimated tokens, enough
     // for the tiny summary and a follow-up, but not a second long question.
-    let reserved = 4096 + orch_engine::ask::context::tokens(MODEL, 262144);
     let smaller =
-        reserved + orch_engine::ask::context::estimate(MODEL, &first.input).unwrap() + 1000;
+        window_leaving(orch_engine::ask::context::estimate(MODEL, &first.input).unwrap() + 1000);
     assert!(smaller < first.model_parameters.context_window.unwrap());
     setting(&s, "ask.context_tokens", json!(smaller)).await;
     let second = send(&s, made.conversation_id, "second", original.clone()).await;
@@ -191,6 +201,40 @@ async fn a_short_history_is_complete_and_a_smaller_ask_window_compacts_once_then
 }
 
 #[tokio::test]
+async fn a_model_added_by_name_with_no_window_answers_with_every_setting_as_shipped() {
+    // EN: Providers > add a model by name, without a context window > Ask > send a question; it is answered.
+    // 中文：在提供方中按名称添加不带上下文窗口的模型 > Ask > 提问；得到回答。
+    let s = Scene::new().await;
+    let provider = configured_provider(&s).await;
+    sqlx::query(
+        "UPDATE provider_models SET parameters='{}' WHERE provider_id=$1 AND model_name=$2",
+    )
+    .bind(provider)
+    .bind(MODEL)
+    .execute(s.rig.db.pool())
+    .await
+    .unwrap();
+    let requests = recorder(&s);
+    let made = create_unseeded(&s, &s.cai).await;
+    let receipt = send(
+        &s,
+        made.conversation_id,
+        "no-window",
+        "A first question".into(),
+    )
+    .await;
+    let error: Option<Json> = sqlx::query_scalar("SELECT error FROM turns WHERE id=$1")
+        .bind(receipt.turn_id.unwrap())
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(error, None, "the turn is not refused for room");
+    let calls = requests.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "the model was asked");
+    assert!(has_text(&calls[0], "A first question"));
+}
+
+#[tokio::test]
 async fn ask_output_policy_changes_the_reserve_and_an_impossible_window_refuses_before_generation()
 {
     // EN browser: set Ask output to 1024 > Ask > send a short question > lower
@@ -224,13 +268,13 @@ async fn ask_output_policy_changes_the_reserve_and_an_impossible_window_refuses_
         .unwrap();
     assert_eq!(error["code"], "ask_context_no_room");
     let reason = error["message"].as_str().unwrap();
-    for setting in [
-        "ask.context_tokens",
-        "ask.max_output_tokens",
-        "ask.turn_tool_bytes",
-    ] {
+    for setting in ["ask.context_tokens", "ask.max_output_tokens"] {
         assert!(reason.contains(setting));
     }
+    assert!(
+        !reason.contains("ask.turn_tool_bytes"),
+        "a setting that cannot help is not named: {reason}"
+    );
     let events: Vec<Json> =
         sqlx::query_scalar("SELECT body FROM ask_events WHERE thread_id=$1 ORDER BY seq")
             .bind(made.conversation_id)
@@ -264,8 +308,7 @@ async fn a_question_that_cannot_fit_even_without_old_history_is_refused_with_the
     let requests = recorder(&s);
     let made = create_unseeded(&s, &s.cai).await;
     send(&s, made.conversation_id, "first", "A small question".into()).await;
-    let reserved = 4096 + orch_engine::ask::context::tokens(MODEL, 262144);
-    setting(&s, "ask.context_tokens", json!(reserved + 100)).await;
+    setting(&s, "ask.context_tokens", json!(window_leaving(100))).await;
     let refused = send(
         &s,
         made.conversation_id,
@@ -383,11 +426,12 @@ async fn even_a_completed_summary_that_cannot_fit_is_visible_counted_and_refused
     let question = format!("Keep these original details {}", "x".repeat(12_000));
     send(&s, made.conversation_id, "first", question.clone()).await;
     let first = requests.lock().unwrap()[0].clone();
-    let reserved = 4096 + orch_engine::ask::context::tokens(MODEL, 262144);
     setting(
         &s,
         "ask.context_tokens",
-        json!(reserved + orch_engine::ask::context::estimate(MODEL, &first.input).unwrap() + 1000),
+        json!(window_leaving(
+            orch_engine::ask::context::estimate(MODEL, &first.input).unwrap() + 1000
+        )),
     )
     .await;
     let refused = send(&s, made.conversation_id, "second", question).await;
