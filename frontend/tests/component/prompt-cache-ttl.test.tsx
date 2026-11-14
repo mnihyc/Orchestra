@@ -8,8 +8,8 @@ import { currentLocale, i18n, setLocale } from '@/i18n';
 import { settingChoice } from '@/i18n/choices';
 import { show } from './support';
 
-vi.mock('@/features/chat/open', () => ({ useOpenPath: () => vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/chat/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useOpenPath: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const locale=currentLocale();
 afterEach(async()=>{await setLocale(locale);});
 const key='agents.prompt_cache_ttl';
