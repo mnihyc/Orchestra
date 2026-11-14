@@ -1,0 +1,5 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --test members --test member_move_native_scopes --test invitation_roles
+test -p orch-engine --test environments -- a_multiline_host_refusal_is_kept_once_in_the_failed_setup_log

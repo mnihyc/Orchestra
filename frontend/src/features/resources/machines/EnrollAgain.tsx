@@ -4,13 +4,16 @@
  * for that machine alone as the dialog opens; the command that uses it gives the machine a new certificate and
  * it is the same machine afterwards, so nothing registered from it is made again. A certificate of it that still
  * stood is revoked when the new one is first used, so that the old disk, if somebody has it, is out. The dialog
- * asks for the machine every few seconds and says when its certificate is new.
+ * reads the machine again every few seconds while it waits, and says when its certificate is new.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { LoaderCircle } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { InstallationGateway } from '@/features/gateways/InstallationGateway';
+import { commandFor } from './Enrollment';
+import { readAgain } from '@/api/readAgain';
 import { enrollMachineAgain, machineEnrollmentInfoQuery, machineKey, machineQuery, machinesKey } from '@/api/resources';
 import { CommandBox } from '@/features/resources/Facts';
 import { TaskGuideLink } from '@/features/help/TaskGuideLink';
@@ -41,6 +44,7 @@ export function EnrollAgainDialog({ machine, onClose }: { machine: Machine; onCl
   const queryClient = useQueryClient();
   const now = useNow();
   const [os, setOs] = useState<MachineOs>(machine.platform_os);
+  const [gateway, setGateway] = useState('');
   // How the machine stood as the dialog opened: a certificate that is not this one is the new one.
   const [before] = useState({ ends: machine.cert_not_after, status: machine.status });
 
@@ -62,7 +66,9 @@ export function EnrollAgainDialog({ machine, onClose }: { machine: Machine; onCl
 
   const expiresAt = made === undefined ? null : Date.parse(made.expires_at);
   const expired = expiresAt !== null && expiresAt <= now;
-  const watch = useQuery({ ...machineQuery(machine.id), enabled: made !== undefined });
+  const watch = useQuery({ ...machineQuery(machine.id), enabled: made !== undefined,
+    // The machine's return is told over the live connection, once: until it has come back the dialog reads it again by itself.
+    refetchInterval: readAgain<Machine>((read) => !(read?.status === 'active' && (before.status !== 'active' || Date.parse(read.cert_not_after) > Date.parse(before.ends)))) });
   const current = watch.data;
   // A new certificate ends later than the one the machine had; a machine that was revoked is well again as soon as it is active.
   const enrolled = current?.status === 'active' && (before.status !== 'active' || Date.parse(current.cert_not_after) > Date.parse(before.ends));
@@ -75,6 +81,7 @@ export function EnrollAgainDialog({ machine, onClose }: { machine: Machine; onCl
   // Whole minutes are counted down, so that a reading is never more than there is.
   const minutesLeft = expiresAt === null ? 0 : expiresAt <= now ? 0 : Math.max(1, Math.floor((expiresAt - now) / MINUTE_MS));
   const registered = registeredCount(machine);
+  const install = { foreground: false, instance: '', node, gateway: gateway === '' ? undefined : gateway };
 
   return (
     <Dialog
@@ -123,7 +130,7 @@ export function EnrollAgainDialog({ machine, onClose }: { machine: Machine; onCl
           </InlineAlert>
         ) : (
           <>
-            {!expired && (node ? <CommandBox command={made.commands.linux} label={t('machines.add.copy')} /> : <Tabs
+            {!expired && (node ? <CommandBox command={commandFor(made, 'linux', install)} label={t('machines.add.copy')} /> : <Tabs
               label={t('machines.add.systems')}
               value={os}
               onValueChange={setOs}
@@ -133,11 +140,12 @@ export function EnrollAgainDialog({ machine, onClose }: { machine: Machine; onCl
                 panel: (
                   <div className="flex flex-col gap-2 pt-3">
                     <p className="text-sm text-text-muted">{t(`machines.add.run.${value}`)}</p>
-                    <CommandBox command={made.commands[value]} label={t('machines.add.copy')} />
+                    <CommandBox command={commandFor(made, value, install)} label={t('machines.add.copy')} />
                   </div>
                 ),
               }))}
             />)}
+            <InstallationGateway value={gateway} onChange={setGateway} keepCurrent disabled={make.isPending} />
             <p className="text-sm text-text-muted">{expired ? t('machines.add.expired') : t('machines.add.validFor', { count: minutesLeft })}</p>
             {expired ? (
               <div>

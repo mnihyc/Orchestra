@@ -6,12 +6,12 @@ import { choiceOption } from '@/i18n/choices';
 import { DeclaredHint } from '@/features/resources/Hint';
 import type { Field } from '@/generated/api-types';
 import { Badge } from '@/ui/Badge';
-import { Button } from '@/ui/Button';
 import { Checkbox } from '@/ui/Checkbox';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { FieldForm, initialValues, missingFields, type FormValues } from '@/ui/FieldForm';
 import { InlineAlert } from '@/ui/InlineAlert';
-import { Input, PasswordInput } from '@/ui/Input';
+import { Input } from '@/ui/Input';
+import { SecretField } from '@/ui/SecretField';
 import { Select } from '@/ui/Select';
 import { resourcePreview } from '@/features/resource-facts/ResourceFacts';
 import { ResourceSentence } from '@/features/resource-facts/ResourceSentence';
@@ -120,16 +120,16 @@ export function SourceFields({ element, value, onChange, programs, defaultTitle,
   const fault=sourceFault(value,{programs,httpAllowed,canSendCredential,savedAddress,authorizationSet,secretFieldsSet,addressFields,defaultFields,...(builtin===undefined?{}:{builtin})});
   const change = (patch: Partial<SourceDraft>) => onChange({ ...value,...patch });
   const fieldHelp = (field: Field) => {
-    const saved = secretFieldsSet.includes(field.name) && !value.removedSecrets?.includes(field.name);
-    const removed = value.removedSecrets?.includes(field.name) === true;
     const help = field.name === 'admin_key' ? t('providerSources.adminKeyHelp') : field.help;
-    if (!saved && !removed && (help === null || help.trim() === '')) return null;
-    return <span className="inline-flex items-center gap-1">
-      {saved && <span className="text-xs text-text-muted">{t('providerSources.setReplace')}</span>}
-      {saved && <Button size="sm" variant="ghost" type="button" onClick={() => change({fields:{...value.fields,[field.name]:''},removedSecrets:[...new Set([...(value.removedSecrets ?? []),field.name])]})}>{t('providerSources.removeSavedKey')}</Button>}
-      {removed && <span>{t('providerSources.keyWillBeRemoved')}</span>}
-      <DeclaredHint term={field.label} help={help} />
-    </span>;
+    if (help === null || help.trim() === '') return null;
+    return <span className="inline-flex items-center gap-1"><DeclaredHint term={field.label} help={help} /></span>;
+  };
+  // A secret that is saved shows as dots that are set, with Replace and Remove; taking it away is kept in the draft until saved.
+  const secrets = {
+    secretsSet: secretFieldsSet, secretsRemoved: value.removedSecrets ?? [],
+    onSecretAct: (name: string, act: 'remove' | 'keep') => change(act === 'remove'
+      ? { fields: { ...value.fields, [name]: '' }, removedSecrets: [...new Set([...(value.removedSecrets ?? []), name])] }
+      : { removedSecrets: (value.removedSecrets ?? []).filter((field) => field !== name) }),
   };
   return <fieldset disabled={disabled} className="flex min-w-0 flex-col gap-3">
     <legend className="text-sm font-medium">{t(element === 'facts' ? 'providerSources.detailsFrom' : 'providerSources.modelsFrom')}</legend>
@@ -143,8 +143,8 @@ export function SourceFields({ element, value, onChange, programs, defaultTitle,
       {value:'program',...choiceOption(t,'sourceKind.program')}, {value:'address',...choiceOption(t,'sourceKind.address')},
       {value:'none',...choiceOption(t,element === 'facts' ? 'sourceKind.none' : 'sourceKind.manual')},
     ])} />
-    {value.by === 'default' && defaultFields.length > 0 && <FieldForm fields={defaultFields} values={sourceValues(defaultFields,value.fields)} errors={declaredErrors} helpFor={fieldHelp} onChange={(name,next) => change({fields:{...value.fields,[name]:next},removedSecrets:(value.removedSecrets ?? []).filter((field)=>field!==name)})} />}
-    {value.by === 'builtin' && builtin !== undefined && <FieldForm fields={builtin.fields} values={sourceValues(builtin.fields,value.fields)} errors={declaredErrors} helpFor={fieldHelp} onChange={(name,next) => change({fields:{...value.fields,[name]:next},removedSecrets:(value.removedSecrets ?? []).filter((field)=>field!==name)})} />}
+    {value.by === 'default' && defaultFields.length > 0 && <FieldForm fields={defaultFields} values={sourceValues(defaultFields,value.fields)} errors={declaredErrors} helpFor={fieldHelp} {...secrets} onChange={(name,next) => change({fields:{...value.fields,[name]:next},removedSecrets:(value.removedSecrets ?? []).filter((field)=>field!==name)})} />}
+    {value.by === 'builtin' && builtin !== undefined && <FieldForm fields={builtin.fields} values={sourceValues(builtin.fields,value.fields)} errors={declaredErrors} helpFor={fieldHelp} {...secrets} onChange={(name,next) => change({fields:{...value.fields,[name]:next},removedSecrets:(value.removedSecrets ?? []).filter((field)=>field!==name)})} />}
     {value.by === 'program' && <>
       <ResourcePicker pickerKey="resources.providers.SourceFields.providerSources.registeredProgram" label={t('providerSources.registeredProgram')} error={serverErrors.name} value={value.program} onValueChange={(name) => change({program:name,fields:sourceValues(programs.find((program) => (program.choice ?? program.name) === name)?.fields ?? []),removedSecrets:[]})} options={programs.map((program) => {
         const label = program.templateName === null || program.templateName === undefined ? program.title : t('providerSources.inTemplate', { program: program.title, template: program.templateName });
@@ -158,7 +158,7 @@ export function SourceFields({ element, value, onChange, programs, defaultTitle,
         <p className="text-sm text-text-muted">{program.reports === null ? t('providerSources.reportsUnread') : element === 'models' ? t('providerSources.listsModels') : program.reports.length === 0 ? t('providerSources.reportsNone') : t('providerSources.reports',{members:reportedMembers})}</p>
         {program.command !== null && <p className="break-words text-sm"><span>{t('providerSources.registeredCommand')}{': '}</span><code>{program.command.join(' ')}</code></p>}
         {program.templateId !== null && <InlineAlert tone="info">{t('providerSources.templateProgram')}</InlineAlert>}
-        <FieldForm fields={program.fields} values={sourceValues(program.fields,value.fields)} errors={declaredErrors} helpFor={fieldHelp} onChange={(name,next) => change({fields:{...value.fields,[name]:next},removedSecrets:(value.removedSecrets ?? []).filter((field)=>field!==name)})} />
+        <FieldForm fields={program.fields} values={sourceValues(program.fields,value.fields)} errors={declaredErrors} helpFor={fieldHelp} {...secrets} onChange={(name,next) => change({fields:{...value.fields,[name]:next},removedSecrets:(value.removedSecrets ?? []).filter((field)=>field!==name)})} />
       </>}
     </>}
     {value.by === 'address' && <>
@@ -167,8 +167,8 @@ export function SourceFields({ element, value, onChange, programs, defaultTitle,
       {unencrypted && httpAllowed !== true && <InlineAlert tone="warning">{t(httpAllowed === null ? 'providerSources.httpUnknown' : 'providerSources.httpOff')}</InlineAlert>}
       <Select<SourceDraft['auth']> error={addressErrors.auth} label={t('providerSources.authorization')} value={value.auth} onValueChange={(auth) => change({auth,authorization:''})} options={[{value:'none',...choiceOption(t,'sourceAuthorization.none')},{value:'bearer',...choiceOption(t,'sourceAuthorization.bearer')},{value:'header',...choiceOption(t,'sourceAuthorization.header')}]} />
       {value.auth === 'header' && <Input label={t('providerSources.header')} error={addressErrors.header} value={value.header} autoComplete="off" onChange={(event) => change({header:event.target.value,authorization:''})} />}
-      {value.auth !== 'none' && <PasswordInput label={t('providerSources.secret')} error={serverErrors.authorization} value={value.authorization} autoComplete="new-password" hint={t(kept ? 'providerSources.setReplace' : 'providerSources.writeOnly')} onChange={(event) => change({authorization:event.target.value})} />}
-      {savedAddress !== null && savedAddress.url === value.url.trim() && addressFields.length > 0 && <FieldForm fields={addressFields} values={sourceValues(addressFields,value.fields)} errors={declaredErrors} helpFor={fieldHelp} onChange={(name,next) => change({fields:{...value.fields,[name]:next},removedSecrets:(value.removedSecrets ?? []).filter((field)=>field!==name)})} />}
+      {value.auth !== 'none' && <SecretField label={t('providerSources.secret')} error={serverErrors.authorization} value={value.authorization} set={kept} hint={kept ? undefined : t('providerSources.writeOnly')} onValueChange={(next) => change({authorization:next})} />}
+      {savedAddress !== null && savedAddress.url === value.url.trim() && addressFields.length > 0 && <FieldForm fields={addressFields} values={sourceValues(addressFields,value.fields)} errors={declaredErrors} helpFor={fieldHelp} {...secrets} onChange={(name,next) => change({fields:{...value.fields,[name]:next},removedSecrets:(value.removedSecrets ?? []).filter((field)=>field!==name)})} />}
       {canSendCredential ? <Checkbox label={t('providerSources.sendKey')} checked={value.sendCredential} disabled={host === null || disabled} onCheckedChange={(checked) => { if (!checked) change({sendCredential:false}); else if (host !== null) setConfirm({url:value.url.trim(),host}); }} /> : credentialKind === 'none' ? null : <p className="text-sm text-text-muted">{t('providerSources.noSignIn')}</p>}
       {value.sendCredential && host !== null && <InlineAlert tone="warning">{t('providerSources.keyWillBeSent',{host})}</InlineAlert>}
       {warnings.map((warning,index) => <InlineAlert key={index} tone="warning">{warning}</InlineAlert>)}

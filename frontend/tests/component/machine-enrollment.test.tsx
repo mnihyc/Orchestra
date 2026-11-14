@@ -205,3 +205,34 @@ it('changes the gateway flag of the displayed installer without minting another 
   expect(createMachineToken).toHaveBeenLastCalledWith(expect.any(String), { roles: ['environment', 'agent'], delegate: [], dedicated: false });
   expect(createHostToken).not.toHaveBeenCalled();
 });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const entry of ['machine', 'host'] as const) {
+  it(`uses the chosen ${entry} name without issuing another permission token (${locale})`, async () => {
+    await setLocale(locale);
+    const user = userEvent.setup();
+    const view = show(entry === 'host' ? <AddHostDialog onClose={vi.fn()} /> : <AddMachineDialog onClose={vi.fn()} />);
+    try {
+      if (entry === 'host') await user.selectOptions(screen.getByRole('combobox', { name: 'Home' }), 'org');
+      const field = screen.getByRole('textbox', { name: (name) => name.startsWith(i18n.t('resources.edit.name')) });
+      expect(field).toHaveValue('');
+      await showCommand();
+      const before = vi.mocked(entry === 'host' ? createHostToken : createMachineToken).mock.calls.length;
+      await user.type(field, "Team's $work");
+      expect(screen.getByText(/--name/u)).toHaveTextContent("--name 'Team'\\''s $work'");
+      expect(vi.mocked(entry === 'host' ? createHostToken : createMachineToken).mock.calls).toHaveLength(before);
+      await user.clear(field);
+      expect(screen.queryByText(/--name/u)).not.toBeInTheDocument();
+    } finally { view.unmount(); await setLocale('en'); }
+  });
+}
+
+for (const os of ['linux', 'macos', 'windows'] as const) {
+  it(`keeps spaces, quotes and shell expressions inside the ${os} machine name`, () => {
+    const options = { foreground: false, instance: '', node: false, name: "Team's $HOME $(whoami) `id`" };
+    const command = commandFor(reply('INSTALL'), os, options);
+    expect(command).toBe(os === 'windows'
+      ? "INSTALL -Name 'Team''s $HOME $(whoami) `id`'"
+      : "INSTALL --name 'Team'\\''s $HOME $(whoami) `id`'");
+    expect(commandFor(reply('INSTALL'), os, { ...options, name: '   ' })).toBe('INSTALL');
+  });
+}
