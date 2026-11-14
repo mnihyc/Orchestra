@@ -34,6 +34,7 @@ pub(super) struct Delete;
 pub(super) struct Value {
     row: McpRow,
     copies: Vec<rows::Offering>,
+    notify: bool,
 }
 
 pub(super) struct Output {
@@ -56,7 +57,7 @@ async fn copies(conn: &mut Conn, server: Id) -> ApiResult<Vec<rows::Offering>> {
 
 impl effects::Effect for Delete {
     type Source = Source;
-    type Query = ();
+    type Query = orch_api_contract::resource_facts::ResourceDeleteQuery;
     type Body = ();
     type Value = Value;
     type Output = Output;
@@ -67,7 +68,7 @@ impl effects::Effect for Delete {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        (): (),
+        query: Self::Query,
         (): (),
     ) -> BoxFuture<'a, ApiResult<(Value, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
@@ -166,6 +167,7 @@ impl effects::Effect for Delete {
                 Value {
                     row,
                     copies: selected,
+                    notify: query.notify.unwrap_or(false),
                 },
                 facts,
             ))
@@ -190,6 +192,24 @@ impl effects::ApplyOwned for Delete {
         before: effects::FirstEffect<'a>,
     ) -> BoxFuture<'a, ApiResult<effects::Outcome<Output>>> {
         Box::pin(async move {
+            let people = if value.notify {
+                let raw = orch_engine::resource_facts::target_dependents(
+                    &mut tx,
+                    &orch_api_contract::resource_facts::FactTarget {
+                        object: ObjectRef {
+                            kind: ResourceKind::McpServer.into(),
+                            id: value.row.id,
+                        },
+                        model_id: None,
+                    },
+                    Time::new(ctx.now),
+                )
+                .await
+                .map_err(ApiError::engine)?;
+                super::super::notices::mcp_audience(&mut tx, principal, &value.row, &raw).await?
+            } else {
+                Vec::new()
+            };
             let deadline = before.deadline();
             let deletion = orch_engine::environment_mcp::deleting::Deletion::capture(
                 &mut tx,
@@ -206,6 +226,12 @@ impl effects::ApplyOwned for Delete {
                 .apply(&mut tx, principal, ctx.app.clock.as_ref())
                 .await
                 .map_err(ApiError::engine)?;
+            if value.notify {
+                super::super::notices::notify_mcp_deletion(
+                    ctx, &mut tx, principal, &value.row, people,
+                )
+                .await?;
+            }
             deadline.check()?;
             tx.commit().await.map_err(DbError::from)?;
             Ok(effects::Outcome::Applied(Output { commands }))
@@ -213,7 +239,11 @@ impl effects::ApplyOwned for Delete {
     }
 }
 
-pub(super) async fn run(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
+pub(super) async fn run(
+    ctx: Ctx,
+    _query: orch_api_contract::resource_facts::ResourceDeleteQuery,
+    (): (),
+) -> ApiResult<()> {
     let (tx, _) = transaction_guard::begin(&ctx).await?;
     let completed = effects::apply_owned::<Delete>(&ctx, tx).await?;
     let _ = deliver(&ctx, completed.output).await;
@@ -227,9 +257,16 @@ pub(super) async fn from_machine(
     request: Id,
 ) -> ApiResult<bool> {
     let tx = app.db.begin().await?;
-    let completed =
-        effects::apply_owned_from_machine::<Delete>(app, tx, machine, server, request, (), ())
-            .await?;
+    let completed = effects::apply_owned_from_machine::<Delete>(
+        app,
+        tx,
+        machine,
+        server,
+        request,
+        orch_api_contract::resource_facts::ResourceDeleteQuery::default(),
+        (),
+    )
+    .await?;
     let removed = deliver(&completed.ctx, completed.output).await;
     Ok(removed.contains(&machine))
 }

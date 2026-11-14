@@ -52,15 +52,21 @@ pub const LIBRARY_FACETS: [FacetSpec; 3] = [
     FacetSpec::response_content(NAMED_KINDS, TargetResolver::ResolvedCollection(NAMES)),
 ];
 /// The exact single impact target supported by the native reader and its named consequences.
-pub const IMPACT_FACETS: [FacetSpec; 2] = [
+pub const IMPACT_FACETS: [FacetSpec; 3] = [
     FacetSpec::required(
         KeyAction::Read,
         &[
             KeyTargetKind::Object(ObjectKind::Provider),
             KeyTargetKind::Object(ObjectKind::Agent),
             KeyTargetKind::Object(ObjectKind::Environment),
+            KeyTargetKind::Object(ObjectKind::McpServer),
         ],
         TargetResolver::Resolved("requested_resources"),
+    ),
+    FacetSpec::required(
+        KeyAction::Read,
+        &[KeyTargetKind::Object(ObjectKind::Environment)],
+        TargetResolver::ResolvedCollection(PARENTS),
     ),
     FacetSpec::response_content(NAMED_KINDS, TargetResolver::ResolvedCollection(NAMES)),
 ];
@@ -98,6 +104,12 @@ pub const IMPACT: Declaration<Source> = Declaration {
             target: TargetResolver::Resolved("requested_resources"),
             usage: FacetUsage::Required,
             cardinality: Cardinality::One,
+        },
+        Binding {
+            source: Source::OwnedEnvironments,
+            target: TargetResolver::ResolvedCollection(PARENTS),
+            usage: FacetUsage::Required,
+            cardinality: Cardinality::Collection,
         },
         Binding {
             source: Source::Names,

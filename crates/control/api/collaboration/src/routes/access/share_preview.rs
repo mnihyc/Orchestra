@@ -409,6 +409,7 @@ enum TrialError {
 
 fn empty_effects() -> api::PagePreview {
     api::PagePreview {
+        server_host_use: None,
         owner_reads: None,
         pages: 0,
         orgs: None,

@@ -629,6 +629,9 @@ async fn register_node_token(link: Link, file: PathBuf, stop: CancellationToken)
             }
             Ok(adopted) => {
                 tracing::info!(?adopted, "the token of the bundled node");
+                tracing::info!(
+                    "the host installed with the server starts private; containers may share the server's kernel; review Host Use before granting it"
+                );
                 return;
             }
             Err(fault) => {

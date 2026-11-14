@@ -11,7 +11,10 @@ import { AddMachineDialog,commandFor } from '@/features/resources/machines/Enrol
 import { AddHostDialog } from '@/features/resources/hosts/AddHost';
 import type { EnrollmentToken,Host,Machine,MachineEnrollmentTokenCreateBody } from '@/generated/api-types';
 import { i18n,setLocale } from '@/i18n';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+// These form and command cases use complete values; a browser proves overflow layout.
+skipOverflowFallback();
 
 const info=vi.hoisted(()=>({secure:true,public_url:'https://orch.example',configure:undefined as string|undefined}));
 vi.mock('@/api/gateways', async (load) => ({ ...await load<typeof GatewayApi>(),
@@ -205,3 +208,45 @@ it('changes the gateway flag of the displayed installer without minting another 
   expect(createMachineToken).toHaveBeenLastCalledWith(expect.any(String), { roles: ['environment', 'agent'], delegate: [], dedicated: false });
   expect(createHostToken).not.toHaveBeenCalled();
 });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const entry of ['machine', 'host'] as const) {
+  it(`uses the chosen ${entry} name without issuing another permission token (${locale})`, async () => {
+    await setLocale(locale);
+    const user = userEvent.setup();
+    const view = show(entry === 'host' ? <AddHostDialog onClose={vi.fn()} /> : <AddMachineDialog onClose={vi.fn()} />);
+    try {
+      if (entry === 'host') await user.selectOptions(screen.getByRole('combobox', { name: 'Home' }), 'org');
+      const field = screen.getByRole('textbox', { name: (name) => name.startsWith(i18n.t('resources.edit.name')) });
+      expect(field).toHaveValue('');
+      await showCommand();
+      const before = vi.mocked(entry === 'host' ? createHostToken : createMachineToken).mock.calls.length;
+      await user.type(field, "Team's $work");
+      expect(screen.getByText(/--name/u)).toHaveTextContent("--name 'Team'\\''s $work'");
+      expect(vi.mocked(entry === 'host' ? createHostToken : createMachineToken).mock.calls).toHaveLength(before);
+      await user.clear(field);
+      expect(screen.queryByText(/--name/u)).not.toBeInTheDocument();
+    } finally { view.unmount(); await setLocale('en'); }
+  });
+}
+
+for (const os of ['linux', 'macos', 'windows'] as const) {
+  it(`keeps spaces, quotes and shell expressions inside the ${os} machine name`, () => {
+    const options = { foreground: false, instance: '', node: false, name: "Team's $HOME $(whoami) `id`" };
+    const command = commandFor(reply('INSTALL'), os, options);
+    expect(command).toBe(os === 'windows'
+      ? "INSTALL -Name 'Team''s $HOME $(whoami) `id`'"
+      : "INSTALL --name 'Team'\\''s $HOME $(whoami) `id`'");
+    expect(commandFor(reply('INSTALL'), os, { ...options, name: '   ' })).toBe('INSTALL');
+  });
+}
+
+for (const quote of ['\u2018', '\u2019', '\u201a', '\u201b']) {
+  it(`keeps the PowerShell quote U+${quote.codePointAt(0)?.toString(16)} literal in a name and gateway`, () => {
+    const value = `Team${quote}$HOME $(exit 99)`;
+    const literal = `'Team${quote}${quote}$HOME $(exit 99)'`;
+    expect(commandFor(reply('INSTALL'), 'windows', { foreground: false, instance: '', node: false, name: value, gateway: value }))
+      .toBe(`INSTALL -Gateway ${literal} -Name ${literal}`);
+    expect(commandFor(reply('INSTALL'), 'linux', { foreground: false, instance: '', node: false, name: value, gateway: value }))
+      .toBe(`INSTALL --gateway '${value}' --name '${value}'`);
+  });
+}

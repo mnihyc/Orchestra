@@ -1,17 +1,16 @@
 /** The server's informed-sharing notice, with the same explicit confirmation on every share path. */
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { installOwnerReadReview } from '@/api/ownerReadConfirmation';
-import type { OwnerReadDisclosure } from '@/generated/api-types';
+import { installOwnerReadReview, type SharingDisclosure } from '@/api/ownerReadConfirmation';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { InlineAlert } from '@/ui/InlineAlert';
 
-export function OwnerReadNotice({ disclosure }: { disclosure: OwnerReadDisclosure | null | undefined }) {
+export function OwnerReadNotice({ disclosure }: { disclosure: SharingDisclosure | null | undefined }) {
   const { t } = useTranslation();
-  return disclosure === null || disclosure === undefined ? null : <InlineAlert tone="warning"><p>{t('access.ownerReads.notice', { count: disclosure.count })}</p></InlineAlert>;
+  return disclosure === null || disclosure === undefined ? null : <InlineAlert tone="warning"><p>{'host_id' in disclosure ? t('hosts.serverHost.grantNotice') : t('access.ownerReads.notice', { count: disclosure.count })}</p></InlineAlert>;
 }
 
-interface Request { disclosure: OwnerReadDisclosure; answer: (confirmed: boolean) => void }
+interface Request { disclosure: SharingDisclosure; answer: (confirmed: boolean) => void }
 
 export function OwnerReadConfirmation() {
   const { t } = useTranslation();
@@ -33,7 +32,8 @@ export function OwnerReadConfirmation() {
     setCurrent(queue.current[0] ?? null);
     request?.answer(confirmed);
   };
-  return <ConfirmDialog open={current !== null} onOpenChange={(open) => { if (!open) finish(false); }} title={t('access.ownerReads.title')} confirmLabel={t('access.ownerReads.confirm')} onConfirm={() => finish(true)}>
+  const serverHost = current !== null && 'host_id' in current.disclosure;
+  return <ConfirmDialog open={current !== null} onOpenChange={(open) => { if (!open) finish(false); }} title={t(serverHost ? 'hosts.serverHost.grantTitle' : 'access.ownerReads.title')} confirmLabel={t(serverHost ? 'hosts.serverHost.grantConfirm' : 'access.ownerReads.confirm')} onConfirm={() => finish(true)}>
     <OwnerReadNotice disclosure={current?.disclosure} />
   </ConfirmDialog>;
 }

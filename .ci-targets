@@ -1,0 +1,11 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --test providers --test provider_crud_scopes --test resource_facts --test resource_resume --test kmounts_mcp --test mcp_delete_scopes --test certificates --test hosts --test host_list_scopes
+test -p orch-engine --lib -- reports::provider_runtime_tests::
+test -p orch-engine --test lifecycle --test provider_runtime
+test -p orchctl --test doctor
+test -p orch-node --test conformance
+web typecheck
+web lint
+web test -- tests/unit/share-confirmation-keys.test.ts tests/component/resource-detail-pages.test.tsx tests/component/resource-inventory.test.tsx tests/component/host-settings-entry.test.tsx tests/component/resource-pause-dialog.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts

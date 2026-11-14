@@ -14,6 +14,7 @@ import { mcpKey } from '@/api/resource-tools';
 import { AgentScreen, type AgentTab } from '@/features/resources/agents/Profile';
 import { EnvironmentScreen, type EnvironmentTab } from '@/features/resources/environments/Environment';
 import { HostScreen, type HostTab } from '@/features/resources/hosts/Host';
+import { HostLink } from '@/features/resources/hosts/HostList';
 import { Machine, type MachineTab } from '@/features/resources/machines/Machine';
 import { TemplateScreen, type TemplateTab } from '@/features/resources/templates/Template';
 import { McpScreen } from '@/features/resources/mcp/Preset';
@@ -102,6 +103,19 @@ afterEach(async () => { cleanup(); useAppearance.setState(previousAppearance); d
   records.agent = detailAgent;
   records.machine = detailMachine;
   if (previousTheme === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = previousTheme; await setLocale('en'); });
+
+for (const locale of ['en','zh-CN'] as const) it(`marks the protected server host on its page and list name without guessing from its name (${locale})`,async()=>{
+  await setLocale(locale);
+  const bundled={...detailHost,bundled_with_server:true,name:'Renamed host'};
+  const view=draw(<HostScreen hostId={bundled.id}/>,bundled);
+  expect(await screen.findByText(i18n.t('hosts.serverHost.label'))).toBeVisible();
+  view.unmount();
+  const listed=show(<HostLink host={bundled}/>);
+  expect(screen.getByText(i18n.t('hosts.serverHost.label'))).toBeVisible();
+  listed.unmount();
+  show(<HostLink host={{...detailHost,name:'Bundled node',bundled_with_server:false}}/>);
+  expect(screen.queryByText(i18n.t('hosts.serverHost.label'))).not.toBeInTheDocument();
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it.each(kinds)(`keeps %s native tabs visible, one compact fact list and no diagnostic dump (${locale}/${theme})`, async (kind) => {

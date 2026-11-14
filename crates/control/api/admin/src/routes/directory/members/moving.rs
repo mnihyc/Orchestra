@@ -164,10 +164,20 @@ impl effects::Effect for Move {
                 )
                 .await?;
             }
-            if core.wanted == Role::Admin {
-                let policy = policy_at(conn, core.destination.id).await?;
-                admin_matters(conn, principal, core.destination.id, policy).await?;
-            }
+            let policy = policy_at(conn, core.destination.id).await?;
+            let standing =
+                orch_authz::giving::role_standing(conn, principal, core.destination.id, policy)
+                    .await
+                    .map_err(ApiError::internal)?;
+            crate::routes::access::role_matters(
+                conn,
+                principal,
+                core.destination.id,
+                core.wanted,
+                &standing,
+                policy,
+            )
+            .await?;
             Ok(())
         })
     }

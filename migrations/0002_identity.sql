@@ -150,6 +150,7 @@ CREATE TABLE enrollment_tokens (
     again_machine_id uuid,
     issuer_origin jsonb,
     issuer_required boolean DEFAULT false NOT NULL,
+    bundled_with_server boolean DEFAULT false NOT NULL,
     CONSTRAINT enrollment_tokens_required_issuer_check CHECK (NOT issuer_required OR issuer_origin IS NOT NULL),
     CONSTRAINT enrollment_tokens_issuer_origin_check CHECK (issuer_origin IS NULL OR jsonb_typeof(issuer_origin) = 'object'),
     CONSTRAINT enrollment_tokens_access_check CHECK ((access = ANY (ARRAY['defaults'::text, 'only_me'::text, 'home'::text]))),

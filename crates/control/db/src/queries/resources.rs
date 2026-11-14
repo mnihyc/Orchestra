@@ -1189,12 +1189,19 @@ pub mod thread_engine {
         pub platform_os: String,
         /// `connected` or `managed`.
         pub placement: String,
+        /// The host of a managed machine.
+        pub host_id: Option<Id>,
     }
 
-    /// A machine, as a reference to it names it.
+    /// A machine, as a reference to it names it. The machine of a host's container is called by its host's name:
+    /// its own name is the container's hostname, which says nothing to a person.
     pub async fn machine_name(conn: &mut Conn, id: Id) -> Result<Option<MachineName>, DbError> {
         Ok(sqlx::query_as(
-            "SELECT id, name, online, platform_os, placement FROM machines WHERE id = $1",
+            "SELECT m.id,
+                    CASE WHEN m.placement = 'managed' THEN COALESCE(h.name, m.name) ELSE m.name END AS name,
+                    m.online, m.platform_os, m.placement, m.host_id
+               FROM machines m LEFT JOIN hosts h ON h.id = m.host_id
+              WHERE m.id = $1",
         )
         .bind(id)
         .fetch_optional(conn)
@@ -3143,6 +3150,8 @@ pub mod routes {
         pub platform_os: String,
         /// `connected` or `managed`.
         pub placement: String,
+        /// The host of a managed machine.
+        pub host_id: Option<Id>,
     }
 
     /// Live physical reference identities, before any machine payload is projected.
@@ -3155,14 +3164,18 @@ pub mod routes {
         )
     }
 
-    /// The machines `ids` that are not deleted, in one statement.
+    /// The machines `ids` that are not deleted, in one statement. The machine of a host's container is called by
+    /// its host's name: its own name is the container's hostname, which says nothing to a person.
     pub async fn machine_names(
         conn: &mut Conn,
         ids: &[Id],
     ) -> Result<Vec<MachineNameRow>, DbError> {
         Ok(sqlx::query_as(
-            "SELECT id, name, online, platform_os, placement FROM machines
-              WHERE id = ANY($1) AND deleted_at IS NULL",
+            "SELECT m.id,
+                    CASE WHEN m.placement = 'managed' THEN COALESCE(h.name, m.name) ELSE m.name END AS name,
+                    m.online, m.platform_os, m.placement, m.host_id
+               FROM machines m LEFT JOIN hosts h ON h.id = m.host_id
+              WHERE m.id = ANY($1) AND m.deleted_at IS NULL",
         )
         .bind(ids)
         .fetch_all(conn)
@@ -4220,6 +4233,8 @@ pub mod routes {
     /// A host, as stored, with the units that run there.
     #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
     pub struct HostRow {
+        /// Protected enrollment origin, never inferred from its name or current home.
+        pub bundled_with_server: bool,
         /// The last measured load, distinct from resource declarations.
         pub load: Json,
         /// When that load was observed.
@@ -4275,7 +4290,7 @@ pub mod routes {
     /// on each; `caller` is who the count of their own environments is for.
     pub async fn hosts(conn: &mut Conn, ids: &[Id], caller: Id) -> Result<Vec<HostRow>, DbError> {
         let mut rows:Vec<HostRow>=sqlx::query_as(
-            "SELECT h.id, h.machine_id, m.offline_since, m.lost_at, h.owner_id, h.org_id, h.home_id, h.name, h.labels, h.drivers, h.capacity,
+            "SELECT h.id, h.machine_id, h.bundled_with_server, m.offline_since, m.lost_at, h.owner_id, h.org_id, h.home_id, h.name, h.labels, h.drivers, h.capacity,
                     h.load, h.load_at,
                     COALESCE(u.stopped_environments, 0) AS stopped_environments,
                     h.storages, (h.schedulable AND NOT h.disabled) AS schedulable, h.when_full, h.ports, h.ports_revision,
@@ -5167,6 +5182,45 @@ pub mod hosting {
                 .fetch_all(conn)
                 .await?,
         )
+    }
+
+    /// The host that runs `machine` as the container of one of its providers or environments (a
+    /// unit). Any other machine has none. A unit enrols as a machine of its own that has no owner,
+    /// home or page: the page of the host that runs it governs it.
+    pub async fn host_running(conn: &mut Conn, machine: Id) -> Result<Option<Id>, DbError> {
+        Ok(sqlx::query_scalar(
+            "SELECT host_id FROM machines WHERE id = $1 AND runtime_id IS NOT NULL AND host_id IS NOT NULL",
+        )
+        .bind(machine)
+        .fetch_optional(conn)
+        .await?)
+    }
+
+    /// The host whose page names each of these machines, as `(machine, host, host name)`: the host
+    /// whose node a machine is, or the host that runs it as a unit. A machine that is neither is
+    /// not among them.
+    pub async fn hosts_naming(
+        conn: &mut Conn,
+        machines: &[Id],
+    ) -> Result<Vec<(Id, Id, String)>, DbError> {
+        Ok(sqlx::query_as(
+            "SELECT machine_id, id, name FROM hosts WHERE machine_id = ANY($1)
+             UNION ALL
+             SELECT m.id, h.id, h.name FROM machines m JOIN hosts h ON h.id = m.host_id
+              WHERE m.id = ANY($1) AND m.runtime_id IS NOT NULL",
+        )
+        .bind(machines)
+        .fetch_all(conn)
+        .await?)
+    }
+
+    /// The host whose page names `machine`, as [`hosts_naming`] answers it for one machine.
+    pub async fn host_naming(conn: &mut Conn, machine: Id) -> Result<Option<Id>, DbError> {
+        Ok(hosts_naming(conn, &[machine])
+            .await?
+            .into_iter()
+            .next()
+            .map(|(_, host, _)| host))
     }
 
     /// Records what a host's node reports it has and can make.

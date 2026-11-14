@@ -24,7 +24,7 @@ const requests: { parent: string | null; filter: EverythingFilter; cursor: strin
 let failNext = false;
 
 function host(id: string, name: string, native = false): Host {
-  return { ...unjudgedProvenance(), id, name, address: `team.${id}`, owner, org_id: null, home: null,
+  return { bundled_with_server: false, ...unjudgedProvenance(), id, name, address: `team.${id}`, owner, org_id: null, home: null,
     machine: { id: `machine-${id}`, name, online: true, platform_os: 'linux', placement: 'managed' },
     labels: [], drivers: [{ name: 'docker', title: 'Docker', creates: ['environment'], runtime_classes: [] }],
     ports: null, ports_revision: 0, ports_proposal: null, capacity: { cpu_millis: 4000, memory_mb: 8192, disk_gb: 100 },

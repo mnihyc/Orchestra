@@ -737,6 +737,39 @@ pub async fn conversation_reader_grants(
     Ok(grants)
 }
 
+/// Actual owners and inherited grant identities for a resource permission and its higher levels.
+/// This is consequence metadata from the ordinary page chains, never a new admission.
+pub async fn resource_permission_grants(
+    conn: &mut Conn,
+    object: orch_access_contract::decisions::ObjectRef,
+    permission: Permission,
+    now: Time,
+) -> Result<Vec<Entry>, Error> {
+    let (graph, _, site) = crate::resources::site(conn, object).await?;
+    let mut pages = vec![site.page()];
+    pages.extend(site.chain.iter().copied().map(PageRef::defaults_of));
+    let mut permissions = vec![permission];
+    permissions.extend(permission.held_through());
+    let store = Store::load(conn, &pages, &permissions).await?;
+    let mut grants = Vec::new();
+    for row in access::owner_entries(conn, &[site.page().key()]).await? {
+        let entry = entry_of(&row)?;
+        if entry.counts(now) {
+            grants.push(entry);
+        }
+    }
+    for permission in permissions {
+        grants.extend(
+            store
+                .chain(&graph, &site, permission)
+                .holders(now)
+                .into_iter()
+                .map(|named| named.entry.clone()),
+        );
+    }
+    Ok(grants)
+}
+
 /// What was read to decide about some sites for one person.
 #[derive(Debug)]
 pub struct Frame<'p, S = Principal> {

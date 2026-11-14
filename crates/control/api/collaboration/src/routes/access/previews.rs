@@ -91,6 +91,7 @@ pub(crate) async fn worded(conn: &mut Conn, preview: Preview) -> ApiResult<api::
     )
     .unwrap_or(i64::MAX);
     Ok(api::PagePreview {
+        server_host_use: None,
         owner_reads: None,
         pages: preview.pages,
         orgs: preview.orgs,
@@ -139,6 +140,12 @@ pub async fn page(ctx: Ctx, (): (), body: api::PageChange) -> ApiResult<api::Pag
     )
     .await
     .map_err(ApiError::internal)?;
+    let server_host = match named.thing {
+        things::Thing::Other(object) => {
+            crate::server_host_use::Before::take(&mut tx, &principal, object, &body).await?
+        }
+        _ => None,
+    };
     let previewed: Result<Preview, ChangeError> = async {
         match named.thing {
             things::Thing::Node(_) => {
@@ -169,6 +176,9 @@ pub async fn page(ctx: Ctx, (): (), body: api::PageChange) -> ApiResult<api::Pag
     .await;
     let mut answer = answered(&mut tx, previewed).await;
     if let Ok(answer) = &mut answer {
+        if let Some(before) = server_host {
+            answer.server_host_use = before.disclosure(&mut tx, &principal).await?;
+        }
         answer.owner_reads = disclosure.disclosure(&ctx.app, &mut tx).await?;
     }
     // Nothing a preview did is kept: the change was made in a trial, and the transaction is ended

@@ -999,6 +999,9 @@ impl Engine {
             let host = host_rows::host(&mut conn, row.host_id).await?;
             (row, host)
         };
+        if row.state != runtime_state::STOPPING {
+            return Ok(());
+        }
         let Some(host) = host else {
             return Err(RuntimeError::Host("the host is gone".to_owned()));
         };
@@ -1030,6 +1033,12 @@ impl Engine {
         let now = self.inner.clock.now();
         let mut tx = self.inner.db.begin().await?;
         rows::lock(&mut tx, provider).await?;
+        let current = env_rows::runtime(&mut tx, runtime).await?;
+        if current.as_ref().is_none_or(|current| {
+            current.state != runtime_state::STOPPING || current.updated_at != row.updated_at
+        }) {
+            return Ok(());
+        }
         match waited {
             Ok(Ok(Outcome::Succeeded(_))) => {
                 let detail = env_rows::runtime(&mut tx, runtime)

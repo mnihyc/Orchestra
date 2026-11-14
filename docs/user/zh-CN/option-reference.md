@@ -14,6 +14,16 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 
 | 参考标识 | 含义 |
 | --- | --- |
+| `option:Host.bundled_with_server` | 仅由受保护的服务端引导令牌记录的不可变安装来源，不根据主机名或所选归属推断。 |
+| `option:PagePreview.server_host_use` | 向随服务端安装的主机授予使用、管理或所有者权限前的当前提示和精确确认凭据；没有新增授权时省略。 |
+| `option:ServerHostUseDisclosure.host_id` | 本次权限请求指定的主机，不包含私有名称或定义。 |
+| `option:ServerHostUseDisclosure.confirmation` | 通过 orch-server-host-use-confirmed 请求头确认此次权限变更及当前原生授权集合；变更意图改变时需重新确认，此凭据本身不授予访问权限。 |
+| `option:ProviderPauseQuery.note` | 显示在受影响会话中的提供方停用简短备注。 |
+| `option:ProviderPauseQuery.notify` | 停用提供方时，明确选择向每位受影响者发送一条合并通知；省略时不通知。对话框按“操作通知”设置初始选项，确认者可修改。 |
+| `option:ResourceDeleteQuery.notify` | 删除提供方或 MCP 定义时，明确选择向每位受影响者发送一条合并通知；省略时不通知。提供方子任务进度更新同一条收件箱通知。MCP 通知记录定义移除，机器上的清理仍通过持久命令继续。 |
+| `option:ResourceImpact.notification` | 提供方整体停用、提供方删除或 MCP 定义删除操作当前的通知对象和复选框初始值；其他影响类型和单个模型不提供此字段。 |
+| `option:ResourceOperationNotification.audience` | 可显示的受影响人员，以及关联关系不可见的人员数量；不包含操作确认者，每人只计一次。 |
+| `option:ResourceOperationNotification.default_on` | 根据此次影响继承的“操作通知”初始值；确认者可在执行前修改选项。 |
 | `option:ask.models.*.model` | 已启用 API 模型的路由名称，与 provider_id 一起标识一个允许的问一问模型。子级列表可以缩小可选范围，并保留父级顺序。 |
 | `option:ask.models.*.provider_id` | 此项允许的问一问模型所使用的 API 提供方标识。提问者和当前付费人仍须有权在对话所属组织中使用该提供方及模型。 |
 | `option:AccessOptions.models` | 此使用权限涵盖的模型。 |
@@ -26,6 +36,7 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 | `option:BindingOptions.providers` | 每个提供方及其模型和代理。 |
 | `option:BindingOptions.environments` | 当前读者可管理的已有环境，当前话题的环境优先。 |
 | `option:BindingOptions.environment_default` | 未另行选择时，新线程如何选择环境。 |
+| `option:BindingOptions.default_environment` | 最近一层设置指定的默认环境（无论设在哪一层），以及当前读者无法使用它时的原因；没有设置指定默认环境、或重新绑定现有线程时缺省。 |
 | `option:BindingOptions.source` | 已安全解析的仓库设置及仓库地址的来源位置。 |
 | `option:BindingOptions.access` | 在这里创建的线程最初采用的权限页。 |
 | `option:BindingOptions.agent_access` | 此创建上下文可选的代理权限；重新绑定不会创建新贡献。 |
