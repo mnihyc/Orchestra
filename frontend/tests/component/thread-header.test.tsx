@@ -31,15 +31,15 @@ vi.mock('@/api/approvals', async (original) => {
   return { ...actual, approvalQuery: (id: string) => ({ ...actual.approvalQuery(id), queryFn: () => calls.approval(id) }) };
 });
 const changesView = vi.hoisted(() => vi.fn());
-vi.mock('@/features/inspector/reviewTarget', () => ({ openThreadChanges: changesView }));
+vi.mock('@/features/inspector/reviewTarget', async (loadOriginal) => ({ ...await loadOriginal<object>(), openThreadChanges: changesView }));
 vi.mock('@/features/settings/Editor', () => ({ SettingsEditor: (props: { target: unknown; only?: readonly string[]; scope: string }) => { calls.settings(props); return <div>One scoped setting</div>; } }));
 vi.mock('@/features/goal/editor', () => ({ openGoalEditor: calls.goal }));
 vi.mock('@/api/nodes', async (importOriginal) => ({ ...await importOriginal<typeof NodesApi>(), updateNode: calls.update }));
 vi.mock('@/api/threads', async (importOriginal) => ({ ...await importOriginal<typeof ThreadsApi>(), resumeAutomatic: vi.fn() }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: calls.share }));
-vi.mock('@/features/navigation/favorites', () => ({ StarButton: () => <button>{calls.starred ? 'Unstar' : 'Star'}</button> }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: calls.share }));
+vi.mock('@/features/navigation/favorites', async (loadOriginal) => ({ ...await loadOriginal<object>(), StarButton: () => <button>{calls.starred ? 'Unstar' : 'Star'}</button> }));
 vi.mock('@/features/thread/SubscriptionBell', () => ({ SubscriptionBell: () => <button>Notifications</button> }));
-vi.mock('@/features/navigation/NodeMenu', () => ({ useNodeMenu: () => [calls.starred ? 'Unstar' : 'Star', 'Export', 'Archive', 'Delete'].map((label) => ({ id: label.toLowerCase(), label, onSelect: vi.fn() })) }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodeMenu: () => [calls.starred ? 'Unstar' : 'Star', 'Export', 'Archive', 'Delete'].map((label) => ({ id: label.toLowerCase(), label, onSelect: vi.fn() })) }));
 vi.mock('@/features/thread/forkNow', () => ({ useForkNow: () => ({ pending: false, start: calls.fork }) }));
 vi.mock('@/api/forks', async (original) => ({ ...await original<object>(), planFork: () => Promise.resolve({
   access: { summary: { custom: false, from: null, interact: [], manage: [], view: [] } },
@@ -48,7 +48,7 @@ vi.mock('@/api/forks', async (original) => ({ ...await original<object>(), planF
     { where: 'topic', parts: {} }, { where: 'project', parts: {} },
   ] },
 }) }));
-vi.mock('@/features/change/target', () => ({ openChange: calls.change }));
+vi.mock('@/features/change/target', async (loadOriginal) => ({ ...await loadOriginal<object>(), openChange: calls.change }));
 vi.mock('@/features/side-threads/ask', () => ({ openSideAsk: calls.ask }));
 vi.mock('@/features/side-threads/SideChips', () => ({ SideThreadList: () => <p>Open side threads</p> }));
 vi.mock('@/features/thread-move/MoveToTopic', () => ({ MoveToTopic: () => null }));

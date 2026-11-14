@@ -384,7 +384,7 @@ describe('main origin is independent from bottom keyboard focus', () => {
     const empty = spatialMainGroups(state().layout.main)[5];
     if (empty === undefined) throw new Error('The explicit grid cell is missing.');
     state().setFocusedGroup(empty.id); state().focus(inspector.id); state().flush();
-    expect(loadWorkspace(USER, 'thread').kept?.focusedMainGroup).toBe(empty.id);
+    expect(loadWorkspace(USER).kept?.focusedMainGroup).toBe(empty.id);
     state().leave();
     const drawn = draw(requiredHref(a));
     await settled(drawn, requiredHref(a)); await focusBottom();
@@ -491,7 +491,7 @@ describe('sidebar movement carries presentation focus without changing content c
     await focusOutline(outline);
     expect(state().focusedMainTab).toBe(chat.id);
     act(() => { state().flush(); });
-    const saved = loadWorkspace(USER, 'thread').kept;
+    const saved = loadWorkspace(USER).kept;
     expect(saved?.focusedTab).toBe(outline.id); expect(saved?.focusedMainTab).toBe(chat.id); expect(saved?.activeContent).toBe(a.id);
     act(() => { state().reset(); });
     await settled(drawn, requiredHref(a));

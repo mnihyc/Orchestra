@@ -1002,3 +1002,6 @@ async fn an_opening_the_system_gave_up_stops_fetching_and_removes_what_it_fetche
     assert!(matches!(ended, Progress::Succeeded(_)), "{ended:?}");
     rig.connector.unwrap().stop().await;
 }
+
+#[path = "agent_role/stop_during_command.rs"]
+mod stop_during_command;

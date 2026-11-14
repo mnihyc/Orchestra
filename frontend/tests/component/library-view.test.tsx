@@ -13,7 +13,7 @@ const original=client.session.getState();
 const calls:EverythingFilter[]=[];
 let admin=false;
 let orgReady=true;
-vi.mock('@/api/auth',()=>({meQuery:{queryKey:['library-reader'],initialData:{id:'library-reader'},queryFn:()=>Promise.resolve({id:'library-reader'})}}));
+vi.mock('@/api/auth',async (loadOriginal) => ({ ...await loadOriginal<object>(),meQuery:{queryKey:['library-reader'],initialData:{id:'library-reader'},queryFn:()=>Promise.resolve({id:'library-reader'})}}));
 vi.mock('@/api/everything',()=>({everythingQuery:(_reader:string,_parent:string,filter:EverythingFilter)=>({queryKey:['library-inventory',filter],initialPageParam:null,
  queryFn:()=>{calls.push(filter);return Promise.resolve({items:[],next_cursor:null});},getNextPageParam:()=>null})}));
 vi.mock('@/features/resources/HomePicker',()=>({useViewedOrgState:()=>({org:orgReady?{id:'team',name:'Workshop',access:{administers:admin}}:null,load:{isSuccess:orgReady,isPending:!orgReady,isError:false}})}));

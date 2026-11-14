@@ -33,8 +33,22 @@ pub const PREPARING: &str = "files";
 /// them again first.
 pub const FILES_READY: &str = "files_ready";
 
-/// The source panel retains the precise failure and the explicit recovery action.
-pub(crate) const SOURCE_FAILED: &str = "Source preparation failed. Choose Prepare again to retry.";
+/// The step of a thread that records the files of its directory before the turn.
+pub const RECORDING_STEP: &str = "recording";
+
+/// The step an input's preparation is in once its source is ready: writing its files, or, with none to
+/// write, recording the files of the directory before the turn.
+fn files_step(input: Id, content: &[ContentPart]) -> &'static str {
+    if delivery::plan(input, content).is_empty() {
+        RECORDING_STEP
+    } else {
+        delivery::FILES_STEP
+    }
+}
+
+/// A human explanation only; source state and cause are structured members, never parsed from this sentence.
+pub(crate) const SOURCE_FAILED_DETAIL: &str =
+    "Source preparation failed. Choose Prepare again to retry.";
 
 pub(crate) fn source_failed(thread: &ThreadRow) -> Result<bool, EngineError> {
     thread
@@ -131,7 +145,9 @@ impl Engine {
     ) -> Result<Gate, EngineError> {
         let content: Vec<ContentPart> = serde_json::from_value(input.content.clone())?;
         let before = delivery::plan(input.id, &content);
-        let content = self.prepare_pastes(unit.conn, thread, &content).await?;
+        let prepared = self.prepare_pastes(unit.conn, thread, &content).await?;
+        let pastes_ready = prepared.missing.is_empty();
+        let content = prepared.content;
         let after = delivery::plan(input.id, &content);
         if input.state_detail.as_deref() == Some(FILES_READY)
             && after.iter().any(|file| {
@@ -152,8 +168,9 @@ impl Engine {
                 .map_err(orch_db::DbError::from)?;
             input.content = prepared;
         }
-        if (delivery::plan(input.id, &content).is_empty()
-            || input.state_detail.as_deref() == Some(FILES_READY))
+        if pastes_ready
+            && (delivery::plan(input.id, &content).is_empty()
+                || input.state_detail.as_deref() == Some(FILES_READY))
             && crate::source::before_ready(unit, thread, input).await?
         {
             return Ok(Gate::Pass);
@@ -169,7 +186,7 @@ impl Engine {
                 reason: None,
                 detail: None,
                 step: Some(if crate::source::ready(thread)? {
-                    delivery::FILES_STEP
+                    files_step(input.id, &content)
                 } else {
                     "source"
                 }),
@@ -220,7 +237,7 @@ impl Engine {
     }
 
     async fn drive_preparation_inner(&self, thread_id: Id) -> Result<(), EngineError> {
-        let (thread, input, environment) = {
+        let (thread, input) = {
             let mut conn = self.inner.db.acquire().await?;
             let Some(thread) = threads::thread(&mut conn, thread_id).await? else {
                 return Ok(());
@@ -232,14 +249,21 @@ impl Engine {
                 .await?
                 .into_iter()
                 .find(|input| input.state_detail.as_deref() == Some(PREPARING));
-            let environment = match thread.environment_id {
-                Some(id) => environments::environment(&mut conn, id).await?,
-                None => None,
-            };
-            (thread, input, environment)
+            (thread, input)
         };
         let Some(input) = input else {
             return self.end_preparation(thread_id, None, Prepared::Back).await;
+        };
+        let Some((thread, input)) = self.refresh_preparing_pastes(&thread, &input).await? else {
+            return Ok(());
+        };
+        // Blob reading may have waited while the same environment acquired a new runtime generation.
+        let environment = {
+            let mut conn = self.inner.db.acquire().await?;
+            match thread.environment_id {
+                Some(id) => environments::environment(&mut conn, id).await?,
+                None => None,
+            }
         };
         let Some(environment) = environment.filter(|environment| environment.deleted_at.is_none())
         else {
@@ -247,6 +271,7 @@ impl Engine {
                 .end_preparation(thread_id, Some(input.id), Prepared::Back)
                 .await;
         };
+        let content: Vec<ContentPart> = serde_json::from_value(input.content.clone())?;
         // The environment as the start of the turn will find it: one decision for both
         // (`Engine::environment_standing`), so that preparation never sends back an input that
         // pre-flight sends here again at once.
@@ -255,7 +280,7 @@ impl Engine {
                 self.set_step(
                     thread_id,
                     if crate::source::ready(&thread)? {
-                        delivery::FILES_STEP
+                        files_step(input.id, &content)
                     } else {
                         "source"
                     },
@@ -283,7 +308,6 @@ impl Engine {
             self.prepare_pending_source(&thread).await?;
             return Ok(());
         }
-        let content: Vec<ContentPart> = serde_json::from_value(input.content.clone())?;
         let directory =
             crate::sessions::absolute_directory(&environment.workspace_root, &thread.workspace_dir);
         let Some(placement) = self
@@ -302,6 +326,8 @@ impl Engine {
         };
         let issues = issues_of(input.id, &content, &placement);
         let prepared = if issues.is_empty() {
+            // Its files are written; the directory is recorded next, and the page says so.
+            self.set_step(thread_id, RECORDING_STEP).await?;
             self.record_before(&thread, &input, &environment).await?;
             Prepared::Ready
         } else {
@@ -309,6 +335,92 @@ impl Engine {
         };
         self.end_preparation(thread_id, Some(input.id), prepared)
             .await
+    }
+
+    /// Only immutable paste bytes cross this wait. An edit, Stop or changed budget wins the next row lock.
+    async fn refresh_preparing_pastes(
+        &self,
+        snapshot: &ThreadRow,
+        input: &InputRow,
+    ) -> Result<Option<(ThreadRow, InputRow)>, EngineError> {
+        let original: Vec<ContentPart> = serde_json::from_value(input.content.clone())?;
+        if !original
+            .iter()
+            .any(|part| matches!(part, ContentPart::PastedText(_)))
+        {
+            return Ok(Some((snapshot.clone(), input.clone())));
+        }
+        let cancel = tokio_util::sync::CancellationToken::new();
+        crate::engine::lock(&self.inner.preparation_reads).insert(snapshot.node_id, cancel.clone());
+        let loaded = async {
+            let mut conn = self.inner.db.acquire().await?;
+            let current = threads::thread(&mut conn, snapshot.node_id).await?;
+            let current_input = threads::input(&mut conn, input.id).await?;
+            if self.is_stopped()
+                || !current.is_some_and(|thread| {
+                    thread.state == thread_state::STARTING && thread.current_turn_id.is_none()
+                })
+                || !current_input.is_some_and(|row| {
+                    row.thread_id == snapshot.node_id
+                        && row.state == input_state::PENDING
+                        && row.state_detail.as_deref() == Some(PREPARING)
+                        && row.seq_updated == input.seq_updated
+                })
+            {
+                return Ok::<_, EngineError>(None);
+            }
+            // This phase has no transaction. Cancellation never drops a begin, commit or checked write.
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => Ok(None),
+                content = self.load_pastes(&mut conn, snapshot, &original) => content.map(Some),
+            }
+        }
+        .await;
+        crate::engine::lock(&self.inner.preparation_reads).remove(&snapshot.node_id);
+        let Some(loaded) = loaded? else {
+            return Ok(None);
+        };
+        let mut tx = self.inner.db.begin().await?;
+        let mut unit = Unit::new(&mut tx, self.inner.clock.now());
+        let Some(thread) = threads::lock(unit.conn, snapshot.node_id).await? else {
+            return Ok(None);
+        };
+        self.apply_open_stops_in(&mut unit, thread.node_id).await?;
+        let Some(thread) = threads::thread(unit.conn, snapshot.node_id).await? else {
+            return Ok(None);
+        };
+        if thread.state != thread_state::STARTING
+            || thread.current_turn_id.is_some()
+            || thread.agent_id != snapshot.agent_id
+            || thread.provider_id != snapshot.provider_id
+            || thread.environment_id != snapshot.environment_id
+            || thread.workspace_dir != snapshot.workspace_dir
+            || thread.active_continuation_id != snapshot.active_continuation_id
+        {
+            return Ok(None);
+        }
+        let Some(mut current) = threads::input(unit.conn, input.id).await?.filter(|row| {
+            row.state == input_state::PENDING
+                && row.state_detail.as_deref() == Some(PREPARING)
+                && row.content == input.content
+                && row.continuation_id == thread.active_continuation_id
+        }) else {
+            return Ok(None);
+        };
+        let prepared = self.prepare_pastes(unit.conn, &thread, &loaded).await?;
+        if !prepared.missing.is_empty() {
+            return Ok(None);
+        }
+        let stored = serde_json::to_value(&prepared.content)?;
+        if stored != current.content {
+            let seq = unit.stamp(thread.node_id).await?;
+            threads::update_input_content(unit.conn, current.id, &stored, seq).await?;
+            current.content = stored;
+        }
+        let finished = unit.finish().await?;
+        self.commit(tx, finished).await?;
+        Ok(Some((thread, current)))
     }
 
     /// Settles what was prepared, under the thread's lock, and runs pre-flight again in the same
@@ -344,7 +456,7 @@ impl Engine {
             };
             let blocked = match &prepared {
                 Prepared::Unavailable(why) => Some(("environment_unavailable", why.clone())),
-                Prepared::SourceFailed => Some(("error", SOURCE_FAILED.to_owned())),
+                Prepared::SourceFailed => Some(("source_failed", SOURCE_FAILED_DETAIL.to_owned())),
                 Prepared::Ready | Prepared::Held(_) | Prepared::Back => None,
             };
             if let Some(row) = &row {
@@ -527,6 +639,12 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_input_without_files_starts_its_preparation_in_the_recording_step() {
+        let input = orch_types::new_id();
+        assert_eq!(files_step(input, &[]), RECORDING_STEP);
+    }
 
     #[test]
     fn images_are_planned_for_file_delivery_even_without_native_image_input() {
