@@ -33,8 +33,8 @@ function show(ui: ReactNode) {
 const read = vi.hoisted(() => vi.fn<() => Promise<EverythingRowPage>>());
 const open = vi.hoisted(() => vi.fn());
 vi.mock('@/api/everything', () => ({ everythingQuery: (reader: string, parent: string, filter: unknown) => ({ queryKey: ['everything', reader, parent, filter], initialPageParam: null, queryFn: () => read(), getNextPageParam: (page: EverythingRowPage) => page.next_cursor }) }));
-vi.mock('@/features/chat/open', () => ({ useOpenPath: () => open }));
-vi.mock('@/features/workbench/viewOpening', () => ({ useViewShown: () => true }));
+vi.mock('@/features/chat/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useOpenPath: () => open }));
+vi.mock('@/features/workbench/viewOpening', async (loadOriginal) => ({ ...await loadOriginal<object>(), useViewShown: () => true }));
 
 const tree = { nodes: new Map(), lastSeq: 1, loaded: true, error: null };
 const filter = navigationFilter('opened', '', { threads: true, documents: true, chats: false }, false, false, false);

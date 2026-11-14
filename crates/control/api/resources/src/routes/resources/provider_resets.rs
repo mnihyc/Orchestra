@@ -323,9 +323,13 @@ async fn consume(
         return Err(stale(&ctx, &mut tx, principal, id).await);
     }
     // Confirm only what the runtime actually observed, never an override of the available count.
-    let snapshot_epoch = rows::credential_epoch(&mut tx, id, Some(provider.revision))
-        .await?
-        .ok_or_else(ApiError::not_found)?;
+    let snapshot_epoch = rows::credential_epoch(
+        &mut tx,
+        id,
+        Some(provider.revision - provider.observation_revision),
+    )
+    .await?
+    .ok_or_else(ApiError::not_found)?;
     let read_started = Time::new(ctx.now);
     if reserved.is_none()
         && !rows::claim_read(&mut tx, id, true, ctx.now, chrono::Duration::zero()).await?

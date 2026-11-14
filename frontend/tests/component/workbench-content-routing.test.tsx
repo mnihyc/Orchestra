@@ -77,7 +77,7 @@ vi.mock('@/api/nodes', async (original) => {
 });
 
 // This witness receives the real FileTabs props; actual CodeView dispatch is covered separately.
-vi.mock('@/features/files/lazy', () => ({ lazyPart: () => function FileViewerWitness({ line, lineRequest }: ViewerProps) {
+vi.mock('@/features/files/lazy', async (loadOriginal) => ({ ...await loadOriginal<object>(), lazyPart: () => function FileViewerWitness({ line, lineRequest }: ViewerProps) {
   return <section><output aria-label="Addressed file line" data-line={line ?? 'none'} data-request={lineRequest ?? 'none'} />
     <textarea aria-label="Retained viewer draft" defaultValue="Original file bytes" /></section>;
 } }));
@@ -340,10 +340,10 @@ it('the actual fixed-history opening hydrator cannot replace shared controls', a
   selectThreadContinuation(fixed, 'history-b');
   const capture = threadWriter.capture(fixed, client.session.getState().readerVersion);
   const controls = queryClient.getQueryData(threadKeys.parameters(ACME.mainThread));
-  hydrateThreadOpening(queryClient, { ...opening, draft: null, parameters: null, limits: null, settings: [] }, capture);
+  hydrateThreadOpening(queryClient, { ...opening, draft: null, parameters: null, limits: null }, capture);
   expect(queryClient.getQueryData(threadKeys.draft(ACME.mainThread))).toEqual(before);
   expect(queryClient.getQueryData(threadKeys.parameters(ACME.mainThread))).toEqual(controls);
-  expect(queryClient.getQueryData(threadKeys.outline(fixed))).toEqual({ pages: [opening.outline], pageParams: [null] });
+  expect(queryClient.getQueryData(threadKeys.outline(fixed))).toBeUndefined();
   expect(fixed.controls).toBeUndefined();
 });
 
@@ -358,7 +358,7 @@ it('shared current workspace metadata cannot replace the existing draft or contr
   expect(source).toEqual(workspaceThreadRead('workspace-a', ACME.mainThread));
   expect(source).not.toEqual(workspaceThreadRead('workspace-b', ACME.mainThread));
   const capture = threadWriter.capture(source, client.session.getState().readerVersion);
-  hydrateThreadOpening(queryClient, { ...opening, draft: null, parameters: null, limits: null, settings: [] }, capture);
+  hydrateThreadOpening(queryClient, { ...opening, draft: null, parameters: null, limits: null }, capture);
   expect(queryClient.getQueryData(threadKeys.draft(ACME.mainThread))).toEqual(draft);
   expect(queryClient.getQueryData(threadKeys.parameters(ACME.mainThread))).toEqual(parameters);
   expect(source.key.kind).toBe('result'); expect(source.controls).toBeUndefined();

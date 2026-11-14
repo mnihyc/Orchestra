@@ -10,7 +10,7 @@ import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ open: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.open }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => calls.open }));
 afterEach(async () => { calls.open.mockClear(); await setLocale('en'); });
 
 const destinations = [

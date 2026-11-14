@@ -20,7 +20,7 @@ import { show } from './support';
 const calls = vi.hoisted(() => ({ reload: vi.fn() }));
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useThreadFeed: () => undefined, useOrgTreeFeed: () => undefined, reloadThread: calls.reload }));
 vi.mock('@/shell/screen', async (load) => ({ ...await load<typeof Screen>(), useScreenHeading: () => undefined }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
 vi.mock('@/features/thread/Header', () => ({ ThreadHeader: ({ thread }: { thread: Thread }) => <header><h1>{thread.name}</h1></header> }));
 vi.mock('@/features/composer/Composer', () => ({ Composer: () => <textarea aria-label="Thread draft" /> }));
 vi.mock('@/features/composer/QueueTray', () => ({ QueueTray: () => null }));

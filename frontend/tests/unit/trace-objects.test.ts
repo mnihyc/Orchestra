@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { objectActs } from '@/features/trace/objects';
 
 const { request, deleteRequest } = vi.hoisted(() => ({ request: vi.fn(), deleteRequest: vi.fn() }));
-vi.mock('@/api/client', () => ({ api: { request, DELETE: deleteRequest }, ok: async (given: Promise<{ response: Response; data?: unknown }>) => { const reply = await given; if (!reply.response.ok) throw new Error('refused'); return reply.data; }, repeatable: (key: string) => ({ headers: { 'Idempotency-Key': key } }) }));
+vi.mock('@/api/client', async (loadOriginal) => ({ ...await loadOriginal<object>(), api: { request, DELETE: deleteRequest }, ok: async (given: Promise<{ response: Response; data?: unknown }>) => { const reply = await given; if (!reply.response.ok) throw new Error('refused'); return reply.data; }, repeatable: (key: string) => ({ headers: { 'Idempotency-Key': key } }) }));
 import { downloadTrail, purgeEnvironment, restoreEnvironment } from '@/api/trace';
 import type { AuditEntry as TraceEntry } from '@/generated/api-types';
 

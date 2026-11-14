@@ -9,7 +9,7 @@ import { TraceFilters } from '@/features/trace/Filters';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 it.each(['en', 'zh-CN'] as const)('shows and changes export content and dates without an extra menu in %s', async (locale) => {
   try {

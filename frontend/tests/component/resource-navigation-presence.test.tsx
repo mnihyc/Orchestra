@@ -15,7 +15,7 @@ import { show, skipOverflowFallback } from './support';
 
 skipOverflowFallback();
 
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   Link: ({ to, activeProps: _activeProps, children, ...props }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; activeProps?: unknown; children?: ReactNode }) => {
     return <a href={to} {...props}>{children}</a>;
   },
@@ -66,22 +66,19 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(screen.getAllByRole('navigation', { name: i18n.t('navigation.resources.title') })).toHaveLength(1);
   });
 
-  it(`uses Resources + for each native creation flow instead of adding a view in ${locale}/${theme}`, async () => {
+  for (const { name } of KINDS) it(`opens the native ${name} creation flow from Resources + in ${locale}/${theme}`, async () => {
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
     expect(viewOf('resource-navigation')?.add).toBe(ResourceAddMenu);
     const user = userEvent.setup(); show(<ResourceAddMenu />);
-    for (const { name } of KINDS) {
-      await user.click(screen.getByRole('button', { name: i18n.t('resources.controls.add') }));
-      const menu = screen.getByRole('menu'); expect(within(menu).getAllByRole('menuitem')).toHaveLength(9);
-      // The click starts a real lazy import. Await its resolution inside the same React update.
-      await act(async () => {
-        await user.click(within(menu).getByRole('menuitem', { name: i18n.t(`screens.${name}.title`) }));
-        await vi.dynamicImportSettled();
-      });
-      const dialog = await screen.findByRole('dialog', { name });
-      expect(screen.getAllByRole('dialog')).toHaveLength(1);
-      await user.click(within(dialog).getByRole('button', { name: 'Close' }));
-      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    }
+    await user.click(screen.getByRole('button', { name: i18n.t('resources.controls.add') }));
+    const menu = screen.getByRole('menu'); expect(within(menu).getAllByRole('menuitem')).toHaveLength(9);
+    await act(async () => {
+      await user.click(within(menu).getByRole('menuitem', { name: i18n.t(`screens.${name}.title`) }));
+      await vi.dynamicImportSettled();
+    });
+    const dialog = await screen.findByRole('dialog', { name });
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    await user.click(within(dialog).getByRole('button', { name: 'Close' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 }

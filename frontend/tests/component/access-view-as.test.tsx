@@ -7,7 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as AccessApi from '@/api/access';
 import type { AccessKind, AccessTarget } from '@/api/access';
 import { ApiError } from '@/api/client';
-import { AccessDialog } from '@/features/access/AccessDialog';
+import { AccessDialog } from '@/features/access/AccessDialogBody';
 import { ViewAs } from '@/features/access/ViewAs';
 import type { Candidates } from '@/features/access/candidates';
 import type { EffectiveAccess } from '@/generated/api-types';
@@ -30,11 +30,11 @@ vi.mock('@/features/access/candidates', () => ({ useTargetOrg: () => null,
     byValue: new Map([[BEA.id, { input: { kind: 'user', id: BEA.id }, holder: { kind: 'user', user: BEA }, user: BEA, name: BEA.display_name, outside: false }]]),
     loading: false, placePicker: null }),
 }));
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="#place">{children}</a> }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: ReactNode }) => <a href="#place">{children}</a> }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/features/access/ByArea', () => ({ ByArea: () => <p>Full permissions</p> }));
-vi.mock('@/features/navigation/placeLabels', () => ({ useNodeLabel: (_id: string, name: string) => name,
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodeLabel: (_id: string, name: string) => name,
   usePlaceLabel: () => (place: { name: string | null } | null) => place?.name ?? null, useKnownPlaces: () => new Map() }));
 
 const kinds: Exclude<AccessKind, 'chat'>[] = ['org', 'project', 'topic', 'thread', 'document', 'provider', 'agent', 'environment', 'host', 'machine', 'template', 'mcp_server', 'mount'];

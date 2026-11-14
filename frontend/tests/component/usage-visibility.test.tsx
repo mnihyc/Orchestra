@@ -8,11 +8,11 @@ import { i18n, setLocale } from '@/i18n';
 import { NetworkError } from '@/lib/requests';
 import { show } from './support';
 
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess:vi.fn() }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess:vi.fn() }));
 const read = vi.hoisted(() => vi.fn<() => Promise<{ id: string; kind: 'project'; name: string }>>());
-vi.mock('@/api/nodes', () => ({ nodeQuery:() => ({ queryKey:['visibility-node'],queryFn:read,retry:false }) }));
+vi.mock('@/api/nodes', async (loadOriginal) => ({ ...await loadOriginal<object>(), nodeQuery:() => ({ queryKey:['visibility-node'],queryFn:read,retry:false }) }));
 const reads = vi.hoisted(() => ({ page: vi.fn() }));
-vi.mock('@/api/access', () => ({ pageQuery: reads.page }));
+vi.mock('@/api/access', async (loadOriginal) => ({ ...await loadOriginal<object>(), pageQuery: reads.page }));
 beforeEach(() => { vi.clearAllMocks(); read.mockReset().mockResolvedValue({ id: 'project', kind: 'project', name: 'Research' }); });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 

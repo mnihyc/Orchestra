@@ -17,7 +17,7 @@ import { marker } from '../doubles/thread-rows';
 import { show } from './support';
 
 const openGuide = vi.hoisted(() => vi.fn());
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => openGuide }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => openGuide }));
 
 const context: TimelineContext = { threadId: 'history-thread', threadName: 'History', detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: false, canManage: false, live: true, lit: null, selection: NOT_PICKING };

@@ -13,13 +13,13 @@ import { planProvider } from '../unit/provider-plan-fixtures';
 import { show } from './support';
 
 vi.mock('@tanstack/react-router',async(load)=>({...await load<typeof RouterModule>(),Link:({to,params,children,...anchor}:AnchorHTMLAttributes<HTMLAnchorElement> & {to:string;params?:Record<string,string>;search?:unknown;hash?:unknown;children?:ReactNode})=><a {...anchor} href={to.replace(/\$(\w+)/g,(_,key:string)=>params?.[key] ?? '')}>{children}</a>}));
-vi.mock('@/shell/screen',()=>({useScreenHeading:()=>undefined}));
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/shell/screen',async (loadOriginal) => ({ ...await loadOriginal<object>(),useScreenHeading:()=>undefined}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/usage/Export',()=>({Export:()=>null}));
 vi.mock('@/features/usage/Limits',()=>({Limits:()=> <Section id="order-limits" title="Limits"><p>One cap</p></Section>}));
 vi.mock('@/api/planUsage',()=>({PLAN_PAGE_SIZE:20,creditUsageQuery:()=>({queryKey:['order-credit'],queryFn:()=>Promise.resolve({items:[],next_cursor:null})}),planUsageQuery:()=>({queryKey:['order-plan'],queryFn:()=>Promise.resolve({items:[],next_cursor:null})})}));
-vi.mock('@/api/nodes',()=>({nodeQuery:(id:string)=>({queryKey:['order-node',id],queryFn:()=>Promise.resolve(org(id,'acme','Acme',userRef(me(1,'ada','Ada'))))}),orgsQuery:{queryKey:['order-orgs'],queryFn:()=>Promise.resolve([])},fetchTree:()=>Promise.resolve({nodes:[]})}));
-vi.mock('@/api/resources',()=>({providerQuery:(id:string)=>({queryKey:['order-provider',id],queryFn:()=>Promise.resolve(planProvider())})}));
+vi.mock('@/api/nodes',async (loadOriginal) => ({ ...await loadOriginal<object>(),nodeQuery:(id:string)=>({queryKey:['order-node',id],queryFn:()=>Promise.resolve(org(id,'acme','Acme',userRef(me(1,'ada','Ada'))))}),orgsQuery:{queryKey:['order-orgs'],queryFn:()=>Promise.resolve([])},fetchTree:()=>Promise.resolve({nodes:[]})}));
+vi.mock('@/api/resources',async (loadOriginal) => ({ ...await loadOriginal<object>(),providerQuery:(id:string)=>({queryKey:['order-provider',id],queryFn:()=>Promise.resolve(planProvider())})}));
 vi.mock('@/api/usage',async(load)=>({...await load<typeof UsageApi>(),
   eventsQuery:(params:EventParams)=>({queryKey:['order-records',params],initialPageParam:null,queryFn:()=>Promise.resolve({items:[],next_cursor:null}),getNextPageParam:()=>null}),
   usageQuery:(params:UsageParams)=>({queryKey:['order-usage',params],queryFn:()=>{

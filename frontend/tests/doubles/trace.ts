@@ -5,7 +5,7 @@ import { ACTIONS, kindOf } from '../../src/features/trace/catalogue.ts';
 import type { DocumentSync, HostKeptData, Job, Node, NodeRef, ThreadSync, TreeNode, DeletedEnvironment, EnvironmentRemoval, DeletedInspection as Inspection, Environment as RetainedEnvironment, AuditEntry as TraceEntry, AuditEntryPage as TracePage } from '../../src/generated/api-types.ts';
 import { ACME, id, RUNS_ON, TRACE, userRef } from './fixtures.ts';
 import { sceneOf } from './thread-scenes.ts';
-import type { PlanSeed } from './plan-usage.ts';
+import type { PlanFacts, PlanSeed } from './plan-usage.ts';
 import { type Answer, type Person, Refusal, type World } from './world.ts';
 
 /** More than two normal pages makes continuation observable without a large browser fixture. */
@@ -45,7 +45,7 @@ export class TraceWorld {
   barred = new Set<string>();
   constructor(world: World) { this.world = world; }
   /** The external reset markers in the plan scenario open matching rows in the ordinary trail. */
-  seedPlanResets(provider:{id:string;name:string;home:string},seed:PlanSeed):void {
+  seedPlanResets(provider:{id:string;name:string;home:string},seed:PlanSeed<PlanFacts>):void {
     const home=this.world.places.rowOf(provider.home);
     if(home===undefined)throw new Error('A seeded provider needs its home');
     const node:NodeRef={id:home.id,kind:home.kind,name:home.name,redacted:false};

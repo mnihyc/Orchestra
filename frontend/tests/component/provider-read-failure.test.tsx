@@ -10,7 +10,7 @@ import { i18n,setLocale } from '@/i18n';
 import { show } from './support';
 
 const navigate=vi.hoisted(()=>vi.fn());
-vi.mock('@tanstack/react-router',()=>({useNavigate:()=>navigate}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),useNavigate:()=>navigate}));
 vi.mock('@/api/resources',async(load)=>({...await load<typeof Resources>(),deleteProvider:vi.fn()}));
 afterEach(async()=>{vi.clearAllMocks();document.documentElement.removeAttribute('data-theme');await setLocale('en');});
 for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'])describe(`${locale}/${theme}`,()=>{

@@ -119,9 +119,13 @@ async fn made(world: &World, host: &ScriptedHost, provider: Id) -> (Id, Unit) {
     .await;
     host.wait_for(K::NodeRuntimeStart, before + 1).await;
     let runtime = host.started().unwrap();
-    let unit = runtimes::enrol(world, runtime).await;
-    // The harness declaration exists from its first launch, including the immediate provider read.
-    let initial = listen(&unit, "ready", json!({}));
+    // Install the listener before adoption lets provisioning start its first read.
+    let mut initial = None;
+    let unit = runtimes::enrol_with(world, runtime, |unit| {
+        initial = Some(listen(unit, "ready", json!({})));
+    })
+    .await;
+    let initial = initial.unwrap();
     let (state, _, error) = wait_over(world, job).await;
     assert_eq!(state, "succeeded", "{error:?}");
     eventually("the initial provider read to complete", || async {
@@ -544,12 +548,16 @@ async fn a_sign_in_that_completed_is_looked_at_by_the_schedule_and_the_provider_
             .is_some_and(|state| state["looked_at"].is_string())
     })
     .await;
-    let before = asked(&heard, K::ProviderRefresh).len();
-    common::meanwhile(std::time::Duration::from_millis(600)).await;
-    assert_eq!(
-        asked(&heard, K::ProviderRefresh).len(),
-        before,
-        "a sign-in is looked at once"
+    assert_eq!(asked(&heard, K::ProviderRefresh).len(), 1);
+    // Exercise the schedule's actual candidate query after the stored completion
+    // marker, rather than sleeping and hoping another sweep ran in that interval.
+    let mut conn = world.pool.acquire().await.unwrap();
+    let due = rows::completed_not_looked_at(&mut conn, i64::MAX)
+        .await
+        .unwrap();
+    assert!(
+        !due.contains(&provider),
+        "a completed observation is not scheduled again"
     );
 }
 

@@ -71,6 +71,21 @@ export function caseUnavailable(result: BuildCase): boolean {
   return !result.passed || unsupportedReason(result) !== null;
 }
 
+/**
+ * The cases of the program's present manifest that the build's stored check has not run, by their titles: not failed and not
+ * unverified, but pending. Empty without a catalogue to say which cases there are, and for a build that was never checked.
+ */
+export function pendingCases(build: HarnessBuild, catalogue: unknown, locale: string): string[] {
+  if (build.check === undefined || build.check === null || typeof catalogue !== 'object' || catalogue === null || !('cases' in catalogue)) return [];
+  const entries = (catalogue as Record<string, unknown>).cases;
+  if (!Array.isArray(entries)) return [];
+  const ran = new Set(build.check.cases.map((result) => result.name));
+  return entries.flatMap((entry: unknown) => {
+    if (typeof entry !== 'object' || entry === null || !('name' in entry) || typeof entry.name !== 'string' || ran.has(entry.name)) return [];
+    return [('title' in entry ? localizedText(entry.title, locale) : null) ?? entry.name];
+  });
+}
+
 /** Feature protocol identifiers remain data even when an external adapter adds a new one. */
 export function featureName(feature: string, t: TFunction, catalogue?: unknown, locale = 'en'): string {
   if (catalogue !== undefined && catalogue !== null) return catalogueTitle(catalogue, 'features', feature, locale) ?? t('programVersions.disabledFeatures.other');

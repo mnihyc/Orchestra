@@ -46,14 +46,14 @@ use orch_db::queries::everything::Grant;
 
 use orch_db::queries::everything::Row;
 
-use orch_types::Id;
+use orch_types::{Id, Time};
 /// These projections affect the shared SQL filter/order before its LIMIT, never a client-side slice.
 pub(super) async fn prepare(
     conn: &mut Conn,
     query: &EverythingListQuery,
     projection: &mut Projection,
 ) -> ApiResult<()> {
-    if query.resource_details == Some(true) {
+    if query.resource_details == Some(true) || query.resource_rows == Some(true) {
         let names: std::collections::BTreeMap<_, _> = projection
             .names
             .iter()
@@ -166,6 +166,77 @@ pub(super) async fn page(
     Ok(keyed(values))
 }
 
+/// Only the facts the list draws or needs to offer its current acts. Editors read the native full view.
+pub(super) fn list_row(
+    view: &EverythingResource,
+) -> orch_api_contract::resource_rows::ResourceListRow {
+    use orch_api_contract::resource_rows::*;
+    match view {
+        EverythingResource::Provider(provider) => {
+            let mut row = ProviderListRow::from(provider.as_ref());
+            let mut thin = provider.as_ref().clone();
+            thin.thin_for_list();
+            row.facts = thin.facts;
+            row.choice_usage = thin.choice_usage;
+            ResourceListRow::Provider(Box::new(row))
+        }
+        EverythingResource::Agent(agent) => {
+            let mut row = AgentListRow::from(agent.as_ref());
+            row.profile =
+                serde_json::json!({"harness_version":agent.profile.get("harness_version")});
+            ResourceListRow::Agent(Box::new(row))
+        }
+        EverythingResource::Environment(environment) => {
+            ResourceListRow::Environment(Box::new(EnvironmentListRow::from(environment.as_ref())))
+        }
+        EverythingResource::Host(host) => {
+            let mut row = HostListRow::from(host.as_ref());
+            for driver in &mut row.drivers {
+                driver.runtimes.clear();
+                driver.runtime_classes.clear();
+                driver.availability.clear();
+                driver.default_runtime = None;
+            }
+            ResourceListRow::Host(Box::new(row))
+        }
+        EverythingResource::Machine(machine) => {
+            ResourceListRow::Machine(Box::new(MachineListRow::from(machine.as_ref())))
+        }
+        EverythingResource::Template(template) => {
+            let mut row = TemplateListRow::from(template.as_ref());
+            row.spec = serde_json::json!({"image":template.spec.get("image"),"runtime":template.spec.get("runtime"),
+                "network":{"mode":template.spec.pointer("/network/mode")},
+                "security":{"read_only_rootfs":template.spec.pointer("/security/read_only_rootfs"),"no_new_privileges":template.spec.pointer("/security/no_new_privileges")}});
+            if template
+                .spec
+                .get("build")
+                .is_some_and(serde_json::Value::is_object)
+            {
+                row.spec["build"] = serde_json::json!({});
+            }
+            if template
+                .spec
+                .get("archive")
+                .is_some_and(serde_json::Value::is_object)
+            {
+                row.spec["archive"] = serde_json::json!({});
+            }
+            ResourceListRow::Template(Box::new(row))
+        }
+        EverythingResource::McpServer(server) => {
+            let mut row = McpServerListRow::from(server.as_ref());
+            row.spec = serde_json::json!({"transport":server.spec.get("transport")});
+            ResourceListRow::McpServer(Box::new(row))
+        }
+        EverythingResource::Mount(mount) => {
+            ResourceListRow::Mount(Box::new(MountListRow::from(mount.as_ref())))
+        }
+        EverythingResource::Skill(skill) => {
+            ResourceListRow::Skill(Box::new(SkillListRow::from(skill.as_ref())))
+        }
+    }
+}
+
 fn keyed(values: Vec<EverythingResource>) -> HashMap<String, EverythingResource> {
     values
         .into_iter()
@@ -188,3 +259,120 @@ fn keyed(values: Vec<EverythingResource>) -> HashMap<String, EverythingResource>
 
 #[path = "resources/scoped.rs"]
 pub mod scoped;
+
+/// The home's actual page is prepared before its names and groups join the inventory's source plan.
+pub(in crate::routes::everything) struct PreparedSharing {
+    pub page: orch_authz::pages::PageView,
+    pub root: Option<Id>,
+    pub names: crate::routes::access::page::NameBounds,
+}
+
+impl PreparedSharing {
+    pub(in crate::routes::everything) fn name_sources(
+        &self,
+    ) -> crate::routes::access::page::NameSources {
+        let mut entries = Vec::new();
+        for row in &self.page.rows {
+            entries.extend(row.entries.iter().cloned());
+            if let Some(inherited) = &row.inherited {
+                entries.extend(inherited.iter().map(|entry| entry.entry.clone()));
+            }
+        }
+        crate::routes::access::page::entry_name_sources(&entries, self.page.role_place)
+    }
+}
+
+pub(in crate::routes::everything) async fn prepare_sharing(
+    conn: &mut Conn,
+    principal: &Principal,
+    home: Id,
+    kind: &str,
+) -> ApiResult<PreparedSharing> {
+    crate::middleware::authorization::require_projected(
+        conn,
+        principal,
+        home,
+        crate::middleware::authorization::VIEW,
+        orch_authz::Act::Use,
+        orch_authz::Policy::default(),
+        crate::key_operations::native::modern(principal.caller()),
+    )
+    .await?;
+    let (_, site) = orch_authz::things::site(conn, orch_authz::things::Thing::Node(home))
+        .await
+        .map_err(ApiError::internal)?;
+    let mut page = orch_authz::pages::read(
+        conn,
+        principal,
+        orch_authz::pages::Target::Defaults(orch_access_contract::roles::PlaceRef::Node(home)),
+        orch_authz::Policy::default(),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    let kind = kind
+        .parse::<orch_access_contract::permissions::ObjectKind>()
+        .map_err(ApiError::internal)?;
+    page.rows.retain(|row| row.permission.on().contains(&kind));
+    Ok(PreparedSharing {
+        page,
+        root: site.root,
+        names: Default::default(),
+    })
+}
+
+/// A list shares one compact defaults summary per visible home; a refusal belongs to that heading only.
+pub(super) async fn sharing(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    home: Id,
+    kind: &str,
+    prepared: Option<&PreparedSharing>,
+) -> orch_api_contract::resource_rows::ResourceSharing {
+    let result: ApiResult<orch_api_contract::access::PermissionPage> = async {
+        if let Some(prepared) = prepared {
+            let dependencies = Default::default();
+            return crate::routes::access::page::permission_page_bounded(
+                conn,
+                principal,
+                &prepared.page,
+                prepared.root,
+                Time::new(ctx.now),
+                &prepared.names,
+                &dependencies,
+            )
+            .await;
+        }
+        if crate::key_operations::native::modern(principal.caller()) {
+            return Err(ApiError::new(
+                orch_api_contract::common::ErrorCode::AuthzDenied,
+                "This key cannot read the home's sharing summary.",
+            ));
+        }
+        let prepared = prepare_sharing(conn, principal, home, kind).await?;
+        crate::routes::access::page::permission_page(
+            conn,
+            principal,
+            &prepared.page,
+            prepared.root,
+            Time::new(ctx.now),
+        )
+        .await
+    }
+    .await;
+    match result {
+        Ok(defaults) => orch_api_contract::resource_rows::ResourceSharing {
+            home_id: home,
+            rows: Some(defaults.rows),
+            problem: None,
+        },
+        Err(error) => {
+            let (problem, _) = error.into_parts_for(&ctx.request_id);
+            orch_api_contract::resource_rows::ResourceSharing {
+                home_id: home,
+                rows: None,
+                problem: Some(problem),
+            }
+        }
+    }
+}

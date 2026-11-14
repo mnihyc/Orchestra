@@ -18,8 +18,8 @@ vi.mock('@/api/resources', async (load) => ({ ...await load<object>(),
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useNavigate: () => vi.fn() }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
 vi.mock('@/features/resources/templates/acts', () => ({ useTemplateActs: () => ({ page: () => ({ primary: null, edit: null, menu: [] }), dialogs: null }) }));
-vi.mock('@/features/resources/ResourceCreation', () => ({ ResourceCreateButton: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => openGuide }));
+vi.mock('@/features/resources/ResourceCreation', async (loadOriginal) => ({ ...await loadOriginal<object>(), ResourceCreateButton: () => null }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => openGuide }));
 vi.mock('@/shell/Page', async (load) => ({ ...await load<object>(), Page: ({ children }: { children: ReactNode }) => <main>{children}</main>, PageHeader: ({ title }: { title: string }) => <h1>{title}</h1> }));
 const priorAppearance = useAppearance.getState();
 beforeEach(() => { vi.clearAllMocks(); });

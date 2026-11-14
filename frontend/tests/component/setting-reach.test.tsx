@@ -17,8 +17,8 @@ interface ReadOptions {
 }
 const calls = vi.hoisted(() => ({ read: vi.fn<(path: string, options: ReadOptions) => Promise<{ data: SettingReach; response: Response }>>() }));
 vi.mock('@/api/client', async (load) => ({ ...await load<object>(), api: { GET: calls.read } }));
-vi.mock('@/features/chat/open', () => ({ useOpenPath: () => vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/chat/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useOpenPath: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const def: KeyDef = { key: 'agent.web_search', title: 'Web search', description: 'Let the agent search the web.',
   group: 'agent', class: 'parameter', scopes: ['org', 'project', 'topic'], merge: 'replace', schema: { type: 'boolean' },

@@ -1027,6 +1027,9 @@ pub fn marker_words(marker: &MarkerPayload) -> String {
                         .unwrap_or_default()
                 ),
                 GoalReason::Failed => "A turn failed, which paused the goal".to_owned(),
+                GoalReason::Unchecked => {
+                    "The goal report is unchecked and waits for a person's decision".to_owned()
+                }
                 _ => format!("{} paused the goal", by()),
             }
         }
@@ -1037,7 +1040,7 @@ pub fn marker_words(marker: &MarkerPayload) -> String {
             m.condition,
             match m.checked_by {
                 orch_api_contract::goals::GoalCheckedBy::Helper => "checked by the summary model",
-                orch_api_contract::goals::GoalCheckedBy::Agent => "the agent's report",
+                orch_api_contract::goals::GoalCheckedBy::Person => "confirmed by a person",
             }
         ),
         M::GoalStopped(m) => format!(
@@ -1666,22 +1669,22 @@ async fn read_conversation_piece(
     let turn_rows = selected::turns_between(conn, thread, view, low, high).await?;
     let turn_ids: Vec<Id> = turn_rows.iter().map(|turn| turn.id).collect();
     let item_rows = selected::items_of_turns(conn, thread, view, &turn_ids).await?;
-    // The lines of the history that belong to no turn go with the turn that follows them.
-    let after = if low > 1 {
-        selected::turn_high(conn, thread, view, low - 1)
-            .await?
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let up_to = if high == last {
-        i64::MAX
-    } else {
-        selected::turn_high(conn, thread, view, high)
-            .await?
-            .unwrap_or(i64::MAX)
-    };
     let loose = if detail == Detail::Full {
+        // The lines of the history that belong to no turn go with the turn that follows them.
+        let after = if low > 1 {
+            selected::turn_high(conn, thread, view, low - 1)
+                .await?
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let up_to = if high == last {
+            i64::MAX
+        } else {
+            selected::turn_high(conn, thread, view, high)
+                .await?
+                .unwrap_or(i64::MAX)
+        };
         let mut loose =
             selected::items_between(conn, thread, view, after, up_to, Some("main")).await?;
         loose.retain(|row| row.turn_id.is_none() && row.kind != "reasoning");

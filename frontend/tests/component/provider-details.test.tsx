@@ -12,8 +12,8 @@ import { OBSERVED, planProvider } from '../unit/provider-plan-fixtures';
 import { detailAgent, detailMachineRef } from './resource-detail-fixtures';
 import { show } from './support';
 
-vi.mock('@tanstack/react-router', () => ({ Link:({children}:{children:ReactNode}) => <a href="#provider-usage">{children}</a> }));
-vi.mock('@/features/help/open', () => ({useHelpOpener:() => vi.fn()}));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link:({children}:{children:ReactNode}) => <a href="#provider-usage">{children}</a> }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:() => vi.fn()}));
 const MEMBERS: readonly DetailMember[] = ['identity','credential','credential_verified','plan','windows','limit_reached','ordinary_usage_allowed','balances','spend','extra_usage','available_resets'];
 const STATES = ['unsupported','not_read_yet','empty','told'] as const;
 afterEach(async () => { useAppearance.setState({locale:'en'}); await setLocale('en'); });
@@ -238,7 +238,7 @@ it('uses windows, then balance, then spend in a compact card while preserving pr
 it.each(STATES)('models remain %s independently of the manually enabled list', (state) => {
   const provider=planProvider();
   provider.facts_state.models=state;
-  provider.facts.models=state === 'told' ? [{model_name:'example',display_name:'Example',parameters:{},listed:true}] : state === 'empty' ? [] : null;
+  provider.facts.models_count=state === 'told' ? 1 : state === 'empty' ? 0 : null;
   show(<ModelsSourceState provider={provider} />);
   const key=state === 'unsupported' ? 'providerDetails.models.unsupported' : state === 'not_read_yet' ? 'providerDetails.models.notRead' : state === 'empty' ? 'providerDetails.models.empty' : 'providerDetails.models.told';
   expect(screen.getByText(i18n.t(key))).toBeVisible();

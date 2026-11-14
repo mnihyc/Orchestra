@@ -8,7 +8,7 @@ import { i18n, setLocale } from '@/i18n';
 import { options } from '../unit/start-fixtures';
 import { show } from './support';
 const calls = vi.hoisted(() => ({ open: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.open }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => calls.open }));
 afterEach(async () => { cleanup(); calls.open.mockReset(); await setLocale('en'); });
 for (const locale of ['en', 'zh-CN'] as const) it(`opens the documented arrangement from its section heading without changing the selection (${locale})`, async () => {
   await setLocale(locale); const change = vi.fn(), user = userEvent.setup();

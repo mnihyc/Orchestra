@@ -2,10 +2,12 @@
 
 `TestDb::fresh()` reserves database capacity before opening a PostgreSQL
 connection. Cooperating processes on one host use the same lease directory
-and server address. The default budget is 128 connections with 32 reserved
-per fixture: four fixture connections, the largest secondary test pool of
-24, and four for administration, listeners and headroom. This admits four
-fixtures at once. Pools opened separately through a fixture's URL must fit
+and server address. Admission discovers PostgreSQL's usable capacity and
+leaves one fifth of its connection allowance for other traffic, with a
+128-connection minimum where the server can fit it. Each fixture reserves
+32 connections: four fixture connections, the largest secondary test pool
+of 24, and four for administration, listeners and headroom. A 100-connection
+server admits three fixtures; a 1,200-connection server admits thirty. Pools opened separately through a fixture's URL must fit
 inside its reservation; increase the reservation when a test needs more.
 
 Configure `ORCH_TEST_DATABASE_CONNECTION_BUDGET`,
@@ -16,9 +18,12 @@ temporary directory. A budget change is refused while a fixture is active;
 the configured budget is checked against PostgreSQL's usable connection
 capacity. Address aliases and different lease directories do not share
 admission, so use one address and directory for a test server. Tests waiting
-for admission hold no database connection. `ORCH_TEST_DATABASE_WAIT_SECS`
-defaults to 300 seconds, covering enrollment, attach and one job lease ahead
-of a waiter. A timeout identifies the lease, its capacity and its records.
+for admission hold no database connection. Locked, numbered tickets admit
+waiters in arrival order. Long-running healthy fixtures keep their slots
+through cleanup without expiring tests queued behind them. Cancelling an
+admission removes its ticket; a stopped process releases its kernel lock,
+so the next waiter can discard the abandoned ticket. The test job runner's
+process deadline bounds a stuck job.
 
 Run one job with Python 3 and `psql` available:
 
@@ -68,8 +73,8 @@ databases in that run's validated records. It reports every exact removal
 in `exact_cleanup`. Records remain for diagnosis. A historical database
 without ownership evidence is never selected by a prefix search.
 
-Real PostgreSQL regressions in `crates/control/api/tests/ktestkit.rs` cover
-competing processes with secondary pools, admission timeout diagnostics,
+Real PostgreSQL regressions in `crates/control/api/base/tests/ktestkit.rs` cover
+competing processes with secondary pools, cancellation of a queued process,
 explicit cleanup, and a process that prints success but exits unsuccessfully
 and leaves its database. Engine regressions hold domain time through the
 deployed hosting waits and advance a controlled clock to the deployed

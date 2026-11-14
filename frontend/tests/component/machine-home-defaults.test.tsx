@@ -22,13 +22,15 @@ vi.mock('@/api/nodes', async (load) => ({ ...await load<typeof Nodes>(),
     queryFn: () => Promise.resolve([org('other-home', 'another', 'Another home', userRef(me(1, 'ada', 'Ada')))]) },
 }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useNavigate: () => vi.fn(), useLocation: () => ({ pathname: '/machine', searchStr: '' }) }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 afterEach(async () => { cleanup(); writes.register.mockClear(); useTreeStore.setState({ byOrg: new Map() }); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const override of [false, true]) it(`registers a provider with ${override ? 'the chosen override' : 'the machine default'} in ${locale}`, async () => {
   await setLocale(locale); const user = userEvent.setup();
   const machine = { ...detailMachine, home: detailHome, agents: [detailAgent] };
   show(<RegisterProviderDialog machine={machine} open onClose={vi.fn()} />);
+  const name = screen.getByRole('textbox', { name: i18n.t('machines.provider.name') });
+  expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],[role="radio"],select')).toBe(name);
   const home = await screen.findByRole('combobox', { name: i18n.t('resources.home.label') });
   await waitFor(() => expect(home).toHaveDisplayValue(i18n.t('resourceGroups.machineHomeNamed', { name: detailHome.name })));
   expect(writes.register).not.toHaveBeenCalled();

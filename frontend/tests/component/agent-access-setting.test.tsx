@@ -14,7 +14,7 @@ import { show, skipOverflowFallback } from './support';
 
 skipOverflowFallback();
 
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const definition = SETTINGS_REGISTRY.find((row) => row.key === 'threads.agent_access');
 if (definition === undefined) throw new Error('The creation preset is registered');
 const preset: AgentAccessChoice = { where: 'topic', parts: { documents: 'edit' } };

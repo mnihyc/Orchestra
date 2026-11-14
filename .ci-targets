@@ -1,0 +1,11 @@
+fmt
+clippy
+contracts
+test -p orch-db --lib
+test -p orch-db --test provider_keeper
+test -p orch-engine --lib
+test -p orch-api-core --lib -- --skip routes::resources::models::tests::a_name_the_catalogue_lists_is_added_with_what_the_catalogue_says_under_what_was_written
+test -p orch-api-core --test kfix_binding --test provider_harness --test provider_resets --test provider_sources
+web typecheck
+web lint
+web test -- tests/unit/module-doubles.test.ts tests/component/resource-landing.test.tsx tests/component/storage.test.tsx tests/unit/document-reference-intent.test.ts tests/component/people.test.tsx tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts tests/unit/start-up-wave.test.ts tests/unit/row-kinds.test.ts tests/component/adopt.test.tsx tests/component/side-lane.test.tsx tests/component/subagent-lane.test.tsx tests/component/thread-turn-files.test.tsx --testNamePattern='^(?!.*(?:holds no unfinished-product message or unreferenced key in either ordinary catalogue|shows the before-Orch band for a failed adoption even when no earlier items exist and history lines are hidden)).*$'

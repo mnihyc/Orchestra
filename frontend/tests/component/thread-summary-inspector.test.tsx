@@ -14,7 +14,7 @@ import { A, B, projection, snapshot } from '../unit/continuation-fixtures';
 import { show } from './support';
 
 const host = vi.hoisted(() => ({ live: vi.fn<(props: ResourceSummaryProps) => void>(), retry: vi.fn<typeof Live.reloadThread>() }));
-vi.mock('@/realtime/live', () => ({ reloadThread: host.retry }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), reloadThread: host.retry }));
 vi.mock('@/features/summaries/ResourceSummary', () => ({ ResourceSummary: (props: ResourceSummaryProps) => {
   host.live(props); return <span>Live paragraph canary</span>;
 } }));

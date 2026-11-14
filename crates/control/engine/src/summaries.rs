@@ -14,7 +14,6 @@ pub mod resource;
 pub mod sources;
 
 pub(crate) use budget::InputBudget;
-pub(crate) use budget::UNKNOWN_WINDOW_TOKENS;
 pub(crate) use estimate::handoff_estimate;
 pub use handoff::{
     Carried, IndexedTranscript, handoff, indexed_transcript, notice as handoff_notice,

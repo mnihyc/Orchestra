@@ -1,4 +1,5 @@
 /** Screens-review regressions: an empty newcomer can finish a lesson, actual owned choices navigate, and Help stays readable. */
+import type * as WorkbenchStore from '@/features/workbench/store';
 import { act, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -25,13 +26,19 @@ vi.mock('@tanstack/react-router', async (original) => ({
   useMatches: () => fake.path,
   useRouterState: () => undefined,
 }));
-vi.mock('@/api/environments', () => ({ environmentsQuery: () => ({ queryKey: ['tutorial-places-test'], queryFn: () => Promise.resolve(fake.rows) }) }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: fake.open }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => fake.open }));
+vi.mock('@/api/environments', async (original) => ({ ...await original<object>(), environmentsQuery: () => ({ queryKey: ['tutorial-places-test'], queryFn: () => Promise.resolve(fake.rows) }) }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: fake.open }));
 vi.mock('@/features/help/Dismissed', () => ({ useDismissed: () => ({ isFinished: () => false, stepOf: () => 0, keepStep: fake.keep, finish: fake.finish, reopenAll: () => undefined }) }));
-vi.mock('@/features/workbench/Narrow', () => ({ useShape: () => 'wide' }));
-vi.mock('@/features/workbench/store', () => ({ useWorkbench: (select: (state: { change: typeof fake.change; setOverlay: typeof fake.overlay }) => unknown) => select({ change: fake.change, setOverlay: fake.overlay }) }));
-vi.mock('@/lib/viewChoices', () => ({ useViewChoice: () => ['screen', () => undefined] }));
+vi.mock('@/features/workbench/Narrow', async (loadOriginal) => ({ ...await loadOriginal<object>(), useShape: () => 'wide' }));
+// A store as the modules that watch it need it: read through a selector, `getState`, and `subscribe` (the close guards subscribe when they are loaded).
+vi.mock('@/features/workbench/store', async (loadOriginal) => {
+  const actual = await loadOriginal<typeof WorkbenchStore>();
+  return { ...actual, useWorkbench: Object.assign(
+  (select: (state: { change: typeof fake.change; setOverlay: typeof fake.overlay }) => unknown) => select({ change: fake.change, setOverlay: fake.overlay }),
+  actual.useWorkbench,
+  { getState: () => ({ change: fake.change, setOverlay: fake.overlay }), subscribe: () => () => undefined }) };
+});
+vi.mock('@/lib/viewChoices', async (loadOriginal) => ({ ...await loadOriginal<object>(), useViewChoice: () => ['screen', () => undefined] }));
 vi.mock('@/help/localized', () => ({ useLocalizedGuide: () => ({ articles: [{ id: 'test-guide', title: 'Test guide', headings: [], screens: ['/help'], keywords: [], body: '# Test guide\n\nLast paragraph.' }] }) }));
 
 function environment(id: string, owner: string): TutorialEnvironment {
@@ -149,6 +156,7 @@ describe('QS-014 and QS-024: meaningful guide links and Help flow', () => {
   });
 
   it('has one section entrance on Network, with each distinct guide inside it', async () => {
+    fake.path = '/resources/environments/mine';
     const network: ComponentProps<typeof EnvironmentNetwork>['environment'] = {
       id: 'mine', name: 'My environment', job: null, access: { permissions: ['environment.view'] },
       network: { mode: 'open', required_mode: 'open', network_mode: 'bridge', networks: [], proxy_url: null, allowed_hosts: [], sources: [], revision: 'r1', always: [], always_revision: 'a1', always_source: 'orch_configuration', state: 'ready', reason: null, last_denied: null },
@@ -160,7 +168,7 @@ describe('QS-014 and QS-024: meaningful guide links and Help flow', () => {
     expect(screen.getByRole('button', { name: 'Let agents open ports without asking' })).toHaveTextContent('Let agents open ports without asking');
     expect(screen.getAllByRole('button', { name: 'Change an environment while it runs' })).toHaveLength(1);
     await userEvent.click(screen.getByRole('button', { name: 'Change an environment while it runs' }));
-    expect(fake.open).toHaveBeenCalledWith('change-a-running-environment');
+    expect(useHelpState.getState().article).toBe('change-a-running-environment');
     expect(screen.queryByRole('dialog', { name: 'Network' })).toBeNull();
   });
 });
