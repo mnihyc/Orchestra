@@ -847,9 +847,10 @@ pub(super) async fn for_input(
         return Ok(None);
     }
     if let Some(parent) = authority.capability_parent()
-        && !parent
-            .current(unit.conn, thread, &input.content, actor, clock)
-            .await?
+        && (!parent.owns_input(unit.conn, input.id).await?
+            || !parent
+                .current(unit.conn, thread, &input.content, actor, clock)
+                .await?)
     {
         return Ok(None);
     }
@@ -876,9 +877,10 @@ pub(super) async fn for_preflight(
         return Ok(None);
     }
     if let Some(parent) = authority.capability_parent()
-        && !parent
-            .current(unit.conn, thread, &input.content, actor, clock)
-            .await?
+        && (!parent.owns_input(unit.conn, input.id).await?
+            || !parent
+                .current(unit.conn, thread, &input.content, actor, clock)
+                .await?)
     {
         return Ok(None);
     }

@@ -14,6 +14,195 @@ async fn native_scene() -> Proof<(Scene, Id)> {
     Ok((scene, provider))
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shared_program_executor_cannot_use_a_call_context_without_its_actual_source() -> Proof {
+    let (scene, provider) = native_scene().await?;
+    let engine = scene.world.engine();
+    let sources = engine
+        .inner
+        .capability_services
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .ok_or("no installed declarations")?;
+    let selected=crate::tools::capability_service::selection::from_value(sources.capabilities().declarations(),"image_generation",
+        json!({"route":"image_generation.delegation","offering":{"provider":provider,"offering":NATIVE_MODEL}})).ok_or("no native selection")?;
+    let call = crate::tools::CallContext {
+        machine: scene.world.machine_id,
+        thread: scene.thread,
+        turn: scene.start.turn_id,
+        call_ref: "unscoped-program".into(),
+        attempt: None,
+        tool: orch_agent_contract::events::OrchTool::ImageGeneration,
+        arguments: json!({"prompt":"An orchard","output_paths":["out/unscoped.png"]}),
+    };
+    let result = crate::tools::capability_service::delegation::executor::Executor::thread_tool(
+        &engine,
+        &call,
+        "image_generation",
+        &sources,
+        selected,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(EngineError::StaleToolSource)),
+        "a current thread ID is not native source authority"
+    );
+    let helpers: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM nodes WHERE kind='thread' AND id<>$1")
+            .bind(scene.thread)
+            .fetch_one(scene.world.pool.pool())
+            .await?;
+    assert_eq!(helpers, 0);
+    scene.end_original().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_threadless_placement_never_picks_another_environment_or_governance_root() -> Proof {
+    use crate::tools::capability_service::delegation::placement::Placement;
+    use orch_provider_contract::capabilities::ProgramPlacement;
+    let (scene, _) = native_scene().await?;
+    let mut conn = scene.world.pool.acquire().await?;
+    let source = orch_db::queries::threads::thread(&mut conn, scene.thread)
+        .await?
+        .ok_or("missing source thread")?;
+    let mut config = ProgramPlacement {
+        environment_id: source.environment_id,
+        helper_topic_id: Some(new_id()),
+    };
+    let placed =
+        Placement::configured(&mut conn, source.org_id, Some(source.topic_id), &config).await?;
+    assert_eq!(Some(placed.environment), source.environment_id);
+    assert_eq!(
+        placed.topic, source.topic_id,
+        "the actual source topic takes precedence"
+    );
+    config.helper_topic_id = Some(source.topic_id);
+    assert!(
+        Placement::configured(&mut conn, source.org_id, None, &config)
+            .await?
+            .current(&mut conn)
+            .await?
+    );
+    assert!(
+        Placement::configured(&mut conn, new_id(), None, &config)
+            .await
+            .is_err()
+    );
+    config.environment_id = None;
+    assert!(
+        Placement::configured(&mut conn, source.org_id, None, &config)
+            .await
+            .is_err(),
+        "a usable environment elsewhere is never selected by default"
+    );
+    config.environment_id = Some(new_id());
+    assert!(
+        Placement::configured(&mut conn, source.org_id, None, &config)
+            .await
+            .is_err()
+    );
+    drop(conn);
+    scene.end_original().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_threads_delegated_work_keeps_its_actual_environment_topic_and_directory() -> Proof {
+    let (scene, provider) = native_scene().await?;
+    scene.world.set(scene.thread,orch_settings_contract::registry::keys::AGENTS_IMAGE_GENERATION_BACKEND,
+        json!({"route":"image_generation.delegation","offering":{"provider":provider,"offering":NATIVE_MODEL},
+          "config":{"environment_id":new_id(),"helper_topic_id":new_id()}})).await;
+    publish(&scene, "source-placement", "out/source-placement.png").await;
+    let (helper, start) = begin_helper(&scene, "source-placement").await?;
+    let actual: (Id, Id, String) = sqlx::query_as(
+        "SELECT environment_id,topic_id,workspace_dir FROM threads WHERE node_id=$1",
+    )
+    .bind(helper)
+    .fetch_one(scene.world.pool.pool())
+    .await?;
+    let expected: (Id, Id, String) = sqlx::query_as(
+        "SELECT environment_id,topic_id,workspace_dir FROM threads WHERE node_id=$1",
+    )
+    .bind(scene.thread)
+    .fetch_one(scene.world.pool.pool())
+    .await?;
+    assert_eq!(
+        actual, expected,
+        "backend placement references never redirect an ordinary thread's work"
+    );
+    image(&scene, helper, start.turn_id, "placed-image", true).await?;
+    let outcome = Scene::answer(&scene.world, scene.thread, "source-placement", None).await?;
+    assert!(outcome.error.is_none(), "{outcome:?}");
+    scene.end_original().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn changing_the_requesting_directory_stops_owned_work_before_a_result_is_published() -> Proof
+{
+    let (scene, _) = native_scene().await?;
+    publish(&scene, "moved-source", "out/moved-source.png").await;
+    let (helper, start) = begin_helper(&scene, "moved-source").await?;
+    sqlx::query("UPDATE threads SET workspace_dir='moved-source' WHERE node_id=$1")
+        .bind(scene.thread)
+        .execute(scene.world.pool.pool())
+        .await?;
+    scene.world.engine().wake(scene.thread);
+    scene.world.wait_turn(start.turn_id, "interrupted").await;
+    assert_eq!(scene.world.began(CommandKind::FsWrite), 0);
+    assert_eq!(scene.world.turn_starts(helper).len(), 1);
+    scene.end_original().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_program_without_the_requested_codec_is_unavailable_before_a_helper_is_created() -> Proof
+{
+    let (scene, provider) = native_scene().await?;
+    let mut descriptor: Json = scene
+        .world
+        .scalar(
+            "SELECT descriptor FROM agents WHERE id=$1",
+            scene.world.agent,
+        )
+        .await;
+    descriptor["x_capability_program"]["access"]["native"]["native"]["image_generation"]["execution"] =
+        json!([]);
+    scene.world.declares(descriptor).await;
+    let engine = scene.world.engine();
+    let sources = engine
+        .inner
+        .capability_services
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .ok_or("no installed declarations")?;
+    let mut conn = scene.world.pool.acquire().await?;
+    let result = crate::tools::capability_service::delegation::native_state(
+        &mut conn,
+        &sources,
+        provider,
+        NATIVE_MODEL,
+        "image_generation",
+    )
+    .await?;
+    drop(conn);
+    assert!(
+        result.is_err(),
+        "a delegated mode alone does not prove an implemented input and result codec"
+    );
+    let helpers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM nodes WHERE kind='thread' AND name='Capability helper'",
+    )
+    .fetch_one(scene.world.pool.pool())
+    .await?;
+    assert_eq!(helpers, 0);
+    scene.end_original().await?;
+    Ok(())
+}
+
 async fn native_scene_with_file_failure() -> Proof<(Scene, Id, Arc<AtomicBool>)> {
     Box::pin(native_scene_with_input_keys(false)).await
 }
@@ -31,6 +220,7 @@ async fn native_scene_with_input_keys(keyed: bool) -> Proof<(Scene, Id, Arc<Atom
     "title":"Fixture image program", "access":{"native":{"orch_tools":true,"native":{
         "generation":{"enabled":true,"modes":["native"],"default_mode":"native"},
         "image_generation":{"enabled":true,"modes":["off","on"],"default_mode":"off","delegated_mode":"on",
+            "execution":[{"input":"image.request","result":"image.generated"}],
             "eligible_when":{"required":["plan"],"properties":{"plan":{"const":"fixture-paid"}}},
             "delegation_label":{"en":"Fixture image program","zh-CN":"测试图像程序"}}
     }}}});
@@ -132,7 +322,7 @@ async fn helper(scene: &Scene, call: &str) -> Proof<Id> {
     let answer = crate::ids::tool_result(scene.thread, call);
     tokio::time::timeout(common::PATIENCE, async {
         loop {
-            let helper:Option<Id>=sqlx::query_scalar("SELECT (e.value->>'helper')::uuid FROM thread_tool_calls c CROSS JOIN LATERAL jsonb_each(c.plan) e WHERE c.answer_id=$1 AND e.key LIKE 'delegated_capability:%'")
+            let helper:Option<Id>=sqlx::query_scalar("SELECT helper_id FROM delegated_program_work WHERE request_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1")
                 .bind(answer).fetch_optional(scene.world.pool.pool()).await?;
             if let Some(helper)=helper {return Ok(helper);}
             tokio::time::sleep(common::config().sweep_every).await;

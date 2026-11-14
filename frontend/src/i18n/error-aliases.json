@@ -7,6 +7,7 @@
   "image_result_unavailable": "ui.error.imageResultUnavailable",
   "native_web_action_failed": "ui.error.nativeWebActionFailed",
   "native_web_action_unproven": "ui.error.nativeWebActionUnproven",
+  "native_web_no_end": "ui.error.nativeWebNoEnd",
   "context_length_exceeded": "ui.error.contextLimit",
   "timeout": "network.silent",
   "timed_out": "network.silent",

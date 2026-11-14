@@ -4,7 +4,7 @@ import type { FilePreview } from '../../src/features/files/source';
 import type { Item } from '../../src/generated/api-types';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
-import { AT, errorItem, threadInput, toolCall, turn, userMessage } from '../doubles/thread-rows';
+import { AT, errorItem, rawOf, threadInput, toolCall, turn, userMessage } from '../doubles/thread-rows';
 import { ADA } from '../doubles/thread-scenes';
 import { ACME, configureThread, emit, scenario, signIn } from './support';
 import { waitForSavedTabId } from './workbench-support';
@@ -30,7 +30,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       { title: 'Image', turn: 'view-turn', at: AT, durationMs: null });
     if (picture.kind !== 'tool_call') throw new Error('The viewed image is a tool result');
     const image: Item = { ...picture, parent_item_id: 'view-call', payload: { ...picture.payload, raw: {
-      ...picture.payload.raw, name: 'image_result', output: { inline: '', total_len: Buffer.byteLength(ORIGINAL), truncated: true, blob: RAW },
+      ...rawOf(picture), name: 'image_result', output: { inline: '', total_len: Buffer.byteLength(ORIGINAL), truncated: true, blob: RAW },
     } } };
     const failed: Item = { ...errorItem('missing-view', 'The returned image could not be retained.', { turn: 'view-turn', at: AT }),
       parent_item_id: 'view-call', kind: 'error', payload: { code: 'image_result_unavailable', message: 'The returned image could not be retained.', retryable: false } };
@@ -75,8 +75,10 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     } else await page.locator(`[id=${JSON.stringify(`tab-${tabId}`)}]`).click();
     await expect.poll(() => new URL(page.url()).pathname).toBe(`/thread/${ACME.mainThread}`);
     const fold = page.locator('[data-fold="view-turn"]');
-    if (await fold.count() > 0 && await fold.first().getAttribute('aria-expanded') === 'false') await fold.first().click();
     const step = page.locator('[data-step="viewed-picture"]');
+    // The thread is drawn after its address is; the fold, or the step it holds, is what says the turn has been drawn.
+    await expect(fold.or(step).first()).toBeVisible();
+    if (await fold.count() > 0 && await fold.first().getAttribute('aria-expanded') === 'false') await fold.first().click();
     await step.locator('[data-tool-row] > button[aria-expanded]').click();
     const open = step.getByRole('button', { name: words.fileMedia.openFile.replace('{{name}}', NAME), exact: true });
     await open.focus();

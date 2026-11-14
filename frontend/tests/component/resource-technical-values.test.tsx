@@ -45,26 +45,30 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await user.click(screen.getByRole('button', { name: i18n.t('resourceDetails.copyPath') }));
     expect(await navigator.clipboard.readText()).toBe(path);
   });
-  it(`keeps full runtime fingerprints in Details and retains a genuine update (${locale}/${theme})`, async () => {
+  it(`keeps full runtime fingerprints behind Copy ID, not in a sentence or a disclosure, and retains a genuine update (${locale}/${theme})`, async () => {
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme }); document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
     const user = userEvent.setup(), from = 'a'.repeat(64), to = 'b'.repeat(64);
     show(<RuntimeChange change={{ what: 'settings', name: 'Runtime definition', from, to }} />);
     expect(screen.getByText(i18n.t('resourceDetails.definitionChanged'))).toBeVisible(); expect(screen.queryByText(from)).not.toBeInTheDocument(); expect(screen.queryByText(to)).not.toBeInTheDocument();
-    await user.click(screen.getByText(i18n.t('common.details'), { exact: true }));
-    expect(await screen.findByText(from, { exact: true })).toBeVisible(); expect(screen.getByText(to, { exact: true })).toBeVisible();
+    expect(screen.queryByText(i18n.t('common.details'), { exact: true })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: i18n.t('common.copyId') }));
+    expect(await navigator.clipboard.readText()).toBe(`${from}\n${to}`); expect(screen.queryByText(from)).not.toBeInTheDocument();
   });
-  it(`keeps the update plan's complete fingerprints available without making them its sentence (${locale}/${theme})`, async () => {
+  it(`keeps the update plan's complete fingerprints behind Copy ID without making them its sentence (${locale}/${theme})`, async () => {
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme }); document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
     const user = userEvent.setup(), technical = { what: 'settings' as const, name: 'Runtime definition', from: 'c'.repeat(64), to: 'd'.repeat(64) };
     show(<PlanLists changes={[{ id: 'runtime', tone: 'plain', text: runtimeChangeText(technical, i18n.getFixedT(locale)), technical }]} stays={[]} ends={[]} />);
     expect(screen.getByText(i18n.t('resourceDetails.definitionChanged'))).toBeVisible(); expect(screen.queryByText(technical.from)).not.toBeInTheDocument();
-    await user.click(screen.getByText(i18n.t('common.details'), { exact: true })); expect(await screen.findByText(technical.from, { exact: true })).toBeVisible(); expect(screen.getByText(technical.to, { exact: true })).toBeVisible();
+    expect(screen.queryByText(i18n.t('common.details'), { exact: true })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: i18n.t('common.copyId') })); expect(await navigator.clipboard.readText()).toBe(`${technical.from}\n${technical.to}`);
   });
   it(`names a host runtime and guards deletion by its resource name while submitting the exact unit (${locale}/${theme})`, async () => {
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme }); document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
     reads.runtimes.mockResolvedValue([runtime]); const user = userEvent.setup(); show(<HostRuntimes host={detailHost} />);
     expect(await screen.findByRole('link', { name: detailEnvironment.name })).toBeVisible(); expect(screen.queryByText(unit, { exact: true })).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: i18n.t('resourceDetails.copyId') })); expect(await navigator.clipboard.readText()).toBe(unit); expect(removeHostRuntime).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: i18n.t('common.copyId') })).not.toBeInTheDocument(); expect(screen.queryByText(/Runtime \d|运行单元/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: i18n.t('hosts.runtimes.menu', { name: detailEnvironment.name }) })); await user.click(screen.getByRole('menuitem', { name: i18n.t('common.copyId') }));
+    expect(await navigator.clipboard.readText()).toBe(unit); expect(removeHostRuntime).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: i18n.t('hosts.runtimes.menu', { name: detailEnvironment.name }) })); await user.click(screen.getByRole('menuitem', { name: i18n.t('hosts.runtimes.remove') }));
     const confirm = screen.getByRole('button', { name: i18n.t('hosts.runtimes.removeConfirm', { name: detailEnvironment.name }) }); expect(confirm).toHaveAttribute('aria-disabled', 'true');
     await user.click(confirm); expect(removeHostRuntime).not.toHaveBeenCalled();

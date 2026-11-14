@@ -142,12 +142,13 @@ pub async fn attribution_of_lease(
         "SELECT topic.org_id AS org_id, topic.parent_id AS project_id, th.topic_id AS topic_id,
                 l.thread_id AS thread_id, t.segment_id AS segment_id, t.id AS turn_id,
                 l.provider_id AS provider_id, l.entry_id AS entry_id,
-                CASE WHEN t.background_overlap THEN t.background_charge_to ELSE i.author_id END AS user_id,
+                CASE WHEN work.node_id IS NOT NULL THEN work.person_id WHEN t.background_overlap THEN t.background_charge_to ELSE i.author_id END AS user_id,
                 s.agent_id AS agent_id, a.harness_kind AS harness_kind,
                 s.environment_id AS environment_id, e.placement AS environment_kind,
                 s.arrangement AS arrangement, t.model AS turn_model, t.effort AS effort, t.params AS params
            FROM leases l
            JOIN turns t ON t.id = l.turn_id
+           LEFT JOIN LATERAL usage_work_scope(t.input_id) work ON true
            JOIN segments s ON s.id = t.segment_id
            JOIN threads th ON th.node_id = l.thread_id
            JOIN nodes topic ON topic.id = th.topic_id
@@ -171,9 +172,9 @@ pub async fn attribution_of_turn(
     Ok(sqlx::query_as(
         "SELECT topic.org_id AS org_id,topic.parent_id AS project_id,th.topic_id AS topic_id,
           t.thread_id,t.segment_id,t.id AS turn_id,s.provider_id,NULL::uuid AS entry_id,
-          t.audit_for_user_id AS user_id,s.agent_id,a.harness_kind,s.environment_id,
+          CASE WHEN work.node_id IS NOT NULL THEN work.person_id ELSE t.audit_for_user_id END AS user_id,s.agent_id,a.harness_kind,s.environment_id,
           e.placement AS environment_kind,s.arrangement,t.model AS turn_model,t.effort,t.params
-         FROM turns t JOIN segments s ON s.id=t.segment_id JOIN threads th ON th.node_id=t.thread_id
+         FROM turns t LEFT JOIN LATERAL usage_work_scope(t.input_id) work ON true JOIN segments s ON s.id=t.segment_id JOIN threads th ON th.node_id=t.thread_id
          JOIN nodes topic ON topic.id=th.topic_id LEFT JOIN agents a ON a.id=s.agent_id
          LEFT JOIN environments e ON e.id=s.environment_id WHERE t.id=$1 FOR SHARE OF topic",
     )
@@ -476,7 +477,7 @@ async fn record_as(
     .bind(attribution.turn_id)
     .bind(attribution.provider_id)
     .bind(attribution.entry_id)
-    .bind(attribution.user_id)
+    .bind(work.as_ref().map_or(attribution.user_id,|work|work.person))
     .bind(attribution.agent_id)
     .bind(attribution.harness_kind.as_deref())
     .bind(attribution.environment_id)

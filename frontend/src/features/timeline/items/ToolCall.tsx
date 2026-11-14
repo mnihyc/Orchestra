@@ -33,7 +33,7 @@ import type { MenuEntry } from '@/ui/Menu';
 import { useTimelineContext } from '@/features/timeline/context';
 import { useRecordedItem } from '@/features/timeline/historical';
 import { ItemFrame } from '@/features/timeline/ItemActions';
-import { RawCall } from '@/features/timeline/RawCall';
+import { RawCall, useRawCall } from '@/features/timeline/RawCall';
 import { timelineUi, useThreadUi } from '@/features/timeline/state';
 import { describeStep, stepFailed, type ToolItem } from '@/features/timeline/titles';
 import { CommandDisplay } from '@/features/timeline/tools/Command';
@@ -145,6 +145,7 @@ function ToolCallRowView({ item }: { item: ToolItem }) {
   const recorded = useRecordedItem(context.threadId, item);
   const thread = useThreadPart(context.threadId, (view) => view.thread);
   const ui = useThreadUi(context.threadId);
+  const rawCall = useRawCall(item, false);
   const title = describeStep(item, t);
   const failed = stepFailed(item);
   const running = item.status === 'in_progress' && !recorded;
@@ -180,8 +181,11 @@ function ToolCallRowView({ item }: { item: ToolItem }) {
   if (tool.kind === 'file_change') {
     extra.push({ id: 'copy-patch', label: t('timeline.step.copyPatch'), onSelect: () => copy(tool.changes.map((change) => change.diff ?? '').join('\n')) });
   }
-  extra.push({ id: 'copy-raw-input', label: t('timeline.step.copyRawInput'), onSelect: () => copy(item.payload.raw.input.inline) });
-  if (item.payload.raw.output !== null) extra.push({ id: 'copy-raw-output', label: t('timeline.step.copyRawOutput'), onSelect: () => copy(item.payload.raw.output?.inline ?? '') });
+  // The call as its harness made it is not on the item: it is read when one of its parts is asked to be copied.
+  const copyRaw = (part: 'input' | 'output') => void (rawCall.data === undefined ? rawCall.refetch().then((read) => read.data) : Promise.resolve(rawCall.data))
+    .then((body) => { if (body !== undefined) copy(part === 'input' ? body.input.inline : body.output?.inline ?? ''); });
+  extra.push({ id: 'copy-raw-input', label: t('timeline.step.copyRawInput'), onSelect: () => copyRaw('input') });
+  if (item.status !== 'in_progress') extra.push({ id: 'copy-raw-output', label: t('timeline.step.copyRawOutput'), onSelect: () => copyRaw('output') });
 
   return (
     <ItemFrame item={item} label={t('timeline.step.menu')} extra={extra}>

@@ -231,6 +231,18 @@ impl Engine {
             i64::try_from(serde_json::to_vec(&value)?.len()).map_err(EngineError::unreadable)?;
         let mut tx = self.db().begin().await?;
         source::check_call(&mut tx, call).await?;
+        source::original_callers(
+            &mut tx,
+            call,
+            self.inner.clock.as_ref(),
+            self.inner.access.as_ref(),
+        )
+        .await?;
+        if let Some(helper) = &accepted.receipt.helper
+            && !helper.current_placement(&mut tx).await?
+        {
+            return Err(EngineError::StaleToolSource);
+        }
         let mut hashes: Vec<Hash> = accepted
             .native_images
             .iter()
@@ -456,6 +468,12 @@ impl Engine {
             self.inner.access.as_ref(),
         )
         .await?;
+        if current.answer() == receipt.owner.answer()
+            && let Some(helper) = &receipt.helper
+            && !helper.current_placement(&mut conn).await?
+        {
+            return Err(EngineError::StaleToolSource);
+        }
         Ok(accepted)
     }
 

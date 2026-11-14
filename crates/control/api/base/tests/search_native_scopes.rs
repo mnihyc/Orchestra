@@ -103,6 +103,30 @@ async fn name_search_filters_native_candidates_before_its_limit_and_binds_contex
     assert_eq!(answer["items"].as_array().unwrap().len(), 1);
     assert_eq!(answer["items"][0]["id"], json!(target));
     assert_eq!(answer["items"][0]["name"], "Needle row selected");
+    let exact = value(
+        world
+            .app
+            .call(NameSearchList, &[])
+            .token(&selected_key)
+            .raw_query(&format!("id={target}&kinds=project"))
+            .send_bytes()
+            .await,
+    );
+    assert_eq!(exact["items"].as_array().unwrap().len(), 1);
+    assert_eq!(exact["items"][0]["name"], "Needle row selected");
+    let outside = value(
+        world
+            .app
+            .call(NameSearchList, &[])
+            .token(&selected_key)
+            .raw_query(&format!("id={org}&kinds=org"))
+            .send_bytes()
+            .await,
+    );
+    assert!(
+        outside["items"].as_array().unwrap().is_empty(),
+        "an exact identity never widens the key's selected targets"
+    );
     let path = answer["items"][0]["path"].as_array().unwrap();
     assert!(
         path.iter().any(|step| step["id"] == json!(org)),
@@ -980,9 +1004,14 @@ async fn streamed_search_stops_delivery_after_the_actual_key_expires_between_fra
     let response = router.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body();
-    let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
-    let first: Json = serde_json::from_slice(&first).unwrap();
-    assert_eq!(first["type"], "options");
+    // A search opens with what its index covers, then with the options of this opening.
+    let mut opening = Vec::new();
+    while opening.last().map(String::as_str) != Some("options") {
+        let part = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        let part: Json = serde_json::from_slice(&part).unwrap();
+        opening.push(part["type"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(opening, ["coverage", "options"]);
     world.advance(chrono::Duration::hours(2));
     assert!(
         body.frame().await.is_none_or(|frame| frame.is_err()),
