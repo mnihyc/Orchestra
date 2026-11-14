@@ -1,0 +1,9 @@
+fmt
+clippy
+contracts
+test -p orch-notifier-email --lib
+test -p orch-worker-core --test channel_setup
+test -p orch-api-core --test notifications_routes --test accounts
+web typecheck
+web lint
+web test -- tests/component/screen-labels.test.tsx tests/component/metadata-declaration-locators.test.tsx tests/component/system-auto-save.test.tsx

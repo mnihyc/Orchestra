@@ -455,8 +455,10 @@ test.describe('Sign-in', () => {
 
   test('keeps the other settings where they are shown: confirming addresses, passwords, and what a code by mail may be for with the lock', async ({ page }) => {
     await open(page, '/admin/sign-in');
-    await page.getByRole('switch', { name: 'Ask new people to confirm their address' }).click();
-    await expect(page.getByRole('switch', { name: 'Ask new people to confirm their address' })).toBeChecked();
+    const verification = page.getByRole('switch', { name: 'Require a confirmed address to sign in' });
+    await expect(verification).toHaveAccessibleDescription('System administrators and people without an email address can sign in without confirmation. Existing sessions stay signed in.');
+    await verification.click();
+    await expect(verification).toBeChecked();
 
     // A code by mail: the two ticks are the system's own value, and the lock holds every org to it.
     const code = page.getByRole('group', { name: 'A code by mail', exact: true });
