@@ -5,6 +5,7 @@ import { ApiError, client } from '@/api/client';
 import type * as ClientModule from '@/api/client';
 import { documentDirectoryQuery, type DocumentDirectoryRequest } from '@/api/documentTree';
 import { adoptDocumentDirectory, documentDirectoryKey, retireDocumentDirectory } from '@/api/documentTreeCache';
+import { observeDocumentDirectory, observeDocumentEntry, repairDocumentDirectories, restartDocumentEntry } from '@/api/documentTreeChanges';
 import type { DocumentTreePage } from '@/generated/api-types';
 
 const calls = vi.hoisted(() => ({ get: vi.fn<(path: string, options?: unknown) => Promise<DocumentTreePage>>() }));
@@ -34,6 +35,26 @@ beforeEach(() => {
   calls.get.mockReset();
 });
 afterEach(() => { cache.clear(); client.session.setState({ readerVersion: reader }); });
+
+it('repairs a visible directory through every kept view of its one query cache', async () => {
+  const scoped = new QueryClient({ queryCache: cache.getQueryCache() }), reset = vi.fn();
+  const off = observeDocumentDirectory(scoped, { ...request, cursor: 'older-page' }, reset);
+  calls.get.mockResolvedValue(snapshot('current-directory'));
+  try {
+    await repairDocumentDirectories(cache, [request.at]);
+    expect(reset).toHaveBeenCalledExactlyOnceWith({ ...request, cursor: null });
+    expect(cache.getQueryData(documentDirectoryKey(request))).toEqual(snapshot('current-directory'));
+    expect(calls.get).toHaveBeenCalledOnce();
+  } finally { off(); }
+});
+
+it('retries the same document entry when its retained view uses the shared cache', () => {
+  const scoped = new QueryClient({ queryCache: cache.getQueryCache() }), retry = vi.fn(), other = vi.fn();
+  const item = { kind: 'document', id: 'document' } as const;
+  const off = observeDocumentEntry(scoped, item, retry), stopOther = observeDocumentEntry(scoped, { ...item, id: 'other' }, other);
+  try { restartDocumentEntry(cache, item); expect(retry).toHaveBeenCalledOnce(); expect(other).not.toHaveBeenCalled(); }
+  finally { off(); stopOther(); }
+});
 
 it('erases all cursor pages immediately and cancels an unmounted late result without touching independent scopes', async () => {
   const first = documentDirectoryKey(request), second = documentDirectoryKey({ ...request, cursor: 'next' });

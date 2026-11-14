@@ -6,7 +6,7 @@ import '@/features/documents/register';
 import { registerHelpView } from '@/features/help/register';
 import { registerInspectorViews } from '@/features/inspector/Inspector';
 import { shippedLayout } from '@/features/workbench/Arrangements';
-import { allTabs, keepOffered, serialize } from '@/features/workbench/layout';
+import { allTabs, parse, serialize } from '@/features/workbench/layout';
 import { registerShippedViews } from '@/features/workbench/shippedViews';
 import { offers, registerView, type ViewDefinition, viewOf } from '@/features/workbench/views';
 
@@ -36,8 +36,10 @@ it('restores all thirteen native views from shell registrations before any docum
     expect(definition('screen').closable).not.toBe(false);
     expect(definition('page').role).toBe('content');
     expect(definition('navigation').area).toBe('left');
-    const visible = keepOffered(saved, (name) => viewOf(name) !== undefined);
-    expect(allTabs(visible).some((tab) => OWNED.some((name) => name === tab.view))).toBe(false);
+    const retained = parse(serialize(saved));
+    expect(retained).not.toBeNull();
+    if (retained === null) throw new Error('A current layout must remain readable.');
+    expect(allTabs(retained).some((tab) => OWNED.some((name) => name === tab.view))).toBe(true);
     expect(serialize(saved)).toBe(before);
   } finally { for (const view of native) registerView(view); }
   for (const original of native) {

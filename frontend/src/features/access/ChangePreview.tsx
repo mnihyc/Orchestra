@@ -95,7 +95,6 @@ export function ChangePreview({ source, asked, changes, onClose }: { source: Pag
     },
     enabled: wanted && page.data !== undefined,
     retry: false,
-    staleTime: 0,
     gcTime: 0,
   });
 

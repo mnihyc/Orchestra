@@ -19,7 +19,7 @@ export function Templates({ nodeId }: { nodeId: string }) {
   const settings = useQuery(settingsQuery(nodeId));
   const setting = settings.isError ? undefined : settings.data?.find((row) => row.key === 'docs.templates')?.value;
   const ids = Array.isArray(setting) ? [...new Set(setting.filter((id): id is string => typeof id === 'string'))] : [];
-  const reads = useQueries({ queries: ids.map((id) => ({ ...documentQuery(id), retry: false, staleTime: 0 })) });
+  const reads = useQueries({ queries: ids.map((id) => ({ ...documentQuery(id), retry: false })) });
   const [chosen, setChosen] = useState<Document | null>(null);
   const visible = reads.filter((read) => read.isSuccess && !read.data.deleted);
   const errors = [settings, ...reads].filter((read) => read.isError);

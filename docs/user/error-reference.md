@@ -16,6 +16,27 @@ A failed action keeps its human explanation and available recovery. These stable
 | `error:request.invalid` | Something in this request is not valid. Check what you entered and try again. |
 | `error:request.value_refused` | A value in this request is not one that can be kept. Check what you entered and try again. |
 | `error:admin.risk_not_acknowledged` | This change carries a risk that has to be acknowledged first. Tick the acknowledgement and try again. |
+| `error:ask.not_in_list` | This model is not on this organization’s Ask list. Choose one of the listed models. |
+| `error:ask.model_disabled` | This model is switched off. Choose another model. |
+| `error:ask.provider_unavailable` | This model’s provider is not available. Choose another model or ask whoever manages the provider. |
+| `error:ask.no_interface` | This model’s provider offers no way to hold a conversation. Choose another model. |
+| `error:ask.options_refused` | The options chosen for this model are not allowed. Change them or use the model’s defaults. |
+| `error:ask.model_not_allowed` | This organization’s policy does not allow this model. Choose another model. |
+| `error:ask.provider_not_allowed` | This organization’s policy does not allow this model’s provider. Choose another model. |
+| `error:ask.payer_unset` | Ask is set to be paid for by whoever set it, and that person is no longer known. Ask an administrator to set who pays. |
+| `error:ask.no_use` | You may not use this model’s provider in this organization. Ask whoever manages it to let you. |
+| `error:ask.identity_not_usable` | Your access to this provider does not cover this model’s default options. Choose another model. |
+| `error:ask.use_excludes` | Your access to this provider leaves out this model or effort. Choose another. |
+| `error:ask.payer_no_use` | The person who pays for Ask here may not use this provider in this organization. Ask an administrator. |
+| `error:ask.payer_excludes` | The person who pays for Ask here may not use this model or effort. Choose another. |
+| `error:ask.no_keeper` | This provider has no machine that keeps its key. Ask whoever manages it to set one. |
+| `error:ask.keeper_offline` | The machine that keeps this provider’s key is offline. Try again shortly or choose another model. |
+| `error:ask.cap_reached` | A usage limit for Ask has been reached. Try again after it resets, or ask an administrator. |
+| `error:ask.other_organization` | This page belongs to another organization. Ask in that organization. |
+| `error:ask.root_refused` | You cannot open this organization as yourself. Ask answers as you are here, not as an administrator, so As admin does not open it. Use an organization you belong to. |
+| `error:ask_context_too_long` | The conversation cannot fit even after folding whole older turns. Choose a larger allowed model, start a new conversation or keep it as a thread; the originals remain in history. |
+| `error:ask_turn_too_long` | The current question and what it read cannot fit by themselves. Ask a narrower question or choose a model with more room; summarizing older messages cannot make this turn smaller. |
+| `error:ask_unavailable` | The question could not finish. Read its current explanation and use the offered retry when available; a later question can continue the conversation. |
 | `error:environment.none_usable` | There is no environment you can use for this thread, and you may not create one. Ask somebody who manages one to let you in. |
 | `error:auth.required` | You are not signed in. Sign in and try again. |
 | `error:auth.invalid_token` | Your session is no longer valid. Sign in again. |
@@ -129,6 +150,7 @@ A failed action keeps its human explanation and available recovery. These stable
 | `error:import.nothing` | There is nothing here that you may bring into this place. Choose another source or place. |
 | `error:import.invalid` | This is not an Orch package or files that can be imported. Check the file and try again. |
 | `error:import.undone` | This import was taken back already, or is being taken back. |
+| `error:summary.nothing_new` | There is nothing new here to summarize, so no summary was asked for. Try again when something has been written or posted. |
 | `error:gone` | This link was used already or has expired. Ask for a new link. |
 | `error:docs.too_large` | This would take the document past a limit. Remove some content or split it into separate documents. |
 | `error:share.too_large` | This copy is larger than the limit here. Choose less content to share. |
@@ -144,6 +166,14 @@ A failed action keeps its human explanation and available recovery. These stable
 | `error:provider.unavailable` | The provider is not ready at the moment. Try again shortly. |
 | `error:harness.sessions_no_runtime` | This agent has no runtime for this provider yet. Start a thread with this agent, then check its sessions again. |
 | `error:harness.sessions_unavailable` | This agent could not list its sessions. Check its machine and try again. |
+| `error:native_web_no_end` | The native program did not report this web action's end within the resolved wait. Its row closes with the reason while the turn continues. A later real end can still update that row; no manual Stop is required. |
+| `error:native_web_action_unproven` | Native result evidence could not be matched to the exact action, turn, owner, model or supported format. The reported action status is retained and usage remains unknown; a missing proof is not proof of failure. |
+| `error:native_web_action_failed` | The exact retained native result reports failure. The action is marked failed with its original details; this alone does not fail the text turn. |
+| `error:native_result_timed_out` | Evidence reason: the optional retained-result read reached its declared wait. Other sessions continue and the reported action result is retained as unverified. |
+| `error:native_result_buffer_full` | Evidence reason: the waiting session's ordered-input buffer filled. Orch ends optional proof and processes every retained and current frame without dropping input. |
+| `error:native_result_ordering_unknown` | Evidence reason: a retained child introduction must be processed before newly arrived child input can be owned safely. Only that session's optional proof ends; input order is preserved. |
+| `error:native_result_session_closed` | Evidence reason: the owning session closed before optional retained evidence could finish. Late evidence cannot attach to another session. |
+| `error:native_result_session_changed` | Evidence reason: the session, segment, native owner or result source no longer matches the read. The stale proof is discarded instead of updating or charging the replacement. |
 | `error:harness.channels_unavailable` | The release channels could not be read. Check this server's internet access or name a mirror. |
 | `error:provider.reset_stale` | The reset or the number available changed. Refresh and confirm the current reset again. |
 | `error:provider.reset_unavailable` | This provider cannot use a reset now. Refresh its facts or ask its manager. |

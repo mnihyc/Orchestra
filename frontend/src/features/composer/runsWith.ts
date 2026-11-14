@@ -5,10 +5,11 @@
  * changed, including before any history exists; the thread's own choices are asked for only where a control
  * is opened, since they decide who a choice is credited to and what a change of model leaves behind.
  */
+import { READ_NOW } from '@/api/freshness';
 import type { SkeletonRead } from '@/ui/Skeleton';
 import { type QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useViewShown } from '@/features/workbench/viewOpening';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { modelDisplayName } from '@/features/models/names';
 import { useShallow } from 'zustand/react/shallow';
@@ -49,8 +50,9 @@ export function ownChoices(settings: readonly ResolvedSetting[] | undefined): Re
 }
 
 /** Every model chooser keeps compatible thread choices and reports each incompatible choice it removes. */
-export async function changeModelChoice(thread: Pick<Thread, 'id' | 'model'>, choice: { model: string; effort: string | null; option: ModelOption }, states: readonly State[], settings: readonly ResolvedSetting[]) {
-  await setThreadSetting(thread.id, 'agent.model', { value: choice.model, expected_revision: settingOf(settings, 'agent.model').own?.revision ?? 0 });
+export async function changeModelChoice(thread: Pick<Thread, 'id' | 'model'>, choice: { model: string; effort: string | null; option: ModelOption; effortOnly?: boolean }, states: readonly State[], settings: readonly ResolvedSetting[]) {
+  // A change of the effort alone leaves the model's own setting as it is.
+  if (choice.effortOnly !== true) await setThreadSetting(thread.id, 'agent.model', { value: choice.model, expected_revision: settingOf(settings, 'agent.model').own?.revision ?? 0 });
   if (choice.effort !== null) await setThreadSetting(thread.id, 'agent.effort', { value: choice.effort, expected_revision: settingOf(settings, 'agent.effort').own?.revision ?? 0 });
   if (choice.model === thread.model) return { dropped: [], option: choice.option };
   const own = ownChoices(settings) ?? {};
@@ -83,8 +85,8 @@ async function readRefusal(threadId: string, error: unknown, queryClient: QueryC
   const by = error.problem.changed_by;
   refreshThread(threadId);
   const [settings, parameters] = await Promise.all([
-    queryClient.query({ ...settingsQuery(threadId), staleTime: 0 }),
-    queryClient.query({ ...parametersQuery(threadId), staleTime: 0 }),
+    queryClient.query({ ...settingsQuery(threadId), ...READ_NOW }),
+    queryClient.query({ ...parametersQuery(threadId), ...READ_NOW }),
   ]);
   const model = parameters.model.options.find((option) => option.model_name === parameters.model.value);
   const key = isRecord(current) && typeof current.key === 'string' ? current.key : 'agent.model';
@@ -131,8 +133,13 @@ export function useRunsWith(thread: Thread, withOwn: boolean): RunsWith {
   const queryClient = useQueryClient();
   // A thread that is not bound to anything yet runs with nothing to choose.
   const bound = thread.binding !== null;
-  const parameters = useQuery({ ...parametersQuery(thread.id), enabled: bound && shown });
+  const parameters = useQuery({ ...parametersQuery(thread.id, withOwn), enabled: bound && shown });
   const settings = useQuery({ ...settingsQuery(thread.id), enabled: withOwn && bound && shown });
+  const needsChoices = withOwn && parameters.data?.model.options_partial === true;
+  const { isFetching: choicesFetching, isError: choicesFailed, refetch: readChoices } = parameters;
+  useEffect(() => {
+    if (needsChoices && !choicesFetching && !choicesFailed) void readChoices({ cancelRefetch: false });
+  }, [needsChoices, choicesFetching, choicesFailed, readChoices]);
   const [refusal, setRefusal] = useState<SettingRefusal | null>(null);
   const written = useThreadPart(
     thread.id,
@@ -170,7 +177,10 @@ export function useRunsWith(thread: Thread, withOwn: boolean): RunsWith {
   const states = parameters.data === undefined ? [] : statesOf(parameters.data, own, t);
 
   const choose = useMutation({
-    mutationFn: (change: { state: State; value: string | number | null }) => changeThreadChoices(thread.id, (choices) => withChoice(choices, change.state, change.value), settingOf(settings.data, 'agent.params')),
+    mutationFn: async (change: { state: State; value: string | number | null }) => {
+      const current = settings.data ?? await queryClient.query({ ...settingsQuery(thread.id), staleTime: 0 });
+      return changeThreadChoices(thread.id, (choices) => withChoice(choices, change.state, change.value), settingOf(current, 'agent.params'));
+    },
     onMutate: () => setRefusal(null),
     onError: (error, change) => refuse(error, change.state.key),
   });
@@ -178,7 +188,7 @@ export function useRunsWith(thread: Thread, withOwn: boolean): RunsWith {
   return {
     parameters: parameters.data,
     settings: settings.data,
-    ready: settings.data !== undefined && settings.error === null && !settings.isFetching && !parameters.isFetching,
+    ready: parameters.data !== undefined && !parameters.isFetching && (!withOwn || settings.data !== undefined && settings.error === null && parameters.data.model.options_partial !== true && !settings.isFetching),
     refusal,
     refuse,
     clearRefusal: () => setRefusal(null),
@@ -187,7 +197,7 @@ export function useRunsWith(thread: Thread, withOwn: boolean): RunsWith {
     own,
     states,
     reads: withOwn ? [parameters, settings] : [parameters],
-    pending: bound && (parameters.isPending || (withOwn && settings.isPending)),
+    pending: bound && (parameters.isPending || (withOwn && (settings.isPending || parameters.isFetching && parameters.data?.model.options_partial === true))),
     failed: parameters.error ?? settings.error,
     chooser: (key) =>
       chooserOf(

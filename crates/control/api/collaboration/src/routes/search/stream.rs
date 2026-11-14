@@ -471,6 +471,7 @@ pub(super) async fn prepare(
         keys::SEARCH_MEANING_PAUSE_MS,
         keys::SEARCH_CURSOR_TTL_SECS,
         keys::SEARCH_CURSOR_ENTRIES,
+        keys::SEARCH_TEXT_CHARS,
     ] {
         options.insert(
             key,
@@ -501,11 +502,17 @@ fn begin(ctx: Ctx, prepared: PreparedStream, queued_at: std::time::Instant) -> S
     let number = |key| u32::try_from(options[&key]).unwrap_or_default();
     let page_size = number(keys::SEARCH_PAGE_SIZE);
     let pause = number(keys::SEARCH_MEANING_PAUSE_MS);
-    let mut events = VecDeque::from([Event::Options {
-        page_size,
-        reorder_window_secs: number(keys::SEARCH_REORDER_WINDOW_SECS),
-        meaning_pause_ms: pause,
-    }]);
+    let mut events = VecDeque::from([
+        Event::Coverage {
+            conversation_chars: u64::try_from(options[&keys::SEARCH_TEXT_CHARS])
+                .unwrap_or_default(),
+        },
+        Event::Options {
+            page_size,
+            reorder_window_secs: number(keys::SEARCH_REORDER_WINDOW_SECS),
+            meaning_pause_ms: pause,
+        },
+    ]);
     let mut pending = tokio::task::JoinSet::new();
     let mut tasks = HashMap::new();
     if !cursor.meaning_done && cursor.generation != generation {

@@ -31,8 +31,8 @@ function Observation({ result }: { result: RowResult }) {
   const parent = current?.path.at(-2);
   const parentName = useNodeLabel(parent?.id ?? '', parent?.redacted === true ? undefined : parent?.name ?? undefined);
   if (current === undefined) return null;
-  if (result.review.kind === 'delete' && current.inspection !== undefined && current.inspection !== null) return <p>{t('placeReview.observedDeleted', { revision: current.revision })}</p>;
-  return <p>{result.review.kind === 'move' ? t('placeReview.observedParent', { parent: parentName ?? t('placeReview.private'), revision: current.revision }) : t('placeReview.observedArchive', { state: current.archived ? t('placeReview.readOnly') : t('placeReview.ordinaryRights'), revision: current.revision })}</p>;
+  if (result.review.kind === 'delete' && current.inspection !== undefined && current.inspection !== null) return <p>{t('placeReview.observedDeleted')}</p>;
+  return <p>{result.review.kind === 'move' ? t('placeReview.observedParent', { parent: parentName ?? t('placeReview.private') }) : t('placeReview.observedArchive', { state: current.archived ? t('placeReview.readOnly') : t('placeReview.ordinaryRights') })}</p>;
 }
 
 export function PlaceReview({ rows, action, onClose, onApplied }: { rows: readonly Node[]; action: ReviewAction; onClose: () => void; onApplied: () => void }) {
@@ -58,7 +58,7 @@ export function PlaceReview({ rows, action, onClose, onApplied }: { rows: readon
       if (destination === null || before.kind === 'thread') throw new Error(t('placeReview.destinationFirst'));
       return { kind: 'move', before, plan: await previewMove(before.kind, before.id, destination.id) };
     },
-    enabled: action !== 'move' || destination !== null, retry: false, staleTime: 0,
+    enabled: action !== 'move' || destination !== null, retry: false,
   })) });
   const plans = query.flatMap((entry) => entry.isError || entry.data === undefined ? [] : [entry.data]);
   const ready = plans.filter((plan) => plan.kind === 'delete' || plan.plan.blockers.length === 0);

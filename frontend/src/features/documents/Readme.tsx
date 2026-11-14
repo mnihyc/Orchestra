@@ -1,4 +1,4 @@
-/** The README of a place at the top of its view: the document it named, up to that document's first page break or its first twelve blocks where it has none, with Read more, which opens the document.
+/** The README of a place at the top of its view: a bounded preview with a path to the whole document.
  *
  * It is read here and written on its own page. A thread shows it folded to one line once the reader has
  * read the document as it stands, and opens it again with a press. Somebody who may not read the
@@ -12,6 +12,8 @@ import { useTranslation } from 'react-i18next';
 
 import { fetchDocumentSync } from '@/api/documents';
 import { updateNode } from '@/api/nodes';
+import { settingsQuery } from '@/api/settings';
+import { useViewShown } from '@/features/workbench/viewOpening';
 import { compareBlocks } from '@/features/documents/blocks';
 import type { BlockEditor as BlockEditorView } from '@/features/documents/Editor';
 import { lazyPart } from '@/features/files/lazy';
@@ -22,20 +24,19 @@ import { useErrorText } from '@/ui/errorText';
 import { quietButtonClasses } from '@/ui/link';
 import type { MenuEntry } from '@/ui/Menu';
 import { SkeletonRows } from '@/ui/Skeleton';
+import { ErrorAlert } from '@/ui/ErrorState';
+import { Button } from '@/ui/Button';
 import { toast } from '@/ui/Toast';
 
-/** How many top-level blocks a README shows where its document has no page break: the top of a screen. */
-export const README_BLOCKS_MAX = 12;
-
 /**
- * The blocks a README shows: the top-level ones before the document's first page break, or its first
- * [`README_BLOCKS_MAX`] where it has none, each with everything inside it; and whether the document holds more.
+ * The chosen top-level blocks before the first page break, with all their children; and whether more remains.
  */
-export function readmeCut(blocks: readonly DocumentBlock[]): { shown: DocumentBlock[]; more: boolean } {
+export function readmeCut(blocks: readonly DocumentBlock[], maxBlocks: number): { shown: DocumentBlock[]; more: boolean } {
   const top = blocks.filter((block) => block.parent_id === null && !block.removed).sort(compareBlocks);
   const stop = top.findIndex((block) => block.type === 'page_break');
-  const kept = stop >= 0 ? top.slice(0, stop) : top.slice(0, README_BLOCKS_MAX);
-  const more = stop >= 0 ? top.length > stop + 1 : top.length > kept.length;
+  const end = stop >= 0 ? Math.min(stop, maxBlocks) : maxBlocks;
+  const kept = top.slice(0, end);
+  const more = top.slice(kept.length).some((block) => block.type !== 'page_break');
   const keep = new Set(kept.map((block) => block.id));
   // What lies inside a kept block goes with it, however deep.
   for (let grew = true; grew; ) {
@@ -83,15 +84,20 @@ function wasRead(readme: DocumentRef): boolean {
 /** The document editor draws the README; it is fetched when a README is first drawn, never with the sidebar that offers its menu entry. */
 const BlockEditor = lazyPart<ComponentProps<typeof BlockEditorView>>(() => import('@/features/documents/Editor').then((module) => ({ default: module.BlockEditor })));
 
-export function PlaceReadme({ readme, foldable = false }: { readme: DocumentRef; foldable?: boolean }) {
+export function PlaceReadme({ readme, nodeId, foldable = false }: { readme: DocumentRef; nodeId: string; foldable?: boolean }) {
   const { t } = useTranslation();
+  const shown = useViewShown();
   const [open, setOpen] = useState(() => !foldable || !wasRead(readme));
+  const settings = useQuery({ ...settingsQuery(nodeId), enabled: open && shown });
   const sync = useQuery({
     queryKey: ['readme', readme.id, readme.seq],
     queryFn: ({ signal }) => fetchDocumentSync(readme.id, null, signal),
-    enabled: open,
+    enabled: open && shown,
   });
-  const cut = sync.data === undefined ? null : readmeCut(sync.data.blocks);
+  const allowance = settings.data?.find((one) => one.key === 'documents.readme_blocks')?.value;
+  const maxBlocks = typeof allowance === 'number' && allowance >= 1 ? allowance : null;
+  const cut = sync.data === undefined || maxBlocks === null ? null : readmeCut(sync.data.blocks, maxBlocks);
+  const failure = sync.error ?? settings.error ?? (settings.isSuccess && maxBlocks === null ? new Error(t('documents.readme.unavailable')) : null);
   const title = (
     <span className="flex min-w-0 items-center gap-2">
       <BookOpen aria-hidden className="size-4 shrink-0 text-text-muted" />
@@ -115,16 +121,17 @@ export function PlaceReadme({ readme, foldable = false }: { readme: DocumentRef;
       )}
       {open && (
         <div className="px-4 pb-3">
-          {sync.data === undefined || cut === null ? (
+          {failure !== null ? <ErrorAlert error={failure} action={<Button size="sm" onClick={() => { void sync.refetch(); void settings.refetch(); }}>{t('common.tryAgain')}</Button>} /> : sync.data === undefined || cut === null ? (
             <SkeletonRows read={sync} rows={3} />
           ) : (
             <Suspense fallback={<SkeletonRows read={sync} rows={3} />}><BlockEditor document={sync.data.document} editable={false} inspection fixed={cut.shown} /></Suspense>
           )}
-          {cut?.more === true && (
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            {cut?.more === true && <span className="text-text-muted">{t('documents.readme.preview')}</span>}
             <Link to="/doc/$documentId" params={{ documentId: readme.id }} className="text-sm font-medium text-accent hover:underline focus-visible:outline-2 focus-visible:outline-focus">
-              {t('documents.readme.more')}
+              {t('documents.readme.open')}
             </Link>
-          )}
+          </div>
         </div>
       )}
     </section>

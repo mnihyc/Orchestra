@@ -5,13 +5,15 @@ import { useEffect } from 'react';
 import { processKeys, SAMPLE_MINUTES } from '@/api/processes';
 import type { ResourceSample } from '@/generated/api-types';
 import { socket } from '@/realtime/live';
+import { useViewReadsReady } from '@/features/workbench/KeptQueries';
 
-const readers = new WeakMap<QueryClient, Map<string, { users: number; stop: () => void }>>();
+const readers = new WeakMap<ReturnType<QueryClient['getQueryCache']>, Map<string, { users: number; stop: () => void }>>();
 export const currentSampleKey = (environmentId: string) => ['resource-facts-sample', environmentId] as const;
 
 /** Multiple visible status items or an opened card share one subscription to the same environment. */
 export function useResourceSample(environmentId: string | null, allowed = true): ResourceSample | null {
   const client = useQueryClient();
+  const ready = useViewReadsReady();
   const id = environmentId ?? '';
   const sample = useQuery<ResourceSample | null>({
     queryKey: currentSampleKey(id),
@@ -20,9 +22,9 @@ export function useResourceSample(environmentId: string | null, allowed = true):
     initialData: () => client.getQueryData<ResourceSample[]>(processKeys.samples({ environmentId: id, threadId: null }, SAMPLE_MINUTES))?.at(-1) ?? null,
   });
   useEffect(() => {
-    if (id === '' || !allowed) return;
-    let active = readers.get(client);
-    if (active === undefined) { active = new Map(); readers.set(client, active); }
+    if (id === '' || !allowed || !ready) return;
+    let active = readers.get(client.getQueryCache());
+    if (active === undefined) { active = new Map(); readers.set(client.getQueryCache(), active); }
     let reader = active.get(id);
     if (reader === undefined) {
       const subscription = socket.subscribe(`env:${id}:stats`, {
@@ -41,6 +43,6 @@ export function useResourceSample(environmentId: string | null, allowed = true):
       reader.users -= 1;
       if (reader.users === 0) { reader.stop(); active.delete(id); }
     };
-  }, [client, id, allowed]);
+  }, [client, id, allowed, ready]);
   return allowed ? sample.data ?? null : null;
 }
