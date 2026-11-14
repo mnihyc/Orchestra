@@ -284,6 +284,7 @@
   --reading-width: 51.25rem; /* 820 px */
   --diff-max-height: 28rem; /* 448 px: a difference scrolls inside itself beyond this */
   --output-height: 30rem; /* 480 px: 24 lines of a command's output */
+  --work-preview-height: 14rem; /* 224 px: the latest steps of a turn that is still at it, before the box scrolls */
   --composer-max-height: 18rem; /* 288 px: 12 lines of the message being written */
   --dialog-max-height: calc(100dvh - 2rem);
   --chip-width: 18rem; /* 288 px: the most a chip of the header or the box grows to */

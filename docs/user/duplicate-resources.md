@@ -15,6 +15,8 @@ The copy takes the destination’s defaults, locks and a fresh permission page. 
 
 A thread’s Duplicate is its native fork. Its existing agent-access review and job plan still apply. Duplicate to lets you choose a topic using the same place picker; the plan checks the destination and the resources it would use. Built-in program threads retain their own Private creation flow.
 
+The person who starts a thread move can still inspect its accepted job after the original is deleted. A scoped credential keeps the job’s actual organization and place restrictions.
+
 ## Credentials and notices
 
 The native operation decides whether you own the source and may carry its secrets. Other readers’ copies need their own key. Subscription copies start signed out, with an independent sign-in. Copying never asks the browser to retrieve and resubmit source credentials.
@@ -40,7 +42,7 @@ Hosts and machines offer this home move without Duplicate. For an environment, *
 
 In **Move…**, choosing a home in another root org changes the button to **Copy to <org>, then delete**. Only an owner of the source may use it. Every copy-out and deletion rule still applies; a manager or administrator who is not an owner cannot use this move.
 
-For providers, agents, skills, mounts, templates, hosts and machines, review the **Deletion plan** before confirming. Its rows show the actual consequences, including stopping bound work or keeping a registration. The copy and source removal happen in one operation; cancelling the dialog changes neither. Hosts and machines keep their registration and identifier rather than creating another registration. Environments and threads remain unavailable until their move operation is ready.
+For providers, agents, skills, mounts, templates, hosts and machines, review the **Deletion plan** before confirming. Its rows show the actual consequences, including stopping bound work or keeping a registration. The copy and source removal happen in one operation; cancelling the dialog changes neither. Hosts and machines keep their registration and identifier rather than creating another registration. Environment moves across orgs remain unavailable until their native move operation is ready.
 
 After a refused move, the place and reason stay visible. If the source or deletion footprint changed, **Review again** loads a new plan for you to confirm. Retrying a lost response keeps the original operation and cannot make a second copy. The accepted identity opens through its ordinary reader.
 
@@ -54,3 +56,6 @@ For a group, the native operation checks its actual current managers and copy-ou
 
 
 Moving a provider uses the native creation and successful source-deletion path. Its stop and erasure consequences appear in the plan. A subscription sign-in is handed over in that same act; ordinary Duplicate still starts its subscription copy signed out. The browser never reads and resubmits those credentials.
+
+
+For a coding thread, open its **⋯** menu and choose **Move to another org…**. Choose a destination topic and review the full conversation copy, fresh destination access and original deletion together. Only an actual owner can confirm; Export, copy-out policy, destination creation and original deletion checks still apply. Open side threads must be closed or kept first, as named in the plan. The native job deletes the original only after the copy commits, and can be hidden or cancelled before commit. Its progress remains readable after the original disappears; **Open moved thread** opens the accepted new conversation. **Notify N people** is optional and follows the reviewed contributor set. Built-in program conversations keep their own copy flow and currently cannot move across orgs.

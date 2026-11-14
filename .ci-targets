@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/thread-read-context.test.tsx tests/component/connection-status.test.tsx tests/unit/thread-read-transport.test.ts tests/unit/thread-read-handles.test.ts tests/unit/feed-cancelled-read.test.ts tests/unit/socket.test.ts tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts --maxWorkers=2 --testTimeout=30000

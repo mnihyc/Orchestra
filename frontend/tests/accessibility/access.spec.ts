@@ -102,7 +102,8 @@ test('a thread on a person’s machine and the page of a provider, which has par
   await signIn(page, PEOPLE.ada);
   await page.goto(`/thread/${ACME.mainThread}`);
   // A thread's header shares it with its own button.
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Share thread', exact: true }).click();
+  await page.locator('[data-thread-header] [data-thread-more]').click();
+  await page.getByRole('menuitem', { name: 'Share thread', exact: true }).click();
   await expect(dialog(page)).toContainText('runs on Ada Lovelace’s machine');
   await expectAccessibleInBothThemes(page, '[role="dialog"]');
   await page.keyboard.press('Escape');

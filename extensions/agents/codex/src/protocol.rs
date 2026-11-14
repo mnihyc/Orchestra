@@ -170,7 +170,7 @@ pub enum Incoming {
     },
 }
 
-fn incoming_weight(event: &Incoming) -> usize {
+pub(crate) fn incoming_weight(event: &Incoming) -> usize {
     std::mem::size_of::<Incoming>().saturating_add(match event {
         Incoming::Notification { method, params } => {
             method.capacity().saturating_add(flow::json_weight(params))

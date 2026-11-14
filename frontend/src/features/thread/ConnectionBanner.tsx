@@ -8,20 +8,22 @@
 import { useTranslation } from 'react-i18next';
 
 import { reloadThread } from '@/realtime/live';
+import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { useThreadPart } from '@/realtime/stores/thread';
 import { Banner } from '@/ui/Banner';
 import { Button } from '@/ui/Button';
 
 export function ConnectionBanner({ threadId }: { threadId: string }) {
   const { t } = useTranslation();
-  const failed = useThreadPart(threadId, (view) => view.loaded !== 'none' && view.error !== null);
+  const read = useThreadReadRef(threadId);
+  const failed = useThreadPart(read, (view) => view.closed === null && view.loaded !== 'none' && view.error !== null);
   if (!failed) return null;
   return (
     <Banner
       tone="warning"
       className="rounded-md border"
       action={
-        <Button size="sm" onClick={() => reloadThread(threadId)}>
+        <Button size="sm" onClick={() => reloadThread(read)}>
           {t('thread.connection.retry')}
         </Button>
       }

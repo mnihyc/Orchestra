@@ -54,6 +54,19 @@ under shared caps. Size and interval values are defaults, not spending caps;
 locks above the place still apply. Call recovery follows the configured call
 rules for summaries.
 
+To choose the summarizer, press the pencil of **Summarizer** in the place's settings,
+choose **A model**, then a provider you can use and one of its enabled models.
+**Answer tokens** and **Context tokens** show the built-in counts until you set
+your own; **Request options** and **Instructions per field** open only when you need
+them. Orch says beside the field when the provider or the model cannot be used.
+**None here** takes this place's choice away, so the place above applies again, and
+**Edit as JSON** shows the raw value.
+
+Each row of **Summary targets** has an **Automatic** switch. While it is on, **When**,
+**At most every**, **Reads up to** and **Writes up to** show their defaults until you set
+your own. **Save** writes the whole value once and **Discard** puts the saved one back;
+pressing another switch or a filter never saves it or takes it off the page.
+
 Without an explicit interval, threads use 120 seconds, topics 900 seconds,
 documents 300 seconds, and chats and chat titles 300 seconds. Topic changes
 aggregate many threads; document edits and chat messages usually arrive in

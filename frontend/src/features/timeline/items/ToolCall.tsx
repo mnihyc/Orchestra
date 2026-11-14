@@ -31,9 +31,10 @@ import { useTranslation } from 'react-i18next';
 
 import type { MenuEntry } from '@/ui/Menu';
 import { useTimelineContext } from '@/features/timeline/context';
+import { useAgentSwitch } from '@/features/thread/agentSwitch';
 import { useRecordedItem } from '@/features/timeline/historical';
 import { ItemFrame } from '@/features/timeline/ItemActions';
-import { RawCall } from '@/features/timeline/RawCall';
+import { RawCall, useRawCall } from '@/features/timeline/RawCall';
 import { timelineUi, useThreadUi } from '@/features/timeline/state';
 import { describeStep, stepFailed, type ToolItem } from '@/features/timeline/titles';
 import { CommandDisplay } from '@/features/timeline/tools/Command';
@@ -140,11 +141,13 @@ function ToolCallRowView({ item }: { item: ToolItem }) {
   const { t } = useTranslation();
   const format = useFormatContext();
   const context = useTimelineContext();
+  const switchTo = useAgentSwitch();
   const read = useThreadReadRef(context.threadId);
   const continuation = useThreadPart(context.threadId, (view) => view.read?.projection?.viewed_continuation_id);
   const recorded = useRecordedItem(context.threadId, item);
   const thread = useThreadPart(context.threadId, (view) => view.thread);
   const ui = useThreadUi(context.threadId);
+  const rawCall = useRawCall(item, false);
   const title = describeStep(item, t);
   const failed = stepFailed(item);
   const running = item.status === 'in_progress' && !recorded;
@@ -159,8 +162,8 @@ function ToolCallRowView({ item }: { item: ToolItem }) {
     }
     return null;
   });
-  // Every tool starts as one row, including the most recent edit and failed command.
-  const open = ui.steps.get(item.id) ?? (context.liveTools === true && running);
+  // Every tool starts as one row, including the most recent edit and failed command; reading Verbose, a running one is open as it prints.
+  const open = ui.steps.get(item.id) ?? (context.detail !== 'normal' && context.readOnly !== true && running);
   const raw = ui.raw.has(item.id);
   const tookMs = running ? Math.max(0, now - Date.parse(item.payload.started_at)) : item.payload.duration_ms;
   const took = tookMs === null || tookMs < 1000 ? null : formatSpan(tookMs, format);
@@ -180,8 +183,11 @@ function ToolCallRowView({ item }: { item: ToolItem }) {
   if (tool.kind === 'file_change') {
     extra.push({ id: 'copy-patch', label: t('timeline.step.copyPatch'), onSelect: () => copy(tool.changes.map((change) => change.diff ?? '').join('\n')) });
   }
-  extra.push({ id: 'copy-raw-input', label: t('timeline.step.copyRawInput'), onSelect: () => copy(item.payload.raw.input.inline) });
-  if (item.payload.raw.output !== null) extra.push({ id: 'copy-raw-output', label: t('timeline.step.copyRawOutput'), onSelect: () => copy(item.payload.raw.output?.inline ?? '') });
+  // The call as its harness made it is not on the item: it is read when one of its parts is asked to be copied.
+  const copyRaw = (part: 'input' | 'output') => void (rawCall.data === undefined ? rawCall.refetch().then((read) => read.data) : Promise.resolve(rawCall.data))
+    .then((body) => { if (body !== undefined) copy(part === 'input' ? body.input.inline : body.output?.inline ?? ''); });
+  extra.push({ id: 'copy-raw-input', label: t('timeline.step.copyRawInput'), onSelect: () => copyRaw('input') });
+  if (item.status !== 'in_progress') extra.push({ id: 'copy-raw-output', label: t('timeline.step.copyRawOutput'), onSelect: () => copyRaw('output') });
 
   return (
     <ItemFrame item={item} label={t('timeline.step.menu')} extra={extra}>
@@ -189,8 +195,11 @@ function ToolCallRowView({ item }: { item: ToolItem }) {
         <div className="flex min-w-0 items-center gap-1 pr-[calc(var(--control-sm)+var(--spacing-3))]" data-tool-row>
         <button
           type="button"
-          aria-expanded={open}
-          onClick={() => timelineUi.setStep(read, item.id, !open)}
+          aria-expanded={tool.kind === 'subagent' && switchTo !== null ? undefined : open}
+          onClick={() => {
+            if (tool.kind === 'subagent' && switchTo !== null && tool.child_stream !== '') switchTo(item.id);
+            else timelineUi.setStep(read, item.id, !open);
+          }}
           className={cx(
             'flex min-h-8 min-w-0 flex-1 gap-2 rounded-md px-2 py-1 text-left text-sm hover:bg-bg-muted',
             tool.kind === 'subagent' ? 'items-start' : 'items-center',
@@ -221,7 +230,7 @@ function ToolCallRowView({ item }: { item: ToolItem }) {
         </button>
         {open && <IconButton size="sm" icon={<Braces aria-hidden />} label={raw ? t('timeline.step.showDisplay') : t('timeline.step.showRaw')} pressed={raw}
           onClick={() => timelineUi.toggleRaw(read, item.id)} />}
-        {open && tool.kind === 'subagent' && context.inspection === undefined && <IconButton size="sm" icon={<PanelRightOpen aria-hidden />} label={t('timeline.subagent.openPanel')} blocked={tool.child_stream === ''} reason={tool.child_stream === '' ? t('timeline.subagent.unavailable') : undefined}
+        {tool.kind === 'subagent' && context.inspection === undefined && <IconButton size="sm" icon={<PanelRightOpen aria-hidden />} label={t('timeline.subagent.openPanel')} blocked={tool.child_stream === ''} reason={tool.child_stream === '' ? t('timeline.subagent.unavailable') : undefined}
           onClick={() => revealView('subagent', { thread: context.threadId, item: item.id,
             ...(continuation === undefined ? {} : { continuation }) })} />}
         {open && singleFile !== undefined && singleFile.change !== 'delete' && path !== null && environmentId !== undefined && <IconButton size="sm" icon={<FileText aria-hidden />} label={t('files.link.open', { path })}

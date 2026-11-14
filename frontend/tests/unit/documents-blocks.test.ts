@@ -14,6 +14,7 @@ import {
   type Draft,
 } from '@/features/documents/blocks';
 import type { DocumentBlock } from '@/generated/api-types';
+import { readmeCut } from '@/features/documents/Readme';
 
 let counter = 0;
 /** A block as the server holds it, at the end of the siblings that are given. */
@@ -43,6 +44,15 @@ const draft = (id: string, parent: string | null = null, text: string = id): Dra
   type: 'paragraph',
   props: {},
   content: [{ type: 'text', text }],
+});
+
+it('previews the chosen number of README blocks with their children and honours an earlier page break', () => {
+  const blocks = [...flat(...Array.from({ length: 16 }, (_, index) => `block-${index}`)), row('child', 'block-0', '1')];
+  expect(readmeCut(blocks, 2)).toMatchObject({ shown: [blocks[0], blocks[1], blocks.at(-1)], more: true });
+  expect(readmeCut(blocks, 20).more).toBe(false);
+  const cut = readmeCut([row('first', null, '1'), row('break', null, '2', { type: 'page_break' }), row('last', null, '3')], 20);
+  expect(cut.shown.map((block) => block.id)).toEqual(['first']);
+  expect(cut.more).toBe(true);
 });
 
 describe('positions', () => {
