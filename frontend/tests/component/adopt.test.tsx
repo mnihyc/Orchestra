@@ -54,7 +54,7 @@ vi.mock('@/features/settings/PlacePicker', () => ({
     </button>
   ),
 }));
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   Link: ({ children, to, 'aria-label': label }: { children: React.ReactNode; to: string; 'aria-label'?: string }) => <a href={to} aria-label={label}>{children}</a>,
   useNavigate: () => vi.fn(),
 }));
