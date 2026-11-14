@@ -1,0 +1,9 @@
+fmt
+test -p orch-agent-programs --lib
+test -p orch-conformance --lib
+test -p orch-adapter-claude-code --lib
+test -p orch-adapter-claude-code --test sessions -- a_tool_free
+test -p orch-adapter-claude-code --test conformance -- a_native_conversation_with_no_tools
+test -p orch-adapter-claude-code --test conformance -- native_startup_
+test -p orch-summarizer-model --lib
+test -p orch-summarizer-model --test prompts --test capabilities
