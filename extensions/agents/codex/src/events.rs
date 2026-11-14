@@ -22,20 +22,21 @@ mod automation;
 mod hooks;
 mod native_settings;
 mod tool_images;
+mod turn_diff;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use orch_agent_contract::discovery::{RecordBuilder, RecordedEntry};
 use orch_agent_contract::events::UsageRequest;
 use orch_agent_contract::events::{
     AgentMessagePayload, AgentMessagePhase, BlobRef, CommandAction, DeltaField, ErrorPayload,
     FILE_CHANGE_DIFF_MAX_BYTES, FileChange, FileChangeKind, ItemCompleted, ItemContent, ItemDelta,
-    ItemStarted, ItemStatus, ItemUpdated, MAIN_STREAM, MarkerPayload, OUTPUT_MAX_BYTES, OrchTool,
-    OutputRef, PlanPayload, PlanStep, PlanStepStatus, RawCall, RawFrame, ReasoningPayload,
-    SessionEvent, SessionLost, SessionTitle, SubagentState, TokenUsage, ToolCallPayload,
-    ToolPayload, TurnCompleted, TurnError, TurnOutcome, TurnPhase, TurnPhaseKind, TurnStarted,
-    UsageUpdated, WebAction, WebSearchResult, count_diff_lines, sub_stream, turn_error,
+    ItemStarted, ItemStatus, ItemUpdated, MAIN_STREAM, MarkerPayload, OrchTool, OutputRef,
+    PlanPayload, PlanStep, PlanStepStatus, RawCall, RawFrame, ReasoningPayload, SessionEvent,
+    SessionLost, SessionTitle, SubagentState, TokenUsage, ToolCallPayload, ToolPayload,
+    TurnCompleted, TurnError, TurnOutcome, TurnPhase, TurnPhaseKind, TurnStarted, UsageUpdated,
+    WebAction, WebSearchResult, count_diff_lines, sub_stream, turn_error,
 };
 use orch_agent_contract::events::{ContextShortening, ModelTokens, StreamTokens, TurnUsageReport};
 use orch_agent_contract::loopback::ORCH_SERVER;
@@ -48,59 +49,8 @@ use crate::failure::{self, Notes, Patience, Windows};
 /// The longest line shown as the title of a tool call, in characters.
 pub const TITLE_MAX_CHARS: usize = 160;
 
-/// How much of the beginning and of the end of a command's output is kept when it is longer than
-/// [`OUTPUT_MAX_BYTES`]: the middle is dropped, and a line in its place says how much.
-const OUTPUT_KEPT_EACH_END_BYTES: usize = 32 * 1024 * 1024;
-
-// ---------------------------------------------------------------------------------------------------------
-// Files that hold a long output
-
-/// Where the whole of a long output is kept, as a file named by its hash, for the connector to upload.
-#[derive(Debug, Clone)]
-pub struct OutputStore {
-    directory: PathBuf,
-}
-
-impl OutputStore {
-    /// A store that keeps its files in `directory`.
-    #[must_use]
-    pub fn new(directory: PathBuf) -> Self {
-        Self { directory }
-    }
-
-    /// The directory the files are in.
-    #[must_use]
-    pub fn directory(&self) -> &Path {
-        &self.directory
-    }
-
-    /// Keeps `bytes` and names them by their hash. A file that is there already is left as it is.
-    pub fn put(&self, bytes: &[u8]) -> std::io::Result<BlobRef> {
-        use std::io::Write;
-
-        let hash = Hash::of(bytes);
-        let path = self.directory.join(hash.to_string());
-        std::fs::create_dir_all(&self.directory)?;
-        let mut file = tempfile::NamedTempFile::new_in(&self.directory)?;
-        file.write_all(bytes)?;
-        file.as_file().sync_all()?;
-        match file.persist_noclobber(&path) {
-            Ok(_) => {}
-            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if std::fs::read(&path)? != bytes {
-                    return Err(std::io::Error::other(
-                        "retained output does not match its hash",
-                    ));
-                }
-            }
-            Err(error) => return Err(error.error),
-        }
-        Ok(BlobRef {
-            hash,
-            size: i64::try_from(bytes.len()).unwrap_or(i64::MAX),
-        })
-    }
-}
+pub use orch_agent_contract::output::OutputStore;
+use orch_agent_contract::output::{self, OutputCapture};
 
 /// What the mapper needs of the world around it.
 pub struct Context<'a> {
@@ -277,29 +227,6 @@ fn command_actions(item: &Json) -> Vec<CommandAction> {
         .unwrap_or_default()
 }
 
-/// A text longer than [`OUTPUT_MAX_BYTES`] without its middle, with a line in its place that says how much
-/// was left out.
-fn cap_middle(output: &str) -> std::borrow::Cow<'_, str> {
-    let limit = usize::try_from(OUTPUT_MAX_BYTES).unwrap_or(usize::MAX);
-    if output.len() <= limit {
-        return std::borrow::Cow::Borrowed(output);
-    }
-    let mut head = OUTPUT_KEPT_EACH_END_BYTES;
-    while !output.is_char_boundary(head) {
-        head -= 1;
-    }
-    let mut tail = output.len() - OUTPUT_KEPT_EACH_END_BYTES;
-    while !output.is_char_boundary(tail) {
-        tail += 1;
-    }
-    std::borrow::Cow::Owned(format!(
-        "{}\n[… {} bytes left out of the middle …]\n{}",
-        &output[..head],
-        tail - head,
-        &output[tail..]
-    ))
-}
-
 // ---------------------------------------------------------------------------------------------------------
 // File changes
 
@@ -465,6 +392,8 @@ pub fn native_settings_snapshot(asked: &Json) -> BTreeMap<String, Json> {
 /// What the mapper is told about the session it follows.
 #[derive(Debug, Clone)]
 pub struct MapperConfig {
+    /// The resolved session allowance for retained native output.
+    pub output_capture_bytes: u64,
     /// The thread of Orch.
     pub thread_id: ThreadId,
     /// The segment of the thread.
@@ -524,12 +453,15 @@ struct OpenItem {
     summary_parts: i64,
     phase: Option<AgentMessagePhase>,
     output: OutputRef,
+    capture: Option<OutputCapture>,
     output_bytes: i64,
     background: bool,
     /// The call as it was last reported, for a tool: what an item that is cut short is completed with.
     call: Option<ToolCallPayload>,
     native_model: Option<String>,
     native_source: Option<(String, String)>,
+    web_wait_started: Option<Time>,
+    web_wait_expired: bool,
 }
 
 impl OpenItem {
@@ -545,11 +477,14 @@ impl OpenItem {
             summary_parts: 0,
             phase: None,
             output: OutputRef::default(),
+            capture: None,
             output_bytes: 0,
             background: false,
             call: None,
             native_model: None,
             native_source: None,
+            web_wait_started: None,
+            web_wait_expired: false,
         }
     }
 }
@@ -582,6 +517,7 @@ pub struct Mapper {
     background_control: bool,
     observation_epoch: Id,
     unrecognized_sequence: u64,
+    warning_sequence: u64,
     native_settings: native_settings::NativeSettings,
     hook_runs: HashMap<(String, String), hooks::HookRun>,
     completed_reviews: std::collections::HashSet<(String, String)>,
@@ -601,6 +537,7 @@ pub struct Mapper {
     // One retained origin covers late notices without retaining a paged history.
     last_owned_turn: Option<(String, TurnId)>,
     compaction_sources: HashMap<String, (String, Option<String>)>,
+    turn_diffs: HashMap<String, (String, Hash)>,
     foreign_turn: Option<String>,
     items: HashMap<String, OpenItem>,
     external_images: bool,
@@ -608,6 +545,7 @@ pub struct Mapper {
     prepared_views: BTreeMap<crate::viewed_images::Key, crate::viewed_images::Prepared>,
     native_web_results: bool,
     native_web_counts: bool,
+    web_action_wait: std::time::Duration,
     pending_web: BTreeMap<crate::viewed_images::Key, crate::native_web::Pending>,
     prepared_web: BTreeMap<crate::viewed_images::Key, crate::native_web::Proof>,
     child_models: HashMap<String, String>,
@@ -690,6 +628,12 @@ impl TurnState {
 }
 
 impl Mapper {
+    /// The retention allowance accepted by this native session.
+    #[must_use]
+    pub const fn output_capture_bytes(&self) -> u64 {
+        self.config.output_capture_bytes
+    }
+
     /// A mapper for the session `config` describes.
     #[must_use]
     pub fn new(config: MapperConfig) -> Self {
@@ -697,6 +641,7 @@ impl Mapper {
             background_control: false,
             observation_epoch: orch_types::new_id(),
             unrecognized_sequence: 0,
+            warning_sequence: 0,
             native_settings: native_settings::NativeSettings::default(),
             hook_runs: HashMap::new(),
             completed_reviews: std::collections::HashSet::new(),
@@ -714,6 +659,7 @@ impl Mapper {
             turn: None,
             last_owned_turn: None,
             compaction_sources: HashMap::new(),
+            turn_diffs: HashMap::new(),
             foreign_turn: None,
             items: HashMap::new(),
             external_images: false,
@@ -721,6 +667,7 @@ impl Mapper {
             prepared_views: BTreeMap::new(),
             native_web_results: false,
             native_web_counts: false,
+            web_action_wait: std::time::Duration::from_secs(120),
             pending_web: BTreeMap::new(),
             prepared_web: BTreeMap::new(),
             child_models: HashMap::new(),
@@ -773,6 +720,65 @@ impl Mapper {
             .filter(|(key, _)| key.native_thread == native && key.native_turn == turn)
             .map(|(key, pending)| (key.clone(), pending.snapshot))
             .collect()
+    }
+    pub(crate) fn with_web_action_wait(mut self, wait: std::time::Duration) -> Self {
+        self.web_action_wait = wait;
+        self
+    }
+
+    /// The runtime timer calls this even when the program sends no more notifications.
+    pub(crate) fn expire_silent_web_actions(&mut self, now: Time) -> Vec<SessionEvent> {
+        let mut events = Vec::new();
+        for (id, open) in &mut self.items {
+            let Some(since) = open.web_wait_started else {
+                continue;
+            };
+            if open.web_wait_expired
+                || (now.get() - since.get()).to_std().unwrap_or_default() < self.web_action_wait
+            {
+                continue;
+            }
+            let Some(mut call) = open.call.clone() else {
+                continue;
+            };
+            open.web_wait_expired = true;
+            call.duration_ms = Some((now.unix_millis() - open.started_at.unix_millis()).max(0));
+            call.raw.is_error = true;
+            let wait_secs = self.web_action_wait.as_secs();
+            let message = format!(
+                "Codex did not report the end of this web action within {wait_secs} seconds. A later result can still update it."
+            );
+            call.raw.output = Some(OutputRef::of(&message));
+            events.push(SessionEvent::ItemCompleted(ItemCompleted {
+                native_ref: id.clone(),
+                status: ItemStatus::Failed,
+                payload: serde_json::to_value(call).unwrap_or(Json::Null),
+                output_blob: None,
+            }));
+            let error = ErrorPayload {
+                code: "native_web_no_end".into(),
+                message,
+                retryable: false,
+                details: Some(json!({"reason":"native_web_no_end","wait_secs":wait_secs})),
+                window: None,
+                resets_at: None,
+            };
+            let reference = format!("web-wait-notice:{id}");
+            events.push(SessionEvent::ItemStarted(ItemStarted {
+                turn_id: open.turn_id,
+                native_ref: reference.clone(),
+                stream: open.stream.clone(),
+                parent_native_ref: Some(id.clone()),
+                content: ItemContent::Error(error.clone()),
+            }));
+            events.push(SessionEvent::ItemCompleted(ItemCompleted {
+                native_ref: reference,
+                status: ItemStatus::Failed,
+                payload: serde_json::to_value(error).unwrap_or(Json::Null),
+                output_blob: None,
+            }));
+        }
+        events
     }
     pub(crate) fn install_web_results(
         &mut self,
@@ -1139,6 +1145,7 @@ impl Mapper {
             self.pending_turn = None;
             // Unloaded is not evidence that native tools or child processes ended.
             out.push(SessionEvent::SessionLost(SessionLost {
+                uncertain: false,
                 reason: "Codex closed the session while a turn was running.".into(),
             }));
         }
@@ -1547,9 +1554,12 @@ impl Mapper {
             }
             "item/reasoning/textDelta" => self.text_delta(params, DeltaField::Summary, &mut out),
             "item/reasoning/summaryPartAdded" => self.summary_part(params, &mut out),
-            "item/commandExecution/outputDelta" => self.output_delta(params, &mut out),
+            "item/commandExecution/outputDelta" => self.output_delta(params, &mut out, ctx),
             "item/fileChange/patchUpdated" => self.patch_updated(params, &mut out),
             "turn/plan/updated" => self.plan_updated(params, &mut out),
+            "turn/diff/updated" => self.turn_diff_updated(params, &mut out, ctx),
+            // Codex has one local receipt; Orch tracks reading independently for every person.
+            "thread/readState/changed" => {}
             "thread/tokenUsage/updated" => self.usage_updated(params, &mut out),
             "item/plan/delta" => self.plan_delta(params, &mut out),
             "item/autoApprovalReview/started" | "item/autoApprovalReview/completed" => {
@@ -1562,6 +1572,7 @@ impl Mapper {
             "warning" if failure::row_name(params) == "credential_refused" => {
                 self.error(params, &mut out, ctx);
             }
+            "warning" => self.runtime_warning(params, &mut out, ctx),
             _ => out.extend(self.unrecognized(method, params, ctx)),
         }
         self.observe_request(method, params, arrived, &out);
@@ -1721,16 +1732,6 @@ impl Mapper {
         );
         if self.background_records.get(&key) == Some(&task) {
             return;
-        }
-        if !self.background_records.contains_key(&key)
-            && self.background_records.len() >= orch_agent_contract::background::SNAPSHOT_COMMANDS
-        {
-            self.background_records.retain(|_, task| {
-                task.state == orch_agent_contract::background::BackgroundTaskState::Running
-            });
-            if self.background_records.len() >= orch_agent_contract::background::SNAPSHOT_COMMANDS {
-                return;
-            }
         }
         self.background_records.insert(key, task.clone());
         self.background_changes.push(task);
@@ -2227,9 +2228,13 @@ impl Mapper {
         let Some(mut item) = self.items.remove(id) else {
             return;
         };
+        if item.web_wait_expired {
+            return;
+        }
         if self.pending_starts.remove(id).is_some() {
             return;
         }
+        let mut captured_blob = None;
         let payload = match item.kind {
             ItemKind::AgentMessage => serde_json::to_value(AgentMessagePayload {
                 text: item.text,
@@ -2244,8 +2249,19 @@ impl Mapper {
             ItemKind::Command | ItemKind::Tool | ItemKind::UserInput => match item.call.take() {
                 Some(mut call) => {
                     if let ToolPayload::Command { output, .. } = &mut call.tool {
-                        *output = item.output.clone();
-                        call.raw.output = Some(item.output);
+                        let retained = match item.capture.as_ref().map(OutputCapture::finish) {
+                            Some(Ok((output, blob))) => {
+                                captured_blob = blob;
+                                output
+                            }
+                            Some(Err(error)) => {
+                                tracing::warn!(%error,"native output capture is unavailable");
+                                item.output.clone()
+                            }
+                            None => item.output.clone(),
+                        };
+                        *output = retained.clone();
+                        call.raw.output = Some(retained);
                     }
                     serde_json::to_value(call)
                 }
@@ -2257,7 +2273,7 @@ impl Mapper {
             native_ref: id.to_owned(),
             status,
             payload,
-            output_blob: None,
+            output_blob: captured_blob,
         }));
     }
 
@@ -2498,6 +2514,9 @@ impl Mapper {
                         .map(|turn| turn.id);
                 }
                 open.call = Some(call.clone());
+                if kind == "webSearch" {
+                    open.web_wait_started = Some(ctx.clock.time());
+                }
                 if matches!(kind, "webSearch" | "imageGeneration") {
                     let native_turn = text(params, "turnId");
                     if !native_turn.is_empty() {
@@ -2855,6 +2874,8 @@ impl Mapper {
                             key,
                             (proof, Some(completed)),
                         )])));
+                    } else {
+                        out.push(SessionEvent::ItemCompleted(completed));
                     }
                 } else {
                     out.push(SessionEvent::ItemCompleted(completed));
@@ -2937,18 +2958,24 @@ impl Mapper {
         }
     }
 
-    fn output_delta(&mut self, params: &Json, out: &mut Vec<SessionEvent>) {
+    fn output_delta(&mut self, params: &Json, out: &mut Vec<SessionEvent>, ctx: &Context<'_>) {
         let id = text(params, "itemId");
         let delta = text(params, "delta");
         if delta.is_empty() {
             return;
         }
+        let allowance = self.config.output_capture_bytes;
         let Some(item) = self.items.get_mut(id) else {
             return;
         };
         let offset = item.output_bytes;
         item.output_bytes += count_bytes(delta);
+        item.output.inline_limit =
+            Some(allowance.min(orch_agent_contract::events::OUTPUT_INLINE_MAX_BYTES as u64));
         item.output.push(delta);
+        item.capture
+            .get_or_insert_with(|| OutputCapture::new(ctx.outputs.clone(), allowance))
+            .push(delta);
         out.push(SessionEvent::ItemDelta(ItemDelta::output(
             id,
             offset,
@@ -3702,31 +3729,39 @@ impl Mapper {
         let kind = text(item, "type");
         let directory = &self.config.directory;
         let mut blob = None;
-        let keep = |body: &str, blob: &mut Option<BlobRef>| -> OutputRef {
-            let capped = cap_middle(body);
-            let mut output = OutputRef::of(&capped);
-            if output.truncated {
-                match ctx.outputs.put(capped.as_bytes()) {
-                    Ok(kept) => {
-                        output = output.with_blob(kept.hash);
+        let keep = |body: &str, total: i64, blob: &mut Option<BlobRef>| -> OutputRef {
+            match ctx
+                .outputs
+                .retain(body, total, self.config.output_capture_bytes)
+            {
+                Ok((output, kept)) => {
+                    if let Some(kept) = kept {
                         blob.get_or_insert(kept);
                     }
-                    Err(error) => {
-                        tracing::warn!(%error, "the whole of a long output could not be kept");
-                    }
+                    output
+                }
+                Err(error) => {
+                    tracing::warn!(%error,"native output capture is unavailable");
+                    output::inline(output::tail(body, self.config.output_capture_bytes), total)
                 }
             }
-            output
         };
         let (tool, title, input, result, is_error) = match kind {
             "commandExecution" => {
                 let command = text(item, "command");
                 let shown = display_command(command);
                 let status = text(item, "status");
-                let output = match (item.get("aggregatedOutput").and_then(Json::as_str), open) {
-                    (Some(body), _) => keep(body, &mut blob),
-                    (None, Some(open)) => open.output.clone(),
-                    (None, None) => OutputRef::default(),
+                let aggregate = item.get("aggregatedOutput").and_then(Json::as_str);
+                let captured = open
+                    .and_then(|open| open.capture.as_ref())
+                    .filter(|capture| {
+                        aggregate.is_none_or(|body| capture.total() > count_bytes(body))
+                    });
+                let output = match (captured, aggregate, open) {
+                    (Some(capture), _, _) => keep(&capture.text(), capture.total(), &mut blob),
+                    (_, Some(body), _) => keep(body, count_bytes(body), &mut blob),
+                    (_, None, Some(open)) => open.output.clone(),
+                    (_, None, None) => keep("", 0, &mut blob),
                 };
                 let exit_code = whole(item, "exitCode");
                 let tool = ToolPayload::Command {
@@ -3797,8 +3832,16 @@ impl Mapper {
                 let input = json!({ "server": server, "tool": tool_name, "arguments": arguments });
                 let output = original_result
                     .map(|result| {
-                        tool_images::raw_result(result, ctx, &mut blob)
-                            .unwrap_or_else(|| keep(&result.to_string(), &mut blob))
+                        tool_images::raw_result(
+                            result,
+                            ctx,
+                            &mut blob,
+                            self.config.output_capture_bytes,
+                        )
+                        .unwrap_or_else(|| {
+                            let text = result.to_string();
+                            keep(&text, count_bytes(&text), &mut blob)
+                        })
                     })
                     .or_else(|| error.as_deref().map(OutputRef::of));
                 let failed = error.is_some() || text(item, "status") == "failed";
@@ -3854,9 +3897,10 @@ impl Mapper {
                     })
                     .collect();
                 let input = json!({ "query": item.get("query"), "action": raw_action });
-                let output = found
-                    .filter(|value| !value.is_null())
-                    .map(|value| keep(&value.to_string(), &mut blob));
+                let output = found.filter(|value| !value.is_null()).map(|value| {
+                    let text = value.to_string();
+                    keep(&text, count_bytes(&text), &mut blob)
+                });
                 let failed = text(item, "status") == "failed";
                 let title = match &action {
                     Some(WebAction::OpenPage { url }) => url.as_deref().map_or_else(
@@ -4007,9 +4051,10 @@ impl Mapper {
                     .filter(|items| !items.is_null())
                     .cloned();
                 let failed = item.get("success").and_then(Json::as_bool) == Some(false);
-                let output = result
-                    .as_ref()
-                    .map(|result| keep(&result.to_string(), &mut blob));
+                let output = result.as_ref().map(|result| {
+                    let text = result.to_string();
+                    keep(&text, count_bytes(&text), &mut blob)
+                });
                 (
                     ToolPayload::Other {
                         name: kind.to_owned(),
@@ -4044,12 +4089,17 @@ impl Mapper {
                 )
             }
         };
+        let input = input.to_string();
         let raw = RawCall {
             name: kind.to_owned(),
-            input: keep(&input.to_string(), &mut blob),
+            input: keep(&input, count_bytes(&input), &mut blob),
             output: result,
             is_error,
         };
+        let blob = blob.filter(|blob| {
+            raw.output.as_ref().is_some_and(|output| output.blob == Some(blob.hash))
+                || matches!(&tool, ToolPayload::Command { output, .. } if output.blob == Some(blob.hash))
+        });
         Some((
             ToolCallPayload {
                 tool,
@@ -4090,6 +4140,7 @@ impl Mapper {
         self.turn = None;
         self.pending_turn = None;
         out.push(SessionEvent::SessionLost(SessionLost {
+            uncertain: false,
             reason: reason.to_owned(),
         }));
         out
@@ -4593,6 +4644,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             Self {
                 mapper: Mapper::new(MapperConfig {
+                    output_capture_bytes: 67_108_864,
                     thread_id: id(1),
                     segment_id: id(2),
                     native_thread: THREAD.into(),
@@ -4751,6 +4803,33 @@ mod tests {
     }
 
     #[test]
+    fn retained_tool_input_keeps_its_own_reference_without_becoming_an_output_attachment() {
+        let mut rig = Rig::new();
+        rig.begin();
+        let arguments = json!({"text":"input only ".repeat(4_000)});
+        let events = rig.item_completed(json!({"type":"dynamicToolCall","id":"input-only","tool":"outline","arguments":arguments,"contentItems":null,"success":true,"status":"completed"}));
+        let completed = events
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::ItemCompleted(item) => Some(item),
+                _ => None,
+            })
+            .expect("completed");
+        let call: ToolCallPayload = serde_json::from_value(completed.payload.clone()).unwrap();
+        let input = call.raw.input.blob.expect("the complete input is retained");
+        assert!(call.raw.output.is_none());
+        assert!(
+            completed.output_blob.is_none(),
+            "an input is not an output attachment"
+        );
+        let held: Json = serde_json::from_slice(
+            &std::fs::read(rig.outputs.directory().join(input.to_string())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(held["arguments"], arguments);
+    }
+
+    #[test]
     fn mcp_image_results_keep_their_tool_origin_bytes_and_replay_identity()
     -> Result<(), Box<dyn std::error::Error>> {
         use base64::Engine as _;
@@ -4868,6 +4947,7 @@ mod tests {
         let replayed = replay(
             &[json!({"id":TURN, "status":"completed", "items":[item]})],
             MapperConfig {
+                output_capture_bytes: 67_108_864,
                 thread_id: id(1),
                 segment_id: id(2),
                 native_thread: THREAD.into(),
@@ -5677,6 +5757,119 @@ mod tests {
             call.raw.output.is_none() && call.raw.is_error,
             "a call that was refused has no output"
         );
+    }
+
+    #[test]
+    fn streamed_command_output_is_retained_whole_when_completion_omits_aggregated_output() {
+        let mut rig = Rig::new();
+        rig.begin();
+        rig.item_started(command(
+            "c1",
+            "inProgress",
+            json!("1"),
+            Json::Null,
+            Json::Null,
+        ));
+        let whole = format!("{}END", "ordinary output\n".repeat(5_000));
+        for part in whole.as_bytes().chunks(4_096) {
+            rig.feed("item/commandExecution/outputDelta",json!({"threadId":THREAD,"turnId":TURN,"itemId":"c1","delta":std::str::from_utf8(part).unwrap()}));
+        }
+        let done = rig.item_completed(command("c1", "completed", json!("1"), Json::Null, json!(0)));
+        let SessionEvent::ItemCompleted(item) = &done[0] else {
+            panic!("completed")
+        };
+        let blob = item
+            .output_blob
+            .as_ref()
+            .expect("every captured byte survives beyond the inline tail");
+        assert_eq!(
+            std::fs::read(rig.outputs.directory().join(blob.hash.to_string())).unwrap(),
+            whole.as_bytes()
+        );
+    }
+
+    #[test]
+    fn shorter_completion_output_does_not_erase_bytes_already_captured_from_native_deltas() {
+        let whole = format!("{}END", "ordinary output\n".repeat(5_000));
+        for summary in ["", "END"] {
+            let mut rig = Rig::new();
+            rig.begin();
+            rig.item_started(command(
+                "c1",
+                "inProgress",
+                json!("1"),
+                Json::Null,
+                Json::Null,
+            ));
+            for part in whole.as_bytes().chunks(4_096) {
+                rig.feed("item/commandExecution/outputDelta",json!({"threadId":THREAD,"turnId":TURN,"itemId":"c1","delta":std::str::from_utf8(part).unwrap()}));
+            }
+            let done = rig.item_completed(command(
+                "c1",
+                "completed",
+                json!("1"),
+                json!(summary),
+                json!(0),
+            ));
+            let SessionEvent::ItemCompleted(item) = &done[0] else {
+                panic!("completed")
+            };
+            let call: ToolCallPayload = serde_json::from_value(item.payload.clone()).unwrap();
+            let ToolPayload::Command { output, .. } = call.tool else {
+                panic!("command")
+            };
+            assert_eq!(output.total_len, i64::try_from(whole.len()).unwrap());
+            let blob = item
+                .output_blob
+                .as_ref()
+                .expect("captured output survives a short final summary");
+            assert_eq!(
+                std::fs::read(rig.outputs.directory().join(blob.hash.to_string())).unwrap(),
+                whole.as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn retained_output_keeps_its_original_count_and_honors_an_allowance_above_the_shipped_default()
+    {
+        let default = orch_agent_contract::output::DEFAULT_CAPTURE_BYTES;
+        let whole = "x".repeat(usize::try_from(default).unwrap() + 8_192);
+        for allowance in [default, default + 16_384] {
+            let mut rig = Rig::new();
+            rig.mapper.config.output_capture_bytes = allowance;
+            rig.begin();
+            let done = rig.item_completed(command(
+                "c1",
+                "completed",
+                json!("1"),
+                json!(whole),
+                json!(0),
+            ));
+            let item = done
+                .iter()
+                .find_map(|event| match event {
+                    SessionEvent::ItemCompleted(item) => Some(item),
+                    _ => None,
+                })
+                .expect("completed");
+            let call: ToolCallPayload = serde_json::from_value(item.payload.clone()).unwrap();
+            let ToolPayload::Command { output, .. } = call.tool else {
+                panic!("command")
+            };
+            let expected = orch_agent_contract::output::tail(&whole, allowance);
+            assert_eq!(output.total_len, i64::try_from(whole.len()).unwrap());
+            let blob = item.output_blob.as_ref().unwrap();
+            assert_eq!(blob.size, i64::try_from(expected.len()).unwrap());
+            assert_eq!(
+                output.retained.unwrap().offset,
+                output.total_len - blob.size
+            );
+            assert_eq!(
+                std::fs::read(rig.outputs.directory().join(blob.hash.to_string())).unwrap(),
+                expected.as_bytes()
+            );
+        }
     }
 
     #[test]
@@ -7282,6 +7475,7 @@ mod tests {
                 command("c1", "completed", json!("9"), json!("ok\n"), json!(0)),
             ] })];
         let config = MapperConfig {
+            output_capture_bytes: 67_108_864,
             thread_id: id(1),
             segment_id: id(2),
             native_thread: THREAD.into(),
@@ -7316,6 +7510,7 @@ mod tests {
             replay(
                 &running,
                 MapperConfig {
+                    output_capture_bytes: 67_108_864,
                     thread_id: id(1),
                     segment_id: id(2),
                     native_thread: THREAD.into(),
@@ -7341,6 +7536,7 @@ mod tests {
             })
             .collect();
         let config = MapperConfig {
+            output_capture_bytes: 67_108_864,
             thread_id: id(1),
             segment_id: id(2),
             native_thread: THREAD.into(),
@@ -7389,6 +7585,7 @@ mod tests {
         ];
         let source_before = serde_json::to_vec(&turns).unwrap();
         let config = MapperConfig {
+            output_capture_bytes: 67_108_864,
             thread_id: id(1),
             segment_id: id(2),
             native_thread: THREAD.into(),
@@ -7496,6 +7693,7 @@ mod tests {
             windows: None,
         };
         let config = MapperConfig {
+            output_capture_bytes: 67_108_864,
             thread_id: id(1),
             segment_id: id(2),
             native_thread: THREAD.into(),
@@ -7850,6 +8048,244 @@ mod tests {
             .collect()
     }
     #[test]
+    fn turn_diff_snapshots_replace_the_changed_files_without_inventing_a_tool_call() {
+        let mut rig = Rig::new();
+        rig.begin();
+        let diff = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let params = json!({"threadId":THREAD,"turnId":TURN,"diff":diff});
+        let events = rig.feed("turn/diff/updated", params.clone());
+        let completed = events
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::ItemCompleted(item)
+                    if item.payload["data"]["change"] == "turn_diff" =>
+                {
+                    Some(item.clone())
+                }
+                _ => None,
+            })
+            .expect("the turn diff feeds the changed files");
+        assert_eq!(
+            completed.payload["data"]["value"]["changes"][0]["path"],
+            "src/main.rs"
+        );
+        assert_eq!(completed.payload["data"]["value"]["changes"][0]["added"], 1);
+        assert!(!events.iter().any(|event| matches!(event, SessionEvent::ItemStarted(item) if matches!(&item.content, ItemContent::ToolCall(_)))));
+        assert!(rig.feed("turn/diff/updated", params).is_empty());
+        let unreadable = rig.feed(
+            "turn/diff/updated",
+            json!({"threadId":THREAD,"turnId":TURN,"diff":"an unsupported patch format"}),
+        );
+        assert!(
+            unreadable
+                .iter()
+                .any(|event| matches!(event, SessionEvent::ItemCompleted(item)
+            if item.payload["data"]["change"] == "turn_diff_unavailable"
+                && item.payload["data"]["value"]["reason"] == "format_unknown"))
+        );
+        assert_eq!(rig.mapper.turn_diffs[THREAD].1, Hash::of(diff.as_bytes()));
+        let cleared = rig.feed(
+            "turn/diff/updated",
+            json!({"threadId":THREAD,"turnId":TURN,"diff":""}),
+        );
+        assert!(cleared.iter().any(|event| matches!(event, SessionEvent::ItemCompleted(item)
+            if item.native_ref == completed.native_ref && item.payload["data"]["value"]["changes"] == json!([]))));
+        assert!(
+            rig.feed(
+                "turn/diff/updated",
+                json!({"threadId":THREAD,"turnId":"another-turn","diff":diff})
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn native_read_receipts_do_not_change_any_persons_unread_state_or_add_a_timeline_warning() {
+        let mut rig = Rig::new();
+        rig.begin();
+        for first in [
+            Json::Null,
+            json!({"type":"threadStart"}),
+            json!({"type":"turn","turnId":TURN}),
+        ] {
+            let events = rig.feed("thread/readState/changed", json!({"threadId":THREAD,"readState":{"firstUnread":first,"revision":"opaque-receipt"}}));
+            assert!(events.is_empty());
+        }
+        assert!(rig.mapper.turn_in_progress());
+    }
+
+    #[test]
+    fn the_same_native_warning_keeps_its_own_record_in_each_turn() {
+        let mut rig = Rig::new();
+        rig.begin();
+        let warning = json!({"threadId":THREAD,"message":"The selected model changed."});
+        let first = rig.feed("warning", warning.clone());
+        rig.end("completed", Json::Null);
+        rig.mapper.expect_turn(id(10));
+        rig.feed(
+            "turn/started",
+            json!({"threadId":THREAD,"turn":{"id":"second-native-turn"}}),
+        );
+        let second = rig.feed("warning", warning);
+        let report = |events: Vec<SessionEvent>, turn| {
+            events.into_iter().find_map(|event| match event {
+            SessionEvent::ItemStarted(item) if item.turn_id == turn && matches!(&item.content,
+                ItemContent::Marker(MarkerPayload::HarnessChanged(data)) if data.change == "warning") => Some(item.native_ref),
+            _ => None,
+        }).unwrap()
+        };
+        assert_ne!(report(first, id(9)), report(second, id(10)));
+    }
+
+    #[test]
+    fn a_native_runtime_warning_shows_its_words_without_failing_the_turn() {
+        let mut rig = Rig::new();
+        rig.begin();
+        let message = "The selected model changed; continuing with the session model.";
+        let events = rig.feed("warning", json!({"threadId":THREAD,"message":message}));
+        assert!(events.iter().any(|event| matches!(event, SessionEvent::ItemCompleted(item)
+            if item.payload["data"]["change"] == "warning" && item.payload["data"]["value"]["message"] == message
+                && item.status == ItemStatus::Completed)));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::TurnCompleted(_)))
+        );
+        assert!(rig.mapper.turn_in_progress());
+    }
+
+    #[test]
+    fn a_silent_web_action_closes_once_with_its_reason_and_a_late_result_can_still_finish_it() {
+        let mut rig = Rig::new();
+        rig.mapper = rig
+            .mapper
+            .with_native_web_results(true)
+            .with_web_action_wait(std::time::Duration::from_secs(3));
+        rig.begin();
+        rig.item_started(
+            json!({"type":"webSearch","id":"silent","action":{"type":"search","query":"question"}}),
+        );
+        rig.item_started(json!({"type":"commandExecution","id":"still-running","command":"work"}));
+        rig.clock.advance(chrono::Duration::seconds(2));
+        assert!(
+            rig.mapper
+                .expire_silent_web_actions(rig.clock.time())
+                .is_empty()
+        );
+        rig.clock.advance(chrono::Duration::seconds(1));
+        let expired = rig.mapper.expire_silent_web_actions(rig.clock.time());
+        assert!(
+            expired
+                .iter()
+                .any(|event| matches!(event, SessionEvent::ItemCompleted(item)
+            if item.native_ref == "silent" && item.status == ItemStatus::Failed
+                && item.payload["raw"]["is_error"] == true))
+        );
+        assert!(expired.iter().any(|event| matches!(event, SessionEvent::ItemStarted(item)
+            if item.turn_id == id(9) && item.parent_native_ref.as_deref() == Some("silent")
+                && matches!(&item.content, ItemContent::Error(error)
+                    if error.code == "native_web_no_end" && error.details.as_ref().unwrap()["wait_secs"] == 3))));
+        assert!(web_counts(&expired).is_empty());
+        assert!(rig.mapper.turn_in_progress());
+        assert!(rig.mapper.items.contains_key("still-running"));
+        assert!(
+            rig.mapper
+                .expire_silent_web_actions(rig.clock.time())
+                .is_empty()
+        );
+        let late = rig.item_completed(
+            json!({"type":"webSearch","id":"silent","action":{"type":"search","query":"question"}}),
+        );
+        assert!(
+            late.iter()
+                .any(|event| matches!(event, SessionEvent::ItemCompleted(item)
+            if item.native_ref == "silent" && item.status == ItemStatus::Completed
+                && item.payload["raw"]["is_error"] == false))
+        );
+        let mut source = native_native_source(
+            &rig,
+            TURN,
+            Some("source-model"),
+            &[("silent", json!([{"type":"input_text","text":"returned"}]))],
+        );
+        assert_eq!(
+            web_counts(&prove_web(&mut rig, &mut source)),
+            BTreeMap::from([(("source-model".into(), "web_search".into()), 1)])
+        );
+    }
+
+    #[test]
+    fn a_turn_ending_does_not_erase_a_silent_web_actions_failure() {
+        let mut rig = Rig::new();
+        rig.mapper = rig
+            .mapper
+            .with_web_action_wait(std::time::Duration::from_secs(1));
+        rig.begin();
+        rig.item_started(json!({"type":"webSearch","id":"silent","action":{"type":"other"}}));
+        rig.clock.advance(chrono::Duration::seconds(1));
+        assert!(
+            !rig.mapper
+                .expire_silent_web_actions(rig.clock.time())
+                .is_empty()
+        );
+        let ended = rig.end("completed", Json::Null);
+        assert!(!ended.iter().any(|event| matches!(event, SessionEvent::ItemCompleted(item) if item.native_ref == "silent")));
+        assert!(rig.mapper.items.is_empty());
+    }
+
+    #[test]
+    fn a_web_action_finishes_at_its_own_end_and_missing_proof_does_not_turn_it_into_a_failure() {
+        let mut rig = Rig::new();
+        rig.mapper = rig.mapper.with_native_web_results(true);
+        rig.begin();
+        rig.item_started(json!({"type":"webSearch","id":"hosted","action":{"type":"other"}}));
+        let ended = rig.item_completed(json!({"type":"webSearch","id":"hosted","action":{"type":"search","query":"a current announcement"}}));
+        let completed = ended
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::ItemCompleted(item) if item.native_ref == "hosted" => Some(item),
+                _ => None,
+            })
+            .expect("the program's end closes the action before the turn ends");
+        assert_eq!(completed.status, ItemStatus::Completed);
+        assert_eq!(completed.payload["tool"]["query"], "a current announcement");
+        assert_eq!(completed.payload["raw"]["is_error"], false);
+        assert!(rig.mapper.turn_in_progress());
+        assert!(web_counts(&ended).is_empty());
+
+        let mut source = native_native_source(&rig, TURN, Some("source-model"), &[]);
+        let checked = prove_web(&mut rig, &mut source);
+        assert!(web_counts(&checked).is_empty());
+        assert!(checked.iter().any(|event| matches!(event,
+            SessionEvent::ItemCompleted(item) if item.payload["code"] == "native_web_action_unproven"
+                && item.payload["details"]["reason"] == "native_result_not_found")));
+        assert!(!checked.iter().any(|event| matches!(event,
+            SessionEvent::ItemCompleted(item) if item.native_ref == "hosted"
+                && (item.status != ItemStatus::Completed || item.payload["raw"]["is_error"] != false))));
+        assert!(!checked.iter().any(|event| matches!(event,
+            SessionEvent::ItemCompleted(item) if item.payload["code"] == "native_web_action_failed")));
+    }
+
+    #[test]
+    fn a_web_action_keeps_its_reported_failure_or_cancellation_without_waiting_for_the_turn() {
+        for (native, status) in [
+            ("failed", ItemStatus::Failed),
+            ("interrupted", ItemStatus::Cancelled),
+        ] {
+            let mut rig = Rig::new();
+            rig.mapper = rig.mapper.with_native_web_results(true);
+            rig.begin();
+            let ended = rig.item_completed(json!({"type":"webSearch","id":"call","status":native,"action":{"type":"search","query":"question"}}));
+            assert!(ended.iter().any(|event| matches!(event,
+                SessionEvent::ItemCompleted(item) if item.native_ref == "call" && item.status == status)));
+            let mut source = native_native_source(&rig, TURN, Some("source-model"), &[]);
+            let checked = prove_web(&mut rig, &mut source);
+            assert!(!checked.iter().any(|event| matches!(event,
+                SessionEvent::ItemCompleted(item) if item.native_ref == "call" && item.status != status)));
+        }
+    }
+
+    #[test]
     fn native_web_counts_only_proven_successes_and_page_actions_keep_their_own_counter() {
         let mut rig = Rig::new();
         rig.mapper = rig.mapper.with_native_web_results(true);
@@ -7869,7 +8305,8 @@ mod tests {
         ];
         for (id, action) in &actions {
             let ended=rig.item_completed(json!({"type":"webSearch","id":id,"query":"native detail","action":action,"results":[]}));
-            assert!(!ended.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.native_ref==*id)),"an end is not success proof");
+            assert!(ended.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.native_ref==*id && item.status == ItemStatus::Completed)),"the program's end closes the row independently of usage proof");
+            assert!(web_counts(&ended).is_empty(), "an end is not usage proof");
         }
         assert!(
             rig.item_completed(
@@ -7901,9 +8338,8 @@ mod tests {
         for id in ["search", "open", "find"] {
             assert!(events.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.native_ref==id&&item.status==ItemStatus::Completed)));
         }
-        for id in ["failed", "missing"] {
-            assert!(events.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.native_ref==id&&item.status==ItemStatus::Failed)));
-        }
+        assert!(events.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.native_ref=="failed"&&item.status==ItemStatus::Failed)));
+        assert!(events.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.native_ref=="missing"&&item.status==ItemStatus::Completed)));
         for code in ["native_web_action_failed", "native_web_action_unproven"] {
             assert!(events.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.payload["code"]==code)));
         }

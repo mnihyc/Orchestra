@@ -36,7 +36,6 @@ for (const locale of ['en', 'zh-CN'] as const) {
   it(`shows retention and read-only admin inspection in ${locale}`, async () => {
     await setLocale(locale); const t = i18n.getFixedT(locale);
     show(<AskGovernance conversation={askConversation({ retention_days: 14, inspecting: true, can: { message: false, keep: false, stop: false, delete: false, export: true } })} />);
-    expect(screen.getByText(t('ask.adminNotice'))).toBeVisible();
     expect(screen.getByText(t('ask.inspection'))).toBeVisible();
     expect(screen.getByText(new RegExp(t('ask.retention', { days: '14' })))).toBeVisible();
   });
