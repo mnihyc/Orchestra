@@ -287,6 +287,8 @@ impl EnvRig {
     /// `env.attach` for a directory, which the machine's owner offers; returns the facts.
     pub async fn attach(&self, directory: &Path) -> Json {
         let body = EnvAttach {
+            workspace: Default::default(),
+
             resources: None,
             data_generation: None,
             storage: None,

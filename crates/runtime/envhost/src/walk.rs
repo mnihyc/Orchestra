@@ -86,6 +86,9 @@ pub fn walk(
         },
         None => None,
     };
+    if let Some(problem) = scope.as_ref().and_then(Scope::problem) {
+        return Err(HostError::Unsupported(problem.message()));
+    }
     let names =
         sorted_names(&dir).map_err(|error| HostError::io(format!("listing {start}"), error))?;
     let mut stack = vec![Level {
@@ -161,6 +164,9 @@ pub fn walk(
                     .last()
                     .and_then(|level| level.scope.as_ref())
                     .map(|scope| scope.enter(&path, &child));
+                if let Some(problem) = scope.as_ref().and_then(Scope::problem) {
+                    return Err(HostError::Unsupported(problem.message()));
+                }
                 match sorted_names(&child) {
                     Ok(names) => stack.push(Level {
                         dir: child,

@@ -1,0 +1,7 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-api-base --lib -- archives::
+test -p orch-api-environments --lib
+test -p orch-link-contract --lib

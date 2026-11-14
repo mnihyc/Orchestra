@@ -7,17 +7,17 @@ import { client } from '@/api/client';
 import type { CopySetupNote } from '@/api/copySetup';
 import type { DuplicateReceipt } from '@/api/duplicates';
 import { libraryReader } from '@/api/resourceLibrary';
-import type { McpServer, Provider } from '@/generated/api-types';
+import type { McpServer, Provider, ProviderListRow } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 
-export function providerCopySetup(provider: Provider): CopySetupNote[] {
+export function providerCopySetup(provider: Provider | ProviderListRow): CopySetupNote[] {
   return [
     ...(provider.kind === 'subscription' ? ['sign_in_not_copied' as const] : []),
     ...(!holds(provider.access, 'access.own') ? ['credentials_not_copied' as const] : []),
-    ...([provider.sources.facts, provider.sources.models, provider.sources.presenter].some((source) => source?.address !== null && source?.address !== undefined) ? ['source_consent_reset' as const] : []),
+    ...(('sources' in provider ? [provider.sources.facts, provider.sources.models, provider.sources.presenter].some((source) => source?.address !== null && source?.address !== undefined) : provider.source_consent) ? ['source_consent_reset' as const] : []),
   ];
 }
-export function mcpCopySetup(server: McpServer): CopySetupNote[] {
+export function mcpCopySetup(server: Pick<McpServer, 'access'>): CopySetupNote[] {
   return holds(server.access, 'access.own') ? [] : ['credentials_not_copied'];
 }
 const key = (kind: string, id: string, version = client.session.getState().readerVersion ?? 0) => ['copy-setup', version, libraryReader(), kind, id] as const;

@@ -59,6 +59,7 @@ import { PersonCard } from '@/ui/PersonCard';
 import { UserChip } from '@/ui/UserChip';
 import type { PersonThing } from '@/features/people/personContext';
 import { type EmojiEntry, emojiName, findEmoji } from '@/ui/emoji-data';
+import type { ReferenceChoice } from '@/features/documents/referenceChoices';
 
 // ---------------------------------------------------------------- what the menu offers
 
@@ -445,7 +446,7 @@ const places: Source<Place> = {
   key: 'orchLink',
   items: (query) => {
     const q = query.trim().toLowerCase();
-    return sources.places.filter((one) => one.name.toLowerCase().includes(q)).slice(0, 8);
+    return sources.places.filter((one) => one.name.toLowerCase().includes(q));
   },
   show: (one) => ({ id: one.id, label: one.name, hint: one.hint, threadId: one.threadId, icon: one.kind === 'document' ? FileText : Braces }),
   run: (editor, range, one) => {
@@ -473,8 +474,8 @@ const emoji: Source<EmojiEntry> = {
 };
 
 /** The lists that open at the caret: blocks, people, places and documents, emoji. */
-type PlaceSuggestion = Place | { kind: 'retry'; query: string };
-export const Suggestions = Extension.create<{ people: ((query: string, cursor: string | null) => Promise<DocumentMentionPage>) | null; places: ((query: string, editor: Editor) => Promise<PlaceChoice[]>) | null }>({
+type PlaceSuggestion = ReferenceChoice | { kind: 'retry'; query: string };
+export const Suggestions = Extension.create<{ people: ((query: string, cursor: string | null) => Promise<DocumentMentionPage>) | null; places: ((query: string, editor: Editor) => Promise<ReferenceChoice[]>) | null }>({
   name: 'orchSuggestions',
   addOptions() { return { people: null, places: null }; },
   // An open list answers the arrow keys, Enter and Escape before the editor's own keys do.
@@ -495,9 +496,10 @@ export const Suggestions = Extension.create<{ people: ((query: string, cursor: s
     };
     const offeredPlaces: Source<PlaceSuggestion> = {
       ...places, items: loadPlaces,
-      show: (one) => one.kind === 'retry' ? { id: 'retry-references', label: i18n.t('common.tryAgain'), hint: i18n.t('documents.referenceReadFailed'), icon: TriangleAlert } : places.show(one),
-      run: (editor, range, one) => { if (one.kind !== 'retry') places.run(editor, range, one); },
-      more: { replace: true, is: (one) => one.kind === 'retry', load: (one) => one.kind === 'retry' ? loadPlaces(one.query) : Promise.resolve([]) },
+      show: (one) => one.kind === 'retry' ? { id: 'retry-references', label: i18n.t('common.tryAgain'), hint: i18n.t('documents.referenceReadFailed'), icon: TriangleAlert }
+        : one.kind === 'more' ? { id: 'more-references', label: i18n.t('documents.referencesMore'), icon: ChevronRight } : places.show(one),
+      run: (editor, range, one) => { if (one.kind !== 'retry' && one.kind !== 'more') places.run(editor, range, one); },
+      more: { is: (one) => one.kind === 'retry' || one.kind === 'more', load: (one) => one.kind === 'retry' ? loadPlaces(one.query) : one.kind === 'more' ? one.load() : Promise.resolve([]) },
     };
     return [suggestion(this.editor, block), suggestion(this.editor, offered), suggestion(this.editor, offeredPlaces), suggestion(this.editor, emoji)];
   },
