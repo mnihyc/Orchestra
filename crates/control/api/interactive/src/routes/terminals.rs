@@ -584,7 +584,7 @@ async fn close(ctx: Ctx, (): (), (): ()) -> ApiResult<api::TerminalCloseResponse
 /// environment, and for whoever holds `audit.view` on the thread it was opened from.
 async fn recording(ctx: Ctx, (): (), _body: Body) -> ApiResult<Response> {
     let person = ctx.user()?.id();
-    let selected = crate::key_operations::native::selected_read::<recording_operation::Recording>(
+    let selected = crate::key_operations::native::selected_value::<recording_operation::Recording>(
         ctx.clone(),
         (),
         (),

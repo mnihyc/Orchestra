@@ -30,7 +30,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       if (request.method() === 'PUT' && new URL(request.url()).pathname.endsWith('/settings/agent.model')) modelWrites++;
     });
     // Exercise the separate parameter reader when the joined opening cannot supply its projection.
-    await page.route(`**/api/v1/threads/${ACME.mainThread}/opening?*`, async (route) => {
+    await page.route(`**/api/v1/threads/${ACME.mainThread}/opening*`, async (route) => {
       const response = await route.fetch();
       const opening = await response.json() as ThreadOpening;
       opening.parameters = null;

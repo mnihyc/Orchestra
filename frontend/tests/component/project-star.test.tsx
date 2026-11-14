@@ -43,7 +43,7 @@ it.each(['en', 'zh-CN'] as const)('stars a view, clears only the saved view and 
   expect(star).toHaveAttribute('aria-pressed', 'true');
   await user.click(star); await user.click(screen.getByRole('menuitem', { name: i18n.t('day100.views.starPlace') }));
   await waitFor(() => expect(calls.star).toHaveBeenLastCalledWith('release', null));
-  expect(screen.queryByRole('link', { name: i18n.t('day100.views.openStarred') })).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole('link', { name: i18n.t('day100.views.openStarred') })).not.toBeInTheDocument());
   expect(star).toHaveAttribute('aria-pressed', 'true');
   await user.click(star); await user.click(screen.getByRole('menuitem', { name: i18n.t('day100.views.removeStar') }));
   await waitFor(() => expect(calls.remove).toHaveBeenCalledWith('release'));

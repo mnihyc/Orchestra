@@ -30,5 +30,5 @@ export async function judgeCopyDestinations(request: CopyDestinationsRequest, si
 }
 export const copyDestinationsQuery = (request: CopyDestinationsRequest, reader: ReturnType<typeof libraryReader>) => queryOptions({
   queryKey: ['copy-destinations', reader, request], queryFn: ({ signal }) => judgeCopyDestinations(request, signal),
-  staleTime: 0, gcTime: 0, retry: false,
+  gcTime: 0, retry: false,
 });

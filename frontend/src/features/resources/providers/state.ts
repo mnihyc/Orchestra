@@ -2,7 +2,7 @@
  */
 import type { TFunction } from 'i18next';
 
-import type { Provider } from '@/generated/api-types';
+import type { Provider, ProviderListRow } from '@/generated/api-types';
 import { DAY_MS, formatTimeOfDay, type TimeContext } from '@/lib/time';
 import type { DotTone } from '@/ui/StatusDot';
 import { detailState, endpointsNeedNoKey, factsSource } from './details';
@@ -34,7 +34,7 @@ export interface ProviderState {
 }
 
 /** Whether a provider has a model that may be chosen. */
-export const hasEnabledModel = (provider: Pick<Provider, 'models'>): boolean => provider.models.some((model) => model.enabled);
+export const hasEnabledModel = (provider: Pick<Provider, 'models'> | Pick<ProviderListRow, 'enabled_models_count'>): boolean => 'models' in provider ? provider.models.some((model) => model.enabled) : provider.enabled_models_count > 0;
 
 /** The days left before the provider's token lapses, when it has one that lapses within the notice. */
 export function daysUntilLapse(provider: Pick<Provider, 'facts'>, now: number): number | null {
@@ -44,7 +44,7 @@ export function daysUntilLapse(provider: Pick<Provider, 'facts'>, now: number): 
   return left <= EXPIRY_NOTICE_DAYS ? Math.max(left, 0) : null;
 }
 
-export function providerState(provider: Provider, t: TFunction, context: TimeContext, now: number): ProviderState {
+export function providerState(provider: Provider | ProviderListRow, t: TFunction, context: TimeContext, now: number): ProviderState {
   const machine = provider.machine?.name ?? '';
   switch (provider.status) {
     case 'disabled':
@@ -67,7 +67,7 @@ export function providerState(provider: Provider, t: TFunction, context: TimeCon
       const ends = credential?.expires_at;
       const expired = ends !== null && ends !== undefined && Date.parse(ends) <= now;
       if (provider.kind === 'subscription' && (!signedIn || expired)) return { tone: 'warning', text: t('providers.phrase.needsSignIn'), detail: t('providers.overview.needsSignInLead'), next: 'signIn' };
-      if (provider.kind === 'api' && !endpointsNeedNoKey(provider) && !provider.key_set && provider.key_machine === null) return { tone: 'warning', text: t('providers.phrase.needsKey'), detail: t('providers.overview.needsKeyLead'), next: 'key' };
+      if (provider.kind === 'api' && !('upstreams' in provider ? endpointsNeedNoKey(provider) : provider.no_key_needed) && !provider.key_set && provider.key_machine === null) return { tone: 'warning', text: t('providers.phrase.needsKey'), detail: t('providers.overview.needsKeyLead'), next: 'key' };
       if (!hasEnabledModel(provider)) return { tone: 'warning', text: t('providers.phrase.needsModel'), detail: t('providers.overview.needsModelLead'), next: 'models' };
       if (provider.placement === 'managed' && (provider.runtime?.state === 'stopped' || provider.runtime === null && provider.machine === null)) {
         return { tone: 'warning', text: t('providers.phrase.needsRuntime'), detail: provider.status_detail ?? t('providers.overview.needsRuntimeLead'), next: 'runtime' };
@@ -87,11 +87,11 @@ export function providerState(provider: Provider, t: TFunction, context: TimeCon
 }
 
 /** What a provider is, in a few words: "Subscription · Pro", "API key · 2 endpoints". */
-export function providerWhat(provider: Provider, harnessTitle: (kind: string) => string, t: TFunction): string {
-  const credential = provider.kind === 'subscription' ? t('providers.what.subscription', { harness:harnessTitle(provider.harness_kind ?? '') }) : t(endpointsNeedNoKey(provider) ? 'providers.what.apiOpen' : 'providers.what.api', { count:provider.upstreams.length });
+export function providerWhat(provider: Provider | ProviderListRow, harnessTitle: (kind: string) => string, t: TFunction): string {
+  const credential = provider.kind === 'subscription' ? t('providers.what.subscription', { harness:harnessTitle(provider.harness_kind ?? '') }) : t(('upstreams' in provider ? endpointsNeedNoKey(provider) : provider.no_key_needed) ? 'providers.what.apiOpen' : 'providers.what.api', { count:'upstreams' in provider ? provider.upstreams.length : provider.upstreams_count });
   const plan = provider.facts.plan;
   if (detailState(provider,'plan') !== 'told' || plan === null) return credential;
-  const title = factsSource(provider).descriptor?.facts?.plans[plan] ?? plan;
+  const title = 'sources' in provider ? factsSource(provider).descriptor?.facts?.plans[plan] ?? plan : provider.plan_label ?? plan;
   return t('providerDetails.whatWithPlan',{ credential,plan:title });
 }
 

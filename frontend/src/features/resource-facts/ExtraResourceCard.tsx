@@ -80,7 +80,7 @@ export default function ExtraResourceCard({ subject }: { subject: Subject }) {
       rows = [
         { name: t('resourceFacts.kind'), value: template.kind === undefined ? t('usagePerf.dash') : t(`templates.kind.${template.kind}`) },
         { name: t('resourceFacts.image'), value: source.kind === 'image' ? source.reference : t(`templates.source.${source.kind === 'none' ? 'none' : source.kind === 'build' ? 'build' : 'archive'}`) },
-        ...(source.kind === 'image' && typeof digest === 'string' && digest !== '' ? [{ name: t('resourceFacts.imageDigest'), value: digest }] : []),
+        ...(source.kind === 'image' && typeof digest === 'string' && digest !== '' ? [{ name: t('resourceFacts.imagePinned'), value: t('resourceFacts.yes') }] : []),
         { name: t('resourceFacts.usedByLabel'), value: count(template.units) },
       ]; break;
     }

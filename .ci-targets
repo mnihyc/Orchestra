@@ -1,0 +1,7 @@
+# b42k-b: the same assembly: the engine's unit run (without the two history-pages cases, until the chance lane is merged) and its programs, the API's libraries
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test turns --test source --test approvals --test forks --test preflight --test summary_targets --test model_parameters --test call_recovery --test provider_rejection --test search_projections --test source_uniform --test environments
+test -p orch-settings --test matrix_inheritance
+test -p orch-api-base --lib
+test -p orch-api-core --lib
+test -p orch-db --test migration_progress --test released_migrations --test commands_in_line
