@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/people.test.tsx tests/component/tabs-keyboard.test.tsx tests/component/profile-editing.test.tsx tests/component/profile-message-people.test.tsx tests/component/rail-toggle.test.tsx tests/component/mobile-thread-navigation.test.tsx tests/unit/craft-catalogue.test.ts

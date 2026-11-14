@@ -10,7 +10,7 @@ import { choiceObservation, speedText } from '@/features/usage/performance';
 import { reportedHarnessName } from '@/features/resources/agents/descriptor';
 import { programNameIn } from '@/features/resources/programNames';
 import type { Agent, CapStatus, Environment, Host, HostRef, MachineRef, McpServer, McpState, ModelParameters, Mount, PlaceHost, Provider, ProviderChoiceUsage, ResourceSample, Skill, Template } from '@/generated/api-types';
-import { formatBytes, formatNumber, formatPercent } from '@/lib/format';
+import { formatBytes, formatNumber } from '@/lib/format';
 import { formatSpan, formatTimeOfDay, type TimeContext } from '@/lib/time';
 
 /** Resource counts use the binary megabytes and gigabytes already used by the places list. */
@@ -119,20 +119,24 @@ export function hostHint(subject: Extract<ResourceSubject, { kind: 'host' }>, co
   if (host.machine?.online === false) return hint(host.offline_since === null || host.offline_since === undefined
     ? t('resourceFacts.offline') : t('resourceFacts.offlineSince', { time: formatTimeOfDay(host.offline_since, context, context.now) }), true);
   const capacity = place?.capacity ?? host.capacity;
-  const declared = place?.declared ?? host.declared;
   const full = place?.warnings.includes('full') === true || place?.reasons.includes('full') === true || host.full === true;
   if (full) return hint(t('resourceFacts.full'), true);
   if (place?.usable === false || host.schedulable === false) return hint(t('resourceFacts.unavailable'), true);
   const count = place?.environments.running ?? host.running?.environment;
+  // What a person decides with is what the host has free of what it has, as it measured them: never what the
+  // environments there say they need, which reserves nothing and sits on the host's own page.
   const memory = place?.used.memory_mb ?? host.usage?.memory_used_mb;
-  const storages = place?.storages ?? host.storages;
-  const free = storages === undefined || storages.length === 0 ? null : storages.reduce((sum, storage) => sum + storage.free_gb, 0);
+  const memoryTotal = capacity === undefined || capacity.memory_mb <= 0 ? null : formatBytes(capacity.memory_mb * MEMORY_BYTES_PER_MB, locale);
+  const memoryWords = memoryTotal === null || capacity === undefined ? null : memory === undefined || memory === null
+    ? t('resourceFacts.memoryTotal', { total: memoryTotal })
+    : t('resourceFacts.memoryFree', { free: formatBytes(Math.max(0, capacity.memory_mb - memory) * MEMORY_BYTES_PER_MB, locale), total: memoryTotal });
+  const disk = place?.used.disk_gb;
+  const diskWords = capacity === undefined || capacity.disk_gb <= 0 || disk === undefined || disk === null ? null
+    : t('resourceFacts.diskFree', { free: formatNumber(Math.max(0, capacity.disk_gb - disk), locale), total: formatNumber(capacity.disk_gb, locale) });
   return hint([
     count === undefined ? null : t('resourceFacts.running', { count, value: formatNumber(count, locale) }),
-    capacity === undefined || capacity.memory_mb <= 0 ? null : memory !== undefined && memory !== null
-      ? t('resourceFacts.memoryPercent', { percent: formatPercent(memory / capacity.memory_mb, locale) })
-      : declared === undefined ? null : t('resourceFacts.declaredPercent', { percent: formatPercent(declared.memory_mb / capacity.memory_mb, locale) }),
-    free === null ? null : t('resourceFacts.free', { size: formatBytes(free * DISK_BYTES_PER_GB, locale) }),
+    memoryWords,
+    diskWords,
   ].filter(Boolean).join(t('resourceFacts.separator')) || t('providerPlan.notReported'));
 }
 
