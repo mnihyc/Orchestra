@@ -22,7 +22,7 @@ vi.mock('@/features/files/door', () => ({
   useRouteThread: () => 'thread',
   useThreadDoor: () => ({ kind: 'ready', access: { environment: { id: 'environment' }, thread: { environment_permissions: world.permissions } } }),
 }));
-vi.mock('@/features/workbench/openView', () => ({ revealView: world.reveal }));
+vi.mock('@/features/workbench/openView', async (loadOriginal) => ({ ...await loadOriginal<object>(), revealView: world.reveal }));
 vi.mock('@/api/browsers', () => ({
   browserKeys: { list: (id: string) => ['target-browsers', id] },
   browsersQuery: (id: string) => ({ queryKey: ['target-browsers', id], queryFn: () => { world.browserRead(); return Promise.resolve({ browsers: world.browsers }); } }),
@@ -31,7 +31,7 @@ vi.mock('@/api/displays', () => ({
   displayKeys: { list: (id: string) => ['target-displays', id] },
   displaysQuery: (id: string) => ({ queryKey: ['target-displays', id], queryFn: () => { world.displayRead(); return Promise.resolve({ displays: world.displays }); } }),
 }));
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: (name: string, handlers: { onFrame: (frame: { op: 'sync' }) => void }) => {
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: (name: string, handlers: { onFrame: (frame: { op: 'sync' }) => void }) => {
   world.refresh.set(name, () => handlers.onFrame({ op: 'sync' }));
   return { unsubscribe: () => { world.refresh.delete(name); } };
 } } }));

@@ -3,16 +3,16 @@ import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as HelpOpening from '@/features/help/open';
 import { ArticleView } from '@/features/help/Article';
 import { ProviderGuideLink } from '@/features/help/ProviderGuideLink';
 import { readArticle } from '@/help/guide';
 import { show } from './support';
 
 const opens = vi.hoisted(() => vi.fn());
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => opens }));
 
 describe('provider guide entrances', () => {
-  beforeEach(() => { opens.mockClear(); });
+  beforeEach(() => { opens.mockClear(); vi.spyOn(HelpOpening, 'useHelpOpener').mockReturnValue(opens); });
 
   it('names the same page a provider source control opens', async () => {
     show(<ProviderGuideLink guide="provider-facts" />);

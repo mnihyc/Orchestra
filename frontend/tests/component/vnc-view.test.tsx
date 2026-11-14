@@ -11,7 +11,7 @@ import { show } from './support';
 
 const made = vi.hoisted(() => ({ tickets: [] as boolean[], viewers: [] as { viewOnly: boolean; channel: unknown }[], sockets: [] as { url: string; protocol: string }[], list: null as EnvironmentDisplays | null }));
 
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
 vi.mock('@/api/displays', () => ({
   displayKeys: { list: (id: string) => ['test-displays', id] },
   displaysQuery: (id: string) => ({ queryKey: ['test-displays', id], queryFn: () => Promise.resolve(made.list) }),

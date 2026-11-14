@@ -8,7 +8,8 @@ import type * as Admin from '@/api/admin';
 import type * as Resources from '@/api/resources';
 import { ApiError } from '@/api/client';
 import { Agents } from '@/features/admin/Agents';
-import { AgentList, type AgentsSearch } from '@/features/resources/agents/AgentList';
+import { AgentList } from '@/features/resources/agents/AgentList';
+import type { AgentsSearch } from '@/features/resources/search';
 import { EditAgent } from '@/features/resources/agents/Edit';
 import { AgentScreen } from '@/features/resources/agents/Profile';
 import { harnessVersionWords } from '@/features/resources/agents/descriptor';
@@ -48,7 +49,7 @@ vi.mock('@/api/executors', () => ({ executorCatalogueQuery: { queryKey: ['profil
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useNavigate: () => calls.navigate,
   Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => null }));
-vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map() }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKnownPlaces: () => new Map() }));
 vi.mock('@/features/resources/agents/acts', () => ({ useAgentActs: () => ({ list: [], dialogs: null, page: () => ({ edit: null, primary: null, menu: [] }) }) }));
 vi.mock('@/features/resources/agents/Overrides', () => ({ DescriptorOverrides: () => null }));
 vi.mock('@/features/resources/ResourceList', () => ({ ResourceList: ({ filters }: { filters: ReactNode }) => <section>{filters}</section>, useSearchText: (value: string) => [value, vi.fn()] }));
@@ -59,7 +60,7 @@ vi.mock('@/shell/Page', async (load) => ({ ...await load<object>(), Page: ({ chi
   PageHeader: ({ title }: { title: string }) => <h1>{title}</h1> }));
 vi.mock('@/features/resources/HomePicker', () => ({ HomePicker: ({ value, onChange, disabled }: Pick<HomePickerProps, 'value' | 'onChange' | 'disabled'>) =>
   <select aria-label="Fixture home" value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}><option value="">Choose</option><option value={HOME_ID}>Workshop</option></select> }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/help', async (load) => ({ ...await load<object>(), useGuide: () => ({ articles: [] }) }));
 
 function draw(ui: ReactNode, knownKinds?: HarnessKindInfo[]) {
@@ -222,6 +223,8 @@ it('registers a late reported machine harness on the unchanged physical machine/
     harnesses: registry.map((kind, index) => ({ kind: kind.kind, path: `/opt/agent-${index + 1}`, version: `${index + 1}.0.0`, daemon: false })),
   } };
   const user = userEvent.setup(); draw(<RegisterAgentDialog machine={machine} open onClose={calls.close} />);
+  const name = screen.getByRole('textbox', { name: new RegExp(i18n.t('machines.agent.name')) });
+  expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],select')).toBe(name);
   const field = await screen.findByRole('combobox', { name: i18n.t('machines.agent.harness') });
   await waitFor(() => expect(calls.kinds).toHaveBeenCalledOnce());
   expect(field).toHaveAccessibleDescription(i18n.t('machines.agent.harnessHint'));

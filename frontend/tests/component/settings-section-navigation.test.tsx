@@ -31,11 +31,11 @@ vi.mock('@/api/auth', async (original) => ({ ...await original<typeof Auth>(), m
 vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof Nodes>(), orgBySlugQuery: () => ({
   queryKey: ['section-nav-org'], initialData: () => department, queryFn: () => Promise.resolve(department), staleTime: Infinity,
 }) }));
-vi.mock('@/features/access/AdminMode', () => ({ useAdminMode: () => ({ data: { available: true, as_admin: true }, isPending: false, isError: false }) }));
+vi.mock('@/features/access/AdminMode', async (loadOriginal) => ({ ...await loadOriginal<object>(), useAdminMode: () => ({ data: { available: true, as_admin: true }, isPending: false, isError: false }) }));
 vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof Live>(), useOrgTreeFeed: () => undefined }));
 vi.mock('@/shell/screen', async (original) => ({ ...await original<typeof Screen>(), useScreenHeading: () => undefined }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
-vi.mock('@/features/navigation/OrgSwitcher', () => ({ orgInitial: () => 'R', orgColor: () => 0 }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
+vi.mock('@/features/navigation/OrgSwitcher', async (loadOriginal) => ({ ...await loadOriginal<object>(), orgInitial: () => 'R', orgColor: () => 0 }));
 vi.mock('@/features/settings/org/General', () => ({ General: () => <p data-section-body>General content</p> }));
 vi.mock('@/features/admin/Overview', () => ({ Overview: () => <p data-section-body>Overview content</p> }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeof Router>(),
@@ -69,8 +69,8 @@ it.each(modes)('keeps complete section links and the compact picker on the same 
     if (frame.current === '/settings/profile') expect(within(nav).getByRole('link', { name: i18n.t('screens.uploads.title') })).toHaveAttribute('href', '/storage?view=uploads');
     const current = within(nav).getAllByRole('link').filter((link) => link.getAttribute('aria-current') === 'page');
     expect(current).toHaveLength(1); expect(current[0]).toHaveAttribute('href', frame.current);
-    // jsdom has no container-query layout; the browser proof checks which presentation is visible.
-    expect(within(nav).getByRole('combobox', { name: frame.label })).toHaveValue(current[0]?.textContent ?? '');
+    // The same links are a list beside the content or a strip above it; there is no dropdown to choose from.
+    expect(within(nav).queryByRole('combobox')).not.toBeInTheDocument();
     expect(within(nav).queryByRole('button', { name: /More|更多/ })).not.toBeInTheDocument();
     expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
     expect(screen.queryByRole('link', { name: /Back to|返回/ })).not.toBeInTheDocument();

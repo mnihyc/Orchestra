@@ -34,7 +34,7 @@ vi.mock('@/api/access', async (load) => ({ ...await load<typeof AccessApi>(),
   accessRequestQuery: (batch: string) => ({ queryKey: ['request-words', batch], queryFn: () => calls.read(batch) }),
 }));
 vi.mock('@/realtime/live',async original=>({...await original(),useSocketStatus:()=>({phase:'ready'})}));
-vi.mock('@/realtime/stores/tree', () => ({ useNodePath: () => ({ path: [] }) }));
+vi.mock('@/realtime/stores/tree', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodePath: () => ({ path: [] }) }));
 vi.mock('@/ui/UserChip', () => ({ UserChip: ({ user }: { user: UserRef }) => <button data-person-chip={user.id}>{user.display_name}</button> }));
 const modes = [['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const;
 const before = useAppearance.getState();

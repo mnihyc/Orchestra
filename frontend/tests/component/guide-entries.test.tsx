@@ -12,8 +12,8 @@ import { Popover } from '@/ui/Popover';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ open: vi.fn(), access: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.open }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: calls.access }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => calls.open }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: calls.access }));
 
 describe('one guide entry on the screen', () => {
 

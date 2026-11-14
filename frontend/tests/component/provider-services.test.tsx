@@ -13,7 +13,7 @@ skipOverflowFallback();
 
 const { update } = vi.hoisted(() => ({ update: vi.fn<(...args: Parameters<typeof Resources.updateProvider>) => Promise<unknown>>() }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<typeof Resources>(), updateProvider: update }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 function provider(): Provider {
   return { ...planProvider({ kind: 'api' }), service_offerings: {

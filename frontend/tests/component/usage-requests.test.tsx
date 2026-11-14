@@ -29,8 +29,8 @@ vi.mock('@/ui/Table', async (importOriginal) => {
   } };
 });
 vi.mock('@/api/usage', () => ({ fetchEventsPage: (_params: unknown, cursor: string) => { fake.cursors.push(cursor); return Promise.resolve({ items: fake.older, next_cursor: null }); }, eventsQuery: () => ({ queryKey: ['request-log-test'], queryFn: () => { fake.reads += 1; return Promise.resolve({ items: fake.rows, next_cursor: null }); }, initialPageParam: null, getNextPageParam: () => null }) }));
-vi.mock('@/api/nodes',()=>({orgsQuery:{queryKey:['orgs'],queryFn:()=>Promise.resolve([])}}));
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: (feed: string, listener: { onFrame: (frame: FeedFrame) => void }) => { fake.feeds.push(feed); fake.receive = listener.onFrame; return { unsubscribe: () => { fake.receive = undefined; } }; } } }));
+vi.mock('@/api/nodes',async (loadOriginal) => ({ ...await loadOriginal<object>(),orgsQuery:{queryKey:['orgs'],queryFn:()=>Promise.resolve([])}}));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: (feed: string, listener: { onFrame: (frame: FeedFrame) => void }) => { fake.feeds.push(feed); fake.receive = listener.onFrame; return { unsubscribe: () => { fake.receive = undefined; } }; } } }));
 vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), Link: ({ params, search, children }: { params: { threadId: string }; search: { turn: number }; children: ReactNode }) => <a href={`/thread/${params.threadId}?turn=${search.turn}`}>{children}</a> }));
 
 beforeEach(() => { fake.feeds.length = 0; fake.reads = 0; fake.narrow = false; fake.rows = [requestRow()]; fake.older = []; fake.cursors = []; fake.receive = undefined; });

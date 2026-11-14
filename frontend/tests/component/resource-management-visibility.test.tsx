@@ -38,7 +38,7 @@ vi.mock('@/api/skills', async (original) => ({ ...await original<typeof Skills>(
 vi.mock('@/api/auth', async (original) => ({ ...await original<typeof Auth>(), meQuery: { queryKey: ['implicit-me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada')) } }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resources/agents/Edit', () => ({ EditAgent: () => <div role="dialog" aria-label="Profile editor" /> }));
 vi.mock('@/features/resources/ResourceAccess', () => ({ ResourceAccess: () => null }));
 vi.mock('@/features/resources/mcp/Enabled', () => ({ McpEnabledIn: () => null }));

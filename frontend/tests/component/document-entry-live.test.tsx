@@ -12,7 +12,7 @@ vi.mock('@/api/client', async (original) => {
   const actual = await original<typeof ClientModule>();
   return { ...actual, api: { ...actual.api, GET: calls.get }, ok: async (request: Promise<unknown>) => request };
 });
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: calls.subscribe } }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: calls.subscribe } }));
 const item = { kind: 'document' as const, id: 'document' };
 const read = (name: string): DocumentTreeRead => ({ feed: 'entry-feed', ancestors: [], entries: [{
   entry: { item, parent: { kind: 'container', id: 'parent' }, node: 'node', root: 'org', basename: name, title: name,

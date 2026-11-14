@@ -63,7 +63,14 @@ export function TurnActions({ turn, ids, records, inputItemId, children }: { tur
   const anchor = [...items].reverse().find((item) => item.kind === 'agent_message') ?? items.at(-1);
   const continuation = useThreadPart(context.threadId, (held) => held.read?.projection?.viewed_continuation_id);
   const origin = context.inspection?.threadId ?? context.threadId;
+  const interactive = context.inspection === undefined;
+  const copy = () => { void copyText(selectionMarkdown(items), t('thread.turnActions.copied')); };
   const entries: MenuEntry[] = [
+    { id: 'copy', label: t('thread.turnActions.copy'), icon: <Copy aria-hidden />, disabled: items.length === 0 ? t('thread.turnActions.noItems') : false, onSelect: copy },
+    ...(interactive ? [
+      { id: 'retry', action: 'retryTurn', label: t('timeline.footer.retry'), disabled: reason ?? (retry.isPending ? t('common.loading') : false), onSelect: () => retry.mutate() },
+      { id: 'fork-now', label: t('timeline.selection.forkNow'), icon: <GitFork aria-hidden />, disabled: forkReason ?? (fork.pending ? t('change.forkNow.making') : false), onSelect: () => fork.start(turn.ordinal) },
+    ] satisfies MenuEntry[] : []),
     { id: 'fork-to', label: t('timeline.selection.forkTo'), icon: <GitFork aria-hidden />, disabled: forkReason ?? false,
       onSelect: () => thread?.program?.id === 'orch' ? fork.start(turn.ordinal)
         : openChange({ kind: 'thread', id: context.threadId, name: context.threadName }, { kind: 'fork', toTurn: turn.ordinal }) },
@@ -78,11 +85,10 @@ export function TurnActions({ turn, ids, records, inputItemId, children }: { tur
     { id: 'copy-reference', label: t('people.reference.copy'), icon: <Link aria-hidden />,
       onSelect: () => void copyText(referenceTo({ kind: 'thread', id: origin, name: t('people.reference.turn', { number: turn.ordinal }) }, { turn: turn.ordinal }), t('people.reference.copied')) },
   ];
-  const interactive = context.inspection === undefined;
-  const menu = interactive ? entries : entries.filter((entry) => 'id' in entry && (entry.id === 'copy-link' || entry.id === 'copy-reference'));
+  const menu = interactive ? entries : entries.filter((entry) => 'id' in entry && (entry.id === 'copy' || entry.id === 'copy-link' || entry.id === 'copy-reference'));
   const actions = <><HoverActions owner="turn">
     <IconButton size="sm" icon={<Copy aria-hidden />} label={t('thread.turnActions.copy')} reason={t(items.length === 0 ? 'thread.turnActions.noItems' : 'thread.turnActions.copyAbout')} blocked={items.length === 0}
-      onClick={() => void copyText(selectionMarkdown(items), t('thread.turnActions.copied'))} />
+      onClick={copy} />
     {interactive && <><IconButton size="sm" action="retryTurn" label={t('timeline.footer.retry')} blocked={reason !== null} reason={reason ?? undefined} pending={retry.isPending} onClick={() => retry.mutate()} />
     {thread !== null && threadCapabilities(thread)?.fork === true ? <ImmediateForkAction turn={turn} blocked={forkReason} fork={fork} />
       : <IconButton size="sm" icon={<GitFork aria-hidden />} label={t('timeline.selection.forkNow')} blocked reason={forkReason ?? t('thread.turnActions.forkUnavailable')} />}</>}

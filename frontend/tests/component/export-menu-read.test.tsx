@@ -21,7 +21,7 @@ vi.mock('@/api/documents', async (original) => ({ ...await original<typeof Docum
 vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof NodesApi>(),
   nodeQuery: (id: string) => ({ queryKey: ['export-read-node', id], queryFn: calls.node, retry: false }) }));
 vi.mock('@/features/documents/Readme', () => ({ useReadmeEntry: () => null }));
-vi.mock('@/features/export/ExportHost', () => ({ openExport: calls.export, requestExportAccess: calls.request }));
+vi.mock('@/features/export/ExportHost', async (loadOriginal) => ({ ...await loadOriginal<object>(), openExport: calls.export, requestExportAccess: calls.request }));
 beforeEach(() => { vi.clearAllMocks(); calls.document.mockReset(); calls.node.mockReset(); });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 

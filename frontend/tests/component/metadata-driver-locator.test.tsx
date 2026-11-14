@@ -27,7 +27,7 @@ vi.mock('@/features/resources/HomePicker', () => ({ HomePicker: ({ value, onChan
   <select aria-label="Fixture home" value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}><option value="">Choose</option><option value={HOME_ID}>Workshop</option></select> }));
 // Host eligibility is a separate resource reader; this test does not turn its window into a catalogue.
 vi.mock('@/features/resources/templates/TemplateHosts', () => ({ TemplateHosts: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 beforeEach(async () => { await setLocale('en'); vi.clearAllMocks(); calls.drivers.mockResolvedValue(drivers); });
 afterEach(() => { cleanup(); });

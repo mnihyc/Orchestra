@@ -54,7 +54,7 @@ vi.mock('@/ui/CodeView', () => ({ CodeView: ({ text, label, onChange, readOnly }
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), useNavigate: () => vi.fn(), useLocation: () => ({ pathname: '/resources/skills/skill', searchStr: '' }),
   Link: ({ children, className }: { children: ReactNode; className?: string }) => <a className={className}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/features/resources/ResourceAccess', () => ({ ResourceAccess: () => <p>access-page</p> }));
 vi.mock('@/shell/Page', async (load) => ({ ...await load<object>(), Page: ({ children }: { children: ReactNode }) => <main>{children}</main>,

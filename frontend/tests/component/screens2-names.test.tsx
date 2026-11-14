@@ -12,17 +12,21 @@ import { show } from './support';
 const fixture = vi.hoisted(() => ({
   policy: { allowed: ['place', 'host', 'link'], publish: { incoming_address: 'build.example.test', listen: 'all', ranges: [{ from: 41000, to: 41015 }] }, limits: null },
 }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
-vi.mock('@/api/access', () => ({ permissionsQuery: {
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
+vi.mock('@/api/access', async (loadOriginal) => ({ ...await loadOriginal<object>(), permissionsQuery: {
   queryKey: ['screen-names-permissions'],
   queryFn: () => Promise.resolve({ permissions: [{ name: 'future.use', label: 'Use report viewer' }] }),
 } }));
-vi.mock('@/api/resources', () => ({
+vi.mock('@/api/resources', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   machinePolicyQuery: () => ({ queryKey: ['screen-names-policy'], queryFn: () => Promise.resolve({ machine: { id: 'machine', name: 'Build machine', online: true, platform_os: 'linux', placement: 'connected' }, command: 'orch-node policy', reported_at: null, keys: [{
     key: 'ports', value: fixture.policy, bounds: 'machine', writable: false, delegated: false,
     definition: { key: 'ports', title: 'Ports', meaning: 'The machine port ceiling.', sections: ['node'], delegable: true,
       managed: fixture.policy, cautious: { allowed: [], publish: null, limits: null } },
+  }, {
+    // A second section, so that the page lists its sections and each of them is a region of its own, named by its heading.
+    key: 'future.flag', value: true, bounds: 'machine', writable: false, delegated: false,
+    definition: { key: 'future.flag', title: 'Future flag', meaning: 'A setting of the environment.', sections: ['environment'], delegable: true, managed: true, cautious: false },
   }] }) }),
   updateMachinePolicy: vi.fn(),
 }));
@@ -67,7 +71,9 @@ it.each(['en', 'zh-CN'] as const)('uses the enrollment role names on chips in %s
 it.each(['en', 'zh-CN'] as const)('reads port audiences and listener facts as words in %s while retaining the exact command', async (locale) => {
   await setLocale(locale);
   const view = show(<MachinePolicyTab machine={{ id: 'machine' }} />);
+  // Each section of the page is a region named by its heading, one per name: a person goes to the Node section by it.
   const section = await screen.findByRole('region', { name: i18n.t('machines.policy.sections.node.name') });
+  expect(screen.getByRole('region', { name: i18n.t('machines.policy.sections.environment.name') })).toBeVisible();
   const portName = i18n.t('machines.policy.keys.ports.title');
   await userEvent.click(within(section).getByRole('button', { name: i18n.t('machines.policy.viewTitle', { key: portName }) }));
   const values = view.container.querySelectorAll<HTMLElement>('[data-policy-port-value]');

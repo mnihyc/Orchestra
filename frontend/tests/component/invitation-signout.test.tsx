@@ -27,7 +27,7 @@ vi.mock('@/api/auth', async (load) => ({ ...await load<typeof Auth>(),
 vi.mock('@/api/users', async (load) => ({ ...await load<typeof Users>(),
   invitationQuery: (token: string) => ({ queryKey: ['invitation-signout', token], queryFn: calls.preview }), acceptInvitation: calls.accept,
 }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabels: () => new Map() }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabels: () => new Map() }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(),
   useRouter: () => ({ navigate: vi.fn() }),
   Link: ({ to, children, className }: Pick<AnchorHTMLAttributes<HTMLAnchorElement>, 'children' | 'className'> & { to: string }) => <a href={to} className={className}>{children}</a>,

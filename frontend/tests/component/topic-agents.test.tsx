@@ -45,8 +45,8 @@ vi.mock('@/api/share', async (original) => ({ ...await original<object>(), agent
   queryKey: ['unwanted-topic-document-policy'], queryFn: () => { calls.shares(); return Promise.resolve([]); },
 }) }));
 vi.mock('@/realtime/live', async (original) => ({ ...await original<object>(), useOrgTreeFeed: () => undefined }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
-vi.mock('@/features/navigation/favorites', () => ({ StarButton: () => null }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
+vi.mock('@/features/navigation/favorites', async (loadOriginal) => ({ ...await loadOriginal<object>(), StarButton: () => null }));
 vi.mock('@/features/announcements/Composer', () => ({ PlaceAnnouncements: () => null }));
 vi.mock('@/features/thread/SubscriptionBell', () => ({ SubscriptionBell: () => null }));
 vi.mock('@/features/topic/TopicMenu', () => ({ TopicMenu: () => null, TopicHeaderMenu: () => null }));

@@ -12,6 +12,7 @@ import { i18n } from '@/i18n';
 import { RuntimeConfiguration } from '@/features/resources/providers/RuntimeConfiguration';
 import { planProvider } from '../unit/provider-plan-fixtures';
 import { show } from './support';
+import { SECRET_DOTS } from '@/ui/SecretField';
 
 const server = vi.hoisted(() => ({ read: vi.fn<() => Promise<ResolvedSetting[]>>() }));
 vi.mock('@/api/resources', async (original) => {
@@ -36,13 +37,16 @@ it('writes a named secret separately, conceals its value and clears the field af
   const user = userEvent.setup();
   const provider = planProvider({ secrets_set: ['runtime:API_TOKEN'] });
   show(<RuntimeConfiguration provider={provider} />);
-  const value = await screen.findByLabelText('API_TOKEN');
+  // A secret that is set is dots with Replace; the field to type a new value is hidden as it is typed.
+  expect(await screen.findByLabelText('API_TOKEN')).toHaveValue(SECRET_DOTS);
+  await user.click(screen.getByRole('button', { name: i18n.t('settingsEditors.secret.replace') }));
+  const value = screen.getByLabelText('API_TOKEN');
   expect(value).toHaveAttribute('type', 'password');
   expect(value).toHaveValue('');
   await user.type(value, 'only-written-once');
   await user.click(screen.getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(setProviderSecret).toHaveBeenCalledWith(provider.id, 'runtime:API_TOKEN', 'only-written-once'));
-  await waitFor(() => expect(value).toHaveValue(''));
+  await waitFor(() => expect(screen.getByLabelText('API_TOKEN')).toHaveValue(SECRET_DOTS));
   expect(screen.queryByText('only-written-once')).not.toBeInTheDocument();
 });
 

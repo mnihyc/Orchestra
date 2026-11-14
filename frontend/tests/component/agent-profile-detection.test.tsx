@@ -24,8 +24,8 @@ vi.mock('@/api/resources', async (load) => ({ ...await load<typeof Resources>(),
 vi.mock('@/api/machinePrograms', () => ({ changeMachinePrograms: calls.program, machineProgramsKey: (id: string) => ['profile-programs', id],
   machineProgramsQuery: (id: string) => ({ queryKey: ['profile-programs', id], queryFn: () => Promise.resolve({ entries: [], can_manage: true, config_file: null,
     capabilities: [{ kind: 'agent', supported: true, delegated: true, enabled: true, remote: true, policy_key: 'agent.programs', reason: null }] }) }) }));
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.help }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNavigate: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => calls.help }));
 vi.mock('@/features/resources/HomePicker', () => ({ HomePicker: ({ value, onChange }: Pick<HomePickerProps, 'value' | 'onChange'>) =>
   <select aria-label="Fixture home" value={value} onChange={(event) => onChange(event.target.value)}><option value="home">Workshop</option><option value="other-home">Other home</option></select> }));
 const registry: HarnessKindInfo[] = ['codex', 'claude-code'].map((kind) => ({ kind, title: harnessName(kind).name, harness: harnessName(kind), builds: [], program: null,
@@ -73,7 +73,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(within(facts).getByText(t('agentDetection.automatic'))).toBeInTheDocument();
     expect(calls.create).not.toHaveBeenCalled(); expect(calls.register).not.toHaveBeenCalled();
     await user.click(screen.getByRole('combobox', { name: t('agents.add.harness') })); await user.click(screen.getByRole('option', { name: 'Claude Code' }));
-    await user.type(screen.getByLabelText(t('agents.add.name')), 'My retained profile');
+    await user.click(screen.getByLabelText(t('agents.add.name'))); await user.paste('My retained profile');
     await user.selectOptions(screen.getByRole('combobox', { name: 'Fixture home' }), 'other-home');
     await refresh({ ...machine, facts: { ...machine.facts as object, harnesses: [
       { kind: 'claude-code', path: '/program/claude', version: 'new-observation', daemon: false },
@@ -88,7 +88,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
   });
   it('keeps a disappeared selection named and blocks creation until another real program is chosen', async () => {
     await setLocale(locale); document.documentElement.dataset.theme = theme; const t = i18n.getFixedT(locale); const user = userEvent.setup(); open(); await chooseMachine(user);
-    await user.type(screen.getByLabelText(t('agents.add.name')), 'Keep this draft');
+    await user.click(screen.getByLabelText(t('agents.add.name'))); await user.paste('Keep this draft');
     await refresh({ ...machine, facts: { adapters: [{ kind: 'claude-code', builtin: true }], harnesses: [{ kind: 'claude-code', version: '', path: '/program/claude', daemon: false }] } });
     expect(screen.getByRole('combobox', { name: t('agents.add.harness') })).toHaveValue('Codex');
     await screen.findByText(t('agentDetection.unavailable'));
@@ -132,4 +132,12 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(screen.queryByText('harness-4')).not.toBeInTheDocument();
     expect(screen.getByLabelText(t('agents.add.name'))).toHaveValue('Retain custom profile draft');
   });
+});
+
+
+it.each(['en', 'zh-CN'] as const)('names the new agent profile before its setup choices in %s', async (locale) => {
+  await setLocale(locale);
+  open();
+  const name = screen.getByRole('textbox', { name: i18n.t('agents.add.name') });
+  expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],select')).toBe(name);
 });

@@ -9,7 +9,7 @@ import { i18n, setLocale } from '@/i18n';
 import { ADA, BEA, TOPIC, named, pageFor } from '../unit/general-access-fixtures';
 import { show } from './support';
 
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const calls = vi.hoisted(() => ({ stop: vi.fn<(id: string) => Promise<void>>() }));
 vi.mock('@/api/share', async (load) => ({ ...await load<typeof ShareApi>(), stopAgentShare: calls.stop }));
 const material: DocumentRef = { id: 'document', title: 'Shared plan', description: '', description_line: '',

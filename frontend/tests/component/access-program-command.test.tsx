@@ -7,7 +7,8 @@ import type { Thread } from '@/generated/api-types';
 
 const fake = vi.hoisted(() => ({ choose: vi.fn() }));
 const state: SpeedOrAccess = { kind: 'access', key: 'access', title: 'Access', description: '', apply: 'next_turn', writable: true, lockedBy: null, place: null, from: 'start', stale: false, start: null, chosen: null, force: null, open: [{ id: 'standard', label: 'Standard' }, { id: 'daybreakBlue', label: 'Daybreak Blue' }] };
-vi.mock('@/features/composer/runsWith', () => ({ useRunsWith: () => ({ states: [state], choose: fake.choose }) }));
+const speed: SpeedOrAccess = { ...state, kind: 'speed', key: 'service_tier', title: 'Speed', open: [{ id: 'fast', label: 'Fast' }] };
+vi.mock('@/features/composer/runsWith', async (loadOriginal) => ({ ...await loadOriginal<object>(), useRunsWith: () => ({ states: [state, speed], choose: fake.choose }) }));
 
 it('chooses the offered Standard program instead of clearing the program', () => {
   const thread = { binding: {}, access: { permissions: ['thread.manage'] }, owner: { display_name: 'Ada' } } as unknown as Thread;
@@ -20,4 +21,25 @@ it('chooses the offered Standard program instead of clearing the program', () =>
   expect(fake.choose).toHaveBeenLastCalledWith(state, 'daybreakBlue');
   expect(command.run('none')).toBeNull();
   expect(fake.choose).toHaveBeenLastCalledWith(state, null);
+});
+
+it('opens the list of its own control for each command of the model, effort, speed and access program', () => {
+  const thread = { binding: {}, access: { permissions: ['thread.manage'] }, owner: { display_name: 'Ada' } } as unknown as Thread;
+  const opened = vi.fn();
+  const { result } = renderHook(() => useModelCommands(thread, opened));
+  for (const name of ['model', 'effort', 'speed', 'access']) {
+    const command = result.current.find((one) => one.name === name);
+    if (command === undefined) throw new Error(`The ${name} command was not offered`);
+    expect(command.run('')).toBeNull();
+    expect(opened).toHaveBeenLastCalledWith(name);
+  }
+});
+
+it('flips the second speed on with /fast', () => {
+  const thread = { binding: {}, access: { permissions: ['thread.manage'] }, owner: { display_name: 'Ada' } } as unknown as Thread;
+  const { result } = renderHook(() => useModelCommands(thread, () => undefined));
+  const command = result.current.find((one) => one.name === 'fast');
+  if (command === undefined) throw new Error('The fast command was not offered');
+  expect(command.run('')).toBeNull();
+  expect(fake.choose).toHaveBeenLastCalledWith(speed, 'fast');
 });

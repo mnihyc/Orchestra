@@ -12,16 +12,16 @@ import type { Problem, Topic, UserRef } from '@/generated/api-types';
 import { toast } from '@/ui/Toast';
 import { TooltipProvider } from '@/ui/Tooltip';
 
-vi.mock('@/features/navigation/NodeMenu', async () => {
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => {
   const { create } = await import('zustand');
-  return {
+  return { ...await loadOriginal<object>(),
     NodeMenuButton: () => null,
     useIsPending: () => false,
     usePendingPlaces: create<{ ids: ReadonlySet<string> }>(() => ({ ids: new Set() })),
   };
 });
-vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: vi.fn() }));
-vi.mock('@/features/navigation/places', () => ({
+vi.mock('@/features/navigation/NodeDialogs', async (loadOriginal) => ({ ...await loadOriginal<object>(), openNodeDialog: vi.fn() }));
+vi.mock('@/features/navigation/places', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   PlaceLink: ({ children }: { children: ReactNode }) => <a href="#topic">{children}</a>,
   placeOfNode: (node: Topic) => node,
 }));
@@ -29,7 +29,7 @@ vi.mock('@/features/org/ProjectCards', () => ({ AttentionChips: () => null }));
 vi.mock('@/features/project/TopicList', () => ({ TopicTags: () => null, topicAttention: () => ({}), lastActivityOf: () => null }));
 vi.mock('@/features/navigation/refresh', () => ({ invalidatePlaces: () => Promise.resolve() }));
 vi.mock('@/ui/RelativeTime', () => ({ RelativeTime: () => null }));
-vi.mock('@/ui/Toast', () => ({ toast: vi.fn() }));
+vi.mock('@/ui/Toast', async (loadOriginal) => ({ ...await loadOriginal<object>(), toast: vi.fn() }));
 
 /** jsdom has no layout: two cards sit in the bottom fifth of a scrolling page with a footer below. */
 const PAGE = new DOMRect(0, 0, 800, 600);
@@ -107,6 +107,44 @@ function refused(kind: 'access' | 'server'): ApiError {
 }
 
 describe('a board above more page content', () => {
+  it('keeps a long column within its own scroll and retains focused and carried cards while reaching its last card', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 240, 180));
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(180);
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(240);
+    const topics = Array.from({ length: 1_200 }, (_, index) => ({ ...TOPICS[0]!, id: 'long-' + String(index), name: 'Topic ' + String(index) }));
+    const cache = new QueryClient();
+    const view = render(<QueryClientProvider client={cache}><TooltipProvider><TopicBoard topics={topics} canSetStatus orgId="acme" /></TooltipProvider></QueryClientProvider>);
+    const column = screen.getByRole('region', { name: /Idle/ });
+    const list = within(column).getByRole('list');
+    const first = within(list).getByRole('link', { name: 'Topic 0' });
+    const card = first.closest('li');
+    expect(card).toHaveAttribute('aria-posinset', '1');
+    expect(card).toHaveAttribute('aria-setsize', '1200');
+    expect(within(list).getAllByRole('listitem').length).toBeLessThan(30);
+    fireEvent.focus(first);
+    const scroll = list.closest('[data-scroll-area]');
+    if (!(scroll instanceof HTMLElement)) throw new Error('The board column needs its own scroll');
+    fireEvent.scroll(scroll, { target: { scrollTop: 1_197 * 188 } });
+    expect(within(list).getByRole('link', { name: 'Topic 1199' })).toBeVisible();
+    expect(first).toBeInTheDocument();
+    expect(within(list).getAllByRole('listitem').length).toBeLessThan(30);
+    fireEvent.scroll(scroll, { target: { scrollTop: 0 } });
+    if (card === null) throw new Error('The focused topic needs its card');
+    fireEvent.pointerDown(card, { button: 0, clientX: 120, clientY: 60 });
+    fireEvent.pointerMove(document, { clientX: 132, clientY: 72 });
+    fireEvent.pointerMove(document, { clientX: 134, clientY: 74 });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(screen.getAllByRole('link', { name: 'Topic 0' })).toHaveLength(2);
+    fireEvent.blur(first, { relatedTarget: document.body });
+    fireEvent.scroll(scroll, { target: { scrollTop: 1_197 * 188 } });
+    expect(first).toBeInTheDocument();
+    expect(within(list).getByRole('link', { name: 'Topic 1199' })).toBeVisible();
+    expect(within(list).getAllByRole('listitem').length).toBeLessThan(30);
+    fireEvent.pointerCancel(document);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    view.unmount(); cache.clear();
+  });
+
   it('keeps the page still during a drag near its lower edge and sends Done when the card is dropped', async () => {
     const update = vi.spyOn(day100, 'changeTopicStatus').mockResolvedValue({ ...TOPICS[0], status: 'done', revision: 8 } as Topic);
     const { card, scroll, finish } = drawBoard();

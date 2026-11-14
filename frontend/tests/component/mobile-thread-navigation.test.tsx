@@ -13,11 +13,11 @@ vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router
   Link: ({ to, children, className, 'aria-label': label }: { to: string; children: ReactNode; className?: string; 'aria-label'?: string }) => <a href={to} className={className} aria-label={label}>{children}</a>,
 }));
 vi.mock('@/features/workbench/NarrowViews', () => ({ useNarrowWorkbench: () => ({ choices: [{ id: 'left:navigation', name: i18n.t('views.navigation.title'), description: '', icon: null, active: false, onSelect: vi.fn() }], main: <h1>Conversation</h1>, primary: null, mainTabs: [], primaryGroup: null, selectMain: vi.fn(), sheets: null, openNavigation: vi.fn() }) }));
-vi.mock('@/shell/TitleBar', () => ({ ScreenTitleBar: ({ before, children }: { before: ReactNode; children: ReactNode }) => <header>{before}{children}</header> }));
-vi.mock('@/shell/Banners', () => ({ Banners: () => null }));
-vi.mock('@/shell/Rail', () => ({ useAccountMenu: () => [] }));
-vi.mock('@/api/nodes', () => ({ orgsQuery: { queryKey: ['mobile-test-orgs'], queryFn: () => Promise.resolve([]) } }));
-vi.mock('@/features/inbox/Counters', () => ({ useInboxCounters: () => ({ unread: 0, approvalsPending: 0 }), useCounterWords: () => ({ unread: null, approvals: null }), CountBadge: () => null }));
+vi.mock('@/shell/TitleBar', async (loadOriginal) => ({ ...await loadOriginal<object>(), ScreenTitleBar: ({ before, children }: { before: ReactNode; children: ReactNode }) => <header>{before}{children}</header> }));
+vi.mock('@/shell/Banners', async (loadOriginal) => ({ ...await loadOriginal<object>(), Banners: () => null }));
+vi.mock('@/shell/Rail', async (loadOriginal) => ({ ...await loadOriginal<object>(), useAccountMenu: () => [] }));
+vi.mock('@/api/nodes', async (loadOriginal) => ({ ...await loadOriginal<object>(), orgsQuery: { queryKey: ['mobile-test-orgs'], queryFn: () => Promise.resolve([]) } }));
+vi.mock('@/features/inbox/Counters', async (loadOriginal) => ({ ...await loadOriginal<object>(), useInboxCounters: () => ({ unread: 0, approvalsPending: 0 }), useCounterWords: () => ({ unread: null, approvals: null }), CountBadge: () => null }));
 beforeEach(() => { route.path = '/thread/thread-1'; });
 
 it('removes thread bottom tabs while retaining the screen, navigation door and finder', () => {

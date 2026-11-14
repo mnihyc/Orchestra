@@ -381,6 +381,9 @@ pub struct Feeds {
     raw_dirty: AtomicBool,
     subs: Mutex<HashMap<Feed, Vec<Arc<Subscription>>>>,
     lists: Mutex<HashMap<Feed, Json>>,
+    /// Controlled captures wait for the actual reader's initial-state request.
+    #[cfg(any(test, feature = "test-support"))]
+    background_seeds: Mutex<HashMap<Feed, Json>>,
     publishers: Mutex<HashSet<Feed>>,
     offline: Mutex<HashSet<Feed>>,
     assemblies: Mutex<Assemblies>,
@@ -401,6 +404,8 @@ impl Default for Feeds {
             raw_dirty: AtomicBool::new(false),
             subs: Mutex::default(),
             lists: Mutex::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            background_seeds: Mutex::default(),
             publishers: Mutex::default(),
             offline: Mutex::default(),
             assemblies: Mutex::default(),
@@ -417,7 +422,7 @@ impl Feeds {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn test_background_seed(&self, feed: Feed, capture: Json) {
         assert!(matches!(feed, Feed::ThreadBackground(_)));
-        lock(&self.lists).insert(feed, capture);
+        lock(&self.background_seeds).insert(feed, capture);
     }
 
     /// Local tree/authority/reconnect wake; bounded-mailbox overflow requests one consolidated repair.
@@ -498,9 +503,36 @@ impl Feeds {
         Ok(())
     }
 
+    /// Unwatched native sources retain no ordinary cached list.
+    pub(crate) fn retain_active_lists(&self, active: &HashSet<Feed>) {
+        lock(&self.lists).retain(|feed, _| {
+            (!matches!(
+                feed,
+                Feed::ThreadBackground(_)
+                    | Feed::ThreadGit(_)
+                    | Feed::EnvGit { .. }
+                    | Feed::Job(_)
+                    | Feed::Fork(_)
+                    | Feed::EnvProcs(_)
+                    | Feed::EnvStats(_)
+                    | Feed::EnvTerminals(_)
+                    | Feed::EnvPorts(_)
+                    | Feed::EnvDir { .. }
+            )) || active.contains(feed)
+        });
+    }
+
     /// The latest complete list held in this process.
     pub(crate) fn list(&self, feed: &Feed) -> Option<Json> {
         lock(&self.lists).get(feed).cloned()
+    }
+
+    fn initial_list(&self, feed: &Feed) -> Option<Json> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(capture) = lock(&self.background_seeds).remove(feed) {
+            return Some(capture);
+        }
+        self.list(feed)
     }
 
     /// Clears the cached outage when an environment returns.
@@ -596,7 +628,7 @@ impl Feeds {
         let data = if offline {
             Some(serde_json::json!({"offline": true}))
         } else {
-            lock(&self.lists).get(sub.feed()).cloned().or_else(|| {
+            self.initial_list(sub.feed()).or_else(|| {
                 if matches!(sub.feed(), Feed::Resource { .. }) {
                     return Some(serde_json::json!({"what": "changed"}));
                 }
@@ -1354,12 +1386,7 @@ async fn run(inner: Arc<Inner>, mut receiver: mpsc::Receiver<Message>) {
                 sources.reconcile(&inner, &active, &mut coordinator).await?;
                 background.reconcile(&inner, &active).await?;
                 usage.reconcile(&inner,&active).await?;
-                lock(&inner.ephemeral.lists).retain(|feed, _| {
-                    (!matches!(feed, Feed::ThreadBackground(_) | Feed::ThreadGit(_) | Feed::EnvGit { .. }
-                        | Feed::Job(_) | Feed::Fork(_)
-                        | Feed::EnvProcs(_) | Feed::EnvStats(_) | Feed::EnvTerminals(_) | Feed::EnvPorts(_) | Feed::EnvDir { .. }))
-                        || active.contains(feed)
-                });
+                inner.ephemeral.retain_active_lists(&active);
                 resources
                     .reconcile(&inner, &active, &mut coordinator)
                     .await?;

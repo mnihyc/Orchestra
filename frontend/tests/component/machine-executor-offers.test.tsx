@@ -14,7 +14,7 @@ const { read, write, executors } = vi.hoisted(() => ({
   write: vi.fn<(id: string, values: Record<string, unknown>) => Promise<MachinePolicy>>(),
   executors: vi.fn<() => Promise<MachineExecutor[]>>(),
 }));
-vi.mock('@/api/resources', () => ({
+vi.mock('@/api/resources', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   machinePolicyQuery: () => ({ queryKey: ['machine-policy', 'machine'], queryFn: read }),
   machineQuery: () => ({ queryKey: ['machine', 'machine'] }), updateMachinePolicy: write,
 }));

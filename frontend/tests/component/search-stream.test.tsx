@@ -24,7 +24,7 @@ vi.mock('@/api/nodes', async (original) => ({...await original<Record<string, un
 vi.mock('@/api/trace', async (original) => ({...await original<Record<string, unknown>>(), selectedPersonQuery: (id: string) => ({
   queryKey: ['stream-person', id], enabled: id !== '', queryFn: () => calls.personFailure === null ? Promise.resolve({id, kind: 'human', username: 'ada', display_name: 'Ada', avatar: {text: 'A', color: 1}}) : Promise.reject(calls.personFailure),
 })}));
-vi.mock('@/shell/screen', () => ({useScreenHeading: () => undefined}));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(),useScreenHeading: () => undefined}));
 vi.mock('@/features/search/Hit', () => ({Hit: ({hit,matchField}: {hit: SearchHit;matchField?:string}) => <li data-match-field={matchField}><button>{hit.snippet}</button></li>}));
 function Page({initial = {q: 'release', sort: 'relevance'}}: {initial?: SearchParams}) {
   const [params, setParams] = useState(initial);
@@ -51,6 +51,20 @@ async function start(initial?: SearchParams, pageSize = 2, windowSecs = OPEN_WIN
   await send({type: 'options', page_size: pageSize, reorder_window_secs: windowSecs, meaning_pause_ms: 800}, source('words', 'running'), source('meaning', 'running'));
   return view;
 }
+it.each(['en', 'zh-CN'] as const)('describes indexed fields and the effective allowance before claiming an empty search in %s', async (locale) => {
+  const previous = currentLocale(); await setLocale(locale);
+  try {
+    await start();
+    await send({ type: 'coverage', conversation_chars: 24_000 }, source('words'), source('meaning'), { type: 'cursor', cursor: null });
+    const coverage = screen.getByRole('button', { name: i18n.t('search.coverage.label') });
+    expect(coverage).toBeVisible();
+    expect(screen.getByText(i18n.t('search.state.nothingIndexed', { query: 'release' }))).toBeVisible();
+    expect(screen.queryByText(i18n.t('search.state.nothing', { query: 'release' }))).not.toBeInTheDocument();
+    fireEvent.click(coverage);
+    expect(screen.getByText(i18n.t('search.coverage.about', { number: '24,000' }))).toBeVisible();
+    expect(screen.getByText(i18n.t('search.coverage.omitted'))).toBeVisible();
+  } finally { cleanup(); await setLocale(previous); }
+});
 it('starts a linked search through strict-mode remounts and cancels it when the view closes', async () => {
   const view = show(<StrictMode><Page /></StrictMode>);
   await waitFor(() => expect(calls.requests.length).toBeGreaterThan(0));
@@ -293,10 +307,12 @@ it('reveals all received results on the first Show more and resumes both sources
   expect(rows()).toEqual(['first', 'second', 'third']);
 });
 it('aborts the old search on a keystroke, debounces words, and asks meaning after a pause or immediately on Enter', async () => {
+  vi.useFakeTimers({shouldAdvanceTime: true});
   await start(); const field = screen.getByRole('textbox', {name: i18n.t('search.field.label')});
   fireEvent.change(field, {target: {value: 'rollback'}}); expect(calls.requests[0]?.signal.aborted).toBe(true);
   expect(calls.requests).toHaveLength(1);
-  await waitFor(() => expect(calls.requests.length).toBe(2)); expect(calls.requests[1]?.immediate).toBe(false);
+  await act(async () => { await vi.advanceTimersByTimeAsync(401); });
+  expect(calls.requests).toHaveLength(2); expect(calls.requests[1]?.immediate).toBe(false);
   fireEvent.submit(screen.getByRole('search')); await waitFor(() => expect(calls.requests.at(-1)?.immediate).toBe(true));
 });
 it('sends every filter in the one search request', async () => {
