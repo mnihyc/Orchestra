@@ -181,17 +181,47 @@ $$;
 
 -- Native work keeps its real helper membership and a separate requesting cap scope.
 -- This is a factual journal association, never current authority or permission.
-CREATE FUNCTION usage_work_scope(input uuid) RETURNS TABLE(node_id uuid,purpose text)
+CREATE TABLE delegated_program_work (
+    id uuid PRIMARY KEY,
+    request_id uuid NOT NULL,
+    source_answer_id uuid REFERENCES thread_tool_calls(answer_id) ON DELETE SET NULL,
+    attempt_id uuid NOT NULL,
+    helper_id uuid NOT NULL UNIQUE,
+    actor_id uuid NOT NULL,
+    person_id uuid,
+    request_node_id uuid NOT NULL,
+    purpose text NOT NULL CHECK (length(purpose)>0),
+    backend jsonb NOT NULL CHECK (jsonb_typeof(backend)='object'),
+    record jsonb NOT NULL CHECK (jsonb_typeof(record)='object'),
+    initial_input_id uuid UNIQUE,
+    idle_close_command_id uuid,
+    created_at timestamptz NOT NULL,
+    deadline_at timestamptz NOT NULL,
+    UNIQUE(request_id,attempt_id),
+    CHECK (source_answer_id IS NULL OR source_answer_id=request_id),
+    CHECK (helper_id<>request_node_id),
+    CHECK (deadline_at>created_at)
+);
+CREATE INDEX delegated_program_work_source ON delegated_program_work(source_answer_id)
+    WHERE source_answer_id IS NOT NULL;
+
+-- A generated initial conversation is factual execution activity, not another automatic target.
+-- Any later independent input makes this an ordinary conversation again.
+CREATE FUNCTION delegated_execution_only(thread uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS(SELECT 1 FROM delegated_program_work w
+        WHERE w.helper_id=thread AND w.initial_input_id IS NOT NULL
+          AND NOT EXISTS(SELECT 1 FROM thread_inputs i WHERE i.thread_id=thread AND i.id<>w.initial_input_id))
+$$;
+
+CREATE FUNCTION usage_work_scope(input uuid) RETURNS TABLE(node_id uuid,purpose text,person_id uuid)
     LANGUAGE sql STABLE AS $$
-    SELECT p.thread_id,p.plan->COALESCE(i.submission_authority#>>'{capability_parent,slot}','delegated_capability')->>'capability'
-      FROM thread_inputs i JOIN thread_tool_calls p
-        ON p.answer_id=(i.submission_authority#>>'{capability_parent,answer}')::uuid
+    SELECT w.request_node_id,w.purpose,w.person_id
+      FROM thread_inputs i JOIN delegated_program_work w
+        ON w.id=(i.submission_authority#>>'{capability_parent,work}')::uuid
      WHERE i.id=input
        AND i.submission_authority#>>'{capability_parent,helper}'=i.thread_id::text
-       AND p.plan->COALESCE(i.submission_authority#>>'{capability_parent,slot}','delegated_capability')->>'helper'=i.thread_id::text
-       AND p.plan->COALESCE(i.submission_authority#>>'{capability_parent,slot}','delegated_capability')->>'actor'=i.author_id::text
-       AND p.thread_id<>i.thread_id
-       AND COALESCE(p.plan->COALESCE(i.submission_authority#>>'{capability_parent,slot}','delegated_capability')->>'capability','')<>''
+       AND w.initial_input_id=i.id AND w.helper_id=i.thread_id AND w.actor_id=i.author_id
+       AND w.request_node_id<>i.thread_id
 $$;
 
 CREATE FUNCTION usage_turn_purpose(turn uuid) RETURNS text LANGUAGE sql STABLE AS $$

@@ -3,16 +3,23 @@ import { cleanup, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as References from '@/api/references';
+import type * as Resources from '@/api/resources';
+import { ApiError } from '@/api/client';
 import type { TypedReference } from '@/features/people/references';
 import { CapabilityHelper } from '@/features/timeline/tools/CapabilityHelper';
 import { CapabilityFailure } from '@/features/timeline/tools/CapabilityFailure';
-import type { ReferencePreview } from '@/generated/api-types';
+import type { Provider, ReferencePreview } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { ADA } from '../doubles/thread-scenes';
 import { ACME } from '../doubles/fixtures';
 import { show } from './support';
+import { planProvider } from '../unit/provider-plan-fixtures';
 
-const fixture = vi.hoisted(() => ({ preview: null as ReferencePreview | null }));
+const fixture = vi.hoisted(() => ({ preview: null as ReferencePreview | null, plan: vi.fn<() => Promise<Provider>>() }));
+vi.mock('@/api/resources', async (load) => ({
+  ...await load<typeof Resources>(),
+  providerQuery: (id: string) => ({ queryKey: ['helper-plan', id], queryFn: fixture.plan, retry: false }),
+}));
 vi.mock('@/api/references', async (load) => ({
   ...await load<typeof References>(),
   referencePreviewQuery: (reference: TypedReference) => ({
@@ -26,6 +33,8 @@ vi.mock('@/api/references', async (load) => ({
 }));
 
 beforeEach(() => {
+  fixture.plan.mockReset();
+  fixture.plan.mockResolvedValue(planProvider());
   fixture.preview = { kind: 'node', id: ACME.depsThread, node_kind: 'thread', title: 'Readable helper', description: 'Current helper description',
     place: null, updated_at: null, updated_by: null, part: null, file: null };
 });
@@ -116,4 +125,45 @@ it('does not turn incomplete or unrelated tool data into a reported failure', ()
     expect(view.queryByRole('alert')).not.toBeInTheDocument();
     view.unmount();
   }
+});
+
+
+it.each(['en', 'zh-CN'] as const)('opens current subscription facts on request without another paid call in %s', async (locale) => {
+  await setLocale(locale);
+  const data = result();
+  const provider = planProvider();
+  show(<CapabilityHelper result={{ ...data, helper: { ...data.helper, provider_id: provider.id } }} />);
+  expect(fixture.plan).not.toHaveBeenCalled();
+  await userEvent.setup().click(screen.getByText(i18n.t('timeline.capabilitySubscription')));
+  expect(await screen.findByRole('meter', { name: 'Weekly window (Fable)' })).toHaveAttribute('aria-valuenow', '81');
+  expect(screen.getByRole('link', { name: provider.name })).toHaveAttribute('href', `/resources/providers/${provider.id}`);
+  expect(document.querySelector(`time[datetime="${provider.facts.windows[1]!.resets_at}"]`)).not.toBeNull();
+  expect(fixture.plan).toHaveBeenCalledTimes(1);
+});
+
+it.each(['en', 'zh-CN'] as const)('keeps unreadable subscription facts hidden from a result viewer in %s', async (locale) => {
+  await setLocale(locale);
+  fixture.plan.mockRejectedValue(new ApiError({ type: 'orch:error:authz.denied', code: 'authz.denied', title: '', detail: '', status: 403, request_id: '' }, null));
+  const data = result();
+  show(<CapabilityHelper result={{ ...data, helper: { ...data.helper, provider_id: 'private-sign-in' } }} />);
+  await userEvent.setup().click(screen.getByText(i18n.t('timeline.capabilitySubscription')));
+  expect(await screen.findByText(i18n.t('providerPlan.roomHidden'))).toBeVisible();
+  expect(screen.queryByRole('meter')).not.toBeInTheDocument();
+  expect(screen.queryByText('Team Pro')).not.toBeInTheDocument();
+});
+
+it.each(['en', 'zh-CN'] as const)('leaves unreported subscription use unknown rather than free in %s', async (locale) => {
+  await setLocale(locale);
+  const provider = planProvider();
+  provider.facts.windows = [];
+  provider.facts.balances = [];
+  provider.facts_state.windows = 'not_read_yet';
+  provider.facts_state.balances = 'not_read_yet';
+  fixture.plan.mockResolvedValue(provider);
+  const data = result();
+  show(<CapabilityHelper result={{ ...data, helper: { ...data.helper, provider_id: provider.id } }} />);
+  await userEvent.setup().click(screen.getByText(i18n.t('timeline.capabilitySubscription')));
+  expect(await screen.findByText(i18n.t('providerPlan.notReported'))).toBeVisible();
+  expect(screen.queryByRole('meter')).not.toBeInTheDocument();
+  expect(screen.queryByText(/0%|free|免费/i)).not.toBeInTheDocument();
 });

@@ -218,6 +218,10 @@ impl Engine {
             return Ok(());
         };
         let declarations = sources.capabilities().declarations();
+        snapshot.context.executor_support.insert(
+            "program-session".into(),
+            capability_service::delegation::execution_support(),
+        );
         let work = sqlx::query_scalar::<_,Id>("SELECT t.input_id FROM threads h JOIN turns t ON t.id=h.current_turn_id WHERE h.node_id=$1")
             .bind(reader.place).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?;
         if let Some(input) = work
@@ -257,12 +261,11 @@ impl Engine {
                     .context
                     .backends
                     .insert(id.clone(), selected.reference.clone());
-                let native_state = capability_service::delegation::native_state(
+                let native_state = capability_service::delegation::backend_state(
                     conn,
                     &sources,
-                    reference.provider,
-                    &reference.offering,
                     id,
+                    &selected.reference,
                 )
                 .await?;
                 let native_available = native_state.is_ok();

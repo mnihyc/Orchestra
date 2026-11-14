@@ -158,19 +158,37 @@ async fn document(s: &Scene, title: &str, markdown: &str) -> Id {
         .id
 }
 
-/// Turns of the indexer until the org's index stands as `state`, or the patience runs out.
+/// Turns of the indexer until the org's index stands as `state`, or the patience runs out. For a state that
+/// the index was not in already: after an act that leaves the index standing as it stood (idle, say), use
+/// [`index_where`] and wait for what the act changed.
 async fn index_until(s: &Scene, state: &str) -> orch_engine::semantic::state::OrgState {
+    index_where(s, state, |_| true).await
+}
+
+/// Turns of the indexer until the org's index stands as `state` and `taken_up` says that the change just made
+/// has been taken up, or the patience runs out.
+///
+/// The standing alone does not say that. The engine's own supervisor takes a turn of the indexer beside the
+/// test's, and the turn that finds the org's claim held does nothing: the index then still stands as it did
+/// before the act ("idle", with the length it had), and a wait for "idle" returns at once with that. Nothing in
+/// the index counts its turns, so a wait for a change waits for the change: the length, the generation, the
+/// provider or the probes that the act is to cause.
+async fn index_where(
+    s: &Scene,
+    state: &str,
+    taken_up: impl Fn(&orch_engine::semantic::state::OrgState) -> bool,
+) -> orch_engine::semantic::state::OrgState {
     let org = s.tree.org.base.id;
     for _ in 0..40 {
         s.rig.engine.keep_indexing().await.unwrap();
         let now = s.rig.engine.semantic_state(org).await.unwrap();
-        if now.state == state {
+        if now.state == state && taken_up(&now) {
             return now;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     let now = s.rig.engine.semantic_state(org).await.unwrap();
-    panic!("the index never stood as {state}: {now:?}");
+    panic!("the index never stood as {state} with the change taken up: {now:?}");
 }
 
 /// Whether the test database can keep vectors; where it cannot, checks that nothing is asked and the reason is said.
@@ -392,7 +410,14 @@ async fn a_new_model_builds_a_new_generation_and_the_same_model_elsewhere_or_sho
     // The same model elsewhere: the probe texts agree, the generation moves, nothing is made again.
     let before = seen.lock().unwrap().len();
     name(&s, elsewhere, "served-a", 4).await;
-    let moved = index_until(&s, "idle").await.active.unwrap();
+    let moved = index_where(&s, "idle", |now| {
+        now.active
+            .as_ref()
+            .is_some_and(|active| active.provider_id == elsewhere)
+    })
+    .await
+    .active
+    .unwrap();
     assert_eq!(moved.id, first.id);
     assert_eq!(moved.provider_id, elsewhere);
     assert_eq!(
@@ -414,7 +439,11 @@ async fn a_new_model_builds_a_new_generation_and_the_same_model_elsewhere_or_sho
         "an unchecked endpoint is never compared with stored vectors"
     );
     let before = seen.lock().unwrap().len();
-    let checked = index_until(&s, "idle").await.active.unwrap();
+    let probed = Arc::clone(&seen);
+    let checked = index_where(&s, "idle", |_| probed.lock().unwrap().len() > before)
+        .await
+        .active
+        .unwrap();
     assert_eq!(
         checked.id, first.id,
         "the same model at the edited endpoint reuses its generation"
@@ -433,7 +462,14 @@ async fn a_new_model_builds_a_new_generation_and_the_same_model_elsewhere_or_sho
     // Shorter vectors of the same model: cut in place, the index made anew, nothing made again.
     let before = seen.lock().unwrap().len();
     name(&s, elsewhere, "served-a", 2).await;
-    let shorter = index_until(&s, "idle").await.active.unwrap();
+    let shorter = index_where(&s, "idle", |now| {
+        now.active
+            .as_ref()
+            .is_some_and(|active| active.dimensions == Some(2))
+    })
+    .await
+    .active
+    .unwrap();
     assert_eq!(shorter.id, first.id);
     assert_eq!(shorter.dimensions, Some(2));
     assert_eq!(seen.lock().unwrap().len(), before + 1);
@@ -466,7 +502,14 @@ async fn a_new_model_builds_a_new_generation_and_the_same_model_elsewhere_or_sho
     // Another model, with room for both: a new generation is built and then answers; the old one goes.
     let before = seen.lock().unwrap().len();
     name(&s, provider, "embed-b", 2).await;
-    let rebuilt = index_until(&s, "idle").await.active.unwrap();
+    let rebuilt = index_where(&s, "idle", |now| {
+        now.active
+            .as_ref()
+            .is_some_and(|active| active.model_name == "embed-b")
+    })
+    .await
+    .active
+    .unwrap();
     assert_ne!(rebuilt.id, first.id);
     assert_eq!(rebuilt.model_name, "embed-b");
     let made: usize = seen.lock().unwrap()[before..]
@@ -506,7 +549,14 @@ async fn a_new_model_builds_a_new_generation_and_the_same_model_elsewhere_or_sho
     );
     // Rebuilding in place removes the present generation; a new one is built where it was.
     s.rig.engine.semantic_rebuild_in_place(org).await.unwrap();
-    let rebuilt_again = index_until(&s, "idle").await.active.unwrap();
+    let rebuilt_again = index_where(&s, "idle", |now| {
+        now.active
+            .as_ref()
+            .is_some_and(|active| active.model_name == "embed-a")
+    })
+    .await
+    .active
+    .unwrap();
     assert_eq!(rebuilt_again.model_name, "embed-a");
     assert_ne!(rebuilt_again.id, rebuilt.id);
 }
@@ -593,7 +643,8 @@ async fn a_new_chunk_size_keeps_the_old_layout_answering_until_the_replacement_i
         "vectors with the former prompt title are stale immediately"
     );
     let before = seen.lock().unwrap().len();
-    index_until(&s, "idle").await;
+    let remade = Arc::clone(&seen);
+    index_where(&s, "idle", |_| remade.lock().unwrap().len() > before).await;
     assert!(
         seen.lock().unwrap()[before..]
             .iter()

@@ -359,6 +359,13 @@
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "generation.conversation",
+        "result": "generation.answer",
+        "streaming": true,
+        "read_tools": true,
+        "confined_tools": true
       }
     },
     "image_input.model": {
@@ -488,6 +495,10 @@
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "image_input.request",
+        "result": "image_input.result"
       }
     },
     "web_search.model": {
@@ -594,6 +605,10 @@
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "web_search.request",
+        "result": "web_search.result"
       }
     },
     "page_fetch.model": {
@@ -700,6 +715,10 @@
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "page_fetch.request",
+        "result": "page_fetch.result"
       }
     },
     "image_generation.model": {
@@ -806,6 +825,10 @@
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "image.request",
+        "result": "image.generated"
       }
     },
     "embeddings.model": {
@@ -909,6 +932,10 @@
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "embeddings.request",
+        "result": "embeddings.result"
       }
     },
     "provider_facts.model": {
@@ -1012,6 +1039,10 @@
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "provider_facts.request",
+        "result": "provider_facts.result"
       }
     },
     "summary.model": {
@@ -1115,6 +1146,11 @@
       "text": {
         "en": "Delegated session",
         "zh-CN": "委派会话"
+      },
+      "execution": {
+        "input": "summary.request",
+        "result": "summary.result",
+        "confined_tools": true
       }
     }
   }

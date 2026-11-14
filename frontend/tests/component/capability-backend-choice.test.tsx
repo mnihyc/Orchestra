@@ -7,7 +7,7 @@ import type * as Client from '@/api/client';
 import { ApiError } from '@/api/client';
 import type { CapabilityBackendCandidate } from '@/generated/api-types';
 import { CapabilityBackendChoice, CapabilityBackendSummary } from '@/features/settings/CapabilityBackendChoice';
-import { changeBackend, selectedBackend } from '@/features/settings/capabilityBackendValue';
+import { backendIdentity, changeBackend, selectedBackend } from '@/features/settings/capabilityBackendValue';
 import { i18n, setLocale } from '@/i18n';
 import { id, me, userRef } from '../doubles/fixtures';
 import { inventoryRow } from '../doubles/everything-row';
@@ -48,6 +48,26 @@ beforeEach(() => {
   calls.choices.mockImplementation((query) => Promise.resolve({ items: query.offering === undefined ? [candidate(false, 'Free model'), candidate(true)] : [candidate(true)], next_cursor: null }));
 });
 afterEach(async () => { cleanup(); await setLocale('en'); });
+
+it('keeps two placements of the same model as distinct choices', () => {
+  const first = { ...backend, config: { environment_id: 'first', options: { a: 1, b: 2 } } };
+  const reordered = { config: { options: { b: 2, a: 1 }, environment_id: 'first' }, offering: { offering: 'native-model', provider: PROVIDER }, route: backend.route };
+  expect(backendIdentity(first)).toBe(backendIdentity(reordered));
+  expect(backendIdentity(first)).not.toBe(backendIdentity({ ...backend, config: { environment_id: 'second', options: { a: 1, b: 2 } } }));
+  expect(backendIdentity(first)).not.toBe(backendIdentity({ ...first, route: 'image_generation.service-model' }));
+});
+
+it('keeps the exact stored placement when the same model is chosen again', async () => {
+  const stored = { ...backend, config: { environment_id: HOME, helper_topic_id: id(93, 13) } };
+  show(<Draw initial={stored} />);
+  const user = userEvent.setup();
+  const route = screen.getByRole('combobox', { name: i18n.t('capabilityBackend.route') });
+  const name = i18n.t('capabilityBackend.delegated', { program: 'Codex on ChatGPT' });
+  await waitFor(() => expect(route).toHaveValue(`${name} · Image model`));
+  await user.click(route);
+  await user.click(await screen.findByRole('option', { name: /Image model/ }));
+  expect(calls.changed).toHaveBeenCalledExactlyOnceWith(stored);
+});
 
 it.each([
   ['en', ['Web search provider', 'Web search route', 'Page fetch provider', 'Page fetch route']],

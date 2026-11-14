@@ -606,7 +606,7 @@ pub async fn topic_threads(
 ) -> Result<Vec<Id>, DbError> {
     Ok(sqlx::query_scalar(
         "SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id \
-         WHERE $1=ANY(n.path) AND t.side_of IS NULL AND ($2::uuid IS NULL OR t.node_id>$2) \
+         WHERE $1=ANY(n.path) AND t.side_of IS NULL AND NOT delegated_execution_only(t.node_id) AND ($2::uuid IS NULL OR t.node_id>$2) \
          AND NOT EXISTS(SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND (a.deleted_at IS NOT NULL OR a.archived_at IS NOT NULL)) \
          ORDER BY t.node_id LIMIT $3"
     ).bind(topic).bind(after).bind(limit).fetch_all(conn).await?)

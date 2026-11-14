@@ -12,7 +12,7 @@ use orch_summarizer_contract::descriptor::SummaryField;
 use orch_summarizer_contract::summarizer::{
     SummarizeError, Summarizer, SummaryLimits, SummaryRequest,
 };
-use orch_summarizer_model::{Complete, Model};
+use orch_summarizer_model::{Complete, CompletionRequest, Model};
 use orch_types::{Id, new_id};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -27,9 +27,9 @@ impl Complete for Port {
     async fn complete(
         &self,
         _node: Id,
-        request: ProviderComplete,
+        request: CompletionRequest,
     ) -> Result<ProviderCompleteResult, SummarizeError> {
-        self.requests.lock().unwrap().push(request);
+        self.requests.lock().unwrap().push(request.into_api()?);
         Ok(ProviderCompleteResult {
             timing: Default::default(),
             text: self.text.clone(),
