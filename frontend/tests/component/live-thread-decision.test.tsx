@@ -6,7 +6,7 @@ import type * as ApprovalsApi from '@/api/approvals';
 import { ApprovalCard } from '@/features/timeline/items/Approval';
 import { StateFact } from '@/features/thread/Header';
 import { StatusLine } from '@/features/timeline/StatusLine';
-import { WorkFold } from '@/features/timeline/Steps';
+import { WorkGroup } from '@/features/timeline/Steps';
 import { TurnFooter } from '@/features/timeline/TurnFooter';
 import { NOT_PICKING, TimelineContextValue, type TimelineContext } from '@/features/timeline/context';
 import type { Approval, Item, Thread } from '@/generated/api-types';
@@ -28,15 +28,15 @@ const at = (ms: number) => new Date(START + ms).toISOString();
 function liveElapsed() {
   const line = document.querySelector<HTMLElement>('[data-status-line]');
   if (line === null) throw new Error('A working turn must have its live line');
-  expect(line).toHaveTextContent(i18n.t('statusItems.generating'));
+  expect(line).toHaveTextContent(i18n.t('thread.now.working'));
   return within(line).getByRole('button', { name: i18n.t('statusItems.items.elapsed') });
 }
-const context: TimelineContext = { threadId: THREAD, threadName: 'Check the redirect', detail: 'summary', recent: new Set(), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: THREAD, threadName: 'Check the redirect', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: true, canManage: true, live: true, lit: null, selection: NOT_PICKING };
 const owner = userRef(me(1, 'ada', 'Ada'));
 const decider = userRef(me(2, 'grace', 'Grace'));
 const thread = { id: THREAD, name: context.threadName, seq: 3, revision: 1, current_turn_id: 'turn-1', state: 'waiting_approval', display: display('waiting_approval', { seq: 3 }), archived: false, lock: null, blocked: null,
-  side_of: null, binding: null, owner, pending_approvals: 1, access: { permissions: ['thread.view', 'thread.interact', 'thread.manage'] } } as Thread;
+  side_of: null, binding: null, owner, pending_approvals: 1, environment: null, environment_permissions: [], access: { permissions: ['thread.view', 'thread.interact', 'thread.manage'] } } as unknown as Thread;
 
 function question(input: boolean): Approval {
   return harnessApproval('ask-1', { threadId: THREAD, itemId: 'request-item', requester: owner, title: input ? 'Choose scope' : 'Run checks',
@@ -52,13 +52,14 @@ function item(approval: Approval, status: Item['status'] = 'pending'): Extract<I
 function View() {
   const current = useThreadPart(THREAD, (view) => view.thread);
   const request = useThreadPart(THREAD, (view) => view.items.get('request-item'));
+  const running = useThreadPart(THREAD, (view) => view.turns.get('turn-1')?.state === 'running');
   if (current === null || request?.kind !== 'approval') return null;
   return <TimelineContextValue.Provider value={context}>
     <header data-testid="thread-state"><StateFact thread={current} compact /></header>
     <aside data-testid="state-clock"><StateFact thread={current} /></aside>
     <ApprovalCard item={request} />
-    <StatusLine />
-    <WorkFold turnId="turn-1" ids={['check-1']} open={false} />
+    <StatusLine threadId={THREAD} />
+    <WorkGroup rowKey="work:check-1" turnId="turn-1" ids={['check-1']} last live={running} only />
     <TurnFooter turnId="turn-1" />
   </TimelineContextValue.Provider>;
 }
@@ -85,11 +86,15 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     const clock = (ms: number) => formatSpan(ms, { locale: language, timeZone: 'UTC' });
     expect(within(screen.getByTestId('thread-state')).getByText(i18n.t('composer.row.waitingForYou'))).toBeVisible();
-    expect(document.querySelector('[data-status-line]')).toHaveTextContent(i18n.t('timeline.status.waitingApproval', { time: clock(600_000) }));
-    expect(document.querySelector('[data-fold="turn-1"]')).toHaveTextContent(clock(7_000));
+    // The line names the request that waits for a person, and its one clock is the turn's working time, which the wait does not run.
+    expect(document.querySelector('[data-status-line]')).toHaveTextContent(i18n.t('thread.now.needsInput'));
+    expect(document.querySelector('[data-status-item="elapsed"]')).toHaveTextContent(clock(7_000));
+    // The work line of a turn that is still at it names no clock of its own: the live line has the one.
+    expect(document.querySelector('[data-fold="turn-1"]')).toHaveTextContent(i18n.t('timeline.group.working'));
+    expect(document.querySelector('[data-fold="turn-1"]')).not.toHaveTextContent(clock(7_000));
     expect(document.querySelector('[data-fold="turn-1"] .animate-spin')).toBeNull();
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-    expect(document.querySelector('[data-fold="turn-1"]')).toHaveTextContent(clock(7_000));
+    expect(document.querySelector('[data-fold="turn-1"]')).not.toHaveTextContent(clock(67_000));
     const resolved: Approval = { ...pending, state: 'approved', can_decide: false, decided_by: decider, decided_at: at(667_000),
       decision: input ? { answers: { scope: ['Login'] } } : { option_id: 'allow_once' } };
     // This is the receiving page: it performs no POST and changes only from the ordinary live rows.
@@ -111,8 +116,9 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
       turns: [{ ...started, state: 'completed', completed_at: at(672_000), waiting_since: null, waited_ms: 660_000, seq_updated: 5 }] }));
     expect(within(screen.getByTestId('thread-state')).getByText(i18n.t('state.idle'))).toBeVisible();
     expect(document.querySelector('[data-status-line]')).toBeNull();
-    expect(document.querySelector('[data-footer="turn-1"]')).toHaveTextContent(clock(12_000));
-    expect(document.querySelector('[data-fold="turn-1"]')).toHaveTextContent(clock(12_000));
+    // Once the turn is over its line says how long it worked, without the time spent waiting for a person.
+    expect(document.querySelector('[data-fold="turn-1"]')).toHaveTextContent(i18n.t('timeline.group.workedFor', { time: clock(12_000) }));
+    expect(document.querySelector('[data-footer="turn-1"]')).not.toHaveTextContent(clock(12_000));
     expect(calls.read).not.toHaveBeenCalled(); expect(calls.decide).not.toHaveBeenCalled();
   });
 });

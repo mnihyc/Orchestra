@@ -1,10 +1,9 @@
-/** Duration, the model by its display name and effort, recorded usage, and what the turn changed.
+/** What stands under a turn that is over: how it ended, what it ran with where that changed, the files it changed, and its acts.
  *
- * The end of a turn, in small quiet type: how long it took, the tokens it used, the model by its
- * display name with its effort and, where it ran with them, its speed, its access program and its context,
- * and how many files it changed. A turn that failed or was stopped says
- * so (and who stopped it), and for whoever drives the thread offers to try it again. "Select this turn"
- * picks every item of it at once.
+ * Its duration is on the line of its work and its tokens are under the pointer on its answer's toolbar. A turn that
+ * failed says why, with Try again, and for an answer cut short, Continue; one that was stopped says by whom where no work
+ * line does; a model or effort that changed stands in small quiet type; the changed files are one card with Review. A
+ * turn with no answer carries its toolbar here. "Select this turn" picks every item of it at once.
  */
 import { useMutation } from '@tanstack/react-query';
 import { memo, type ReactNode } from 'react';
@@ -14,16 +13,11 @@ import { useShallow } from 'zustand/react/shallow';
 import { sendInput } from '@/api/threads';
 import { hasParams, RanWith, effectiveTurnModel, effectiveTurnModelName } from '@/features/composer/RanWith';
 import { effortDisplayName, modelDisplayName } from '@/features/models/names';
-import { useTimelineContext } from '@/features/timeline/context';
+import { useConversationTurn, useTimelineContext } from '@/features/timeline/context';
 import { TurnFiles, useTurnChanges } from '@/features/timeline/TurnFiles';
-import { TurnActions } from '@/features/timeline/TurnActions';
-import { openTurnReview } from '@/features/inspector/reviewTarget';
-import { turnActiveMs } from '@/features/timeline/turnTime';
-import { TurnCost } from '@/features/usage/context/TurnCost';
-import { useFormatContext } from '@/lib/appearance';
+import { TurnActions, useTurnScope } from '@/features/timeline/TurnActions';
 import { turnPasteSource } from '@/lib/turnPasteSource';
 import { newActKey } from '@/lib/requests';
-import { formatSpan } from '@/lib/time';
 import { threadWriter, useThreadPart } from '@/realtime/stores/thread';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
 import type { Turn, TurnLimit } from '@/generated/api-types';
@@ -96,80 +90,54 @@ function TurnFailure({ threadId, turn, canInteract, live, manual, attempts, owne
   );
 }
 
-function TurnFooterView({ turnId,inputItemId }: { turnId: string;inputItemId?:string }) {
+function TurnFooterView({ turnId, inputItemId, answered = false, lined = false }: { turnId: string; inputItemId?: string | undefined; answered?: boolean; lined?: boolean }) {
   const { t } = useTranslation();
-  const format = useFormatContext();
-  const { threadId, canInteract, live, detail, inspection } = useTimelineContext();
-  const turn = useThreadPart(threadId, (view) => view.turns.get(turnId));
+  const { threadId, canInteract, live, inspection, conversation } = useTimelineContext();
+  const turn = useConversationTurn(turnId);
   const manual = useThreadPart(threadId, (view) => turn !== undefined && manualFailureActions(view, turn));
   const group = useThreadPart(threadId, useShallow((view) => turn === undefined ? { owner: turnId, attempts: 1 } : failureGroup(view, turn)));
   const previous = useThreadPart(threadId, (view) => {
     if (turn === undefined) return undefined;
     let before: Turn | undefined;
-    for (const candidate of view.turns.values()) {
+    for (const candidate of (conversation?.turns ?? view.turns).values()) {
       if (candidate.ordinal < turn.ordinal && (before === undefined || candidate.ordinal > before.ordinal)) before = candidate;
     }
     return before;
   });
-  // "Select this turn": every item of it that can be picked, in the order of the conversation.
-  const ofTurn = useThreadPart(
-    threadId,
-    useShallow((view) => view.order.filter((id) => view.items.get(id)?.turn_id === turnId)),
-  );
-  const records = useThreadPart(threadId, useShallow((view) => [...new Set(view.order.flatMap((id) => {
-    const item = view.items.get(id);
-    return item?.turn_id === turnId && item.kind === 'marker' && item.payload.marker === 'orch_context' ? [item.payload.data.model_input_id] : [];
-  }))]));
+  const scope = useTurnScope(threadId, turnId);
   const changed = useTurnChanges(threadId, turnId);
   if (turn === undefined) return null;
-  const took = turn.completed_at === null ? null : turnActiveMs(turn, Date.parse(turn.completed_at));
-  const usage = turn.usage;
-  const parts: ReactNode[] = [];
-  if (turn.state === 'failed') parts.push(<span key="failed">{t('timeline.footer.failed')}</span>);
-  if (turn.state === 'interrupted') {
-    parts.push(<span key="interrupted">{turn.interrupted_by === null ? t('timeline.footer.interrupted') : t('timeline.footer.interruptedBy', { name: turn.interrupted_by.display_name })}</span>);
+  // What stands under a turn: how it ended where no work line says so, what it ran with where that changed, the files it changed, and its acts where it has no answer to carry them.
+  const facts: ReactNode[] = [];
+  if (conversation?.stream === undefined && turn.state === 'failed' && !lined) facts.push(<span key="failed">{t('timeline.footer.failed')}</span>);
+  if (conversation?.stream === undefined && turn.state === 'interrupted' && !lined) {
+    facts.push(<span key="interrupted">{turn.interrupted_by === null ? t('timeline.footer.interrupted') : t('timeline.footer.interruptedBy', { name: turn.interrupted_by.display_name })}</span>);
   }
-  if (took !== null && took > 0) parts.push(<span key="took" title={t('timeline.footer.duration', { time: formatSpan(took, format) })}>{formatSpan(took, format)}</span>);
   const cleanup = turn.command_cleanup ?? null;
-  if (cleanup !== null) parts.push(<span key="cleanup">{t('running.cleanup', { ended: cleanup.ended, still: cleanup.still_running, unknown: cleanup.unknown })}</span>);
-  if (usage !== null && usage.total_tokens > 0) {
-    // The figure is what was used, with a thin bar of what it was made of; the numbers are under the pointer
-    // and the keyboard, and one click opens the turn's details.
-    parts.push(<TurnCost key="usage" threadId={threadId} turn={turn} />);
-  }
-  const effective=effectiveTurnModel(turn), previousModel=previous===undefined ? undefined : effectiveTurnModel(previous);
-  const rerouted=effective!==turn.model;
-  const modelName=modelDisplayName(effectiveTurnModelName(turn),t);
-  const model=turn.effort===null ? modelName : `${modelName} (${effortDisplayName(turn.effort,t)})`;
-  if (rerouted || previous !== undefined && previousModel !== effective) parts.push(
+  if (cleanup !== null) facts.push(<span key="cleanup">{t('running.cleanup', { ended: cleanup.ended, still: cleanup.still_running, unknown: cleanup.unknown })}</span>);
+  const effective = effectiveTurnModel(turn), previousModel = previous === undefined ? undefined : effectiveTurnModel(previous);
+  const rerouted = effective !== turn.model;
+  const modelName = modelDisplayName(effectiveTurnModelName(turn), t);
+  const model = turn.effort === null ? modelName : `${modelName} (${effortDisplayName(turn.effort, t)})`;
+  if (rerouted || previous !== undefined && previousModel !== effective) facts.push(
     <Tooltip key="model" content={model}>
       <span>
         {model}
       </span>
     </Tooltip>,
   );
-  if (!rerouted && previous !== undefined && previousModel === effective && previous.effort !== turn.effort) parts.push(<span key="effort">{turn.effort === null ? t('timeline.footer.effortDefault') : t('timeline.footer.effort', { effort: effortDisplayName(turn.effort, t) })}</span>);
+  if (!rerouted && previous !== undefined && previousModel === effective && previous.effort !== turn.effort) facts.push(<span key="effort">{turn.effort === null ? t('timeline.footer.effortDefault') : t('timeline.footer.effort', { effort: effortDisplayName(turn.effort, t) })}</span>);
   const paramsChanged = hasParams(turn.params) && (rerouted || previous === undefined || JSON.stringify(previous.params) !== JSON.stringify(turn.params));
-  const files = changed.files.length;
-  const { added, removed } = changed;
-  if (files > 0) parts.push(<span key="changed" className="inline-flex flex-wrap items-center gap-1" data-turn-changes={turnId}>
-    {detail === 'summary' ? t('thread.viewModes.files', { count: files }) : t('timeline.footer.changed', { count: files, added, removed })}
-    {inspection === undefined && <><span aria-hidden>·</span><button type="button" className="rounded-sm underline underline-offset-2 hover:text-text" onClick={() => openTurnReview(threadId, turnId)}>{t('thread.turnFiles.review')}</button></>}
-  </span>);
   return (
-    <TurnActions turn={turn} ids={ofTurn} records={records} {...(inputItemId === undefined ? {} : { inputItemId })}>
-      {(actions) => <>
-    <TurnFailure threadId={threadId} turn={turn} canInteract={canInteract} live={live} manual={manual} attempts={group.attempts} owner={group.owner} inputItemId={inputItemId} />
-    <div className="group/turn flex min-h-(--control-sm) flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-subtle" data-footer={turnId}>
-      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1" data-turn-facts>
-      {parts}
-      {paramsChanged && <RanWith threadId={threadId} turn={turn} />}
-      </div>
-      {actions}
-      {detail !== 'summary' && <TurnFiles turn={turn} changes={changed} />}
+    <div className="flex min-w-0 flex-col gap-2" data-footer={turnId}>
+      <TurnFailure threadId={threadId} turn={turn} canInteract={canInteract} live={live} manual={manual} attempts={group.attempts} owner={group.owner} inputItemId={inputItemId} />
+      {(facts.length > 0 || paramsChanged) && <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-subtle" data-turn-facts>
+        {facts}
+        {paramsChanged && <RanWith threadId={threadId} turn={turn} />}
+      </div>}
+      <TurnFiles turn={turn} changes={changed} />
+      {(!answered || inspection !== undefined) && <TurnActions turn={turn} scope={scope} />}
     </div>
-    </>}
-    </TurnActions>
   );
 }
 

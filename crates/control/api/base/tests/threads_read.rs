@@ -31,7 +31,7 @@ fn text(words: &str) -> Vec<ContentPart> {
 }
 
 #[tokio::test]
-async fn goal_inputs_have_bounded_human_outline_titles_in_opening_and_older_pages() {
+async fn goal_inputs_have_bounded_human_titles_in_initial_and_older_outline_pages() {
     use orch_api_contract::threads::{
         OUTLINE_TITLE_CHARS, ThreadOpeningGet, ThreadOpeningGetQuery, ThreadOutlineGetQuery,
     };
@@ -87,9 +87,24 @@ async fn goal_inputs_have_bounded_human_outline_titles_in_opening_and_older_page
             .send()
             .await
             .ok();
+        assert!(
+            serde_json::to_value(&opening)
+                .unwrap()
+                .get("outline")
+                .is_none()
+        );
+        let initial_outline = scene
+            .rig
+            .world
+            .app
+            .call(ThreadOutlineGet, &[&thread])
+            .token(&reader.token)
+            .query(&ThreadOutlineGetQuery::default())
+            .send()
+            .await
+            .ok();
         assert_eq!(
-            opening
-                .outline
+            initial_outline
                 .entries
                 .iter()
                 .find(|entry| entry.item_id == item && entry.kind == OutlineKind::UserMessage),
@@ -264,7 +279,8 @@ async fn opening_carries_the_native_screen_projections_and_only_the_readers_own_
     );
     let opening = response.ok();
     assert_eq!(opening.sync.seq, opening.sync.thread.seq);
-    assert_eq!(opening.sync.seq, opening.outline.seq);
+    let wire = serde_json::to_value(&opening).unwrap();
+    assert!(wire.get("outline").is_none() && wire.get("settings").is_none());
     assert!(
         opening
             .sync
@@ -303,16 +319,50 @@ async fn opening_carries_the_native_screen_projections_and_only_the_readers_own_
             .ok()
     );
     assert_eq!(opening.draft, Some(saved));
-    assert_eq!(
-        opening.parameters,
-        Some(
-            app.call(ThreadParameterGet, &[&id])
-                .token(&scene.ada.token)
-                .send()
-                .await
-                .ok()
-        )
-    );
+    let parameters = app
+        .call(ThreadParameterGet, &[&id])
+        .token(&scene.ada.token)
+        .send()
+        .await
+        .ok();
+    let shown = opening
+        .parameters
+        .as_ref()
+        .expect("the reader sees the composer controls");
+    assert_eq!(shown.model.value, parameters.model.value);
+    assert_eq!(shown.model.source, parameters.model.source);
+    assert_eq!(shown.model.writable, parameters.model.writable);
+    assert!(shown.model.options_partial);
+    assert_eq!(shown.effort, parameters.effort);
+    assert_eq!(shown.parameters, parameters.parameters);
+    assert_eq!(shown.provider, parameters.provider);
+    assert_eq!(shown.agent, parameters.agent);
+    assert_eq!(shown.environment, parameters.environment);
+    assert_eq!(shown.composer, parameters.composer);
+    let selected = parameters
+        .model
+        .options
+        .iter()
+        .find(|option| Some(&option.model_name) == parameters.model.value.as_ref());
+    assert_eq!(shown.model.options.len(), usize::from(selected.is_some()));
+    if let Some(selected) = selected {
+        let current = &shown.model.options[0];
+        assert_eq!(current.model_name, selected.model_name);
+        assert_eq!(current.display_name, selected.display_name);
+        assert_eq!(
+            current.parameters.input_images,
+            selected.parameters.input_images
+        );
+        assert_eq!(
+            current.parameters.context_window,
+            selected.parameters.context_window
+        );
+        assert_eq!(
+            current.parameters.service_tiers,
+            selected.parameters.service_tiers
+        );
+        assert_eq!(current.allowed, selected.allowed);
+    }
     assert_eq!(
         opening.limits,
         Some(
@@ -324,23 +374,30 @@ async fn opening_carries_the_native_screen_projections_and_only_the_readers_own_
                 .ok()
         )
     );
+    let settings = app
+        .call(NodeSettingList, &[&id])
+        .token(&scene.ada.token)
+        .send()
+        .await
+        .ok();
+    assert!(!settings.is_empty());
     assert_eq!(
-        opening.settings,
-        app.call(NodeSettingList, &[&id])
-            .token(&scene.ada.token)
-            .send()
-            .await
-            .ok()
+        settings
+            .iter()
+            .find(|setting| setting.key == "agent.model")
+            .and_then(|setting| setting.value.as_ref())
+            .and_then(serde_json::Value::as_str),
+        shown.model.value.as_deref()
     );
-    assert_eq!(
-        opening.outline,
-        app.call(ThreadOutlineGet, &[&id])
-            .token(&scene.ada.token)
-            .query(&ThreadOutlineGetQuery::default())
-            .send()
-            .await
-            .ok()
-    );
+    let outline = app
+        .call(ThreadOutlineGet, &[&id])
+        .token(&scene.ada.token)
+        .query(&ThreadOutlineGetQuery::default())
+        .send()
+        .await
+        .ok();
+    assert!(outline.seq >= opening.sync.seq);
+    assert!(outline.entries.iter().all(|entry| entry.seq <= outline.seq));
     let other = app
         .call(ThreadOpeningGet, &[&id])
         .token(&scene.dan.token)
@@ -810,6 +867,272 @@ async fn command_printing(s: &Scene, thread: Id, output: serde_json::Value) -> I
     .await
     .unwrap();
     id
+}
+
+async fn outline_tool(s: &Scene, thread: Id, turn: Id, tool: serde_json::Value) -> Id {
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    let seq = orch_db::sequences::next(&mut conn, thread)
+        .await
+        .unwrap()
+        .unwrap();
+    let id = new_id();
+    let segment = s.rig.segment_of(thread).await;
+    sqlx::query("INSERT INTO items (id,thread_id,segment_id,turn_id,stream,kind,status,payload,seq_created,seq_updated)
+        VALUES ($1,$2,$3,$4,'main','tool_call','completed',$5,$6,$6)")
+        .bind(id).bind(thread).bind(segment).bind(turn)
+        .bind(json!({"tool":tool,"title":"Recorded work","started_at":"2026-10-08T14:00:00.000Z","duration_ms":5000,
+            "raw":{"name":"recorded-tool","input":{"inline":"{}","total_len":2,"truncated":false,"blob":null},"output":null,"is_error":false}}))
+        .bind(seq).execute(&mut *conn).await.unwrap();
+    id
+}
+
+#[tokio::test]
+async fn older_messages_are_searchable_by_sender_and_their_second_line_with_real_change_facts() {
+    use orch_api_contract::threads::{OutlineSelection, ThreadOutlineGetQuery};
+    let scene = Scene::new().await;
+    let thread = scene.thread().await.base.id;
+    scene
+        .exchange(
+            thread,
+            0,
+            &format!(
+                "First question\n{}\nA distinctive second-line needle",
+                "Long prompt context. ".repeat(2_000)
+            ),
+            "First answer",
+        )
+        .await;
+    let first_turn: Id =
+        sqlx::query_scalar("SELECT id FROM turns WHERE thread_id=$1 AND ordinal=1")
+            .bind(thread)
+            .fetch_one(scene.rig.db.pool())
+            .await
+            .unwrap();
+    outline_tool(&scene, thread, first_turn, json!({"kind":"file_change","changes":[{
+        "path":"src/redirect.rs","change":"modify","old_path":null,"diff":"+updated","added":7,"removed":2,"binary":false,"truncated":false
+    }]})).await;
+    let sent = scene
+        .say(
+            &scene.eve,
+            thread,
+            "Recent question",
+            Delivery::Queue,
+            "recent-question",
+        )
+        .await;
+    assert!(sent.status.is_success(), "{:?}", sent.body);
+    scene.rig.run_turn(thread, 1, "Recent answer").await;
+    scene.rig.wait_state(thread, "idle").await;
+    let newest = scene
+        .rig
+        .world
+        .app
+        .call(ThreadOutlineGet, &[&thread])
+        .token(&scene.cai.token)
+        .query(&ThreadOutlineGetQuery {
+            selection: Some(OutlineSelection::Messages),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert!(
+        newest.next_before.is_some(),
+        "older human messages remain pageable"
+    );
+    assert!(
+        newest
+            .entries
+            .iter()
+            .all(|entry| entry.kind == OutlineKind::UserMessage)
+    );
+    let older = scene
+        .rig
+        .world
+        .app
+        .call(ThreadOutlineGet, &[&thread])
+        .token(&scene.cai.token)
+        .query(&ThreadOutlineGetQuery {
+            selection: Some(OutlineSelection::Messages),
+            q: Some("second-line needle".into()),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    let message = older
+        .entries
+        .iter()
+        .find(|entry| entry.kind == OutlineKind::UserMessage)
+        .unwrap();
+    assert_eq!(message.title, "First question");
+    let facts = message.message.as_ref().unwrap();
+    assert_eq!(
+        facts.author.as_ref().map(|author| author.id),
+        Some(scene.ada.id())
+    );
+    assert_eq!((facts.added, facts.removed), (Some(7), Some(2)));
+    let sender = scene
+        .rig
+        .world
+        .app
+        .call(ThreadOutlineGet, &[&thread])
+        .token(&scene.cai.token)
+        .query(&ThreadOutlineGetQuery {
+            selection: Some(OutlineSelection::Messages),
+            q: Some("eve".into()),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(sender.entries.len(), 1);
+    assert_eq!(
+        sender.entries[0]
+            .message
+            .as_ref()
+            .and_then(|facts| facts.author.as_ref())
+            .map(|author| author.id),
+        Some(scene.eve.id())
+    );
+    let snapshot = new_id();
+    let segment = scene.rig.segment_of(thread).await;
+    let mut conn = scene.rig.db.acquire().await.unwrap();
+    let seq = orch_db::sequences::next(&mut conn, thread)
+        .await
+        .unwrap()
+        .unwrap();
+    let payload = json!({"marker":"harness_changed","data":{
+        "program":"Codex","change":"turn_diff","subject":null,"previous":{"state":"unsupported"},
+        "expected":{"state":"unsupported"},"value":{"changes":[{"path":"src/net.rs","old_path":null,"change":"modify",
+            "diff":"+net","added":4,"removed":1,"binary":false,"truncated":false}]},
+        "changed":true,"diverged":false,"next_turn":false,"turn_id":first_turn,"reported_at":"2026-10-08T14:00:00.000Z"}});
+    sqlx::query("INSERT INTO items(id,thread_id,segment_id,turn_id,stream,kind,status,payload,seq_created,seq_updated) VALUES($1,$2,$3,$4,'main','marker','completed',$5,$6,$6)")
+        .bind(snapshot).bind(thread).bind(segment).bind(first_turn).bind(payload).bind(seq)
+        .execute(&mut *conn).await.unwrap();
+    drop(conn);
+    for expected in [(4, 1), (0, 0)] {
+        if expected == (0, 0) {
+            let mut conn = scene.rig.db.acquire().await.unwrap();
+            let seq = orch_db::sequences::next(&mut conn, thread)
+                .await
+                .unwrap()
+                .unwrap();
+            sqlx::query("UPDATE items SET payload=jsonb_set(payload,'{data,value,changes}','[]'::jsonb),seq_updated=$2 WHERE id=$1")
+                .bind(snapshot).bind(seq).execute(&mut *conn).await.unwrap();
+        }
+        let page = scene
+            .rig
+            .world
+            .app
+            .call(ThreadOutlineGet, &[&thread])
+            .token(&scene.cai.token)
+            .query(&ThreadOutlineGetQuery {
+                selection: Some(OutlineSelection::Messages),
+                q: Some("second-line needle".into()),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        let facts = page
+            .entries
+            .iter()
+            .find(|entry| entry.kind == OutlineKind::UserMessage)
+            .and_then(|entry| entry.message.as_ref())
+            .expect("the older prompt keeps its native change facts");
+        assert_eq!(
+            (facts.added, facts.removed),
+            (Some(expected.0), Some(expected.1))
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_outline_uses_visible_answer_words_after_private_program_context() {
+    let scene = Scene::new().await;
+    let thread = scene.thread().await.base.id;
+    scene
+        .exchange(
+            thread,
+            0,
+            "Check the redirect",
+            "<orch>\nPrivate program context\n</orch>\nThe visible answer",
+        )
+        .await;
+    sqlx::query("UPDATE items SET search_text=NULL WHERE thread_id=$1 AND kind='agent_message'")
+        .bind(thread)
+        .execute(scene.rig.db.pool())
+        .await
+        .unwrap();
+    let outline = scene
+        .rig
+        .world
+        .app
+        .call(ThreadOutlineGet, &[&thread])
+        .token(&scene.cai.token)
+        .send()
+        .await
+        .ok();
+    let answer = outline
+        .entries
+        .iter()
+        .find(|entry| entry.kind == OutlineKind::AgentMessage)
+        .expect("the visible answer stays reachable");
+    assert_eq!(answer.title, "The visible answer");
+    assert!(
+        !serde_json::to_string(&outline)
+            .unwrap()
+            .contains("Private program context")
+    );
+}
+
+#[tokio::test]
+async fn earlier_subagents_stay_discoverable_without_reading_their_assigned_prompt_into_the_list() {
+    use orch_api_contract::threads::{OutlineSelection, SubagentState, ThreadOutlineGetQuery};
+    let scene = Scene::new().await;
+    let thread = scene.thread().await.base.id;
+    scene
+        .exchange(thread, 0, "Review the redirect", "Reviewed")
+        .await;
+    let turn: Id = sqlx::query_scalar("SELECT id FROM turns WHERE thread_id=$1 AND ordinal=1")
+        .bind(thread)
+        .fetch_one(scene.rig.db.pool())
+        .await
+        .unwrap();
+    let item = outline_tool(&scene, thread, turn, json!({"kind":"subagent","child_stream":"sub:earlier-reviewer",
+        "name":"Earlier reviewer","role":"review","prompt":"private assigned prompt ".repeat(100),"state":"completed"})).await;
+    let page = scene
+        .rig
+        .world
+        .app
+        .call(ThreadOutlineGet, &[&thread])
+        .token(&scene.cai.token)
+        .query(&ThreadOutlineGetQuery {
+            selection: Some(OutlineSelection::Agents),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.total, Some(1));
+    let entry = page
+        .entries
+        .iter()
+        .find(|entry| entry.item_id == item)
+        .unwrap();
+    assert_eq!(entry.kind, OutlineKind::Subagent);
+    let agent = entry.agent.as_ref().unwrap();
+    assert_eq!(agent.stream, "sub:earlier-reviewer");
+    assert_eq!(agent.name.as_deref(), Some("Earlier reviewer"));
+    assert_eq!(agent.state, SubagentState::Completed);
+    assert_eq!(agent.duration_ms, Some(5000));
+    assert!(
+        !serde_json::to_string(&page)
+            .unwrap()
+            .contains("private assigned prompt")
+    );
 }
 
 #[tokio::test]

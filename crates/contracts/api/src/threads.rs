@@ -351,10 +351,21 @@ pub enum StartingStep {
     Credential,
     /// A session.
     Session,
+    /// The files of the directory, recorded before the turn so that they can be put back.
+    Recording,
     /// Its files.
     Files,
     /// The turn itself.
     Turn,
+}
+
+/// The command a starting thread's step waits for, and the other work that holds it up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StartingWork {
+    /// The kind of command the step waits for, such as `fs.mkdir`, `git.prepare` or `fs.record`.
+    pub command: String,
+    /// The kind of command of other work, on the same machine and in the same line, that it waits behind.
+    pub behind: Option<String>,
 }
 
 /// The `kind` of a thread: always `thread`.
@@ -818,6 +829,12 @@ pub struct Thread {
     pub side_reading: Option<SideReading>,
     /// What a starting thread is waiting for.
     pub starting_step: Option<StartingStep>,
+    /// When the step it is waiting for began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_since: Option<Time>,
+    /// The command that step waits for, and what holds it up; none while it waits for nothing in particular.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_work: Option<StartingWork>,
     /// Why it cannot go on.
     pub blocked: Option<ThreadBlocked>,
     /// What a person's Stop holds of its queue.
@@ -1678,8 +1695,11 @@ pub struct ToolCallPayload {
     pub started_at: Time,
     /// How long it took, once it ended.
     pub duration_ms: Option<i64>,
-    /// The identical call exactly as the harness issued it.
-    pub raw: RawCall,
+    /// The identical call exactly as the harness issued it. A thread's timeline does not carry it (it is the
+    /// same content as `tool`, and as long); it is read apart by `GET /threads/{id}/items/{item_id}/raw`, and
+    /// stands in an export of the whole record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<RawCall>,
 }
 
 /// A request for approval. Harness cards carry their current projection for this reader,
@@ -3018,6 +3038,11 @@ pub struct Turn {
     pub input_id: Id,
     /// The complete or explicitly unavailable recorded files before this turn.
     pub before_snapshot_id: Option<Id>,
+    /// How many included files the turn changed, whoever changed them: the difference of the files recorded
+    /// before it and the files observed at its end. `null` while either is missing (the files were not
+    /// recorded, or the end has not been observed yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_changed: Option<i64>,
     /// The model's routing name.
     pub model: String,
     /// The model's display name.
@@ -3304,10 +3329,6 @@ pub struct ThreadOpening {
     pub parameters: Option<crate::settings::ThreadParameters>,
     /// The native limits for a new input; absent only when unavailable to this reader.
     pub limits: Option<ThreadLimits>,
-    /// The settings, including each setting's own writability and source.
-    pub settings: Vec<crate::settings::ResolvedSetting>,
-    /// The initial bounded outline page, from the same conversation cut as sync.
-    pub outline: ThreadOutlinePage,
     /// The current tool carrier observation; omitted for a retained conversation view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<crate::nodes::OverviewPart<crate::gateways::ThreadTunnelGatewayStatus>>,
@@ -3327,6 +3348,8 @@ pub enum OutlineKind {
     UserMessage,
     /// What the agent said in the main stream.
     AgentMessage,
+    /// A sub-agent's recorded starting point and compact current facts.
+    Subagent,
     /// A milestone the agent announced.
     Milestone,
     /// An announcement that reached the thread.
@@ -3339,6 +3362,68 @@ pub enum OutlineKind {
     Error,
     /// A pinned item.
     Pin,
+}
+
+/// The message facts needed without loading a historical item body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OutlineMessage {
+    /// Its actual author, when still available.
+    pub author: Option<UserRef>,
+    /// The native input source; absent on an agent's message.
+    pub source: Option<String>,
+    /// The turn it belongs to.
+    pub turn_id: Option<Id>,
+    /// Admitted line changes across that whole turn; unknown without a turn.
+    pub added: Option<i64>,
+    /// Admitted lines removed across that whole turn.
+    pub removed: Option<i64>,
+    /// The program's own commentary/final mark, when it supplies one.
+    pub phase: Option<String>,
+    /// The last nonempty agent message of this turn in the selected history.
+    pub last_agent_seq: Option<Seq>,
+    /// The last explicitly final agent message of this turn.
+    pub last_final_seq: Option<Seq>,
+    /// The last work step of this turn in the selected history.
+    pub last_work_seq: Option<Seq>,
+    /// Whether this recorded turn has ended.
+    pub ended: bool,
+}
+
+/// One child's discoverable facts, without its prompt or tool/output bodies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OutlineAgent {
+    /// Its own stream.
+    pub stream: String,
+    /// Its source turn.
+    pub turn_id: Option<Id>,
+    /// Its supplied name.
+    pub name: Option<String>,
+    /// Its reported state; current native observations may supersede it.
+    pub state: SubagentState,
+    /// When it started, where recorded.
+    pub started_at: Option<Time>,
+    /// Its reported duration.
+    pub duration_ms: Option<i64>,
+    /// Its recorded output tokens, where reported separately.
+    pub tokens_out: Option<i64>,
+    /// The first line of its last reported result.
+    pub result: Option<String>,
+    /// A running observation belongs to an ended recording rather than a live child.
+    pub recorded: bool,
+    /// The source item's last change, to compare with live observations.
+    pub updated_seq: Seq,
+}
+
+/// The existing conversation outline, only human prompts, or only child-agent records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OutlineSelection {
+    /// The ordinary conversation outline.
+    Conversation,
+    /// Only human prompts, with their sender and turn-change facts.
+    Messages,
+    /// Child agents, including records outside the current item window.
+    Agents,
 }
 
 /// One line of a thread's outline.
@@ -3360,6 +3445,12 @@ pub struct OutlineEntry {
     /// A goal input's bounded condition; its label is made in the reader's language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_condition: Option<String>,
+    /// Facts of a human or agent message, independent of the held item window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<OutlineMessage>,
+    /// Compact child-agent facts for the agent selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<OutlineAgent>,
 }
 
 /// An item that a catch-up points at.
@@ -3548,6 +3639,9 @@ pub struct ThreadOutlinePage {
     pub next_before: Option<Seq>,
     /// The coherent conversation sequence of this page.
     pub seq: Seq,
+    /// Complete child count for the selected history; absent for ordinary conversation points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<i64>,
 }
 
 /// One outline neighborhood or older page, never the entire historical payload table.
@@ -3573,6 +3667,15 @@ pub struct ThreadOutlineGetQuery {
     /// Source points, default THREAD_SYNC_DEFAULT_LIMIT and at most THREAD_SYNC_MAX_LIMIT.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// A compact list selection; omission reads ordinary conversation points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<OutlineSelection>,
+    /// Literal text or sender search across this selected history, independently of pages already loaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Include whole-turn line counts for message lists; navigation can omit these optional facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_changes: Option<bool>,
 }
 
 /// Explicit historical turn/segment pagination; a missing cursor starts at the most recent window.
@@ -3630,7 +3733,7 @@ pub struct ThreadOpeningGetQuery {
     pub continuation_id: Option<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_revision: Option<i64>,
-    /// Items in the initial window; the same bounds as [`ThreadSyncGetQuery::limit`].
+    /// Items in the initial window; the resolved `threads.opening_items` default when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -4345,6 +4448,28 @@ crate::endpoints! {
         ]);
     /// Reads one item of a thread.
     ThreadItemGet: GET "/threads/{id}/items/{item_id}", Permission("thread.view"), query continuations::ThreadReadSelector, none, json Item, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored thread restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
+    /// Reads a tool call exactly as its harness made it: its own name for the tool, its arguments and what came back. A thread's items leave this out.
+    ThreadItemRawGet: GET "/threads/{id}/items/{item_id}/raw", Permission("thread.view"), query continuations::ThreadReadSelector, none, json RawCall, 200,
         operation Op::variants(&[
             Variant {
                 name: "read",

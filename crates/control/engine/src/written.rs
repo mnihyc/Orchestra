@@ -1027,6 +1027,9 @@ pub fn marker_words(marker: &MarkerPayload) -> String {
                         .unwrap_or_default()
                 ),
                 GoalReason::Failed => "A turn failed, which paused the goal".to_owned(),
+                GoalReason::Unchecked => {
+                    "The goal report is unchecked and waits for a person's decision".to_owned()
+                }
                 _ => format!("{} paused the goal", by()),
             }
         }
@@ -1037,7 +1040,7 @@ pub fn marker_words(marker: &MarkerPayload) -> String {
             m.condition,
             match m.checked_by {
                 orch_api_contract::goals::GoalCheckedBy::Helper => "checked by the summary model",
-                orch_api_contract::goals::GoalCheckedBy::Agent => "the agent's report",
+                orch_api_contract::goals::GoalCheckedBy::Person => "confirmed by a person",
             }
         ),
         M::GoalStopped(m) => format!(

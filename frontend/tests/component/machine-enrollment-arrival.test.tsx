@@ -17,6 +17,7 @@ import type { EnrollmentProgress, EnrollmentToken, Host, Machine } from '@/gener
 import { i18n, setLocale } from '@/i18n';
 import { toast, Toaster } from '@/ui/Toast';
 import { tellUserEvent } from '@/realtime/stores/user';
+import { READ_AGAIN_DOWN_MS, READ_AGAIN_UP_MS, readAgainFollows } from '@/api/readAgain';
 import type * as ToastApi from '@/ui/Toast';
 import { TooltipProvider } from '@/ui/Tooltip';
 import { enrollmentMachine as machine, enrollmentHost as host } from '../doubles/enrollment-row';
@@ -79,6 +80,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
   vi.useRealTimers();
+  readAgainFollows(() => true);
   cleanup();
   act(() => {
     for (const result of vi.mocked(toast).mock.results) if (result.type === 'return') result.value();
@@ -101,7 +103,7 @@ function openEnrollment(kind: 'connector' | 'node' = 'connector', existing: Mach
     const [open, setOpen] = useState(true);
     return open ? <AddMachineDialog initialKind={kind} onClose={() => { closed(); setOpen(false); }} /> : null;
   }
-  const view = render(<StrictMode><QueryClientProvider client={client}><TooltipProvider><Toaster><Enrollment /></Toaster></TooltipProvider></QueryClientProvider></StrictMode>);
+  const view = render(<StrictMode><QueryClientProvider client={client}><TooltipProvider overflow={false}><Toaster><Enrollment /></Toaster></TooltipProvider></QueryClientProvider></StrictMode>);
   return { client, closed, ...view };
 }
 async function issueCommand(command = 'INSTALL_CONNECTOR') {
@@ -226,21 +228,78 @@ it('does not open from a late command for changed consent or from a dialog the p
   expect(live.navigate).not.toHaveBeenCalled(); expect(toast).not.toHaveBeenCalled();
 });
 
-it('makes no idle reads and recovers only the current receipt on reconnect', async () => {
+it('reads seldom while the live connection is up, and recovers only the current receipt on reconnect', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
   const { closed } = openEnrollment();
   await issueCommand();
   await waitFor(() => expect(live.progress).toHaveBeenCalledExactlyOnceWith(RECEIPT));
-  vi.useFakeTimers();
-  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(READ_AGAIN_UP_MS - 2_000); });
   expect(live.progress).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(live.progress).toHaveBeenCalledTimes(2);
   expect(live.machines).not.toHaveBeenCalled(); expect(live.hosts).not.toHaveBeenCalled();
-  vi.useRealTimers();
   const connected = machine('missed-while-disconnected', true);
   live.progress.mockResolvedValueOnce({ receipt: RECEIPT, machine: connected, host: null });
   await receive(() => { tellUserEvent('connected', {}); });
   await waitFor(() => expect(live.navigate).toHaveBeenCalledExactlyOnceWith({ to: '/resources/machines/$id', params: { id: connected.id } }));
-  expect(live.progress).toHaveBeenNthCalledWith(2, RECEIPT);
-  expect(live.progress).toHaveBeenCalledTimes(2);
+  expect(live.progress).toHaveBeenNthCalledWith(3, RECEIPT);
+  expect(live.progress).toHaveBeenCalledTimes(3);
   expect(closed).toHaveBeenCalledTimes(1);
   expect(live.machines).not.toHaveBeenCalled(); expect(live.hosts).not.toHaveBeenCalled();
+});
+
+it.each(['en', 'zh-CN'] as const)('opens the machine from a later read when no live event ever arrives and the connection is down (%s)', async (language) => {
+  await setLocale(language);
+  readAgainFollows(() => false);
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const { closed } = openEnrollment();
+  await issueCommand();
+  await waitFor(() => expect(live.progress).toHaveBeenCalledExactlyOnceWith(RECEIPT));
+  // The machine enrols, and nothing tells the dialog: only the next read can.
+  const connected = machine('enrolled-unannounced', true);
+  live.progress.mockResolvedValue({ receipt: RECEIPT, machine: connected, host: null });
+  await act(async () => { await vi.advanceTimersByTimeAsync(READ_AGAIN_DOWN_MS); });
+  await waitFor(() => expect(live.navigate).toHaveBeenCalledExactlyOnceWith({ to: '/resources/machines/$id', params: { id: connected.id } }));
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(closed).toHaveBeenCalledTimes(1);
+  expect(toast).toHaveBeenCalledExactlyOnceWith({ tone: 'success', title: i18n.t('machines.add.connected') });
+});
+
+it('stops reading when the dialog is closed', async () => {
+  readAgainFollows(() => false);
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  openEnrollment();
+  await issueCommand();
+  await waitFor(() => expect(live.progress).toHaveBeenCalledExactlyOnceWith(RECEIPT));
+  await userEvent.click(screen.getByText(i18n.t('common.close'), { selector: 'button', exact: true }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(READ_AGAIN_DOWN_MS * 5); });
+  expect(live.progress).toHaveBeenCalledTimes(1);
+});
+
+it('opens the host from a later read when no live event ever arrives', async () => {
+  readAgainFollows(() => false);
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const { closed } = openEnrollment('node');
+  await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Home' }), 'org');
+  await issueCommand('INSTALL_NODE');
+  await waitFor(() => expect(live.progress).toHaveBeenCalledExactlyOnceWith(RECEIPT));
+  const connected = host('enrolled-unannounced', true);
+  live.progress.mockResolvedValue({ receipt: RECEIPT, machine: null, host: { ...connected, machine: { ...connected.machine, online: true } } });
+  await act(async () => { await vi.advanceTimersByTimeAsync(READ_AGAIN_DOWN_MS); });
+  await waitFor(() => expect(live.navigate).toHaveBeenCalledExactlyOnceWith({ to: '/resources/hosts/$id', params: { id: connected.id } }));
+  expect(closed).toHaveBeenCalledTimes(1);
+});
+
+
+for (const kind of ['connector', 'node'] as const) it.each(['en', 'zh-CN'] as const)(`names a new ${kind} before its setup and includes the name in its enrollment token (%s)`, async (locale) => {
+  await setLocale(locale);
+  openEnrollment(kind);
+  const name = screen.getByRole('textbox', { name: `${i18n.t('resources.edit.name')} ${i18n.t('ui.field.optional')}` });
+  expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],select')).toBe(name);
+  const user = userEvent.setup();
+  await user.click(name); await user.paste('Compute bench');
+  if (kind === 'node') await user.selectOptions(screen.getByRole('combobox', { name: 'Home' }), 'org');
+  await issueCommand(kind === 'node' ? 'INSTALL_NODE' : 'INSTALL_CONNECTOR');
+  if (kind === 'node') expect(createHostToken).toHaveBeenCalledWith(expect.objectContaining({ name_hint: 'Compute bench' }), expect.any(String));
+  else expect(createMachineToken).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ name_hint: 'Compute bench' }));
 });

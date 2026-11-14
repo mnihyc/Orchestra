@@ -83,9 +83,10 @@ for (const locale of ['en', 'zh-CN'] as const) {
   });
 
   it(`keeps the header's existing action state in a historical view without a recovery banner (${locale})`, async () => {
-    await setLocale(locale); draw({}, true);
+    await setLocale(locale); const thread = draw({}, true);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(within(screen.getByRole('banner')).getByRole('button', { name: i18n.t('change.menu.switch') })).toHaveAttribute('aria-disabled', 'true');
+    await userEvent.click(within(screen.getByRole('banner')).getByRole('button', { name: actionName('actions', thread.name) }));
+    expect(screen.getByRole('menuitem', { name: i18n.t('change.menu.switch') })).toHaveAttribute('aria-disabled', 'true');
   });
 
   it(`does not offer a manager's Switch to a thread reader (${locale})`, async () => {
@@ -95,16 +96,18 @@ for (const locale of ['en', 'zh-CN'] as const) {
   });
 }
 
-it.each(['idle', 'locked', 'second step', 'call recovery', 'history removal'] as const)('retains the existing ordinary owner for %s', (state) => {
+it.each(['idle', 'locked', 'second step', 'call recovery', 'history removal'] as const)('retains the existing ordinary owner for %s', async (state) => {
   const blocked: Thread['blocked'] = { reason: 'binding_invalid', detail, sandbox: null };
   const more: Partial<Thread> = state === 'idle' ? { state: 'idle', blocked: null }
     : state === 'locked' ? { lock: { id: 'held-job', kind: 'thread_switch', phase: 'switching', percent: 30, state: 'running' } }
       : { blocked: { ...blocked, detail: state === 'second step' ? 'second_step_required' : state === 'call recovery' ? 'call_recovery' : i18n.getFixedT('en')('agentHistory.removingDetail') } };
-  draw(more);
-  const button = within(screen.getByRole('banner')).queryByRole('button', { name: i18n.t('change.menu.switch') });
-  if (state === 'locked') expect(button).not.toBeInTheDocument();
-  else expect(button).toBeVisible();
-  expect(screen.queryByRole('alert')?.querySelector('button') ?? null).toBeNull();
+  const thread = draw(more);
+  await userEvent.click(within(screen.getByRole('banner')).getByRole('button', { name: actionName('actions', thread.name) }));
+  const item = screen.queryByRole('menuitem', { name: i18n.t('change.menu.switch') });
+  if (state === 'locked') expect(item).not.toBeInTheDocument();
+  else expect(item).toBeVisible();
+  // None of these is a mismatch: no recovery banner offers its own Switch.
+  expect(screen.queryByRole('button', { name: i18n.t('change.banner.switchProfile') })).not.toBeInTheDocument();
 });
 
 it('keeps an opaque second-step-looking detail on another reason in its existing recovery', () => {

@@ -252,7 +252,7 @@ const files = (id: string): Change[] => [...ones(id, 'workspace-stat', 'workspac
 
 /** One provider, with what its pages and every chooser of a provider read. */
 const provider = (id: string): Change[] => [
-  ...ones(id, 'provider', 'provider-settings', 'provider-models', 'provider-suggestions', 'provider-threads', 'provider-caps', 'provider-login', 'settings'),
+  ...ones(id, 'provider', 'provider-settings', 'provider-models', 'provider-facts-models', 'provider-threads', 'provider-caps', 'provider-login', 'settings'),
   ...kinds('providers', 'provider-setup', 'start-options', 'usage', 'thread-parameters', AGENT_REACH),
 ];
 
@@ -563,6 +563,8 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /threads/{id}/side': (p) => [...thread(p('id')), ...threads()],
   'POST /threads/{id}/adopt/retry-history': (p) => [...thread(p('id')), one(p('id'), 'adopt-history')],
   'POST /threads/{id}/forks/preflight': () => NOTHING,
+  'POST /threads/{id}/move-out/preview': () => NOTHING,
+  'POST /threads/{id}/move-out': (p) => [...thread(p('id')), ...threads(), ...placement(), ...kinds('everything', 'names', 'trace')],
   'POST /threads/{id}/forks': (p) => [...thread(p('id')), ...threads(), ...placement()],
   'POST /threads/{id}/forks/now': (p) => [...thread(p('id')), ...threads()],
   'POST /forks/preflight': () => NOTHING,
@@ -1125,6 +1127,37 @@ async function repairCapViews(cache: QueryClient, change: { id: string; value?: 
   }));
 }
 
+/** A sharing summary travels with its list, so a changed home retires that exact projection too. */
+async function repairInventorySharing(cache: QueryClient, changes: readonly Change[], current: () => boolean): Promise<void> {
+  const broad = changes.some((change) => 'people' in change || 'row' in change && change.row.kind === 'role');
+  const defaults = changes.flatMap((change) => 'key' in change && change.key[0] === 'defaults' ? [change]
+    : 'missing' in change ? change.missing.filter((part) => part.key[0] === 'defaults') : []);
+  if (!broad && defaults.length === 0) return;
+  const affected = cache.getQueryCache().getAll().filter((query) => {
+    const filter = query.queryKey[3], data = query.state.data;
+    if (query.queryKey[2] !== 'resources' || !record(filter) || !record(filter.resource) || filter.resource.rows !== true
+      || !record(data) || !Array.isArray(data.pages)) return false;
+    return data.pages.some((page: unknown) => record(page) && Array.isArray(page.items) && page.items.some((row: unknown) => {
+      if (!record(row) || !record(row.sharing) || typeof row.sharing.home_id !== 'string') return false;
+      const home = row.sharing.home_id, path = row.home_path;
+      return broad || defaults.some((change) => {
+        const changed = change.id ?? change.key[1];
+        return typeof changed !== 'string' || changed === 'system' || changed === home
+          || Array.isArray(path) && path.some((node: unknown) => record(node) && node.id === changed);
+      });
+    }));
+  });
+  await Promise.all(affected.map(async (query) => {
+    if (!current() || cache.getQueryCache().find({ queryKey: query.queryKey, exact: true }) !== query) return;
+    if (!query.isActive()) { cache.removeQueries({ queryKey: query.queryKey, exact: true }); return; }
+    // A later defaults hint supersedes a page that started before that change.
+    await cache.cancelQueries({ queryKey: query.queryKey, exact: true });
+    if (!current() || cache.getQueryCache().find({ queryKey: query.queryKey, exact: true }) !== query
+      || !query.isActive() || !queryAuthorityAllows(cache, query.meta)) return;
+    await cache.refetchQueries({ queryKey: query.queryKey, exact: true });
+  }));
+}
+
 /** Approval news carries counters, without the request or its membership in the reader's lists. */
 async function repairApprovalViews(cache: QueryClient, current: () => boolean): Promise<void> {
   await Promise.all(cache.getQueryCache().getAll().filter((query) => query.queryKey[0] === 'approvals' || query.queryKey[0] === 'approval' || query.queryKey[0] === 'reference-preview' || query.queryKey[0] === 'access-request').map(async (query) => {
@@ -1348,6 +1381,8 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
     else if (change.gone === true) left.push(change);
     else stale.push(change);
   }
+  await repairInventorySharing(cache, changes, () => client.session.getState().readerVersion === readerVersion);
+  if (client.session.getState().readerVersion !== readerVersion) return;
   const isGone = (query: Query): boolean => left.some((change) => covers(change, query.queryKey));
   if (left.length > 0) cache.removeQueries({ predicate: (query) => query.getObserversCount() === 0 && isGone(query) });
   if (stale.length === 0) return;

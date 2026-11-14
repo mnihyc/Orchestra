@@ -1,6 +1,6 @@
 /** Own bilingual click path through the one audience banner, people card and existing sharing. */
 import { expect, test } from '@playwright/test';
-import type { Entry, PermissionPage, ResolvedSetting, ThreadOpening, UserRef } from '../../src/generated/api-types';
+import type { Entry, PermissionPage, ThreadOpening, UserRef } from '../../src/generated/api-types';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 import { ACME, scenario, signIn } from './support';
@@ -21,13 +21,14 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     const words = locale === 'en' ? english : chinese;
     const audience = { reads: 0, extra: false, personal: true, release: null as (() => void) | null };
     const waiting = new Promise<void>((resolve) => { audience.release = resolve; });
-    // The thread's opening carries its resolved settings (hydrateThreadOpening), so the option is set there.
+    // The first screen carries the compact personal-read flag used by this notice.
     await page.route(new RegExp(`/api/v1/threads/${ACME.mainThread}/opening(?:\\?|$)`), async (route) => {
       if (route.request().method() !== 'GET') { await route.fallback(); return; }
       const response = await route.fetch(); expect(response.status()).toBe(200);
       const native = await response.json() as ThreadOpening;
-      const option: ResolvedSetting = { key: 'orch_tools.owner_reads', value: audience.personal, own: null, writable: false, locked_by: null, source: { scope: 'org', node: null }, parts: [] };
-      await route.fulfill({ json: { ...native, settings: [...native.settings.filter((row) => row.key !== option.key), option] } });
+      if (native.parameters?.composer === undefined || native.parameters.composer === null) throw new Error('The composer facts are supplied by the opening.');
+      native.parameters.composer.owner_reads = audience.personal;
+      await route.fulfill({ json: native });
     });
     await page.route(`**/api/v1/nodes/${ACME.mainThread}/permissions`, async (route) => {
       if (route.request().method() !== 'GET') { await route.fallback(); return; }
@@ -76,7 +77,8 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await page.reload();
     await page.locator('html').evaluate((element, value) => { element.setAttribute('data-theme', value); }, theme);
     await expect.poll(() => audience.reads).toBeGreaterThan(beforeReload);
-    await page.locator('[data-thread-header]').getByRole('button', { name: words.thread.header.shareThread, exact: true }).click();
+    await page.locator('[data-thread-header] [data-thread-more]').click();
+    await page.getByRole('menuitem', { name: words.thread.header.shareThread, exact: true }).click();
     await expect(sharing).toContainText(reader.display_name);
     await expect(line).toHaveCount(0);
     // An Escape can go first to a layer inside the dialog (it stayed open in every variant); its own Close ends it.

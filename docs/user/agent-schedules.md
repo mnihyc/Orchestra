@@ -7,7 +7,7 @@ summary: Let an agent wake its thread on a schedule you can see, pause and end.
 
 # Let the agent schedule future work
 
-An agent can arrange a later input on its own thread, such as checking a CI run in ten minutes or repeating a short review. Orch keeps these schedules visible and cancellable. They use the same input queue as people's schedules.
+An agent can arrange a later input on its own thread, such as checking a CI run in ten minutes or repeating a short review. Orch keeps these schedules visible and cancellable. They use the ordinary input queue and retain their source turn’s Plan mode. A planned future turn still waits for a person to proceed.
 
 ## Enable agent schedules
 

@@ -5,18 +5,26 @@ import { useState } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import { initialChoices, requestOf, selectionOf, type Choices, type FileChoice } from '@/features/change/choices';
+import type * as ThreadsApi from '@/api/threads';
 import { FilesChoice } from '@/features/change/Files';
 import { HistoryChoices } from '@/features/change/History';
 import { Options } from '@/features/change/Options';
 import { HostChoices, Where } from '@/features/change/Where';
-import type { EnvironmentRef, ForkPlan, ForkPlanHistory, Place, PlaceEnvironment, PlaceHost, Thread, UserRef } from '@/generated/api-types';
+import type { EnvironmentRef, ForkPlan, ForkPlanHistory, Item, Place, PlaceEnvironment, PlaceHost, Thread, Turn, UserRef } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 
 import { host as hostPlace, placeEnvironment } from '../unit/start-fixtures';
+import { turn, userMessage } from '../doubles/thread-rows';
 import { show } from './support';
 
-const fixture = vi.hoisted(() => ({ places: [] as Place[], summary: true, history: 'carry' }));
+const fixture = vi.hoisted(() => ({ places: [] as Place[], summary: true, history: 'carry', turns: [] as Turn[], items: [] as Item[],
+  historyPage: vi.fn<(before: number | null) => Promise<{ turns: { id: string; ordinal: number }[]; next_before: number | null }>>() }));
+vi.mock('@/api/threads', async (original) => ({ ...await original<typeof ThreadsApi>(), turnChoicesQuery: () => ({
+  queryKey: ['compact-turn-choices'], enabled: true, initialPageParam: null as number | null,
+  queryFn: ({ pageParam }: { pageParam: number | null }) => fixture.historyPage(pageParam),
+  getNextPageParam: (page: { next_before: number | null }) => page.next_before ?? undefined,
+}) }));
 vi.mock('@/api/forks', async (original) => ({ ...await original<object>(), placesQuery: (topic: string) => ({
   queryKey: ['compact-places', topic], initialData: fixture.places, queryFn: () => Promise.resolve(fixture.places),
 }) }));
@@ -26,7 +34,7 @@ vi.mock('@/api/settings', async (original) => ({ ...await original<object>(), se
   ]),
 }) }));
 vi.mock('@/realtime/stores/thread', async (original) => ({ ...await original<object>(), useThreadView: () => ({
-  order: [], items: new Map(), turns: new Map(),
+  order: fixture.items.map((item) => item.id), items: new Map(fixture.items.map((item) => [item.id, item])), turns: new Map(fixture.turns.map((turn) => [turn.id, turn])),
 }) }));
 
 const owner: UserRef = { id: 'owner', kind: 'human', username: 'owner', display_name: 'Other Owner', avatar: { color: 1, text: 'O' } };
@@ -43,6 +51,46 @@ beforeEach(() => {
   fixture.places = [declared];
   fixture.summary = true;
   fixture.history = 'carry';
+  fixture.turns = []; fixture.items = [];
+  fixture.historyPage.mockReset().mockResolvedValue({ turns: [], next_before: null });
+});
+
+it.each(['en', 'zh-CN'] as const)('finds a held turn by its prompt and preserves its native ordinal in the history choice in %s', async (locale) => {
+  await setLocale(locale);
+  fixture.turns = Array.from({ length: 12 }, (_, at) => turn(`turn-${at}`, { ordinal: at + 1, state: 'completed', inputId: `input-${at}` }));
+  fixture.items = fixture.turns.map((turn, at) => userMessage(`message-${at}`, `Question ${at}`, { turn: turn.id, author: owner }));
+  const initial = initialChoices('new');
+  const choices: Choices = { ...initial, history: { ...initial.history, mode: 'upto', toTurn: 1 } };
+  const changed = vi.fn();
+  show(<HistoryChoices threadId="thread" choices={choices} onChange={changed} />);
+  const picker = screen.getByRole('combobox', { name: i18n.t('change.history.upTo') });
+  await userEvent.click(picker);
+  await userEvent.type(picker, 'Question 11');
+  expect(changed).not.toHaveBeenCalled();
+  expect(screen.queryByRole('option', { name: /Question 10/ })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole('option', { name: /Question 11/ }));
+  expect(changed).toHaveBeenCalledExactlyOnceWith({ history: { ...choices.history, toTurn: 12 } });
+});
+
+it.each(['en', 'zh-CN'] as const)('pages to an older empty turn after a failed page without losing the held choices in %s', async (locale) => {
+  await setLocale(locale);
+  fixture.turns = [turn('latest-turn', { ordinal: 21, state: 'completed', inputId: 'latest-input' })];
+  fixture.historyPage.mockResolvedValueOnce({ turns: [{ id: 'recent-turn', ordinal: 20 }], next_before: 20 })
+    .mockRejectedValueOnce(new Error('The earlier page did not arrive.'))
+    .mockResolvedValueOnce({ turns: [{ id: 'older-empty-turn', ordinal: 1 }], next_before: null });
+  const initial = initialChoices('new');
+  const choices: Choices = { ...initial, history: { ...initial.history, mode: 'upto', toTurn: 21 } };
+  const changed = vi.fn();
+  show(<HistoryChoices threadId="thread" choices={choices} onChange={changed} />);
+  expect(fixture.historyPage).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('combobox', { name: i18n.t('change.history.upTo') }));
+  await userEvent.click(await screen.findByRole('button', { name: i18n.t('ui.pagination.more') }));
+  await userEvent.click(await screen.findByRole('button', { name: i18n.t('common.tryAgain') }));
+  await userEvent.type(screen.getByRole('combobox', { name: i18n.t('change.history.upTo') }), i18n.t('change.history.turn', { n: 1 }));
+  await userEvent.click(await screen.findByRole('option', { name: i18n.t('change.history.turn', { n: 1 }) }));
+  expect(fixture.historyPage.mock.calls.map(([before]) => before)).toEqual([null, 20, 20]);
+  expect(changed).toHaveBeenCalledExactlyOnceWith({ history: { ...choices.history, toTurn: 1 } });
+  expect(fixture.turns.map((turn) => turn.id)).toEqual(['latest-turn']);
 });
 const appearance = useAppearance.getState();
 afterEach(async () => { useAppearance.setState(appearance); await setLocale('en'); });
@@ -199,7 +247,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
   });
 }
 
-it('keeps host capacity and policy refusals inside the open picker without weakening the gate', async () => {
+it('keeps the host refusal compact inside the open picker without weakening the gate', async () => {
   const host: PlaceHost = hostPlace('host', 'Build host', {
     host: { id: 'host', name: 'Build host', address: 'team.owner.build' }, owner,
     when_full: 'block', usable: false, policy_refusal: 'Machine policy forbids writes.',
@@ -212,7 +260,7 @@ it('keeps host capacity and policy refusals inside the open picker without weake
   const option = screen.getByRole('option', { name: 'Build host' });
   expect(option).toHaveAttribute('aria-disabled', 'true');
   expect(option).toHaveAccessibleDescription(/Machine policy forbids writes/);
-  expect(screen.getByRole('meter', { name: '2 of 8 GB declared' })).toBeVisible();
+  expect(within(option).queryByRole('meter')).toBeNull();
   await userEvent.click(option);
   expect(changed).not.toHaveBeenCalled();
 });

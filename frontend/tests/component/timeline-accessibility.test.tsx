@@ -6,21 +6,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NOT_PICKING, TimelineContextValue, type TimelineContext } from '@/features/timeline/context';
 import { ToolCallRow } from '@/features/timeline/items/ToolCall';
 import { MarkerLine } from '@/features/timeline/items/Marker';
-import { RawCall } from '@/features/timeline/RawCall';
+import { RawCallView } from '@/features/timeline/RawCall';
 import { McpDisplay } from '@/features/timeline/tools/Mcp';
 import { FailureAlert } from '@/features/timeline/FailureAlert';
 import { TurnFooter } from '@/features/timeline/TurnFooter';
 import { effortDisplayName } from '@/features/models/names';
 import { currentLocale, i18n, setLocale } from '@/i18n';
 import { threadWriter } from '@/realtime/stores/thread';
-import { marker, toolCall, turn } from '../doubles/thread-rows';
+import { marker, rawOf, toolCall, turn } from '../doubles/thread-rows';
 import { show } from './support';
 
 const given = vi.hoisted(() => vi.fn<(thread: string, selection: { turn?: string; record?: string }) => void>());
 vi.mock('@/features/inspector/givenFocus', () => ({ openGiven: given }));
 vi.mock('@/features/source/Restore', () => ({ RestoreFromTurn: () => null }));
 const THREAD = 'accessibility-thread';
-const context: TimelineContext = { threadId: THREAD, threadName: 'Login', detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: THREAD, threadName: 'Login', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: false, canManage: false, live: true, lit: null, selection: NOT_PICKING };
 const stored = (state: 'completed' | 'running' = 'completed') => turn('turn-1', { ordinal: 1, state, inputId: 'input-1', completedAt: state === 'completed' ? '2026-10-01T10:00:01Z' : null });
 const pointer = (id: string, record: string) => marker(id, { marker: 'orch_context', data: { model_input_id: record, purpose: 'input' } }, { turn: 'turn-1' });
@@ -32,6 +32,29 @@ afterEach(async () => { threadWriter.evict(THREAD); await setLocale(locale);
 
 describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('timeline in %s / %s', (language, look) => {
   beforeEach(async () => { await setLocale(language); document.documentElement.setAttribute('data-theme', look); });
+  it('opens the exact time of a rate-limit report by keyboard and touch', async () => {
+    const item = marker('rate-time', { marker: 'harness_changed', data: {
+      program: 'Claude Code', change: 'rate_limit', subject: null, previous: { state: 'unsupported' },
+      value: { status: 'rejected', message: 'Try again later' }, expected: { state: 'unsupported' }, changed: false,
+      diverged: false, next_turn: false, turn_id: null, reported_at: '2026-10-01T10:00:00.000Z',
+    } });
+    if (item.kind !== 'marker') throw new Error('The fixture is a rate report');
+    show(<TimelineContextValue.Provider value={context}><MarkerLine item={item} /></TimelineContextValue.Provider>);
+    const time = screen.getByRole('button', { name: i18n.t('timeline.exactTime') });
+    const user = userEvent.setup();
+    await user.tab();
+    expect(time).toHaveFocus();
+    await user.keyboard('{Enter}');
+    const moment = screen.getByRole('dialog', { name: i18n.t('timeline.exactTime') }).querySelector('time');
+    expect(moment).toBeVisible();
+    expect(moment).toHaveAttribute('datetime', item.created_at);
+    expect(moment?.textContent).toBe(time.getAttribute('title'));
+    await user.keyboard('{Escape}');
+    expect(time).toHaveFocus();
+    await user.pointer({ keys: '[TouchA]', target: time });
+    expect(screen.getByRole('dialog', { name: i18n.t('timeline.exactTime') })).toBeVisible();
+  });
+
   it('keeps native runtime names and diagnostics as inert text',()=>{
     const native='<img src=x onerror="globalThis.nativeNoticeExecuted=true">';
     const view=show(<FailureAlert error={{code:'mcp_server_failed',message:'Native wrapper',retryable:false,details:{server:'Source catalog',message:native}}}/>);
@@ -216,7 +239,7 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
   it('uses level-two tool detail sections beneath the thread’s heading', () => {
     const item = toolCall('mcp-1', { kind: 'mcp', server: 'Issues', tool: 'lookup', arguments: { query: 'login' }, result: { found: true }, error: null }, { title: 'Look up login', turn: 'turn-1' });
     if (item.kind !== 'tool_call') throw new Error('The fixture is a tool call');
-    show(<><h1>Login</h1><RawCall item={item} /><McpDisplay item={item} /></>);
+    show(<><h1>Login</h1><RawCallView item={item} raw={rawOf(item)} /><McpDisplay item={item} /></>);
     const sections = screen.getAllByRole('heading').filter((heading) => heading.tagName !== 'H1');
     expect(sections).toHaveLength(4);
     for (const section of sections) expect(section.tagName).toBe('H2');

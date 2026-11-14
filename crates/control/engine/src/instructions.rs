@@ -305,6 +305,9 @@ pub fn tools_guide(tools: &[OrchTool], rates: ToolRates) -> Option<String> {
     ];
     if reads {
         tree.push("Everything in your reach is one tree of paths, like files.".to_owned());
+        if has(OrchTool::ReadShared) {
+            tree.push("A pasted Orch document link can be passed directly as the path to read_shared; the same current shares apply.".to_owned());
+        }
         if has(OrchTool::ListShared) {
             tree.push("list_shared without a path shows where you are: your topic and the other threads on it.".to_owned());
             tree.push("Documents and nested document folders live below docs/. A folder is listed as a directory; the built-in docs, attachment and history directories are not mutable objects.".to_owned());

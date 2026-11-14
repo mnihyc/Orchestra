@@ -21,7 +21,7 @@ import { Input } from '@/ui/Input';
 import { Pagination } from '@/ui/Pagination';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { SegmentedControl } from '@/ui/SegmentedControl';
-import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Tree, type TreeRow } from '@/ui/Tree';
 import { UserChip } from '@/ui/UserChip';
@@ -92,7 +92,7 @@ function StartingFilesDialog({ onClose, onChoose }: { onClose: () => void; onCho
           { value: 'current', name: t('start.where.currentFiles') }, { value: 'snapshot', name: t('start.where.recordedFiles') },
         ]} />
         {mode === 'current' ? <FilesChoice value={files} onChange={setFiles} /> : <>
-          {snapshots.isPending ? <SkeletonRows rows={2} /> : snapshots.isError && recorded.length === 0 ? <ErrorState compact error={snapshots.error} onRetry={() => void snapshots.refetch()} /> : recorded.length === 0 ? <p className="text-sm text-text-muted">{t('start.where.noSnapshots')}</p> : <Select label={t('start.where.snapshot')} value={snapshot ?? ''} placeholder={t('start.where.chooseSnapshot')} onValueChange={setSnapshot}
+          {snapshots.isPending ? <SkeletonRows rows={2} /> : snapshots.isError && recorded.length === 0 ? <ErrorState compact error={snapshots.error} onRetry={() => void snapshots.refetch()} /> : recorded.length === 0 ? <p className="text-sm text-text-muted">{t('start.where.noSnapshots')}</p> : <ResourcePicker pickerKey="start.recorded-source" label={t('start.where.snapshot')} value={snapshot ?? ''} placeholder={t('start.where.chooseSnapshot')} onValueChange={setSnapshot}
             options={recorded.map((row) => ({ value: row.id, label: row.label, disabled: !restorable(row), description: <span className="flex flex-wrap items-center gap-2">
               <RelativeTime at={row.created_at} /><ByteSize bytes={row.total_bytes} />{row.created_by !== null && <UserChip user={row.created_by} />}
               {!restorable(row) && <span>{unrecordedReason(t, row)}</span>}

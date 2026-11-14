@@ -834,31 +834,57 @@ export class WorkspaceWorld implements Part {
     const limit = Number(query.get('limit') ?? 200), before = query.get('before'), around = query.get('around'), turn = query.get('turn');
     if (!Number.isInteger(limit) || limit < 1 || limit > 500 || [before, around, turn].filter((v) => v !== null).length > 1) throw new Refusal(400, 'request.invalid', 'invalid outline page');
     const entries: OutlineEntry[] = [];
+    const selection = query.get('selection') ?? 'conversation';
+    const q = (query.get('q') ?? '').trim().toLocaleLowerCase();
+    const ordered = view.items.toSorted((a, b) => a.seq_created - b.seq_created);
+    let total = 0;
     const first = new Map<string, string>();
-    for (const item of view.items.toSorted((a, b) => a.seq_created - b.seq_created)) {
-      if (item.stream !== 'main') continue;
+    for (const item of ordered) {
+      const child = item.kind === 'tool_call' && item.payload.tool.kind === 'subagent' ? item.payload.tool : null;
+      if (selection === 'agents' ? child === null : item.stream !== 'main') continue;
+      if (child !== null) total += 1;
+      if (selection === 'messages' && (item.kind !== 'user_message' || item.payload.source !== 'user')) continue;
       if (item.turn_id !== null && !first.has(item.turn_id)) first.set(item.turn_id, item.id);
       const numbered = view.turns.find((one) => first.get(one.id) === item.id);
-      if (numbered !== undefined) entries.push({ at: item.created_at, item_id: item.id, seq: item.seq_created, kind: 'turn', title: '', turn_ordinal: numbered.ordinal });
-      const kind = item.kind === 'user_message' ? 'user_message' : item.kind === 'agent_message' ? 'agent_message' : item.kind === 'approval' ? 'approval' : item.kind === 'error' ? 'error' : item.kind === 'marker' ? 'marker' : null;
+      if (selection === 'conversation' && numbered !== undefined) entries.push({ at: item.created_at, item_id: item.id, seq: item.seq_created, kind: 'turn', title: '', turn_ordinal: numbered.ordinal });
+      const kind = selection === 'agents' ? 'subagent' : item.kind === 'user_message' ? 'user_message' : item.kind === 'agent_message' ? 'agent_message' : item.kind === 'approval' ? 'approval' : item.kind === 'error' ? 'error' : item.kind === 'marker' ? 'marker' : null;
       if (kind === null) continue;
       const payload = item.payload as Record<string, unknown>;
       const parts = Array.isArray(payload.parts) ? (payload.parts as { type?: string; text?: string }[]) : [];
-      const spoken = parts.flatMap((part) => (part.type === 'text' && typeof part.text === 'string' ? [part.text] : [])).join(' ');
+      const spoken = parts.flatMap((part) => (part.type === 'text' && typeof part.text === 'string' ? [part.text] : [])).join('\n');
       const text = spoken !== '' ? spoken : typeof payload.message === 'string' ? payload.message : typeof payload.text === 'string' ? payload.text : typeof payload.title === 'string' ? payload.title : item.kind;
+      if (q !== '' && !`${text}\n${child?.name ?? ''}\n${item.author?.username ?? ''}\n${item.author?.display_name ?? ''}`.toLocaleLowerCase().includes(q)) continue;
+      const turn = view.turns.find((turn) => turn.id === item.turn_id);
+      const own = ordered.filter((row) => row.stream === 'main' && row.turn_id === item.turn_id);
+      const changes = own.flatMap((row) => row.kind === 'tool_call' && row.payload.tool.kind === 'file_change' ? row.payload.tool.changes : []);
+      const lastAgent = own.findLast((row) => row.kind === 'agent_message' && row.payload.text.trim() !== '')?.seq_created ?? null;
+      const lastFinal = own.findLast((row) => row.kind === 'agent_message' && row.payload.phase === 'final' && row.payload.text.trim() !== '')?.seq_created ?? null;
+      const lastWork = own.findLast((row) => row.kind === 'tool_call' || row.kind === 'reasoning' || row.kind === 'plan' || row.kind === 'approval' && row.status !== 'pending')?.seq_created ?? null;
       const goalCondition = item.kind === 'user_message' && item.payload.source === 'goal' ? Array.from(item.payload.goal?.condition ?? '').slice(0, 80).join('') : undefined;
-      entries.push({ at: item.created_at, item_id: item.id, kind, seq: item.seq_created, title: goalCondition ?? text.slice(0, 120), ...(goalCondition === undefined ? {} : { goal_condition: goalCondition }) });
+      entries.push({ at: item.created_at, item_id: item.id, kind, seq: item.seq_created, title: child?.name ?? goalCondition ?? text.trim().split(/\r?\n/)[0]?.slice(0, 120) ?? '', ...(goalCondition === undefined ? {} : { goal_condition: goalCondition }),
+        ...(item.kind === 'user_message' || item.kind === 'agent_message' ? { message: { author: item.author, source: item.kind === 'user_message' ? item.payload.source : null, turn_id: item.turn_id,
+          added: turn === undefined ? null : changes.reduce((count, change) => count + change.added, 0), removed: turn === undefined ? null : changes.reduce((count, change) => count + change.removed, 0),
+          phase: item.kind === 'agent_message' ? item.payload.phase ?? null : null, last_agent_seq: lastAgent, last_final_seq: lastFinal, last_work_seq: lastWork, ended: turn !== undefined && !['running', 'starting'].includes(turn.state) } } : {}),
+        ...(child === null || item.kind !== 'tool_call' ? {} : { agent: { stream: child.child_stream, turn_id: item.turn_id, name: child.name, state: child.state, started_at: item.payload.started_at,
+          duration_ms: item.payload.duration_ms, tokens_out: turn?.usage_detail?.by_subagent.find((share) => share.stream === child.child_stream)?.tokens.output_tokens ?? null,
+          result: null,
+          recorded: item.before_orch || turn !== undefined && !['running', 'starting'].includes(turn.state), updated_seq: item.seq_updated } }),
+      });
+      const point = entries.at(-1);
+      if (point?.agent !== undefined && point.agent !== null) {
+        const result = ordered.findLast((row) => row.stream === child?.child_stream && row.kind === 'agent_message');
+        point.agent.result = result?.kind === 'agent_message' ? result.payload.text.trim().split(/\r?\n/)[0] ?? null : null;
+      }
     }
     const points = [...new Set(entries.map((entry) => entry.seq))].sort((a, b) => a - b);
     let selected: number[];
     if (around !== null || turn !== null) {
-      const anchor = entries.find((entry) => around !== null ? entry.item_id === around : entry.kind === 'turn' && entry.turn_ordinal === Number(turn));
+      const anchor = around !== null ? ordered.find((item) => item.id === around)?.seq_created : entries.find((entry) => entry.kind === 'turn' && entry.turn_ordinal === Number(turn))?.seq;
       if (anchor === undefined) throw new Refusal(404, 'not_found', 'there is no such outline point');
-      const start = Math.max(0, points.indexOf(anchor.seq) - Math.floor(limit / 2));
-      selected = points.slice(start, start + limit);
+      selected = [...points.filter((seq) => seq <= anchor).slice(-Math.ceil(limit / 2)), ...points.filter((seq) => seq > anchor).slice(0, Math.floor(limit / 2))];
     } else selected = points.filter((seq) => before === null || seq < Number(before)).slice(-limit);
     const oldest = selected[0];
-    return { entries: entries.filter((entry) => selected.includes(entry.seq)), next_before: oldest !== undefined && points.some((seq) => seq < oldest) ? oldest : null, seq: view.seq };
+    return { entries: entries.filter((entry) => selected.includes(entry.seq)), next_before: oldest !== undefined && points.some((seq) => seq < oldest) ? oldest : null, seq: view.seq, ...(selection === 'agents' ? { total } : {}) };
   }
 
   // ---------------------------------------------------------------- what a test steers
