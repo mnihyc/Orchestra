@@ -664,6 +664,7 @@ pub fn spec_in(work: &Path, agent_id: Id, provider: Id, mode: SessionMode) -> Se
     let directory = work.display().to_string();
     SessionSpec {
         settings: SessionSettings {
+            output_capture_bytes: 67_108_864,
             native_model: None,
             agent_id,
             thread_id: new_id(),
@@ -686,6 +687,7 @@ pub fn spec_in(work: &Path, agent_id: Id, provider: Id, mode: SessionMode) -> Se
             subagent_limits: Default::default(),
             prompt_cache_ttl: None,
             background_wake: true,
+            web_action_wait_secs: 120,
             image_generation: None,
             memory: None,
             arrangement: ArrangementType::KeySeparated,

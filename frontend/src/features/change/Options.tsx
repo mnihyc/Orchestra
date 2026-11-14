@@ -46,9 +46,11 @@ export interface OptionsProps {
   topic: string;
   /** The source's creation default; built-in forks begin Private. */
   defaultPage?: PageChoice;
+  /** A cross-organization copy always creates its page from the destination defaults. */
+  accessChoices?: boolean;
 }
 
-export function Options({ choices, onChange, applied, plan, topic, defaultPage = 'original' }: OptionsProps) {
+export function Options({ choices, onChange, applied, plan, topic, defaultPage = 'original', accessChoices = true }: OptionsProps) {
   const { t } = useTranslation();
   const start = applied ?? SHIPPED;
   const set = (patch: Partial<OptionChoices>) => onChange({ options: { ...choices.options, ...patch } });
@@ -88,10 +90,9 @@ export function Options({ choices, onChange, applied, plan, topic, defaultPage =
                 label={t('change.options.minutes')}
                 type="number"
                 min={0}
-                max={1440}
                 inputMode="numeric"
                 value={String(o.waitMinutes ?? start.wait_minutes)}
-                onChange={(event) => set({ waitMinutes: Math.min(1_440, Math.max(0, Number(event.target.value) || 0)) })}
+                onChange={(event) => set({ waitMinutes: Math.max(0, Number(event.target.value) || 0) })}
                 fieldClassName="w-(--field-narrow)"
               />
             )}
@@ -102,11 +103,10 @@ export function Options({ choices, onChange, applied, plan, topic, defaultPage =
         <Input
           label={t('change.options.checksSeconds')}
           type="number"
-          min={10}
-          max={3600}
+          min={1}
           inputMode="numeric"
           value={String(o.verifySecs ?? start.verify_timeout_secs)}
-          onChange={(event) => set({ verifySecs: Math.min(3_600, Math.max(10, Number(event.target.value) || 10)) })}
+          onChange={(event) => set({ verifySecs: Math.max(1, Number(event.target.value) || 1) })}
           fieldClassName="w-(--field-narrow)"
         />
       </Row>
@@ -139,7 +139,7 @@ export function Options({ choices, onChange, applied, plan, topic, defaultPage =
           />
         </Row>
       )}
-      {fork && (
+      {fork && accessChoices && (
         <Row
           title={t('fork.page.title')}
           help={<ChoiceFieldHelp label={t('fork.page.title')} options={accessOptions} />}
