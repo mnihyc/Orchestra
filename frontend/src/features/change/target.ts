@@ -9,6 +9,7 @@
  */
 import { create } from 'zustand';
 import type { Environment } from '@/generated/api-types';
+import type { Choices } from './choices';
 
 /** What is done to the thing named. */
 export type ChangeKind =
@@ -58,6 +59,8 @@ export interface ChangeOptions {
   batch?: string;
   /** For a fork made from a message of a person: what it said, to be put in the new thread's box. */
   say?: string;
+  /** Choices already made in the shared location field, reviewed by the ordinary plan. */
+  placement?: Partial<Pick<Choices, 'where' | 'directory'>>;
 }
 
 /** What the host holds: the change asked for, until it is closed. */

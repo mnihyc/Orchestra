@@ -316,8 +316,18 @@ async fn completed(
     spec: &SessionSpec,
     script: &str,
 ) -> Result<Vec<SessionEvent>, String> {
+    completed_turn(adapter, events, spec, turn(spec, script)).await
+}
+
+/// As [`completed`], for a turn the caller made, so that it knows the turn's identity.
+async fn completed_turn(
+    adapter: &mut dyn AgentAdapter,
+    events: &mut (impl Stream<Item = AdapterEvent> + Unpin),
+    spec: &SessionSpec,
+    input: TurnStart,
+) -> Result<Vec<SessionEvent>, String> {
     adapter
-        .start_turn(turn(spec, script))
+        .start_turn(input)
         .await
         .map_err(|error| error.to_string())?;
     let mut seen = Vec::new();
@@ -440,6 +450,216 @@ async fn native_import_observation(
     Ok(())
 }
 
+/// How long a command left running, or its end, may take to show in the program's list: the list is read, never waited
+/// on for longer than the case's own deadline.
+const LIST_WAIT: Duration = Duration::from_secs(30);
+/// The command a turn leaves running past its end.
+const STAYING_COMMAND: &str = "sleep 600";
+
+/// A command the model leaves running when its turn ends is listed by the program, ended by the name it was listed
+/// with, and no longer listed afterwards. Only what the adapter reports of the program is read.
+async fn background_commands(
+    adapter: &mut dyn AgentAdapter,
+    fixture: &Fixture<'_>,
+    events: &mut (impl Stream<Item = AdapterEvent> + Unpin),
+    spec: &SessionSpec,
+    declared: bool,
+) -> Result<(), String> {
+    use orch_agent_contract::background::BackgroundEndState;
+
+    if !declared {
+        return Err("the build declares no control over its background commands".to_owned());
+    }
+    let script = format!(
+        "#!mock\n{}\nthen\nsay the command stays running\n",
+        tool_line(
+            fixture,
+            "background_command",
+            &json!({ "command": STAYING_COMMAND })
+        )?
+    );
+    completed(adapter, events, spec, &script).await?;
+    let thread = spec.settings.thread_id;
+    let waiting = Instant::now();
+    let listed = loop {
+        let now = adapter
+            .background_commands(thread)
+            .await
+            .map_err(|error| format!("the list of background commands failed: {error}"))?;
+        if !now.supported {
+            return Err(format!(
+                "the build lists no background commands: {}",
+                now.reason.unwrap_or_default()
+            ));
+        }
+        if let Some(found) = now.items.into_iter().find(|item| {
+            item.command
+                .as_deref()
+                .is_some_and(|text| text.contains(STAYING_COMMAND))
+        }) {
+            break found;
+        }
+        if waiting.elapsed() > LIST_WAIT {
+            return Err(
+                "the command the turn left running was not in the program's list".to_owned(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let ended = adapter
+        .end_background_command(thread, &listed.id)
+        .await
+        .map_err(|error| format!("ending the listed command failed: {error}"))?;
+    if ended.state != BackgroundEndState::Ended {
+        return Err(format!(
+            "the program did not confirm the end of the listed command ({:?}{})",
+            ended.state,
+            ended
+                .reason
+                .map(|reason| format!(": {reason}"))
+                .unwrap_or_default()
+        ));
+    }
+    let waiting = Instant::now();
+    loop {
+        let now = adapter
+            .background_commands(thread)
+            .await
+            .map_err(|error| format!("the list after the end failed: {error}"))?;
+        if now.items.iter().all(|item| item.id != listed.id) {
+            return Ok(());
+        }
+        if waiting.elapsed() > LIST_WAIT {
+            return Err("the command was still in the program's list after its end".to_owned());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// The last request to the scripted model that holds `words`, as text.
+fn request_holding(fixture: &Fixture<'_>, words: &str) -> Result<String, String> {
+    (fixture.requests)()
+        .iter()
+        .rev()
+        .map(|request| request.body.to_string())
+        .find(|body| body.contains(words))
+        .ok_or_else(|| format!("no request to the model held {words}"))
+}
+
+/// An exact checkpoint before an earlier message: three turns are made, the checkpoint is taken before the second, the
+/// prefix is opened as a conversation of its own without asking the model, and the next request holds the first
+/// exchange and the new words and neither of the later two; the original, resumed, still holds all three and not the
+/// new words. It reads the checkpoint the way the thread's engine does: the turn's identity names the message.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one case reads everything the shared fixture holds"
+)]
+async fn input_prefix(
+    adapter: &mut dyn AgentAdapter,
+    fixture: &Fixture<'_>,
+    events: &mut (impl Stream<Item = AdapterEvent> + Unpin),
+    source: &SessionSpec,
+    source_ref: &str,
+    check: &NativeCheck,
+    protocol: &str,
+    declared: bool,
+) -> Result<(), String> {
+    use orch_agent_contract::history::NativePrefixSource;
+
+    // Distinct words, none a part of another: a request that holds one holds that turn.
+    const EXCHANGES: [&str; 3] = [
+        "prefix-first-exchange",
+        "prefix-second-exchange",
+        "prefix-third-exchange",
+    ];
+    const REVISED: &str = "prefix-revised-exchange";
+    const RESUMED: &str = "prefix-resumed-exchange";
+    if !declared {
+        return Err("the build declares no exact input checkpoint".to_owned());
+    }
+    let thread = source.settings.thread_id;
+    let mut inputs = Vec::new();
+    for words in EXCHANGES {
+        let input = turn(source, &format!("#!mock\nsay {words}\n"));
+        inputs.push(input.turn_id);
+        completed_turn(adapter, events, source, input).await?;
+    }
+    let asked = (fixture.requests)().len();
+    let from = NativePrefixSource {
+        thread_id: thread,
+        segment_id: source.settings.segment_id,
+        native_session_ref: source_ref.to_owned(),
+    };
+    let prefix = adapter
+        .inspect_input_prefix(from, &inputs[1].to_string())
+        .await
+        .map_err(|error| format!("the checkpoint before the second message: {error}"))?;
+    if prefix.empty {
+        return Err("the checkpoint before the second message was reported empty".to_owned());
+    }
+    adapter
+        .close_session(thread)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut fork = session(fixture, check, protocol);
+    fork.settings.thread_id = thread;
+    fork.settings.mode = SessionMode::Fork;
+    fork.settings.native_session_ref = Some(source_ref.to_owned());
+    let opened = adapter
+        .open_input_prefix(fork.clone(), prefix)
+        .await
+        .map_err(|error| format!("opening the prefix: {error}"))?;
+    if opened.session.native_session_ref == source_ref {
+        return Err("the prefix was opened as the source conversation itself".to_owned());
+    }
+    if (fixture.requests)().len() != asked {
+        return Err("inspecting and opening the prefix asked the model".to_owned());
+    }
+    completed(adapter, events, &fork, &format!("#!mock\nsay {REVISED}\n")).await?;
+    let body = request_holding(fixture, REVISED)?;
+    if !body.contains(EXCHANGES[0]) {
+        return Err("the prefix lost the exchange before the checkpoint".to_owned());
+    }
+    for later in &EXCHANGES[1..] {
+        if body.contains(later) {
+            return Err(format!(
+                "the prefix carried {later}, which is not before the checkpoint"
+            ));
+        }
+    }
+    adapter
+        .close_session(thread)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut original = session(fixture, check, protocol);
+    original.settings.thread_id = thread;
+    original.settings.mode = SessionMode::Resume;
+    original.settings.native_session_ref = Some(source_ref.to_owned());
+    adapter
+        .open_session(original.clone())
+        .await
+        .map_err(|error| format!("resuming the source conversation: {error}"))?;
+    completed(
+        adapter,
+        events,
+        &original,
+        &format!("#!mock\nsay {RESUMED}\n"),
+    )
+    .await?;
+    let body = request_holding(fixture, RESUMED)?;
+    for kept in EXCHANGES {
+        if !body.contains(kept) {
+            return Err(format!(
+                "the source conversation lost {kept} after the fork"
+            ));
+        }
+    }
+    if body.contains(REVISED) {
+        return Err("the source conversation took in the words of the fork".to_owned());
+    }
+    Ok(())
+}
+
 async fn exercise(
     adapter: &mut dyn AgentAdapter,
     fixture: &Fixture<'_>,
@@ -558,6 +778,33 @@ async fn exercise(
         "history.native_import" => {
             return native_history_import(adapter, fixture, &mut events, &spec, &check, &protocol)
                 .await;
+        }
+        "background_commands" => {
+            background_commands(
+                adapter,
+                fixture,
+                &mut events,
+                &spec,
+                started.descriptor.capabilities.background_commands,
+            )
+            .await?
+        }
+        "input_prefix" => {
+            input_prefix(
+                adapter,
+                fixture,
+                &mut events,
+                &spec,
+                &opened.native_session_ref,
+                &check,
+                &protocol,
+                started
+                    .descriptor
+                    .capabilities
+                    .native_input_prefix
+                    .is_some(),
+            )
+            .await?
         }
         "command_approval" => {
             let marker = fixture.workspace.join("must-not-exist");

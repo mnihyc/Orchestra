@@ -17,6 +17,9 @@ const io = vi.hoisted(() => ({
   create: vi.fn<(body: NewEnvironment, key: string) => Promise<EnvironmentRef>>(), fresh: false, loading: false, asking: false,
 }));
 vi.mock('@/api/environments', async (original) => ({ ...await original<object>(), createEnvironment: io.create }));
+vi.mock('@/api/resources', async (original) => ({ ...await original<object>(), templatesQuery: () => ({
+  queryKey: ['import-templates'], queryFn: () => Promise.resolve([]),
+}) }));
 vi.mock('@/api/threadSetup', () => ({ placeUnboundThread: io.place, bindUnboundThread: io.bind }));
 vi.mock('@/api/start', async (original) => ({ ...await original<object>(), startOptionsQuery: (_topic: string, id: string | null) => ({
   queryKey: ['import-access', id], queryFn: () => id === 'e2' ? Promise.reject(new ApiError({ type: 'orch:error:authz.denied', code: 'authz.denied', status: 403, title: 'Access denied', detail: 'Use is needed', request_id: 'use-required', missing: [{ object: { kind: 'environment', id, name: 'Env e2', owner: null }, permissions: ['environment.use'], ask: [], ask_more: 0, closed: null, options: null, override: false }] }, null)) : Promise.resolve(options()),
@@ -106,7 +109,7 @@ it('does not place an imported thread in the old environment while asking for an
   io.asking = true;
   const user = userEvent.setup();
   show(<SetUpThread thread={imported()} onClose={vi.fn()} />);
-  await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.moreTitle') }));
+  await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.title') }));
   await user.click(screen.getByRole('option', { name: 'Env e2' }));
   const save = screen.getByRole('button', { name: 'Set up' });
   expect(save).toBeDisabled();

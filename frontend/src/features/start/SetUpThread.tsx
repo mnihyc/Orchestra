@@ -32,7 +32,8 @@ export function SetUpThread({ thread, onClose }: { thread: Thread; onClose: () =
   const [picks, setPicks] = useState<Picks>({ ...NO_PICKS, environment: thread.environment?.id ?? null });
   const [requesting, setRequesting] = useState<BindingEnvironment | null>(null);
   const [temporary, setTemporary] = useState(false);
-  const { options, resolved, loading, failed, refreshing, retry } = useStartOptions(thread.topic_id, picks, SUGGEST);
+  const { options, resolved: checked, preview, loading, failed, refreshing, retry } = useStartOptions(thread.topic_id, picks, SUGGEST);
+  const resolved = checked ?? (picks.environment === NEW_ENVIRONMENT ? preview : null);
   // A binding refusal leaves the accepted environment standing. Retry that same choice without making another.
   const made = useRef<{ intent: string; environment: Environment } | null>(null);
   const placed = useRef<{ choice: string; environment: string } | null>(null);
@@ -41,7 +42,7 @@ export function SetUpThread({ thread, onClose }: { thread: Thread; onClose: () =
   const pick = (patch: Partial<Picks>) => setPicks((before) => ({ ...before, ...patch }));
   const save = useMutation({
     mutationFn: async () => {
-      if (resolved === null || requesting !== null) return;
+      if (resolved === null || checked === null || failed !== null || refreshing || resolved.missing.length > 0 || requesting !== null) return;
       if (resolved.provider === null || resolved.agent === null || resolved.model === null || resolved.arrangement === null) return;
       const choice = resolved.fresh ? NEW_ENVIRONMENT : resolved.environment?.environment.id;
       if (choice === undefined) return;
@@ -72,7 +73,7 @@ export function SetUpThread({ thread, onClose }: { thread: Thread; onClose: () =
     onSuccess: onClose,
   });
   const missing = resolved?.missing[0];
-  const why = loading ? t('start.why.loading') : requesting !== null ? t('start.why.environment') : refreshing || resolved?.settling ? t('start.why.checking')
+  const why = loading ? t('start.why.loading') : failed !== null ? t('start.why.failed') : requesting !== null ? t('start.why.environment') : refreshing || resolved?.settling ? t('start.why.checking')
     : missing === undefined ? null : t(`start.why.${missing.kind === 'agent' && missing.unreported ? 'agentUnreported' : missing.kind}`);
   const unavailable = resolved === null || options === null || why !== null;
   return <BindingPickerScope options={options} screen="thread-initial-setup" currentHomes={[thread.topic_id,...thread.path.map((node)=>node.id).reverse()]}>{<Dialog open onOpenChange={(open) => { if (!open && !save.isPending) onClose(); }} dismissible={!save.isPending}
@@ -93,9 +94,11 @@ export function SetUpThread({ thread, onClose }: { thread: Thread; onClose: () =
           onValueChange={(model) => pick({ model, effort: null })}
           options={resolved.models.map((model) => ({ value: model.model_name, label: modelName(model), ...resourceChoice({ kind: 'model', model, providerId: resolved.provider?.id ?? '' }) }))} />
         <section className="flex flex-col gap-2"><h3 className="text-sm font-medium">{t('start.where.title')}</h3>
-          <Where compact place={place} options={options} value={resolved.fresh ? NEW_ENVIRONMENT : resolved.environment?.environment.id ?? null}
+          <Where compact assessed place={place} options={options} value={resolved.fresh ? NEW_ENVIRONMENT : resolved.environment?.environment.id ?? null}
             onChange={(environment) => { if (!save.isPending) pick({ environment, arrangement: null }); }} machines={[]} homeId={thread.org_id} requesting={requesting} onRequestingChange={setRequesting} onRefresh={retry}
-            newEnvironment={picks.newEnvironment} onNewEnvironmentChange={(newEnvironment) => { if (!save.isPending) pick({ newEnvironment }); }} />
+            newEnvironment={picks.newEnvironment} onNewEnvironmentChange={(newEnvironment) => { if (!save.isPending) pick({ environment: NEW_ENVIRONMENT, newEnvironment }); }}
+            note={resolved.environmentNote} agentHere={resolved.agentHere} />
+          {failed !== null && <ErrorAlert error={failed} action={<Button size="sm" onClick={retry}>{t('common.tryAgain')}</Button>} />}
           {resolved.fresh && requesting === null && <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={save.isPending} forThread />}
         </section>
         {requesting === null && <ArrangementSection resolved={resolved} refreshing={refreshing} onChange={(arrangement) => { if (!save.isPending) pick({ arrangement }); }} />}

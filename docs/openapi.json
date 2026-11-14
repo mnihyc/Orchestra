@@ -31538,6 +31538,42 @@
               "description": "Judge the new-environment template rather than the topic's existing shared default; cannot be combined with environment_id.",
               "default": false
             }
+          },
+          {
+            "name": "template_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid",
+              "description": "The template of the new environment being assessed; requires environment_new."
+            }
+          },
+          {
+            "name": "host_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid",
+              "description": "The chosen host must be usable for this template; omission inherits the place's host unless host_auto is true."
+            }
+          },
+          {
+            "name": "host_auto",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "boolean",
+              "description": "Choose the scheduler's host rather than inheriting the place's configured host.\nRequires environment_new and cannot be combined with host_id.",
+              "default": false
+            }
           }
         ]
       }
@@ -159373,10 +159409,32 @@
             "type": "boolean",
             "description": "Judge the new-environment template rather than the topic's existing shared default; cannot be combined with environment_id.",
             "default": false
+          },
+          "template_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The template of the new environment being assessed; requires environment_new."
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The chosen host must be usable for this template; omission inherits the place's host unless host_auto is true."
+          },
+          "host_auto": {
+            "type": "boolean",
+            "description": "Choose the scheduler's host rather than inheriting the place's configured host.\nRequires environment_new and cannot be combined with host_id.",
+            "default": false
           }
         },
         "required": [
-          "environment_new"
+          "environment_new",
+          "host_auto"
         ],
         "description": "The environment used to judge a binding before a thread exists."
       },
@@ -159426,6 +159484,17 @@
           "environment_default": {
             "$ref": "#/components/schemas/EnvironmentDefault",
             "description": "What a new thread does about its environment unless told."
+          },
+          "default_environment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BindingDefaultEnvironment"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The environment the nearest setting names as the default, wherever it is set, and why the caller cannot use\nit when they cannot; absent when no setting names one and when rebinding an existing thread."
           },
           "source": {
             "$ref": "#/components/schemas/BindingSource",
@@ -160019,7 +160088,7 @@
           },
           "is_default": {
             "type": "boolean",
-            "description": "Whether it is the topic's default."
+            "description": "Whether it is the default of the threads started here: the environment the nearest setting of\n`env.default_id` names (the topic's own, else its project's, else its org's), and the caller may use it."
           },
           "used": {
             "$ref": "#/components/schemas/EnvironmentUse",
@@ -160101,6 +160170,40 @@
           }
         ],
         "description": "What `env.thread_default` resolves to."
+      },
+      "BindingDefaultEnvironment": {
+        "type": "object",
+        "properties": {
+          "environment": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The environment the setting names."
+          },
+          "from": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NodeRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The place whose setting it is, when that is not the place asked about itself: a project or org above it."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the caller cannot start a thread in it, when they cannot: the reason of its row among the environments,\nor `environment_not_seen` when it is not among those the caller may see."
+          }
+        },
+        "required": [
+          "environment",
+          "from",
+          "reason"
+        ],
+        "description": "The environment that the nearest setting of `env.default_id` names for the threads started here, whoever may use it."
       },
       "BindingSource": {
         "type": "object",

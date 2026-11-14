@@ -1,0 +1,20 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --test hosted_environments --test binding_options --test binding_readiness --test kfix_binding
+test -p orch-engine --lib -- binding::machine_programs::
+web typecheck
+web lint
+web test -- tests/unit/start-choices.test.ts
+web test -- tests/component/start-environment-options.test.tsx
+web test -- tests/component/start-options-fetch.test.tsx
+web test -- tests/component/start-submit.test.tsx
+web test -- tests/component/start-flow.test.tsx
+web test -- tests/component/imported-thread-setup.test.tsx
+web test -- tests/component/provider-create-locations.test.tsx
+web test -- tests/component/program-versions.test.tsx
+web test -- tests/component/agent-profile-program-check.test.tsx
+web test -- tests/component/change-directory.test.tsx
+web test -- tests/component/change-compact.test.tsx
+web test -- tests/component/thread-status-data.test.tsx
+web test -- tests/component/thread-change-refusal.test.tsx

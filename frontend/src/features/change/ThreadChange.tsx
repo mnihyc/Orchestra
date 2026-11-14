@@ -42,6 +42,7 @@ import { Result } from '@/features/change/Result';
 import { agentFor, automaticProfileFor, hasReported, movesRuns, profilesFor, RunsOn, useModelFor } from '@/features/change/RunsOn';
 import { Time } from '@/features/change/Time';
 import { Where } from '@/features/change/Where';
+import { useChangeHost } from '@/features/change/target';
 import type { CopyDestinationJudgement } from '@/api/copyDestinations';
 import { CopyPlacePicker } from '@/features/duplicate/CopyPlacePicker';
 import { CreationAgentAccess } from '@/features/start/AgentAccess';
@@ -115,8 +116,9 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
   const reasonId = useId();
   // A side thread that is forked is kept as a thread of the topic.
   const keeping = fork && thread.side_of !== null;
+  const placement = useChangeHost((state) => state.current?.target.kind === 'thread' && state.current.target.id === thread.id ? state.current.options.placement : undefined);
 
-  const [choices, setChoices] = useState<Choices>(() => initialThreadChoices(thread, fork ? 'new' : 'replace', toTurn));
+  const [choices, setChoices] = useState<Choices>(() => ({ ...initialThreadChoices(thread, fork ? 'new' : 'replace', toTurn), ...placement }));
   const patch = (next: Partial<Choices>) => setChoices((current) => ({ ...current, ...next }));
   // A provider-blocked thread starts with the next usable provider, with every picker directly available.
   const blockedReason = thread.state === 'blocked' && thread.blocked !== null ? thread.blocked.reason : null;

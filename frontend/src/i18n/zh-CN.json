@@ -82,6 +82,7 @@
     "noModels": "此处没有可用的 API 模型",
     "modelUnavailable": "此模型在这里不可用",
     "sources": "来源",
+    "noAnswer": "没有写出回答。请重试。",
     "sourceUnavailable": "来源已不可用",
     "copy": "复制回答",
     "retry": "重新回答",
@@ -91,7 +92,6 @@
     "noHistory": "暂无对话",
     "retention": "最后一条消息发出后保留 {{days}} 天",
     "expires": "到期时间",
-    "adminNotice": "此组织的管理员可以查看并导出此对话",
     "inspection": "管理员只读查看",
     "readOnlyTools": "使用你的权限读取 · 标注来源 · 不作修改",
     "paidBy": "付费方",
@@ -99,7 +99,9 @@
     "privateThread": "在此组织中创建永久保留的私有会话",
     "destination": "目标话题",
     "defaultDestination": "使用当前页面的话题或有权限的默认位置",
-    "contextNoRoom": "扣除 ask.max_output_tokens 和 ask.turn_tool_bytes 的预留空间后，ask.context_tokens 已无空间容纳对话历史。请提高 ask.context_tokens，或降低上述预留值。",
+    "contextNoRoom": "为回答预留空间（ask.max_output_tokens）后，ask.context_tokens 已无空间容纳对话。请提高 ask.context_tokens，或降低 ask.max_output_tokens。",
+    "windowNoRoom": "为回答预留空间（ask.max_output_tokens）后，{{model}} 的上下文窗口已无空间容纳对话。请换用窗口更大的模型，或降低 ask.max_output_tokens。",
+    "windowUnknown": "{{model}} 的上下文窗口未记录，按较小的窗口估计；为回答预留空间（ask.max_output_tokens）后已无空间容纳对话。请记录该模型的上下文窗口，或降低 ask.max_output_tokens。",
     "contextTooLong": "这段对话超出了 {{model}} 的上下文容量；请新建对话，或将它保留为线程。"
   },
   "viewWindow": {
@@ -5010,6 +5012,7 @@
       "label": "上下文共 {{window}}，已用 {{used}}（{{percent}}），在 {{compact}} 处压缩",
       "labelBare": "上下文共 {{window}}，已用 {{used}}（{{percent}}）",
       "open": "查看上下文的组成（{{label}}）",
+      "labelUsed": "上下文已用 {{used}}；未报告窗口大小",
       "modelLabel": "{{model}}：{{context}}"
     },
     "panel": {
@@ -7452,7 +7455,8 @@
       "auto": "$t(composer.mode.labels.auto)",
       "bypass": "$t(composer.mode.labels.bypass)"
     },
-    "help": {}
+    "help": {},
+    "notConfirmed": "{{machine}} 上的 {{name}} 尚未确认。机器的所有者可以在机器页面确认它。"
   },
   "sandboxReadiness": {
     "summary": "环境访问",
@@ -9874,7 +9878,11 @@
         "right": "隐藏右栏",
         "bottom": "隐藏底栏"
       },
-      "pin": "固定为侧栏"
+      "pin": "固定为侧栏",
+      "peek": {
+        "title": "栏",
+        "label": "悬停时显示已隐藏的栏：{{state}}"
+      }
     },
     "sash": {
       "left": "左栏的宽度",
@@ -9941,9 +9949,10 @@
       "shellsHint": "你在此环境中的 Shell。打开终端。",
       "connecting": "正在连接…",
       "connectingHint": "正在连接实时更新。",
-      "reconnectingSince": "正在重新连接… · {{time}}",
       "reconnecting": "正在重新连接…",
       "reconnectingHint": "页面上的内容仍然可以阅读。审批和干预需要等连接恢复，输入不受影响。",
+      "noLive": "没有实时更新 · {{time}}",
+      "noLiveHint": "实时更新连接不上，所以这个页面每隔几秒重新读取一次。如果一直如此，请让运行这套系统的人检查 HTTPS 前端是否放行 /api/v1/ws 的 WebSocket 升级；orchctl doctor --url 会把它标为 edge-ws。",
       "slow": "连接较慢 · {{ms}} 毫秒",
       "slowHint": "发送、保存和终端会慢一些。你的输入不会被耽搁。"
     },
@@ -13808,21 +13817,13 @@
       "chooseFileThread": "请选择线程",
       "useFiles": "使用这些文件",
       "clearFiles": "从空目录开始",
-      "choice": "环境设置",
       "useExisting": "使用现有环境",
       "createNew": "新建环境",
       "noExisting": "暂无现有环境",
       "noHost": "这里没有主机能创建默认环境",
       "chooseExisting": "选择环境",
-      "more": "更多…",
-      "moreTitle": "更多环境",
       "search": "查找环境…",
       "noMatches": "没有匹配的环境",
-      "used": {
-        "project": "在此项目中",
-        "elsewhere": "其他位置",
-        "unused": "未使用"
-      },
       "machineTitle": "你某台机器上的目录",
       "machineAbout": "登记目录会使其成为你的一个环境，随后此会话加入其中。能够运行机器的人可以读取机器上的内容。",
       "allOffline": "你的机器当前都处于离线状态。",
@@ -13841,9 +13842,12 @@
       "directoryNew": "将会创建",
       "directoryIsFile": "此位置不是目录",
       "closed": "目前无法使用。",
-      "hosts": "将在哪里创建",
-      "hostChosen": "未另选时使用",
       "hostClosed": "不可使用",
+      "hostGone": "此主机已不可用",
+      "hostDefault": "默认主机",
+      "manageThread": "需要会话管理权限",
+      "threadArchived": "会话已归档",
+      "review": "查看变更",
       "makeOne": "新建环境…",
       "mayNotMake": "你不能在此处新建环境",
       "threads_one": "{{count}} 个会话",
@@ -13853,7 +13857,33 @@
       "alsoUsedByMore_other": "另被 {{names}} 等 {{count}} 个主题使用",
       "directoryIs": "此会话在环境中的工作位置。留空则为 {{directory}}。",
       "canUse": "可以使用",
-      "askAccess": "申请使用"
+      "askAccess": "申请使用",
+      "newRow": "新建环境…",
+      "newName": "新环境",
+      "unavailable": "不可用",
+      "default": "默认",
+      "defaultFrom": "默认环境，由“{{place}}”设置",
+      "defaultFromAbove": "默认环境，由上一级位置设置",
+      "defaultUnusable": "默认环境 {{name}} 无法使用：{{why}}。",
+      "defaultUnusableUnnamed": "默认环境无法使用：{{why}}。",
+      "defaultSetOn": "它由“{{place}}”设置。",
+      "defaultFresh": "此处的会话各自使用独立的环境（“新会话”设置），所以不会使用默认环境 {{name}}。",
+      "defaultFreshUnnamed": "此处的会话各自使用独立的环境（“新会话”设置），所以不会使用默认环境。",
+      "insteadNew": "改用新环境。",
+      "insteadNamed": "改用 {{name}}。",
+      "insteadChoose": "请选择它在哪里运行。",
+      "cannotRun": "{{agent}} 无法在{{where}}中运行：",
+      "aNewEnvironment": "新环境",
+      "using": "改用 {{agent}}。",
+      "allowVersions": "允许其他版本",
+      "askOwner": "请让 {{name}} 在该环境的“工具”页允许它。",
+      "openTools": "打开它的工具",
+      "openMachine": "打开这台机器",
+      "host": "主机",
+      "hostAuto": "空间最多",
+      "hostAutoNamed": "空间最多（{{host}}）",
+      "template": "模板",
+      "templateDefault": "此位置的模板"
     },
     "arrangement": {
       "asChosen": "按其位置和提供方的决定",
@@ -13908,7 +13938,11 @@
       "not_on_provider": "提供方没有列出它",
       "excluded_by_entry": "你使用该提供方的入口不包含它",
       "excluded_by_policy": "此处的策略不包含它",
-      "not_allowed_where": "你使用该提供方的入口不允许它在此环境中运行"
+      "not_allowed_where": "你使用该提供方的入口不允许它在此环境中运行",
+      "environment_lost": "它已被标记为丢失",
+      "environment_failed": "它上次启动失败",
+      "environment_use_required": "你需要先获得它的使用权",
+      "environment_not_seen": "你看不到它"
     },
     "made": {
       "topic": "已创建主题 {{name}}。",
@@ -17478,12 +17512,12 @@
       "system": "系统的设置"
     },
     "capacity": {
-      "title": "容量",
-      "lead": "“满”是按这里的环境声明需要的资源来计算的，而不是按它们现在实际用了多少。声明并不预留任何资源，所以可能超过总量。",
+      "title": "已承诺给环境",
+      "lead": "这里各环境声称需要的资源之和。它不预留任何资源，也不是主机实际使用或空闲的量。主机是否算作已满，由它来决定。",
       "cpu": "处理器",
       "memory": "内存",
       "disk": "磁盘",
-      "declared": "已声明 {{declared}}，共 {{capacity}}",
+      "declared": "已承诺 {{declared}}，共 {{capacity}}",
       "over": "声明的比主机拥有的还多。",
       "unknown": "主机没有报告容量。"
     },
@@ -22859,11 +22893,10 @@
       },
       "place": "位置",
       "noHost": "现在没有主机接收新环境",
-      "declared": "已声明 {{declared}} / {{capacity}} GB",
       "hostReason": {
         "unschedulable": "{{name}} 不接收新环境",
-        "full": "已满，{{name}} 满后不再接收：已声明 {{declared}} / {{capacity}} GB",
-        "no_room": "空间太小，{{name}} 不再接收：已声明 {{declared}} / {{capacity}} GB",
+        "full": "已满，{{name}} 满后不再接收",
+        "no_room": "空间太小，{{name}} 不再接收",
         "driver": "无法运行这个模板",
         "source": "不构建镜像，而这个模板是 Dockerfile",
         "labels": "没有这个模板需要的标签",
@@ -22873,7 +22906,7 @@
         "template_not_allowed": "它的所有者不允许在那里使用这个模板"
       },
       "hostWarning": {
-        "full": "已满：那里运行的东西声明了 {{declared}} / {{capacity}} GB",
+        "full": "已满：那里运行的东西声明它们需要的接近全部资源",
         "no_room": "空间不多：所需的只有一部分是空闲的"
       },
       "name": "名称",
@@ -23395,6 +23428,9 @@
       "askBoxAbout": "把这条发到旁路会话，不打扰正在进行的轮次。",
       "moveOut": "移到其他组织",
       "moveOutReason": "随主会话一起移动 · 保留后可单独移动"
+    },
+    "slash": {
+      "about": "在旁路会话中提问，不打扰正在进行的轮次"
     },
     "ask": {
       "title": "旁路会话",
@@ -24097,8 +24133,6 @@
     "offline": "离线",
     "offlineSince": "自 {{time}} 起离线",
     "full": "已满",
-    "memoryPercent": "内存 {{percent}}",
-    "declaredPercent": "已声明 {{percent}}",
     "free": "可用 {{size}}",
     "hostOffline": "主机离线",
     "idleFor": "空闲 {{time}}",
@@ -24124,7 +24158,6 @@
     "no": "否",
     "memoryNow": "当前内存",
     "cpu": "当前 CPU",
-    "declaredMemory": "已声明 {{used}} / {{total}}",
     "host": "主机",
     "threads": "线程",
     "threadCounts": "{{running}} 运行中 · {{idle}} 空闲 · {{blocked}} 受阻",
@@ -24184,7 +24217,10 @@
       "draft": "草稿",
       "copy": "副本"
     },
-    "environmentState": "环境 · {{state}}"
+    "environmentState": "环境 · {{state}}",
+    "memoryFree": "{{total}} 内存，可用 {{free}}",
+    "memoryTotal": "{{total}} 内存",
+    "diskFree": "{{total}} GB 磁盘，可用 {{free}} GB"
   },
   "statusItems": {
     "textEstimateHint": "用量记录到达前，根据文本长度估算",
@@ -24417,6 +24453,9 @@
     "runtimeCount_other": "{{number}} 个运行时",
     "offInBuild": "此版本已关闭：{{feature}}",
     "caseUnavailable": "不可用",
+    "checkedPending_one": "已检查 · 另有 {{number}} 项检查待运行",
+    "checkedPending_other": "已检查 · 另有 {{number}} 项检查待运行",
+    "casesPending": "尚未验证：{{names}}",
     "notChecked": "此版本尚未检查",
     "checkFailed": "兼容性检查失败 · 请查看结果",
     "policySummary": "{{name}}：{{choice}}",
@@ -24457,7 +24496,8 @@
       "neutralCarry": "切换时按条目携带历史；容纳不下时，近期历史写入交接说明",
       "handoff": "切换时将近期历史写入交接说明，完整对话作为文件保留",
       "handoffWithoutNative": "无法原生接续时，切换改用交接说明"
-    }
+    },
+    "unknownCheckWhy": "此已安装程序的来源未知，因此无法确定对应的构建检查。"
   },
   "uploadHelp": {
     "messageTitle": "附件",
@@ -26192,6 +26232,8 @@
     "resultsRootPending": "无法打开结果所属组织",
     "model": "模型摘要器",
     "details": "摘要详情",
+    "hide": "隐藏摘要",
+    "show": "显示摘要",
     "inputFacts": "源条目：纳入 {{included}} 条 · 缩短 {{shortened}} 条 · 未纳入 {{omitted}} 条",
     "baseRates": "所选模型基础费率",
     "noRates": "未提供基础费率",

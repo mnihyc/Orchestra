@@ -28,8 +28,6 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await page.locator('[data-quick-start]').getByRole('button', { name: t('start.quick.change'), exact: true }).click();
     const form = page.getByRole('dialog', { name: t('start.title', { parent: 'Fix login' }), exact: true });
     await form.getByRole('button', { name: t('start.options.title'), exact: true }).click();
-    const existing = form.getByRole('radio', { name: t('start.where.useExisting'), exact: true });
-    if (await existing.isVisible()) await existing.click();
     const directory = form.getByRole('textbox', { name: t('start.where.directory') });
     await directory.fill('work');
     const sign = form.locator('[data-directory-sign="unchecked"]');

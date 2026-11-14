@@ -94,7 +94,16 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
   const { t } = useTranslation();
   const optionsId = useId();
   const harnessTitle = useHarnessTitle(open);
-  const [picks, setPicks] = useState<Picks>(draft?.picks ?? { ...NO_PICKS, provider: prepare?.initial?.binding?.provider_id ?? null, agent: prepare?.initial?.binding?.agent_id ?? null, model: prepare?.initial?.model ?? null, effort: prepare?.initial?.effort ?? null, arrangement: prepare?.initial?.binding?.arrangement ?? null, environment: prepare?.initial?.environment !== undefined && prepare.initial.environment !== null && 'use' in prepare.initial.environment ? prepare.initial.environment.use : null });
+  const initialEnvironment = prepare?.initial?.environment;
+  const initialNew = initialEnvironment !== undefined && initialEnvironment !== null && 'new' in initialEnvironment ? initialEnvironment.new : undefined;
+  const [picks, setPicks] = useState<Picks>(draft?.picks ?? {
+    ...NO_PICKS, provider: prepare?.initial?.binding?.provider_id ?? null, agent: prepare?.initial?.binding?.agent_id ?? null,
+    model: prepare?.initial?.model ?? null, effort: prepare?.initial?.effort ?? null, arrangement: prepare?.initial?.binding?.arrangement ?? null,
+    environment: initialNew === undefined ? initialEnvironment !== undefined && initialEnvironment !== null && 'use' in initialEnvironment ? initialEnvironment.use : null : NEW_ENVIRONMENT,
+    ...(initialNew === undefined ? {} : { newEnvironment: {
+      host_id: initialNew.host_id, template_id: initialNew.template_id, access: initialNew.access, files: initialNew.files,
+    } }),
+  });
   const [requesting, setRequesting] = useState<BindingEnvironment | null>(null);
   const [access, setAccess] = useState<NewPagePreset>(draft?.generalAccess ?? 'defaults');
   const [name, setName] = useState(draft?.name ?? prepare?.initial?.name ?? '');
@@ -109,13 +118,14 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
   const audienceReady = simpleAudience || catalogue.data !== undefined;
   const threadAccess = access === 'defaults' ? undefined : access === 'private' ? 'private' as const
     : catalogue.data === undefined ? undefined : generalAccessChange(indexCatalogue(catalogue.data), 'thread', parent.kind === 'topic' ? parent.id : null, access);
-  const { options, resolved, loading, failed, refreshing, retry } = useStartOptions(parent.id, picks, SUGGEST, open && audienceReady,
+  const { options, resolved: checked, preview, loading, failed, refreshing, retry } = useStartOptions(parent.id, picks, SUGGEST, open && audienceReady,
     threadAccess === undefined ? undefined : { threadAccess });
+  const resolved = checked ?? (picks.environment === NEW_ENVIRONMENT ? preview : null);
   const viewers = useViewerDefault(parent.id, options, draft?.letIntoEnvironment ?? prepare?.initial?.let_into_environment ?? undefined);
   const agentAccess = useOfferedAgentAccess({ at: parent.id, enabled: open, initial: draft?.agentAccess,
     initialPreset:draft?.agentAccessPreset,
     offer: options?.agent_access, pending: loading || refreshing || !audienceReady,
-    error: options === null || resolved === null ? null : failed, retry });
+    error: options === null || checked === null ? null : failed, retry });
   const extraOpen = advanced || resolved?.missing.some((row) => row.kind === 'arrangement') === true;
   // Drawn beside a choice and never the choice: what a provider is, where it runs and how much of it is used.
   const providers = useQuery({ ...providersQuery('all'), enabled: open });
@@ -140,7 +150,7 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
       ? loading
         ? t('start.why.loading')
         : t('start.why.failed')
-      : !viewers.ready ? t('startImplicit.checkingViewerDefault') : !agentAccess.ready ? t('agentAccess.checking')
+      : failed !== null ? t('start.why.failed') : !viewers.ready ? t('startImplicit.checkingViewerDefault') : !agentAccess.ready ? t('agentAccess.checking')
       : requesting !== null
         ? t('start.why.environment')
       : refreshing || resolved.settling
@@ -150,7 +160,7 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
           : t(`start.why.${resolved.missing[0].kind === 'agent' && resolved.missing[0].unreported ? 'agentUnreported' : resolved.missing[0].kind}`);
 
   const create = () => {
-    if (options === null || resolved === null || requesting !== null || !agentAccess.ready || !audienceReady || viewers.value === undefined) return;
+    if (options === null || resolved === null || checked === null || why !== null || requesting !== null || !agentAccess.ready || !audienceReady || viewers.value === undefined) return;
     if (prepare !== undefined) {
       if (resolved.agent === null || resolved.provider === null || resolved.model === null || resolved.arrangement === null) return;
       const { first_input: _input, program: _program, ...kept } = prepare.initial ?? {};
@@ -308,8 +318,10 @@ function NativeThreadSetup({ parent, open, onClose, draft, prepare, onProgram }:
             </Step>
 
             <Step title={t('start.where.title')} mark={<ChoiceOriginMark origin={resolved.origins.environment} />}>
-              <Where compact place={parent} options={options} value={whereValue} onChange={(next) => pick({ environment: next, arrangement: null })} machines={machines.data ?? []} homeId={place.data?.org_id ?? ''} requesting={requesting} onRequestingChange={setRequesting} onRefresh={retry}
-                newEnvironment={picks.newEnvironment} onNewEnvironmentChange={(newEnvironment) => pick({ newEnvironment })} />
+              <Where compact assessed place={parent} options={options} value={whereValue} onChange={(next) => pick({ environment: next, arrangement: null })} machines={machines.data ?? []} homeId={place.data?.org_id ?? ''} requesting={requesting} onRequestingChange={setRequesting} onRefresh={retry}
+                newEnvironment={picks.newEnvironment} onNewEnvironmentChange={(newEnvironment) => pick({ environment: NEW_ENVIRONMENT, newEnvironment })}
+                note={resolved.environmentNote} agentHere={resolved.agentHere} />
+              {failed !== null && <ErrorAlert error={failed} action={<Button size="sm" onClick={retry}>{t('common.tryAgain')}</Button>} />}
               {requesting === null && resolved.fresh && <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={make.pending} />}
             </Step>
           </>
