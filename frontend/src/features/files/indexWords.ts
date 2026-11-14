@@ -14,6 +14,13 @@ export function liveIndexReasonKey(reason: EnvironmentIndexReason | null | undef
   }
 }
 
+/** How far the machine is in looking at a whole tree, while it is: the files in all and the share done in whole percent. */
+export function indexingProgress(facts: unknown): { total: number; percent: number } | null {
+  const { done, total } = record(record(facts).indexing);
+  if (typeof done !== 'number' || typeof total !== 'number' || !Number.isSafeInteger(total) || total <= 0) return null;
+  return { total, percent: Math.min(100, Math.max(0, Math.floor((done * 100) / total))) };
+}
+
 /** An older machine may omit the bound; an unknown bound is never replaced by a guessed default. */
 export function liveIndexReason(t: TFunction, reason: EnvironmentIndexReason | null | undefined, facts: unknown): string {
   const limit = record(facts).index_entry_limit;

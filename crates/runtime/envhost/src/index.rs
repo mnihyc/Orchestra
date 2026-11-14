@@ -11,7 +11,7 @@
 //! was computed for: same file, same size, same modification time and same change time, so a
 //! program that writes new content and sets the modification time back is not believed.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -202,7 +202,24 @@ struct Inner {
     ready: bool,
     revision: u64,
     known_since: u64,
-    changes: VecDeque<(u64, RelPath)>,
+    changes: BTreeMap<RelPath, u64>,
+    change_order: BTreeMap<u64, RelPath>,
+}
+
+impl Inner {
+    fn advance(&mut self) -> Option<u64> {
+        let Some(revision) = self.revision.checked_add(1) else {
+            self.state = IndexState::Live(LiveReason::Watches);
+            self.entries.clear();
+            self.changes.clear();
+            self.change_order.clear();
+            self.ready = false;
+            self.dirty = false;
+            return None;
+        };
+        self.revision = revision;
+        Some(revision)
+    }
 }
 
 /// The index of one workspace.
@@ -249,7 +266,8 @@ impl Index {
                 ready: false,
                 revision: 0,
                 known_since: 0,
-                changes: VecDeque::new(),
+                changes: BTreeMap::new(),
+                change_order: BTreeMap::new(),
             }),
         }
     }
@@ -271,6 +289,7 @@ impl Index {
             inner.state = IndexState::Live(reason);
             inner.entries.clear();
             inner.changes.clear();
+            inner.change_order.clear();
             inner.dirty = false;
             inner.ready = false;
         }
@@ -297,30 +316,36 @@ impl Index {
         if cursor == inner.revision {
             return Some(Vec::new());
         }
-        Some(
-            inner
-                .changes
-                .iter()
-                .filter(|(revision, _)| *revision > cursor)
-                .map(|(_, path)| path.clone())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
-        )
+        let mut paths: Vec<_> = inner
+            .change_order
+            .range((
+                std::ops::Bound::Excluded(cursor),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(|(_, path)| path.clone())
+            .collect();
+        paths.sort();
+        Some(paths)
     }
 
-    /// Records just the paths a watcher reported, bounded by the index's entry budget.
+    /// Records the last revision of each watcher path, bounded by distinct paths, not write rate.
+    /// The ordered revision index lets eviction cost logarithmic work too.
     pub fn observe(&self, paths: &[RelPath]) {
         let mut inner = self.inner();
         if !inner.state.is_full() {
             return;
         }
         for path in paths {
-            inner.revision = inner.revision.saturating_add(1);
-            let revision = inner.revision;
-            inner.changes.push_back((revision, path.clone()));
+            let Some(revision) = inner.advance() else {
+                return;
+            };
+            if let Some(previous) = inner.changes.insert(path.clone(), revision) {
+                inner.change_order.remove(&previous);
+            }
+            inner.change_order.insert(revision, path.clone());
             while inner.changes.len() as u64 > self.max_entries {
-                if let Some((revision, _)) = inner.changes.pop_front() {
+                if let Some((revision, path)) = inner.change_order.pop_first() {
+                    inner.changes.remove(&path);
                     inner.known_since = revision;
                 }
             }
@@ -330,9 +355,12 @@ impl Index {
     /// Marks a gap in the event stream, so no turn is promised a complete list across it.
     pub fn lost_events(&self) {
         let mut inner = self.inner();
-        inner.revision = inner.revision.saturating_add(1);
+        if inner.advance().is_none() {
+            return;
+        }
         inner.known_since = inner.revision;
         inner.changes.clear();
+        inner.change_order.clear();
         inner.ready = false;
     }
 
@@ -352,6 +380,28 @@ impl Index {
     #[must_use]
     pub fn get(&self, path: &RelPath) -> Option<IndexEntry> {
         self.inner().entries.get(path.as_str()).cloned()
+    }
+
+    /// What the index knows of everything strictly below `path`, in the order of the paths: the
+    /// cost is what lies there, not the size of the tree.
+    #[must_use]
+    pub fn below(&self, path: &RelPath) -> Vec<(RelPath, IndexEntry)> {
+        let inner = self.inner();
+        if path.is_root() {
+            return inner
+                .entries
+                .iter()
+                .map(|(path, entry)| (RelPath::from_walked(path.clone()), entry.clone()))
+                .collect();
+        }
+        // Everything below "a/b" sorts between "a/b/" and "a/b0" ('0' follows '/').
+        let from = format!("{}/", path.as_str());
+        let to = format!("{}0", path.as_str());
+        inner
+            .entries
+            .range(from..to)
+            .map(|(path, entry)| (RelPath::from_walked(path.clone()), entry.clone()))
+            .collect()
     }
 
     /// Every path of the index with what is known of it, in the order of the paths.
@@ -482,6 +532,7 @@ impl Index {
             inner.dirty = false;
             inner.ready = false;
             inner.changes.clear();
+            inner.change_order.clear();
             return Ok(ScanOutcome {
                 changed: true,
                 went_live: true,
@@ -681,6 +732,53 @@ mod tests {
     }
 
     #[test]
+    fn repeated_writes_keep_a_turns_cursor_until_distinct_changed_paths_are_lost() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("code"), "before").unwrap();
+        let index = Index::new(IndexMode::Full, 2);
+        index.scan(&workspace(root.path()), &rules()).unwrap();
+        let before = index.revision();
+        for _ in 0..20 {
+            index.observe(&[path("code")]);
+        }
+        assert_eq!(
+            index.changes_since(before),
+            Some(vec![path("code")]),
+            "one busy file does not evict the only path a turn needs"
+        );
+        index.observe(&[path("second")]);
+        assert_eq!(
+            index.changes_since(before),
+            Some(vec![path("code"), path("second")])
+        );
+        index.observe(&[path("third")]);
+        assert!(
+            index.changes_since(before).is_none(),
+            "losing a distinct path leaves unknown coverage"
+        );
+    }
+
+    #[test]
+    fn exhausted_watcher_revisions_never_promise_an_empty_change_list() {
+        for lost in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let index = Index::new(IndexMode::Full, 2);
+            index.scan(&workspace(root.path()), &rules()).unwrap();
+            index.inner().revision = u64::MAX;
+            if lost {
+                index.lost_events();
+            } else {
+                index.observe(&[path("code")]);
+            }
+            assert!(index.changes_since(u64::MAX).is_none());
+            assert!(
+                !index.state().is_full(),
+                "another attachment must supply a new journal"
+            );
+        }
+    }
+
+    #[test]
     fn a_tree_above_the_entry_limit_is_not_indexed_and_the_index_says_it_is_live() {
         let root = tempfile::tempdir().unwrap();
         for n in 0..7 {
@@ -793,5 +891,31 @@ mod tests {
             None,
             "an unverifiable version never returns the earlier hash"
         );
+    }
+
+    #[test]
+    fn what_lies_below_a_path_is_read_without_the_rest_of_the_tree() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("a/b")).unwrap();
+        std::fs::create_dir_all(root.path().join("a0")).unwrap();
+        std::fs::write(root.path().join("a/one.txt"), "1").unwrap();
+        std::fs::write(root.path().join("a/b/two.txt"), "2").unwrap();
+        std::fs::write(root.path().join("a0/three.txt"), "3").unwrap();
+        std::fs::write(root.path().join("top.txt"), "t").unwrap();
+        let ws = workspace(root.path());
+        let index = Index::new(IndexMode::Full, 1000);
+        index.scan(&ws, &rules()).unwrap();
+        let below: Vec<String> = index
+            .below(&path("a"))
+            .into_iter()
+            .map(|(path, _)| path.to_string())
+            .collect();
+        assert_eq!(
+            below,
+            ["a/b", "a/b/two.txt", "a/one.txt"],
+            "a sibling that sorts right after the directory is not below it"
+        );
+        assert!(index.below(&path("a/one.txt")).is_empty());
+        assert_eq!(index.below(&RelPath::root()).len(), index.len());
     }
 }

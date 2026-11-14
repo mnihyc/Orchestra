@@ -1600,6 +1600,7 @@ mod tests {
                     environment_id: environment,
                     snapshot_id: snapshot,
                     directory: "repo".to_owned(),
+                    wait_for_indexing: true,
                     kind: RecordKind::Turn,
                     record_days: 7,
                     max_bytes: crate::file_states::DEFAULT_RECORD_MAX_BYTES,

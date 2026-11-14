@@ -35,8 +35,10 @@ for (const locale of ['en', 'zh-CN'] as const) {
   it.each(['auto.summarizer', 'search.semantic.embeddings'] as const)(`keeps supplied model facts while its provider name is unread for %s (${locale})`, async (key) => {
     await setLocale(locale); const cache = nativeNames();
     const view = show(<QueryClientProvider client={cache}><SettingSummary def={{key, title: 'Embeddings'}} value={{kind: 'model', provider_id: 'unread-provider', model_name: 'Supplied model', dimensions: 256}} /></QueryClientProvider>);
-    expect(screen.getByText(i18n.t('places.providerDefault.selected'))).toBeVisible();
-    expect(view.container).toHaveTextContent('Supplied model'); expect(view.container).toHaveTextContent('256');
+    // The summarizer reads as one sentence (a model, its provider and its model); the embeddings keep their fields.
+    if (key === 'auto.summarizer') expect(view.container).toHaveTextContent(i18n.t('places.providerDefault.selected'));
+    else { expect(screen.getByText(i18n.t('places.providerDefault.selected'))).toBeVisible(); expect(view.container).toHaveTextContent('256'); }
+    expect(view.container).toHaveTextContent('Supplied model');
     expect(view.container).not.toHaveTextContent('unread-provider');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     await act(async () => { await Promise.resolve(); }); expect(calls.read).not.toHaveBeenCalled();

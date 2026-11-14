@@ -278,6 +278,7 @@ impl Native {
                 environment_id: fixture.world.environment,
                 snapshot_id: snapshot,
                 directory: "repo".into(),
+                wait_for_indexing: true,
                 kind: RecordKind::Turn,
                 record_days: 7,
                 max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,

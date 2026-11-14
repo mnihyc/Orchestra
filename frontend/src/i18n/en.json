@@ -82,6 +82,7 @@
     "noModels": "No API models available here",
     "modelUnavailable": "This model is unavailable here",
     "sources": "Sources",
+    "noAnswer": "No answer was written. Try again.",
     "sourceUnavailable": "Source no longer available",
     "copy": "Copy answer",
     "retry": "Retry answer",
@@ -91,7 +92,6 @@
     "noHistory": "No conversations yet",
     "retention": "Kept for {{days}} days after the last message",
     "expires": "Expires",
-    "adminNotice": "This organization’s admins can inspect and export this conversation",
     "inspection": "Read-only admin inspection",
     "readOnlyTools": "Reads as you · cites sources · makes no changes",
     "paidBy": "Paid by",
@@ -99,7 +99,9 @@
     "privateThread": "Creates a Private permanent thread in this organization",
     "destination": "Destination topic",
     "defaultDestination": "Use the page’s topic or an authorized default",
-    "contextNoRoom": "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves.",
+    "contextNoRoom": "ask.context_tokens leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Increase ask.context_tokens or reduce ask.max_output_tokens.",
+    "windowNoRoom": "The context window of {{model}} leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Use a model with a larger window or reduce ask.max_output_tokens.",
+    "windowUnknown": "The context window of {{model}} is not recorded and is assumed to be small, and the answer’s reserve (ask.max_output_tokens) leaves no room for the conversation. Record the model’s context window or reduce ask.max_output_tokens.",
     "contextTooLong": "This conversation is too long for {{model}}; start a new one or keep it as a thread."
   },
   "viewWindow": {
@@ -263,8 +265,6 @@
     "environmentManager": "Ask {{who}} or an environment manager"
   },
   "switchChoice": {
-    "picker": "Agent and provider",
-    "option": "{{agent}} on {{provider}}",
     "modelUnavailable": "Waiting for a usable model",
     "hold": "New messages wait while the switch runs.",
     "approvalMode": "Approval: {{mode}}"
@@ -362,8 +362,6 @@
     },
     "currentEnvironment": "{{name}} · keep files",
     "sharedEnvironment": "{{name}} · share files",
-    "currentModel": "Current model",
-    "currentEffort": "Current effort",
     "startActions": "Thread actions",
     "automatic": "Automatic",
     "automaticHost": "Automatic · {{host}}",
@@ -2917,6 +2915,20 @@
         "description": "Nobody has said what this data is."
       }
     },
+    "modelAddSwitches": {
+      "all": {
+        "name": "Everything it offers",
+        "description": "Efforts, the window, every context size, speed and access program the catalogue lists"
+      },
+      "basic": {
+        "name": "Efforts and context",
+        "description": "Efforts, the window and every context size; speeds and access programs stay on offer"
+      },
+      "nothing": {
+        "name": "Only what it states",
+        "description": "The model's window and efforts; the rest stays on offer until a manager switches it on"
+      }
+    },
     "operationNotices": {
       "when_blocking": {
         "name": "When work is blocked",
@@ -3607,6 +3619,10 @@
       "allowed": {
         "title": "Allowed models",
         "description": "Patterns naming the models that may be used here at all; a model has to be named by every scope that sets a list."
+      },
+      "add_switches_on": {
+        "title": "Switched on when added",
+        "description": "What a model starts with when it is added from its provider's catalogue: everything it offers (all), only its efforts and context sizes (basic), or only its window and efforts (nothing). A manager can switch on the rest afterwards."
       }
     },
     "providers": {
@@ -3876,11 +3892,11 @@
     "workspace": {
       "ignore": {
         "title": "Ignored paths",
-        "description": "Patterns, written as in a gitignore file, for what the index of a workspace leaves out."
+        "description": "Patterns, written as in a gitignore file, for paths to hide in a workspace: they are absent from its file lists, search, listings of the tree and recorded turn files, and cannot be read or written through Orch. It is for what a person wants hidden, never for speed: a large tree needs no list."
       },
       "index": {
         "title": "Index",
-        "description": "Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online."
+        "description": "Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online. An online workspace is listed one directory at a time from its machine either way, however large the tree."
       },
       "record_days": {
         "title": "Keep turn files",
@@ -3889,6 +3905,10 @@
       "record_max_bytes": {
         "title": "Largest recorded directory",
         "description": "The included file and link bytes eligible for whole-state recording; larger directories use per-file undo."
+      },
+      "record_wait_secs": {
+        "title": "Wait for turn files",
+        "description": "Seconds to wait for a whole recording before a turn. The shipped default skips initial indexing; choosing a wait also waits for indexing. Changed files can still be restored individually when whole recording is not ready."
       }
     },
     "source": {
@@ -5010,6 +5030,7 @@
       "label": "Context {{used}} of {{window}} ({{percent}}); shortens at {{compact}}",
       "labelBare": "Context {{used}} of {{window}} ({{percent}})",
       "open": "Show what fills the context ({{label}})",
+      "labelUsed": "Context {{used}} used; no window reported",
       "modelLabel": "{{model}}: {{context}}"
     },
     "panel": {
@@ -5131,7 +5152,7 @@
     "requested": "Restart requested"
   },
   "placeReview": {
-    "observedDeleted": "The place is retained after deletion; revision {{revision}}. This read is not an Undo receipt.",
+    "observedDeleted": "The place is retained after deletion. This read is not an Undo receipt.",
     "undone": "Undone",
     "private": "Private place",
     "privateEnvironment": "Private environment",
@@ -5202,8 +5223,8 @@
     "skipped": "Not applied",
     "partial": "Some rows did not succeed. Each result below stands on its own.",
     "uncertainAbout": "The write may have happened. Read the current state; this does not invent a confirmation or an Undo receipt.",
-    "observedArchive": "Current archive state: {{state}}; revision {{revision}}.",
-    "observedParent": "Current parent: {{parent}}; revision {{revision}}.",
+    "observedArchive": "Current archive state: {{state}}.",
+    "observedParent": "Current parent: {{parent}}.",
     "notReadable": "The place is not currently readable. That alone does not prove a delete succeeded.",
     "undoChanged": "A newer revision prevents Undo. Nothing was overwritten.",
     "newReviewRequired": "The place or its consequences changed. Review again before applying."
@@ -5239,7 +5260,7 @@
     "system": "System",
     "notAllowed": "This share is not allowed.",
     "changed": "The page changed during review. Go back and review again.",
-    "observed": "Current permission page, revision {{revision}}. This read is not a confirmation of the lost write."
+    "observed": "Current permission page. This read is not a confirmation of the lost write."
   },
   "backupRestore": {
     "none": "No verified restore list",
@@ -5260,6 +5281,7 @@
     "inspect_other": "{{count}} environments need inspection",
     "noLocations": "No locations enumerated in this category.",
     "location": "Recorded location",
+    "identifiers": "Identifiers",
     "unknownLocation": "Location not reported",
     "copy": "Separate backup copy",
     "uninspectedCopy": "Availability not checked",
@@ -5294,7 +5316,9 @@
     "title": "Kept installed files",
     "lead": "Owned layers kept for each environment, including archived environments. Shared base-image bytes are excluded; flattening makes a complete owned filesystem.",
     "environment": "Environment",
-    "generation": "Generation",
+    "which": "Layer",
+    "latest": "Latest",
+    "earlier": "Earlier",
     "size": "Kept layers",
     "carried": "Installed programs and files are carried too: {{size}} of kept layers. The image archive also carries its base layers."
   },
@@ -5772,6 +5796,7 @@
   },
   "source": {
     "restore": {
+      "gitignore": ".gitignore leaves files out of recordings only; they remain in Files.",
       "open": "Restore files…",
       "review": "Review and undo files…",
       "titleTurn": "Restore files to before this turn",
@@ -5823,13 +5848,18 @@
       "done": "The files were restored.",
       "rolledBack": "Nothing was left half-written: the files are as they were before.",
       "why": {
+        "indexing": "Whole recording was not ready while the directory was being indexed.",
+        "cancelled": "Recording was cancelled.",
         "notRecorded": "Files of this turn were not recorded.",
         "expired": "The files recorded before this turn are no longer kept.",
         "recording": "The files of this turn are still being recorded.",
         "liveTree": "Files of this turn were not recorded: the workspace is live.",
         "notReady": "Files were not recorded yet when this turn began.",
+        "timeout": "The files were not ready in time when this turn began, so only the files the agent changes can be put back.",
         "storeUnavailable": "The file store could not provide a complete copy of this turn.",
         "tooLarge": "The files were too large to record as a whole.",
+        "changedDuring": "Files were still changing when this turn began, so they could not be recorded as a whole.",
+        "unreadable": "Some files could not be read when this turn began, so they could not be recorded as a whole.",
         "recordingOff": "File recording was switched off when this turn began.",
         "offline": "File recording could not reach the machine.",
         "missing_one": "{{count}} recorded file is missing.",
@@ -5936,6 +5966,21 @@
       "held": "The first message waits until the source is ready.",
       "writeDisabled": "This environment or its machine does not allow Orch to write files here. Its managers can enable remote writes in the environment and machine policy, then prepare again.",
       "failureReason": "Preparation failed. Review the job's error and prepare again; existing files are kept.",
+      "stopped": "The source could not be prepared. {{reason}}",
+      "reasons": {
+        "timeout": "Another task was using this environment, so the directory could not be made in time. Wait for it to end, then choose Prepare again.",
+        "busy": "This environment is busy with other work. Choose Prepare again in a moment.",
+        "notFound": "The directory or the repository was not found. Check the address, then choose Prepare again.",
+        "conflict": "The destination already exists and is not a directory. Choose another directory, then prepare again.",
+        "restoreUnavailable": "The current files could not be recorded as a whole, so a worktree cannot start from them. Choose a commit instead.",
+        "offline": "The machine went offline. Choose Prepare again when it is back.",
+        "tooLarge": "The repository is larger than this machine allows. Its managers can raise the limit; then choose Prepare again.",
+        "credential": "The credential for the repository could not be used. Check it, then choose Prepare again.",
+        "changed": "The directory changed while it was being prepared. Choose Prepare again.",
+        "internal": "The change could not be saved. Choose Prepare again.",
+        "expired": "The machine did not take the work up in time. Choose Prepare again when it is online.",
+        "unsupported": "This machine cannot prepare a source. Choose another environment."
+      },
       "choice": "Clone the topic's repository into a new directory",
       "existing": "Using existing files in {{directory}}.",
       "workspace": "the workspace",
@@ -7048,7 +7093,7 @@
       "credits": "Credits",
       "summary": "A summary of the topic",
       "embeddings": "Embeddings",
-      "turn": "turn {{id}}",
+      "turn": "turn {{number}}",
       "prompt": "The prompt was {{tokens}} tokens",
       "noRate": "This model had no rate, so its credits are not counted.",
       "prices": "Counted at {{input}} / {{cached}} / {{output}} credits per million tokens (input / cached input / output)",
@@ -7511,7 +7556,6 @@
     "directHelp": "Runtime variables and sealed secrets override the agent profile at the next start or attachment. Commands follow the machine's policy.",
     "configure": "Where it runs",
     "reviewHelp": "Save the desired host and variables, then review the runtime update. Existing sign-ins stay in the persistent volume.",
-    "secretSet": "A value is set; it is never returned.",
     "secretMissing": "No value is set.",
     "autoHost": "Choose a host with room",
     "review": "Review update",
@@ -7760,8 +7804,6 @@
   "providerSources": {
     "needsAdminKey": "Not offered · needs an admin key",
     "adminKeyHelp": "Used only by this facts source. Model calls keep their own credential.",
-    "removeSavedKey": "Remove saved key",
-    "keyWillBeRemoved": "Removed when saved",
     "described": "Described",
     "creationLead": "The defaults follow the credential and endpoints. Choose another registered program or address here when its details come from elsewhere.",
     "defaultModels": "The credential’s keeper or endpoints list models when they offer discovery; models can always be added by name.",
@@ -7796,7 +7838,6 @@
     "auth": {},
     "header": "Header name",
     "secret": "Authorization value",
-    "setReplace": "Set; replace",
     "writeOnly": "Write only; the saved value is never shown again.",
     "sendKey": "Send this provider’s key to this address",
     "noSignIn": "A sign-in stays with its harness and is never sent to an address.",
@@ -7909,8 +7950,7 @@
       "history": "History",
       "refused": "You need a current browser sign-in and provider.manage. Ask a provider manager.",
       "review": "Review again",
-      "windowsMissing": "Affected windows not reported",
-      "receipt": "This request: {{id}}"
+      "windowsMissing": "Affected windows not reported"
     },
     "recovery": {
       "refused": "The vendor refused this provider’s sign-in.",
@@ -7947,7 +7987,6 @@
       "tokenLink": "Manage API tokens",
       "failed": "Sign-in failed",
       "expired": "The sign-in request expired",
-      "request": "POST /providers/{{id}}/login · method: {{method}}",
       "status": "Sign-in state: {{state}}"
     }
   },
@@ -8028,6 +8067,13 @@
     "confirmDetail_other": "Ends only these {{count}} reviewed tasks. Tasks started afterwards are kept. Each task's actual result is shown. Orch sends no model prompt; the harness may tell the model the work ended."
   },
   "largeTree": {
+    "recordingIndexing": "Started while indexing {{files}} files, {{percent}} %; changed files can still be restored.",
+    "recordingIndexingUnknown": "Started while indexing; changed files can still be restored.",
+    "recordingWait": "Recording wait",
+    "recordingTooLarge": "This directory is larger than a whole recording holds; files the agent changed can still be restored.",
+    "recordingLive": "Whole-directory recording is unavailable here; files the agent changed can still be restored.",
+    "recordingSetting": "Recording limit",
+    "indexing": "Indexing {{files}} files, {{percent}} %",
     "liveTitle": "Live file listing",
     "liveCost": "Directory listings are read from disk when requested. Whole-directory restore is unavailable; Restore files can still use the files the agent changed.",
     "reasons": {
@@ -8268,6 +8314,8 @@
     "copied": "Copied",
     "copyRefused": "The browser did not allow copying",
     "linkCopied": "Link copied",
+    "copyId": "Copy ID",
+    "idCopied": "ID copied",
     "refresh": "Refresh"
   },
   "ui": {
@@ -9874,7 +9922,11 @@
         "right": "Hide the right bar",
         "bottom": "Hide the bottom"
       },
-      "pin": "Keep open as a bar"
+      "pin": "Keep open as a bar",
+      "peek": {
+        "title": "Bars",
+        "label": "Show hidden bars on hover: {{state}}"
+      }
     },
     "sash": {
       "left": "Width of the left bar",
@@ -9941,9 +9993,10 @@
       "shellsHint": "Your shells in this environment. Open Terminal.",
       "connecting": "Connecting…",
       "connectingHint": "Connecting to live updates.",
-      "reconnectingSince": "Reconnecting… · {{time}}",
       "reconnecting": "Reconnecting…",
       "reconnectingHint": "What is on screen stays and can be read. Approving and steering wait for the connection; typing does not.",
+      "noLive": "No live updates · {{time}}",
+      "noLiveHint": "Live updates cannot connect, so this page reads again every few seconds. If this stays, ask whoever runs this system to check that the HTTPS front passes WebSocket upgrades for /api/v1/ws; orchctl doctor --url shows it as edge-ws.",
       "slow": "Slow connection · {{ms}} ms",
       "slowHint": "Sending, saving and shells take longer. Nothing you type waits."
     },
@@ -10049,7 +10102,7 @@
       "custom": "Custom",
       "back": "Back to {{place}}’s rules",
       "about": "Owners and people added keep their own access. The general choice decides everyone else’s access.",
-      "letIn": "Let them into the environment",
+      "letIn": "Viewers can open the environment",
       "cannotLetIn": "The thread’s access changed, but you cannot give its readers access to {{name}}. Ask its managers.",
       "changing": "Changing general access",
       "title": "Change general access to {{choice}}?",
@@ -12820,6 +12873,11 @@
       "changed_other": "{{count}} files changed (+{{added}} −{{removed}})",
       "retry": "Retry this turn"
     },
+    "start": {
+      "line": "Started with {{agent}} on {{provider}}",
+      "created": "Created by {{by}}",
+      "open": "Show how this thread began"
+    },
     "catchup": {
       "title": "Since you were last here",
       "turns_one": "{{count}} turn completed",
@@ -13140,7 +13198,6 @@
   },
   "composer": {
     "row": {
-      "provider": "Provider: {{name}}",
       "archived": "Thread archived",
       "sideBinding": "Change the parent thread’s binding",
       "label": "Message controls",
@@ -13153,7 +13210,9 @@
       "empty": "Write a message or attach a file first.",
       "tooLong": "Shorten the message before sending.",
       "filesWaiting": "Wait for the attachments to finish.",
-      "waitingForTurn": "The running turn is still being loaded."
+      "waitingForTurn": "The running turn is still being loaded.",
+      "runsWith": "What this thread runs with",
+      "agentName": "Agent"
     },
     "mode": {
       "title": "Approval mode",
@@ -13194,16 +13253,11 @@
       "loading": "Reading…"
     },
     "model": {
-      "change": "Model and effort: {{model}}. Change",
-      "current": "Model and effort: {{model}}",
-      "efforts": "Efforts of {{model}}",
       "find": "Find a model",
       "list": "Models",
-      "noEffort": "This agent takes no effort setting.",
       "none": "No model set",
       "notAllowed": "Not allowed here",
       "readOnly": "Changing the model is for whoever manages this thread: {{who}}",
-      "title": "Model and effort",
       "reason": {
         "not_on_provider": "{{provider}} does not offer it",
         "disabled": "It is switched off",
@@ -13214,7 +13268,6 @@
       "exampleLarge": "Large example model",
       "exampleSmall": "Small example model",
       "example": "Example model",
-      "runsWith": "What this thread runs with",
       "conflict": {
         "title": "This choice changed",
         "model": "{{name}} switched to {{model}} just now. Choose again to apply your choice.",
@@ -13300,8 +13353,11 @@
         "context": "Choose the context size, such as /context 400k",
         "done": "{{what}}: {{value}}",
         "notOpen": "{{what}} “{{given}}” is not open for this model. Open: {{list}}.",
-        "sizeInvalid": "Write a size such as 400K, 1M or 400000."
-      }
+        "sizeInvalid": "Write a size such as 400K, 1M or 400000.",
+        "fast": "Switch the fast speed on or off"
+      },
+      "chip": "Model",
+      "window": "{{size}} context"
     },
     "label": "Message to the agent",
     "placeholder": "Message {{agent}}…",
@@ -13411,7 +13467,8 @@
       "label": "Plan",
       "on": "Planning: the agent proposes a plan and changes nothing until somebody proceeds. The approval mode stays as it is.",
       "off": "Plan first: the agent proposes a plan and changes nothing until somebody proceeds.",
-      "checking": "Checking the place’s Plan default…"
+      "checking": "Checking the place’s Plan default…",
+      "slash": "Work the next message in plan mode, such as /plan the task"
     },
     "confinement": {
       "placeDefault": "Sandbox default",
@@ -13419,6 +13476,67 @@
       "label": "Sandbox: {{mode}}",
       "readOnly": "Changing the sandbox is for whoever manages this thread: {{who}}",
       "notOffered": "The agent program has not offered a sandbox choice here."
+    },
+    "pick": {
+      "find": "Search",
+      "nothing": "Nothing matches",
+      "provider": {
+        "ask": "Ask for access",
+        "off": "Unavailable",
+        "why": {
+          "needs_setup": "needs a model",
+          "ready": "ready",
+          "exhausted": "at its limit",
+          "error": "reports an error",
+          "offline": "offline",
+          "disabled": "stopped",
+          "notAllowed": "not allowed here",
+          "noUse": "no access"
+        }
+      },
+      "agent": {
+        "off": "Does not work with {{provider}}",
+        "only": "The only agent that works with this provider",
+        "open": "Open agent",
+        "changed": "Agent changed to {{agent}}: {{was}} does not work with {{provider}}",
+        "why": {
+          "unreported": "not reported yet",
+          "error": "reports an error",
+          "disabled": "switched off",
+          "noUse": "no access",
+          "unavailable": "unavailable"
+        }
+      }
+    },
+    "chip": {
+      "value": "{{what}}: {{value}}",
+      "unset": "Not set",
+      "startsWith": "Where threads start"
+    },
+    "effort": {
+      "title": "Effort",
+      "default": "Default"
+    },
+    "slash": {
+      "fork": "Fork this thread into a new one",
+      "directory": "Choose the directory the thread works in"
+    },
+    "where": {
+      "label": "Works in {{where}}. Change"
+    },
+    "withheld": {
+      "agent": "{{agent}} does not offer it",
+      "access": "Only while the credential stays with the provider",
+      "placement": "Not offered in this kind of environment",
+      "providerKind": "Not offered with this kind of provider",
+      "feature": "Switched off in Agent features",
+      "provider": "The provider leaves it out for this model",
+      "condition": "Not offered here",
+      "act": {
+        "feature": "Switch on in Agent features",
+        "access": "Change how it runs",
+        "placement": "Change where it runs"
+      }
     }
   },
   "thread": {
@@ -13492,6 +13610,11 @@
       "more": "More turn actions"
     },
     "turnFiles": {
+      "reported_one": "Changes reported by tools: {{count}} file",
+      "reported_other": "Changes reported by tools: {{count}} files",
+      "toolLines": "Lines from tools: +{{added}} −{{removed}}",
+      "reviewReported": "Review reported edits",
+      "search": "Search changed files",
       "list": "Files changed in this turn",
       "review": "Review",
       "thisTurn": "This turn"
@@ -13518,6 +13641,8 @@
       "focusedAbout": "Keep inputs, answers and waiting approvals visible; fold the other work.",
       "fullAbout": "Show the work step by step, with tool output closed until opened.",
       "liveAbout": "Open current tool output as it arrives and follow the latest work until you scroll up.",
+      "diagnostics": "Diagnostics",
+      "diagnosticsAbout": "Show everything in Full, and the program's own status lines: session status, tool servers, collaboration mode and events Orch does not read.",
       "toolCalls_one": "{{count}} tool call",
       "toolCalls_other": "{{count}} tool calls",
       "files_one": "{{count}} file changed",
@@ -13566,8 +13691,31 @@
     "starting": {
       "none": "Starting",
       "environment": "Waking the environment",
+      "environmentMaking": "Its environment is being made",
       "source": "Preparing the source",
-      "files": "Preparing the environment",
+      "files": "Writing the attached files",
+      "recording": "Recording the files before the turn",
+      "behind": "{{what}} · waiting behind {{other}} on this environment",
+      "work": {
+        "fsStat": "Looking at the directory",
+        "fsMkdir": "Making the directory",
+        "gitPrepare": "Cloning the repository",
+        "gitWorktree": "Making the worktree",
+        "fsRecord": "Recording the files before the turn",
+        "fsMaterialize": "Writing the attached files",
+        "sessionOpen": "Opening the session"
+      },
+      "other": {
+        "fsRecord": "a file recording",
+        "gitPrepare": "a clone",
+        "gitWorktree": "a worktree being made",
+        "fsMaterialize": "files being written",
+        "fsSnapshot": "a file snapshot",
+        "fsMkdir": "a directory being made",
+        "fsWrite": "a file being written",
+        "envAttach": "the environment starting",
+        "work": "other work"
+      },
       "provider": "Starting {{provider}}'s runtime",
       "harness": "Starting {{agent}}",
       "credential": "Getting a credential from {{provider}}",
@@ -13763,7 +13911,6 @@
       "arrangement": "No way of placing this agent works here."
     },
     "provider": {
-      "title": "Provider",
       "none": "There is no provider you can run work on yet. Somebody who manages providers has to add one, or give you the use of one.",
       "locked": "A place above fixes the provider for new threads here.",
       "notYours": "you may not use it; ask {{owner}}",
@@ -13786,10 +13933,7 @@
     },
     "model": {
       "model": "Model",
-      "effort": "Effort",
-      "pickProvider": "Choose a provider first.",
-      "none": "This provider lists no model you can choose yet.",
-      "closed": "it cannot be used here"
+      "none": "This provider lists no model you can choose yet."
     },
     "where": {
       "title": "Where it runs",
@@ -13951,9 +14095,6 @@
       "model": "No model is chosen for new threads in {{place}}.",
       "environment": "You manage no environment here and may not make one.",
       "arrangement": "{{agent}} cannot be placed on {{provider}} here: {{why}}",
-      "pickProvider": "Choose a provider",
-      "pickAgent": "Choose an agent",
-      "pickModel": "Choose a model",
       "keepFor": "Default for",
       "scope": {
         "topic": "This topic",
@@ -15991,6 +16132,12 @@
       "renew": "Started to renew at",
       "updates": "What it is behind in",
       "update": "{{name}}: {{from}} → {{to}}",
+      "toolAdded": "{{name}} {{release}} is added",
+      "toolRebuilt": "{{name}}: a newer build of {{release}}",
+      "tools": {
+        "connector": "Orch connector",
+        "executor": "Orch tools"
+      },
       "lastProgramError": "Last program error"
     },
     "models": {
@@ -17522,7 +17669,7 @@
       "labelsHint": "Separated by commas.",
       "save": "Save settings",
       "changed": "Somebody changed this host first",
-      "changedLead": "It was read again; it is now at revision {{revision}}. Look at what changed, then save again."
+      "changedLead": "It was read again, and it has changed. Look at what changed, then save again."
     },
     "runtimes": {
       "title": "What runs on it",
@@ -17532,7 +17679,7 @@
       "unit": "Unit",
       "state": "State",
       "driver": "Driver",
-      "machine": "Machine",
+      "unowned": "A container with no owner",
       "active": "Last busy",
       "never": "Never",
       "actions": "Actions",
@@ -17907,7 +18054,7 @@
         "which": "To keep a page to a few people: make it private and name them. To go back to what the place decides: choose the place’s name."
       },
       "goes-environment": {
-        "title": "Let them into the environment",
+        "title": "Viewers can open the environment",
         "what": "A thread runs in an environment, and its files, processes, browsers and displays are that environment’s, given on its own page. This names the people just added there to look, and with Can manage of the thread to change files and open a shell too."
       },
       "goes-model": {
@@ -19009,8 +19156,6 @@
     "none": {
       "size": "Size",
       "type": "Type",
-      "hash": "Hash",
-      "copyHash": "Copy the hash",
       "openAsText": "Open as text"
     },
     "edit": {
@@ -19140,9 +19285,8 @@
   },
   "resourceDetails": {
     "copyPath": "Copy path",
-    "copyId": "Copy ID",
+    "copyValue": "Copy value",
     "copyCommand": "Copy command",
-    "unitGeneration": "Runtime {{generation}}",
     "definitionChanged": "Runtime configuration changed",
     "resourceLimitsChanged": "Resource limits changed",
     "homeChanged": "Workspace or home storage changed",
@@ -19215,7 +19359,6 @@
         "variables": "Secret variables",
         "variableNames": "Variable names (one per line)",
         "token": "Token",
-        "keepSecret": "Leave blank to keep the saved value",
         "advanced": "Advanced",
         "json": "Definition (JSON)",
         "nameInvalid": "Use 2–32 lowercase letters, digits, - or _, starting with a letter.",
@@ -20087,7 +20230,6 @@
       "addressWrong": "This is not a web address.",
       "secret": "Secret",
       "secretHint": "Signs what is posted. It is kept and never shown again.",
-      "secretKept": "A secret is set. Leave this empty to keep it, or type a new one.",
       "addConfirm": "Add the webhook",
       "saveConfirm": "Save",
       "added": "Added {{name}}",
@@ -20802,7 +20944,6 @@
     "about": "Listeners, openings and connections of this environment.",
     "exposed": "Open outside",
     "exposedReason": "People beyond Ports holders may enter this port",
-    "generation": "Generation {{generation}}",
     "observed": "Observed",
     "refresh": "Refresh",
     "old": "Old observation",
@@ -21614,6 +21755,7 @@
       "largestBelowWindow": "The largest context cannot be less than the model's own window ({{window}}).",
       "startAboveLargest": "A thread cannot start with more than the largest ({{largest}}).",
       "startNeedsWindow": "Give the model's own window first.",
+      "windowRequired": "Required: neither the catalogue nor the endpoint reports this model's window.",
       "rateInvalid": "A rate is written as a number, such as 2.50.",
       "rateMissing": "Give all three prices: input, cached input and output.",
       "stepIncomplete": "Each step needs the size it begins at, and its input and output prices.",
@@ -21681,7 +21823,8 @@
       "contextBoth": "Context {{window}}, up to {{largest}}",
       "contextLargest": "Context up to {{largest}}",
       "offered": "Offered, not switched on: {{list}}",
-      "suggestionsOffer": "What a suggestion offers (speeds, access programs, a larger context) is kept as offered. None of it is switched on by adding the model.",
+      "offers": "Offers: {{list}}",
+      "suggestionsOffer": "Adding a model switches on what it offers (efforts, context sizes, speeds, access programs), unless the organization's settings say otherwise. Narrow it afterwards under Edit options…",
       "edit": "Edit options…"
     },
     "editor": {
@@ -21694,6 +21837,8 @@
       "defaultSpeed": "Starting speed",
       "defaultProgram": "Starting access program",
       "defaultContext": "Starting context",
+      "fromCatalogue": "{{value}} from the catalogue",
+      "none": "none",
       "standard": "Standard",
       "noProgram": "None",
       "typedIn": "Typed in here: {{source}} does not list it",
@@ -22298,7 +22443,6 @@
       "clientRule": "Give the client id the provider made for this system.",
       "secret": "Client secret",
       "secretHint": "Written here once; it is never shown again.",
-      "secretKept": "One is set. Leave this empty to keep it, or write a new one.",
       "secretRule": "Give the client secret.",
       "scopes": "Scopes",
       "scopesHint": "Separated by spaces. The provider needs to give a name and an address.",
@@ -22806,11 +22950,9 @@
       "made": "The plan was older than 15 minutes and has been made again. Look it over, then confirm."
     },
     "runs": {
-      "modelUnknown": "Model not reported",
       "unavailable": {
         "profileDisabled": "Profile disabled",
-        "keeper": "Provider requires its keeper profile",
-        "modelDisabled": "Disabled at provider"
+        "keeper": "Provider requires its keeper profile"
       },
       "automatic": {
         "profile": {
@@ -22843,7 +22985,6 @@
       "model": "Model",
       "effort": "Effort",
       "arrangement": "How agent and provider are placed",
-      "providerNow": "{{name}} (now)",
       "providerCurrent": "{{name}} (current provider)",
       "providerSelected": "{{name}} (selected provider)"
     },
@@ -23235,7 +23376,6 @@
       },
       "plan": {
         "recreate": "A new unit, with nothing new in it",
-        "update": "{{name}}: {{from}} → {{to}}",
         "staysOwners": "Stays {{name}}’s, with the page it has",
         "rollback": {
           "unit": "The old unit of {{name}} comes back as it was",
@@ -23395,6 +23535,9 @@
       "askBoxAbout": "Sends this to a side thread and leaves the turn alone.",
       "moveOut": "Move to another org",
       "moveOutReason": "Moves with its main thread · Keep it to move it alone"
+    },
+    "slash": {
+      "about": "Ask a question on the side, without disturbing the turn"
     },
     "ask": {
       "title": "Side thread",
@@ -23606,7 +23749,7 @@
       "workspace": {
         "ignore": {
           "title": "Ignored paths",
-          "description": "Patterns excluded from the workspace index.",
+          "description": "Paths to hide in the workspace: absent from its file lists, search and recorded turn files.",
           "keywords": "Ignored paths"
         }
       },
@@ -24115,7 +24258,6 @@
     "price": "Price",
     "priceValue": "{{input}} in · {{output}} out credits / 1M",
     "applies": "Applies",
-    "nextTurn": "Applies from the next turn",
     "runningEnvironments": "Running environments",
     "stoppedEnvironments": "Stopped environments",
     "mine": "Mine",
@@ -24163,7 +24305,7 @@
     "enabledAt": "Enabled in",
     "kind": "Used for",
     "image": "Image",
-    "imageDigest": "Digest",
+    "imagePinned": "Pinned",
     "usedByLabel": "Used by",
     "program": "Program",
     "provider": "Provider",
@@ -24417,6 +24559,9 @@
     "runtimeCount_other": "{{number}} runtimes",
     "offInBuild": "Off in this version: {{feature}}",
     "caseUnavailable": "Unavailable",
+    "checkedPending_one": "Checked · {{number}} check pending",
+    "checkedPending_other": "Checked · {{number}} checks pending",
+    "casesPending": "Not verified yet: {{names}}",
     "notChecked": "This version has not been checked",
     "checkFailed": "Compatibility check failed · review its results",
     "policySummary": "{{name}}: {{choice}}",
@@ -25020,6 +25165,7 @@
       "running": "Cleaning up",
       "results": "Cleanup results",
       "outcome": "Outcome",
+      "itemUnknown": "A kept item",
       "manageRequired": "Manage required",
       "choices": {
         "keep": "Keep",
@@ -25827,7 +25973,7 @@
     "measurements": "Measured round trips",
     "measured": "Measured",
     "milliseconds": "{{value}} ms",
-    "unavailable": "Unavailable ({{id}})",
+    "unavailable": "Unavailable gateway",
     "toolConnection": "Tool connection",
     "unreachable": "$t(errors.tunnel.gateway_unreachable)",
     "attempted": "Attempted gateways",
@@ -25838,7 +25984,6 @@
       "unavailable": "Unavailable",
       "unknown": "Not reported"
     },
-    "revision": "Revision {{revision}}",
     "edit": "Edit",
     "editTitle": "Edit gateways",
     "empty": "No gateways advertised",
@@ -25928,7 +26073,7 @@
     "attempt": "Attempt",
     "tools": "Tool calls",
     "toolTime": "Tool time",
-    "providerId": "Provider request ID",
+    "providerId": "Provider's request",
     "adapterId": "Request reference",
     "owner": "Thread owner",
     "reasons": {
@@ -25966,6 +26111,7 @@
     "expand": "Expand {{name}}",
     "sharingPolicy": "Sharing policy",
     "from": "From",
+    "fromContainer": "From the container on <host/>",
     "current": "Group by: {{name}}",
     "noOwner": "Owner unavailable",
     "selectionUnavailable": "Selection unavailable",
@@ -26151,7 +26297,6 @@
       "last_used": "Last used",
       "shared_default": "Shared default"
     },
-    "effort": "Effort {{value}}",
     "name": "Name {{value}}",
     "message": "Message {{value}}",
     "sourceUnreported": "Source not reported",
@@ -26192,6 +26337,8 @@
     "resultsRootPending": "The results’ organization cannot be opened",
     "model": "Model summarizer",
     "details": "Summary details",
+    "hide": "Hide summary",
+    "show": "Show summary",
     "inputFacts": "Source items: {{included}} included · {{shortened}} shortened · {{omitted}} omitted",
     "baseRates": "Configured model base rates",
     "noRates": "No base rates reported",
@@ -26753,5 +26900,124 @@
     "allowance": "Allowance: {{window}}",
     "resets": "Resets <time/>",
     "example": "A provider and its declared route"
+  },
+  "settingsEditors": {
+    "draft": {
+      "discard": "Discard",
+      "nothingToSave": "Nothing has changed.",
+      "fixMarked": "Fix what is marked before it can be saved."
+    },
+    "leave": {
+      "title": "Leave without saving?",
+      "confirm": "Leave",
+      "about": "A setting you were editing has not been saved. Leaving drops it."
+    },
+    "secret": {
+      "set": "Set",
+      "replace": "Replace",
+      "keep": "Keep",
+      "remove": "Remove",
+      "removed": "Removed when saved",
+      "keepSaved": "Keep it"
+    },
+    "targets": {
+      "label": "Summary targets",
+      "automatic": "Automatic",
+      "when": "When",
+      "whenFor": "{{name}}: when to refresh",
+      "defaultEvents": "Default",
+      "useDefault": "Use the default for {{name}}",
+      "min_interval_secs": "At most every (seconds)",
+      "context_tokens": "Reads up to (tokens)",
+      "output_chars": "Writes up to (characters)",
+      "least": "At least {{least}}",
+      "summaryOff": "Not automatic",
+      "summaryOn": "Automatic for {{names}}"
+    },
+    "summarizer": {
+      "none": "None here",
+      "model": "A model",
+      "kind": "Kind",
+      "noneHere": "Nothing is chosen here; what a place above chose applies.",
+      "useForm": "Use the form",
+      "editJson": "Edit as JSON",
+      "provider": "Provider",
+      "modelName": "Model",
+      "chooseProvider": "Choose a provider",
+      "chooseModel": "Choose a model",
+      "providerFirst": "Choose a provider first",
+      "cannotUse": "You cannot use this provider.",
+      "noModels": "This provider has no enabled models.",
+      "modelNotOffered": "This provider does not offer {{model}}.",
+      "atLeastOne": "At least 1",
+      "answerTokens": "Answer tokens",
+      "contextTokens": "Context tokens",
+      "requestOptions": "Request options",
+      "instructions": "Instructions per field",
+      "builtInText": "Empty keeps the built-in text",
+      "summary": "A model · {{provider}} · {{model}}",
+      "fields": {
+        "summary": "Summary",
+        "title": "Title",
+        "description": "Description",
+        "tags": "Tags",
+        "rollup": "Roll-up",
+        "handoff": "Hand-off"
+      }
+    },
+    "thing": {
+      "gone": "No longer exists",
+      "goneAbout": "This {{kind}} no longer exists.",
+      "clear": "Clear",
+      "kinds": {
+        "environment": "environment",
+        "agent": "agent profile"
+      },
+      "needsManage": "You need to manage this environment to choose it.",
+      "needsUse": "You need to use this {{kind}} to choose it.",
+      "attachedAs": "How {{name}} is attached",
+      "remove": "Remove {{name}}",
+      "addMount": "Choose a mount",
+      "addDocument": "Add a document",
+      "searchDocuments": "Search documents by name",
+      "examples": {
+        "environment": "An environment you manage",
+        "agent": "An agent profile you can use",
+        "mount": "A mount and how it is attached",
+        "document": "Documents you can read"
+      }
+    },
+    "features": {
+      "label": "Agent features",
+      "none": "No installed agent program has a feature to switch.",
+      "unknown": "No installed agent program names this feature",
+      "on": "On",
+      "off": "Off",
+      "remove": "Remove {{name}}",
+      "useDefault": "Use the default for {{name}}",
+      "summaryNone": "No feature is set",
+      "summaryOne": "{{name}} ({{state}})"
+    },
+    "model": {
+      "use": "Use “{{name}}”",
+      "choose": "Choose a model or type its name",
+      "name": "Type a model name"
+    },
+    "order": {
+      "by": "Order by",
+      "groups": "Arranged groups",
+      "arrange": "Arrange a group",
+      "arrangePlaceholder": "Choose a place whose contents to arrange",
+      "nothingToArrange": "Nothing left to arrange",
+      "add": "Add a place to {{name}}",
+      "addPlaceholder": "Add a place",
+      "gone": "No longer exists",
+      "removeGroup": "Stop arranging {{name}}",
+      "up": "Move {{name}} up in {{group}}",
+      "down": "Move {{name}} down in {{group}}",
+      "remove": "Remove {{name}} from {{group}}",
+      "useForm": "Use the form",
+      "editJson": "Edit as JSON"
+    }
   }
 }

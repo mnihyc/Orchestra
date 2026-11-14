@@ -923,6 +923,7 @@ async fn recording_and_restore(root_alias: bool) {
                 environment_id: site.environment,
                 snapshot_id: snapshot,
                 directory: "web".into(),
+                wait_for_indexing: true,
                 kind: RecordKind::Turn,
                 record_days: days,
                 max_bytes,
@@ -1001,6 +1002,8 @@ async fn recording_and_restore(root_alias: bool) {
     // The original native result is good, but old server validation could freeze only a
     // generic unavailable fallback. Reading it must revalidate that original, never recapture.
     let fallback = FsRecordResult {
+        indexing: None,
+
         state: RecordState::Unavailable,
         tree_ref: None,
         repository_head: None,

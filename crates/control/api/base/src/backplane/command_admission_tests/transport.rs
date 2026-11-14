@@ -96,8 +96,16 @@ fn connect(fixture: &mut Fixture, issuer: CommandIssuer) -> oneshot::Receiver<()
                                 );
                             }
                         };
-                        link.route_up(&gateway, machine, session, UpFrame::CmdAck(CmdAck { id }))
-                            .await;
+                        link.route_up(
+                            &gateway,
+                            machine,
+                            session,
+                            UpFrame::CmdAck(CmdAck {
+                                id,
+                                key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+                            }),
+                        )
+                        .await;
                         link.route_up(
                             &gateway,
                             machine,

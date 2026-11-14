@@ -354,7 +354,8 @@ pub struct Cmd {
     /// Its serial key; `null` for a command that waits for no other.
     #[serde(default)]
     pub key: Option<String>,
-    /// The moment after which it is not to be started.
+    /// The latest arrival time. Once accepted, admission and serial-key queue time are credited
+    /// to execution, including after a connector restart.
     pub deadline: Time,
     /// Its body, as its kind defines it.
     #[serde(rename = "b")]
@@ -372,11 +373,28 @@ pub fn is_transport_rebind(kind: &str, body: &Json) -> bool {
     flag.and_then(Json::as_bool) == Some(true)
 }
 
+/// Actual serial-key ownership, independent of an accepted command's later upload.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[repr(i16)]
+pub enum CommandKeyPhase {
+    /// Accepted, still waiting for its place in the serial line.
+    Queued = 0,
+    /// Running while it owns the key.
+    Running = 1,
+    /// Capture released the key; its result can still be uploading.
+    Released = 2,
+}
+
 /// A machine's acceptance: durable for ordinary commands, in memory for a live transport rebind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct CmdAck {
     /// The command.
     pub id: Id,
+    /// The machine's current ownership of its serial key.
+    pub key_phase: CommandKeyPhase,
 }
 
 /// The system's wish that a command not be carried out after all.

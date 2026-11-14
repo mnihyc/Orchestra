@@ -734,6 +734,8 @@ impl Scene {
                 }
                 Ok(CommandResult::FsRecord(
                     orch_link_contract::source::FsRecordResult {
+                        indexing: None,
+
                         state: orch_link_contract::source::RecordState::Unavailable,
                         tree_ref: None,
                         repository_head: None,

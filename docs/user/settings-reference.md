@@ -61,6 +61,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:models.allowed` | **Allowed models** — Patterns naming the models that may be used here at all; a model has to be named by every scope that sets a list. |
 | `setting:services.allowed` | **Allowed services** — Patterns naming enabled provider services that may be used here; every scope that sets a list must admit the service. |
 | `setting:providers.allowed` | **Allowed providers** — Patterns over providers' Orch addresses; every scope that sets a list must admit the provider used for work here. |
+| `setting:models.add_switches_on` | **Switched on when added** — What a model starts with when it is added from its provider's catalogue: everything it offers (all), only its efforts and context sizes (basic), or only its window and efforts (nothing). A manager can switch on the rest afterwards. |
 | `setting:collab.attribution` | **Attribution** — Whether Orch's composed input, stop, denial and forwarded text names people: auto once a second person's words are delivered, always, or never (a person/an approver, with source, time and notes kept). Authored chats and documents retain their writers. |
 | `setting:collab.default_delivery` | **Default delivery** — What an input does when a turn is running, unless its sender says otherwise: wait for the next turn, or steer the running one. |
 | `setting:composer.paste_inline_context_share` | **Pasted text in the message** — The default share of remaining context for pasted text. 0 always sends it as a file; 100 always sends it in the message. The sender can choose for each paste. |
@@ -133,13 +134,14 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:export.keep_hours` | **Archives are kept** — For how many hours a finished archive is kept for its person to fetch before it is removed. |
 | `setting:import.max_bytes` | **Import size limit** — The expanded bytes allowed in one import. When unset, the place's export size limit applies. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:import.max_items` | **Import item limit** — The objects allowed in one import. When unset, the place's export item limit applies. A lower scope can only reduce this limit; it cannot remove a limit set above. |
-| `setting:workspace.ignore` | **Ignored paths** — Patterns, written as in a gitignore file, for what the index of a workspace leaves out. |
-| `setting:workspace.index` | **Index** — Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online. |
+| `setting:workspace.ignore` | **Ignored paths** — Patterns, written as in a gitignore file, for paths to hide in a workspace: they are absent from its file lists, search, listings of the tree and recorded turn files, and cannot be read or written through Orch. It is for what a person wants hidden, never for speed: a large tree needs no list. |
+| `setting:workspace.index` | **Index** — Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online. An online workspace is listed one directory at a time from its machine either way, however large the tree. |
 | `setting:source.repository_url` | **Repository** — The repository prepared only when the thread's directory is missing; an existing directory keeps its own files. |
 | `setting:source.branch` | **Source branch** — The branch to prepare; unset, use the repository's advertised default branch. |
 | `setting:source.secret_name` | **Source secret** — The name of an existing HTTPS Git reading secret; its value is sealed only to the preparation command. |
 | `setting:workspace.record_days` | **Keep turn files** — Days to keep complete turn and restore undo files in the environment; zero disables recording. |
 | `setting:workspace.record_max_bytes` | **Largest recorded directory** — The included file and link bytes eligible for whole-state recording; larger directories use per-file undo. |
+| `setting:workspace.record_wait_secs` | **Wait for turn files** — Seconds to wait for a whole recording before a turn. The shipped default skips initial indexing; choosing a wait also waits for indexing. Changed files can still be restored individually when whole recording is not ready. |
 | `setting:broadcast.delivery` | **Announcement delivery** — How an announcement reaches a thread whose turn is running: it interrupts, steers, or waits for the next turn. |
 | `setting:broadcast.fallback` | **When steering is impossible** — What is done instead when an announcement is to steer an agent that cannot be steered. |
 | `setting:broadcast.wake_idle` | **Allow waking idle threads** — Whether a send may wake an idle thread here; on as shipped. Each announcement or thread message chooses wake explicitly, false when omitted. |

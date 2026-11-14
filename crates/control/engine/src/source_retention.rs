@@ -99,7 +99,7 @@ impl Engine {
                 return Ok(());
             }
         }
-        // End namespace facts stay in the turn; the separately uploaded manifest need not outlive
+        // Change names and counts stay in the turn; the complete end manifest need not outlive
         // its immutable before-state deadline. Detachment and pin release share one transaction.
         let mut tx = self.db().begin().await?;
         let expired_ends: Vec<Vec<u8>> = sqlx::query_scalar("WITH due AS (
