@@ -91,7 +91,8 @@ trust = "pinned"
 [link]
 heartbeat_secs = 20
 dead_after_secs = 60
-max_frame_bytes = 262144
+max_frame_bytes = 262144                     # the largest frame on a session's wire
+max_message_bytes = 16777216                 # ordinary message allowance; paged catalogue values span it in parts
 tunnel_window_bytes = 1048576
 tunnel_resume_grace_secs = 60
 tunnel_session_idle_secs = 60                # unused tunnel-only sessions; active work protects them

@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-link-contract --lib --test largest_messages
+test -p orch-link --lib --test commands --test large_messages --test streams --test spool --test slow_link --test handshake
+test -p orch-gateway-core --test large_messages --test commands --test events --test sessions --test tunnels --test tunnel_attachments --test node_port_records --test ports_walk
+test -p orch-gateway-core --features test-observers --test wss_observers
+test -p orch-api-core --features test-observers --lib backplane
+test -p orch-image-backends --lib
+test -p orch-engine --lib tools::image_generation

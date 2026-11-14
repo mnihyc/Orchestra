@@ -17,7 +17,7 @@
 use async_trait::async_trait;
 use orch_link::controller::{ControllerLink, ControllerOutputs, Notice};
 use orch_link::framing::{
-    Connection, Message, MessageSink, MessageSource, PeerInfo, TransportError,
+    Connection, Message, MessageSink, MessageSource, PeerInfo, Refused, TransportError,
 };
 use orch_link::reconnect::{DialError, Dialer};
 use orch_link::session::{GatewayConfig, SessionAuthority, SessionEvent, SessionSender, accept};
@@ -38,6 +38,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+
+pub mod large_messages;
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -69,8 +71,8 @@ pub enum Action {
 #[derive(Debug, Clone)]
 struct Rule {
     direction: Direction,
-    /// The `t` of a text frame, or `data` for tunnel data; any frame when
-    /// `None`.
+    /// The `t` of a text frame, `part` for a part of a large message, or `data`
+    /// for tunnel data; any frame when `None`.
     frame: Option<String>,
     /// When set, the frame must carry this event of this durable stream.
     event: Option<(String, Seq)>,
@@ -289,10 +291,17 @@ fn carries_event(message: &Message, stream: &str, seq: Seq) -> bool {
     }
 }
 
-/// The kind of a message, as rules name it: the `t` of a text frame, `data`
-/// for binary.
+/// The kind of a message, as rules name it: the `t` of a text frame, `part`
+/// for a part of a large message, `data` for other binary.
 fn kind_of(message: &Message) -> String {
     match message {
+        Message::Binary(bytes)
+            if bytes
+                .first()
+                .is_some_and(|kind| orch_link_contract::frames::PartFrame::is_kind(*kind)) =>
+        {
+            "part".to_owned()
+        }
         Message::Binary(_) => "data".to_owned(),
         Message::Text(text) => serde_json::from_str::<serde_json::Value>(text)
             .ok()
@@ -945,37 +954,47 @@ impl Dialer for HubDialer {
     }
 }
 
-/// Carries what the system sends a machine to the machine's session.
+/// Carries what the system sends a machine to the machine's session. A command that the session cannot
+/// carry is failed at once with the reason, as a gateway tells the system.
 async fn carry_down(
     hub: Arc<HubInner>,
     machine_id: Id,
     mut down: mpsc::UnboundedReceiver<DownFrame>,
 ) {
     while let Some(frame) = down.recv().await {
-        let sender = lock(&hub.machines)
-            .get(&machine_id)
-            .and_then(|slot| slot.session.as_ref().map(|(_, sender)| sender.clone()));
-        if let Some(sender) = sender {
-            let _ = match frame {
-                DownFrame::Cmd(cmd) => sender.send(Frame::Cmd(cmd)),
-                DownFrame::CmdCancel(cancel) => sender.send(Frame::CmdCancel(cancel)),
-                DownFrame::Ack(ack) => sender.send(Frame::Ack(ack)),
-                DownFrame::Nak(nak) => sender.send(Frame::Nak(nak)),
-                DownFrame::McpImportAnswer(answer) => sender.send(Frame::McpImportAnswer(answer)),
-                DownFrame::PortLocalAnswer(answer) => sender.send(Frame::PortLocalAnswer(answer)),
-                DownFrame::PortConnectionsQuery(query) => {
-                    sender.send(Frame::PortConnectionsQuery(query))
-                }
-                DownFrame::Gateways(advertisement) => sender.send(Frame::Gateways(advertisement)),
-                DownFrame::TunnelRouteAnswer(answer) => {
-                    sender.send(Frame::TunnelRouteAnswer(answer))
-                }
-                DownFrame::TunnelAttach(attach) => sender.send(Frame::TunnelAttach(attach)),
-                DownFrame::TunnelPrepareAnswer(answer) => {
-                    sender.send(Frame::TunnelPrepareAnswer(answer))
-                }
-                DownFrame::TunnelRelease(release) => sender.send(Frame::TunnelRelease(release)),
+        let (session, controller) = {
+            let machines = lock(&hub.machines);
+            let slot = machines.get(&machine_id);
+            (
+                slot.and_then(|slot| slot.session.clone()),
+                slot.map(|slot| slot.controller.clone()),
+            )
+        };
+        if let Some((session_id, sender)) = session {
+            let command = match &frame {
+                DownFrame::Cmd(cmd) => Some(cmd.id),
+                _ => None,
             };
+            let sent = if let Some(id) = command {
+                sender.send_tracked(Frame::from(frame)).map(|receipt| {
+                    if let Some(controller) = controller.clone() {
+                        tokio::spawn(async move {
+                            if receipt.await.is_ok() {
+                                controller.command_sent(session_id, id);
+                            }
+                        });
+                    }
+                })
+            } else {
+                sender.send(Frame::from(frame))
+            };
+            if let (Err(Refused::TooLarge { bytes, limit }), Some(id), Some(controller)) =
+                (sent, command, controller)
+            {
+                controller
+                    .commands()
+                    .refuse_unaccepted(id, &orch_link::commands::command_too_large(bytes, limit));
+            }
         }
     }
 }

@@ -19,6 +19,7 @@
 //! handed to a machine expire at its deadline, and lets whoever issued a
 //! command wait for its result.
 
+use crate::framing::Refused;
 use crate::journal::{Entry, Journal, JournalError, Step};
 use crate::session::SessionSender;
 use async_trait::async_trait;
@@ -151,6 +152,40 @@ fn too_late() -> CommandError {
         TIMEOUT,
         "the deadline passed before the command could start",
     )
+}
+
+/// How a command fails when it is larger than a message on the link may be: the system says so at once,
+/// with the size and the setting, instead of leaving the machine to never answer.
+#[must_use]
+pub fn command_too_large(bytes: usize, limit: usize) -> CommandError {
+    CommandError::new(
+        ErrorCode::TooLarge,
+        format!(
+            "the command is {bytes} bytes, and a message on this link may have {limit} at most (`max_message_bytes` in the `[link]` section of the settings)"
+        ),
+    )
+}
+
+/// How a command fails when its answer is larger than a message on the link may be.
+#[must_use]
+pub fn reply_too_large(bytes: usize, limit: usize) -> CommandError {
+    CommandError::new(
+        ErrorCode::TooLarge,
+        format!(
+            "the answer to the command is {bytes} bytes, and a message on this link may have {limit} at most (`max_message_bytes` in the `[link]` section of the settings)"
+        ),
+    )
+}
+
+/// What the system is told when the answer to a command cannot be sent.
+fn unsendable_reply(refused: Refused) -> CommandError {
+    match refused {
+        Refused::TooLarge { bytes, limit } => reply_too_large(bytes, limit),
+        Refused::SessionOver | Refused::Unwritable => CommandError::new(
+            ErrorCode::Internal,
+            "the answer to the command could not be written",
+        ),
+    }
 }
 
 // ---------------------------------------------------------------- the machine's end
@@ -366,10 +401,76 @@ impl CommandServer {
         Time::new(self.inner.clock.now() - chrono::Duration::milliseconds(offset))
     }
 
+    /// Says a word to the system that is small by its kind: an acknowledgement.
     fn send(&self, frame: impl Into<Frame>) {
         let session = lock(&self.inner.state).session.clone();
-        if let Some(session) = session {
-            let _ = session.send(frame);
+        if let Some(session) = session
+            && let Err(refused @ (Refused::TooLarge { .. } | Refused::Unwritable)) =
+                session.send(frame)
+        {
+            tracing::error!(%refused, "a word to the system was not sent");
+        }
+    }
+
+    /// Says how a command ended. An answer that this session cannot carry is
+    /// not lost in silence: the system is told that the command cannot be
+    /// answered, and why, which is what its caller is shown.
+    fn send_result(&self, result: CmdRes) {
+        let session = lock(&self.inner.state).session.clone();
+        let Some(session) = session else {
+            return;
+        };
+        let id = result.id;
+        let paged = self.entry(id).is_some_and(|entry| {
+            entry
+                .cmd
+                .kind
+                .parse::<CommandKind>()
+                .is_ok_and(CommandKind::is_paged)
+        });
+        let sent = if paged {
+            session.send_paged(result)
+        } else {
+            session.send(result)
+        };
+        let refused = match sent {
+            Ok(()) | Err(Refused::SessionOver) => return,
+            Err(refused) => refused,
+        };
+        tracing::error!(command = %id, %refused, "the answer to a command was not sent as it was");
+        metrics::counter!("orch_link_replies_refused_total").increment(1);
+        self.send(CmdRes {
+            id,
+            outcome: Err(unsendable_reply(refused)),
+        });
+    }
+
+    /// What a command ended with, or, where the session it is to be answered
+    /// on cannot carry that answer, the failure that says so: this is what is
+    /// written down, so that a command asked for again is answered the same.
+    fn fitting(&self, id: Id, outcome: Result<Json, CommandError>) -> Result<Json, CommandError> {
+        if self.entry(id).is_some_and(|entry| {
+            entry
+                .cmd
+                .kind
+                .parse::<CommandKind>()
+                .is_ok_and(CommandKind::is_paged)
+        }) {
+            return outcome;
+        }
+        let limit = lock(&self.inner.state)
+            .session
+            .as_ref()
+            .map(SessionSender::max_message_bytes);
+        let Some(limit) = limit else {
+            return outcome;
+        };
+        let result = CmdRes { id, outcome };
+        match orch_link_contract::frames::encode(&Frame::from(result.clone()), limit) {
+            Err(orch_link_contract::frames::FrameError::TooLarge { bytes, .. }) => {
+                Err(unsendable_reply(Refused::TooLarge { bytes, limit }))
+            }
+            _ => result.outcome,
         }
     }
 
@@ -458,7 +559,7 @@ impl CommandServer {
             }) => {
                 drop(state);
                 self.send(CmdAck { id });
-                self.send(result);
+                self.send_result(result);
                 return;
             }
             Some(Entry {
@@ -817,7 +918,7 @@ impl CommandServer {
             return;
         }
         if transport_only {
-            self.send(CmdRes { id, outcome });
+            self.send_result(CmdRes { id, outcome });
             drop(hold);
             {
                 let mut state = lock(&self.inner.state);
@@ -846,7 +947,7 @@ impl CommandServer {
                 "the live observation expired; read the current session again",
             ))
         } else {
-            outcome
+            self.fitting(id, outcome)
         };
         loop {
             match self.write_finished(id, outcome.clone()).await {
@@ -854,7 +955,7 @@ impl CommandServer {
                     if let Some(kind) = kind {
                         command_phase(kind, CommandPhase::Finalization, started.elapsed());
                     }
-                    self.send(live.unwrap_or(result));
+                    self.send_result(live.unwrap_or(result));
                     drop(hold);
                     {
                         let mut state = lock(&self.inner.state);
@@ -1159,9 +1260,11 @@ impl CommandIssuer {
         self.down.send(frame)
     }
 
-    fn transmit(&self, issued: &mut Issued, now: Instant) {
+    fn transmit(&self, issued: &mut Issued) {
         if self.send_down(DownFrame::Cmd(issued.cmd.clone())).is_ok() {
-            issued.sent_at = Some(now);
+            // Queueing is not transmission: a large command may spend minutes waiting
+            // for and crossing the line. The gateway starts the acknowledgement wait.
+            issued.sent_at = None;
             issued.tx.send_if_modified(|progress| {
                 if *progress == Progress::Queued {
                     *progress = Progress::Sent;
@@ -1201,7 +1304,7 @@ impl CommandIssuer {
             resends: 0,
         };
         if state.ready && !issued.tx.borrow().is_final() {
-            self.transmit(&mut issued, Instant::now());
+            self.transmit(&mut issued);
         }
         state.commands.insert(id, issued);
         CommandHandle { id, progress: rx }
@@ -1220,13 +1323,12 @@ impl CommandIssuer {
 
     /// A session is ready: every command that did not end is sent again.
     pub fn session_ready(&self) {
-        let now = Instant::now();
         let mut state = lock(&self.state);
         state.ready = true;
         for issued in state.commands.values_mut() {
             if !issued.tx.borrow().is_final() {
                 issued.resends = 0;
-                self.transmit(issued, now);
+                self.transmit(issued);
             }
         }
     }
@@ -1262,6 +1364,18 @@ impl CommandIssuer {
                     false
                 }
             });
+        }
+    }
+
+    /// The gateway wrote the complete command onto its current machine session.
+    /// A native acknowledgement or result can arrive first and already retires this wait.
+    pub fn on_sent(&self, id: Id) {
+        let mut state = lock(&self.state);
+        if state.ready
+            && let Some(issued) = state.commands.get_mut(&id)
+            && matches!(*issued.tx.borrow(), Progress::Sent)
+        {
+            issued.sent_at = Some(Instant::now());
         }
     }
 
@@ -1385,7 +1499,7 @@ impl CommandIssuer {
             if ready && now.duration_since(sent_at) >= patience {
                 if issued.resends < ACK_RESENDS {
                     issued.resends += 1;
-                    self.transmit(issued, now);
+                    self.transmit(issued);
                 } else {
                     let error = CommandError::new(
                         ErrorCode::Timeout,
