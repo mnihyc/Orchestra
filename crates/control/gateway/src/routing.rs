@@ -12,8 +12,9 @@
 //! Tunnels go on being carried, because they never needed the system.
 
 use crate::Gateway;
-use orch_link_contract::backplane::{BackplaneFrame, Down, Up, UpFrame};
-use orch_link_contract::frames::{DataFrame, Frame};
+use orch_link::framing::Refused;
+use orch_link_contract::backplane::{BackplaneFrame, Down, DownFrame, DownRefused, Up, UpFrame};
+use orch_link_contract::frames::{DataFrame, Frame, Tagged};
 use orch_types::Id;
 use std::sync::atomic::Ordering;
 
@@ -78,10 +79,37 @@ pub(crate) fn data_from_machine(gateway: &Gateway, machine: Id, session: Id, dat
 }
 
 /// A frame the system sent for a machine. A machine that has no session here
-/// is not told: the system sends again when it has.
+/// is not told: the system sends again when it has. A frame that its session
+/// cannot carry, because it is larger than a message there may be, is told to
+/// the system, which fails the command it was at once with the reason.
 pub(crate) fn to_machine(gateway: &Gateway, down: Down) {
     let Some(sender) = gateway.inner.sessions.primary_sender_of(down.machine_id) else {
         return;
     };
-    let _ = sender.send(Frame::from(down.frame));
+    let Down { machine_id, frame } = down;
+    let command = match &frame {
+        DownFrame::Cmd(cmd) => Some(cmd.id),
+        _ => None,
+    };
+    let kind = frame.type_name();
+    let refused = match sender.send(Frame::from(frame)) {
+        Ok(()) | Err(Refused::SessionOver) => return,
+        Err(refused) => refused,
+    };
+    let (bytes, limit) = match refused {
+        Refused::TooLarge { bytes, limit } => (bytes, limit),
+        Refused::SessionOver | Refused::Unwritable => (0, sender.max_message_bytes()),
+    };
+    tracing::error!(machine = %machine_id, kind, bytes, limit, "a frame of the system was not put into the machine's session");
+    metrics::counter!("orch_gateway_frames_refused_total").increment(1);
+    gateway
+        .inner
+        .backplane
+        .send(BackplaneFrame::DownRefused(DownRefused {
+            machine_id,
+            command,
+            frame: kind.to_owned(),
+            bytes: bytes as u64,
+            limit: limit as u64,
+        }));
 }

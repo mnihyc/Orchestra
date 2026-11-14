@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orchctl --test channel
+web typecheck
+web lint
+web test -- tests/component/screen-labels.test.tsx tests/component/metadata-declaration-locators.test.tsx tests/component/system-auto-save.test.tsx
