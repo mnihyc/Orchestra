@@ -52,6 +52,7 @@ pub mod person_notices;
 pub use person_notices::ThreadMoveNotice;
 
 mod operations;
+mod settlement;
 pub use operations::{
     NotificationOperation, OperationRecipient, attach_operation, extend_operation_audience,
     notify_operation, operation_audience, operation_default, operation_thread_audience,
@@ -1111,12 +1112,11 @@ pub(crate) async fn approval_asked(
     Ok(())
 }
 
-/// An approval is not waiting any more, decided or withdrawn: what asked
-/// people to decide it is marked read, since nobody has anything left to do
-/// about it and a message that went out later would ask for what is done.
+/// A decided or withdrawn approval retains its recipient work in the same transaction. A private worker
+/// marks every copy read and advances its recipient feeds without holding this thread or approval row.
 pub(crate) async fn approval_settled(unit: &mut Unit<'_>, approval: Id) -> Result<(), EngineError> {
     let now = unit.now();
-    inbox::settle_approval(&mut *unit.conn, approval, now).await?;
+    inbox::defer_approval_settlement(&mut *unit.conn, approval, now).await?;
     Ok(())
 }
 
