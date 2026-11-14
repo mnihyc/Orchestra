@@ -51,6 +51,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:thread.read_turn_bytes` | **Turn read size** — The most the messages of one turn may take, written out in full, for Orch to read that turn into a summary of the conversation or a goal check; a larger turn is named and left out, and nothing of it is read. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:thread.plan_first` | **Plan first** — Whether the composer's Plan switch starts on for a thread's first message. The approval mode stays as it is. |
 | `setting:thread.plan_answered_by` | **Who answers plans** — Who may proceed with a plan an agent proposes, or keep it planning. A lower scope can only choose a stricter option. Strictness order: `writers` → `managers` (strictest last). |
+| `setting:thread.silent_after_secs` | **Silence notice** — How many seconds nothing may arrive from a running agent, with no tool running, before the status line says how long nothing came. |
 | `setting:thread.goal.max_turns` | **Goal turns** — The most turns a goal may use here; 0 is no limit. A goal may set a stricter own limit; it cannot raise an ancestor limit. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:thread.goal.max_minutes` | **Goal minutes** — The most minutes a goal may be active here; 0 is no limit. It is looked at between turns: a running turn is not cut short. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:thread.goal.max_credits` | **Goal credits** — The most credits a goal may use here, written as a decimal number; 0 is no limit. Usage caps hold as always. A lower scope can only reduce this limit; it cannot remove a limit set above. |
@@ -61,6 +62,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:models.allowed` | **Allowed models** — Patterns naming the models that may be used here at all; a model has to be named by every scope that sets a list. |
 | `setting:services.allowed` | **Allowed services** — Patterns naming enabled provider services that may be used here; every scope that sets a list must admit the service. |
 | `setting:providers.allowed` | **Allowed providers** — Patterns over providers' Orch addresses; every scope that sets a list must admit the provider used for work here. |
+| `setting:models.add_switches_on` | **Switched on when added** — What a model starts with when it is added from its provider's catalogue: everything it offers (all), only its efforts and context sizes (basic), or only its window and efforts (nothing). A manager can switch on the rest afterwards. |
 | `setting:collab.attribution` | **Attribution** — Whether Orch's composed input, stop, denial and forwarded text names people: auto once a second person's words are delivered, always, or never (a person/an approver, with source, time and notes kept). Authored chats and documents retain their writers. |
 | `setting:collab.default_delivery` | **Default delivery** — What an input does when a turn is running, unless its sender says otherwise: wait for the next turn, or steer the running one. |
 | `setting:composer.paste_inline_context_share` | **Pasted text in the message** — The default share of remaining context for pasted text. 0 always sends it as a file; 100 always sends it in the message. The sender can choose for each paste. |
@@ -140,6 +142,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:source.secret_name` | **Source secret** — The name of an existing HTTPS Git reading secret; its value is sealed only to the preparation command. |
 | `setting:workspace.record_days` | **Keep turn files** — Days to keep complete turn and restore undo files in the environment; zero disables recording. |
 | `setting:workspace.record_max_bytes` | **Largest recorded directory** — The included file and link bytes eligible for whole-state recording; larger directories use per-file undo. |
+| `setting:workspace.record_wait_secs` | **Wait for turn files** — Seconds a turn waits for the files before it to be recorded; when they are not ready in time the turn starts with per-file undo, and the turn says so. |
 | `setting:broadcast.delivery` | **Announcement delivery** — How an announcement reaches a thread whose turn is running: it interrupts, steers, or waits for the next turn. |
 | `setting:broadcast.fallback` | **When steering is impossible** — What is done instead when an announcement is to steer an agent that cannot be steered. |
 | `setting:broadcast.wake_idle` | **Allow waking idle threads** — Whether a send may wake an idle thread here; on as shipped. Each announcement or thread message chooses wake explicitly, false when omitted. |
@@ -488,10 +491,12 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:ask.retention_min_days` | **Shortest Ask retention** — The minimum history retention chosen by administrators of the conversation's root organization. A lower scope can only raise this minimum. |
 | `setting:ask.retention_max_days` | **Longest Ask retention** — The maximum history retention allowed by administrators of the conversation's root organization. |
 | `setting:ask.max_steps` | **Ask steps per turn** — The model steps allowed for one question before it asks the person to continue. |
-| `setting:ask.max_output_tokens` | **Ask answer tokens** — The most output tokens per Ask model request, also reserved before fitting conversation context. The lowest system or organization value applies. |
-| `setting:ask.context_tokens` | **Ask context tokens** — Unset uses the chosen model's context window. When set, the smaller value applies to Ask only; output and tool-result reserves must still fit. The lowest system or organization value applies. |
+| `setting:ask.max_output_tokens` | **Ask answer tokens** — The most output tokens per Ask model request. The request is fitted to the window less this, and an answer takes half of the window at most. The lowest system or organization value applies. |
+| `setting:ask.context_tokens` | **Ask context tokens** — Unset uses the chosen model's context window; a model that states none is not given a small one. When set, the smaller value applies to Ask only. A window no larger than twice the answer tokens leaves the answer half of it. The lowest system or organization value applies. |
 | `setting:ask.max_tools` | **Ask tools per turn** — The read operations allowed for one question before it asks the person to narrow the question. |
-| `setting:ask.tool_bytes` | **Ask source size** — The most bytes from one read result supplied to the model, with a canonical link to the full source. |
-| `setting:ask.turn_tool_bytes` | **Ask sources per turn** — The total read-result bytes supplied while answering one question. |
+| `setting:ask.docs_hits` | **Ask guide pages per search** — The most guide pages one Ask search of the help gives the model, English and Chinese alternating where both match. |
+| `setting:ask.docs_excerpt_tokens` | **Ask guide excerpt size** — The most tokens of one guide page that Ask's help search gives the model; the page's link comes with it. |
+| `setting:ask.max_operations` | **Ask operations per search** — The most read operations one Ask search of the read catalogue returns. |
+| `setting:ask.max_links` | **Ask links per source** — The most canonical source links Ask keeps from one read. |
 | `setting:providers.model_groups_max` | **Model groups** — The maximum number of named groups per model. The default is 8 and can be raised; 0 allows no new group memberships. Existing memberships are kept. |
 | `option:usage.rates.*.web_fetch_per_call` | Credits per successful page-fetch call. |

@@ -170,7 +170,8 @@ test('a side thread: the dialog that asks, the lane that answers, the limit that
 
   // The limit: the dialog that says how many are open, with a way to close each.
   await change.sides(MAIN, 3);
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Side thread…', exact: true }).click();
+  await page.locator('[data-thread-header] [data-thread-more]').click();
+  await page.getByRole('menuitem', { name: 'Side thread…', exact: true }).click();
   await ask.getByRole('textbox', { name: 'What to ask' }).fill('One more question');
   await ask.getByRole('button', { name: 'Start side thread', exact: true }).click();
   await expect(ask.getByText('Close one to start another.')).toBeVisible();
@@ -282,8 +283,9 @@ test('in Chinese: the plan of a switch and of a fork, each with its choices open
   await playScene(MAIN, 'history');
   await page.goto(`/thread/${MAIN}`);
   await expect(page.getByRole('log', { name: '对话', exact: true }).getByText('Please fix it, and run the tests.')).toBeVisible();
-  // Visible header actions retain their handler and are omitted from the folded menu.
-  const forkAction = page.locator('[data-thread-header]').getByRole('button', { name: '创建副本到…', exact: true });
+  // The act keeps its handler in the menu of the head.
+  await page.locator('[data-thread-header] [data-thread-more]').click();
+  const forkAction = page.getByRole('menuitem', { name: '创建副本到…', exact: true });
   await expect(forkAction).toBeVisible();
   await forkAction.click();
   const fork = wizard(page, '分叉“Main thread”');

@@ -20,8 +20,8 @@ export function useStatusValues(threadId: string, place: StatusPlace, activeLabe
   const turn = useThreadPart(threadId, runningTurn);
   const arrangement = useWorkbench((state) => state.statusItems);
   const selected = arrangement.filter((entry) => entry.place === place && entry.shown);
-  const needsSpeed = selected.some((entry) => entry.id === 'speed'), needsTokens = selected.some((entry) => entry.id === 'tokens');
-  const needsText = (needsSpeed || needsTokens) && (turn?.usage?.output_tokens ?? 0) <= 0;
+  const needsSpeed = selected.some((entry) => entry.id === 'speed'), needsUsage = selected.some((entry) => entry.id === 'usage');
+  const needsText = (needsSpeed || needsUsage) && (turn?.usage?.output_tokens ?? 0) <= 0;
   const outputCounts = useThreadPart(threadId, (view) => needsText && view.outputCounts.turnId === turn?.id ? view.outputCounts.counts : null);
   const providerNeeded = selected.some((entry) => entry.id === 'provider_window' || entry.id === 'provider_running');
   const environmentNeeded = selected.some((entry) => entry.id === 'environment_cpu' || entry.id === 'environment_memory' || entry.id === 'host_load');

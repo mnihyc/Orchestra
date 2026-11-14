@@ -1,0 +1,6 @@
+fmt
+clippy
+contracts
+test -p orch-db --test released_migrations --test migration_progress
+test -p orch-api-core --test threads_read --test thread_history_pages --test thread_opening_scopes --test search_content --test thread_continuation_search
+test -p orch-api-core --test forks -- moving_routes::

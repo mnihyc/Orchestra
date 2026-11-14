@@ -20,10 +20,10 @@ use orch_api_contract::goals::ThreadGoal;
 use orch_api_contract::nodes::{JobRef, NodeBase, NodeRef};
 use orch_api_contract::threads::continuations::ThreadReadSelector;
 use orch_api_contract::threads::{
-    BlockedReason, Item, RecordedCost, Segment, SideReading, StartingStep, THREAD_SYNC_ENDED_TURNS,
-    THREAD_SYNC_MAX_CHANGES, Thread, ThreadBinding, ThreadBlocked, ThreadCan, ThreadCosts,
-    ThreadInput, ThreadInputAccess, ThreadKind, ThreadMemory, ThreadQueue, ThreadSides,
-    ThreadState, ThreadSync, ThreadUsage, Turn, TurnRecordedCost,
+    BlockedReason, Item, RecordedCost, Segment, SideReading, StartingStep, StartingWork,
+    THREAD_SYNC_ENDED_TURNS, THREAD_SYNC_MAX_CHANGES, Thread, ThreadBinding, ThreadBlocked,
+    ThreadCan, ThreadCosts, ThreadInput, ThreadInputAccess, ThreadKind, ThreadMemory, ThreadQueue,
+    ThreadSides, ThreadState, ThreadSync, ThreadUsage, Turn, TurnRecordedCost,
 };
 use orch_api_contract::users::UserRef;
 use orch_blob_contract::range::ByteRange;
@@ -473,6 +473,9 @@ pub fn turn_view(row: &TurnRow, display: &str, people: &People) -> Result<Turn, 
                     .unwrap_or("internal"),
             );
             object.insert("message".to_owned(), Json::String(message));
+            // An error stored without this member (Ask's failures before 0.1.3 were) must not make the
+            // whole turn, and with it the thread, unreadable: it is read as not worth trying again.
+            object.entry("retryable").or_insert(Json::Bool(false));
         }
         error
     });
@@ -487,6 +490,7 @@ pub fn turn_view(row: &TurnRow, display: &str, people: &People) -> Result<Turn, 
             "id": row.id, "thread_id": row.thread_id, "segment_id": row.segment_id, "ordinal": row.ordinal,
             "state": row.state, "input_id": row.input_id, "model": row.model,
             "before_snapshot_id": row.before_snapshot_id,
+            "files_changed": row.files_changed.map(i64::from),
             "model_display": display,
             "effort": row.effort, "params": row.params, "error": error, "usage": row.usage,
             // What the harness reported beyond the totals, and what filled the context: a record of another
@@ -651,6 +655,10 @@ pub struct ThreadFacts {
     pub side_reading: Option<SideReading>,
     /// What a starting thread waits for.
     pub starting_step: Option<StartingStep>,
+    /// When that step began.
+    pub starting_since: Option<orch_types::Time>,
+    /// The command the step waits for, and what holds it up.
+    pub starting_work: Option<StartingWork>,
     /// Why it cannot go on.
     pub blocked: Option<ThreadBlocked>,
     /// What a person's Stop holds of its queue.
@@ -943,6 +951,8 @@ impl ThreadSyncData {
                 sides: frame.sides,
                 side_reading: facts.side_reading,
                 starting_step: facts.starting_step,
+                starting_since: facts.starting_since,
+                starting_work: facts.starting_work,
                 blocked: frame.blocked,
                 queue: facts.queue,
                 binding: frame.binding,
@@ -1657,6 +1667,11 @@ async fn thread_facts(
                 .as_deref()
                 .map(|step| read::<StartingStep>(Json::String(step.to_owned()), "a starting step"))
                 .transpose()?,
+            starting_since: row.starting_step_at.map(orch_types::Time::new),
+            starting_work: row.starting_command.clone().map(|command| StartingWork {
+                command,
+                behind: row.starting_behind.clone(),
+            }),
             blocked: blocked_of(conn, row).await?,
             queue,
             environment: environment_ref,

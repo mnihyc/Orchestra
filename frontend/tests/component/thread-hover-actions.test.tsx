@@ -6,6 +6,7 @@ import type * as Threads from '@/api/threads';
 import type * as Source from '@/api/source';
 import { captureThreadRead } from '@/api/threadRead';
 import { NOT_PICKING, TimelineContextValue, type TimelineContext } from '@/features/timeline/context';
+import { AgentMessage } from '@/features/timeline/items/AgentMessage';
 import { UserMessage } from '@/features/timeline/items/UserMessage';
 import { TurnFooter } from '@/features/timeline/TurnFooter';
 import { ViewCompactContext } from '@/features/workbench/Narrow';
@@ -29,12 +30,13 @@ afterEach(async () => { cleanup(); for (const id of ids.splice(0)) threadWriter.
   if (themeBefore === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = themeBefore;
   await setLocale('en'); });
 
-function draw(width: number, middle = false, checkpoint = true, state: 'completed' | 'failed' | 'interrupted' = 'completed') {
+function draw(width: number, middle = false, checkpoint = true, state: 'completed' | 'failed' | 'interrupted' = 'completed', under: 'footer' | 'answer' = 'footer') {
   const source = snapshot(); const id = source.thread.id; ids.push(id);
   const completed = { ...turn('hover-turn', { ordinal: 1, state, inputId: 'hover-input', completedAt: '2026-10-01T10:00:12Z' }), before_snapshot_id: checkpoint ? 'before-person-message' : null };
   const person = { ...userMessage('hover-person', 'Fix this route', { author: source.thread.owner, turn: completed.id, inputId: completed.input_id }), continuation_id: A };
   if (person.kind !== 'user_message') throw new Error('The checkpoint belongs to the human input');
   const answer = { ...agentMessage('hover-answer', 'The route is fixed.', { turn: completed.id }), continuation_id: A };
+  if (answer.kind !== 'agent_message') throw new Error('The answer is a message of the agent');
   const input = { ...threadInput(completed.input_id, 'Fix this route', { author: source.thread.owner, position: 'a', state: 'delivered' }), thread_id: id };
   const thread = { ...source.thread, state: 'idle' as const, current_turn_id: null, environment_permissions: ['files.view', 'files.manage'], can: { ...source.thread.can, fork: true } };
   threadWriter.reset(id, { ...source, thread, items: [person, answer], inputs: [input], turns: [completed,
@@ -42,10 +44,10 @@ function draw(width: number, middle = false, checkpoint = true, state: 'complete
     prompt_summaries: [{ ...summary(input.id), author: source.thread.owner, total: 1, edit: { available: true, reason: null, detail: null } }] }, false, captureThreadRead(id));
   wire.send.mockResolvedValue({ input, seq: source.seq + 1 }); wire.retry.mockResolvedValue({ input, seq: source.seq + 1 }); wire.copy.mockResolvedValue(true);
   wire.checkpoint.mockImplementation(() => new Promise<Snapshot>(() => undefined));
-  const context: TimelineContext = { threadId: id, threadName: thread.name, meId: source.thread.owner.id, detail: 'steps', recent: new Set(),
+  const context: TimelineContext = { threadId: id, threadName: thread.name, meId: source.thread.owner.id, detail: 'normal',
     layout: 'one', setLayout: () => undefined, canInteract: true, canManage: true, live: true, lit: null, selection: NOT_PICKING };
   const view = show(<ViewCompactContext.Provider value={width === 400}><div style={{ width }}><TimelineContextValue.Provider value={context}>
-    <UserMessage item={person} /><TurnFooter turnId={completed.id} inputItemId={person.id} />
+    <UserMessage item={person} />{under === 'answer' ? <><AgentMessage item={answer} answer /><TurnFooter turnId={completed.id} inputItemId={person.id} answered /></> : <TurnFooter turnId={completed.id} inputItemId={person.id} />}
   </TimelineContextValue.Provider></div></ViewCompactContext.Provider>);
   return { ...view, id, completed, input };
 }
@@ -71,7 +73,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(wire.copy).toHaveBeenCalledWith('Fix this route\n\nThe route is fixed.', i18n.t('thread.turnActions.copied'));
     await userEvent.click(within(person).getByRole('button', { name: i18n.t('thread.turnActions.restoreBefore') }));
     await waitFor(() => expect(wire.checkpoint).toHaveBeenCalledExactlyOnceWith('before-person-message'));
-    expect(screen.getByRole('dialog', { name: i18n.t('source.restore.titleTurn') })).toBeVisible();
+    expect(await screen.findByRole('dialog', { name: i18n.t('source.restore.titleTurn') })).toBeVisible();
     expect(wire.send).not.toHaveBeenCalled(); expect(wire.retry).not.toHaveBeenCalled();
   });
 }
@@ -107,4 +109,21 @@ it.each(['failed', 'interrupted'] as const)('retries a middle %s turn through it
   await userEvent.click(retry);
   await waitFor(() => expect(wire.retry).toHaveBeenCalledWith(expect.objectContaining({ threadId: view.id }), view.completed.id, expect.any(String)));
   expect(wire.send).not.toHaveBeenCalled();
+});
+
+it('carries the toolbar of the turn on its answer: Copy, Retry, Fork, Restore, the time, and a menu that copies the whole turn', async () => {
+  const view = draw(1440, false, true, 'completed', 'answer');
+  const acts = view.container.querySelector<HTMLElement>('[data-item="hover-answer"] [data-hover-actions]');
+  if (acts === null) throw new Error('The answer carries its toolbar');
+  expect(within(acts).getAllByRole('button').flatMap((button) => button.getAttribute('aria-label') ?? [])).toEqual([
+    i18n.t('timeline.actions.copy'), i18n.t('timeline.footer.retry'), i18n.t('timeline.selection.forkNow'), i18n.t('source.restore.open'), i18n.t('timeline.actions.more'),
+  ]);
+  expect(acts.querySelector('[data-turn-figures="hover-turn"]')).not.toBeNull();
+  // The turn has no second toolbar under it: the person's and the answer's are the only two.
+  expect(view.container.querySelectorAll('[data-hover-actions]')).toHaveLength(2);
+  await userEvent.click(within(acts).getByRole('button', { name: i18n.t('timeline.footer.retry') }));
+  await waitFor(() => expect(wire.send).toHaveBeenCalledWith(expect.objectContaining({ threadId: view.id }), expect.objectContaining({ content: view.input.content, delivery: 'queue' })));
+  await userEvent.click(within(acts).getByRole('button', { name: i18n.t('timeline.actions.more') }));
+  await userEvent.click(await screen.findByRole('menuitem', { name: i18n.t('thread.turnActions.copy') }));
+  expect(wire.copy).toHaveBeenCalledWith('Fix this route\n\nThe route is fixed.', i18n.t('thread.turnActions.copied'));
 });

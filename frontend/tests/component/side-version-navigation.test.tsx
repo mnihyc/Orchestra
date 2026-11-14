@@ -35,7 +35,7 @@ const IA = '01950000-0000-7000-8000-000000000031', IB = '01950000-0000-7000-8000
 const DA = '01950000-0000-7000-8000-000000000041', DB = '01950000-0000-7000-8000-000000000042', DC = '01950000-0000-7000-8000-000000000043';
 const owner = snapshot().thread.owner;
 const panelRead = resultThreadRead(SIDE, PANEL), sideDefault = defaultThreadRead(SIDE);
-const parentContext: TimelineContext = { threadId: PARENT, threadName: 'Parent stays selected', detail: 'steps', recent: new Set(),
+const parentContext: TimelineContext = { threadId: PARENT, threadName: 'Parent stays selected', detail: 'normal',
   layout: 'one', setLayout: () => undefined, meId: owner.id, canInteract: true, canManage: false, live: true, lit: null, selection: NOT_PICKING };
 const reference = { id: SIDE, kind: 'thread' as const, name: 'Versioned aside', redacted: false };
 let previousWorkbench = useWorkbench.getState();

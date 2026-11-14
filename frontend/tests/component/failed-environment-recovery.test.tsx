@@ -37,7 +37,7 @@ function draw(thread: Thread, input: ThreadInput) {
   function Surface() {
     const view = useThreadView(thread.id);
     const current = view.thread ?? thread;
-    return <><TimelineContextValue.Provider value={{ threadId: current.id, threadName: current.name, detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined, meId: current.owner.id, canInteract: current.access.permissions.includes('thread.interact'), canManage: current.access.permissions.includes('thread.manage'), live: true, lit: null, selection: NOT_PICKING }}><StatusLine /></TimelineContextValue.Provider>
+    return <><TimelineContextValue.Provider value={{ threadId: current.id, threadName: current.name, detail: 'normal', layout: 'one', setLayout: () => undefined, meId: current.owner.id, canInteract: current.access.permissions.includes('thread.interact'), canManage: current.access.permissions.includes('thread.manage'), live: true, lit: null, selection: NOT_PICKING }}><StatusLine threadId={current.id} /></TimelineContextValue.Provider>
       <BlockedBanner thread={current} onProceed={calls.proceed} /><SourcePreparation thread={current} /><QueueTray threadId={thread.id} queued={queuedInputs(view)} sending={[]} /></>;
   }
   return show(<Surface />);
