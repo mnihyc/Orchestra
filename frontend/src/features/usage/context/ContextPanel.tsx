@@ -24,6 +24,7 @@ import {
   freedBy,
   ringOf,
   type Segment,
+  usedAlone,
 } from '@/features/usage/context/fill';
 import { PartsBar, Swatch } from '@/features/usage/context/PartsBar';
 import type { ContextFill, ContextPart, Thread } from '@/generated/api-types';
@@ -148,6 +149,7 @@ export function ContextPanel({ thread }: { thread: Thread }) {
         {fill !== null && <span className="text-xs text-text-subtle" data-context-count={fill.count}>{t(countKey(fill.count), { harness })}</span>}
       </div>
       {contextModelName(thread)!==null && <p className="text-sm text-text-muted">{t('contextUsage.panel.model',{model:modelDisplayName(contextModelName(thread)??'',t)})}</p>}
+      {ring === null && usedAlone(thread.usage) !== null && <p className="text-sm text-text-muted tabular-nums">{t('contextUsage.ring.labelUsed', { used: formatTokens(usedAlone(thread.usage) ?? 0, locale) })}</p>}
       {ring !== null && (
         <p className="text-sm text-text-muted tabular-nums">
           {t(ring.compactPercent === null ? 'contextUsage.ring.labelBare' : 'contextUsage.ring.label', {

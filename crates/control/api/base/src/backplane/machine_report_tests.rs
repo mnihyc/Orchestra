@@ -1381,3 +1381,59 @@ pub fn __api_run_a_runtime_network_report_obeys_the_runtime_hosts_source_binding
 -> ::futures::future::LocalBoxFuture<'static, ()> {
     ::std::boxed::Box::pin(self::a_runtime_network_report_obeys_the_runtime_hosts_source_binding())
 }
+
+#[cfg(any(test, feature = "test-support"))]
+async fn the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted()
+ {
+    let office = Office::new().await;
+    // The unit enrolled for the environment's runtime, and the environment does not name it yet.
+    sqlx::query("UPDATE environments SET machine_id = NULL, status = 'provisioning' WHERE id = $1")
+        .bind(office.other_environment)
+        .execute(&office.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE runtimes SET state = 'creating' WHERE environment_id = $1")
+        .bind(office.other_environment)
+        .execute(&office.db.pool)
+        .await
+        .unwrap();
+    let stream = Stream::Env {
+        environment_id: office.other_environment,
+    };
+    let mut unit = Wire::new(&office.app.app.link, office.other).await;
+    unit.send(&office.app, &stream, 1, &facts("/workspace")).await;
+    assert!(
+        unit.is_silent(),
+        "nothing is answered, so that the unit sends the report again"
+    );
+    assert_eq!(office.cursor(office.other, &stream).await, None);
+    assert_eq!(
+        office
+            .app
+            .app
+            .link
+            .inner
+            .refusals
+            .total(office.other, StreamFamily::Env)
+            .await,
+        0
+    );
+    // The environment names the unit now, and the report that is sent again is taken.
+    sqlx::query("UPDATE environments SET machine_id = $2, status = 'running' WHERE id = $1")
+        .bind(office.other_environment)
+        .bind(office.other)
+        .execute(&office.db.pool)
+        .await
+        .unwrap();
+    unit.send(&office.app, &stream, 1, &facts("/workspace")).await;
+    unit.ack(&stream, 1).await;
+    assert_eq!(office.cursor(office.other, &stream).await, Some(1));
+}
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn __api_run_the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted()
+-> ::futures::future::LocalBoxFuture<'static, ()> {
+    ::std::boxed::Box::pin(
+        self::the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted(),
+    )
+}

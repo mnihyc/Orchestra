@@ -1,0 +1,9 @@
+# n41-unit-reads: a host's unit named by its host in one place, the passing executor warning, held reports, the timeline's row kinds; first compile.
+fmt
+clippy
+test -p orch-api-core --test container_units --test everything_resources --test realtime_diagnostics --test kfix_binding
+test -p orch-api-base --lib
+test -p orch-engine --test preflight
+web typecheck
+web lint
+web test -- tests/unit/row-kinds.test.ts tests/unit/waiting-environment-making.test.ts tests/unit/thread-timeline.test.ts tests/component/thread-first-minutes.test.tsx tests/component/thread-view-modes.test.tsx tests/component/instructions-deferred.test.tsx tests/component/timeline-accessibility.test.tsx tests/component/agent-history.test.tsx
