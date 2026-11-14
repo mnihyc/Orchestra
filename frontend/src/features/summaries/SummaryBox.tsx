@@ -3,6 +3,7 @@ import { MessageSquareText, RefreshCw } from 'lucide-react';
 import { type ReactNode, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { ApiError } from '@/api/client';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 import { Button } from '@/ui/Button';
 import { ErrorAlert } from '@/ui/ErrorState';
@@ -23,6 +24,8 @@ export interface SummaryBoxProps {
   /** Resolves after the page adapter has adopted the server's accepted snapshot. */
   onRefresh?: (() => Promise<void>) | undefined;
   refreshBlockedReason?: string | undefined;
+  /** What the box covers has nothing in it (no unread message), so that nothing is asked of a model. */
+  nothingNew?: boolean | undefined;
   onConfigure?: (() => void) | undefined;
   /** Opens Ask with this context; opening does not send a paid question. */
   onAsk: (context: SummaryAskContext) => void;
@@ -31,6 +34,18 @@ export interface SummaryBoxProps {
   className?: string;
 }
 
+/** What stopped a summary, as the server names it; each has its sentence under `summaryBox.failure`. */
+const failureReasons = ['asker_ended', 'source_gone', 'source_unreadable', 'nothing_new', 'no_summarizer', 'provider_gone', 'provider_not_ready', 'no_interface',
+  'model_off', 'model_not_allowed', 'provider_forbidden', 'not_allowed', 'effort_not_offered', 'no_keeper', 'keeper_offline', 'cap_no_room',
+  'output_cut', 'model_failed', 'unusable_answer', 'unexpected'] as const;
+type FailureReason = (typeof failureReasons)[number];
+
+const failureReason = (error: unknown): FailureReason | null => {
+  if (!(error instanceof ApiError)) return null;
+  const reason = error.problem.reason;
+  return failureReasons.find((known) => known === reason) ?? null;
+};
+
 const tones: Record<SummaryState, DotTone> = { empty: 'idle', fresh: 'success', stale: 'idle', scheduled: 'idle', updating: 'info', failed: 'danger', no_summarizer: 'idle' };
 
 /** Reader and page identity own transient request state, never another view's result. */
@@ -38,10 +53,11 @@ export function SummaryBox(props: SummaryBoxProps) {
   return <SummaryContent key={JSON.stringify([props.readerKey, props.target.kind, props.target.reference])} {...props} />;
 }
 
-function SummaryContent({ target, summary, onRefresh, refreshBlockedReason, onConfigure, onAsk, askBlockedReason, details, className }: SummaryBoxProps) {
+function SummaryContent({ target, summary, onRefresh, refreshBlockedReason, nothingNew = false, onConfigure, onAsk, askBlockedReason, details, className }: SummaryBoxProps) {
   const { t } = useTranslation();
   const heading = useId();
   const title = t(target.kind === 'chat_title' ? 'summaryOptions.fields.chat_title' : target.kind === 'chat' ? 'summaryBox.catchUp' : 'summaryBox.title');
+  const emptyText = t(target.kind === 'chat' ? 'summaryBox.nothingNew.chat' : 'summaryBox.nothingNew.other');
   const stateText = (text: string) => target.kind === 'chat' || target.kind === 'chat_title'
     ? t('summaryBox.subjectState', { subject: title, state: text }) : text;
   const locked = useRef(false);
@@ -50,12 +66,18 @@ function SummaryContent({ target, summary, onRefresh, refreshBlockedReason, onCo
   // A later durable revision supersedes an older request's local error.
   const localError = failure?.revision === summary.revision ? failure : null;
   const hasText = summary.text !== null && summary.text.trim() !== '';
-  const state: SummaryState = pending || summary.state === 'updating' ? 'updating' : localError !== null ? 'failed' : summary.state === 'fresh' && !hasText ? 'empty' : summary.state;
+  const shown: SummaryState = pending || summary.state === 'updating' ? 'updating' : localError !== null ? 'failed' : summary.state === 'fresh' && !hasText ? 'empty' : summary.state;
   const error = localError === null ? summary.error : localError.error;
+  const reason = failureReason(error);
+  // A source with nothing in it is no failure: the box says so plainly, beside any paragraph it already holds.
+  const nothingToSay = nothingNew || reason === 'nothing_new';
+  const state: SummaryState = nothingToSay && shown === 'failed' ? (hasText ? 'fresh' : 'empty') : shown;
+  // Say what stopped it, and that a paragraph already written stays.
+  const failureText = reason === null ? undefined : hasText ? `${t(`summaryBox.failure.${reason}`)} ${t('summaryBox.failure.kept')}` : t(`summaryBox.failure.${reason}`);
   const refreshable = onRefresh !== undefined && summary.producer?.kind !== 'written' && summary.state !== 'no_summarizer';
 
   const refresh = async () => {
-    if (!refreshable || refreshBlockedReason !== undefined || state === 'updating' || locked.current) return;
+    if (!refreshable || refreshBlockedReason !== undefined || nothingNew || state === 'updating' || locked.current) return;
     locked.current = true;
     setFailure(null);
     setPending(true);
@@ -82,7 +104,7 @@ function SummaryContent({ target, summary, onRefresh, refreshBlockedReason, onCo
       <div className="ml-auto flex shrink-0 flex-wrap items-center gap-1">
         {details}
         {refreshable && <IconButton size="sm" label={t(summaryActionKey(target.kind, 'refresh'))} icon={<RefreshCw aria-hidden />}
-          pending={state === 'updating'} blocked={refreshBlockedReason !== undefined} reason={refreshBlockedReason}
+          pending={state === 'updating'} blocked={refreshBlockedReason !== undefined || nothingNew} reason={refreshBlockedReason ?? (nothingNew ? emptyText : undefined)}
           onClick={() => { void refresh(); }} />}
         <Button size="sm" variant="ghost" icon={<MessageSquareText aria-hidden />} blocked={askBlockedReason !== undefined} reason={askBlockedReason} onClick={() => { if (askBlockedReason === undefined) onAsk({ target, summary: summary.text }); }}>{t(summaryActionKey(target.kind, 'ask'))}</Button>
       </div>
@@ -92,7 +114,7 @@ function SummaryContent({ target, summary, onRefresh, refreshBlockedReason, onCo
     {state === 'no_summarizer' && <StateLine compact role="status" title={stateText(t('summaryBox.state.no_summarizer'))}
       message={refreshBlockedReason}
       action={onConfigure === undefined ? undefined : <Button size="sm" variant="ghost" onClick={onConfigure}>{t(summaryActionKey(target.kind, 'choose'))}</Button>} />}
-    {state === 'failed' && <ErrorAlert error={error} />}
-    {state === 'empty' && !hasText && <StateLine compact title={stateText(t('summaryBox.empty'))} />}
+    {state === 'failed' && <ErrorAlert error={error} message={failureText} />}
+    {state === 'empty' && !hasText && <StateLine compact title={stateText(nothingToSay ? emptyText : t('summaryBox.empty'))} />}
   </section>;
 }

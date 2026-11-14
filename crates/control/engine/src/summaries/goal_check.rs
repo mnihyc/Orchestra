@@ -272,7 +272,19 @@ pub(crate) async fn ask(
         task: "goal_check",
         resource: None,
     };
-    let request = config.completion(system, input, config.max_output_tokens.max(ANSWER_TOKENS));
+    let reasoning = match host
+        .reasoning(thread, config.provider_id, &config.model_name)
+        .await
+    {
+        Ok(reasoning) => reasoning,
+        Err(error) => return Ok(Checked::Unavailable(super::safe_reason(&error))),
+    };
+    let request = config.completion_with(
+        &reasoning,
+        system,
+        input,
+        config.max_output_tokens.max(ANSWER_TOKENS),
+    );
     let answered = match host.complete(thread, request).await {
         Ok(answer) => answer,
         Err(error) => return Ok(Checked::Unavailable(super::safe_reason(&error))),

@@ -12,6 +12,15 @@ use orch_summarizer_contract::summarizer::{SummarizeError, Summarizer, SummaryRe
 use orch_types::Id;
 use std::sync::Arc;
 
+/// What a model's own parameters say about reasoning.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Reasoning {
+    /// Whether the model reasons before it answers, so that part of its output allowance goes before any text.
+    pub reasons: bool,
+    /// The lowest effort the model offers that the writer may use, to ask a summary for.
+    pub lowest_effort: Option<String>,
+}
+
 /// The host's permission-checked API-provider completion port.
 #[async_trait]
 pub trait Complete: Send + Sync {
@@ -21,6 +30,18 @@ pub trait Complete: Send + Sync {
         node: Id,
         request: ProviderComplete,
     ) -> Result<ProviderCompleteResult, SummarizeError>;
+
+    /// What the model's parameters say of reasoning, for work at this node. A host that knows nothing of it
+    /// says the model does not reason.
+    async fn reasoning(
+        &self,
+        node: Id,
+        provider_id: Id,
+        model_name: &str,
+    ) -> Result<Reasoning, SummarizeError> {
+        let _ = (node, provider_id, model_name);
+        Ok(Reasoning::default())
+    }
 }
 
 /// The built-in model producer over a host's completion port.
@@ -62,11 +83,15 @@ impl Summarizer for Model {
             request.activity = crate::context::fill(input, budget, None, total)?.activity;
         }
         let (system, input) = prompts::render(&request, &config);
+        let reasoning = self
+            .complete
+            .reasoning(request.node.id, config.provider_id, &config.model_name)
+            .await?;
         let answer = self
             .complete
             .complete(
                 request.node.id,
-                config.completion(system, input, config.max_output_tokens),
+                config.completion_with(&reasoning, system, input, config.max_output_tokens),
             )
             .await?;
         let tokens: TokenUsage = answer.usage;

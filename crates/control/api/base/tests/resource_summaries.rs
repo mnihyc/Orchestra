@@ -781,3 +781,84 @@ async fn a_real_document_scoped_refresh_retains_its_original_http_token_and_clos
         "acceptance and raw identity checks make no model request"
     );
 }
+
+#[tokio::test]
+async fn a_failed_refresh_says_what_stopped_it_and_that_the_previous_paragraph_is_kept() {
+    use orch_api_contract::{
+        documents::{NodeDocumentCreate, NodeDocumentCreateBody},
+        summaries::SummaryModelChoice,
+    };
+    let scene = rig::Scene::new().await;
+    scene.rig.engine.stop();
+    let app = &scene.rig.world.app;
+    let document = app
+        .call(NodeDocumentCreate, &[&scene.tree.topic.base.id])
+        .token(&scene.ada.token)
+        .body(&NodeDocumentCreateBody {
+            title: "A refresh that fails".into(),
+            blocks: None,
+            markdown: Some("Text that was summarized before.".into()),
+            access: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    sqlx::query("UPDATE providers SET kind='api',harness_kind=NULL,agent_id=NULL,protocols=ARRAY['openai-responses'],upstreams=$2,key_machine_id=$3,status='ready' WHERE id=$1")
+        .bind(scene.on.provider).bind(json!([{"protocol":"openai-responses","base_url":"https://fixture.example.invalid/v1","options":{"auth":"none"}}])).bind(scene.rig.machine_id).execute(scene.rig.db.pool()).await.unwrap();
+    let target = SummaryTarget::Document {
+        id: document.base.id,
+    };
+    let receipt = app
+        .call(SummaryRefresh, &[&"document", &document.base.id])
+        .token(&scene.ada.token)
+        .body(&SummaryRefreshBody {
+            client_id: new_id(),
+            model: Some(SummaryModelChoice {
+                provider_id: scene.on.provider,
+                model: rig::MODEL.into(),
+                params: None,
+            }),
+            range: None,
+        })
+        .send()
+        .await
+        .ok();
+    cache_in(
+        &scene.rig.world,
+        target,
+        Some(scene.ada.id()),
+        "An earlier paragraph.",
+        json!([target]),
+    )
+    .await;
+    // As the engine leaves a request that could not run: failed, with the reason it stored.
+    sqlx::query("UPDATE resource_summary_requests SET state='failed',problem=$2,finished_at=now(),lease_token=NULL,lease_until=NULL WHERE id=$1")
+        .bind(receipt.id)
+        .bind(json!({"code":"summary_unavailable","message":"The machine that keeps the key of the provider is offline. Bring it online or move the key.","reason":"keeper_offline"}))
+        .execute(scene.rig.db.pool())
+        .await
+        .unwrap();
+    let view = app
+        .call(SummaryGet, &[&"document", &document.base.id])
+        .token(&scene.ada.token)
+        .query(&SummaryReadQuery::default())
+        .send()
+        .await
+        .ok();
+    assert_eq!(view.state, SummaryState::Failed);
+    assert_eq!(view.text.as_deref(), Some("An earlier paragraph."));
+    let problem = view.problem.expect("a failed refresh carries its problem");
+    assert_eq!(
+        problem.extra.get("reason"),
+        Some(&json!("keeper_offline")),
+        "the page is told which thing stopped it, not only that something did"
+    );
+    assert!(
+        problem.detail.starts_with("The machine that keeps the key")
+            && problem.detail.ends_with("The previous paragraph is kept."),
+        "{}",
+        problem.detail
+    );
+}

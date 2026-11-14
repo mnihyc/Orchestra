@@ -685,6 +685,23 @@ impl CommandAuthority {
         }
     }
 
+    /// Whether the rows around this stored command already refuse it, decided before the native
+    /// source's rows are taken, so that a command refused for that reason never holds a person's
+    /// thread for the time its refusal takes. `false` leaves the decision to the check under the
+    /// source's fence, as for every authority that has no such part.
+    pub async fn refused_without_fence(
+        &self,
+        conn: &mut Conn,
+        command: &CommandRow,
+    ) -> Result<bool, EngineError> {
+        match self.paid_service_native().unwrap_or(self) {
+            Self::ResourceSummary(authority) => {
+                authority.refused_without_fence(conn, command).await
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// Native operation-owned suppliers also prepare their actual queue insertion after waits.
     /// Existing recorded commands retain their independent receipt/reconciliation path.
     pub fn requires_issue_checkpoint(&self) -> bool {

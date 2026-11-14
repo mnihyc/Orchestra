@@ -1173,6 +1173,21 @@ impl Link {
             if let Some(value) = &private.authority {
                 let authority: orch_engine::commands::CommandAuthority =
                     serde_json::from_value(value.clone()).map_err(|_| internal())?;
+                // Whatever the rows around the command already decide is decided before the
+                // source's rows are taken: a command that is refused for that reason never holds
+                // a person's thread, or any place above it, while the refusal is made. A command
+                // that passes (or that this cannot decide) takes them and is checked as before.
+                if authority
+                    .refused_without_fence(&mut tx, &row)
+                    .await
+                    .unwrap_or(false)
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        format!("the accepted {operation} command is no longer authorized"),
+                    )
+                    .into());
+                }
                 authority
                     .lock_native_source(&mut tx)
                     .await

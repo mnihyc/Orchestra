@@ -61,7 +61,9 @@ impl Authority {
             machine: command.machine,
             slot: slot.into(),
             kind: command.kind,
-            body: Hash::of(&serde_json::to_vec(&command.body)?),
+            // PostgreSQL keeps an object's members in its own order, so the body is identified
+            // without regard to member order, as every other stored command body is.
+            body: crate::jobs::command_identity::hash(&command.body)?,
             deadline,
         };
         if value.lane(recipe, plan).is_none() {
@@ -180,7 +182,7 @@ impl Authority {
             || machine != self.machine
             || kind != self.kind.as_str()
             || deadline != self.deadline
-            || Hash::of(&serde_json::to_vec(body)?) != self.body
+            || crate::jobs::command_identity::hash(body)? != self.body
         {
             return Ok(None);
         }

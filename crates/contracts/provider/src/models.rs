@@ -458,6 +458,12 @@ impl ModelParameters {
             .as_deref()
             .filter(|start| self.reasoning_modes().iter().any(|mode| mode == *start))
     }
+    /// Whether the model reasons before it answers, as its parameters say: it takes efforts, or a
+    /// reasoning mode starts on. What reasons spends part of the output allowance before any text.
+    #[must_use]
+    pub fn reasons(&self) -> bool {
+        !self.efforts().is_empty() || self.reasoning_mode_start().is_some()
+    }
     /// Service tiers explicitly enabled by a manager.
     #[must_use]
     pub fn service_tiers(&self) -> &[ServiceTier] {

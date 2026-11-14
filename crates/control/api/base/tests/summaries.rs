@@ -5,6 +5,8 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "container_units/fixture.rs"]
+mod container_units;
 mod places;
 mod rig;
 mod support;
@@ -20,8 +22,12 @@ use orch_api_contract::nodes::{
     AutoAction, AutoField, Node, NodeAuto, NodeAutoBody, NodeUpdate, NodeUpdateBody,
 };
 use orch_api_contract::settings::{NodeSettingList, NodeSettingSet, NodeSettingSetBody};
+use orch_api_contract::summaries::{
+    SummaryModelChoice, SummaryRefresh, SummaryRefreshBody, SummaryTarget,
+};
 use orch_api_contract::threads::Delivery;
 use orch_authz::Caller;
+use orch_db::queries::summaries as rows;
 use orch_engine::summaries::{handoff, indexed_transcript};
 use orch_link_contract::commands::{
     Command, CommandKind, CommandResult, ProviderComplete, ProviderCompleteResult,
@@ -1337,4 +1343,172 @@ async fn a_report_of_met_is_checked_by_the_helper_and_a_not_yet_starts_the_next_
         2,
         "nothing goes on after it is met"
     );
+}
+
+/// The provider's key kept on the machine of a container that a host of Ada's runs, as the system
+/// leaves a provider once its container has enrolled. The unit's machine is online.
+async fn key_in_a_container(s: &Scene, provider: Id) -> Id {
+    let now = s.rig.world.now();
+    let unit = {
+        let mut conn = s.rig.db.acquire().await.unwrap();
+        let (host, template) = container_units::host_and_template(
+            &mut conn,
+            s.ada.id(),
+            s.tree.org.base.id,
+            "Summary",
+            now,
+        )
+        .await;
+        container_units::provider_unit(&mut conn, host, template, provider, now).await
+    };
+    sqlx::query("UPDATE machines SET online = true WHERE id = $1")
+        .bind(unit)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    unit
+}
+
+/// The request once it is over, whichever way it ended.
+async fn ended(s: &Scene, request: Id) -> rows::Request {
+    eventually("the summary request is over", || async {
+        let row = rows::request(&mut *s.rig.world.conn().await, request)
+            .await
+            .unwrap()
+            .unwrap();
+        matches!(row.state.as_str(), "done" | "failed" | "discarded")
+    })
+    .await;
+    rows::request(&mut *s.rig.world.conn().await, request)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// The model request of a refresh went to the unit's machine and ended well, and the thread's
+/// paragraph is the text that came back.
+async fn paragraph_of_the_thread_came_from(s: &Scene, thread: Id, unit: Id, viewer: Option<Id>) {
+    let sent: Vec<(Id, String)> =
+        sqlx::query_as("SELECT machine_id,state FROM commands WHERE kind = 'provider.complete'")
+            .fetch_all(s.rig.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        sent,
+        [(unit, "succeeded".to_owned())],
+        "one model request, on the machine the key is on"
+    );
+    let cache = rows::get(
+        &mut *s.rig.world.conn().await,
+        SummaryTarget::Thread { id: thread },
+        viewer,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        cache
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("redirect test now passes")),
+        "the paragraph is what the model answered: {:?}",
+        cache.text
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_persons_refresh_of_a_thread_writes_its_paragraph_when_the_providers_key_is_on_a_unit_machine()
+ {
+    let s = Scene::new().await;
+    let provider = api_provider(&s).await;
+    let calls = script(&s, false);
+    let thread = s.thread().await.base.id;
+    s.exchange(thread, 0, "Fix login", "The redirect is repaired")
+        .await;
+    // The case runs the refresh itself, so no sweep of the engine competes with it.
+    s.rig.engine.stop();
+    let unit = key_in_a_container(&s, provider).await;
+    let receipt = s
+        .rig
+        .world
+        .app
+        .call(SummaryRefresh, &[&"thread", &thread])
+        .token(&s.ada.token)
+        .body(&SummaryRefreshBody {
+            client_id: new_id(),
+            model: Some(SummaryModelChoice {
+                provider_id: provider,
+                model: MODEL.into(),
+                params: None,
+            }),
+            range: None,
+        })
+        .send()
+        .await
+        .ok();
+    s.rig.engine.summarize_resources().await.unwrap();
+    let request = ended(&s, receipt.id).await;
+    assert_eq!(
+        request.state, "done",
+        "the refresh ends with its paragraph, not with {:?}",
+        request.problem
+    );
+    assert!(
+        request
+            .accepted_source
+            .get("http")
+            .is_some_and(|http| !http.is_null()),
+        "a person's refresh keeps the raw identity that asked for it"
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    paragraph_of_the_thread_came_from(&s, thread, unit, Some(s.ada.id())).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_automatic_refresh_of_a_thread_writes_its_paragraph_when_the_providers_key_is_on_a_unit_machine()
+ {
+    let s = Scene::new().await;
+    let provider = api_provider(&s).await;
+    let calls = script(&s, false);
+    let unit = key_in_a_container(&s, provider).await;
+    configure(
+        &s,
+        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+    )
+    .await;
+    s.rig
+        .world
+        .set_at(
+            Target::Node(s.tree.topic.base.id),
+            "summary.targets",
+            json!({"thread":{"automatic":true}}),
+        )
+        .await;
+    let thread = s.thread().await.base.id;
+    s.exchange(thread, 0, "Fix login", "The redirect is repaired")
+        .await;
+    let target = SummaryTarget::Thread { id: thread };
+    eventually("the thread's paragraph is written", || async {
+        rows::get(&mut *s.rig.world.conn().await, target, None)
+            .await
+            .unwrap()
+            .is_some_and(|cache| cache.text.is_some())
+    })
+    .await;
+    let cache = rows::get(&mut *s.rig.world.conn().await, target, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let request = rows::latest(&mut *s.rig.world.conn().await, cache.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (request.origin.as_str(), request.state.as_str()),
+        ("automatic", "done"),
+        "the automatic refresh ends with its paragraph, not with {:?}",
+        request.problem
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    paragraph_of_the_thread_came_from(&s, thread, unit, None).await;
 }

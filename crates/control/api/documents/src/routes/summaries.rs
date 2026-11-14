@@ -452,10 +452,26 @@ async fn read_view(
             .map(Into::into),
         route,
         problem: (failed && !follow.updating).then(|| {
-            Problem::new(
-                ErrorCode::ProviderUnavailable,
-                "The summary could not be refreshed. The previous paragraph is kept.",
-            )
+            // What the failed request stored: the thing that stopped it, by a stable word the page
+            // keys its sentence by, and that sentence in English for readers that know no word.
+            let stored = latest.as_ref().and_then(|row| row.problem.as_ref());
+            let reason = stored
+                .and_then(|problem| problem.get("reason"))
+                .and_then(Json::as_str);
+            let message = stored
+                .and_then(|problem| problem.get("message"))
+                .and_then(Json::as_str)
+                .unwrap_or("The summary could not be refreshed.");
+            let detail = if cache.as_ref().is_some_and(|row| row.text.is_some()) {
+                format!("{message} The previous paragraph is kept.")
+            } else {
+                message.to_owned()
+            };
+            let problem = Problem::new(ErrorCode::ProviderUnavailable, detail);
+            match reason {
+                Some(reason) => problem.with("reason", reason),
+                None => problem,
+            }
         }),
     };
     Ok(View {
@@ -468,11 +484,45 @@ async fn read_view(
 }
 
 fn same_view(old: &View, fresh: &View) -> bool {
-    old.identity.fact() == fresh.identity.fact()
-        && old.inputs == fresh.inputs
-        && old.providers == fresh.providers
-        && old.policy == fresh.policy
-        && old.snapshot == fresh.snapshot
+    let differing: Vec<&str> = [
+        ("identity", old.identity.fact() != fresh.identity.fact()),
+        ("inputs", old.inputs != fresh.inputs),
+        ("providers", old.providers != fresh.providers),
+        ("policy", old.policy != fresh.policy),
+        ("snapshot", old.snapshot != fresh.snapshot),
+    ]
+    .into_iter()
+    .filter_map(|(member, differs)| differs.then_some(member))
+    .collect();
+    if differing.is_empty() {
+        return true;
+    }
+    // The read that is refused with "no longer readable" says which member moved between the read
+    // and its publication, and which members of the snapshot, so that the cause can be told from the log.
+    let (old, fresh) = (&old.snapshot, &fresh.snapshot);
+    let moved: Vec<&str> = [
+        ("state", old.state != fresh.state),
+        ("revision", old.revision != fresh.revision),
+        ("text", old.text != fresh.text),
+        ("wait", old.wait != fresh.wait),
+        ("poll_after_ms", old.poll_after_ms != fresh.poll_after_ms),
+        ("updated_at", old.updated_at != fresh.updated_at),
+        ("route", old.route != fresh.route),
+        ("producer", old.producer != fresh.producer),
+        ("problem", old.problem != fresh.problem),
+        ("input", old.input != fresh.input),
+        ("manual_problem", old.manual_problem != fresh.manual_problem),
+    ]
+    .into_iter()
+    .filter_map(|(member, differs)| differs.then_some(member))
+    .collect();
+    tracing::info!(
+        target_kind = ?old.target,
+        view = ?differing,
+        snapshot = ?moved,
+        "a summary read changed between its read and its publication and is refused"
+    );
+    false
 }
 
 struct Reader;

@@ -16,6 +16,18 @@ pub(super) fn needs_journal(command: &Outgoing) -> bool {
         || creation(command)
 }
 
+/// The commands whose private authority holds a digest of their body.
+fn identifies_its_body(kind: CommandKind) -> bool {
+    matches!(
+        kind,
+        CommandKind::ProviderComplete
+            | CommandKind::SessionPrefixInspect
+            | CommandKind::SessionPrefixOpen
+            | CommandKind::SessionContinuationResume
+            | CommandKind::SessionContinuationClose
+    )
+}
+
 fn failed(error: impl std::fmt::Display) -> CommandsError {
     CommandsError::Other(error.to_string())
 }
@@ -109,6 +121,29 @@ pub(super) async fn journal(
         )
         .await
         .map_err(failed)?;
+        // The writer asks its authority again about the stored row once it has inserted it, and the
+        // wire admission asks it before the command goes out. Both read the row back, so what is
+        // asked about is the body as the database keeps it (its object members in the database's
+        // own order), never the body as the engine built it. The commands whose authority
+        // identifies their body are checked the same way here: an authority that knows its body
+        // only in the order it was built refuses them.
+        if identifies_its_body(command.kind)
+            && let Some(authority) = &command.authority
+        {
+            let stored = link_queries::command(&mut tx, command.id)
+                .await
+                .map_err(failed)?
+                .ok_or_else(|| failed("the command that was just stored cannot be read back"))?;
+            Box::pin(authority.current_callers(
+                &mut tx,
+                &stored,
+                commands.clock.as_ref(),
+                commands.access.as_ref(),
+            ))
+            .await
+            .map_err(|error| CommandsError::BeforeEffect(Box::new(error)))?
+            .ok_or(CommandsError::AuthorityMismatch)?;
+        }
         if admitted.iter().any(|(caller, until)| {
             caller
                 .as_ref()

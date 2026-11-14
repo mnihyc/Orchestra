@@ -10,17 +10,18 @@ import { IconButton } from '@/ui/IconButton';
 import { Button } from '@/ui/Button';
 import { StateLine } from '@/ui/StateLine';
 import { useFrameReady } from '@/shell/FrameReadiness';
-import type { Tab } from './layout';
+import { tabHidden, type Tab } from './layout';
 import { openingForView, showViewOpening } from './viewOpening';
 import { viewKey } from './viewIdentity';
 import { useWorkbench } from './store';
 
-/** A floating slot remains visible when its former bar closes, including on a restored workspace. */
+/** A floating slot remains visible when its former bar closes, including on a restored workspace; it is gone when its own section is closed. */
 export function ViewWindowLease({ tab }: { tab: Tab }) {
   const ready = useFrameReady();
   const [floating] = useViewChoice<boolean>('view-window', 'floating', false, tab.view);
+  const hidden = useWorkbench((state) => tabHidden(state.layout, tab.id));
   const key = viewKey(tab);
-  useLayoutEffect(() => floating && ready ? showViewOpening(key, openingForView(tab.id)) : undefined, [floating, ready, key, tab.id]);
+  useLayoutEffect(() => floating && ready && !hidden ? showViewOpening(key, openingForView(tab.id)) : undefined, [floating, ready, hidden, key, tab.id]);
   return null;
 }
 
@@ -55,6 +56,8 @@ export function ViewWindow({ name, tabId, title, actions, status, children, onCl
   const header = useRef<HTMLDivElement>(null), body = useRef<HTMLDivElement>(null);
   const dock = useRef<HTMLDivElement>(null);
   const [home] = useState(() => document.createElement('div'));
+  // Closing the window closes the view's section: a floating window of a closed section is not shown, and comes back with the section.
+  const closed = useWorkbench((state) => tabId !== undefined && tabHidden(state.layout, tabId));
   const drag = useRef<{ mode: 'move' | 'resize'; x: number; y: number; start: WindowGeometry } | null>(null);
   const update = useCallback((next: WindowGeometry) => {
     actual.current = fitViewWindow(next, innerWidth, innerHeight, minimumHeight.current);
@@ -67,10 +70,20 @@ export function ViewWindow({ name, tabId, title, actions, status, children, onCl
     return () => window.removeEventListener('resize', resize);
   }, [update]);
   useLayoutEffect(() => {
-    const parent = floating ? document.body : dock.current;
+    const parent = floating ? closed ? null : document.body : dock.current;
     parent?.appendChild(home);
     return () => home.remove();
-  }, [floating, home]);
+  }, [floating, closed, home]);
+  // Escape in a floating window closes it, unless something inside it (a menu, a list, a field that was composing) took the key.
+  useLayoutEffect(() => {
+    if (!floating) return;
+    const escape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented || isComposing(event)) return;
+      event.preventDefault(); event.stopPropagation(); onClose();
+    };
+    home.addEventListener('keydown', escape);
+    return () => home.removeEventListener('keydown', escape);
+  }, [floating, home, onClose]);
   useLayoutEffect(() => {
     if (tabId === undefined) return;
     const focus = () => useWorkbench.getState().focus(tabId);

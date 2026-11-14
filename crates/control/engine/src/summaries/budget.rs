@@ -36,7 +36,7 @@ pub(super) async fn context_tokens(
     .map_err(EngineError::unreadable)?;
     orch_summarizer_model::context::fit_window(
         config.context_tokens,
-        config.max_output_tokens,
+        config.output_reserve(parameters.reasons()),
         parameters
             .context_open()
             .or(parameters.context_window.filter(|window| *window > 0)),

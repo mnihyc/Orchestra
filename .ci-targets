@@ -1,0 +1,14 @@
+# n41-summaries, rounds two and three: the cases that fail without the stored-order repair; the same trap in the continuation commands; a reason per refusal shown to the person; the wire admission decides before it locks; room for reasoning and the upstream's own reason for a cut answer; no model call for an empty source.
+fmt
+clippy
+test -p orch-summarizer-model --lib
+test -p orch-protocol-openai-responses --test cut_answers
+test -p orch-protocol-anthropic-messages --test cut_answers
+test -p orch-connector-core --test provider_role
+test -p orch-engine --lib
+test -p orch-engine --test resource_summaries --test document_summaries
+test -p orch-api-core --lib -- command_admission_tests
+test -p orch-api-core --test summaries --test resource_summaries --test thread_continuation_cancel --test thread_continuation_exports --test thread_continuation_late --test thread_continuation_queues --test thread_continuation_reads --test thread_continuation_search --test thread_continuation_summaries --test thread_continuation_tokens --test container_units
+web typecheck
+web lint
+web test -- tests/component/resource-summary.test.tsx tests/component/summary-box.test.tsx tests/component/summary-follow.test.tsx tests/component/thread-summary-inspector.test.tsx tests/component/thread-first-minutes.test.tsx
