@@ -103,6 +103,7 @@ pub(super) struct CurrentImpact {
     visibility: PreparedVisibility,
     activity: activity::PreparedProjection,
     stopping: bool,
+    notification: Option<(Id, super::lifecycle_notifications::Review)>,
     displays: BTreeMap<Id, orch_api_contract::threads::ThreadDisplay>,
 }
 
@@ -444,7 +445,11 @@ impl native::Selected for Impact {
         Box::pin(async move {
             if !matches!(
                 target.object.kind,
-                ObjectKind::Provider | ObjectKind::Agent | ObjectKind::Environment
+                ObjectKind::Provider
+                    | ObjectKind::Agent
+                    | ObjectKind::Environment
+                    | ObjectKind::McpServer
+                    | ObjectKind::Mount
             ) || target.model_id.is_some() && target.object.kind != ObjectKind::Provider
             {
                 return Err(ApiError::invalid(
@@ -500,6 +505,35 @@ impl native::Selected for Impact {
             let stopping = activity::stopping(conn, target)
                 .await
                 .map_err(engine_error)?;
+            let notification = if target.model_id.is_none()
+                && matches!(
+                    target.object.kind,
+                    ObjectKind::Provider | ObjectKind::McpServer | ObjectKind::Mount
+                ) {
+                let manageable = facts::authorities(conn, &principal, &[target.object.id])
+                    .await
+                    .map_err(engine_error)?
+                    .iter()
+                    .any(|source| source.resource.object() == target.object && source.manageable);
+                if manageable {
+                    Some((
+                        orch_types::new_id(),
+                        super::lifecycle_notifications::Review {
+                            object: target.object,
+                            audience: super::lifecycle_notifications::audience(
+                                conn,
+                                &principal,
+                                target.object,
+                            )
+                            .await?,
+                        },
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             Ok((
                 CurrentImpact {
                     target: target.clone(),
@@ -508,6 +542,7 @@ impl native::Selected for Impact {
                     visibility,
                     activity,
                     stopping,
+                    notification,
                     displays,
                 },
                 bound,
@@ -536,6 +571,13 @@ impl native::Selected for Impact {
                 .next()
                 .ok_or_else(|| ApiError::internal("the native impact figures are missing"))?;
             Ok(ResourceImpact {
+                notification: value.notification.as_ref().map(|(id, review)| {
+                    orch_api_contract::loss::OperationNotificationPlan {
+                        preview_id: Some(*id),
+                        people: review.audience.len() as i64,
+                        default_on: false,
+                    }
+                }),
                 target: value.target.clone(),
                 name: value.name.clone(),
                 facts,
@@ -543,6 +585,19 @@ impl native::Selected for Impact {
                 stopping: value.stopping,
                 thread_displays: value.displays.clone(),
             })
+        })
+    }
+    fn after_read<'a>(
+        ctx: &'a Ctx,
+        accepted: &'a Caller,
+        _query: &'a Self::Query,
+        value: &'a CurrentImpact,
+    ) -> BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async move {
+            if let Some((id, review)) = &value.notification {
+                super::lifecycle_notifications::retain(ctx, accepted.user(), *id, review).await?;
+            }
+            Ok(())
         })
     }
     fn check_opened<'a>(
@@ -554,7 +609,15 @@ impl native::Selected for Impact {
         fresh: &'a CurrentImpact,
     ) -> BoxFuture<'a, ApiResult<bool>> {
         Box::pin(async move {
-            if opened.target != fresh.target
+            if opened
+                .notification
+                .as_ref()
+                .map(|(_, review)| &review.audience)
+                != fresh
+                    .notification
+                    .as_ref()
+                    .map(|(_, review)| &review.audience)
+                || opened.target != fresh.target
                 || !memberships(&opened.raw, &opened.visibility)
                     .is_subset(&memberships(&fresh.raw, &fresh.visibility))
                 || !work_memberships(&opened.activity).is_subset(&work_memberships(&fresh.activity))

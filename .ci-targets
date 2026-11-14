@@ -1,0 +1,3 @@
+test -p orch-api-core --lib
+test -p orch-api-core --test notifications_routes --test providers --test resource_resume --test mcp_delete_scopes
+test -p orch-api-core --test loss --test provider_recovery --test hosts --test kmounts_mcp --test everything_resources
