@@ -1,0 +1,5 @@
+# b42j-web: the assembly with the timeline rows' missing import repaired: the web job alone (the Rust of this commit is the same as b42i's)
+web typecheck
+web lint
+web test
+web build
