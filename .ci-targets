@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/resource-names.test.tsx tests/component/resource-inventory.test.tsx tests/component/resource-management-visibility.test.tsx tests/component/resource-status-agreement.test.tsx tests/component/environment-list-view.test.tsx tests/component/host-settings-entry.test.tsx tests/component/machine-management.test.tsx tests/component/fleet-node-moves.test.tsx

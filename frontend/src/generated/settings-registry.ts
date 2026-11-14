@@ -2747,6 +2747,34 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
+    "key": "threads.opening_items",
+    "title": "Thread opening items",
+    "description": "Timeline items in the first screen. Older items remain available by scrolling; a reader may request another window size.",
+    "group": "collaboration",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 40,
+    "example": 60,
+    "text_key": "day100.builtin.threads.opening_items",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
     "key": "threads.offline_deadline",
     "title": "Offline turn deadline",
     "description": "End the active turn after this many offline seconds; none keeps waiting. Each outage retains the setting it began with.",

@@ -1,3 +1,5 @@
+import { machineQuery } from '@/api/resources';
+import { currentResourceDetail, ResourceReadDialog } from '@/features/resources/ReadDialog';
 import { homeMoveEntries } from '@/features/duplicate/move';
 /** What can be done with a machine, from its row in the list and from its own page: enroll it again, refresh what it reports, open, edit, rename, copy its link and revoke it.
  *
@@ -24,7 +26,7 @@ import { type Act, type BulkAct, BulkNames, entriesOf, keysOf, type ListActs, ty
 import { EditMachine } from '@/features/resources/machines/Edit';
 import { EnrollAgainDialog, lostEnrollment } from '@/features/resources/machines/EnrollAgain';
 import { holdsMachineManagement, needsMachineManagementOverride, useMachineManagement } from '@/features/resources/machines/Management';
-import type { Machine } from '@/generated/api-types';
+import type { MachineListRow as Machine } from '@/generated/api-types';
 import { useNow } from '@/lib/time';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { adminSpec } from '@/ui/AdminAct';
@@ -51,7 +53,10 @@ export function useMachineActs(): MachineActs {
   const copyLink = useCopyLink();
   const { busy, track } = useBusy();
   const cleanup = useResourceCleanup();
-  const [asked, setAsked] = useState<Asked | null>(null);
+  const [requested, setAsked] = useState<Asked | null>(null);
+  const detail = useQuery({ ...machineQuery(requested?.machine.id ?? ''), staleTime: (query) => currentResourceDetail(query.state.data, requested?.machine) === undefined ? 0 : Infinity, enabled: requested !== null });
+  const fullDetail = currentResourceDetail(detail.data, requested?.machine);
+  const asked = requested === null || fullDetail === undefined ? null : { ...requested, machine: fullDetail };
   const componentUpdate = useComponentUpdateAct();
   const management = useMachineManagement();
   const ask = (what: Asked['what'], machine: Machine) => management.run(machine, () => setAsked({ what, machine }));
@@ -137,6 +142,7 @@ export function useMachineActs(): MachineActs {
 
   const dialogs = (
     <>
+      {requested !== null && asked === null && <ResourceReadDialog name={requested.machine.name} read={detail} onClose={() => setAsked(null)} />}
       {cleanup.dialogs}
       {asked?.what === 'lost' && <DeclareLostDialog target={{ type: 'machine', id: asked.machine.id }} name={asked.machine.name} onClose={() => setAsked(null)} />}
       {management.dialog}
