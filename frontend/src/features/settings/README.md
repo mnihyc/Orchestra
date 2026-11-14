@@ -1,8 +1,11 @@
 # Personal and hierarchical configuration
 
 Every scope uses `Frame.tsx`: personal, org/department, project, topic and Management. Section links
-stay in a fixed vertical list from a 600px viewport; below that one Select activates the same real
-links. Every scope's sections replace the unrelated Navigation tree. `sidebarPresence.ts` follows
+are one list beside the content from 600px of room (it stays in view and scrolls by itself where it is
+longer than the window) and one strip of the same names above the content where narrower, which scrolls
+sideways; there is never a dropdown. A list inside the content of another list is a strip at every width.
+The groups of a long page of settings, and the sections of a template's settings, are all on one scroll
+under their headings with the same list or strip (`shell/ScrollSections.tsx`), marking the one the page is at. Every scope's sections replace the unrelated Navigation tree. `sidebarPresence.ts` follows
 the existing native visible-view lifetime, so a hidden/closed/moved bar restores the frame's fallback
 without guessing saved layout visibility. A scope heading labels a reused Section of the same name;
 there is one title and no redundant Back link or common repeated subtitle. The legacy settings Usage
@@ -18,7 +21,11 @@ opening. Org destination aliases, flat-org sections, exact setting links and the
 remembered Settings tab select one current item. Settings pages hold no navigation-tree subscription.
 
 Ordinary settings save on change: discrete choices write immediately, text uses the shared typing
-pause or leaving its form. `AutoSave.tsx` retains raw invalid/IME/refused drafts, serializes newer text
+pause or leaving its form. An object or a list is a draft instead: its row opens in place with Save and
+Discard at its foot (with the reason Save is off beside them), and nothing else (another row's switch, the filter, leaving the field) writes,
+closes or hides it; closing the editor on an edit leaves "Unsaved changes" with the same Save and Discard beside it; `drafts.ts` holds each open draft so that closing the view, reloading or pressing
+another section asks once. The summarizer and the summary targets have editors of their own
+(`SummarizerEditor.tsx`, `SummaryTargetsEditor.tsx`); the targets' defaults are the registry's. `AutoSave.tsx` retains raw invalid/IME/refused drafts, serializes newer text
 against the accepted answer, and supplies `ui/SaveStatus` with quiet Saved/Undo. Place, notification
 and system edits/Undo retain native revisions (including absence); an explicit conflict recovery alone
 reads again. Personal name/appearance/profile endpoints have no revision member, so their inverses
@@ -131,6 +138,9 @@ Org Audit, project Settings → Audit and topic Settings → Audit share the sam
 - `SettingValue.tsx`: The common own-value control in the row; inheritance and optional contribution previews stay in the row's source/details.
 - `ProviderChoice.tsx`: A provider default is chosen and read by its authorized name inside the existing settings row. The usable-provider picker loads its options on opening; its selected name uses a shared detail cache. The generic schema control remains independent. Selection uses the row's same immediate save, revision, lock, refusal, acknowledgement and Undo path. Read-only or unavailable references expose no raw identifier, examples are human samples rather than live UUID reads, and an empty list opens the existing provider creation workflow. Creation returns the choice without selecting or writing it automatically.
 - `EmbeddingsChoice.tsx`: The embeddings of search by meaning, chosen in their setting row: the provider by its name among those the reader may use, and the model, length and prefixes as the registry's members.
+- `AgentFeaturesChoice.tsx`: The agent features as a switch for each feature that a parameter of an installed agent program names (read from the same list that names the programs), each with the program, the parameter's title and what it opens in a few words; what a feature starts as is the registry's default and what places above set, and a stored feature no program names is shown with a Remove act.
+- `AgentModelChoice.tsx`: The model of a place, chosen by name among the enabled models of the provider in force there (`ProviderModelChoice.tsx`); a name the provider does not list can be typed.
+- `NavigationOrderChoice.tsx`: The order of an org's tree: the named choice, and for an order arranged by hand each group by the names of its places, moved, taken out and added; the raw value stays one press away.
 - `settingParts.ts`: Separates stored own values from inherited parts without guessing or stripping duplicated text.
 - `SettingLock.tsx`: Links the locking place and reads the actual holders of the permission which decides the key there.
 - `OutsideOrch.tsx`: One section containing the applicable people and room/system lists under their ordinary guards.
