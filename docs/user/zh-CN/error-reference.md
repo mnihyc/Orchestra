@@ -151,3 +151,4 @@ summary: Orch 显示的每个错误的含义，以及下一步该做什么。
 | `error:environment.unavailable` | 环境暂时不可用，请稍后重试。 |
 | `error:network.restricted_unavailable` | 请求的网络限制尚未验证。请重试更改，或在新的计划中明确选择开放网络。 |
 | `error:network.host_denied` | 网络策略拒绝了这个地址。请选择允许的地址，或联系机器所有者。 |
+| `error:invalid_timezone` | 无法解析已保存的时区。设有安静时段的对外通知保持等待，不消耗投递尝试次数，收件箱仍可使用。时区恢复有效后会自动继续投递，不会擅自改用 UTC。 |

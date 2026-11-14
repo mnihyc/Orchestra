@@ -421,13 +421,18 @@ pub async fn hold_unreserved(
     conn: &mut Conn,
     ids: &[Id],
     until: DateTime<Utc>,
+    quiet_problem: Option<&str>,
 ) -> Result<(), DbError> {
     sqlx::query(
-        "UPDATE outbox SET next_attempt_at = $2, payload = jsonb_set(payload, '{held}', 'true'::jsonb)
+        "UPDATE outbox SET next_attempt_at = $2,
+                last_error = CASE WHEN $3::text IS NOT NULL THEN $3 WHEN payload ? 'quiet_error' THEN NULL ELSE last_error END,
+                payload = CASE WHEN $3::text IS NULL THEN jsonb_set(payload, '{held}', 'true'::jsonb) - 'quiet_error'
+                               ELSE jsonb_set(jsonb_set(payload, '{held}', 'true'::jsonb), '{quiet_error}', to_jsonb($3::text)) END
           WHERE id = ANY($1) AND state = 'pending'",
     )
     .bind(ids)
     .bind(until)
+    .bind(quiet_problem)
     .execute(conn)
     .await?;
     Ok(())

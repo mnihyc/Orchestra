@@ -53,6 +53,8 @@ export interface ParameterDef {
   default: string;
   /** What it may be, written as a short phrase. */
   options: string;
+  /** The feature of `agent.features` that has to be on for a thread to offer it, where it names one. */
+  feature: string | null;
 }
 
 export interface ArrangementOffer {
@@ -101,6 +103,12 @@ export function humanize(key: string): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
+/** The program's shipped feature states, without any place overrides. */
+export function declaredFeatureDefaults(value: unknown): Record<string, boolean> {
+  return Object.fromEntries(Object.entries(isRecord(value) && isRecord(value.features) ? value.features : {})
+    .filter((entry): entry is [string, boolean] => typeof entry[1] === 'boolean'));
+}
+
 export function readDescriptor(value: unknown, locale = 'en'): DescriptorView {
   if (!isRecord(value) || Object.keys(value).length === 0) {
     return { declared: false, harness: null, parameters: [], capabilities: [], arrangements: [], sandboxModes: [], approvalModes: [], adapterVersion: null };
@@ -135,6 +143,7 @@ export function readDescriptor(value: unknown, locale = 'en'): DescriptorView {
           description: translated(`parameters.${key}.description`, text(entry.description) ?? ''),
           default: phrase(entry.default),
           options: phrase(entry.options),
+          feature: text(entry.feature),
         },
       ];
     }),

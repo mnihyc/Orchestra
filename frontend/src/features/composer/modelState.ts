@@ -139,7 +139,7 @@ const tiersOf = (model: ModelParameters): ServiceTier[] => model.service_tiers ?
  * from. `own` is the thread's own choices when they are known (what they are the object `agent.params`); without
  * it a value that the parameter shows is taken to be the thread's own where its source says the thread.
  */
-export function statesOf(parameters: ThreadParameters, own: Readonly<Record<string, unknown>> | null, t?: TFunction): State[] {
+export function statesOf(parameters: Pick<ThreadParameters, 'model' | 'parameters' | 'provider'>, own: Readonly<Record<string, unknown>> | null, t?: TFunction): State[] {
   const model = parameters.model.options.find((option) => option.model_name === parameters.model.value)?.parameters;
   if (model === undefined) return [];
   const states: State[] = [];

@@ -1,0 +1,3 @@
+fmt
+clippy
+test -p orch-node --test program
