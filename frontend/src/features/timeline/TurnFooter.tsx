@@ -15,7 +15,7 @@ import { sendInput } from '@/api/threads';
 import { hasParams, RanWith, effectiveTurnModel, effectiveTurnModelName } from '@/features/composer/RanWith';
 import { effortDisplayName, modelDisplayName } from '@/features/models/names';
 import { useTimelineContext } from '@/features/timeline/context';
-import { TurnFiles, useTurnChanges } from '@/features/timeline/TurnFiles';
+import { TurnFiles, turnFilesLabel, useTurnChanges } from '@/features/timeline/TurnFiles';
 import { TurnActions } from '@/features/timeline/TurnActions';
 import { openTurnReview } from '@/features/inspector/reviewTarget';
 import { turnActiveMs } from '@/features/timeline/turnTime';
@@ -153,9 +153,11 @@ function TurnFooterView({ turnId,inputItemId }: { turnId: string;inputItemId?:st
   const files = changed.files.length;
   const { added, removed } = changed;
   if (files > 0) parts.push(<span key="changed" className="inline-flex flex-wrap items-center gap-1" data-turn-changes={turnId}>
-    {detail === 'summary' ? t('thread.viewModes.files', { count: files }) : t('timeline.footer.changed', { count: files, added, removed })}
+    {turnFilesLabel(t, changed)}
+    {detail !== 'summary' && (added > 0 || removed > 0) && <span>{t('thread.turnFiles.toolLines', { added, removed })}</span>}
     {inspection === undefined && <><span aria-hidden>·</span><button type="button" className="rounded-sm underline underline-offset-2 hover:text-text" onClick={() => openTurnReview(threadId, turnId)}>{t('thread.turnFiles.review')}</button></>}
   </span>);
+  if (files === 0 && changed.reported > 0 && inspection === undefined) parts.push(<button key="reported-edits" type="button" className="rounded-sm underline underline-offset-2 hover:text-text" onClick={() => openTurnReview(threadId, turnId)}>{t('thread.turnFiles.reviewReported')}</button>);
   return (
     <TurnActions turn={turn} ids={ofTurn} records={records} {...(inputItemId === undefined ? {} : { inputItemId })}>
       {(actions) => <>

@@ -354,7 +354,8 @@ pub struct Cmd {
     /// Its serial key; `null` for a command that waits for no other.
     #[serde(default)]
     pub key: Option<String>,
-    /// The moment after which it is not to be started.
+    /// The latest arrival time. Once accepted, admission and serial-key queue time are credited
+    /// to execution, including after a connector restart.
     pub deadline: Time,
     /// Its body, as its kind defines it.
     #[serde(rename = "b")]
@@ -372,11 +373,28 @@ pub fn is_transport_rebind(kind: &str, body: &Json) -> bool {
     flag.and_then(Json::as_bool) == Some(true)
 }
 
+/// Actual serial-key ownership, independent of an accepted command's later upload.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[repr(i16)]
+pub enum CommandKeyPhase {
+    /// Accepted, still waiting for its place in the serial line.
+    Queued = 0,
+    /// Running while it owns the key.
+    Running = 1,
+    /// Capture released the key; its result can still be uploading.
+    Released = 2,
+}
+
 /// A machine's acceptance: durable for ordinary commands, in memory for a live transport rebind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct CmdAck {
     /// The command.
     pub id: Id,
+    /// The machine's current ownership of its serial key.
+    pub key_phase: CommandKeyPhase,
 }
 
 /// The system's wish that a command not be carried out after all.
@@ -3143,6 +3161,51 @@ impl UnitAfterUpResult {
     }
 }
 
+/// Resolved workspace working allowances. Larger trees keep bounded incremental coverage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkspaceLimits {
+    /// Cached file entries.
+    pub index_entries: u64,
+    /// Indexing slice.
+    pub index_scan_secs: u64,
+    /// Exclusion parsing.
+    pub ignore_max_bytes: u64,
+    /// Cached exclusion rules.
+    pub ignore_cache_bytes: u64,
+    /// Folder continuation idle time.
+    pub directory_idle_secs: u64,
+    /// Folder observations.
+    pub directory_slots: u64,
+    /// Folder metadata cache.
+    pub directory_cache_bytes: u64,
+    /// Folder metadata reads.
+    pub directory_builds: u64,
+    /// Folder page bytes.
+    pub directory_page_bytes: u64,
+    /// File search slice.
+    pub search_slice_secs: u64,
+    /// Diff bytes.
+    pub git_diff_bytes: u64,
+}
+
+impl Default for WorkspaceLimits {
+    fn default() -> Self {
+        Self {
+            index_entries: 250000,
+            index_scan_secs: 10,
+            ignore_max_bytes: 1048576,
+            ignore_cache_bytes: 16777216,
+            directory_idle_secs: 300,
+            directory_slots: 256,
+            directory_cache_bytes: 268435456,
+            directory_builds: 1,
+            directory_page_bytes: 2097152,
+            search_slice_secs: 20,
+            git_diff_bytes: 2097152,
+        }
+    }
+}
+
 /// The body of `env.attach`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvAttach {
@@ -3163,6 +3226,8 @@ pub struct EnvAttach {
     /// The root of its workspace; `null` where a driver made the unit
     /// and the connector uses what it was given.
     pub workspace_root: Option<String>,
+    /// Resolved working allowances from the workspace settings.
+    pub workspace: WorkspaceLimits,
     /// The patterns of what is left out of the workspace.
     pub ignore: Vec<String>,
     /// Whether a list of the whole tree is kept.
@@ -5142,7 +5207,7 @@ mod tests {
                 turn_id: id(TURN)
             })
         );
-        round_trip::<CmdAck>(json!({ "id": COMMAND }));
+        round_trip::<CmdAck>(json!({ "id": COMMAND, "key_phase": "queued" }));
         round_trip::<CmdCancel>(json!({ "id": COMMAND }));
     }
 
@@ -5418,6 +5483,7 @@ mod tests {
         }));
         round_trip::<EnvAttach>(json!({
             "environment_id": ENVIRONMENT_ID, "workspace_root": null, "ignore": ["node_modules/"], "index": "full",
+            "workspace": WorkspaceLimits::default(),
             "mounts": null, "variables": { "CI": "1" }, "secrets": { "NPM_TOKEN": { "$sealed": "c2VhbGVk" } }
         }));
         round_trip::<FsSearch>(json!({
@@ -5783,5 +5849,45 @@ mod reported_cost_tests {
         );
         assert!(LeaseReportedCost::of(&RequestTiming::default()).is_none());
         assert_eq!(one("0", "USD").complete(1).unwrap().amount, "0");
+    }
+    #[test]
+    fn workspace_working_allowances_match_the_defaults_people_can_change() {
+        use orch_settings_contract::registry::{self, keys};
+        let limits = WorkspaceLimits::default();
+        for (key, expected) in [
+            (keys::WORKSPACE_INDEX_ENTRIES, limits.index_entries),
+            (keys::WORKSPACE_INDEX_SCAN_SECS, limits.index_scan_secs),
+            (keys::WORKSPACE_IGNORE_MAX_BYTES, limits.ignore_max_bytes),
+            (
+                keys::WORKSPACE_IGNORE_CACHE_BYTES,
+                limits.ignore_cache_bytes,
+            ),
+            (
+                keys::WORKSPACE_DIRECTORY_IDLE_SECS,
+                limits.directory_idle_secs,
+            ),
+            (keys::WORKSPACE_DIRECTORY_SLOTS, limits.directory_slots),
+            (
+                keys::WORKSPACE_DIRECTORY_CACHE_BYTES,
+                limits.directory_cache_bytes,
+            ),
+            (keys::WORKSPACE_DIRECTORY_BUILDS, limits.directory_builds),
+            (
+                keys::WORKSPACE_DIRECTORY_PAGE_BYTES,
+                limits.directory_page_bytes,
+            ),
+            (keys::WORKSPACE_SEARCH_SLICE_SECS, limits.search_slice_secs),
+            (keys::WORKSPACE_GIT_DIFF_BYTES, limits.git_diff_bytes),
+        ] {
+            assert_eq!(
+                registry::get(key)
+                    .unwrap()
+                    .default_value()
+                    .unwrap()
+                    .as_u64(),
+                Some(expected),
+                "{key}"
+            );
+        }
     }
 }

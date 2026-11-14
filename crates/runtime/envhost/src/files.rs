@@ -363,9 +363,14 @@ impl Files {
         let Some(rules) = &self.inner.ignore else {
             return Ok(());
         };
-        if rules.is_ignored(self.ws(), asked, is_dir)
-            || rules.is_ignored(self.ws(), &located.real, is_dir)
-        {
+        let ignored = rules
+            .check(self.ws(), asked, is_dir)
+            .map_err(|problem| HostError::Unsupported(problem.message()))?;
+        let real_ignored = &located.real != asked
+            && rules
+                .check(self.ws(), &located.real, is_dir)
+                .map_err(|problem| HostError::Unsupported(problem.message()))?;
+        if ignored || real_ignored {
             return Err(HostError::Ignored(format!(
                 "{asked} is left out by the workspace's ignore rules"
             )));
@@ -468,6 +473,9 @@ impl Files {
             })?),
             None => None,
         };
+        if let Some(problem) = scope.as_ref().and_then(crate::ignore::Scope::problem) {
+            return Err(HostError::Unsupported(problem.message()));
+        }
         let mut failed = None;
         dir.visit_names(&mut |name| {
             let mut one = || -> Result<()> {
@@ -1083,6 +1091,9 @@ impl Files {
         depth: usize,
         budget: &mut Budget,
     ) -> Result<()> {
+        if let Some(problem) = scope.and_then(crate::ignore::Scope::problem) {
+            return Err(HostError::Unsupported(problem.message()));
+        }
         match meta.kind {
             Kind::File => {
                 let source = from_dir

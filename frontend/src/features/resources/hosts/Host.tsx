@@ -346,7 +346,7 @@ function HostSettings({ host, manage }: { host: Host; manage: boolean }) {
       {revert.error !== null && <ErrorAlert error={revert.error} />}
       {stale && (
         <InlineAlert tone="warning" title={t('hosts.settings.changed')}>
-          {t('hosts.settings.changedLead', { revision: host.revision })}
+          {t('hosts.settings.changedLead')}
           <SettingChanges rows={[{ name: t('hosts.settings.name'), current: host.name, draft: name }, { name: t('hosts.settings.labels'), current: host.labels, draft: wanted }]}
             disabled={busy || host.revision <= base.revision} onKeep={() => { setBase(host); save.reset(); }} />
         </InlineAlert>

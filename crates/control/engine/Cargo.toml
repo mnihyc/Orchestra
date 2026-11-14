@@ -64,6 +64,7 @@ zip.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 orch-adapter-claude-code.workspace = true # continuation admission uses the isolated scripted native rig
 orch-adapter-codex.workspace = true # real separated-turn loss uses the existing pinned native adapter rig
 orch-executor-codex.workspace = true # retire the real local-program executor, not a socket stand-in

@@ -55,6 +55,8 @@ struct Rig {
 
 fn body(env: Id, root: &Path) -> EnvAttach {
     EnvAttach {
+        workspace: Default::default(),
+
         resources: None,
         data_generation: None,
         storage: None,
@@ -169,6 +171,7 @@ async fn a_unit_home_store_keeps_its_publication_lease_through_upload_and_refuse
         environment_id: rig.env,
         snapshot_id: orch_types::new_id(),
         directory: String::new(),
+        wait_for_indexing: true,
         kind: RecordKind::Turn,
         record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
         max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
@@ -184,6 +187,7 @@ async fn a_unit_home_store_keeps_its_publication_lease_through_upload_and_refuse
         .fs_record_capture(
             &request,
             orch_types::new_id(),
+            until,
             until,
             tokio_util::sync::CancellationToken::new(),
         )
@@ -255,6 +259,7 @@ async fn recorded_exports_send_saved_bytes_and_the_original_manifest_after_live_
                 environment_id: rig.env,
                 snapshot_id: snapshot,
                 directory: String::new(),
+                wait_for_indexing: true,
                 kind: RecordKind::Turn,
                 record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
                 max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
@@ -325,6 +330,7 @@ async fn restore_commands_transfer_the_reviewed_plan_and_undo_the_exact_prior_fi
                 environment_id: rig.env,
                 snapshot_id: snapshot,
                 directory: String::new(),
+                wait_for_indexing: true,
                 kind: RecordKind::Turn,
                 record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
                 max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
@@ -435,6 +441,7 @@ async fn a_first_turn_in_a_new_directory_records_and_restores_with_the_shipped_d
         environment_id: rig.env,
         snapshot_id: orch_types::new_id(),
         directory: "web/feature".into(),
+        wait_for_indexing: true,
         kind: RecordKind::Turn,
         record_days,
         max_bytes,
@@ -539,6 +546,7 @@ async fn re_enabling_the_shipped_recording_policy_prepares_the_next_identity_bef
         environment_id: rig.env,
         snapshot_id: orch_types::new_id(),
         directory: String::new(),
+        wait_for_indexing: true,
         kind: RecordKind::Turn,
         record_days: 0,
         max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
@@ -559,6 +567,99 @@ async fn re_enabling_the_shipped_recording_policy_prepares_the_next_identity_bef
         rig.host.fs_record(&off, &rig.store).await.unwrap(),
         disabled,
         "the previous disabled result stays immutable"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burst_of_new_files_reaches_the_next_recording_by_their_own_paths() {
+    use orch_link_contract::source::{FsRecord, RecordKind, RecordState};
+    let rig = rig(&[("seed.txt", "seed")]).await;
+    let ask = || FsRecord {
+        environment_id: rig.env,
+        snapshot_id: orch_types::new_id(),
+        directory: String::new(),
+        wait_for_indexing: true,
+        kind: RecordKind::Turn,
+        record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
+        max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
+    };
+    let first = rig.host.fs_record(&ask(), &rig.store).await.unwrap();
+    assert_eq!((first.state, first.files), (RecordState::Complete, 1));
+    for number in 0..300 {
+        std::fs::write(
+            rig.root.join(format!("burst-{number}.txt")),
+            format!("burst {number}"),
+        )
+        .unwrap();
+    }
+    let began = std::time::Instant::now();
+    loop {
+        let recorded = rig.host.fs_record(&ask(), &rig.store).await.unwrap();
+        if recorded.state == RecordState::Complete && recorded.files == 301 {
+            break;
+        }
+        assert!(
+            began.elapsed() < PATIENCE,
+            "the burst did not reach a recording in time: {recorded:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_beyond_whole_recording_still_names_the_paths_that_changed() {
+    use orch_link_contract::source::{FsRecord, RecordKind, WorkspaceObserve};
+    let rig = rig(&[("project/code.txt", "before"), ("other.txt", "outside")]).await;
+    let environment = rig.host.environment(rig.env).unwrap();
+    let request = FsRecord {
+        environment_id: rig.env,
+        snapshot_id: orch_types::new_id(),
+        directory: "project".into(),
+        wait_for_indexing: true,
+        kind: RecordKind::Turn,
+        record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
+        max_bytes: 1,
+    };
+    let recorded = rig.host.fs_record(&request, &rig.store).await.unwrap();
+    assert_eq!(recorded.reason.as_deref(), Some("too_large"));
+    std::fs::write(rig.root.join("project/code.txt"), "after").unwrap();
+    let changed = environment.files().parse("project/code.txt").unwrap();
+    environment.index().observe(&[
+        changed.clone(),
+        changed,
+        environment.files().parse("other.txt").unwrap(),
+    ]);
+    assert_eq!(
+        rig.host.fs_record(&request, &rig.store).await.unwrap(),
+        recorded,
+        "a replay cannot move the starting journal cursor"
+    );
+    let observe = WorkspaceObserve {
+        environment_id: rig.env,
+        thread_id: orch_types::new_id(),
+        turn_id: Some(orch_types::new_id()),
+        before_snapshot_id: Some(request.snapshot_id),
+        directory: request.directory,
+    };
+    let result = rig
+        .host
+        .workspace_observe(&observe, &rig.store)
+        .await
+        .unwrap();
+    assert_eq!(result.changed_paths, Some(vec!["code.txt".to_owned()]));
+    assert!(
+        result.end_manifest_blob.is_none(),
+        "a journal never claims whole coverage"
+    );
+    environment.index().lost_events();
+    let lost = rig
+        .host
+        .workspace_observe(&observe, &rig.store)
+        .await
+        .unwrap();
+    assert!(
+        lost.changed_paths.is_none(),
+        "lost notices never claim an empty change list"
     );
 }
 
@@ -783,6 +884,7 @@ async fn a_capture_after_managed_reattachment_keeps_generation_two_and_its_actua
                 environment_id: rig.env,
                 snapshot_id: orch_types::new_id(),
                 directory: String::new(),
+                wait_for_indexing: true,
                 kind: RecordKind::Turn,
                 record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
                 max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
@@ -854,7 +956,7 @@ async fn a_tree_above_the_entry_limit_is_listed_live_and_not_indexed() {
         .iter()
         .map(|(path, text)| (path.as_str(), *text))
         .collect();
-    let mut rig = rig_with(&refs, |settings, _| settings.limits.index_max_entries = 10).await;
+    let mut rig = rig_with(&refs, |_, attach| attach.workspace.index_entries = 10).await;
     assert_eq!(
         rig.facts.index,
         IndexMode::Live,
@@ -900,8 +1002,8 @@ async fn a_tree_above_the_entry_limit_is_listed_live_and_not_indexed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tree_that_grows_past_the_entry_limit_after_attaching_turns_live_and_says_so() {
-    let mut rig = rig_with(&[("a.txt", "1")], |settings, _| {
-        settings.limits.index_max_entries = 5
+    let mut rig = rig_with(&[("a.txt", "1")], |_, attach| {
+        attach.workspace.index_entries = 5
     })
     .await;
     assert_eq!(rig.facts.index, IndexMode::Full);
@@ -914,9 +1016,10 @@ async fn a_tree_that_grows_past_the_entry_limit_after_attaching_turns_live_and_s
         std::fs::write(rig.root.join(format!("more{n}.txt")), "x").unwrap();
     }
     let report = rig
-        .report("the facts of a tree that is live now", |report| {
-            matches!(report, Report::Facts(_))
-        })
+        .report(
+            "the facts of a tree that is live now",
+            |report| matches!(report, Report::Facts(facts) if facts.index == IndexMode::Live),
+        )
         .await;
     let Report::Facts(facts) = report else {
         unreachable!()
@@ -925,6 +1028,44 @@ async fn a_tree_that_grows_past_the_entry_limit_after_attaching_turns_live_and_s
     assert_eq!(
         rig.host.environment(rig.env).unwrap().facts().index,
         IndexMode::Live
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn broken_exclusions_leave_the_environment_available_and_explain_why_its_files_are_not_served()
+ {
+    let rig = rig(&[
+        (".orch_ignore", "[z-a]\n"),
+        ("hidden.txt", "do not return this"),
+    ])
+    .await;
+    let problem = rig
+        .facts
+        .exclusion_problem
+        .as_ref()
+        .expect("the rules problem is reported");
+    assert_eq!(problem.path, ".orch_ignore");
+    assert_eq!(problem.line, Some(1));
+    let error = rig
+        .host
+        .fs_stat(&FsStat {
+            environment_id: rig.env,
+            mount: None,
+            path: "hidden.txt".to_owned(),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains(".orch_ignore"));
+    assert!(
+        rig.host
+            .fs_stat(&FsStat {
+                environment_id: rig.env,
+                mount: None,
+                path: ".orch_ignore".to_owned()
+            })
+            .await
+            .is_ok(),
+        "the environment and its broken control file remain available for correction"
     );
 }
 

@@ -83,6 +83,11 @@ impl Wire {
             .await;
     }
 
+    /// Whether nothing has been sent back to the machine yet.
+    pub(super) fn is_silent(&mut self) -> bool {
+        self.out.try_recv().is_err()
+    }
+
     pub(super) async fn ack(&mut self, stream: &Stream, seq: i64) {
         let outgoing = tokio::time::timeout(ACK_WAIT, self.out.recv())
             .await
