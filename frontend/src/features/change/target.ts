@@ -29,6 +29,9 @@ export type ChangeKind =
   /** The view of a job that is under way or over, asked for by its number. */
   | 'progress';
 
+/** The selected home and template suffice to ask the server for an authoritative move plan. */
+export type EnvironmentMoveSource = Pick<Environment, 'id' | 'home' | 'template'>;
+
 /** What a screen names: the thing the change is about. */
 export type ChangeTarget =
   | { kind: 'thread'; id: string; name?: string }
@@ -40,7 +43,7 @@ export type ChangeTarget =
   | { kind: 'model'; providerId: string; id: string; name?: string }
   | { kind: 'environment'; id: string; name?: string }
   /** Several environments of one place, listed. */
-  | { kind: 'environments'; ids: string[]; node?: string; selection?: { reader: number; rows: readonly Environment[] } }
+  | { kind: 'environments'; ids: string[]; node?: string; selection?: { reader: number; rows: readonly EnvironmentMoveSource[] } }
   | { kind: 'machine'; id: string; name?: string }
   | { kind: 'host'; id: string; name?: string }
   /** A place with environments in it: an org, a project or a topic. */

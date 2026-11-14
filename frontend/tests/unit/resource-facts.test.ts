@@ -1,7 +1,7 @@
 /** Resource hints preserve permitted observations, configured thresholds, model groups and unknown measurements. */
 import { describe, expect, it } from 'vitest';
-import { environmentHint, hostHint, modelHint, providerHint, resourceHint } from '@/features/resource-facts/facts';
-import type { CapStatus, ProviderChoiceUsage } from '@/generated/api-types';
+import { environmentHint, fullProvider, hostHint, modelHint, providerHint, resourceHint } from '@/features/resource-facts/facts';
+import type { CapStatus, ProviderChoiceUsage, ThreadProvider } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { detailEnvironment, detailHost } from '../component/resource-detail-fixtures';
 import { planProvider } from './provider-plan-fixtures';
@@ -22,6 +22,16 @@ it('names an agent program from its descriptor without guessing from its kind', 
 });
 
 describe('provider hints', () => {
+  it('gives a row that holds none of the models the hint of the whole provider, and is not taken for the whole provider', () => {
+    const whole = planProvider();
+    const row: ThreadProvider = { access: whole.access, address: whole.address, facts: whole.facts, facts_state: whole.facts_state, harness: whole.harness,
+      harness_kind: whole.harness_kind, id: whole.id, kind: whole.kind, models_count: 3, name: whole.name, placement: whole.placement,
+      running_threads: whole.running_threads, status: whole.status };
+    expect(providerHint(row, context())).toEqual(providerHint(whole, context()));
+    expect(fullProvider(whole)).toBe(true);
+    expect(fullProvider(row)).toBe(false);
+    expect(fullProvider({ ...whole, models_count: 3 })).toBe(false);
+  });
   it('shows the binding window and never invents an alarm band', () => {
     const provider = planProvider();
     provider.facts.windows[1]!.resets_at = '2026-10-25T12:00:00Z';

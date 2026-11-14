@@ -5,9 +5,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { answerProviderLogin, cancelProviderLogin, loginStateQuery, retryProvider, startProviderLogin } from '@/api/provider-plan';
+import { readAgain } from '@/api/readAgain';
 import { providerSetupQuery } from '@/api/resources';
 import { CommandBox } from '@/features/resources/Facts';
-import type { LoginMethod, Provider } from '@/generated/api-types';
+import type { LoginMethod, LoginState, Provider } from '@/generated/api-types';
 import { Button } from '@/ui/Button';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { FieldForm, initialValues, missingFields, textValues, type FormValues } from '@/ui/FieldForm';
@@ -44,7 +45,8 @@ function NativeLogin({ provider,allowed }: { provider:Provider;allowed:boolean }
   const { t } = useTranslation();
   const cache=useQueryClient();
   const setup = useQuery({...providerSetupQuery(provider.home.id,provider.id),enabled:allowed});
-  const progress = useQuery(loginStateQuery(provider.id));
+  // The sign-in's progress is told over the live connection, once: while it waits for the person or the program, it is read again by itself.
+  const progress = useQuery({ ...loginStateQuery(provider.id), refetchInterval: readAgain<LoginState>((state) => state?.state === 'starting' || state?.state === 'awaiting_user') });
   const methods = setup.data?.subscriptions.find((row) => row.agent.id === provider.agent?.id)?.methods ?? [];
   const [chosen, setChosen] = useState<string | null>(null);
   const [values, setValues] = useState<FormValues>({});

@@ -58,7 +58,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
   test(`model restrictions and missing context stay explicit ${locale}/${width}/${theme}`, async ({ page, request }, info) => {
     await scenario(); await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme: theme });
     const t = await language(page, request, locale, theme); let knownContext = false; let providerName = '';
-    await page.route(`**/threads/${ACME.mainThread}/opening?**`, async (route) => {
+    await page.route(`**/threads/${ACME.mainThread}/opening**`, async (route) => {
       const response = await route.fetch(); const opening = await response.json() as ThreadOpening;
       const parameters = opening.parameters;
       if (parameters === null) throw new Error('The readable fixture includes thread parameters');

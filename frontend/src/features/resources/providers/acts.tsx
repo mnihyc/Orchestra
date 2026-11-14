@@ -1,3 +1,6 @@
+import { providerQuery } from '@/api/resources';
+import { ResourceReadDialog } from '@/features/resources/ReadDialog';
+import { useQuery } from '@tanstack/react-query';
 import { homeMoveEntries } from '@/features/duplicate/move';
 import { resourceDuplicateEntries } from '@/features/duplicate/target';
 import { providerCopySetup } from '@/features/duplicate/CopySetup';
@@ -23,7 +26,7 @@ import { DeleteProviderDialog, DisableProviderDialog } from '@/features/resource
 import { EditProvider } from '@/features/resources/providers/Edit';
 import type { ProviderTab } from '@/features/resources/providers/Provider';
 import { PROVIDER_NEXT, providerState } from '@/features/resources/providers/state';
-import type { Provider } from '@/generated/api-types';
+import type { ProviderListRow as Provider } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
 import { holds } from '@/lib/permissions';
 import { useNow } from '@/lib/time';
@@ -52,7 +55,9 @@ export function useProviderActs(options: { onTab?: (provider: Provider, tab: Pro
   const { busy } = useBusy();
   const cleanup = useResourceCleanup();
   const enablePlan = useResourceEnable();
-  const [asked, setAsked] = useState<Asked | null>(null);
+  const [requested, setAsked] = useState<Asked | null>(null);
+  const detail = useQuery({ ...providerQuery(requested?.provider.id ?? ''), enabled: requested !== null });
+  const asked = requested === null || detail.data === undefined ? null : { ...requested, provider: detail.data };
 
   /** Leads to a tab of the provider's page: from a row by the address, from the page by its own way. */
   const toTab = (provider: Provider, tab: ProviderTab) => {
@@ -134,6 +139,7 @@ export function useProviderActs(options: { onTab?: (provider: Provider, tab: Pro
 
   const dialogs = (
     <>
+      {requested !== null && asked === null && <ResourceReadDialog name={requested.provider.name} read={detail} onClose={() => setAsked(null)} />}
       {cleanup.dialogs}
       {enablePlan.dialogs}
       {asked !== null && (asked.what === 'edit' || asked.what === 'rename') && (

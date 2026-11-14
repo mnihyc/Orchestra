@@ -1,3 +1,5 @@
+import { templateQuery } from '@/api/resources';
+import { ResourceReadDialog } from '@/features/resources/ReadDialog';
 import { homeMoveEntries } from '@/features/duplicate/move';
 import { resourceDuplicateEntries } from '@/features/duplicate/target';
 /** What can be done with a template, from its row in the list and from its own page: enable or disable, open, edit, rename, copy its link and delete, each only where the reader may.
@@ -8,7 +10,7 @@ import { resourceDuplicateEntries } from '@/features/duplicate/target';
  * cannot be deleted, and its Delete stays in the menu with that reason.
  */
 import { useResourceCleanup } from '@/features/storage/acts';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { Ban, CirclePlay, Copy, ArrowRight, Pencil, TextCursorInput, Trash2 } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
@@ -19,7 +21,7 @@ import { deleteTemplate, updateTemplate } from '@/api/resources';
 import { type Act, type BulkAct, BulkNames, entriesOf, managedAct, keysOf, type ListActs, type RowActs, useBusy, useCopyLink, shareAct } from '@/features/resources/acts';
 import { EditTemplate } from '@/features/resources/templates/Edit';
 import type { TemplateTab } from '@/features/resources/templates/Template';
-import type { Template } from '@/generated/api-types';
+import type { TemplateListRow as Template } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { adminSpec } from '@/ui/AdminAct';
@@ -46,7 +48,9 @@ export function useTemplateActs(options: { onTab?: (template: Template, tab: Tem
   const copyLink = useCopyLink();
   const { busy, track } = useBusy();
   const cleanup = useResourceCleanup();
-  const [asked, setAsked] = useState<Asked | null>(null);
+  const [requested, setAsked] = useState<Asked | null>(null);
+  const detail = useQuery({ ...templateQuery(requested?.template.id ?? ''), enabled: requested !== null });
+  const asked = requested === null || detail.data === undefined ? null : { ...requested, template: detail.data };
 
   const toTab = (template: Template, tab: TemplateTab) => {
     if (options.onTab !== undefined) options.onTab(template, tab);
@@ -147,6 +151,7 @@ export function useTemplateActs(options: { onTab?: (template: Template, tab: Tem
   const inUse = remove.error instanceof ApiError && remove.error.is('resource.in_use');
   const dialogs = (
     <>
+      {requested !== null && asked === null && <ResourceReadDialog name={requested.template.name} read={detail} onClose={() => setAsked(null)} />}
       {cleanup.dialogs}
       {asked !== null && (asked.what === 'edit' || asked.what === 'rename') && (
         <EditTemplate

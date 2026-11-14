@@ -17,7 +17,7 @@ import { versionPin } from '@/features/resources/agents/descriptor';
 import { useHarnessTitle } from '@/features/resources/harnesses';
 import { ResourceList, useSearchText } from '@/features/resources/ResourceList';
 import { oneOf } from '@/features/resources/search';
-import type { Agent } from '@/generated/api-types';
+import type { AgentListRow as Agent } from '@/generated/api-types';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { ErrorState } from '@/ui/ErrorState';
