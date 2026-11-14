@@ -57,12 +57,12 @@ const readerScope = defaultProviderReader;
 const refused = (error: unknown) => error instanceof ApiError && [401, 403, 404].includes(error.status);
 
 /** The parent's revision/lock/autosave machinery remains the only writer of the setting. */
-export function ProviderDefaultChoice(props: ValueControlProps & { size?: 'sm' | 'md' }) {
+export function ProviderDefaultChoice(props: ValueControlProps & { size?: 'sm' | 'md'; providerKind?: Provider['kind'] }) {
   const reader = useStore(client.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
   return <ReaderChoice key={reader} {...props} reader={reader} />;
 }
 
-function ReaderChoice({ value, label, onChange, onEdited, error, disabled = false, placeholder, reader, showLabel, size = 'sm' }: ValueControlProps & { reader: string; size?: 'sm' | 'md' }) {
+function ReaderChoice({ value, label, onChange, onEdited, error, disabled = false, placeholder, reader, showLabel, size = 'sm', providerKind }: ValueControlProps & { reader: string; size?: 'sm' | 'md'; providerKind?: Provider['kind'] }) {
   const { t } = useTranslation();
   const cache = useQueryClient();
   const known = useKnownPlaces({ trees: false });
@@ -102,7 +102,7 @@ function ReaderChoice({ value, label, onChange, onEdited, error, disabled = fals
     const provider = item.resource?.kind === 'provider' ? item.resource.value : undefined;
     if (provider === undefined) return [];
     return item.kind === 'provider' && item.my_access !== 'path_only' && item.name !== null && item.id === provider.id
-      && provider.status !== 'disabled' && holds(provider.access, 'provider.view') && holds(provider.access, 'provider.use')
+      && provider.status !== 'disabled' && holds(provider.access, 'provider.view') && holds(provider.access, 'provider.use') && (providerKind === undefined || provider.kind === providerKind)
       && !(provider.id === selected && (currentError !== null || currentMissing)) ? [[provider.id, provider] as const] : [];
   })).values()];
   const labels = providerLabels([...new Map([...(current === undefined ? [] : [current]), ...rows].map((row) => [row.id, row])).values()], known);

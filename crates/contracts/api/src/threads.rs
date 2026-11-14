@@ -329,6 +329,8 @@ pub enum BlockedReason {
     /// Its workspace holds a configuration of the harness's own, and the people who manage the environment have
     /// not yet answered whether the harness may use it.
     WorkspaceTrust,
+    /// Its source could not be prepared; the source keeps the structured cause.
+    SourceFailed,
     /// A switch holds it.
     Switching,
     /// Something went wrong.
@@ -351,10 +353,21 @@ pub enum StartingStep {
     Credential,
     /// A session.
     Session,
+    /// The files of the directory, recorded before the turn so that they can be put back.
+    Recording,
     /// Its files.
     Files,
     /// The turn itself.
     Turn,
+}
+
+/// The command a starting thread's step waits for, and the other work that holds it up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StartingWork {
+    /// The kind of command the step waits for, such as `fs.mkdir`, `git.prepare` or `fs.record`.
+    pub command: String,
+    /// The kind of command of other work, on the same machine and in the same line, that it waits behind.
+    pub behind: Option<String>,
 }
 
 /// The `kind` of a thread: always `thread`.
@@ -818,6 +831,16 @@ pub struct Thread {
     pub side_reading: Option<SideReading>,
     /// What a starting thread is waiting for.
     pub starting_step: Option<StartingStep>,
+    /// When the step it is waiting for began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_since: Option<Time>,
+    /// The command that step waits for, and what holds it up; none while it waits for nothing in particular.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_work: Option<StartingWork>,
+    /// Since when the thread is being stopped: the oldest Stop that was asked for and is not over, whether it names
+    /// a turn that has not yet stopped or waits to be carried out. Absent while nobody is stopping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopping_since: Option<Time>,
     /// Why it cannot go on.
     pub blocked: Option<ThreadBlocked>,
     /// What a person's Stop holds of its queue.
@@ -1678,8 +1701,11 @@ pub struct ToolCallPayload {
     pub started_at: Time,
     /// How long it took, once it ended.
     pub duration_ms: Option<i64>,
-    /// The identical call exactly as the harness issued it.
-    pub raw: RawCall,
+    /// The identical call exactly as the harness issued it. A thread's timeline does not carry it (it is the
+    /// same content as `tool`, and as long); it is read apart by `GET /threads/{id}/items/{item_id}/raw`, and
+    /// stands in an export of the whole record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<RawCall>,
 }
 
 /// A request for approval. Harness cards carry their current projection for this reader,
@@ -1833,6 +1859,8 @@ pub enum MarkerKind {
     Compacted,
     /// The resumed session keeps its original instructions until a new session is made.
     InstructionsDeferred,
+    /// The thread's next turn opened its session again, and why.
+    SessionReopened,
     /// A turn was let past limits.
     LimitBypassed,
     /// It, or a place above it, was archived.
@@ -2381,6 +2409,37 @@ pub struct MarkerCompacted {
     pub duration_ms: Option<i64>,
 }
 
+/// Why a thread's next turn opened its session again, where the session had been opened before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionReopenReason {
+    /// The session was not known to be open: the server or the program started again since it was opened.
+    Unknown,
+    /// The instructions changed.
+    Instructions,
+    /// The limits on its sub-agents changed.
+    Limits,
+    /// The start directory or another setting that only a new session takes changed.
+    Configuration,
+    /// The MCP servers it is offered changed.
+    Mcp,
+    /// The Orch tools it is offered changed.
+    Tools,
+    /// The skills it is given changed.
+    Skills,
+    /// The program reads the directory's files again each time its session is opened, so it is opened at each turn.
+    ProgramReloads,
+    /// The history of a side thread is read from its parent again.
+    SideHistory,
+}
+
+/// The thread's next turn opened its session again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MarkerSessionReopened {
+    /// Why.
+    pub reason: SessionReopenReason,
+}
+
 /// The resumed session keeps its original instructions until a new session is made.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MarkerInstructionsDeferred {
@@ -2577,6 +2636,8 @@ pub enum MarkerPayload {
     Compacted(MarkerCompacted),
     /// The resumed session keeps its original instructions until a new session is made.
     InstructionsDeferred(MarkerInstructionsDeferred),
+    /// The thread's next turn opened its session again, and why.
+    SessionReopened(MarkerSessionReopened),
     /// A turn was let past limits.
     LimitBypassed(MarkerLimitBypassed),
     /// It, or a place above it, was archived.
@@ -2658,6 +2719,7 @@ impl MarkerPayload {
             Self::CapabilityRevoked(_) => MarkerKind::CapabilityRevoked,
             Self::Compacted(_) => MarkerKind::Compacted,
             Self::InstructionsDeferred(_) => MarkerKind::InstructionsDeferred,
+            Self::SessionReopened(_) => MarkerKind::SessionReopened,
             Self::LimitBypassed(_) => MarkerKind::LimitBypassed,
             Self::Archived(_) => MarkerKind::Archived,
             Self::Unarchived(_) => MarkerKind::Unarchived,
@@ -3018,6 +3080,11 @@ pub struct Turn {
     pub input_id: Id,
     /// The complete or explicitly unavailable recorded files before this turn.
     pub before_snapshot_id: Option<Id>,
+    /// How many included files the turn changed, whoever changed them: the difference of the files recorded
+    /// before it and the files observed at its end. `null` while either is missing (the files were not
+    /// recorded, or the end has not been observed yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_changed: Option<i64>,
     /// The model's routing name.
     pub model: String,
     /// The model's display name.
@@ -3039,6 +3106,10 @@ pub struct Turn {
     pub context: Option<crate::context::ContextFill>,
     /// Who stopped it.
     pub interrupted_by: Option<UserRef>,
+    /// When the stop was asked for, which is when the clock of a turn that is stopping starts; absent for a turn
+    /// nobody stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupted_at: Option<Time>,
     /// The stopped turn's actual native cleanup, including a report that arrives after completion.
     #[serde(default)]
     pub command_cleanup: Option<crate::background::CommandCleanup>,
@@ -3304,10 +3375,6 @@ pub struct ThreadOpening {
     pub parameters: Option<crate::settings::ThreadParameters>,
     /// The native limits for a new input; absent only when unavailable to this reader.
     pub limits: Option<ThreadLimits>,
-    /// The settings, including each setting's own writability and source.
-    pub settings: Vec<crate::settings::ResolvedSetting>,
-    /// The initial bounded outline page, from the same conversation cut as sync.
-    pub outline: ThreadOutlinePage,
     /// The current tool carrier observation; omitted for a retained conversation view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<crate::nodes::OverviewPart<crate::gateways::ThreadTunnelGatewayStatus>>,
@@ -3630,7 +3697,7 @@ pub struct ThreadOpeningGetQuery {
     pub continuation_id: Option<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_revision: Option<i64>,
-    /// Items in the initial window; the same bounds as [`ThreadSyncGetQuery::limit`].
+    /// Items in the initial window; the resolved `threads.opening_items` default when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -3932,12 +3999,36 @@ pub struct ThreadInputUpdateBody {
     pub after_input_id: Option<Option<Id>>,
 }
 
-/// Stops a turn.
+/// Stops a turn, or the start of the next one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadInterruptBody {
-    /// The turn.
-    pub turn_id: Id,
+    /// The turn. Left out, the Stop is of the start of the thread's next turn: the thread is recording the
+    /// files of its directory or writing the message's files, and there is no turn to name yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<Id>,
+}
+
+/// How far a Stop has come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StopState {
+    /// Asked for, and the program has not yet confirmed that it stopped.
+    Stopping,
+    /// Nothing is left to wait for: the start was given up, or the turn was over.
+    Stopped,
+}
+
+/// A Stop as it is answered the moment it is taken.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadStop {
+    /// Whether the program has stopped.
+    pub state: StopState,
+    /// When the Stop was asked for, which is when its clock starts.
+    pub requested_at: Time,
+    /// The turn it names, as it stands; absent for the Stop of a start that has no turn yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<Turn>,
 }
 
 /// An image or a file that was uploaded.
@@ -4365,6 +4456,28 @@ crate::endpoints! {
                 )],
             },
         ]);
+    /// Reads a tool call exactly as its harness made it: its own name for the tool, its arguments and what came back. A thread's items leave this out.
+    ThreadItemRawGet: GET "/threads/{id}/items/{item_id}/raw", Permission("thread.view"), query continuations::ThreadReadSelector, none, json RawCall, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored thread restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
     /// Reads a piece of a command's output as plain text, with its total length in a header.
     ThreadItemOutputGet: GET "/threads/{id}/items/{item_id}/output", Permission("thread.view"), query ThreadItemOutputGetQuery, none, raw, 200,
         operation Op::variants(&[
@@ -4580,8 +4693,9 @@ crate::endpoints! {
             Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("input_native_manage")),
             Facet::response_content(&[Object(K::Thread)], Target::Path("id")),
         ]);
-    /// Stops a running turn, and holds what waits in the queue until somebody resumes it.
-    ThreadInterrupt: POST "/threads/{id}/interrupt", Permission("thread.interact"), none, json ThreadInterruptBody, json Turn, 200,
+    /// Stops a running turn, or the start of the next one, and holds what waits in the queue until somebody resumes it.
+    /// The answer is at once: the Stop is recorded, and says that the thread is stopping until the program has stopped.
+    ThreadInterrupt: POST "/threads/{id}/interrupt", Permission("thread.interact"), none, json ThreadInterruptBody, json ThreadStop, 200,
         operation Op::returning(Write, &[Object(K::Thread)], Target::PermissionObject);
     /// Resumes what a person's Stop held, naming the revision of the queue that was seen.
     ThreadQueueResume: POST "/threads/{id}/queue/resume", Permission("thread.interact"), none, json ThreadQueueResumeBody, json ThreadQueue, 200,
