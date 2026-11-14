@@ -144,7 +144,16 @@ export function SourcesForm({provider,facts,models,httpAllowed,onSave,warnings,u
   const [saved,setSaved]=useState(false);
   const allowed=holds(provider.access,'provider.manage');
   const why=denial(t,'provider.manage',provider.name,provider.owner);
-  const changed=reviewed.revision !== provider.revision;
+  // A provider's revision also moves when its state or its figures are read again, which is not an edit of its sources.
+  // Only a change of what this form edits, met while a draft exists, is a conflict; anything else is followed quietly.
+  const saved_as=(one:Provider) => JSON.stringify([sourceDraft(one.sources.facts),sourceDraft(one.sources.models),one.secrets_set.filter((name) => name.startsWith('source:'))]);
+  const moved=reviewed.revision !== provider.revision;
+  const sameSources=moved && saved_as(reviewed) === saved_as(provider);
+  const changed=moved && !sameSources && (dirty.facts || dirty.models);
+  if (moved && !changed) {
+    setReviewed(provider);
+    if (!sameSources) { setDetails(sourceDraft(provider.sources.facts)); setListing(sourceDraft(provider.sources.models)); }
+  }
   const context=(element:'facts' | 'models',offers:SourceOffers) => {
     const draft=element === 'facts' ? details : listing;
     const choice=reviewed.sources[element];

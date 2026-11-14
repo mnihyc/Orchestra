@@ -34,6 +34,8 @@ import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Switch } from '@/ui/Switch';
 import { linkSharingPreference } from '@/features/sharing/preference';
+import { Select } from '@/ui/Select';
+import { LINK_OPENINGS, useSidebarPreferences } from '@/features/navigation/preferences';
 
 /** The tutorials that ship, by the name each is kept under when it is finished. */
 export const TUTORIALS = [
@@ -123,6 +125,24 @@ function useStateKey(key: string) {
     },
     onSettled: (_data, error) => { if (error !== null) void queryClient.invalidateQueries({ queryKey: meStateKey }); },
   });
+}
+
+/** Whether a hidden bar peeks over the page when the pointer rests at its edge: off unless the person turns it on, and kept with the other choices of the bars. */
+function OpenLinks() {
+  const { t } = useTranslation();
+  const choices = useSidebarPreferences();
+  return <Section id="interface-opening" title={t('workbench.openLinks.label')}>
+    <Select size="sm" label={t('workbench.openLinks.label')} value={choices.openLinks ?? 'automatic'} onValueChange={choices.setOpenLinks}
+      options={LINK_OPENINGS.map((value) => ({ value, name: t(`workbench.openLinks.${value}`) }))} />
+  </Section>;
+}
+
+function HiddenBars() {
+  const { t } = useTranslation();
+  const preferences = useSidebarPreferences();
+  return <Section id="interface-bars" title={t('workbench.bars.peek.title')}>
+    <Switch label={t('workbench.bars.peek.label', { state: t(preferences.peek === true ? 'common.on' : 'common.off') })} checked={preferences.peek === true} onCheckedChange={preferences.setPeek} />
+  </Section>;
 }
 
 function LinkSharing({ state }: { state: Record<string, unknown> }) {
@@ -433,6 +453,8 @@ export function InterfaceSettings() {
           )}
           <Keys />
           <LinkSharing state={state.data} />
+          <OpenLinks />
+          <HiddenBars />
           <Viewers state={state.data} />
           <Tutorials state={state.data} />
           <ThisDevice />
