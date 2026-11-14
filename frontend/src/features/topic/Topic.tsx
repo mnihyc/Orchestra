@@ -165,7 +165,7 @@ export function Topic({ topicId, tab, onTab, section, onSection }: TopicProps) {
         </div>
       )}
 
-      {data.readme !== null && <PlaceReadme readme={data.readme} />}
+      {data.readme !== null && <PlaceReadme readme={data.readme} nodeId={data.id} />}
 
       <Tabs
         label={t('places.topic.sections')}

@@ -9,6 +9,7 @@
  */
 import { create } from 'zustand';
 import type { Environment } from '@/generated/api-types';
+import type { Choices } from './choices';
 
 /** What is done to the thing named. */
 export type ChangeKind =
@@ -53,11 +54,17 @@ export interface ChangeOptions {
   toTurn?: number;
   /** For a switch, what the person came for: another provider, or another environment or directory. */
   focus?: 'provider' | 'environment';
+  /** For a switch asked for from a list that named what it is to run on: the provider, the agent and the model, each chosen before the wizard is seen. */
+  provider?: string;
+  agent?: string;
+  model?: string;
   /** For the progress of a job, or of a batch, that was started already. */
   job?: string;
   batch?: string;
   /** For a fork made from a message of a person: what it said, to be put in the new thread's box. */
   say?: string;
+  /** Choices already made in the shared location field, reviewed by the ordinary plan. */
+  placement?: Partial<Pick<Choices, 'where' | 'directory'>>;
 }
 
 /** What the host holds: the change asked for, until it is closed. */

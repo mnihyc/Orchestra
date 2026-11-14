@@ -12,7 +12,9 @@ if [ -n "${ORCH_FRONTEND_HTTPS_BIND:-}" ]; then
   test -r /etc/orch/frontend-tls/current/key.pem
   for target in "$main" "$ports"; do
     if [ "$target" = "$main" ]; then
-      printf 'listen 443 ssl default_server;\n' > "$target"
+      # HTTP/2 for the application and its API (one connection carries the scripts and every read). A program's own address,
+      # in `ports`, keeps HTTP/1.1: its pages and sockets are the program's.
+      printf 'listen 443 ssl default_server;\nhttp2 on;\n' > "$target"
     else
       printf 'listen 443 ssl;\n' > "$target"
     fi
