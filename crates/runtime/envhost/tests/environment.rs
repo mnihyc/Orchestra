@@ -185,6 +185,7 @@ async fn a_unit_home_store_keeps_its_publication_lease_through_upload_and_refuse
             &request,
             orch_types::new_id(),
             until,
+            until,
             tokio_util::sync::CancellationToken::new(),
         )
         .await?;
@@ -560,6 +561,41 @@ async fn re_enabling_the_shipped_recording_policy_prepares_the_next_identity_bef
         disabled,
         "the previous disabled result stays immutable"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burst_of_new_files_reaches_the_next_recording_by_their_own_paths() {
+    use orch_link_contract::source::{FsRecord, RecordKind, RecordState};
+    let rig = rig(&[("seed.txt", "seed")]).await;
+    let ask = || FsRecord {
+        environment_id: rig.env,
+        snapshot_id: orch_types::new_id(),
+        directory: String::new(),
+        kind: RecordKind::Turn,
+        record_days: orch_envhost::file_states::DEFAULT_RECORD_DAYS,
+        max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
+    };
+    let first = rig.host.fs_record(&ask(), &rig.store).await.unwrap();
+    assert_eq!((first.state, first.files), (RecordState::Complete, 1));
+    for number in 0..300 {
+        std::fs::write(
+            rig.root.join(format!("burst-{number}.txt")),
+            format!("burst {number}"),
+        )
+        .unwrap();
+    }
+    let began = std::time::Instant::now();
+    loop {
+        let recorded = rig.host.fs_record(&ask(), &rig.store).await.unwrap();
+        if recorded.state == RecordState::Complete && recorded.files == 301 {
+            break;
+        }
+        assert!(
+            began.elapsed() < PATIENCE,
+            "the burst did not reach a recording in time: {recorded:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 impl Drop for Rig {

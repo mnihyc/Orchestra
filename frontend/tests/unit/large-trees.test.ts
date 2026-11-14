@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import { liveIndexReasonKey } from '@/features/inspector/Files';
 import { gitReadTooSlow } from '@/features/inspector/Git';
-import { liveIndexReason } from '@/features/files/indexWords';
+import { indexingProgress, liveIndexReason } from '@/features/files/indexWords';
 import { wholeUnavailableReason } from '@/features/source/words';
 import { i18n, setLocale } from '@/i18n';
 
@@ -16,6 +16,13 @@ describe('a large workspace', () => {
     }
     expect(i18n.t(liveIndexReasonKey(null))).toContain('has not reported why');
     expect(i18n.t('largeTree.mountSuggestion')).toContain('Choose explicit paths');
+  });
+
+  it('says how far a pass over a whole tree has come, only while there is one', () => {
+    expect(indexingProgress({ indexing: { done: 80_000, total: 200_000 } })).toEqual({ total: 200_000, percent: 40 });
+    expect(indexingProgress({ indexing: { done: 300, total: 200 } })).toEqual({ total: 200, percent: 100 });
+    for (const facts of [{ indexing: { done: 5, total: 0 } }, { indexing: 'now' }, {}, null, undefined]) expect(indexingProgress(facts)).toBeNull();
+    expect(i18n.t('largeTree.indexing', { files: '200,000', percent: 40 })).toBe('Indexing 200,000 files, 40 %');
   });
 
   it('offers a shell when a bounded Git read runs out and does not confuse other errors with that', () => {

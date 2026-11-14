@@ -354,6 +354,28 @@ impl Index {
         self.inner().entries.get(path.as_str()).cloned()
     }
 
+    /// What the index knows of everything strictly below `path`, in the order of the paths: the
+    /// cost is what lies there, not the size of the tree.
+    #[must_use]
+    pub fn below(&self, path: &RelPath) -> Vec<(RelPath, IndexEntry)> {
+        let inner = self.inner();
+        if path.is_root() {
+            return inner
+                .entries
+                .iter()
+                .map(|(path, entry)| (RelPath::from_walked(path.clone()), entry.clone()))
+                .collect();
+        }
+        // Everything below "a/b" sorts between "a/b/" and "a/b0" ('0' follows '/').
+        let from = format!("{}/", path.as_str());
+        let to = format!("{}0", path.as_str());
+        inner
+            .entries
+            .range(from..to)
+            .map(|(path, entry)| (RelPath::from_walked(path.clone()), entry.clone()))
+            .collect()
+    }
+
     /// Every path of the index with what is known of it, in the order of the paths.
     #[must_use]
     pub fn entries(&self) -> Vec<(RelPath, IndexEntry)> {
@@ -793,5 +815,31 @@ mod tests {
             None,
             "an unverifiable version never returns the earlier hash"
         );
+    }
+
+    #[test]
+    fn what_lies_below_a_path_is_read_without_the_rest_of_the_tree() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("a/b")).unwrap();
+        std::fs::create_dir_all(root.path().join("a0")).unwrap();
+        std::fs::write(root.path().join("a/one.txt"), "1").unwrap();
+        std::fs::write(root.path().join("a/b/two.txt"), "2").unwrap();
+        std::fs::write(root.path().join("a0/three.txt"), "3").unwrap();
+        std::fs::write(root.path().join("top.txt"), "t").unwrap();
+        let ws = workspace(root.path());
+        let index = Index::new(IndexMode::Full, 1000);
+        index.scan(&ws, &rules()).unwrap();
+        let below: Vec<String> = index
+            .below(&path("a"))
+            .into_iter()
+            .map(|(path, _)| path.to_string())
+            .collect();
+        assert_eq!(
+            below,
+            ["a/b", "a/b/two.txt", "a/one.txt"],
+            "a sibling that sorts right after the directory is not below it"
+        );
+        assert!(index.below(&path("a/one.txt")).is_empty());
+        assert_eq!(index.below(&RelPath::root()).len(), index.len());
     }
 }

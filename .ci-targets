@@ -1,0 +1,14 @@
+# n41-bigdir: a very large changing directory holds with no setting or ignore: a baseline flushed once for all its files, work per change and not per tree, a recording that answers at once beyond its bound, a changed ignore list reaching a running environment, the server's reads of a repository's state spaced by the machine
+fmt
+clippy
+contracts
+test -p orch-settings-contract --lib
+test -p orch-link-contract --lib
+test -p orch-envhost --lib
+test -p orch-envhost --test environment
+test -p orch-engine --lib
+test -p orch-connector-core --test recording_keys --test link_cuts
+test -p orch-engine --test live_mounts --test source_uniform --test environments
+web typecheck
+web lint
+web test -- tests/unit/large-trees.test.ts tests/unit/source-words.test.ts

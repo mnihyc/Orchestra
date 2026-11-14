@@ -972,7 +972,12 @@ pub(super) async fn authorize_on(
                 || recipe.forkplan.from.provider().id != recipe.forkplan.to.provider.id
                 || moving);
         if provider_required {
-            if !principal.caller().permits(Permission::ProviderUse) {
+            // A placement under the provider the thread has is carried, as the thread is, by its first
+            // owner's use: whoever places it needs what placement needs, which is checked above.
+            let carried = recipe.result == ForkResult::Replace
+                && recipe.forkplan.from.provider().id == recipe.forkplan.to.provider.id
+                && !matches!(recipe.source_execution, ExecutionSource::Program { .. });
+            if !carried && !principal.caller().permits(Permission::ProviderUse) {
                 return Err(failed(
                     "authz.denied",
                     "The accepted credential no longer includes provider.use.",
@@ -982,7 +987,7 @@ pub(super) async fn authorize_on(
                 .provider_use(
                     conn,
                     &crate::access::ProviderUse {
-                        person: recipe.by,
+                        person: if carried { thread.owner_id } else { recipe.by },
                         node: target.map_or(
                             if recipe.result == ForkResult::Replace {
                                 source.thread
@@ -1000,6 +1005,10 @@ pub(super) async fn authorize_on(
                 .await
                 .map_err(EngineError::from)?;
             match answer {
+                // A carrier who may not use the provider for another reason is for the turns to say, as it
+                // was before an entry named places.
+                crate::access::Answer::Refused(missing)
+                    if carried && !missing.iter().any(MissingAccess::leaves_out_the_place) => {}
                 crate::access::Answer::Refused(missing) => {
                     return Err(failed(
                         "authz.denied",

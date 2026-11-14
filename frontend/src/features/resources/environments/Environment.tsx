@@ -9,7 +9,7 @@
  * made, switches it off and removes it, naming it to be sure. Updating, moving and its Tools are not
  * served yet and are not offered.
  */
-import { liveIndexReason } from '@/features/files/indexWords';
+import { indexingProgress, liveIndexReason } from '@/features/files/indexWords';
 import { environmentRuntimeRows, namesRuntime, RuntimePair } from '@/features/resources/isolation/RuntimeInfo';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ENVIRONMENT_TABS, type EnvironmentTab } from '@/features/resources/tabs';
@@ -134,6 +134,7 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
   const timeZone = useAppearance((state) => state.timeZone);
   const now = useNow();
   const context = { locale, timeZone };
+  const indexing = indexingProgress(environment.facts);
   return (
     <div className="flex flex-col gap-6">
       {environment.status_detail !== null && environmentRemovalPhase(environment) === undefined && <InlineAlert tone={environment.status === 'failed' ? 'danger' : 'info'}>{environmentStatusDetail(environment, t)}</InlineAlert>}
@@ -157,6 +158,7 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
           </span>
         </InlineAlert>
       )}
+      {indexing !== null && <InlineAlert tone="info">{t('largeTree.indexing', { files: new Intl.NumberFormat().format(indexing.total), percent: indexing.percent })}</InlineAlert>}
       {environment.index === 'live' && <InlineAlert tone="info" title={t('largeTree.liveTitle')}>
         <p>{liveIndexReason(t, environment.index_reason, environment.facts)}</p>
         <p>{t('largeTree.liveCost')}</p>
