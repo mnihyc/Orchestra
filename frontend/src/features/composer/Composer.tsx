@@ -33,7 +33,7 @@ import { DraftMark } from '@/features/composer/DraftMark';
 import { ComposerControls } from '@/features/composer/Controls';
 import { ReferencePicker, type ReferenceKind } from '@/features/composer/Mentions';
 import { addToMessage } from '@/features/files/AddToMessage';
-import { useAskOnSide } from '@/features/side-threads/ask';
+import { asideUnconfirmed, openSideAsk, useAskOnSide } from '@/features/side-threads/ask';
 import { sideReadingAvailable, sideRefusal } from '@/features/side-threads/availability';
 import { composerWriter, steerRefusedFor, submitInput, useAttachmentParts, useBox, useComposerStore, useDraftSync } from '@/features/composer/Draft';
 import { ModelEffort } from '@/features/composer/ModelEffort';
@@ -196,9 +196,19 @@ function ThreadComposer({ thread, onSent }: { thread: Thread; onSent?: () => voi
   }, [text]);
 
   const fileReason = thread.environment === null ? t('composer.plus.noEnvironment') : !thread.environment_permissions.includes('files.view') ? t('composer.plus.noFileAccess') : false;
+  // `/side` is listed as `/goal` is: always, and disabled with the reason where this thread has no verified way to answer without acting (the thread's `sides`), exactly as the entry of the Send menu is. Words after it are the question; none opens the dialog that asks it.
+  const sideOff = sideRefusal(thread, t);
   const commands = [
     ...useModelCommands(thread, (section) => setControl({ open: true, section })),
     ...useGoalCommand(thread),
+    { name: 'side', about: t('side.slash.about'), off: sideOff === false ? null : sideOff,
+      run: (question: string) => {
+        if (aside.isPending) return t('side.ask.sending');
+        if (question === '') { openSideAsk({ threadId, threadName: thread.name, toTurn: null, text: '', read }); return null; }
+        const written = text;
+        aside.mutate({ text: question, toTurn: null }, { onError: (error) => { if (!asideUnconfirmed(error)) setText(written); } });
+        return null;
+      } },
     ...(['file', 'document'] as const).map((kind) => ({ name: kind, about: t(kind === 'file' ? 'composer.plus.file' : 'composer.plus.document'), off: !mayDrive ? t('composer.row.readOnly') : kind === 'file' && fileReason !== false ? fileReason : null,
       run: (query: string) => { setReference({ kind, query }); return null; } })),
   ];
