@@ -8,8 +8,11 @@ import { client } from '@/api/client';
 import { feedSequences } from '@/api/cache';
 import { pendingAgentSchedulesQuery, seedPendingAgentSchedules, topicSchedulesQuery, type ThreadPendingAgentSchedules } from '@/api/inputSchedules';
 import { scheduledReads } from '@/api/readScheduler';
-import { PendingAgentSchedules } from '@/features/schedules/Schedules';
+import { PendingAgentSchedules, ThreadSchedules } from '@/features/schedules/Schedules';
 import { i18n, setLocale } from '@/i18n';
+import { useAppearance } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
+import { formatDateTime } from '@/lib/time';
 import type { HttpTransport } from '../doubles/http-wire';
 import { inputSchedule, SCHEDULE_THREAD, SCHEDULE_TOPIC } from '../doubles/input-schedules';
 import { snapshot } from '../unit/continuation-fixtures';
@@ -17,7 +20,8 @@ import { show } from './support';
 
 const wire = vi.hoisted(() => ({ get: vi.fn<HttpTransport>() }));
 vi.mock('@/api/client', async (load) => ({ ...await load<typeof Client>(), api: { GET: wire.get } }));
-const session = client.session.getState();
+vi.mock('@/features/settings/Editor', () => ({ SettingsEditor: () => null }));
+const session = client.session.getState(), appearance = useAppearance.getState();
 const caches: QueryClient[] = [];
 const thread = () => ({ ...snapshot().thread, id: SCHEDULE_THREAD, topic_id: SCHEDULE_TOPIC });
 const ready = (seq = 10, name = 'Check the CI run'): ThreadPendingAgentSchedules => {
@@ -36,7 +40,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
   cleanup(); caches.splice(0).forEach((one) => one.clear()); scheduledReads.advance();
-  feedSequences.delete(`topic:${SCHEDULE_TOPIC}`); client.session.setState(session); await setLocale('en');
+  feedSequences.delete(`topic:${SCHEDULE_TOPIC}`); client.session.setState(session); useAppearance.setState(appearance); await setLocale('en');
 });
 
 for (const locale of ['en', 'zh-CN'] as const) {
@@ -107,4 +111,19 @@ it('keeps a newer native cut when an abort-ignoring opening reply arrives late a
   expect(held.getQueryState(key)?.fetchStatus).toBe('idle');
   seedPendingAgentSchedules(held, SCHEDULE_THREAD, SCHEDULE_TOPIC, { status: 'ready', data: ready(11, 'Older supplied work') });
   expect(held.getQueryData(key)).toEqual(ready(12, 'New native work')); off();
+});
+
+it.each(['en', 'zh-CN'] as const)('shows the recorded agent schedule end and remaining runs instead of its current defaults in %s', async (locale) => {
+  await setLocale(locale); useAppearance.setState({ locale }); const held = cache(), row = inputSchedule();
+  if (row.agent === null || row.agent === undefined) throw new Error('The agent schedule carries its retained limits');
+  const until = '2030-02-01T09:00:00Z';
+  const saved = { ...row, agent: { ...row.agent, until, runs: 2, max_runs: 125 } };
+  const key = topicSchedulesQuery(SCHEDULE_TOPIC).queryKey;
+  held.setQueryDefaults(key, { staleTime: Infinity }); held.setQueryData(key, [saved]);
+  show(<QueryClientProvider client={held}><ThreadSchedules thread={thread()} /></QueryClientProvider>);
+  const table = within(await screen.findByRole('table', { name: i18n.t('agentSchedules.title') }));
+  expect(table.getByText(locale === 'en' ? '2 / 125 runs · 123 left' : '已运行 2 / 125 次 · 剩余 123 次')).toBeVisible();
+  expect(table.getByText(i18n.t('agentSchedules.runs', { done: formatNumber(2, locale), total: formatNumber(125, locale), remaining: formatNumber(123, locale) }))).toBeVisible();
+  expect(table.getByText(formatDateTime(until, { locale: useAppearance.getState().locale, timeZone: useAppearance.getState().timeZone }))).toBeVisible();
+  expect(wire.get).not.toHaveBeenCalled();
 });

@@ -224,6 +224,9 @@ function QueueRow({ threadId, input, index, orderIndex, count, busy, fallback, c
   const { role: _role, 'aria-pressed': _pressed, 'aria-roledescription': _description, ...dragAttributes } = attributes;
   const changedContent = withEditedWords(input.content, words);
   const held = heldInputWords(input, thread, t);
+  const heldAuthority = input.state_detail === 'owner_lacks_access'
+    || input.author === null && input.run_as === null && ['cap_reached', 'second_step_required', 'model_use_required'].includes(input.state_detail ?? '')
+    ? thread?.owner ?? null : null;
   // Somebody who may drive the thread runs a message that waits for the model on their own access; the server
   // asks for their own use of the model and answers with what is missing when they have none.
   const [decided,setDecided]=useState<{approvalId:string|null;status:RequestDecisionStatus}|null>(null);
@@ -355,7 +358,7 @@ function QueueRow({ threadId, input, index, orderIndex, count, busy, fallback, c
           </div>
         )}
       {!mayExecute && <span className="text-xs text-text-muted">{t(`composer.queue.delivery.${input.delivery}`)}</span>}
-      {held !== null && <div className="flex items-center gap-1"><p className="min-w-0 text-xs text-text-muted">{held}</p>{input.state_detail === 'model_use_required' && <Hint id="held-model" popover />}</div>}
+      {held !== null && <div className="flex flex-wrap items-center gap-1"><p className="flex min-w-0 flex-wrap items-center gap-1 text-sm text-text-muted">{heldAuthority !== null && heldAuthority.id !== input.author?.id && <UserChip user={heldAuthority} size={24} className="max-w-full" />}{held}</p>{input.state_detail === 'model_use_required' && <Hint id="held-model" popover />}</div>}
       {decision!==null?<DecisionStatus source={decision}/>:runsOn !== null && <p className="flex items-center gap-1 text-sm text-text-muted">{t('agentIdentity.runsAs')}<UserChip user={runsOn} size={24}/></p>}
       {runnable && (
         <span>
