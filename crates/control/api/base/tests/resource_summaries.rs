@@ -21,6 +21,7 @@ use orch_api_contract::{
     },
 };
 use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::testing::{Boundaries, follow};
 use orch_db::queries::{
     access,
     identity::{self, NewApiToken},
@@ -28,6 +29,10 @@ use orch_db::queries::{
 };
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 async fn key(desk: &Desk, target: Id) -> String {
     let scope:orch_access_contract::key_scope::KeyScope=serde_json::from_value(json!({"rules":[{"target":{"kind":"topic","id":target,"reach":"self"},"resources":["topic"],"allow":[{"operation":"SummaryGet","actions":["read"]}]}]})).unwrap();
@@ -780,4 +785,599 @@ async fn a_real_document_scoped_refresh_retains_its_original_http_token_and_clos
         (0, 0),
         "acceptance and raw identity checks make no model request"
     );
+}
+
+#[tokio::test]
+async fn a_failed_refresh_says_what_stopped_it_and_that_the_previous_paragraph_is_kept() {
+    use orch_api_contract::{
+        documents::{NodeDocumentCreate, NodeDocumentCreateBody},
+        summaries::SummaryModelChoice,
+    };
+    let scene = rig::Scene::new().await;
+    scene.rig.engine.stop();
+    let app = &scene.rig.world.app;
+    let document = app
+        .call(NodeDocumentCreate, &[&scene.tree.topic.base.id])
+        .token(&scene.ada.token)
+        .body(&NodeDocumentCreateBody {
+            title: "A refresh that fails".into(),
+            blocks: None,
+            markdown: Some("Text that was summarized before.".into()),
+            access: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    sqlx::query("UPDATE providers SET kind='api',harness_kind=NULL,agent_id=NULL,protocols=ARRAY['openai-responses'],upstreams=$2,key_machine_id=$3,status='ready' WHERE id=$1")
+        .bind(scene.on.provider).bind(json!([{"protocol":"openai-responses","base_url":"https://fixture.example.invalid/v1","options":{"auth":"none"}}])).bind(scene.rig.machine_id).execute(scene.rig.db.pool()).await.unwrap();
+    let target = SummaryTarget::Document {
+        id: document.base.id,
+    };
+    let receipt = app
+        .call(SummaryRefresh, &[&"document", &document.base.id])
+        .token(&scene.ada.token)
+        .body(&SummaryRefreshBody {
+            client_id: new_id(),
+            model: Some(SummaryModelChoice {
+                provider_id: scene.on.provider,
+                model: rig::MODEL.into(),
+                params: None,
+            }),
+            range: None,
+        })
+        .send()
+        .await
+        .ok();
+    cache_in(
+        &scene.rig.world,
+        target,
+        Some(scene.ada.id()),
+        "An earlier paragraph.",
+        json!([target]),
+    )
+    .await;
+    // As the engine leaves a request that could not run: failed, with the reason it stored.
+    sqlx::query("UPDATE resource_summary_requests SET state='failed',problem=$2,finished_at=now(),lease_token=NULL,lease_until=NULL WHERE id=$1")
+        .bind(receipt.id)
+        .bind(json!({"code":"summary_unavailable","message":"The machine that keeps the key of the provider is offline. Bring it online or move the key.","reason":"keeper_offline"}))
+        .execute(scene.rig.db.pool())
+        .await
+        .unwrap();
+    let view = app
+        .call(SummaryGet, &[&"document", &document.base.id])
+        .token(&scene.ada.token)
+        .query(&SummaryReadQuery::default())
+        .send()
+        .await
+        .ok();
+    assert_eq!(view.state, SummaryState::Failed);
+    assert_eq!(view.text.as_deref(), Some("An earlier paragraph."));
+    let problem = view.problem.expect("a failed refresh carries its problem");
+    assert_eq!(
+        problem.extra.get("reason"),
+        Some(&json!("keeper_offline")),
+        "the page is told which thing stopped it, not only that something did"
+    );
+    assert!(
+        problem.detail.starts_with("The machine that keeps the key")
+            && problem.detail.ends_with("The previous paragraph is kept."),
+        "{}",
+        problem.detail
+    );
+}
+
+#[tokio::test]
+async fn a_changed_source_keeps_its_previous_paragraph_outdated_and_offers_a_new_explicit_summary()
+{
+    let desk = Desk::new().await;
+    for kept in [false, true] {
+        let doc = desk.make(&desk.ada, "Changed summary source").await.base.id;
+        let target = SummaryTarget::Document { id: doc };
+        let summary = cache(&desk, target, None, "Previous paragraph.", json!([target])).await;
+        if !kept {
+            sqlx::query("UPDATE resource_summaries SET text=NULL,producer=NULL,source_snapshot=NULL,source_refs='[]',completed_request_id=NULL,completed_at=NULL,completed_dirty_revision=NULL WHERE id=$1")
+                .bind(summary)
+                .execute(&mut *desk.world.conn().await)
+                .await
+                .unwrap();
+        }
+        let request = queued_request(&desk, summary, target).await;
+        for reason in ["source_changed", "content_changing", "settings_changed"] {
+            sqlx::query("UPDATE resource_summary_requests SET state='discarded',problem=$2,finished_at=$3 WHERE id=$1")
+                .bind(request).bind(json!({"reason":reason,"message":"The source changed while this summary was being written."})).bind(desk.world.now())
+                .execute(&mut *desk.world.conn().await).await.unwrap();
+            let view = desk
+                .world
+                .app
+                .call(SummaryGet, &[&"document", &doc])
+                .token(&desk.ada.token)
+                .query(&SummaryReadQuery::default())
+                .send()
+                .await
+                .ok();
+            assert_eq!(
+                view.state,
+                if kept {
+                    SummaryState::Stale
+                } else {
+                    SummaryState::Empty
+                }
+            );
+            assert_eq!(view.text.as_deref(), kept.then_some("Previous paragraph."));
+            let problem = view
+                .problem
+                .expect("the changing source is explained without an access refusal");
+            assert_eq!(problem.code, ErrorCode::ConflictStaleRevision);
+            assert_eq!(problem.extra.get("reason"), Some(&json!(reason)));
+            assert!(view.wait.is_none());
+        }
+    }
+}
+
+/// A request of the summary that waits for its turn, as the sweep leaves a queued one.
+async fn queued_request(desk: &Desk, summary: Id, target: SummaryTarget) -> Id {
+    let now = desk.world.now();
+    let mut tx = orch_db::Db::from_pool(desk.world.db.pool.clone())
+        .begin()
+        .await
+        .unwrap();
+    let result = rows::enqueue(
+        &mut tx,
+        summary,
+        rows::Origin::Automatic {
+            writer: desk.ada.id(),
+        },
+        &json!({"client_id":new_id(),"model":null,"range":null}),
+        &json!({"target":target}),
+        now,
+        now,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let rows::Enqueued::New(pending) = result else {
+        panic!("one native queued fixture");
+    };
+    pending.id
+}
+
+/// Runs `moving` once, at the place where the read of `route` is about to be checked again after its
+/// read: what the person sees is then answered while something about it moves, and always at that moment.
+fn when_the_read_is_checked_again<Fut>(
+    log: &Boundaries,
+    route: &'static str,
+    phase: &'static str,
+    moving: impl Fn() -> Fut + Send + Sync + 'static,
+) -> Arc<AtomicBool>
+where
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let moved = Arc::new(AtomicBool::new(false));
+    let seen = moved.clone();
+    log.hold(move |operation, at| {
+        let work =
+            (operation == route && at == phase && !seen.swap(true, Ordering::SeqCst)).then(&moving);
+        Box::pin(async move {
+            if let Some(work) = work {
+                work.await;
+            }
+        })
+    });
+    moved
+}
+
+/// The queued request is taken up by the sweep.
+async fn take_up(pool: sqlx::PgPool, request: Id) {
+    sqlx::query("UPDATE resource_summary_requests SET state='running',lease_token=$2,lease_until=now()+interval '5 minutes' WHERE id=$1")
+        .bind(request)
+        .bind(new_id())
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_read_during_which_the_summarys_request_is_taken_up_is_answered_with_the_newer_state_not_refused()
+ {
+    let desk = Desk::new().await;
+    let doc = desk
+        .make(&desk.ada, "A summary that is being written")
+        .await
+        .base
+        .id;
+    let target = SummaryTarget::Document { id: doc };
+    let summary = cache(
+        &desk,
+        target,
+        None,
+        "The earlier paragraph.",
+        json!([target]),
+    )
+    .await;
+    let request = queued_request(&desk, summary, target).await;
+    let waiting = desk
+        .world
+        .app
+        .call(SummaryGet, &[&"document", &doc])
+        .token(&desk.ada.token)
+        .query(&SummaryReadQuery::default())
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        waiting.wait.map(|wait| wait.reason),
+        Some(orch_api_contract::summaries::SummaryWaitReason::Queue),
+        "a queued request is waiting for its turn"
+    );
+    let log = Boundaries::new();
+    let pool = desk.world.db.pool.clone();
+    let moved = when_the_read_is_checked_again(&log, "SummaryGet", "selected.settle", move || {
+        take_up(pool.clone(), request)
+    });
+    let view = follow(log, async {
+        desk.world
+            .app
+            .call(SummaryGet, &[&"document", &doc])
+            .token(&desk.ada.token)
+            .query(&SummaryReadQuery::default())
+            .send()
+            .await
+    })
+    .await
+    .ok();
+    assert!(
+        moved.load(Ordering::SeqCst),
+        "the request was taken up between the read and its check"
+    );
+    assert_eq!(view.state, SummaryState::Updating);
+    assert_eq!(view.text.as_deref(), Some("The earlier paragraph."));
+    assert!(
+        view.wait.is_none(),
+        "the answer is the newer state, in which the request is no longer waiting for its turn"
+    );
+}
+
+#[tokio::test]
+async fn a_read_whose_source_the_person_lost_between_the_read_and_its_check_is_refused() {
+    let desk = Desk::new().await;
+    let reader = desk.member("summary-reader-who-loses", "viewer").await;
+    let doc = desk
+        .make(&desk.ada, "A document that is withdrawn")
+        .await
+        .base
+        .id;
+    let target = SummaryTarget::Document { id: doc };
+    cache(
+        &desk,
+        target,
+        None,
+        "A paragraph of a document that is withdrawn.",
+        json!([target]),
+    )
+    .await;
+    let before = desk
+        .world
+        .app
+        .call(SummaryGet, &[&"document", &doc])
+        .token(&reader.token)
+        .query(&SummaryReadQuery::default())
+        .send()
+        .await
+        .ok();
+    assert!(
+        before.text.is_some(),
+        "the reader may read it to begin with"
+    );
+    let log = Boundaries::new();
+    let pool = desk.world.db.pool.clone();
+    let moved = when_the_read_is_checked_again(&log, "SummaryGet", "selected.settle", move || {
+        let pool = pool.clone();
+        async move {
+            let mut conn = pool.acquire().await.unwrap();
+            access::testing::set_row(
+                &mut conn,
+                &access::PageKey::new("document", doc, "live"),
+                "any",
+                "doc.view",
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        }
+    });
+    let refused = follow(log, async {
+        desk.world
+            .app
+            .call(SummaryGet, &[&"document", &doc])
+            .token(&reader.token)
+            .query(&SummaryReadQuery::default())
+            .send()
+            .await
+    })
+    .await;
+    assert!(moved.load(Ordering::SeqCst));
+    let problem = refused.problem();
+    assert_eq!(
+        problem.code,
+        ErrorCode::NotFound,
+        "a paragraph of what the person may no longer read is not given: {}",
+        problem.detail
+    );
+}
+
+#[tokio::test]
+async fn the_first_read_of_a_chats_summary_is_answered_for_a_member_and_for_an_inspector() {
+    use orch_api_contract::chats::{OrgChatCreate, OrgChatCreateBody};
+    let desk = Desk::new().await;
+    let first = desk.member("summary-chat-opener", "viewer").await;
+    let second = desk.member("summary-chat-partner", "viewer").await;
+    let chat = desk
+        .world
+        .app
+        .call(OrgChatCreate, &[&desk.org])
+        .token(&first.token)
+        .body(&OrgChatCreateBody {
+            visibility: None,
+            home_id: None,
+            user_ids: vec![second.id()],
+            name: Some("A chat that is opened for the first time".into()),
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap()
+        .base
+        .id;
+    let member = desk
+        .world
+        .app
+        .call(SummaryGet, &[&"chat", &chat])
+        .token(&first.token)
+        .query(&SummaryReadQuery::default())
+        .send()
+        .await
+        .ok();
+    assert!(!member.inspecting);
+    // An administrator who is not in the chat has the opening written between the read and its check.
+    let opening = new_id().to_string();
+    for _ in 0..2 {
+        let inspector = desk
+            .world
+            .app
+            .call(SummaryGet, &[&"chat", &chat])
+            .token(&desk.ada.token)
+            .header("x-orch-opening", &opening)
+            .query(&SummaryReadQuery::default())
+            .send()
+            .await
+            .ok();
+        assert!(inspector.inspecting);
+    }
+}
+
+#[tokio::test]
+async fn a_refresh_of_a_source_with_nothing_in_it_is_answered_at_once_and_makes_no_request() {
+    use orch_api_contract::{
+        documents::{NodeDocumentCreate, NodeDocumentCreateBody},
+        summaries::SummaryModelChoice,
+    };
+    let scene = rig::Scene::new().await;
+    scene.rig.engine.stop();
+    let app = &scene.rig.world.app;
+    let document = app
+        .call(NodeDocumentCreate, &[&scene.tree.topic.base.id])
+        .token(&scene.ada.token)
+        .body(&NodeDocumentCreateBody {
+            title: "Nothing written yet".into(),
+            blocks: None,
+            markdown: None,
+            access: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    sqlx::query("UPDATE providers SET kind='api',harness_kind=NULL,agent_id=NULL,protocols=ARRAY['openai-responses'],upstreams=$2,key_machine_id=$3,status='ready' WHERE id=$1")
+        .bind(scene.on.provider).bind(json!([{"protocol":"openai-responses","base_url":"https://fixture.example.invalid/v1","options":{"auth":"none"}}])).bind(scene.rig.machine_id).execute(scene.rig.db.pool()).await.unwrap();
+    let refused = app
+        .call(SummaryRefresh, &[&"document", &document.base.id])
+        .token(&scene.ada.token)
+        .body(&SummaryRefreshBody {
+            client_id: new_id(),
+            model: Some(SummaryModelChoice {
+                provider_id: scene.on.provider,
+                model: rig::MODEL.into(),
+                params: None,
+            }),
+            range: None,
+        })
+        .send()
+        .await;
+    assert_eq!(refused.status, http::StatusCode::CONFLICT);
+    let problem = refused.problem();
+    assert_eq!(
+        problem.code,
+        ErrorCode::SummaryNothingNew,
+        "a source with nothing in it is no failed request but an answer: {}",
+        problem.detail
+    );
+    let work: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM resource_summary_requests)+(SELECT count(*) FROM summary_calls)+(SELECT count(*) FROM model_inputs)+(SELECT count(*) FROM usage_events WHERE purpose='summary')")
+        .fetch_one(scene.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(work, 0, "no request row, no model input and no use is made");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nothing_unread_needs_no_model_but_an_explicit_nonempty_range_still_gets_its_summary() {
+    use orch_api_contract::{
+        chats::{
+            ChatMessageCreate, ChatMessageCreateBody, ChatPart, OrgChatCreate, OrgChatCreateBody,
+        },
+        summaries::{SummaryChatRange, SummaryModelChoice},
+    };
+    use orch_link_contract::commands::{
+        Command, CommandKind, CommandResult, ProviderCompleteResult,
+    };
+    let scene = rig::Scene::new().await;
+    scene.rig.engine.stop();
+    let app = &scene.rig.world.app;
+    let chat = app
+        .call(OrgChatCreate, &[&scene.tree.org.base.id])
+        .token(&scene.ada.token)
+        .body(&OrgChatCreateBody {
+            visibility: None,
+            home_id: None,
+            user_ids: vec![scene.dan.id()],
+            name: Some("A deliberately selected range".into()),
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap()
+        .base
+        .id;
+    let posted = app
+        .call(ChatMessageCreate, &[&chat])
+        .token(&scene.ada.token)
+        .body(&ChatMessageCreateBody {
+            parts: vec![ChatPart::Text {
+                text: "The selected earlier message is still material.".into(),
+            }],
+            reply_to: None,
+            agent_review: None,
+            client_id: new_id().to_string(),
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    orch_db::queries::chats::mark_read(
+        &mut *scene.rig.world.conn().await,
+        scene.ada.id(),
+        chat,
+        posted.seq,
+    )
+    .await
+    .unwrap();
+    let empty = app
+        .call(SummaryRefresh, &[&"chat", &chat])
+        .token(&scene.ada.token)
+        .body(&SummaryRefreshBody {
+            client_id: new_id(),
+            model: None,
+            range: None,
+        })
+        .send()
+        .await;
+    assert_eq!(empty.status, http::StatusCode::CONFLICT);
+    assert_eq!(
+        empty.problem().code,
+        ErrorCode::SummaryNothingNew,
+        "an empty unread range needs neither model selection nor model permission"
+    );
+    let requests: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_summary_requests")
+        .fetch_one(scene.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(requests, 0);
+    // A new native API fixture has no inherited harness route or endpoint state.
+    let provider = new_id();
+    scene
+        .rig
+        .machine
+        .handler
+        .on(CommandKind::ProviderStart, move |command| {
+            let Command::ProviderStart(start) = command else {
+                panic!("a native provider start");
+            };
+            assert_eq!(start.provider_id, provider);
+            Ok(CommandResult::ProviderStart(
+                orch_link_contract::commands::Empty {},
+            ))
+        });
+    sqlx::query("INSERT INTO providers(id,name,owner_id,org_id,home_id,kind,key_machine_id,machine_id,protocols,arrangements,status,upstreams) VALUES($1,'Selected range API',$2,$3,$3,'api',$4,$4,ARRAY['openai-responses'],ARRAY['key_separated'],'ready',$5)")
+        .bind(provider).bind(scene.ada.id()).bind(scene.tree.org.base.id).bind(scene.rig.machine_id)
+        .bind(json!([{"protocol":"openai-responses","base_url":"https://fixture.example.invalid/v1","options":{"auth":"none"}}]))
+        .execute(scene.rig.db.pool()).await.unwrap();
+    sqlx::query("INSERT INTO provider_models(id,provider_id,model_name,display_name,enabled,source,created_by) VALUES($1,$2,$3,'Selected range model',true,'manual',$4)")
+        .bind(new_id()).bind(provider).bind(rig::MODEL).bind(scene.ada.id()).execute(scene.rig.db.pool()).await.unwrap();
+    scene
+        .rig
+        .lets_use("provider", provider, "access.own", &scene.ada, json!({}))
+        .await;
+    scene
+        .rig
+        .machine
+        .handler
+        .on(CommandKind::ProviderComplete, |command| {
+            let Command::ProviderComplete(request) = command else {
+                panic!("only the summary completion reaches this fixture")
+            };
+            assert!(request.input.contains("selected earlier message"));
+            Ok(CommandResult::ProviderComplete(ProviderCompleteResult {
+                text: "The selected range has a summary.".into(),
+                usage: orch_api_contract::threads::TokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 20,
+                    total_tokens: 120,
+                    ..Default::default()
+                },
+                request_ref: Some("synthetic-selected-range-summary".into()),
+                timing: Default::default(),
+            }))
+        });
+    let range = SummaryChatRange {
+        after: 0,
+        through: posted.seq,
+    };
+    let receipt = app
+        .call(SummaryRefresh, &[&"chat", &chat])
+        .token(&scene.ada.token)
+        .body(&SummaryRefreshBody {
+            client_id: new_id(),
+            model: Some(SummaryModelChoice {
+                provider_id: provider,
+                model: rig::MODEL.into(),
+                params: None,
+            }),
+            range: Some(range),
+        })
+        .send()
+        .await
+        .ok();
+    scene.rig.engine.summarize_resources().await.unwrap();
+    rig::eventually(
+        "the explicitly selected read range is summarized",
+        || async {
+            matches!(
+                rows::request(&mut *scene.rig.world.conn().await, receipt.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state
+                    .as_str(),
+                "done" | "failed" | "discarded"
+            )
+        },
+    )
+    .await;
+    let request = rows::request(&mut *scene.rig.world.conn().await, receipt.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        request.state, "done",
+        "the selected range runs through the native API door: {:?}",
+        request.problem
+    );
+    assert_eq!(request.accepted_source["range"], json!(range));
+    assert_eq!(scene.rig.commands.issued_of("provider.complete"), 1);
 }

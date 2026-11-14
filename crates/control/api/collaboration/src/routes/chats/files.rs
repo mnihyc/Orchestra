@@ -164,7 +164,7 @@ fn described_in(parts: &[ChatPart], hash: &Hash) -> Option<Kept> {
 /// Serves files from live messages to chat readers, and independently authorized private draft
 /// files to their author. Other bytes in the store are not found.
 async fn blob_get(ctx: Ctx, query: ChatBlobGetQuery, _: Body) -> ApiResult<Response> {
-    let selected = crate::key_operations::native::selected_read::<source::Blobs>(
+    let selected = crate::key_operations::native::selected_value::<source::Blobs>(
         ctx.clone(),
         query.clone(),
         (),

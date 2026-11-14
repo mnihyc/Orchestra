@@ -1,0 +1,3 @@
+fmt
+clippy
+test -p orch-api-core --test summaries --test resource_summaries --test admin_messages
