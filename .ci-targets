@@ -1,0 +1,13 @@
+# n41-frame, second round: the lint and the connector case repaired; an old connector refused with the version it needs; a spooled event that can no longer be sent is given up and told; the guard over every kind's largest message.
+fmt
+clippy
+contracts
+test -p orch-link-contract --lib
+test -p orch-link-contract --test largest_messages
+test -p orch-config --lib
+test -p orch-link --lib
+test -p orch-link --test large_messages --test handshake --test streams --test spool --test refusals_are_told --test raw_spool_restart --test commands
+test -p orch-gateway-core --test large_messages --test sessions
+test -p orch-connector-core --test provider_role
+test -p orch-api-core --test component_updates -- the_system_states_that_a_connector_older_than_its_release_can_carry_has_to_update
+test -p orch-xtask
