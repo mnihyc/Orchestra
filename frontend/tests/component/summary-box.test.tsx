@@ -2,6 +2,7 @@
 import { act, cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
+import { ApiError } from '@/api/client';
 import { SummaryBox } from '@/features/summaries/SummaryBox';
 import type { SummaryAskContext, SummarySnapshot, SummaryTarget } from '@/features/summaries/model';
 import { i18n, setLocale } from '@/i18n';
@@ -11,6 +12,12 @@ const target: SummaryTarget = { kind: 'thread', reference: '/thread/review' };
 const snapshot = (changes: Partial<SummarySnapshot> = {}): SummarySnapshot => ({
   revision: '1', state: 'fresh', text: 'The review is ready', producer: { kind: 'extension', name: 'Rules' }, updated_at: null, ...changes,
 });
+/** What stopped a summary, each as the server names it in the problem it keeps; `nothing_new` is no failure and has its own cases. */
+const failureReasons = ['asker_ended', 'source_gone', 'source_unreadable', 'no_summarizer', 'provider_gone', 'provider_not_ready', 'no_interface', 'model_off', 'model_not_allowed',
+  'provider_forbidden', 'not_allowed', 'effort_not_offered', 'no_keeper', 'keeper_offline', 'cap_no_room', 'output_cut', 'model_failed', 'unusable_answer', 'unexpected'] as const;
+/** The problem a summary that could not be written carries: the one code every such failure has, and the reason of this one. */
+const stopped = (reason: string) => new ApiError({ type: 'orch:error:provider.unavailable', code: 'provider.unavailable', status: 503, title: '',
+  detail: 'The summary could not be written.', request_id: 'summary-case', reason }, null);
 function deferred() {
   let resolve!: () => void;
   let reject!: (error: unknown) => void;
@@ -179,6 +186,78 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(view.container.querySelector('section')).toHaveAttribute('data-summary-state', 'fresh');
     expect(screen.getByText('Newly delivered summary')).toBeVisible();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it.each(failureReasons)(`says what stopped a summary in its own sentence, never that the provider is not ready (${locale}, %s)`, async (reason) => {
+    await setLocale(locale);
+    show(<SummaryBox readerKey="preview-reader" target={target} summary={snapshot({ state: 'failed', text: null, error: stopped(reason) })} onRefresh={vi.fn()} onAsk={vi.fn()} />);
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent(i18n.t(`summaryBox.failure.${reason}`));
+    expect(alert).not.toHaveTextContent(i18n.t('errors.provider.unavailable'));
+    expect(alert).not.toHaveTextContent(i18n.t('summaryBox.failure.kept'));
+  });
+
+  it(`keeps the paragraph of a failed refresh and says that it is kept (${locale})`, async () => {
+    await setLocale(locale);
+    show(<SummaryBox readerKey="preview-reader" target={target} summary={snapshot({ state: 'failed', error: stopped('keeper_offline') })} onRefresh={vi.fn()} onAsk={vi.fn()} />);
+    expect(screen.getByText('The review is ready')).toBeVisible();
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent(i18n.t('summaryBox.failure.keeper_offline'));
+    expect(alert).toHaveTextContent(i18n.t('summaryBox.failure.kept'));
+    expect(alert).not.toHaveTextContent(i18n.t('errors.provider.unavailable'));
+  });
+
+  it(`gives a failure that names no reason the words its code has (${locale})`, async () => {
+    await setLocale(locale);
+    show(<SummaryBox readerKey="preview-reader" target={target} summary={snapshot({ state: 'failed', text: null, error: stopped('a_reason_no_page_knows') })} onAsk={vi.fn()} />);
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent(i18n.t('errors.provider.unavailable'));
+    expect(alert).not.toHaveTextContent(i18n.t('summaryBox.failure.kept'));
+  });
+
+  it.each([
+    { kind: 'thread', line: 'summaryBox.nothingNew.other', text: null },
+    { kind: 'thread', line: 'summaryBox.nothingNew.other', text: 'The review is ready' },
+    { kind: 'chat', line: 'summaryBox.nothingNew.chat', text: null },
+    { kind: 'chat', line: 'summaryBox.nothingNew.chat', text: 'The review is ready' },
+  ] as const)(`says that there is nothing new as a plain line, not as an error (${locale}, $kind, paragraph: $text)`, async ({ kind, line, text }) => {
+    await setLocale(locale);
+    const page = { ...target, kind };
+    const view = show(<SummaryBox readerKey="preview-reader" target={page} summary={snapshot({ state: 'failed', text, error: stopped('nothing_new') })} onRefresh={vi.fn()} onAsk={vi.fn()} />);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(view.container.querySelector('section')).not.toHaveAttribute('data-summary-state', 'failed');
+    expect(screen.queryByText(i18n.t('summaryBox.state.failed'))).not.toBeInTheDocument();
+    const said = i18n.t(line);
+    expect(screen.getByText(kind === 'chat' ? i18n.t('summaryBox.subjectState', { subject: i18n.t('summaryBox.catchUp'), state: said }) : said)).toBeVisible();
+    if (text !== null) expect(screen.getByText(text)).toBeVisible();
+    expect(view.container.querySelector('section')).not.toHaveAttribute('data-summary-state', 'fresh');
+    expect(screen.queryByText(i18n.t('errors.provider.unavailable'))).not.toBeInTheDocument();
+  });
+
+  it(`says that there is nothing new when the server refuses a refresh for that reason, without an error (${locale})`, async () => {
+    await setLocale(locale);
+    const refused = new ApiError({ type: 'orch:error:summary.nothing_new', code: 'summary.nothing_new', status: 409, title: '', detail: 'There is nothing new to summarize', request_id: 'summary-case' }, null);
+    const onRefresh = vi.fn<() => Promise<void>>().mockRejectedValue(refused);
+    const view = show(<SummaryBox readerKey="preview-reader" target={target} summary={snapshot({ state: 'empty', text: null })} onRefresh={onRefresh} onAsk={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('summaryBox.refresh') }));
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledOnce());
+    expect(await screen.findByText(i18n.t('summaryBox.nothingNew.other'))).toBeVisible();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(view.container.querySelector('section')).not.toHaveAttribute('data-summary-state', 'failed');
+  });
+
+  it(`blocks Refresh for a source that has nothing in it and says why, without asking for anything (${locale})`, async () => {
+    await setLocale(locale);
+    const onRefresh = vi.fn();
+    const chat: SummaryTarget = { kind: 'chat', reference: '/chat/read-to-the-end' };
+    show(<SummaryBox readerKey="preview-reader" target={chat} summary={snapshot({ state: 'empty', text: null })} onRefresh={onRefresh} nothingNew onAsk={vi.fn()} />);
+    expect(screen.getByRole('heading', { name: i18n.t('summaryBox.catchUp') })).toBeVisible();
+    const button = screen.getByRole('button', { name: i18n.t('summaryBox.catchUpActions.refresh') });
+    expect(button).toHaveAttribute('aria-disabled', 'true');
+    await userEvent.click(button);
+    await userEvent.hover(button);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('summaryBox.nothingNew.chat'));
+    expect(onRefresh).not.toHaveBeenCalled();
   });
 
   it(`isolates readers of the same chat even when their revision strings match (${locale})`, async () => {

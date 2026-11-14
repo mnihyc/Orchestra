@@ -13,6 +13,7 @@ use orch_types::Id;
 pub(super) async fn context_tokens(
     conn: &mut orch_db::Conn,
     config: &orch_summarizer_model::descriptor::Config,
+    field: orch_summarizer_contract::descriptor::SummaryField,
 ) -> Result<u32, EngineError> {
     let model = orch_db::queries::resources::thread_engine::model(
         conn,
@@ -36,12 +37,45 @@ pub(super) async fn context_tokens(
     .map_err(EngineError::unreadable)?;
     orch_summarizer_model::context::fit_window(
         config.context_tokens,
-        config.max_output_tokens,
+        config.output_reserve(field, parameters.needs_reasoning_room()),
         parameters
             .context_open()
             .or(parameters.context_window.filter(|window| *window > 0)),
     )
     .map_err(|error| EngineError::unreadable(super::safe_reason(&error)))
+}
+
+/// The same output-room decision used by the actual request, independent of enabled tuning controls.
+/// Unknown model facts reserve the configured room; they do not enable an effort selection.
+pub(super) async fn reasons(
+    conn: &mut orch_db::Conn,
+    config: &orch_summarizer_model::descriptor::Config,
+) -> Result<bool, EngineError> {
+    let Some(model) = orch_db::queries::resources::thread_engine::model(
+        conn,
+        config.provider_id,
+        &config.model_name,
+    )
+    .await?
+    else {
+        return Ok(true);
+    };
+    let Some(provider) =
+        orch_db::queries::resources::thread_engine::provider(conn, config.provider_id).await?
+    else {
+        return Ok(true);
+    };
+    let Some(protocol) = super::resource::completion_protocol(&provider.protocols)? else {
+        return Ok(true);
+    };
+    let parameters = orch_provider_contract::models::composed_model_parameters(
+        &model.parameters,
+        &model.groups,
+        &model.option_layers,
+        Some(&protocol),
+    )
+    .map_err(EngineError::unreadable)?;
+    Ok(parameters.needs_reasoning_room())
 }
 
 /// The window taken for a model whose entry does not say: what every model that does this work has.
@@ -69,6 +103,7 @@ pub(crate) async fn input_budget(
     thread: Id,
     provider: Id,
     model: &str,
+    output_tokens: i64,
 ) -> Result<InputBudget, EngineError> {
     let window = orch_db::queries::resources::thread_engine::model(conn, provider, model)
         .await?
@@ -78,7 +113,7 @@ pub(crate) async fn input_budget(
             .await?
             .unwrap_or(DEFAULT_SHARE)
             .clamp(1, 100);
-    Ok(budget_of(window, share))
+    Ok(after_output(budget_of(window, share), output_tokens))
 }
 
 /// The budget for a window and a share, with nothing read.
@@ -97,9 +132,35 @@ pub(crate) fn budget_of(window: Option<i64>, share: i64) -> InputBudget {
     }
 }
 
+fn after_output(mut budget: InputBudget, output_tokens: i64) -> InputBudget {
+    let remaining = budget
+        .window
+        .unwrap_or(UNKNOWN_WINDOW_TOKENS)
+        .saturating_sub(output_tokens.max(0))
+        .max(0);
+    budget.tokens = budget.tokens.min(remaining);
+    budget.bytes = usize::try_from(
+        budget
+            .tokens
+            .saturating_mul(crate::fork_history::CARRY_BYTES_PER_TOKEN),
+    )
+    .unwrap_or(usize::MAX);
+    budget
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_summarys_input_share_also_leaves_room_for_its_answer_and_reasoning() {
+        let output = 3_024;
+        let budget = after_output(budget_of(Some(4_096), 50), output);
+        assert!(
+            budget.tokens + output <= 4_096,
+            "a percentage of the context is not additional space beyond the model's whole window"
+        );
+    }
 
     #[test]
     fn half_of_a_known_window_is_sent_at_the_carry_rules_bytes_to_a_token() {

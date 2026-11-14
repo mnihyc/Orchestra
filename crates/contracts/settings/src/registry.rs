@@ -2538,7 +2538,7 @@ registry! {
     SUMMARY_HANDOFF_INPUT_SHARE = "summary.handoff_input_share", Automation, Policy, SYSTEM_TO_TOPIC, Min, value("50"), int_between(1, 100, Unit::Percent),
         "Summary input share", "How much of the summary model's context window a hand-off, a fork or a goal check may fill with the conversation it sends; the newest turns first, older ones as their one-line index.";
     AUTO_SUMMARIZER = "auto.summarizer", Automation, Parameter, SYSTEM_TO_THREAD, Replace, UNSET, SUMMARIZER,
-        "Summarizer", "Which summarizer is used, and its configuration.";
+        "Summarizer", "Summarizer and model token allowances. Target character counts are separate.";
     AUTO_TRIGGERS = "auto.triggers", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("{\"on\":[\"turn_completed\",\"milestone\"],\"min_interval_secs\":120}"), TRIGGERS,
         "Triggers", "When automatic titles, tags and summaries are written again: after a turn, at a milestone or at intervals, and how often at most.";
     SUMMARY_TARGETS = "summary.targets", Automation, Parameter, SYSTEM_TO_THREAD, Map, EMPTY_MAP, SUMMARY_TARGETS,
@@ -2717,6 +2717,8 @@ registry! {
         "Shared mail server", "Whether a root org that has no mail server of its own sends its mail through the system's.";
     API_IDEMPOTENCY_WINDOW = "api.idempotency_window", System, Parameter, SYSTEM, Replace, value("24"), int(0, Unit::Hours),
         "Creation replay window", "How many hours a creation key retains its accepted identity; 0 disables replay. This default can be increased.";
+    API_READ_REPEATS = "api.read_repeats", System, Parameter, SYSTEM, Replace, value("3"), int(0, Unit::Count),
+        "Repeated reads", "How many times a read is made again, in place of being refused, when what it showed has moved while it was being answered; 0 makes no repeat.";
     RELEASE_CHECK_DAYS = "release.check_days", System, Policy, SYSTEM, Replace, value("0"), int(0, Unit::Days),
         "Look for a release", "Days between read-only checks of the operator's configured release source; 0 is off. A check sends no installation statistics and installs nothing.";
     CLEANUP_RELEASE_KEEP_COUNT = "cleanup.release_keep_count", Retention, Policy, SYSTEM, Replace, value("3"), int(0, Unit::Count),

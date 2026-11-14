@@ -103818,6 +103818,11 @@
           },
           {
             "type": "string",
+            "const": "summary.nothing_new",
+            "description": "There is nothing new to summarize"
+          },
+          {
+            "type": "string",
             "const": "gone",
             "description": "It expired or was used"
           },

@@ -82,6 +82,7 @@
     "noModels": "No API models available here",
     "modelUnavailable": "This model is unavailable here",
     "sources": "Sources",
+    "noAnswer": "No answer was written. Try again.",
     "sourceUnavailable": "Source no longer available",
     "copy": "Copy answer",
     "retry": "Retry answer",
@@ -91,7 +92,6 @@
     "noHistory": "No conversations yet",
     "retention": "Kept for {{days}} days after the last message",
     "expires": "Expires",
-    "adminNotice": "This organization’s admins can inspect and export this conversation",
     "inspection": "Read-only admin inspection",
     "readOnlyTools": "Reads as you · cites sources · makes no changes",
     "paidBy": "Paid by",
@@ -99,7 +99,9 @@
     "privateThread": "Creates a Private permanent thread in this organization",
     "destination": "Destination topic",
     "defaultDestination": "Use the page’s topic or an authorized default",
-    "contextNoRoom": "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves.",
+    "contextNoRoom": "ask.context_tokens leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Increase ask.context_tokens or reduce ask.max_output_tokens.",
+    "windowNoRoom": "The context window of {{model}} leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Use a model with a larger window or reduce ask.max_output_tokens.",
+    "windowUnknown": "The context window of {{model}} is not recorded and is assumed to be small, and the answer’s reserve (ask.max_output_tokens) leaves no room for the conversation. Record the model’s context window or reduce ask.max_output_tokens.",
     "contextTooLong": "This conversation is too long for {{model}}; start a new one or keep it as a thread."
   },
   "viewWindow": {
@@ -3415,6 +3417,10 @@
       "idempotency_window": {
         "title": "Creation replay window",
         "description": "How many hours a creation key retains its accepted identity; 0 disables replay. This default can be increased."
+      },
+      "read_repeats": {
+        "title": "Repeated reads",
+        "description": "How many times a read is made again, in place of being refused, when what it showed has moved while it was being answered; 0 makes no repeat."
       }
     },
     "message": {
@@ -4148,7 +4154,7 @@
       },
       "summarizer": {
         "title": "Summarizer",
-        "description": "Which summarizer is used, and its configuration."
+        "description": "Summarizer and model token allowances. Target character counts are separate."
       },
       "triggers": {
         "title": "Triggers",
@@ -5010,6 +5016,7 @@
       "label": "Context {{used}} of {{window}} ({{percent}}); shortens at {{compact}}",
       "labelBare": "Context {{used}} of {{window}} ({{percent}})",
       "open": "Show what fills the context ({{label}})",
+      "labelUsed": "Context {{used}} used; no window reported",
       "modelLabel": "{{model}}: {{context}}"
     },
     "panel": {
@@ -8778,6 +8785,9 @@
       "invalid": "This is not an Orch package or files that can be imported. Check the file and try again.",
       "undone": "This import was taken back already, or is being taken back."
     },
+    "summary": {
+      "nothing_new": "There is nothing new here to summarize, so no summary was asked for. Try again when something has been written or posted."
+    },
     "gone": "This link was used already or has expired. Ask for a new link.",
     "rate_limited": "Too many requests in a short time. Wait a little and try again.",
     "internal": "The server could not complete this request. Try again.",
@@ -9874,7 +9884,11 @@
         "right": "Hide the right bar",
         "bottom": "Hide the bottom"
       },
-      "pin": "Keep open as a bar"
+      "pin": "Keep open as a bar",
+      "peek": {
+        "title": "Bars",
+        "label": "Show hidden bars on hover: {{state}}"
+      }
     },
     "sash": {
       "left": "Width of the left bar",
@@ -9941,9 +9955,10 @@
       "shellsHint": "Your shells in this environment. Open Terminal.",
       "connecting": "Connecting…",
       "connectingHint": "Connecting to live updates.",
-      "reconnectingSince": "Reconnecting… · {{time}}",
       "reconnecting": "Reconnecting…",
       "reconnectingHint": "What is on screen stays and can be read. Approving and steering wait for the connection; typing does not.",
+      "noLive": "No live updates · {{time}}",
+      "noLiveHint": "Live updates cannot connect, so this page reads again every few seconds. If this stays, ask whoever runs this system to check that the HTTPS front passes WebSocket upgrades for /api/v1/ws; orchctl doctor --url shows it as edge-ws.",
       "slow": "Slow connection · {{ms}} ms",
       "slowHint": "Sending, saving and shells take longer. Nothing you type waits."
     },
@@ -12820,6 +12835,11 @@
       "changed_other": "{{count}} files changed (+{{added}} −{{removed}})",
       "retry": "Retry this turn"
     },
+    "start": {
+      "line": "Started with {{agent}} on {{provider}}",
+      "created": "Created by {{by}}",
+      "open": "Show how this thread began"
+    },
     "catchup": {
       "title": "Since you were last here",
       "turns_one": "{{count}} turn completed",
@@ -13518,6 +13538,8 @@
       "focusedAbout": "Keep inputs, answers and waiting approvals visible; fold the other work.",
       "fullAbout": "Show the work step by step, with tool output closed until opened.",
       "liveAbout": "Open current tool output as it arrives and follow the latest work until you scroll up.",
+      "diagnostics": "Diagnostics",
+      "diagnosticsAbout": "Show everything in Full, and the program's own status lines: session status, tool servers, collaboration mode and events Orch does not read.",
       "toolCalls_one": "{{count}} tool call",
       "toolCalls_other": "{{count}} tool calls",
       "files_one": "{{count}} file changed",
@@ -13566,6 +13588,7 @@
     "starting": {
       "none": "Starting",
       "environment": "Waking the environment",
+      "environmentMaking": "Its environment is being made",
       "source": "Preparing the source",
       "files": "Preparing the environment",
       "provider": "Starting {{provider}}'s runtime",
@@ -23396,6 +23419,9 @@
       "moveOut": "Move to another org",
       "moveOutReason": "Moves with its main thread · Keep it to move it alone"
     },
+    "slash": {
+      "about": "Ask a question on the side, without disturbing the turn"
+    },
     "ask": {
       "title": "Side thread",
       "about": "Starts from {{thread}}'s conversation. Replies stay in this aside.",
@@ -24417,6 +24443,9 @@
     "runtimeCount_other": "{{number}} runtimes",
     "offInBuild": "Off in this version: {{feature}}",
     "caseUnavailable": "Unavailable",
+    "checkedPending_one": "Checked · {{number}} check pending",
+    "checkedPending_other": "Checked · {{number}} checks pending",
+    "casesPending": "Not verified yet: {{names}}",
     "notChecked": "This version has not been checked",
     "checkFailed": "Compatibility check failed · review its results",
     "policySummary": "{{name}}: {{choice}}",
@@ -26192,6 +26221,8 @@
     "resultsRootPending": "The results’ organization cannot be opened",
     "model": "Model summarizer",
     "details": "Summary details",
+    "hide": "Hide summary",
+    "show": "Show summary",
     "inputFacts": "Source items: {{included}} included · {{shortened}} shortened · {{omitted}} omitted",
     "baseRates": "Configured model base rates",
     "noRates": "No base rates reported",
@@ -26201,7 +26232,11 @@
     "rateCacheWrite": "Cache writes",
     "rateOutput": "Output",
     "title": "Summary",
-    "catchUp": "Catch up",
+    "catchUp": "Since you last read",
+    "nothingNew": {
+      "chat": "Nothing new since you last read.",
+      "other": "Nothing to summarize yet."
+    },
     "catchUpActions": {
       "details": "Catch-up details",
       "ask": "Ask about catch-up",
@@ -26234,6 +26269,29 @@
       "interval": "Minimum interval",
       "recovery": "Waiting to retry",
       "queue": "Waiting for a worker"
+    },
+    "failure": {
+      "kept": "The previous paragraph is kept.",
+      "nothing_new": "There is nothing new to summarize.",
+      "asker_ended": "The sign-in or key that asked for this summary has ended. Refresh it again.",
+      "source_gone": "What this summary describes is gone.",
+      "source_unreadable": "Whoever asked can no longer read what this summary describes. Ask someone who can read it to refresh it.",
+      "no_summarizer": "No summarizer is chosen for this place. Choose one, then refresh.",
+      "provider_gone": "The provider that writes this summary was removed. Choose another provider for summaries.",
+      "provider_not_ready": "The provider that writes this summary is switched off or not ready. Switch it on or choose another.",
+      "no_interface": "The provider that writes this summary cannot generate text. Choose another provider.",
+      "model_off": "The model that writes this summary is switched off or no longer offered. Switch it on or choose another model.",
+      "model_not_allowed": "This place does not allow the model that writes this summary. Choose another model or allow this one.",
+      "provider_forbidden": "This place does not allow the provider that writes this summary. Choose another provider or allow this one.",
+      "not_allowed": "Whoever pays for this summary may not use its provider. Give them use of it or choose another provider.",
+      "effort_not_offered": "The reasoning effort chosen for this summary is not available. Choose another effort.",
+      "no_keeper": "No machine keeps the key of the provider that writes this summary. Give the provider a machine.",
+      "keeper_offline": "The machine that keeps the provider's key is offline. Bring it online, then refresh.",
+      "cap_no_room": "A usage limit leaves no room for summaries. Wait for it to reset or raise it.",
+      "output_cut": "The summarizer's model used its output allowance before finishing. Raise the summarizer's output allowance or choose another model.",
+      "model_failed": "The model did not answer. Try again in a moment.",
+      "unusable_answer": "The model's answer could not be used as a summary. Try again or choose another model.",
+      "unexpected": "Something went wrong while writing the summary. Try again in a moment."
     }
   },
   "capabilityRoutes": {

@@ -129,6 +129,7 @@ A failed action keeps its human explanation and available recovery. These stable
 | `error:import.nothing` | There is nothing here that you may bring into this place. Choose another source or place. |
 | `error:import.invalid` | This is not an Orch package or files that can be imported. Check the file and try again. |
 | `error:import.undone` | This import was taken back already, or is being taken back. |
+| `error:summary.nothing_new` | There is nothing new here to summarize, so no summary was asked for. Try again when something has been written or posted. |
 | `error:gone` | This link was used already or has expired. Ask for a new link. |
 | `error:docs.too_large` | This would take the document past a limit. Remove some content or split it into separate documents. |
 | `error:share.too_large` | This copy is larger than the limit here. Choose less content to share. |

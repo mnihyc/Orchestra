@@ -99,7 +99,10 @@ impl Commands for Stored {
                 || row.body != command.body
                 || row.serial_key() != key.as_deref()
                 || row.deadline_at != deadline.get()
-                || existing.authority.as_ref() != Some(&private)
+                || !existing.authority.as_ref().is_some_and(|saved| {
+                    serde_json::from_value::<orch_engine::commands::CommandAuthority>(saved.clone())
+                        .is_ok_and(|saved| saved.same_origin(authority))
+                })
             {
                 return Err(CommandsError::AuthorityMismatch);
             }
@@ -131,6 +134,28 @@ impl Commands for Stored {
             )
             .await
             .map_err(failed)?;
+            // The real writer asks its authority about the row it has just stored, and the wire
+            // admission asks again before the command goes out. Both read the row back, so what is
+            // asked about is the body as the database keeps it (its object members in the
+            // database's own order), never the body as the engine built it.
+            if paid {
+                let stored = link_queries::command(&mut tx, command.id)
+                    .await
+                    .map_err(failed)?
+                    .ok_or_else(|| {
+                        failed("the command that was just stored cannot be read back")
+                    })?;
+                Box::pin(authority.current_callers_after_issue(
+                    &mut tx,
+                    &stored,
+                    &current,
+                    self.clock.as_ref(),
+                    self.access.as_ref(),
+                ))
+                .await
+                .map_err(|error| CommandsError::BeforeEffect(Box::new(error)))?
+                .ok_or(CommandsError::AuthorityMismatch)?;
+            }
             if current.iter().any(|(caller, until)| {
                 caller
                     .as_ref()

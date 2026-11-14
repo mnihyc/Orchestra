@@ -87,6 +87,20 @@ override it. You may raise it within the model's available window after
 reserving its output; the instruction and framing also use input space.
 This is a planning estimate. Usage still shows what the model actually used.
 
+Answer allowances use **tokens**, separately from a target's **output characters**.
+The model summarizer starts with `answer_max_output_tokens` at 1,024 for paragraphs,
+descriptions, tags and handoffs; `title_max_output_tokens` at 120 for titles;
+and `goal_max_output_tokens` at 512 for a goal verdict and its reason. Each is
+configurable under **Summarizer**. Target characters still start at 600 for a
+paragraph and 80 for a title. They guide the returned text, not the model's
+reasoning allowance or actual billed use.
+
+`reasoning_tokens` leaves another 2,000 tokens by default when reasoning is
+known or unrecorded. Disabled tuning controls do not imply that an upstream
+model does no reasoning. An explicit report without thinking support removes
+that reserve; permitted effort choices remain separate. Zero reasoning tokens
+leaves no extra room.
+
 Recent eligible items come first. Short items stay whole; long items share
 the remaining space fairly, keeping useful detail before adding older items.
 The prompt reads oldest to newest. Unchanged items keep their cuts between
@@ -102,6 +116,10 @@ does not itself request paid work.
 **Catch up** covers the unread message range captured when you opened the
 chat. Refreshing that catch-up keeps the same range; it does not advance your
 read position. Another person's unread position does not become yours.
+
+When the range is empty, the box says there is nothing new and no paid request
+is created. An explicitly selected nonempty range can still be summarized
+after those messages have been marked read.
 
 **Chat title** is separate and uses the chat's bounded current text. A written
 group name stays in place. Automatic titles do not replace it. Private groups

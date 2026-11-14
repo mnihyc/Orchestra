@@ -251,7 +251,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:auto.title` | **Titles** — How automatic titles are written: no title, the first input, the agent’s title, or a summary. |
 | `setting:auto.tags` | **Tags** — Whether the summarizer sets a place's tags. |
 | `setting:summary.handoff_input_share` | **Summary input share** — How much of the summary model's context window a hand-off, a fork or a goal check may fill with the conversation it sends: the newest turns first, older ones as their one-line index. A lower scope can only reduce this limit; it cannot remove a limit set above. |
-| `setting:auto.summarizer` | **Summarizer** — Which summarizer is used, and its configuration. |
+| `setting:auto.summarizer` | **Summarizer** — Summarizer and model token allowances. Target character counts are separate. |
 | `option:auto.summarizer.kind` | The declared source or content kind. |
 | `setting:auto.triggers` | **Triggers** — When automatic titles, tags and summaries are written again: after a turn, at a milestone or at intervals, and how often at most. |
 | `option:auto.triggers.on` | Events that trigger this automation. |
@@ -394,6 +394,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:invitations.max_uses` | **Uses of a shared link** — How many people one shared link may bring in at most. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:mail.shared` | **Shared mail server** — Whether a root org that has no mail server of its own sends its mail through the system's. |
 | `setting:api.idempotency_window` | **Creation replay window** — How many hours a creation key retains its accepted identity; 0 disables replay. This default can be increased. |
+| `setting:api.read_repeats` | **Repeated reads** — How many times a read is made again, in place of being refused, when what it showed has moved while it was being answered; 0 makes no repeat. |
 | `setting:release.check_days` | **Look for a release** — Days between read-only checks of the operator's configured release source; 0 is off. A check sends no installation statistics and installs nothing. |
 | `setting:cleanup.release_keep_count` | **Keep unused releases** — Unused releases kept per payload after an update; 0 keeps all. Current and previous releases are always kept. |
 | `setting:cleanup.unused_keep_days` | **Clean unused caches** — Days to keep images and tool versions that nothing uses; 0 switches automatic cleanup off. Data follows its own retention dates. |
