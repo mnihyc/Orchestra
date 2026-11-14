@@ -385,6 +385,12 @@
             "image_generation.free_plan",
             "image_generation.sign_in_unconfirmed",
             "image_generation.plan_unreported"
+          ],
+          "execution": [
+            {
+              "input": "image.request",
+              "result": "image.generated"
+            }
           ]
         }
       },

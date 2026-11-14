@@ -3,8 +3,8 @@ use crate::completion::{Complete, Model};
 use crate::descriptor::Config;
 use async_trait::async_trait;
 use orch_provider_contract::capabilities::{
-    CallSource, CapabilityCall, CapabilityExecutor, CapabilityItem, CapabilityResult, Declarations,
-    Route,
+    CallSource, CapabilityCall, CapabilityError, CapabilityExecutor, CapabilityItem,
+    CapabilityResult, Declarations, Route,
 };
 use orch_provider_contract::{SourceError, SourceErrorCode};
 use orch_summarizer_contract::descriptor::SummaryField;
@@ -111,7 +111,7 @@ fn failure(error: SummarizeError) -> SourceError {
 
 #[async_trait]
 impl CapabilityExecutor for Executor {
-    async fn execute(&self, call: CapabilityCall) -> Result<CapabilityResult, SourceError> {
+    async fn execute(&self, call: CapabilityCall) -> Result<CapabilityResult, CapabilityError> {
         if call.source != self.source
             || call.capability != "summary"
             || call.item != "summary"
@@ -119,7 +119,7 @@ impl CapabilityExecutor for Executor {
             || call.route.id != ROUTE
             || call.route.executor.as_deref() != Some(EXECUTOR)
         {
-            return Err(malformed());
+            return Err(malformed().into());
         }
         let request: SummaryRequest =
             serde_json::from_value(call.input).map_err(|_| malformed())?;
@@ -127,13 +127,13 @@ impl CapabilityExecutor for Executor {
             || request.limits.max_chars == 0
             || self.source.node_id.or(self.source.thread_id) != Some(request.node.id)
         {
-            return Err(malformed());
+            return Err(malformed().into());
         }
         let config = Config::read(&request.config).map_err(failure)?;
         if !call.route.offering.as_ref().is_some_and(|offering| {
             offering.provider == config.provider_id && offering.offering == config.model_name
         }) {
-            return Err(malformed());
+            return Err(malformed().into());
         }
         let result = Model::new(self.host.clone())
             .summarize(request)

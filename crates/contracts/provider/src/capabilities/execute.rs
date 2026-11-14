@@ -8,6 +8,58 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// Portable failure facts and an optional original in-process error, without serializing authority.
+pub struct CapabilityError {
+    error: SourceError,
+    native: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+impl CapabilityError {
+    /// A trusted native producer preserves its exact refusal/recovery error for its own caller.
+    pub fn native(
+        error: SourceError,
+        cause: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            error,
+            native: Some(Box::new(cause)),
+        }
+    }
+    /// The owning producer may recover its original typed error; portable callers keep safe facts.
+    pub fn into_parts(
+        self,
+    ) -> (
+        SourceError,
+        Option<Box<dyn std::error::Error + Send + Sync>>,
+    ) {
+        (self.error, self.native)
+    }
+}
+impl From<SourceError> for CapabilityError {
+    fn from(error: SourceError) -> Self {
+        Self {
+            error,
+            native: None,
+        }
+    }
+}
+impl std::ops::Deref for CapabilityError {
+    type Target = SourceError;
+    fn deref(&self) -> &SourceError {
+        &self.error
+    }
+}
+impl std::fmt::Display for CapabilityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
+}
+impl std::fmt::Debug for CapabilityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("CapabilityError").field(&self.error).finish()
+    }
+}
+impl std::error::Error for CapabilityError {}
+
 /// Actual ordinary/tool source identities, never supplied as capability arguments.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CallSource {
@@ -63,8 +115,12 @@ pub struct CapabilityResult {
 /// Model, API and later program-session implementations register the same execution port.
 #[async_trait]
 pub trait CapabilityExecutor: Send + Sync {
+    /// Only installed code declares the codecs and facilities it really implements.
+    fn support(&self) -> Vec<ExecutionSupport> {
+        Vec::new()
+    }
     /// Use the existing current-authority, credential-custody, IO and usage paths.
-    async fn execute(&self, call: CapabilityCall) -> Result<CapabilityResult, SourceError>;
+    async fn execute(&self, call: CapabilityCall) -> Result<CapabilityResult, CapabilityError>;
 }
 
 /// No closed backend enum or vendor dispatch in the core.
@@ -103,8 +159,16 @@ impl Executors {
     pub fn names(&self) -> Vec<String> {
         self.entries.keys().cloned().collect()
     }
+    /// Supply these facts to the same resolver that previews a capability's actual route.
+    #[must_use]
+    pub fn support(&self) -> BTreeMap<String, Vec<ExecutionSupport>> {
+        self.entries
+            .iter()
+            .map(|(name, executor)| (name.clone(), executor.support()))
+            .collect()
+    }
     /// An unavailable adapter never falls back to another provider or kind.
-    pub async fn execute(&self, call: CapabilityCall) -> Result<CapabilityResult, SourceError> {
+    pub async fn execute(&self, call: CapabilityCall) -> Result<CapabilityResult, CapabilityError> {
         let executor = call
             .route
             .executor
@@ -116,13 +180,25 @@ impl Executors {
                     "the selected capability executor is unavailable",
                 )
             })?;
+        if call.route.execution.as_ref().is_some_and(|required| {
+            !executor
+                .support()
+                .iter()
+                .any(|support| support.satisfies(required))
+        }) {
+            return Err(SourceError::new(
+                SourceErrorCode::Unsupported,
+                "the selected executor does not implement this consumer's codecs or execution constraints",
+            ).into());
+        }
         let expected = call.item.clone();
         let result = executor.execute(call).await?;
         if result.items.iter().any(|item| item.family != expected) {
             return Err(SourceError::new(
                 SourceErrorCode::Malformed,
                 "the capability returned another common item family",
-            ));
+            )
+            .into());
         }
         Ok(result)
     }

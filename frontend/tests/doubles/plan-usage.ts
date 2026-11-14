@@ -3,14 +3,17 @@ import type { Provider, ProviderPlanSeries, UsageBucket, UsageWindow } from '../
 const HOUR=3_600_000;
 const DAY=24*HOUR;
 
-export interface PlanSeed {
-  facts:Provider['facts'];
+/** What a seeded plan changes of the facts a provider keeps. */
+export type PlanFacts=Pick<Provider['facts'],'plan' | 'windows' | 'field_times'>;
+
+export interface PlanSeed<F extends PlanFacts=Provider['facts']> {
+  facts:F;
   forecasts:NonNullable<Provider['plan_forecasts']>;
   rows:ProviderPlanSeries[];
   at:string;
 }
 
-export function seedPlan(facts:Provider['facts'],now:number):PlanSeed {
+export function seedPlan<F extends PlanFacts>(facts:F,now:number):PlanSeed<F> {
   const stamp=(at:number)=>new Date(at).toISOString();
   const window=(id:string,label:string,duration:number,used:number,left:number,family:string | null=null):UsageWindow=>({id,label,duration_minutes:duration,used_percent:used,resets_at:stamp(now+left),model_family:family,is_active:id==='five',reset_not_started:false,warning_percent:null,severity:null});
   const windows=[window('five','5-hour window',300,60,2*HOUR),window('week','Weekly',10080,20,5*DAY,'Opus'),window('reached','At the limit',300,100,2*HOUR),window('stale','Stopped readings',300,35,HOUR),window('vendor','Weekly · vendor reset',10080,5,6*DAY),window('outside','Weekly · reset elsewhere',10080,4,6*DAY)];
@@ -41,7 +44,7 @@ function bounds(at:number,bucket:UsageBucket):[number,number] {
   return [start,end];
 }
 
-export function planReply(seed:PlanSeed | undefined,windows:readonly UsageWindow[],from:string,to:string,bucket:UsageBucket):ProviderPlanSeries[] {
+export function planReply(seed:PlanSeed<PlanFacts> | undefined,windows:readonly UsageWindow[],from:string,to:string,bucket:UsageBucket):ProviderPlanSeries[] {
   const now=seed===undefined ? Date.now() : Date.parse(seed.at);
   const since=Math.max(Date.parse(`${from}T00:00:00Z`),now-30*DAY);
   const until=Math.min(Date.parse(`${to}T00:00:00Z`)+DAY,now);

@@ -2,6 +2,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useFormatContext } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
+import { StateLine } from '@/ui/StateLine';
 import { EmptyState } from '@/ui/EmptyState';
 import { catalogueQuery, nodeSettingsQuery, RATE_SETTINGS, ratesQuery, refreshRates, setCatalogue, setRateSetting } from '@/api/usage';
 import type { AdminUsageCatalogueSetBody } from '@/generated/api-types';
@@ -24,6 +27,7 @@ type RateKey = (typeof RATE_SETTINGS)[keyof typeof RATE_SETTINGS];
 export function SystemRates() {
   const { t } = useTranslation();
   const cache = useQueryClient();
+  const { locale } = useFormatContext();
   const settings = useQuery(nodeSettingsQuery(null));
   const table = useQuery(ratesQuery(null));
   const catalogue = useQuery(catalogueQuery());
@@ -32,15 +36,25 @@ export function SystemRates() {
   const [file, setFile] = useState<File | null>(null);
   const row = (key:string) => settings.data?.find((setting) => setting.key === key)?.own;
   const card = cardOf(row(RATE_SETTINGS.card)?.value);
+  const catalogueUrl = settings.data?.find((setting) => setting.key === 'usage.catalogue_url')?.value;
+  const canFetch = typeof catalogueUrl === 'string' && catalogueUrl.trim() !== '';
   const write = useMutation({ mutationFn:({key,value}:{ key:RateKey;value:unknown }) => setRateSetting(null,key,value,row(key)?.revision ?? null),onError:() => refreshRates(cache) });
   const replace = useMutation({ mutationFn:async (source:'fetch'|'shipped'|'file') => {
+    const before = catalogue.data;
     let body:AdminUsageCatalogueSetBody;
     if (source === 'file') {
       if (file === null || file.size > CATALOGUE_MAX_BYTES) throw new Error(t('usageAdmin.fileSize'));
       body = JSON.parse(await file.text()) as AdminUsageCatalogueSetBody;
     } else body = source === 'fetch' ? { fetch:true } : { shipped:true };
-    return setCatalogue(body);
-  },onSuccess:() => { setFile(null); } });
+    return { before, after: await setCatalogue(body), source };
+  },onSuccess:({ after }) => {
+    setFile(null);
+    cache.setQueryData(catalogueQuery().queryKey, after);
+    void cache.invalidateQueries({ queryKey: ['usage', 'catalogue'], predicate: (query) => query.queryKey[2] !== null });
+    void refreshRates(cache);
+  } });
+  const fetched = replace.data;
+  const unchanged = fetched !== undefined && fetched.before?.as_of === fetched.after.as_of && JSON.stringify(fetched.before.families) === JSON.stringify(fetched.after.families);
   if (settings.isPending || table.isPending) return <SkeletonRows reads={[settings, table]} rows={4} />;
   if (settings.isError || table.isError) return <ErrorState error={settings.error ?? table.error} onRetry={() => { void settings.refetch(); void table.refetch(); }} />;
   return <div className="flex flex-col gap-6">
@@ -56,9 +70,10 @@ export function SystemRates() {
       {catalogue.data !== undefined && catalogue.data !== null && <p className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-text-muted"><span>{t('usage.rates.catalogueFrom',{date:catalogue.data.as_of,origin:t(`usageAdmin.origins.${catalogue.data.origin}`)})}</span><span>{t('usage.rates.catalogueLoaded')} <RelativeTime at={catalogue.data.loaded_at} /></span></p>}
       {catalogue.data === null && <EmptyState compact title={t('usage.rates.catalogue.none')} description={t('usage.rates.catalogue.noneAbout')} />}
       {catalogue.error && <ErrorAlert error={catalogue.error} />}
-      <div className="flex flex-wrap gap-2"><Button onClick={() => setSeeing(true)}>{t('usage.rates.see')}</Button><Button pending={replace.isPending} onClick={() => replace.mutate('fetch')}>{t('usageAdmin.fetch')}</Button><Button disabled={replace.isPending} onClick={() => replace.mutate('shipped')}>{t('usageAdmin.shipped')}</Button></div>
+      <div className="flex flex-wrap gap-2"><Button onClick={() => setSeeing(true)}>{t('usage.rates.see')}</Button><Button pending={replace.isPending} blocked={!canFetch} reason={!canFetch ? t('usageAdmin.fetchSourceMissing') : undefined} onClick={() => replace.mutate('fetch')}>{t('usageAdmin.fetch')}</Button><Button disabled={replace.isPending} onClick={() => replace.mutate('shipped')}>{t('usageAdmin.shipped')}</Button><Button size="sm" variant="ghost" asChild><a href="/admin/settings?setting=usage.catalogue_url">{t('usageAdmin.source')}</a></Button></div>
       <Input type="file" accept="application/json,.json" label={t('usageAdmin.file')} onChange={(event) => setFile(event.target.files?.[0] ?? null)} disabled={replace.isPending} />
       <Button className="self-start" disabled={file === null || replace.isPending} onClick={() => replace.mutate('file')}>{t('usageAdmin.upload')}</Button>
+      {replace.isSuccess && <StateLine compact role="status" title={unchanged ? t('usageAdmin.nothingNew') : t(replace.data.source === 'fetch' ? 'usageAdmin.fetched' : 'usageAdmin.updated', { count: replace.data.after.families.length, total: formatNumber(replace.data.after.families.length, locale) })} message={<RelativeTime at={replace.data.after.loaded_at} />} />}
       {replace.error && <ErrorAlert error={replace.error} />}
       <CatalogueDialog open={seeing} onOpenChange={setSeeing} />
     </Section>
