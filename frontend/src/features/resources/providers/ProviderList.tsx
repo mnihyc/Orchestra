@@ -24,7 +24,7 @@ import { providerLabels } from './labels';
 import { ResourceHint, ResourceName } from '@/features/resource-facts/ResourceFacts';
 import { ResourceList, useSearchText } from '@/features/resources/ResourceList';
 import { oneOf } from '@/features/resources/search';
-import type { Provider } from '@/generated/api-types';
+import type { ProviderListRow as Provider } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
 import { useNow } from '@/lib/time';
 import { Button } from '@/ui/Button';
@@ -145,7 +145,7 @@ export function ProviderList({ search, onSearch }: { search: ProvidersSearch; on
       from: 'xl',
       align: 'end',
       className: 'text-right tabular-nums',
-      cell: (provider) => provider.models.length,
+      cell: (provider) => provider.models_count,
     },
   ]; };
 

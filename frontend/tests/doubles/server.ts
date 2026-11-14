@@ -171,7 +171,7 @@ async function api(request: IncomingMessage, path: string, query: URLSearchParam
   const opening = /^GET \/threads\/([^/]+)\/opening$/.exec(route);
   if (opening?.[1] !== undefined) {
     receivedRequests.push({ id: requestId, method, path, body: {} });
-    return { status: 200, body: await threadOpening(world, world.browserPerson(bearer), opening[1], Number(query.get('limit') ?? 200)) };
+    return { status: 200, body: await threadOpening(world, world.browserPerson(bearer), opening[1], Number(query.get('limit') ?? 40)) };
   }
   const chat = /^GET \/chats\/([^/]+)\/opening$/.exec(route);
   if (chat?.[1] !== undefined) return { status: 200, body: await chatOpening(world, world.browserPerson(bearer), chat[1], query) };

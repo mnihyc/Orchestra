@@ -1,3 +1,7 @@
+import { createContext, useContext } from 'react';
+import { ApiError } from '@/api/client';
+import { ErrorState } from '@/ui/ErrorState';
+import type { ResourceSharing } from '@/generated/api-types';
 /** Home defaults, read from the same page and catalogue as the sharing dialog. */
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
@@ -9,10 +13,12 @@ import type { Holder, NodeRef, PermissionPage } from '@/generated/api-types';
 import { HolderChip } from '@/ui/HolderChip';
 import { UserChip } from '@/ui/UserChip';
 
+export const ListSharing = createContext<{ homes: ReadonlyMap<string, ResourceSharing>; retry: () => unknown } | null>(null);
+
 interface PolicyLine { holder: Holder; verb: 'view' | 'interact' | 'manage' }
 
 /** Mixed or profile-dependent policies keep their native details instead of claiming one audience. */
-export function resourceSharingLines(page: PermissionPage, catalogue: Catalogue, kinds: readonly string[]): PolicyLine[] | null {
+export function resourceSharingLines(page: Pick<PermissionPage, 'rows'>, catalogue: Catalogue, kinds: readonly string[]): PolicyLine[] | null {
   let same: PolicyLine[] | undefined;
   for (const kind of new Set(kinds)) {
     const rows = page.rows.filter((row) => catalogue.defs.get(row.permission)?.on.includes(kind) === true);
@@ -29,11 +35,16 @@ export function resourceSharingLines(page: PermissionPage, catalogue: Catalogue,
 
 export function ResourceSharingSummary({ home, kinds }: { home: NodeRef; kinds: readonly string[] }) {
   const { t } = useTranslation();
-  const defaults = useQuery({ ...defaultsQuery(home.id), retry: false });
+  const supplied = useContext(ListSharing);
+  const defaults = useQuery({ ...defaultsQuery(home.id), enabled: supplied === null, retry: false });
   const catalogue = useQuery({ ...permissionsQuery, retry: false });
-  // A failed/denied refresh cannot lend a cached audience to a current header.
-  if (defaults.isError || catalogue.isError || defaults.data === undefined || catalogue.data === undefined) return <SharingReadState reads={[defaults, catalogue]} />;
-  const lines = resourceSharingLines(defaults.data, indexCatalogue(catalogue.data), kinds);
+  const shared = supplied?.homes.get(home.id);
+  if (supplied !== null && shared?.rows == null) {
+    return shared?.problem == null ? null : <ErrorState compact error={new ApiError(shared.problem, null)} onRetry={() => { void supplied.retry(); }} />;
+  }
+  const page = supplied === null ? defaults.data : shared?.rows == null ? undefined : { rows: shared.rows };
+  if ((supplied === null && defaults.isError) || catalogue.isError || page == null || catalogue.data === undefined) return <SharingReadState reads={supplied === null ? [defaults, catalogue] : [catalogue]} />;
+  const lines = resourceSharingLines(page, indexCatalogue(catalogue.data), kinds);
   const target = { kind: home.kind, id: home.id, name: home.name ?? t('access.place.hidden') };
   return <span data-resource-sharing className="flex min-w-0 flex-wrap items-center gap-x-1 text-sm text-text-muted">
     <span>{t(lines === null ? 'resourceGroups.policyCustom' : lines.length === 0 ? 'resourceGroups.policyNone' : 'resourceGroups.policyDefaults')}</span>

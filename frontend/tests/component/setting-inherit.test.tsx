@@ -68,7 +68,7 @@ it.each(['en', 'zh-CN'] as const)('edits an inherited boolean directly with one 
   expect(row.getAllByText(def.description)).toHaveLength(1);
   await user.click(value);
   await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, { value: false, expectedRevision: null }));
-  expect(row.getByRole('switch', { name: def.title })).not.toBeChecked();
+  await waitFor(() => expect(row.getByRole('switch', { name: def.title })).not.toBeChecked());
 });
 
 it('edits a number in place and automatically commits its guarded value on blur', async () => {
@@ -82,9 +82,9 @@ it('edits a number in place and automatically commits its guarded value on blur'
   expect(putSetting).not.toHaveBeenCalled();
   fireEvent.blur(field);
   await waitFor(() => expect(putSetting).toHaveBeenCalledWith(target, def.key, { value: 90, expectedRevision: null }));
+  expect(await row.findByText('Saved')).toBeVisible();
   expect(row.getByRole('spinbutton', { name: def.title })).toHaveValue(90);
   expect(row.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
-  expect(row.getByText('Saved')).toBeVisible();
 });
 
 it.each(['en', 'zh-CN'] as const)('shows a disabled numeric behavior as Off and edits its actual zero in %s', async (locale) => {
@@ -167,7 +167,7 @@ it('Cancel restores the current value without writing, and Reset removes only th
   await user.click(row.getByRole('button', { name: 'More about test.number' }));
   await user.click(screen.getByRole('menuitem', { name: 'Reset to inherited' }));
   await waitFor(() => expect(clearSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, 2));
-  expect(row.getByRole('spinbutton', { name: def.title })).toHaveValue(720);
+  await waitFor(() => expect(row.getByRole('spinbutton', { name: def.title })).toHaveValue(720));
 });
 
 it('shows its description once, keeps only supplementary constraints in the question, and links to the actual source', async () => {
@@ -292,9 +292,9 @@ it('commits a completed complex draft when it closes and keeps its value in word
   field.focus();
   await user.keyboard('{Escape}');
   await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, { value: { safe: true }, expectedRevision: null }));
+  expect(await row.findByText('Saved')).toBeVisible();
   expect(row.getByRole('button', { name: 'Edit test.properties' })).toHaveFocus();
   expect(row.queryByRole('textbox')).not.toBeInTheDocument();
-  expect(row.getByText('Saved')).toBeVisible();
   await user.click(row.getByRole('button', { name: 'Edit test.properties' }));
   expect(screen.getByRole('textbox', { name: def.title })).toHaveValue('{\n  "safe": true\n}');
   expect(screen.getByRole('textbox', { name: def.title })).toHaveFocus();
@@ -338,8 +338,8 @@ it('undoes a newly stored value by removing only the returned revision', async (
   const undo = await row.findByRole('button', { name: 'Undo the change to test.number' });
   await user.click(undo);
   await waitFor(() => expect(clearSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, 2));
+  expect(await row.findByText('Undone')).toBeVisible();
   expect(row.getByRole('spinbutton', { name: def.title })).toHaveValue(720);
-  expect(row.getByText('Undone')).toBeVisible();
 });
 
 it('undoes a replacement with its original own value and lock, under the saved answer’s fence', async () => {
@@ -353,6 +353,6 @@ it('undoes a replacement with its original own value and lock, under the saved a
   fireEvent.blur(row.getByRole('spinbutton', { name: def.title }));
   await user.click(await row.findByRole('button', { name: 'Undo the change to test.number' }));
   await waitFor(() => expect(putSetting).toHaveBeenLastCalledWith(target, def.key, { value: 90, locked: false, expectedRevision: 3 }));
+  expect(await row.findByText('Undone')).toBeVisible();
   expect(row.getByRole('spinbutton', { name: def.title })).toHaveValue(90);
-  expect(row.getByText('Undone')).toBeVisible();
 });

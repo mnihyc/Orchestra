@@ -9,7 +9,7 @@ import { privateProvider } from '@/features/resources/providers/plan';
 import { choiceObservation, speedText } from '@/features/usage/performance';
 import { reportedHarnessName } from '@/features/resources/agents/descriptor';
 import { programNameIn } from '@/features/resources/programNames';
-import type { Agent, CapStatus, Environment, Host, HostRef, MachineRef, McpServer, McpState, ModelParameters, Mount, PlaceHost, Provider, ProviderChoiceUsage, ResourceSample, Skill, Template } from '@/generated/api-types';
+import type { Agent, CapStatus, Environment, Host, HostRef, MachineRef, McpServer, McpState, ModelParameters, Mount, PlaceHost, Provider, ProviderRuntimeRow, ProviderChoiceUsage, ResourceSample, Skill, Template } from '@/generated/api-types';
 import { formatBytes, formatNumber, formatPercent } from '@/lib/format';
 import { formatSpan, formatTimeOfDay, type TimeContext } from '@/lib/time';
 
@@ -17,7 +17,7 @@ import { formatSpan, formatTimeOfDay, type TimeContext } from '@/lib/time';
 export const MEMORY_BYTES_PER_MB = 1024 * 1024;
 export const DISK_BYTES_PER_GB = 1024 * 1024 * 1024;
 
-export type ProviderFacts = Pick<Provider, 'id' | 'name'> & Partial<Provider>;
+export type ProviderFacts = Pick<Provider, 'id' | 'name'> & Omit<Partial<Provider>, 'runtime'> & { runtime?: Provider['runtime'] | ProviderRuntimeRow };
 export type HostFacts = Pick<Host, 'id' | 'name'> & Partial<Host>;
 export type EnvironmentFacts = Pick<Environment, 'id' | 'name'> & Partial<Environment>;
 type Named<T extends { id: string; name: string }> = Pick<T, 'id' | 'name'> & Partial<T>;
@@ -52,13 +52,20 @@ export interface Hint { text: string; warning: boolean }
 export interface FactContext extends TimeContext { t: TFunction; now: number }
 const hint = (text: string, warning = false): Hint => ({ text, warning });
 
-/** Only a fully readable provider can disclose vendor amounts or its caps. */
-export function fullProvider(provider: ProviderFacts): provider is Provider {
-  return provider.facts !== undefined && provider.facts_state !== undefined && provider.access !== undefined;
+/** A provider with what its hints read: a list's row of it has these and no models, and so does a thread's own row of it. */
+type ProviderStanding = ProviderFacts & Pick<Provider, 'facts' | 'facts_state' | 'access' | 'running_threads'>;
+function hasStanding(provider: ProviderFacts): provider is ProviderStanding {
+  return provider.facts !== undefined && provider.facts_state !== undefined && provider.access !== undefined && provider.running_threads !== undefined;
 }
 
-export function fullHost(host: HostFacts): host is Host { return host.capacity !== undefined && host.machine !== undefined && host.access !== undefined; }
-export function fullEnvironment(environment: EnvironmentFacts): environment is Environment { return environment.access !== undefined && environment.exec !== undefined; }
+/** Only a fully readable provider can disclose vendor amounts or its caps, and draw its whole card: a list's row of it lacks its models. */
+export function fullProvider(provider: ProviderFacts): provider is Provider {
+  return !('list_row' in provider && provider.list_row === true) && hasStanding(provider) && provider.models !== undefined && provider.models_count !== undefined && provider.models.length >= provider.models_count
+    && provider.sources !== undefined;
+}
+
+export function fullHost(host: HostFacts): host is Host { return !('list_row' in host && host.list_row === true) && host.capacity !== undefined && host.machine !== undefined && host.access !== undefined; }
+export function fullEnvironment(environment: EnvironmentFacts): environment is Environment { return !('list_row' in environment && environment.list_row === true) && environment.access !== undefined && environment.exec !== undefined; }
 
 /** Applicable provider caps retain server-side subject and replacement decisions; model groups use the shared pattern rule. */
 export function modelCaps(subject: Extract<ResourceSubject, { kind: 'model' }>): CapStatus[] {
@@ -76,7 +83,7 @@ export function providerHint(provider: ProviderFacts, context: FactContext, scop
   const { t, locale } = context;
   if (provider.status === undefined) return hint(t('providerPlan.notReported'));
   if (provider.status !== 'ready' && provider.status !== 'exhausted') return hint(t('resourceFacts.unavailable'), true);
-  if (!fullProvider(provider)) return hint(t('providerPlan.notReported'));
+  if (!hasStanding(provider)) return hint(t('providerPlan.notReported'));
   if (privateProvider(provider)) return hint(t('providerPlan.roomHidden'));
   const caps = (provider.choice_usage?.caps ?? []).filter(({ cap }) => cap.models.length === 0 && cap.tiers.length === 0 && cap.harness_kinds.length === 0 && cap.node === null && (scope === 'choice' || cap.meter !== 'running'));
   const reached = caps.find((cap) => cap.state === 'reached');

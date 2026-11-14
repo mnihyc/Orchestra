@@ -62,8 +62,7 @@ test('a full 200-item side window remains usable inline and in its own panel', a
     const response = await route.fetch({ url: url.toString() });
     expect(response.ok()).toBe(true);
     const sync = await response.json() as ThreadSync;
-    const data: ThreadOpening = { sync, draft: null, parameters: null, limits: null, settings: [],
-      outline: { entries: [], next_before: null, seq: sync.seq } };
+    const data: ThreadOpening = { sync, draft: null, parameters: null, limits: null };
     const id = data.sync.thread.id;
     openings.push(id);
     data.sync.items = Array.from({ length: 200 }, (_, index) => ({

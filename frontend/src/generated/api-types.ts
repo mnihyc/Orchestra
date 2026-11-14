@@ -8747,6 +8747,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/providers/{id}/facts/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Lists the models the provider's source last listed, as it kept them and not as the provider's own list; discovery suggests them and never adds one. Empty where no list was read; `facts_state.models` says why. */
+        get: operations["ProviderFactsModelsGet"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/providers/{id}/handover/return": {
         parameters: {
             query?: never;
@@ -10689,6 +10706,23 @@ export interface paths {
         };
         /** Reads a piece of a command's output as plain text, with its total length in a header. */
         get: operations["ThreadItemOutputGet"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/threads/{id}/items/{item_id}/raw": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Reads a tool call exactly as its harness made it: its own name for the tool, its arguments and what came back. A thread's items leave this out. */
+        get: operations["ThreadItemRawGet"];
         put?: never;
         post?: never;
         delete?: never;
@@ -23269,6 +23303,12 @@ export interface components {
              *     Requires exactly one resource kind and parent=resources.
              */
             resource_details?: boolean | null;
+            /**
+             * @description With `resource_details`: each row is the kind's list row, what a table of the kind draws of it, and not its
+             *     whole view. A provider's row has no models (`models_count` says how many), no seven-day performance and no
+             *     descriptors of its sources; the whole view is read from the provider's own page.
+             */
+            resource_rows?: boolean | null;
             /** @description A template's unit kind, or an environment's origin (machine/template). */
             resource_kind?: string | null;
             /** @description A resource's own state, applied before the page limit. */
@@ -23323,7 +23363,21 @@ export interface components {
             value: components["schemas"]["Skill"];
         };
         /** @description One visible thing, or a deliberately minimal path step. */
+        AgentListRow: Pick<components["schemas"]["Agent"], keyof components["schemas"]["AgentRef"] | "owner" | "home" | "profile" | "revision" | "access" | "org_id"> & { list_row?: boolean; };
+        ProviderRuntimeRow: Pick<components["schemas"]["ProviderRuntime"], "state" | "host" | "updates" | "update_required">;
+        ProviderListRow: Pick<components["schemas"]["Provider"], keyof components["schemas"]["ProviderRef"] | "owner" | "home" | "key_set" | "key_machine" | "machine" | "status_detail" | "status_at" | "facts" | "facts_state" | "models_count" | "running_threads" | "runtime_support" | "revision" | "access" | "choice_usage" | "org_id"> & { runtime: components["schemas"]["ProviderRuntimeRow"] | null; list_row?: boolean; enabled_models_count?: number; upstreams_count?: number; no_key_needed?: boolean; plan_label?: string | null; source_consent?: boolean; };
+        EnvironmentListRow: Pick<components["schemas"]["Environment"], keyof components["schemas"]["EnvironmentRef"] | "machine" | "home" | "threads_hidden" | "workspace_root" | "template" | "host" | "updates" | "update_required" | "status_detail" | "job" | "temporary" | "connector_update" | "removal" | "remove_at" | "last_activity_at" | "can_declare_lost" | "access" | "org_id"> & { list_row?: boolean; threads_count?: number; topics_count?: number; start_allowed?: boolean; };
+        HostListRow: Pick<components["schemas"]["Host"], keyof components["schemas"]["HostRef"] | "owner" | "home" | "machine" | "labels" | "drivers" | "capacity" | "declared" | "schedulable" | "running" | "revision" | "access" | "lost_at" | "full" | "usage" | "offline_since" | "software_update" | "storages" | "org_id"> & { list_row?: boolean; };
+        MachineListRow: Pick<components["schemas"]["Machine"], keyof components["schemas"]["MachineRef"] | "revision" | "owner" | "platform_arch" | "connector_version" | "roles" | "status" | "last_seen_at" | "cert_not_after" | "access" | "host" | "lost_at" | "software_update" | "role_management"> & { list_row?: boolean; };
+        TemplateListRow: Pick<components["schemas"]["Template"], "id" | "name" | "owner" | "home" | "address" | "kind" | "driver" | "spec" | "units" | "enabled" | "revision" | "access" | "org_id"> & { list_row?: boolean; };
+        McpServerListRow: Pick<components["schemas"]["McpServer"], "id" | "name" | "description" | "owner" | "home" | "address" | "machine" | "environment" | "imported" | "spec" | "enabled" | "revision" | "access" | "org_id"> & { list_row?: boolean; };
+        MountListRow: Pick<components["schemas"]["Mount"], keyof components["schemas"]["MountRef"] | "description" | "home" | "owner" | "target" | "read_only" | "enabled" | "locations" | "locations_hidden" | "revision" | "access" | "org_id"> & { list_row?: boolean; };
+        SkillListRow: Pick<components["schemas"]["Skill"], "id" | "name" | "description" | "owner" | "home" | "address" | "enabled" | "latest" | "revision" | "access" | "org_id"> & { list_row?: boolean; };
+        ResourceListRow: { kind: "agent"; value: components["schemas"]["AgentListRow"] } | { kind: "provider"; value: components["schemas"]["ProviderListRow"] } | { kind: "environment"; value: components["schemas"]["EnvironmentListRow"] } | { kind: "host"; value: components["schemas"]["HostListRow"] } | { kind: "machine"; value: components["schemas"]["MachineListRow"] } | { kind: "template"; value: components["schemas"]["TemplateListRow"] } | { kind: "mcp_server"; value: components["schemas"]["McpServerListRow"] } | { kind: "mount"; value: components["schemas"]["MountListRow"] } | { kind: "skill"; value: components["schemas"]["SkillListRow"] };
+        ResourceSharing: { home_id: string; rows: components["schemas"]["PermissionRow"][] | null; problem: components["schemas"]["Problem"] | null; };
         EverythingRow: {
+            sharing?: components["schemas"]["ResourceSharing"] | null;
+            resource_row?: components["schemas"]["ResourceListRow"] | null;
             /** @description The last recorded human document editor; absent for agent or unknown activity. */
             activity_by?: components["schemas"]["UserRef"] | null;
             /** @description Native reach alone opens this object; the same marker as its page. */
@@ -39828,6 +39882,11 @@ export interface components {
             model_groups_max?: number | null;
             /** @description The models it lists. */
             models: components["schemas"]["ProviderModel"][];
+            /**
+             * Format: int64
+             * @description How many models it lists. A row of a list carries this and no models: the page of the provider reads them.
+             */
+            models_count: number;
             /** @description Its name. */
             name: string;
             /**
@@ -40115,10 +40174,13 @@ export interface components {
             /** @description A limit that has been reached. */
             limit_reached: components["schemas"]["ProviderFactsLimitReached"] | null;
             /**
-             * @description The last successfully discovered model list; suggestions remain separate from the accepted allowlist.
+             * Format: int64
+             * @description How many models the last successful discovery listed; null where no list was read. The list itself
+             *     is not part of a provider's view: it is read from `GET /providers/{id}/facts/models`, by the places
+             *     that draw it.
              * @default null
              */
-            models: components["schemas"]["ModelSuggestion"][] | null;
+            models_count: number | null;
             /**
              * @description The vendor's explicit permission for ordinary included usage; null is no proof of recovery.
              * @default null
@@ -40401,6 +40463,11 @@ export interface components {
             model_groups_max?: number | null;
             /** @description The models it lists. */
             models: components["schemas"]["ProviderModel"][];
+            /**
+             * Format: int64
+             * @description How many models it lists. A row of a list carries this and no models: the page of the provider reads them.
+             */
+            models_count: number;
             /** @description Its name. */
             name: string;
             /**
@@ -41445,6 +41512,11 @@ export interface components {
             model_groups_max?: number | null;
             /** @description The models it lists. */
             models: components["schemas"]["ProviderModel"][];
+            /**
+             * Format: int64
+             * @description How many models it lists. A row of a list carries this and no models: the page of the provider reads them.
+             */
+            models_count: number;
             /** @description Its name. */
             name: string;
             /**
@@ -48704,6 +48776,7 @@ export interface components {
         };
         /** @description The model of a thread and what it could be set to. */
         ThreadModelParameter: {
+            options_partial?: boolean;
             /** @description The models there are to choose from. */
             options: components["schemas"]["ModelOption"][];
             /** @description Where it comes from. */
@@ -48870,14 +48943,10 @@ export interface components {
             gateway?: components["schemas"]["OverviewPart6"] | null;
             /** @description The native limits for a new input; absent only when unavailable to this reader. */
             limits: components["schemas"]["ThreadLimits"] | null;
-            /** @description The initial bounded outline page, from the same conversation cut as sync. */
-            outline: components["schemas"]["ThreadOutlinePage"];
             /** @description The native model controls; absent only when unavailable to this reader. */
             parameters: components["schemas"]["ThreadParameters"] | null;
             /** @description Pending agent work for the current thread; omitted for retained history. */
             pending_agent_schedules?: components["schemas"]["OverviewPart7"] | null;
-            /** @description The settings, including each setting's own writability and source. */
-            settings: components["schemas"]["ResolvedSetting"][];
             /** @description The complete admitted thread and its initial timeline window. */
             sync: components["schemas"]["ThreadSync"];
         };
@@ -48939,7 +49008,26 @@ export interface components {
             seq: number;
         };
         /** @description What can be set on a thread's agent, and what it is now. */
+        ThreadAgent: {
+            agent: components["schemas"]["AgentRef"];
+            parameters: unknown[];
+        };
+        ThreadEnvironment: {
+            id: string;
+            registered_root: string;
+            workspace_root: string;
+            generation: number;
+        };
+        ThreadComposer: {
+            default_delivery: string;
+            paste_inline_context_share: number;
+            plan_first: boolean;
+            owner_reads: boolean;
+        };
         ThreadParameters: {
+            agent?: components["schemas"]["ThreadAgent"] | null;
+            environment?: components["schemas"]["ThreadEnvironment"] | null;
+            composer?: components["schemas"]["ThreadComposer"] | null;
             /** @description The resolved native permission mode, independent of boundary requests. */
             approval_mode: string;
             /** @description Modes offered by this harness, the place's policy and the current confinement; absent on older servers. */
@@ -48959,8 +49047,11 @@ export interface components {
             parameters: components["schemas"]["ParameterView"][];
             /** @description Current requested/effective port tools from the same native offer gates; absent when unreported. */
             port_tools?: components["schemas"]["ThreadPortTools"] | null;
-            /** @description The provider's ordinary resource view for a caller with provider View, shared by model options and status items. */
-            provider?: components["schemas"]["Provider"] | null;
+            /**
+             * @description The thread's provider as the first screen draws it, for a caller with provider View: shared by model options and
+             *     status items. Its own page is read from `GET /providers/{id}`.
+             */
+            provider?: components["schemas"]["ThreadProvider"] | null;
             /** @description Native sub-agent limits; absent on an older server. */
             subagent_limits?: components["schemas"]["ThreadSubagentLimits"] | null;
         };
@@ -49167,6 +49258,53 @@ export interface components {
          *     drives the thread resumes it (naming this revision), or removes its last input. An empty Stop
          *     creates no hold. No active turn is needed to read or resume one.
          */
+        /**
+         * @description A thread's provider as its first screen draws it: what it is called and how it stands, where its plan is, what the
+         *     reader may choose by and what the reader holds on it. It says how many models the provider lists and holds none
+         *     of them, nor how it is set up, which are the provider's own page's.
+         */
+        ThreadProvider: {
+            /** @description What the caller holds on it. */
+            access: components["schemas"]["ResourceAccess"];
+            /** @description Where it comes from, as the short names of its home and its owner. */
+            address: string;
+            /** @description The caller's applicable provider caps and observed seven-day model performance; absent without View. */
+            choice_usage?: components["schemas"]["ProviderChoiceUsage"] | null;
+            /**
+             * @description What its harness or endpoint reports: the plan and its windows, and what is left to spend; not what has been
+             *     spent, the resets or the extra usage, which are the provider page's.
+             */
+            facts: components["schemas"]["ProviderFacts"];
+            /** @description Where each member of `facts` stands. */
+            facts_state: components["schemas"]["ProviderFactsState"];
+            /** @description The same harness, named. */
+            harness: components["schemas"]["HarnessKindName"] | null;
+            /** @description The harness a subscription signs in to. */
+            harness_kind: string | null;
+            /**
+             * Format: uuid
+             * @description The provider's identifier.
+             */
+            id: string;
+            /** @description A subscription or an API. */
+            kind: components["schemas"]["ProviderKind"];
+            /**
+             * Format: int64
+             * @description How many models it lists.
+             */
+            models_count: number;
+            /** @description Its name. */
+            name: string;
+            /** @description Whether it is made by the system or on a person's machine. */
+            placement: components["schemas"]["Placement"];
+            /**
+             * Format: int64
+             * @description How many turns run on it now.
+             */
+            running_threads: number;
+            /** @description Where it stands. */
+            status: components["schemas"]["ProviderStatus"];
+        };
         ThreadQueue: {
             /**
              * Format: date-time
@@ -49785,8 +49923,12 @@ export interface components {
              * @description How long it took, once it ended.
              */
             duration_ms: number | null;
-            /** @description The identical call exactly as the harness issued it. */
-            raw: components["schemas"]["RawCall"];
+            /**
+             * @description The identical call exactly as the harness issued it. A thread's timeline does not carry it (it is the
+             *     same content as `tool`, and as long); it is read apart by `GET /threads/{id}/items/{item_id}/raw`, and
+             *     stands in an export of the whole record.
+             */
+            raw?: components["schemas"]["RawCall"] | null;
             /**
              * Format: date-time
              * @description When it began.
@@ -55291,6 +55433,7 @@ export type ThreadPromptVersion = components['schemas']['ThreadPromptVersion'];
 export type ThreadPromptVersionCreateBody = components['schemas']['ThreadPromptVersionCreateBody'];
 export type ThreadPromptVersionListQuery = components['schemas']['ThreadPromptVersionListQuery'];
 export type ThreadPromptVersionsPage = components['schemas']['ThreadPromptVersionsPage'];
+export type ThreadProvider = components['schemas']['ThreadProvider'];
 export type ThreadQueue = components['schemas']['ThreadQueue'];
 export type ThreadQueueResumeBody = components['schemas']['ThreadQueueResumeBody'];
 export type ThreadRawListQuery = components['schemas']['ThreadRawListQuery'];
@@ -65511,6 +65654,7 @@ export interface operations {
                 recent?: components["schemas"]["EverythingRecent"] | null;
                 resource_details?: boolean | null;
                 resource_kind?: string | null;
+                resource_rows?: boolean | null;
                 resource_state?: string | null;
                 resource_view?: components["schemas"]["ProviderListScope"] | null;
                 scope?: components["schemas"]["EverythingScope"] | null;
@@ -75748,6 +75892,37 @@ export interface operations {
             };
         };
     };
+    ProviderFactsModelsGet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelSuggestion"][];
+                };
+            };
+            /** @description A problem, with a code a client can act on. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     ProviderFactsOverridesSet: {
         parameters: {
             query?: never;
@@ -80544,6 +80719,42 @@ export interface operations {
             };
         };
     };
+    ThreadItemRawGet: {
+        parameters: {
+            query?: {
+                continuation_id?: string | null;
+                inspect_deleted?: boolean | null;
+                projection_revision?: number | null;
+            };
+            header?: never;
+            path: {
+                id: string;
+                item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RawCall"];
+                };
+            };
+            /** @description A problem, with a code a client can act on. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     ThreadItemOutputGet: {
         parameters: {
             query?: {
@@ -82946,3 +83157,18 @@ export interface operations {
         };
     };
 }
+
+export type AgentListRow = components["schemas"]["AgentListRow"];
+export type ProviderListRow = components["schemas"]["ProviderListRow"];
+export type EnvironmentListRow = components["schemas"]["EnvironmentListRow"];
+export type HostListRow = components["schemas"]["HostListRow"];
+export type MachineListRow = components["schemas"]["MachineListRow"];
+export type TemplateListRow = components["schemas"]["TemplateListRow"];
+export type McpServerListRow = components["schemas"]["McpServerListRow"];
+export type MountListRow = components["schemas"]["MountListRow"];
+export type SkillListRow = components["schemas"]["SkillListRow"];
+export type ResourceListRow = components["schemas"]["ResourceListRow"];
+
+export type ResourceSharing = components["schemas"]["ResourceSharing"];
+
+export type ProviderRuntimeRow = components["schemas"]["ProviderRuntimeRow"];

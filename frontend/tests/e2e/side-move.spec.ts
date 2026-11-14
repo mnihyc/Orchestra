@@ -27,8 +27,7 @@ for (const [locale, label, reason] of [
     const response = await route.fetch({ url: url.toString() });
     expect(response.ok()).toBe(true);
     const sync = await response.json() as ThreadSync;
-    const opening: ThreadOpening = { sync, draft: null, parameters: null, limits: null, settings: [],
-      outline: { entries: [], next_before: null, seq: sync.seq } };
+    const opening: ThreadOpening = { sync, draft: null, parameters: null, limits: null };
     await route.fulfill({ json: opening });
   });
   await page.goto(`/thread/${MAIN}`);

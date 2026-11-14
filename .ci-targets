@@ -1,0 +1,9 @@
+fmt
+clippy
+contracts
+test -p orch-settings-contract --lib
+test -p orch-api-contract --lib
+test -p orch-api-core --test thread_opening_scopes --test thread_child_windows --test threads_settings --test threads_read --test everything_resources --test everything_operation_scopes --test native_resource_family_scopes
+web typecheck
+web lint
+web test -- tests/component/admin-system-resources.test.tsx tests/component/question-item.test.tsx tests/component/raw-tool-outputs.test.tsx tests/component/thread-opening.test.tsx tests/component/workbench-content-routing.test.tsx tests/component/resource-inventory.test.tsx tests/component/resource-names.test.tsx tests/component/resource-sharing-summary.test.tsx tests/component/environment-list-view.test.tsx tests/component/resource-management-visibility.test.tsx tests/component/machine-management.test.tsx tests/component/host-settings-entry.test.tsx tests/component/resource-status-agreement.test.tsx tests/component/composer-controls.test.tsx tests/component/composer-mode-row.test.tsx tests/component/composer-delivery.test.tsx tests/component/pasted-text.test.tsx tests/component/pasted-pending.test.tsx tests/component/paste-delivery-choice.test.tsx tests/component/visible-options.test.tsx tests/unit/cache-updates.test.ts tests/unit/continuation-requests.test.ts tests/unit/thread-opening-choices-double.test.ts tests/unit/thread-read-handles.test.ts tests/unit/side-opening-double.test.ts tests/unit/resource-facts.test.ts
