@@ -1916,6 +1916,18 @@ const WRITTEN_SUMMARY_OPTIONS: Schema = Schema::Object {
     members: &[],
     open: false,
 };
+/// The features of agent programs that are on while no scope says otherwise. A feature whose only purpose is to show what a manager
+/// of a provider has already switched on for a model is on: the access program of Codex, which a thread offers only on a model whose
+/// managers enabled it. A scope that does not want a program offered under it sets its feature off; the others stay as they are.
+const AGENT_FEATURES_SHIPPED: DefaultOf = DefaultOf::Value(r#"{"codex.cyber_access":true}"#);
+/// What each generated target does while no scope sets it, written out in full. The settings page draws these as the values a
+/// target starts from, and the engine falls back to the same numbers (it reads them from this default), so the page and the work
+/// can never disagree: nothing is automatic; a thread keeps the shared trigger pacing (two minutes after a turn or a milestone), a topic
+/// follows its children at a quarter of an hour, a document waits for edits to settle for five minutes, chats and their titles collect
+/// messages for five minutes; each reads up to 32,000 tokens and writes up to 600 characters, 80 for the title of a chat.
+const SUMMARY_TARGETS_SHIPPED: DefaultOf = DefaultOf::Value(
+    r#"{"thread":{"automatic":false,"on":["turn_completed","milestone"],"min_interval_secs":120,"context_tokens":32000,"output_chars":600},"topic":{"automatic":false,"on":["child_changed"],"min_interval_secs":900,"context_tokens":32000,"output_chars":600},"document":{"automatic":false,"on":["content_changed"],"min_interval_secs":300,"context_tokens":32000,"output_chars":600},"chat":{"automatic":false,"on":["message_posted"],"min_interval_secs":300,"context_tokens":32000,"output_chars":600},"chat_title":{"automatic":false,"on":["message_posted"],"min_interval_secs":300,"context_tokens":32000,"output_chars":80}}"#,
+);
 const SUMMARY_TARGETS: Schema = Schema::Object {
     members: &[
         optional("thread", SUMMARY_TARGET_OPTIONS),
@@ -2178,7 +2190,7 @@ registry! {
         "Effort", "The reasoning effort asked of the model, one of those the model lists.";
     AGENT_PARAMS = "agent.params", Agent, Parameter, ORG_TO_THREAD, Map, EMPTY_MAP, map(&ANY),
         "Agent parameters", "Values for the parameters that the agent's adapter declares, by parameter.";
-    AGENT_FEATURES = "agent.features", Agent, Policy, SYSTEM_TO_TOPIC, Map, EMPTY_MAP, map(&BOOL),
+    AGENT_FEATURES = "agent.features", Agent, Policy, SYSTEM_TO_TOPIC, Map, AGENT_FEATURES_SHIPPED, map(&BOOL),
         "Agent features", "Which optional features of agents are switched on, by feature.";
     AGENT_INSTRUCTIONS = "agent.instructions", Agent, Parameter, ORG_TO_THREAD, Append, value("\"\""), INSTRUCTIONS,
         "Instructions", "Standing instructions given to the agent with every session; each scope adds its own under those above it.";
@@ -2205,9 +2217,9 @@ registry! {
         "Release mirror", "A URL that serves the vendors' release files where this server cannot reach them; empty reads the vendors directly.";
     AGENTS_PROMPT_CACHE_TTL = "agents.prompt_cache_ttl", Agent, Parameter, SYSTEM_TO_THREAD, Replace, NULL, Schema::Nullable { of: &choice(&["5m", "1h"]) },
         "Prompt cache lifetime", "An explicit cache lifetime for the agent program's main conversation. Unset uses the program's own default; programs without this control ignore it.";
-    AGENTS_SUBAGENTS_AT_ONCE = "agents.subagents_at_once", Agent, Parameter, SYSTEM_TO_THREAD, Min, value("8"), int_between(1, 64, Unit::Count),
+    AGENTS_SUBAGENTS_AT_ONCE = "agents.subagents_at_once", Agent, Parameter, SYSTEM_TO_THREAD, Min, value("8"), int(1, Unit::Count),
         "Sub-agents at once", "How many sub-agents the harness may run at once; the shortest value along the hierarchy wins. A harness without this control says it does not apply.";
-    AGENTS_SUBAGENT_DEPTH = "agents.subagent_depth", Agent, Parameter, SYSTEM_TO_THREAD, Min, value("1"), int_between(1, 5, Unit::Count),
+    AGENTS_SUBAGENT_DEPTH = "agents.subagent_depth", Agent, Parameter, SYSTEM_TO_THREAD, Min, value("1"), int(1, Unit::Count),
         "Sub-agent depth", "How many layers of sub-agents the harness may spawn; 1 allows no nesting. The shortest value along the hierarchy wins; a harness without this control says it does not apply.";
     AGENTS_SKILLS = "agents.skills", Agent, Parameter, ORG_TO_TOPIC, Map, EMPTY_MAP, by_id(&SKILL_CHOICE),
         "Skills", "Which skills the agents of threads here are given, by skill: off, its latest version, or a pinned version; a lower scope may change or switch off an inherited one.";
@@ -2390,7 +2402,7 @@ registry! {
         "Wider ports", "The distinct port numbers with wider or pending audiences; zero leaves own use available.";
     PORTS_LINK_MAX_SECS = "ports.link_max_secs", Ports, Policy, SYSTEM_TO_TOPIC, Min, value("86400"), int(1, Unit::Seconds),
         "Link lifetime", "The longest link lifetime from creation, including later expiry changes.";
-    REQUESTS_EXPIRY_HOURS = "requests.expiry_hours", Confinement, Policy, SYSTEM_TO_TOPIC, Min, value("24"), int_between(1, 168, Unit::Hours),
+    REQUESTS_EXPIRY_HOURS = "requests.expiry_hours", Confinement, Policy, SYSTEM_TO_TOPIC, Min, value("24"), int(1, Unit::Hours),
         "Pending agent requests", "The longest pending boundary decision an agent requests; an earlier requested port-link lapse also ends it.";
     BROWSER_PRESET = "browser.preset", Browsers, Parameter, ORG_TO_TOPIC_ENV, Replace, value("\"headless\""), choice(&["headless", "window"]),
         "Browser preset", "How a browser is started where nobody says: headless, with no window and no display, or with a window on a display that Orch opens for it.";
@@ -2521,7 +2533,7 @@ registry! {
         "Running turn", "What a switch, a move, a recreate or an update does with a turn that is running: wait for it, or interrupt it.";
     SWITCH_WAIT_MINUTES = "switch.wait_minutes", Switching, Parameter, SYSTEM_TO_THREAD_ENV, Replace, value("10"), int(0, Unit::Minutes),
         "Wait", "For how many minutes it waits for running turns to end before it gives up and leaves everything as it was; 0 does not wait.";
-    SWITCH_VERIFY_TIMEOUT_SECS = "switch.verify_timeout_secs", Switching, Parameter, SYSTEM_TO_THREAD_ENV, Replace, value("120"), int(10, Unit::Seconds),
+    SWITCH_VERIFY_TIMEOUT_SECS = "switch.verify_timeout_secs", Switching, Parameter, SYSTEM_TO_THREAD_ENV, Replace, value("120"), int(1, Unit::Seconds),
         "Health check time", "How many seconds the checks of the new side may take before everything is rolled back.";
     SWITCH_KEEP_PREVIOUS = "switch.keep_previous", Switching, Parameter, SYSTEM_TO_THREAD_ENV, Replace, FALSE, BOOL,
         "Keep the old side", "Whether the side that a switch or a move leaves behind is kept instead of scheduled for removal.";
@@ -2541,7 +2553,7 @@ registry! {
         "Summarizer", "Which summarizer is used, and its configuration.";
     AUTO_TRIGGERS = "auto.triggers", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("{\"on\":[\"turn_completed\",\"milestone\"],\"min_interval_secs\":120}"), TRIGGERS,
         "Triggers", "When automatic titles, tags and summaries are written again: after a turn, at a milestone or at intervals, and how often at most.";
-    SUMMARY_TARGETS = "summary.targets", Automation, Parameter, SYSTEM_TO_THREAD, Map, EMPTY_MAP, SUMMARY_TARGETS,
+    SUMMARY_TARGETS = "summary.targets", Automation, Parameter, SYSTEM_TO_THREAD, Map, SUMMARY_TARGETS_SHIPPED, SUMMARY_TARGETS,
         "Summary targets", "Refresh events and input/output defaults by target, off until enabled under the chosen summarizer and shared usage caps. Help and search results use written or existing summaries.";
     SUMMARY_FOLLOW_INTERVAL_SECS = "summary.follow_interval_secs", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("5"), int_between(1, 4_294_967_295, Unit::Seconds),
         "Summary follow interval", "Free reads while a summary is eligible or running; a scheduled future update is followed at its actual due time instead.";
@@ -2689,7 +2701,7 @@ registry! {
         "Mask secrets", "Whether the values of the secrets a thread was given are masked in stored text.";
     REDACTION_PATTERNS = "redaction.patterns", Redaction, Policy, SYSTEM_TO_TOPIC, Union, EMPTY_LIST, list(&REDACTION_PATTERN),
         "Patterns", "Further patterns to mask in stored text, each with a name.";
-    DIAGNOSTICS_RETENTION_DAYS = "diagnostics.retention_days", Retention, Policy, SYSTEM, Replace, value("14"), int_between(1, 365, Unit::Days),
+    DIAGNOSTICS_RETENTION_DAYS = "diagnostics.retention_days", Retention, Policy, SYSTEM, Replace, value("14"), int(1, Unit::Days),
         "Diagnostics kept", "For how many days diagnostics are kept.";
     ORGS_PERSONAL_ENABLED = "orgs.personal_enabled", Joining, Policy, SYSTEM, Replace, TRUE, BOOL,
         "Personal organizations", "Whether a new human account gets a personal organization. Existing organizations keep their data and access when this is switched off.";
@@ -2711,7 +2723,8 @@ registry! {
         "Invitation life", "For how many hours an invitation is good when its inviter says nothing.";
     INVITATIONS_MAX_HOURS = "invitations.max_hours", Joining, Policy, SYSTEM_ORG, Min, value("720"), int(1, Unit::Hours),
         "Longest invitation", "The most hours an invitation may be good for.";
-    INVITATIONS_MAX_USES = "invitations.max_uses", Joining, Policy, SYSTEM_ORG, Min, value("100"), int_between(1, 1000, Unit::Count),
+    // Invitation use counters are stored as signed 32-bit database integers.
+    INVITATIONS_MAX_USES = "invitations.max_uses", Joining, Policy, SYSTEM_ORG, Min, value("100"), int_between(1, 2_147_483_647, Unit::Count),
         "Uses of a shared link", "How many people one shared link may bring in at most.";
     MAIL_SHARED = "mail.shared", System, Policy, SYSTEM, Replace, TRUE, BOOL,
         "Shared mail server", "Whether a root org that has no mail server of its own sends its mail through the system's.";
@@ -3089,18 +3102,20 @@ mod tests {
     }
 
     #[test]
-    fn native_subagent_limits_have_bounded_values_at_every_place_and_explicit_shipped_defaults() {
-        for (key, maximum, shipped) in [
-            (keys::AGENTS_SUBAGENTS_AT_ONCE, 64, 8),
-            (keys::AGENTS_SUBAGENT_DEPTH, 5, 1),
+    fn native_subagent_limits_accept_positive_represented_values_with_their_shipped_defaults() {
+        for (key, formerly_capped, shipped) in [
+            (keys::AGENTS_SUBAGENTS_AT_ONCE, 64_i64, 8),
+            (keys::AGENTS_SUBAGENT_DEPTH, 5_i64, 1),
         ] {
             let definition = get(key).unwrap();
             assert_eq!(definition.scopes, SYSTEM_TO_THREAD);
             assert_eq!(definition.merge, Merge::Min);
             assert!(validate(key, &json!(1)).is_ok());
-            assert!(validate(key, &json!(maximum)).is_ok());
+            assert!(validate(key, &json!(formerly_capped + 1)).is_ok());
+            assert!(validate(key, &json!(i64::MAX)).is_ok());
             assert!(validate(key, &json!(0)).is_err());
-            assert!(validate(key, &json!(maximum + 1)).is_err());
+            assert!(validate(key, &json!(-1)).is_err());
+            assert!(validate(key, &json!(u64::MAX)).is_err());
             assert_eq!(
                 serde_json::to_value(definition).unwrap()["default"],
                 json!(shipped),
@@ -3256,6 +3271,23 @@ mod tests {
     }
 
     #[test]
+    fn configurable_counts_and_lifetimes_are_not_limited_by_their_shipped_defaults() {
+        for (key, old_maximum) in [
+            (keys::REQUESTS_EXPIRY_HOURS, 168),
+            (keys::DIAGNOSTICS_RETENTION_DAYS, 365),
+        ] {
+            assert!(validate(key, &json!(old_maximum + 1)).is_ok());
+            assert!(validate(key, &json!(i64::MAX)).is_ok());
+            assert!(validate(key, &json!(0)).is_err());
+        }
+        assert!(validate(keys::INVITATIONS_MAX_USES, &json!(1001)).is_ok());
+        assert!(validate(keys::INVITATIONS_MAX_USES, &json!(i32::MAX)).is_ok());
+        assert!(validate(keys::INVITATIONS_MAX_USES, &json!(i64::from(i32::MAX) + 1)).is_err());
+        assert!(validate(keys::SWITCH_VERIFY_TIMEOUT_SECS, &json!(1)).is_ok());
+        assert!(validate(keys::SWITCH_VERIFY_TIMEOUT_SECS, &json!(0)).is_err());
+    }
+
+    #[test]
     fn an_unknown_key_is_refused() {
         assert_eq!(
             validate("agent.mood", &json!("calm")),
@@ -3276,14 +3308,8 @@ mod tests {
         assert_eq!(paths(validate(keys::HOSTS_FULL_PERCENT, &json!(101))), [""]);
         assert_eq!(paths(validate(keys::HOSTS_FULL_PERCENT, &json!(0))), [""]);
         assert_eq!(paths(validate(keys::DOCS_MAX_BYTES, &json!(65_535))), [""]);
-        assert_eq!(
-            paths(validate(keys::INVITATIONS_MAX_USES, &json!(1001))),
-            [""]
-        );
-        assert_eq!(
-            paths(validate(keys::SWITCH_VERIFY_TIMEOUT_SECS, &json!(9))),
-            [""]
-        );
+        assert!(validate(keys::INVITATIONS_MAX_USES, &json!(1001)).is_ok());
+        assert!(validate(keys::SWITCH_VERIFY_TIMEOUT_SECS, &json!(1)).is_ok());
         assert!(
             validate(keys::ENV_IDLE_STOP_MINUTES, &json!(0)).is_ok(),
             "0 means never"

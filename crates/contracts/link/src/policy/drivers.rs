@@ -44,12 +44,10 @@ pub struct MachineDrivers {
     /// Driver identifiers or `*`; this never registers an external program.
     pub allowed: Vec<String>,
     /// Image source, capability and runtime limits, independent of implementation.
-    #[serde(alias = "docker")]
     pub images: ImageRules,
     /// Local account, template and launch-program limits.
-    #[serde(alias = "host")]
     pub processes: ProcessRules,
-    /// Locally imported driver connection/configuration values. A connection change needs a node restart.
+    /// Driver connection/configuration values. A connection change needs a node restart.
     pub configurations: BTreeMap<String, Json>,
 }
 
@@ -291,6 +289,22 @@ impl MachineDrivers {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn driver_policy_reads_only_its_canonical_image_and_process_fields() {
+        for value in [
+            serde_json::json!({"docker":{}}),
+            serde_json::json!({"host":{}}),
+        ] {
+            assert!(serde_json::from_value::<super::MachineDrivers>(value).is_err());
+        }
+        assert!(
+            serde_json::from_value::<super::MachineDrivers>(
+                serde_json::json!({"images":{},"processes":{}})
+            )
+            .is_ok()
+        );
+    }
+
     use super::*;
     use serde_json::json;
     #[test]

@@ -42,8 +42,7 @@ const IDENTITY_DIR: &str = "identity";
 /// How long a request to the daemon for the record of a unit's enrollment may take: it is a small file.
 const PROBE_SECS: u64 = 10;
 
-/// The driver's settings from the operator's `[node.docker]` and `[[node.storage]]`, and from where the node
-/// keeps its tool cache. Everything else is the driver's own default.
+/// The driver's operational settings, storages from the machine policy, and the node's tool cache. Everything else is the driver's own default.
 pub fn config_of(settings: &NodeSettings) -> Result<DockerConfig, DriverError> {
     let docker = &settings.docker;
     let mut labels = docker.labels.clone();

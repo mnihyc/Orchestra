@@ -845,6 +845,9 @@ pub struct ProviderModel {
     /// Effective provider option schemas, including declared tier/program lists; keyed by protocol.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub option_constraints: std::collections::BTreeMap<String, Json>,
+    /// Declared per-thread option forms, keyed by outgoing interface, shared by thread and place defaults.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_forms: std::collections::BTreeMap<String, Json>,
     /// What its tokenizer comes to, for the estimates where nobody counted.
     pub token_estimate: crate::programs::TokenEstimate,
     /// The groups its managers put it in (`frontier`, `small`): names of their own, by which a cap,

@@ -36,7 +36,7 @@ afterEach(async () => { cleanup(); await setLocale('en'); });
 for (const locale of ['en', 'zh-CN'] as const) {
   it(`retains a blocked place with its native reason and recovery in ${locale}`, async () => {
     await setLocale(locale); const user = userEvent.setup(); show(<Picker />); await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') }));
-    const blocked = await screen.findByRole('option', { name: 'Team / Blocked' });
+    const blocked = await screen.findByRole('treeitem', { name: 'Team / Blocked' });
     await waitFor(() => expect(blocked).toHaveTextContent(i18n.t('duplicate.causes.owners_only'))); expect(blocked).toHaveAttribute('aria-disabled', 'true');
     await user.click(screen.getByRole('button', { name: i18n.t('duplicate.reviewDestination', { name: 'Team / Blocked' }) }));
     const dialog = await screen.findByRole('dialog', { name: 'Team / Blocked' }); expect(dialog).toHaveTextContent(i18n.t('duplicate.causes.owners_only'));
@@ -44,12 +44,12 @@ for (const locale of ['en', 'zh-CN'] as const) {
   });
   it(`allows a needs-choice place without presenting it as a denial in ${locale}`, async () => {
     await setLocale(locale); const user = userEvent.setup(); show(<Picker />); await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') }));
-    const choose = await screen.findByRole('option', { name: 'Team / Choose' }); await waitFor(() => expect(choose).toHaveTextContent(i18n.t('duplicate.choices.mcp_machine')));
+    const choose = await screen.findByRole('treeitem', { name: 'Team / Choose' }); await waitFor(() => expect(choose).toHaveTextContent(i18n.t('duplicate.choices.mcp_machine')));
     expect(choose).not.toHaveAttribute('aria-disabled', 'true'); await user.click(choose); expect(screen.getByText('Team / Choose', { exact: true })).toBeInTheDocument();
   });
 }
 it('a failed native judgement leaves candidates disabled and offers a read retry', async () => {
   calls.judge.mockRejectedValue(new NetworkError('failed')); const user = userEvent.setup(); show(<Picker />); await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') }));
-  const place = await screen.findByRole('option', { name: 'Team' }); await waitFor(() => expect(place).toHaveTextContent(i18n.t('duplicate.judgeFailed')));
+  const place = await screen.findByRole('treeitem', { name: 'Team' }); await waitFor(() => expect(place).toHaveTextContent(i18n.t('duplicate.judgeFailed')));
   expect(place).toHaveAttribute('aria-disabled', 'true'); await screen.findByRole('alert'); expect(calls.access).not.toHaveBeenCalled();
 });
