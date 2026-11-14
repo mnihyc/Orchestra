@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-engine --test turns --test approvals --test approval_rules --test paste_delivery --test context_fill --test usage_rows --test source --test notifications --test workspace_trust
+test -p orch-adapter-codex --lib
+test -p orch-adapter-codex --test prompt_cases --test sessions
+test -p orch-api-core --test approvals --test approval_operation_scopes --test threads_drive

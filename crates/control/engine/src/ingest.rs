@@ -1152,7 +1152,7 @@ impl Engine {
         let command = crate::commands::Outgoing::new(
             crate::ids::turn_interrupt(turn),
             batch.machine,
-            SerialKey::Thread(batch.thread_id),
+            SerialKey::None,
             &orch_link_contract::commands::TurnInterrupt {
                 thread_id: batch.thread_id,
                 turn_id: turn,
