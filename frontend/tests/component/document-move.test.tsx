@@ -37,7 +37,7 @@ const full = () => ({ stamp: { entries: [source().entry], authority_epoch: 1, au
 beforeEach(() => { vi.clearAllMocks(); calls.cross = true; calls.same.mockReturnValue(true); calls.navigate.mockResolvedValue(undefined); calls.preview.mockResolvedValue(full()); calls.execute.mockResolvedValue({ projection: 'receipt', operation: 'native-move', entries: [{ kind: 'document', id: 'new-doc' }] }); });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 async function choose(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') })); const option = await screen.findByRole('option', { name: 'Other org' });
+  await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') })); const option = await screen.findByRole('treeitem', { name: 'Other org' });
   await waitFor(() => expect(option).not.toHaveAttribute('aria-disabled', 'true')); await user.click(option);
 }
 const confirm = () => screen.getByRole('button', { name: i18n.t('duplicate.moveAcross', { org: 'Other org' }) });

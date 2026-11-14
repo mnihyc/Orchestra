@@ -23,7 +23,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:agent.model` | **Model** — The model these threads use. Enter the model ID supplied by its provider. |
 | `setting:agent.effort` | **Effort** — The reasoning effort asked of the model, one of those the model lists. |
 | `setting:agent.params` | **Agent parameters** — Values for the parameters that the agent's adapter declares, by parameter. |
-| `setting:agent.features` | **Agent features** — Which optional features of agents are switched on, by feature. |
+| `setting:agent.features` | **Agent features** — Explicit choices laid over each program’s declared shipped feature states; false switches a feature off. The shared default is empty, and the switches show the program default and override source. |
 | `setting:agent.instructions` | **Instructions** — Standing instructions given to the agent with every session; each scope adds its own under those above it. |
 | `setting:agent.memory` | **Agent notes** — Whether an agent keeps notes between sessions: through any available method, through its own program, or not at all. |
 | `setting:agents.harness_versions` | **Agent program versions** — The build each agent program uses in new or updated units, inherited through the project and overridden by the environment. An exact agent profile pin wins; changing this does not replace a running unit. |

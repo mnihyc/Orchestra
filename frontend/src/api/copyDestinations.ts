@@ -19,6 +19,22 @@ const address = (destination: DuplicateDestination) => destination.kind === 'nod
 
 export async function judgeCopyDestinations(request: CopyDestinationsRequest, signal?: AbortSignal): Promise<CopyDestinationsResponse> {
   const before = libraryReader();
+  // The native reader accepts one hundred observations per request; the chooser has no total limit.
+  const batchSize = 100;
+  if (request.destinations.length > batchSize) {
+    let first: CopyDestinationsResponse | undefined;
+    const destinations: CopyDestinationJudgement[] = [];
+    for (let at = 0; at < request.destinations.length; at += batchSize) {
+      signal?.throwIfAborted();
+      const batch = await judgeCopyDestinations({ ...request, destinations: request.destinations.slice(at, at + batchSize) }, signal);
+      if (!sameLibraryReader(before)) throw new DOMException('The requesting reader changed.', 'AbortError');
+      if (first !== undefined && first.source_owned !== batch.source_owned) throw new Error('The source changed during destination checks.');
+      first ??= batch;
+      destinations.push(...batch.destinations);
+    }
+    if (first === undefined) throw new Error('No destination batch was read.');
+    return { ...first, destinations };
+  }
   const result = await traceJson<CopyDestinationsResponse>('/copy-destinations/judge', { method: 'POST', body: request, ...(signal === undefined ? {} : { signal }) });
   signal?.throwIfAborted();
   if (!sameLibraryReader(before)) throw new DOMException('The requesting reader changed.', 'AbortError');

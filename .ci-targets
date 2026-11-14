@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/setting-inherit.test.tsx tests/component/settings-thing-choices.test.tsx tests/component/agent-model-setting.test.tsx tests/component/provider-default-locator.test.tsx tests/component/project-provider-default.test.tsx tests/component/resource-setting-choices.test.tsx tests/component/settings-drafts.test.tsx tests/component/choice-locator.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts --maxWorkers=1

@@ -8,6 +8,7 @@ import { choiceName, type ChoiceDetails, type ChoiceName } from '@/ui/Choice';
 import { Combobox, type ComboboxOption, type ComboboxProps } from '@/ui/Combobox';
 import type { FieldSlots } from '@/ui/Field';
 import { useTransientLayer } from '@/ui/PromptScope';
+import type { ChoiceInheritance } from '@/ui/InheritedChoice';
 
 export type ChoiceLocatorOption<Value extends string> = ChoiceName<string> & ChoiceDetails & {
   value: Value;
@@ -19,6 +20,7 @@ export type ChoiceLocatorOption<Value extends string> = ChoiceName<string> & Cho
 };
 
 export interface ChoiceLocatorProps<Value extends string> extends FieldSlots {
+  inheritance?: ChoiceInheritance | undefined;
   value: Value;
   onValueChange: (value: Value) => void;
   /** This is the complete declaration/catalogue, never a resource or history page. */
@@ -57,7 +59,7 @@ export function ChoiceLocator<Value extends string>({ value, onValueChange, opti
     ...(option.description === undefined ? {} : { description: option.description }),
     ...(option.help === undefined ? {} : { help: option.help }),
     ...(option.disabled === undefined ? {} : { disabled: option.disabled }),
-    icon: <><span className="flex size-4 shrink-0 items-center justify-center text-accent-text">{option.value === value && <Check aria-hidden />}</span>{option.icon}</>,
+    icon: <><span className="flex size-4 shrink-0 items-center justify-center text-accent-text">{field.inheritance?.selected !== true && option.value === value && <Check aria-hidden />}</span>{option.icon}</>,
   }));
   const searchKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'Enter' || !(event.target instanceof HTMLInputElement) || event.target.getAttribute('role') !== 'combobox') return;
@@ -73,7 +75,7 @@ export function ChoiceLocator<Value extends string>({ value, onValueChange, opti
       groups={[{ id: 'choices', label: '', options: matches }]} onSelect={(option) => {
         const current = options.find((candidate) => candidate.value === option.value);
         if (disabled || current === undefined || current.disabled === true) return;
-        if (current.value !== value) onValueChange(current.value);
+        if (field.inheritance?.selected === true || current.value !== value) onValueChange(current.value);
       }} />
   </div>;
 }

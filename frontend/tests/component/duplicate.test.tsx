@@ -53,7 +53,7 @@ afterEach(async () => { cleanup(); useDuplicateHost.getState().close(); client.s
 const target = { kind: 'provider', id: 'source', name: 'Provider', revision: 7 } as const;
 async function chooseOther(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') }));
-  await user.click(await screen.findByRole('option', { name: 'Other org' }));
+  await user.click(await screen.findByRole('treeitem', { name: 'Other org' }));
 }
 for (const locale of ['en', 'zh-CN'] as const) {
   it(`keeps a missing native setup observation unknown after a completed copy (${locale})`, async () => {
@@ -98,10 +98,10 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await setLocale(locale); const user = userEvent.setup(); show(<DuplicateDialog target={target} onClose={() => undefined} />);
     await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') }));
     await waitFor(() => {
-      const topic = screen.getByRole('option', { name: 'Other org / A topic' });
+      const topic = screen.getByRole('treeitem', { name: 'Other org / A topic' });
       expect(topic).toHaveAttribute('aria-disabled', 'true'); expect(topic).toHaveTextContent(i18n.t('duplicate.causes.destination_creation'));
     });
-    await user.click(screen.getByRole('option', { name: 'Other org' }));
+    await user.click(screen.getByRole('treeitem', { name: 'Other org' }));
     await user.click(screen.getByRole('button', { name: i18n.t('duplicate.now') }));
     await waitFor(() => expect(calls.copy).toHaveBeenCalledWith('provider', 'source', { expected_revision: 7, destination: { kind: 'node', id: 'other-org' } }, expect.any(String), {}));
   });
