@@ -778,7 +778,7 @@ pub async fn copy_turns_page(
       'id',md5($1::text||r.row_id::text)::uuid,'thread_id',$1::uuid,'continuation_id',$3::uuid,'ordinal',r.ordinal,
       'segment_id',md5($1::text||(r.body->>'segment_id'))::uuid,'input_id',md5($1::text||(r.body->>'input_id'))::uuid,
       'lease_id',NULL,'native_turn_ref','fork-copy:'||r.row_id::text,'native_end_confirmed',true,
-      'before_snapshot_id',NULL,'end_manifest_blob',NULL,'files_end_manifest',NULL,'end_work',NULL,
+      'before_snapshot_id',NULL,'end_manifest_blob',NULL,'end_work',NULL,
       'files_work_pending',false,'files_end_due',false,'cut_notice_sent',true,'phase',NULL,'phase_at',NULL,'phase_attempt',NULL,
       'waiting_since',NULL,'seq_updated',$4::bigint,'completed_seq',$4::bigint)) p
           RETURNING id

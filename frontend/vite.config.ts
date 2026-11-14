@@ -12,6 +12,7 @@ import tailwindcss from '@tailwindcss/vite';
 import { tanstackRouter } from '@tanstack/router-plugin/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
+import { firstWavePlugin } from './build/first-wave';
 import { helpContentPlugin } from './build/help-content';
 import { releaseNoticesPlugin } from './build/release-notices';
 import { servingProxyConfig } from './build/serving-proxy';
@@ -22,6 +23,8 @@ export default defineConfig({
   plugins: [
     helpContentPlugin(),
     releaseNoticesPlugin(),
+    // The frame and the words that the entry imports once it runs are named in the page, to be fetched with the entry.
+    firstWavePlugin(),
     // The route tree is generated from the files under `src/routes`; every route is its own chunk.
     tanstackRouter({
       target: 'react',

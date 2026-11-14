@@ -177,6 +177,7 @@ impl Samples {
 }
 
 struct CacheInner {
+    archives: crate::archives::ArchiveReads,
     ports: crate::ports_runtime::PortRuntime,
     manifests: Mutex<VecDeque<(Id, Hash, Arc<Manifest>)>>,
     manifests_kept: usize,
@@ -198,6 +199,10 @@ impl std::fmt::Debug for Cache {
 }
 
 impl Cache {
+    /// Shared live continuations of authorized immutable archive sources.
+    pub fn archive_reads(&self) -> &crate::archives::ArchiveReads {
+        &self.inner.archives
+    }
     /// Current port measurements and ephemeral admissions, never durable caller rows.
     #[must_use]
     pub fn ports(&self) -> &crate::ports_runtime::PortRuntime {
@@ -215,6 +220,7 @@ impl Cache {
         let samples = seconds / config.engine.stats_interval_secs.max(1);
         Self {
             inner: Arc::new(CacheInner {
+                archives: crate::archives::ArchiveReads::default(),
                 ports: crate::ports_runtime::PortRuntime::default(),
                 manifests: Mutex::new(VecDeque::new()),
                 manifests_kept: usize::try_from(config.limits.manifest_trees)

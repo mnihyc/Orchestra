@@ -26,20 +26,28 @@ describe('provider observations', () => {
   });
   it('marks only a discovered absence with its actual read time and leaves model acceptance alone', () => {
     const provider = planProvider();
-    expect(modelUnavailableAt(provider, 'old')).toBeNull();
-    provider.facts.models = [{ model_name: 'new', display_name: 'New', listed: true, parameters: {} }];
+    const listing = [{ model_name: 'new', display_name: 'New', listed: true, parameters: {} }];
+    expect(modelUnavailableAt(provider, 'old', undefined)).toBeNull();
+    provider.facts.models_count = 1;
     provider.facts_state.models = 'told';
     provider.facts.field_times.models = OBSERVED;
-    expect(modelUnavailableAt(provider, 'old')).toBe(OBSERVED);
-    expect(modelUnavailableAt(provider, 'new')).toBeNull();
+    expect(modelUnavailableAt(provider, 'old', listing)).toBe(OBSERVED);
+    expect(modelUnavailableAt(provider, 'new', listing)).toBeNull();
     expect(provider.models).toEqual([]);
   });
-  it('uses the source’s explicit empty models state and its time even when the nullable value carries no rows', () => {
+  it('says nothing of any model while the list the upstream gave is not read yet', () => {
+    const provider = planProvider();
+    provider.facts.models_count = 1;
+    provider.facts_state.models = 'told';
+    provider.facts.field_times.models = OBSERVED;
+    expect(modelUnavailableAt(provider, 'old', undefined)).toBeNull();
+  });
+  it('uses the source’s explicit empty models state and its time even when the list carries no rows', () => {
     const provider=planProvider();
-    provider.facts.models=null;provider.facts_state.models='empty';provider.facts.field_times.models=OBSERVED;
-    expect(modelUnavailableAt(provider,'previously-enabled')).toBe(OBSERVED);
+    provider.facts.models_count=0;provider.facts_state.models='empty';provider.facts.field_times.models=OBSERVED;
+    expect(modelUnavailableAt(provider,'previously-enabled',[])).toBe(OBSERVED);
     provider.facts_state.models='not_read_yet';
-    expect(modelUnavailableAt(provider,'previously-enabled')).toBeNull();
+    expect(modelUnavailableAt(provider,'previously-enabled',[])).toBeNull();
   });
   it('reviews a listed available credit without requiring an optional lapse, while refusing unknown status or a known expiry', () => {
     const credit = planProvider().facts.available_resets!.credits![0]!;

@@ -15,6 +15,7 @@ fn a_server_cursor_after_spool_loss_resumes_delivery_without_changing_capture_nu
     use orch_link_contract::frames::Frame;
     use orch_link_contract::session::Role;
     use orch_link_contract::streams::{Ack, Stream};
+    use orch_link_contract::version::Limits;
     use std::collections::BTreeMap;
 
     fn events(frames: Vec<Frame>) -> Vec<(String, i64, Time, serde_json::Value)> {
@@ -69,7 +70,11 @@ fn a_server_cursor_after_spool_loss_resumes_delivery_without_changing_capture_nu
         )
         .unwrap();
     let mut cursors = BTreeMap::from([(name.clone(), 100), ("machine".to_owned(), 50)]);
-    let resets = sender.on_ready(&cursors, 64 * 1024, now).unwrap();
+    let limits = Limits {
+        max_frame_bytes: 64 * 1024,
+        ..Limits::default()
+    };
+    let resets = sender.on_ready(&cursors, limits, now).unwrap();
     assert!(resets.iter().any(
         |frame| matches!(frame, Frame::Reset(reset) if reset.stream == name && reset.from == 101)
     ));
@@ -108,12 +113,7 @@ fn a_server_cursor_after_spool_loss_resumes_delivery_without_changing_capture_nu
         StreamSender::open_for_machine(directory.path(), options, vec![Role::Agent], now)
             .unwrap()
             .0;
-    assert!(
-        sender
-            .on_ready(&cursors, 64 * 1024, now)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(sender.on_ready(&cursors, limits, now).unwrap().is_empty());
     sender
         .publish(
             &stream,

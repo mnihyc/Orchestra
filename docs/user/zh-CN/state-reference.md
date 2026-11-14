@@ -4,6 +4,7 @@ screens: [/help, /thread/$threadId, /resources/providers/$id]
 keywords: [state, status, phase, reference, 状态, 阶段, 参考]
 heading_id.条目: entries
 summary: 线程、提供方或机器旁显示的每种状态的含义。
+heading_id.文件准备: file-preparation
 ---
 
 # 状态参考
@@ -129,8 +130,8 @@ summary: 线程、提供方或机器旁显示的每种状态的含义。
 | 参考标识 | 含义 |
 | --- | --- |
 | `state:GoalStatus.active` | Orch 继续让线程朝此目标工作。 |
-| `state:GoalStatus.paused` | 有人暂停，或代理报告阻塞。 |
-| `state:GoalStatus.met` | 目标条件已满足。 |
+| `state:GoalStatus.paused` | 有人暂停、代理报告阻塞，或未经核实的完成报告需要人工决定。 |
+| `state:GoalStatus.met` | 独立检查确认目标已达成，或用户明确接受了相应证据。 |
 | `state:GoalStatus.stopped` | 未达成即停止：达到限制或无人可继续。 |
 | `state:GoalStatus.cleared` | 有人清除了目标。 |
 
@@ -139,8 +140,36 @@ summary: 线程、提供方或机器旁显示的每种状态的含义。
 | 参考标识 | 含义 |
 | --- | --- |
 | `state:GoalReportStatus.working` | 正在朝目标工作。 |
-| `state:GoalReportStatus.met` | 目标条件已满足。 |
+| `state:GoalReportStatus.met` | 代理报告目标条件已满足；仅凭此报告不会将目标标记为达成。 |
 | `state:GoalReportStatus.blocked` | 需要人工处理才能继续。 |
+
+### GoalReason
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:GoalReason.unchecked` | 完成报告缺少可用的独立检查。目标保持暂停，等待用户明确标记为达成或选择继续工作。 |
+
+### GoalOutcome
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:GoalOutcome.unchecked` | 保留报告及其证据，但尚未作出完成决定。检查模型未配置或不可用，都不会让它自动变为达成。 |
+
+### GoalCheckedBy
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:GoalCheckedBy.person` | 用户明确接受了未经核实的完成报告，审计中记录实际操作者。选择继续工作不会设置此值。 |
+
+### MarkerHarnessChanged
+
+这些值表示观察记录的 `change` 字段，不表示轮次结果。
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:MarkerHarnessChanged.warning` | 原生程序的警告原文，每次发生都保留，并在普通对话中显示于折叠工作之外。警告本身不会让轮次失败。 |
+| `state:MarkerHarnessChanged.turn_diff` | 原生轮次最近报告的净文件更改。快照替代同一流内的各次工具编辑；空快照清除此流的净更改。 |
+| `state:MarkerHarnessChanged.turn_diff_unavailable` | Orch 无法读取某次原生差异更新。保留此前有效的更改文件，并显示说明，不会虚构替代结果。 |
 
 ### FirstStepsState
 
@@ -571,3 +600,12 @@ summary: 线程、提供方或机器旁显示的每种状态的含义。
 | `state:UploadInventoryState.complete` | 已验证的不可变文件内容已入库。 |
 | `state:UploadInventoryState.partial` | 上传尚未完成；不能据此认定发送方此刻仍在活动。 |
 | `state:UploadInventoryState.expired` | 上传会话的完成期限已过。 |
+
+### 文件准备
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:EnvironmentIndexReason.unreadable` | 部分元数据或排除规则无法读取；安全的实时读取保留修正路径。 |
+| `state:CommandKeyPhase.queued` | 已接受并等待执行位置；尚未占据执行通道。 |
+| `state:CommandKeyPhase.running` | 命令当前正在使用执行通道。 |
+| `state:CommandKeyPhase.released` | 捕获已释放执行通道；上传可以与后续启动同时继续。 |

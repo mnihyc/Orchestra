@@ -7,7 +7,7 @@
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 
-import { environmentQuery } from '@/api/workspace';
+import { parametersQuery } from '@/api/threads';
 import { useTimelineContext } from '@/features/timeline/context';
 import { useThreadRow } from '@/realtime/stores/thread';
 import { cx } from '@/ui/cx';
@@ -17,12 +17,6 @@ import { FileAttachment } from './FileChip';
 import { FileChip } from './FileChip';
 import { workspaceSource } from './source';
 import { useFileVisible } from './FilePreview';
-
-function currentRoot(registered: string, facts: unknown, generation: number): string {
-  if (typeof facts !== 'object' || facts === null || !('generation' in facts) || facts.generation !== generation || !('workspace_root' in facts) || typeof facts.workspace_root !== 'string') return registered;
-  const root = facts.workspace_root.replace(/\\/g, '/');
-  return root.startsWith('/') || /^[a-z]:\//i.test(root) ? root : registered;
-}
 
 function atRoot(path: string, registered: string, current: string): string {
   const base = registered.replace(/\\/g, '/').replace(/\/+$/, '');
@@ -85,9 +79,10 @@ export function FileLink({ path, line = null, children, className, threadId: ori
   const label = children ?? path;
   const environment = thread?.environment ?? null;
   const mayRead = inspection === undefined && thread?.environment_permissions.includes('files.view') === true;
-  const root = useQuery({ ...environmentQuery(environment?.id ?? ''), enabled: environment !== null && mayRead });
-  const workspace = root.data === undefined ? null : currentRoot(root.data.workspace_root, root.data.facts, root.data.generation);
-  const cwd = thread === null || root.data === undefined || workspace === null ? null : atRoot(thread.cwd, root.data.workspace_root, workspace);
+  const root = useQuery({ ...parametersQuery(threadId), enabled: environment !== null && mayRead });
+  const place = root.data?.environment;
+  const workspace = place?.id === environment?.id ? place?.workspace_root ?? null : null;
+  const cwd = thread === null || place === undefined || place === null || workspace === null ? null : atRoot(thread.cwd, place.registered_root, workspace);
   const where = thread === null || workspace === null || cwd === null ? null : workspacePath(path, cwd, thread.directory, workspace);
   if (inspection !== undefined || thread === null || environment === null || where === null || !thread.environment_permissions.includes('files.view')) return <>{label}</>;
   const environmentId = environment.id;
@@ -103,9 +98,10 @@ export function FilePathAttachment({ path, name = path.split('/').at(-1) ?? path
   const thread = useThreadRow(threadId);
   const environment = thread?.environment ?? null;
   const mayRead = inspection === undefined && thread?.environment_permissions.includes('files.view') === true;
-  const root = useQuery({ ...environmentQuery(environment?.id ?? ''), enabled: environment !== null && mayRead && visible });
-  const workspace = root.data === undefined ? null : currentRoot(root.data.workspace_root, root.data.facts, root.data.generation);
-  const cwd = thread === null || root.data === undefined || workspace === null ? null : atRoot(thread.cwd, root.data.workspace_root, workspace);
+  const root = useQuery({ ...parametersQuery(threadId), enabled: environment !== null && mayRead && visible });
+  const place = root.data?.environment;
+  const workspace = place?.id === environment?.id ? place?.workspace_root ?? null : null;
+  const cwd = thread === null || place === undefined || place === null || workspace === null ? null : atRoot(thread.cwd, place.registered_root, workspace);
   const where = thread === null || workspace === null || cwd === null ? null : workspacePath(path, cwd, thread.directory, workspace);
   return <span ref={ref}>{!mayRead || environment === null || where === null ? name : <FileAttachment source={{ ...workspaceSource({ environmentId: environment.id, threadId }, where, name, size), mediaType }} />}</span>;
 }

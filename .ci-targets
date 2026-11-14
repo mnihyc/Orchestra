@@ -1,0 +1,7 @@
+test -p orch-api-core --test workspace_source --test workspace_looking --test workspace_source_scopes --test workspace_pages --test workspace_connector --test document_containers --test admin_places
+test -p orch-link --lib
+test -p orch-link --test commands --test slow_link
+test -p orch-db --lib -- queries::link::
+test -p orch-db --test migration_progress --test released_migrations
+test -p orch-connector-core --lib -- orch_tools::
+test -p orch-connector-core --test recording_keys --test link_cuts

@@ -170,6 +170,7 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
                 data_sources: None,
                 environment_id: unit.environment_id,
                 workspace_root: None,
+                workspace: Default::default(),
                 ignore: Vec::new(),
                 index: IndexMode::Full,
                 mounts: Some(Vec::new()),
