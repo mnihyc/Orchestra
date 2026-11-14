@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web test
+web-e2e tests/e2e/thread-stop.spec.ts --project=chromium
