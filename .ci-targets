@@ -1,0 +1,5 @@
+fmt
+test -p orch-engine --lib history_pages::tests::a_transcript_written_in_pages_is_the_file_the_whole_reading_wrote_on_a_small_thread -- --exact
+web typecheck
+web lint
+web test -- tests/component/identifiers-out-of-sight.test.tsx tests/component/resource-groups.test.tsx tests/component/storage.test.tsx tests/component/cleanup-plan.test.tsx tests/component/operation-keys.test.tsx tests/component/service-key-rules.test.tsx tests/unit/search-org-requests.test.ts tests/unit/no-identifiers-in-words.test.ts

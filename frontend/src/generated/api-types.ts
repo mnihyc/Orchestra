@@ -30544,6 +30544,8 @@ export interface components {
         MachineProviderCreateResponse: components["schemas"]["Provider"] | components["schemas"]["ProviderCreateReceipt"];
         /** @description A machine, named wherever another thing points at one. */
         MachineRef: {
+            /** @description The host of a managed machine, independent of the host's displayed name. */
+            host_id?: string | null;
             /**
              * Format: uuid
              * @description The machine's identifier.
@@ -33755,6 +33757,8 @@ export interface components {
          *     `updated_at`.
          */
         NameSearchListQuery: {
+            /** @description One exact identity, independent of recent visits; the same current visibility checks still apply. */
+            id?: string | null;
             /** @description A comma list of [`NameKind`]s; every kind unless given. */
             kinds?: string | null;
             /**
@@ -77091,6 +77095,7 @@ export interface operations {
     NameSearchList: {
         parameters: {
             query?: {
+                id?: string | null;
                 kinds?: string | null;
                 limit?: number | null;
                 org_id?: string | null;

@@ -724,6 +724,7 @@ pub(crate) async fn show_inventory_prepared(
                     online: is_online(&ctx.app, row.id, row.online),
                     platform_os: parse(&row.platform_os)?,
                     placement: parse(&row.placement)?,
+                    host_id: row.host_id,
                 },
                 owner: row.owner_id.and_then(|owner| owners.get(&owner).cloned()),
                 platform_arch: row.platform_arch.clone(),
