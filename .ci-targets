@@ -1,0 +1,9 @@
+fmt
+clippy
+test -p orch-engine --lib -- summaries::budget::
+test -p orch-engine --lib -- semantic::query_origin::
+test -p orch-engine --test resource_summaries
+test -p orch-api-core --lib -- command_admission_tests
+test -p orch-api-core --lib -- key_operations::publication::
+test -p orch-api-core --lib -- response_body::
+test -p orch-api-core --test summaries --test resource_summaries --test admin_messages --test admin_token_inventory --test document_summary_options --test kfix_schemas

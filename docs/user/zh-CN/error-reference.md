@@ -130,6 +130,7 @@ summary: Orch 显示的每个错误的含义，以及下一步该做什么。
 | `error:import.nothing` | 这里没有你可以带入这个位置的内容。请换一个来源或位置。 |
 | `error:import.invalid` | 这不是 Orch 包，也不是可以导入的文件。请检查文件后重试。 |
 | `error:import.undone` | 这次导入已被撤销，或正在撤销。 |
+| `error:summary.nothing_new` | 这里没有可供摘要的新内容，所以没有发起摘要。等有新内容写入或发出后再试。 |
 | `error:gone` | 这个链接已被使用或已过期。请索取新链接。 |
 | `error:docs.too_large` | 这样会使文档超出限制。请删除部分内容，或拆分为多份文档。 |
 | `error:share.too_large` | 这份副本超过了这里的大小限制。请减少要共享的内容。 |

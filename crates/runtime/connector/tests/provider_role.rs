@@ -1254,3 +1254,47 @@ async fn a_legacy_completion_without_ceiling_metadata_requires_explicit_reissue(
         .await;
     assert_eq!(p.model_requests().len(), 1);
 }
+
+#[tokio::test]
+async fn an_answer_that_ran_out_of_output_fails_with_the_upstreams_reason_and_what_it_used() {
+    let p = ProviderRig::new().await;
+    p.start_both_providers().await;
+    for (protocol, reason) in [(RESPONSES, "max_output_tokens"), (MESSAGES, "max_tokens")] {
+        p.mock
+            .queue("think Weighing the work\nsay A part of the summary\nincomplete\nusage 100 120 reasoning=109")
+            .unwrap();
+        let result = p
+            .rig
+            .send(
+                &p.provider_key(),
+                &ProviderComplete {
+                    model_parameters: Some(common::model::enabled_parameters()),
+                    params: None,
+                    provider_id: p.rig.provider,
+                    purpose: CompletionPurpose::Summary,
+                    protocol: protocol.to_owned(),
+                    model_name: MODEL.to_owned(),
+                    system: "Summarize".to_owned(),
+                    input: "Synthetic work".to_owned(),
+                    max_output_tokens: 120,
+                },
+            )
+            .await;
+        let Progress::Failed(error) = result else {
+            panic!("an answer cut by its output allowance is no completed answer");
+        };
+        let details = error.details.unwrap();
+        assert_eq!(
+            details["failure"]["reason"], reason,
+            "the upstream's own word, not one fixed sentence ({protocol})"
+        );
+        assert_eq!(details["failure"]["output_limit"], true);
+        let request: orch_agent_contract::requests::UsageRequest =
+            serde_json::from_value(details["model_request"].clone()).unwrap();
+        assert_eq!(
+            request.tokens.output_tokens,
+            Some(120),
+            "the tokens the cut answer used are counted ({protocol})"
+        );
+    }
+}
