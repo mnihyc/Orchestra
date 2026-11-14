@@ -218,11 +218,17 @@ pub async fn resource_identity(
 /// The existing physical machine permission subject: its Host facade when present,
 /// otherwise its personal Machine page. Keep the subject's actual identity/home;
 /// the operation separately retains Machine as its business resource family.
+///
+/// A unit that a host runs (the container of one of its providers or environments) enrols as a
+/// machine with no owner, home or page of its own: the host that runs it names it, exactly as
+/// the host names its own node. This is the one place where that rule is written for subjects;
+/// every identity, bulk subject and permission check reads it through here or through
+/// `resources::machine_permission`.
 pub async fn machine_subject(
     conn: &mut Conn,
     machine: Id,
 ) -> Result<KeyResolvedTarget, TargetError> {
-    let host = orch_db::queries::resources::hosting::host_of_machine(conn, machine).await?;
+    let host = orch_db::queries::resources::hosting::host_naming(conn, machine).await?;
     page_object(conn, machine_object(machine, host)).await
 }
 
@@ -250,7 +256,8 @@ pub async fn machine_subjects(
 }
 
 /// The same canonical physical subjects as identity facts for already-authorized native refs.
-/// Retention does not turn this into live Machine Get or private inspection authority.
+/// Retention does not turn this into live Machine Get or private inspection authority. A unit
+/// that a host runs is named by that host, as in `machine_subject`.
 pub async fn machine_identities(
     conn: &mut Conn,
     machines: &[Id],
@@ -266,12 +273,11 @@ async fn machine_targets(
     if machines.is_empty() {
         return Ok(HashMap::new());
     }
-    let facades: HashMap<_, _> =
-        orch_db::queries::resources::hosting::machine_hosts(conn, machines)
-            .await?
-            .into_iter()
-            .map(|(machine, host, _)| (machine, host))
-            .collect();
+    let facades: HashMap<_, _> = orch_db::queries::resources::hosting::hosts_naming(conn, machines)
+        .await?
+        .into_iter()
+        .map(|(machine, host, _)| (machine, host))
+        .collect();
     let subjects: Vec<_> = machines
         .iter()
         .map(|machine| {
