@@ -95,6 +95,53 @@ async fn selected_request_options_follow_every_summary_field_without_replacing_i
 }
 
 #[tokio::test]
+async fn titles_and_paragraphs_have_separate_token_allowances_independent_of_the_character_target()
+{
+    let port = Arc::new(Port {
+        text: "A bounded answer".into(),
+        requests: Mutex::new(Vec::new()),
+    });
+    let model = Model::new(port.clone());
+    model.summarize(request(SummaryField::Title)).await.unwrap();
+    let paragraph = request(SummaryField::Summary);
+    assert_eq!(paragraph.limits.max_chars, 600);
+    model.summarize(paragraph).await.unwrap();
+    {
+        let asked = port.requests.lock().unwrap();
+        assert_eq!(asked[0].max_output_tokens, 120 + 2_000);
+        assert_eq!(
+            asked[1].max_output_tokens,
+            1_024 + 2_000,
+            "a paragraph's answer does not inherit the title's short allowance"
+        );
+    }
+    let mut custom = request(SummaryField::Summary);
+    custom.config["answer_max_output_tokens"] = json!(900);
+    custom.limits.max_chars = 250;
+    model.summarize(custom).await.unwrap();
+    assert_eq!(
+        port.requests.lock().unwrap()[2].max_output_tokens,
+        900 + 2_000,
+        "token allowance and character target remain separate explicit choices"
+    );
+}
+
+#[tokio::test]
+async fn a_replaced_shared_answer_allowance_is_refused_before_any_model_call() {
+    let port = Arc::new(Port {
+        text: "Unused".into(),
+        requests: Mutex::new(Vec::new()),
+    });
+    let mut selected = request(SummaryField::Summary);
+    selected.config["max_output_tokens"] = json!(900);
+    assert!(matches!(
+        Model::new(port.clone()).summarize(selected).await,
+        Err(SummarizeError::Config(_))
+    ));
+    assert!(port.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn malformed_request_options_are_refused_before_the_completion_port() {
     let port = Arc::new(Port {
         text: "A bounded summary".to_owned(),

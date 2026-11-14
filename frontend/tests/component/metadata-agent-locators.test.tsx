@@ -8,7 +8,8 @@ import type * as Admin from '@/api/admin';
 import type * as Resources from '@/api/resources';
 import { ApiError } from '@/api/client';
 import { Agents } from '@/features/admin/Agents';
-import { AgentList, type AgentsSearch } from '@/features/resources/agents/AgentList';
+import { AgentList } from '@/features/resources/agents/AgentList';
+import type { AgentsSearch } from '@/features/resources/search';
 import { EditAgent } from '@/features/resources/agents/Edit';
 import { AgentScreen } from '@/features/resources/agents/Profile';
 import { harnessVersionWords } from '@/features/resources/agents/descriptor';
@@ -222,6 +223,8 @@ it('registers a late reported machine harness on the unchanged physical machine/
     harnesses: registry.map((kind, index) => ({ kind: kind.kind, path: `/opt/agent-${index + 1}`, version: `${index + 1}.0.0`, daemon: false })),
   } };
   const user = userEvent.setup(); draw(<RegisterAgentDialog machine={machine} open onClose={calls.close} />);
+  const name = screen.getByRole('textbox', { name: new RegExp(i18n.t('machines.agent.name')) });
+  expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],select')).toBe(name);
   const field = await screen.findByRole('combobox', { name: i18n.t('machines.agent.harness') });
   await waitFor(() => expect(calls.kinds).toHaveBeenCalledOnce());
   expect(field).toHaveAccessibleDescription(i18n.t('machines.agent.harnessHint'));

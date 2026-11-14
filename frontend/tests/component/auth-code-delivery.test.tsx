@@ -167,9 +167,9 @@ it('keeps the entered code and leaves a failed resend immediately retryable', as
   expect(resend).toBeEnabled();
   await user.click(resend);
   await waitFor(() => expect(calls.askCode).toHaveBeenCalledTimes(4));
+  expect(await screen.findByRole('button', { name: /Send another in/u })).toBeDisabled();
   expect(field).toHaveValue('already-typed');
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: /Send another in/u })).toBeDisabled();
 });
 
 it('does not return to a second step when a send completes after starting over', async () => {

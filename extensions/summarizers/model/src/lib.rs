@@ -12,4 +12,4 @@ pub mod context;
 pub mod descriptor;
 pub mod prompts;
 
-pub use completion::{Complete, Model};
+pub use completion::{Complete, Model, Reasoning};

@@ -82,7 +82,6 @@ async fn render_selected(
     .await?;
     if context.node.kind == "project" {
         for entry in &mut environments {
-            entry.is_default = false;
             let used_here =
                 orch_db::queries::binding_start::used_in_project(conn, entry.environment.id, id)
                     .await?;
@@ -95,6 +94,8 @@ async fn render_selected(
             };
         }
     }
+    let default_environment =
+        default_environment_of(conn, principal, id, &environments, &value.projection.names).await?;
     let (mut access, mut new_environment) = access_of(conn, principal, id).await?;
     bound_summary(&mut access.managed, &value.projection.names);
     bound_summary(&mut access.connected, &value.projection.names);
@@ -116,9 +117,18 @@ async fn render_selected(
     )
     .await?;
     let hosts = hosts.into_iter().map(|host| host.place).collect::<Vec<_>>();
+    let chosen_host = match value.query.host_id {
+        Some(id) => Some(id),
+        None if value.query.host_auto => None,
+        None => setting::<Id>(conn, Place::Node(id), keys::ENV_HOST_ID)
+            .await
+            .map_err(ApiError::internal)?,
+    };
     if environment.is_some_and(|row| row.id.is_nil())
         && value.can_create.allowed
-        && !hosts.iter().any(|host| host.usable)
+        && !hosts
+            .iter()
+            .any(|host| host.usable && chosen_host.is_none_or(|id| host.host.id == id))
     {
         for provider in &mut providers {
             for agent in &mut provider.agents {
@@ -227,6 +237,7 @@ async fn render_selected(
         providers,
         environments,
         environment_default: context.environment_default,
+        default_environment,
         source,
         access,
         agent_access: Some(
@@ -304,17 +315,51 @@ async fn template_ground_source(
     conn: &mut Conn,
     principal: &Principal,
     node: &hierarchy::NodeDetail,
+    chosen: Option<Id>,
 ) -> ApiResult<Option<(environments::EnvironmentRow, EnvironmentOffers, Id)>> {
-    let id = setting::<Id>(conn, Place::Node(node.id), keys::ENV_TEMPLATE_ID)
-        .await
-        .map_err(ApiError::internal)?
-        .unwrap_or(orch_db::seeds::DEFAULT_TEMPLATE_ID);
+    let id = match chosen {
+        Some(id) => id,
+        None => setting::<Id>(conn, Place::Node(node.id), keys::ENV_TEMPLATE_ID)
+            .await
+            .map_err(ApiError::internal)?
+            .unwrap_or(orch_db::seeds::DEFAULT_TEMPLATE_ID),
+    };
     let template = orch_db::queries::resources::hosting::template(conn, id)
         .await?
         .filter(|row| row.deleted_at.is_none() && row.kind == "environment");
     let Some(template) = template else {
+        if chosen.is_some() {
+            return Err(ApiError::not_found());
+        }
         return Ok(None);
     };
+    if chosen.is_some() {
+        let object = orch_access_contract::decisions::ObjectRef {
+            kind: ObjectKind::Template,
+            id,
+        };
+        let decision = resources::needs(
+            conn,
+            principal,
+            &resources::Needs {
+                required: Permission::TemplateUse,
+                anchor: object,
+                through: Some(node.id),
+                items: vec![resources::Need {
+                    object,
+                    permissions: vec![Permission::TemplateUse],
+                    options: None,
+                }],
+            },
+            Policy::default(),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+        allowed(conn, decision).await?;
+        if !template.enabled {
+            return Err(invalid("template_id", "this template is switched off"));
+        }
+    }
     let offers = EnvironmentOffers {
         offers: strings(
             template

@@ -32,7 +32,8 @@ pub(crate) use captures::Coverage;
 mod operations;
 pub(crate) use operations::{Attachment, Operation};
 
-/// Half of the existing four-MiB frame leaves room for result/event envelopes.
+/// Half of the four MiB a live frame to a browser holds leaves room for result/event envelopes. A page this
+/// size does not fit a frame of the machine's link and travels in parts, up to what a message may be.
 pub(crate) const PAGE_BYTES: usize = 2 * 1024 * 1024;
 // One existing client-frame allowance covers paths, cursors and result/status envelopes.
 const ENTRY_BYTES: usize = PAGE_BYTES - orch_realtime_contract::version::MAX_CLIENT_FRAME_BYTES;

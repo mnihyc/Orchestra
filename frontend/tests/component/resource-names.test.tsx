@@ -2,10 +2,12 @@ import { unjudgedProvenance } from '../doubles/resource-grouping';
 import type * as RouterModule from '@tanstack/react-router';
 import { resourceCardRead } from './resource-card-readers';
 /** MCP and Mounts lists share primary add controls and explain empty and unmatched lists in either language. */
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { AnchorHTMLAttributes } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { QueryClient } from '@tanstack/react-query';
+import { mcpKey, mountKey, mcpQuery, mountQuery } from '@/api/resource-tools';
 
 import type * as ClientApi from '@/api/client';
 import { ResourceNames } from '@/features/resources/ResourceNames';
@@ -13,7 +15,7 @@ import type { EverythingRow, HiddenItem, McpServer, Mount } from '@/generated/ap
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { matches } from '@/features/finder/ranking';
-import { inventoryRow } from '../doubles/everything-row';
+import { resourceInventoryRow as inventoryRow } from '../doubles/everything-row';
 import { me } from '../doubles/fixtures';
 
 import { show } from './support';
@@ -93,6 +95,77 @@ function readable(kind: 'mcp' | 'mounts'): McpServer | Mount {
     : { ...base, target: '/mnt/data', read_only: true, default_fate: 'as_is', locations: [], locations_hidden: 0, kept: [] };
 }
 
+it.each(['mcp', 'mounts'] as const)('waits for details as new as the selected %s row before mounting its editor', async (kind) => {
+  const row = readable(kind);
+  row.revision = 2;
+  row.access.permissions.push(kind === 'mcp' ? 'mcp.manage' : 'mount.manage');
+  served = [row];
+  const ordinary = read.getMockImplementation();
+  if (ordinary === undefined) throw new Error('The native list reader is required');
+  interface DetailReply { data: McpServer | Mount; response: Response }
+  let finish: ((value: DetailReply) => void) | undefined;
+  const pending = new Promise<DetailReply>((resolve) => { finish = resolve; });
+  const detailPath = kind === 'mcp' ? '/mcp-servers/{id}' : '/mounts/{id}';
+  read.mockImplementation((path, options) => path === detailPath ? pending : ordinary(path, options));
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  cache.setQueryData(kind === 'mcp' ? mcpKey(row.id) : mountKey(row.id), { ...row, revision: 1 });
+  const view = show(<ResourceNames kind={kind} />, cache);
+  const editor = kind === 'mcp' ? 'MCP editor' : 'Mount editor';
+  try {
+    const table = await screen.findByRole('table');
+    await userEvent.click(within(table).getByRole('button', { name: i18n.t('resources.act.of', { act: i18n.t('resources.act.editButton'), name: row.name }) }));
+    await waitFor(() => expect(read.mock.calls.filter(([path]) => path === detailPath)).toHaveLength(1));
+    expect(screen.queryByRole('dialog', { name: editor })).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: row.name })).toBeVisible();
+    const resolve = finish;
+    if (resolve === undefined) throw new Error('The current detail response is required');
+    await act(async () => { resolve({ data: row, response: new Response(null, { status: 200 }) }); await pending; });
+    expect(await screen.findByRole('dialog', { name: editor })).toBeVisible();
+  } finally { view.unmount(); cache.clear(); }
+});
+
+it.each(['mcp', 'mounts'] as const)('reads current %s details again when an earlier hover response finishes behind its row', async (kind) => {
+  const row = readable(kind);
+  row.revision = 2;
+  row.access.permissions.push(kind === 'mcp' ? 'mcp.manage' : 'mount.manage');
+  const older = { ...row, revision: 1 };
+  served = [row];
+  const ordinary = read.getMockImplementation();
+  if (ordinary === undefined) throw new Error('The native list reader is required');
+  interface DetailReply { data: McpServer | Mount; response: Response }
+  let finishEarlier: ((value: DetailReply) => void) | undefined;
+  let finishCurrent: ((value: DetailReply) => void) | undefined;
+  const earlier = new Promise<DetailReply>((resolve) => { finishEarlier = resolve; });
+  const current = new Promise<DetailReply>((resolve) => { finishCurrent = resolve; });
+  const detailPath = kind === 'mcp' ? '/mcp-servers/{id}' : '/mounts/{id}';
+  let requests = 0;
+  read.mockImplementation((path, options) => {
+    if (path !== detailPath) return ordinary(path, options);
+    requests += 1;
+    return requests === 1 ? earlier : current;
+  });
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  cache.setQueryData(kind === 'mcp' ? mcpKey(row.id) : mountKey(row.id), older);
+  const prefetched = (kind === 'mcp'
+    ? cache.query({ queryKey: mcpKey(row.id), queryFn: mcpQuery(row.id).queryFn, staleTime: 0 })
+    : cache.query({ queryKey: mountKey(row.id), queryFn: mountQuery(row.id).queryFn, staleTime: 0 })).catch(() => undefined);
+  const view = show(<ResourceNames kind={kind} />, cache);
+  const editor = kind === 'mcp' ? 'MCP editor' : 'Mount editor';
+  try {
+    const table = await screen.findByRole('table');
+    await userEvent.click(within(table).getByRole('button', { name: i18n.t('resources.act.of', { act: i18n.t('resources.act.editButton'), name: row.name }) }));
+    expect(screen.queryByRole('dialog', { name: editor })).not.toBeInTheDocument();
+    const resolveEarlier = finishEarlier, resolveCurrent = finishCurrent;
+    if (resolveEarlier === undefined || resolveCurrent === undefined) throw new Error('Both native detail responses are required');
+    await act(async () => { resolveEarlier({ data: older, response: new Response(null, { status: 200 }) }); await prefetched; });
+    await waitFor(() => expect(read.mock.calls.filter(([path]) => path === detailPath)).toHaveLength(2));
+    expect(screen.queryByRole('dialog', { name: editor })).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: row.name })).toBeVisible();
+    await act(async () => { resolveCurrent({ data: row, response: new Response(null, { status: 200 }) }); await current; });
+    expect(await screen.findByRole('dialog', { name: editor })).toBeVisible();
+  } finally { view.unmount(); cache.clear(); }
+});
+
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) it(`keeps mount names and Edit usable beside a compact Where value (${locale}/${theme})`, async () => {
   const appearance = useAppearance.getState(), wasDark = document.documentElement.classList.contains('dark'), previousTheme = document.documentElement.dataset.theme;
   try {
@@ -139,8 +212,9 @@ for (const words of CASES) describe(`QS-033 ${words.kind} (${words.language})`, 
     served = [row]; show(<ResourceNames kind={words.kind} />);
     const table = await screen.findByRole('table');
     const edit = within(table).getByRole('button', { name: i18n.t('resources.act.of', { act: i18n.t('resources.act.editButton'), name: row.name }) });
+    expect(read.mock.calls.map(([path]) => path)).toEqual(['/everything']);
     expect(edit).toBeVisible(); await userEvent.click(edit);
-    expect(screen.getByRole('dialog', { name: words.kind === 'mcp' ? 'MCP editor' : 'Mount editor' })).toBeVisible();
+    expect(await screen.findByRole('dialog', { name: words.kind === 'mcp' ? 'MCP editor' : 'Mount editor' })).toBeVisible();
   });
 
   it('names the empty list, offers one primary add action with a sign and opens its editor by keyboard', async () => {
@@ -180,7 +254,7 @@ for (const words of CASES) describe(`QS-033 ${words.kind} (${words.language})`, 
       await waitFor(() => expect(create).toHaveFocus());
       await user.keyboard('{Enter}');
     }
-    expect(screen.getByRole('dialog', { name: words.kind === 'mcp' ? 'MCP editor' : 'Mount editor' })).toBeVisible();
+    expect(await screen.findByRole('dialog', { name: words.kind === 'mcp' ? 'MCP editor' : 'Mount editor' })).toBeVisible();
   });
 
   it('keeps retired hidden references out of readable rows and distinguishes no matches from an empty list', async () => {

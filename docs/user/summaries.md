@@ -41,6 +41,13 @@ If a refresh acknowledgement is lost, retrying **Refresh summary** continues
 that pending request. After an acknowledgement, **Try again** on a failed
 read only reloads the summary; a later deliberate refresh is a new request.
 
+If its source changes before the first model call, Orch reads it again and rebuilds
+the prompt without charge. **Summary read repeats** defaults to three repeats;
+zero makes no repeat. Content that keeps moving says so. If the source changes
+during a model call, its answer is not published as current and no second call is
+made automatically. The box keeps any previous paragraph out of date, explains the
+change and offers **Summarize again**.
+
 For a personal refresh, an automatic summarizer need not be configured. Orch uses
 an allowed API model under your current access, allowlists and summary caps,
 without enabling automation. If no model is usable, the box gives its reason.
@@ -53,6 +60,19 @@ enabled. Automatic summaries use their summarizer setting's writer and count
 under shared caps. Size and interval values are defaults, not spending caps;
 locks above the place still apply. Call recovery follows the configured call
 rules for summaries.
+
+To choose the summarizer, press the pencil of **Summarizer** in the place's settings,
+choose **A model**, then a provider you can use and one of its enabled models.
+**Answer tokens** and **Context tokens** show the built-in counts until you set
+your own; **Request options** and **Instructions per field** open only when you need
+them. Orch says beside the field when the provider or the model cannot be used.
+**None here** takes this place's choice away, so the place above applies again, and
+**Edit as JSON** shows the raw value.
+
+Each row of **Summary targets** has an **Automatic** switch. While it is on, **When**,
+**At most every**, **Reads up to** and **Writes up to** show their defaults until you set
+your own. **Save** writes the whole value once and **Discard** puts the saved one back;
+pressing another switch or a filter never saves it or takes it off the page.
 
 Without an explicit interval, threads use 120 seconds, topics 900 seconds,
 documents 300 seconds, and chats and chat titles 300 seconds. Topic changes
@@ -87,6 +107,20 @@ override it. You may raise it within the model's available window after
 reserving its output; the instruction and framing also use input space.
 This is a planning estimate. Usage still shows what the model actually used.
 
+Answer allowances use **tokens**, separately from a target's **output characters**.
+The model summarizer starts with `answer_max_output_tokens` at 1,024 for paragraphs,
+descriptions, tags and handoffs; `title_max_output_tokens` at 120 for titles;
+and `goal_max_output_tokens` at 512 for a goal verdict and its reason. Each is
+configurable under **Summarizer**. Target characters still start at 600 for a
+paragraph and 80 for a title. They guide the returned text, not the model's
+reasoning allowance or actual billed use.
+
+`reasoning_tokens` leaves another 2,000 tokens by default when reasoning is
+known or unrecorded. Disabled tuning controls do not imply that an upstream
+model does no reasoning. An explicit report without thinking support removes
+that reserve; permitted effort choices remain separate. Zero reasoning tokens
+leaves no extra room.
+
 Recent eligible items come first. Short items stay whole; long items share
 the remaining space fairly, keeping useful detail before adding older items.
 The prompt reads oldest to newest. Unchanged items keep their cuts between
@@ -102,6 +136,10 @@ does not itself request paid work.
 **Catch up** covers the unread message range captured when you opened the
 chat. Refreshing that catch-up keeps the same range; it does not advance your
 read position. Another person's unread position does not become yours.
+
+When the range is empty, the box says there is nothing new and no paid request
+is created. An explicitly selected nonempty range can still be summarized
+after those messages have been marked read.
 
 **Chat title** is separate and uses the chat's bounded current text. A written
 group name stays in place. Automatic titles do not replace it. Private groups
