@@ -38,6 +38,17 @@ format could not be matched. The action keeps its reported query, page and raw
 source, and an otherwise completed text turn stays completed. Open **Full output**
 under the action's raw view to inspect its native result and reported results.
 
+A Codex web action closes when the program reports that action's end, even while
+the answer continues. Missing usage evidence adds an unverified notice and leaves
+the reported result intact. A retained result that proves failure marks the action
+failed. Usage remains unknown until the result is proved.
+
+**Web action wait** (`agents.web_action_wait_secs`) closes a native action that
+has not reported its end, with a notice explaining the wait. It starts at 120
+seconds, can be changed in the place's settings, and applies when the session
+opens again. This closes the action's row while the turn continues; a later result
+can still update that row. An action closed this way supplies no usage count.
+
 
 In **Usage → Requests**, **Native capability usage** identifies these aggregate
 quantities and links to their original turn. They add no model request, token

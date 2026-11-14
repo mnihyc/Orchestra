@@ -1,0 +1,13 @@
+fmt
+clippy
+contracts
+test -p orch-adapter-codex --lib
+test -p orch-adapter-codex --test fake --test performance
+test -p orch-engine --lib
+test -p orch-engine --test turns
+test -p orch-agent-contract --lib
+test -p orch-link-contract --lib
+test -p orch-settings-contract --lib
+web typecheck
+web lint
+web test -- tests/unit/api-error-words.test.ts

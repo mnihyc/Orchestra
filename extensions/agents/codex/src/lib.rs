@@ -1009,6 +1009,7 @@ impl CodexAdapter {
             directory: settings.directory.clone(),
         })
         .with_native_web_results(true)
+        .with_web_action_wait(Duration::from_secs(settings.web_action_wait_secs))
         .with_external_images(
             spec.exec.executor.is_some()
                 || settings.arrangement

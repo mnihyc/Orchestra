@@ -1,11 +1,11 @@
 //! Standalone native web actions are proved by their exact retained function result, not end events.
-use crate::events::{OutputStore, TITLE_MAX_CHARS};
+use crate::events::OutputStore;
 use crate::viewed_images::Key;
 use orch_agent_contract::events::{
-    ErrorPayload, ItemCompleted, ItemContent, ItemStarted, ItemStatus, OutputRef, RawCall,
-    SessionEvent, ToolCallPayload, ToolPayload,
+    ErrorPayload, ItemCompleted, ItemContent, ItemStarted, ItemStatus, OutputRef, SessionEvent,
+    ToolCallPayload, ToolPayload,
 };
-use orch_types::{Hash, Id, Json, Time};
+use orch_types::{Hash, Id, Json};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -193,8 +193,6 @@ pub(crate) struct Pending {
     pub snapshot: Option<Hash>,
     pub turn: Id,
     pub stream: String,
-    pub at: Time,
-    pub title: String,
     pub model: Option<String>,
     pub capability: Option<&'static str>,
     pub unproven: Option<&'static str>,
@@ -233,8 +231,6 @@ impl Pending {
             snapshot,
             turn,
             stream: stream.into(),
-            at: call.started_at,
-            title: call.title.chars().take(TITLE_MAX_CHARS).collect(),
             model,
             capability,
             unproven: None,
@@ -274,41 +270,13 @@ pub(crate) fn finish(
             let call = serde_json::from_value::<ToolCallPayload>(item.payload.clone()).ok()?;
             Some((item, call))
         });
-    let (mut item, mut call) = match parsed {
-        Some((item, call)) => {
-            if item.status != ItemStatus::Completed && outcome == Outcome::Success {
-                outcome = Outcome::Unproven("native_web_sources_disagree");
-            }
-            (item, call)
+    if let Some((item, _)) = &parsed {
+        if item.status != ItemStatus::Completed && outcome == Outcome::Success {
+            outcome = Outcome::Unproven("native_web_sources_disagree");
         }
-        None => {
-            outcome = Outcome::Unproven("native_web_metadata_unavailable");
-            (
-                ItemCompleted {
-                    native_ref: key.call.clone(),
-                    status: ItemStatus::Failed,
-                    payload: Json::Null,
-                    output_blob: None,
-                },
-                ToolCallPayload {
-                    title: pending.title.clone(),
-                    started_at: pending.at,
-                    duration_ms: None,
-                    tool: ToolPayload::Other {
-                        name: "webSearch".into(),
-                        arguments: None,
-                        result: None,
-                    },
-                    raw: RawCall {
-                        name: "webSearch".into(),
-                        input: OutputRef::of("{}"),
-                        output: None,
-                        is_error: true,
-                    },
-                },
-            )
-        }
-    };
+    } else {
+        outcome = Outcome::Unproven("native_web_metadata_unavailable");
+    }
     if outcome == Outcome::Success
         && pending.capability.is_some()
         && pending.model.is_none()
@@ -316,17 +284,25 @@ pub(crate) fn finish(
     {
         outcome = Outcome::Unproven("native_web_model_unreported");
     }
-    if proof.output.is_some() {
-        call.raw.output = proof.output.clone();
+    let mut events = Vec::new();
+    if let Some((mut item, mut call)) = parsed {
+        if proof.output.is_some() {
+            call.raw.output = proof.output.clone();
+        }
+        match outcome {
+            Outcome::Success => {
+                item.status = ItemStatus::Completed;
+                call.raw.is_error = false;
+            }
+            Outcome::Failed => {
+                item.status = ItemStatus::Failed;
+                call.raw.is_error = true;
+            }
+            Outcome::Unproven(_) => {}
+        }
+        item.payload = serde_json::to_value(call).unwrap_or(Json::Null);
+        events.push(SessionEvent::ItemCompleted(item));
     }
-    call.raw.is_error = outcome != Outcome::Success;
-    item.status = if outcome == Outcome::Success {
-        ItemStatus::Completed
-    } else {
-        ItemStatus::Failed
-    };
-    item.payload = serde_json::to_value(call).unwrap_or(Json::Null);
-    let mut events = vec![SessionEvent::ItemCompleted(item)];
     let (count, notice) = match outcome {
         Outcome::Success => (Some(1), None),
         Outcome::Failed => (
@@ -378,6 +354,8 @@ pub(crate) fn finish(
 mod tests {
     use super::*;
     use crate::native_history::ResultItem;
+    use orch_agent_contract::events::RawCall;
+    use orch_types::Time;
     fn result(output: Json) -> Result<ResultItem, &'static str> {
         Ok(ResultItem {
             payload: json!({"type":"function_call_output","call_id":"call","output":output}),

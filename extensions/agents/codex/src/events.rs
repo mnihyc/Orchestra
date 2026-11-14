@@ -530,6 +530,8 @@ struct OpenItem {
     call: Option<ToolCallPayload>,
     native_model: Option<String>,
     native_source: Option<(String, String)>,
+    web_wait_started: Option<Time>,
+    web_wait_expired: bool,
 }
 
 impl OpenItem {
@@ -550,6 +552,8 @@ impl OpenItem {
             call: None,
             native_model: None,
             native_source: None,
+            web_wait_started: None,
+            web_wait_expired: false,
         }
     }
 }
@@ -608,6 +612,7 @@ pub struct Mapper {
     prepared_views: BTreeMap<crate::viewed_images::Key, crate::viewed_images::Prepared>,
     native_web_results: bool,
     native_web_counts: bool,
+    web_action_wait: std::time::Duration,
     pending_web: BTreeMap<crate::viewed_images::Key, crate::native_web::Pending>,
     prepared_web: BTreeMap<crate::viewed_images::Key, crate::native_web::Proof>,
     child_models: HashMap<String, String>,
@@ -721,6 +726,7 @@ impl Mapper {
             prepared_views: BTreeMap::new(),
             native_web_results: false,
             native_web_counts: false,
+            web_action_wait: std::time::Duration::from_secs(120),
             pending_web: BTreeMap::new(),
             prepared_web: BTreeMap::new(),
             child_models: HashMap::new(),
@@ -773,6 +779,65 @@ impl Mapper {
             .filter(|(key, _)| key.native_thread == native && key.native_turn == turn)
             .map(|(key, pending)| (key.clone(), pending.snapshot))
             .collect()
+    }
+    pub(crate) fn with_web_action_wait(mut self, wait: std::time::Duration) -> Self {
+        self.web_action_wait = wait;
+        self
+    }
+
+    /// The runtime timer calls this even when the program sends no more notifications.
+    pub(crate) fn expire_silent_web_actions(&mut self, now: Time) -> Vec<SessionEvent> {
+        let mut events = Vec::new();
+        for (id, open) in &mut self.items {
+            let Some(since) = open.web_wait_started else {
+                continue;
+            };
+            if open.web_wait_expired
+                || (now.get() - since.get()).to_std().unwrap_or_default() < self.web_action_wait
+            {
+                continue;
+            }
+            let Some(mut call) = open.call.clone() else {
+                continue;
+            };
+            open.web_wait_expired = true;
+            call.duration_ms = Some((now.unix_millis() - open.started_at.unix_millis()).max(0));
+            call.raw.is_error = true;
+            let wait_secs = self.web_action_wait.as_secs();
+            let message = format!(
+                "Codex did not report the end of this web action within {wait_secs} seconds. A later result can still update it."
+            );
+            call.raw.output = Some(OutputRef::of(&message));
+            events.push(SessionEvent::ItemCompleted(ItemCompleted {
+                native_ref: id.clone(),
+                status: ItemStatus::Failed,
+                payload: serde_json::to_value(call).unwrap_or(Json::Null),
+                output_blob: None,
+            }));
+            let error = ErrorPayload {
+                code: "native_web_no_end".into(),
+                message,
+                retryable: false,
+                details: Some(json!({"reason":"native_web_no_end","wait_secs":wait_secs})),
+                window: None,
+                resets_at: None,
+            };
+            let reference = format!("web-wait-notice:{id}");
+            events.push(started_event(
+                open.turn_id,
+                &reference,
+                &open.stream,
+                Some(id.clone()),
+                ItemContent::Error(error.clone()),
+            ));
+            events.push(SessionEvent::ItemCompleted(ItemCompleted {
+                native_ref: reference,
+                status: ItemStatus::Failed,
+                payload: serde_json::to_value(error).unwrap_or(Json::Null),
+                output_blob: None,
+            }));
+        }
+        events
     }
     pub(crate) fn install_web_results(
         &mut self,
@@ -2227,6 +2292,9 @@ impl Mapper {
         let Some(mut item) = self.items.remove(id) else {
             return;
         };
+        if item.web_wait_expired {
+            return;
+        }
         if self.pending_starts.remove(id).is_some() {
             return;
         }
@@ -2498,6 +2566,9 @@ impl Mapper {
                         .map(|turn| turn.id);
                 }
                 open.call = Some(call.clone());
+                if kind == "webSearch" {
+                    open.web_wait_started = Some(ctx.clock.time());
+                }
                 if matches!(kind, "webSearch" | "imageGeneration") {
                     let native_turn = text(params, "turnId");
                     if !native_turn.is_empty() {
@@ -2814,6 +2885,7 @@ impl Mapper {
                     output_blob: blob,
                 };
                 if kind == "webSearch" && image_origin_known && self.native_web_results {
+                    out.push(SessionEvent::ItemCompleted(completed.clone()));
                     let source = open.native_source.as_ref();
                     let key = crate::viewed_images::Key {
                         native_thread: source.map_or(thread, |(native, _)| native).into(),
@@ -7850,6 +7922,137 @@ mod tests {
             .collect()
     }
     #[test]
+    fn a_silent_web_action_closes_once_with_its_reason_and_a_late_result_can_still_finish_it() {
+        let mut rig = Rig::new();
+        rig.mapper = rig
+            .mapper
+            .with_native_web_results(true)
+            .with_web_action_wait(std::time::Duration::from_secs(3));
+        rig.begin();
+        rig.item_started(
+            json!({"type":"webSearch","id":"silent","action":{"type":"search","query":"question"}}),
+        );
+        rig.item_started(json!({"type":"commandExecution","id":"still-running","command":"work"}));
+        rig.clock.advance(chrono::Duration::seconds(2));
+        assert!(
+            rig.mapper
+                .expire_silent_web_actions(rig.clock.time())
+                .is_empty()
+        );
+        rig.clock.advance(chrono::Duration::seconds(1));
+        let expired = rig.mapper.expire_silent_web_actions(rig.clock.time());
+        assert!(
+            expired
+                .iter()
+                .any(|event| matches!(event, SessionEvent::ItemCompleted(item)
+            if item.native_ref == "silent" && item.status == ItemStatus::Failed
+                && item.payload["raw"]["is_error"] == true))
+        );
+        assert!(expired.iter().any(|event| matches!(event, SessionEvent::ItemStarted(item)
+            if item.turn_id == id(9) && item.parent_native_ref.as_deref() == Some("silent")
+                && matches!(&item.content, ItemContent::Error(error)
+                    if error.code == "native_web_no_end" && error.details.as_ref().unwrap()["wait_secs"] == 3))));
+        assert!(web_counts(&expired).is_empty());
+        assert!(rig.mapper.turn_in_progress());
+        assert!(rig.mapper.items.contains_key("still-running"));
+        assert!(
+            rig.mapper
+                .expire_silent_web_actions(rig.clock.time())
+                .is_empty()
+        );
+        let late = rig.item_completed(
+            json!({"type":"webSearch","id":"silent","action":{"type":"search","query":"question"}}),
+        );
+        assert!(
+            late.iter()
+                .any(|event| matches!(event, SessionEvent::ItemCompleted(item)
+            if item.native_ref == "silent" && item.status == ItemStatus::Completed
+                && item.payload["raw"]["is_error"] == false))
+        );
+        let mut source = native_native_source(
+            &rig,
+            TURN,
+            Some("source-model"),
+            &[("silent", json!([{"type":"input_text","text":"returned"}]))],
+        );
+        assert_eq!(
+            web_counts(&prove_web(&mut rig, &mut source)),
+            BTreeMap::from([(("source-model".into(), "web_search".into()), 1)])
+        );
+    }
+
+    #[test]
+    fn a_turn_ending_does_not_erase_a_silent_web_actions_failure() {
+        let mut rig = Rig::new();
+        rig.mapper = rig
+            .mapper
+            .with_web_action_wait(std::time::Duration::from_secs(1));
+        rig.begin();
+        rig.item_started(json!({"type":"webSearch","id":"silent","action":{"type":"other"}}));
+        rig.clock.advance(chrono::Duration::seconds(1));
+        assert!(
+            !rig.mapper
+                .expire_silent_web_actions(rig.clock.time())
+                .is_empty()
+        );
+        let ended = rig.end("completed", Json::Null);
+        assert!(!ended.iter().any(|event| matches!(event, SessionEvent::ItemCompleted(item) if item.native_ref == "silent")));
+        assert!(rig.mapper.items.is_empty());
+    }
+
+    #[test]
+    fn a_web_action_finishes_at_its_own_end_and_missing_proof_does_not_turn_it_into_a_failure() {
+        let mut rig = Rig::new();
+        rig.mapper = rig.mapper.with_native_web_results(true);
+        rig.begin();
+        rig.item_started(json!({"type":"webSearch","id":"hosted","action":{"type":"other"}}));
+        let ended = rig.item_completed(json!({"type":"webSearch","id":"hosted","action":{"type":"search","query":"a current announcement"}}));
+        let completed = ended
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::ItemCompleted(item) if item.native_ref == "hosted" => Some(item),
+                _ => None,
+            })
+            .expect("the program's end closes the action before the turn ends");
+        assert_eq!(completed.status, ItemStatus::Completed);
+        assert_eq!(completed.payload["tool"]["query"], "a current announcement");
+        assert_eq!(completed.payload["raw"]["is_error"], false);
+        assert!(rig.mapper.turn_in_progress());
+        assert!(web_counts(&ended).is_empty());
+
+        let mut source = native_native_source(&rig, TURN, Some("source-model"), &[]);
+        let checked = prove_web(&mut rig, &mut source);
+        assert!(web_counts(&checked).is_empty());
+        assert!(checked.iter().any(|event| matches!(event,
+            SessionEvent::ItemCompleted(item) if item.payload["code"] == "native_web_action_unproven"
+                && item.payload["details"]["reason"] == "native_result_not_found")));
+        assert!(!checked.iter().any(|event| matches!(event,
+            SessionEvent::ItemCompleted(item) if item.native_ref == "hosted"
+                && (item.status != ItemStatus::Completed || item.payload["raw"]["is_error"] != false))));
+        assert!(!checked.iter().any(|event| matches!(event,
+            SessionEvent::ItemCompleted(item) if item.payload["code"] == "native_web_action_failed")));
+    }
+
+    #[test]
+    fn a_web_action_keeps_its_reported_failure_or_cancellation_without_waiting_for_the_turn() {
+        for (native, status) in [
+            ("failed", ItemStatus::Failed),
+            ("interrupted", ItemStatus::Cancelled),
+        ] {
+            let mut rig = Rig::new();
+            rig.mapper = rig.mapper.with_native_web_results(true);
+            rig.begin();
+            let ended = rig.item_completed(json!({"type":"webSearch","id":"call","status":native,"action":{"type":"search","query":"question"}}));
+            assert!(ended.iter().any(|event| matches!(event,
+                SessionEvent::ItemCompleted(item) if item.native_ref == "call" && item.status == status)));
+            let mut source = native_native_source(&rig, TURN, Some("source-model"), &[]);
+            let checked = prove_web(&mut rig, &mut source);
+            assert!(!checked.iter().any(|event| matches!(event,
+                SessionEvent::ItemCompleted(item) if item.native_ref == "call" && item.status != status)));
+        }
+    }
+
+    #[test]
     fn native_web_counts_only_proven_successes_and_page_actions_keep_their_own_counter() {
         let mut rig = Rig::new();
         rig.mapper = rig.mapper.with_native_web_results(true);
@@ -7869,7 +8072,8 @@ mod tests {
         ];
         for (id, action) in &actions {
             let ended=rig.item_completed(json!({"type":"webSearch","id":id,"query":"native detail","action":action,"results":[]}));
-            assert!(!ended.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.native_ref==*id)),"an end is not success proof");
+            assert!(ended.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.native_ref==*id && item.status == ItemStatus::Completed)),"the program's end closes the row independently of usage proof");
+            assert!(web_counts(&ended).is_empty(), "an end is not usage proof");
         }
         assert!(
             rig.item_completed(
@@ -7901,9 +8105,8 @@ mod tests {
         for id in ["search", "open", "find"] {
             assert!(events.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.native_ref==id&&item.status==ItemStatus::Completed)));
         }
-        for id in ["failed", "missing"] {
-            assert!(events.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.native_ref==id&&item.status==ItemStatus::Failed)));
-        }
+        assert!(events.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.native_ref=="failed"&&item.status==ItemStatus::Failed)));
+        assert!(events.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.native_ref=="missing"&&item.status==ItemStatus::Completed)));
         for code in ["native_web_action_failed", "native_web_action_unproven"] {
             assert!(events.iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.payload["code"]==code)));
         }

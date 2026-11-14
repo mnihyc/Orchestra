@@ -74,6 +74,8 @@ pub struct SessionConfiguration {
     pub prompt_cache_ttl: Option<orch_agent_contract::session::PromptCacheTtl>,
     /// The background completion preference accepted when the session opened.
     pub background_wake: bool,
+    /// The native web action wait accepted when the session opened.
+    pub web_action_wait_secs: u64,
     /// Native image generation accepted when the session opened.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_generation: Option<bool>,
@@ -97,6 +99,7 @@ impl From<&orch_link_contract::commands::SessionOpen> for SessionConfiguration {
             cwd: open.cwd.clone(),
             prompt_cache_ttl: open.prompt_cache_ttl,
             background_wake: open.background_wake,
+            web_action_wait_secs: open.web_action_wait_secs,
             image_generation: open.image_generation,
             native_configuration: open
                 .native_model
@@ -1682,6 +1685,7 @@ mod tests {
             cwd: "/workspace/child".into(),
             prompt_cache_ttl: None,
             background_wake: true,
+            web_action_wait_secs: 120,
             image_generation: None,
             native_configuration: Default::default(),
             model_details: None,

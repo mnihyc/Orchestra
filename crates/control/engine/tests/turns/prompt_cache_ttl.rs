@@ -4,6 +4,35 @@ use orch_agent_contract::session::PromptCacheTtl;
 use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_web_actions_wait_is_inherited_without_a_hard_upper_limit() {
+    let world = World::new().await;
+    for (chosen, expected) in [(None, 120), (Some(3600), 3600)] {
+        if let Some(chosen) = chosen {
+            world
+                .set(world.project, "agents.web_action_wait_secs", json!(chosen))
+                .await;
+        }
+        let thread = world.thread("Web action wait").await;
+        world
+            .engine()
+            .submit_input(&Caller::session(world.ada), thread, queued("Start"))
+            .await
+            .unwrap();
+        let _ = world.turn_start(thread, 0).await;
+        let open = world
+            .seen
+            .of_kind(CommandKind::SessionOpen)
+            .into_iter()
+            .find_map(|command| match command {
+                Command::SessionOpen(open) if open.thread_id == thread => Some(open),
+                _ => None,
+            })
+            .expect("the actual session open command");
+        assert_eq!(open.web_action_wait_secs, expected);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_session_open_carries_each_explicit_cache_lifetime_and_omits_unset_or_unsupported_values()
  {
     for (supported, ttl) in [
