@@ -989,6 +989,28 @@ mod tests {
     }
 
     #[test]
+    fn a_models_live_web_search_cannot_join_the_tools_a_caller_declared_but_a_disabled_one_leaves_them()
+     {
+        let protocol = orch_protocol_openai_responses::OpenAiResponses;
+        let mut request = request();
+        request.protocol = "openai-responses".into();
+        request.model_parameters.web_search = Some(vec!["live".into()]);
+        request.model_parameters.default_web_search = Some("live".into());
+        request.params = Some(json!({"web_search":{"mode":"live"}}));
+        assert!(
+            build_generation(&protocol, &EndpointOptions::default(), &request).is_err(),
+            "a selected hosted search would add a tool the caller did not declare"
+        );
+        request.params = Some(json!({"web_search":{"mode":"disabled"}}));
+        let (_, _, body) =
+            build_generation(&protocol, &EndpointOptions::default(), &request).unwrap();
+        let body: Json = serde_json::from_slice(&body).unwrap();
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1, "only the declared read tool: {tools:?}");
+        assert!(tools.iter().all(|tool| tool["type"] != "web_search"));
+    }
+
+    #[test]
     fn generation_uses_the_endpoints_output_field_and_final_request_options() {
         for field in [
             OutputLimitField::MaxTokens,

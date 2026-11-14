@@ -190,6 +190,18 @@ impl Use {
             .any(|allowance| options::entry_allows(&allowance.provider, wanted))
     }
 
+    /// Whether one complete allowance permits the specified use without borrowing limits from another.
+    #[must_use]
+    pub fn allows_for(
+        &self,
+        wanted: &options::Wanted<'_>,
+        purpose: orch_access_contract::permissions::ProviderUsePurpose,
+    ) -> bool {
+        self.each
+            .iter()
+            .any(|allowance| options::entry_allows_for(&allowance.provider, wanted, purpose))
+    }
+
     /// The entry a turn that `allowing` allow is put down to: the nearest of them, and for a use
     /// that no entry narrows the entry that `entry` names.
     #[must_use]

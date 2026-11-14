@@ -1,0 +1,12 @@
+fmt
+clippy
+contracts
+test -p orch-access-contract --lib
+test -p orch-authz --lib
+test -p orch-authz --test depends --test resource_pages
+test -p orch-api-base --lib
+test -p orch-engine --lib -- ask::
+test -p orch-api-core --test ask --test settings --test thread_access
+web typecheck
+web lint
+web test -- tests/component/settings-required-members.test.tsx tests/component/managed-provider-settings.test.tsx tests/component/access-where-field.test.tsx tests/unit/entry-beyond-words.test.ts tests/unit/help-summaries.test.ts
