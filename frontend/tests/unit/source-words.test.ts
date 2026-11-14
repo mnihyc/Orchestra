@@ -27,6 +27,15 @@ it.each(['en', 'zh-CN'] as const)('uses catalogue sentences for every recording 
   } finally { await setLocale('en'); }
 });
 
+it.each(['en', 'zh-CN'] as const)('explains a source timeout without inventing a competing task or failed phase in %s', async (locale) => {
+  await setLocale(locale);
+  try {
+    expect(sourceFailure(i18n.t, 'timeout')).toBe(locale === 'en'
+      ? "Source preparation did not finish in time. Review the job's progress, then choose Prepare again."
+      : '源准备未能及时完成。查看任务进度，然后选择“重新准备”。');
+  } finally { await setLocale('en'); }
+});
+
 const DIFF = ['diff --git a/src/login.ts b/src/login.ts', '--- a/src/login.ts', '+++ b/src/login.ts', '@@ -10,3 +10,4 @@ export function login()', ' const user = find();', '-if (!user) return;', '+if (!user) {', '+  throw new Error("no user");', ' }', '@@ -40 +41 @@', '-old', '+new'].join('\n');
 
 function snapshot(change: Partial<Snapshot> = {}): Snapshot {

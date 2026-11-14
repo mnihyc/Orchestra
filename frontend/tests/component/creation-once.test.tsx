@@ -4,7 +4,7 @@ import type * as OrgState from '@/shell/org';
 import type * as OrgOverviewModule from '@/api/orgOverview';
 import type * as FirstStepsModule from '@/api/firstSteps';
 import type * as UsageBoardModule from '@/features/usage/Board';
-import { screen, within } from '@testing-library/react';
+import { fireEvent, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Box } from 'lucide-react';
 import type { ReactNode } from 'react';
@@ -17,6 +17,8 @@ import { placeOfNode } from '@/features/navigation/places';
 import { OrgHome } from '@/features/org/Home';
 import { Project as ProjectPage } from '@/features/project/Project';
 import { ResourceListFrame } from '@/features/resources/ResourceList';
+import { treeNode } from '../doubles/tree-node';
+import { TopicThreads } from '@/features/topic/Threads';
 import { TopicOverview } from '@/features/topic/Overview';
 import type { Org, Project, Topic, TreeNode } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
@@ -115,7 +117,7 @@ const previousTheme = document.documentElement.dataset.theme;
 const wasDark = document.documentElement.classList.contains('dark');
 beforeEach(() => { vi.clearAllMocks(); root = makeOrg(); projectData = project; children = []; nodes = new Map(); });
 afterEach(async () => {
-  useAppearance.setState(appearance);
+  vi.restoreAllMocks(); useAppearance.setState(appearance);
   document.documentElement.classList.toggle('dark', wasDark);
   if (previousTheme === undefined) delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = previousTheme;
@@ -306,3 +308,22 @@ for (const [locale, theme] of modes) {
     expect(calls.dialog).toHaveBeenCalledExactlyOnceWith({ type: 'new-org' });
   });
 }
+
+
+for (const surface of ['overview', 'threads'] as const) it(`finds a late topic thread without drawing every row on ${surface}`, () => {
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) { return this.tagName === 'TR' ? 72 : 384; });
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(600);
+  nodes = new Map(Array.from({ length: 1_200 }, (_, index) => {
+    const row = treeNode({ id: `long-thread-${index}`, kind: 'thread', parent_id: topic.id, name: `Thread ${index}`, tree_seq: index });
+    return [row.id, row];
+  }));
+  show(surface === 'overview' ? <TopicOverview topic={topic} place={placeOfNode(topic)} />
+    : <TopicThreads orgId={topic.org_id} topicId={topic.id} topic={placeOfNode(topic)} allowed owner={topic.owner} />);
+  const table = screen.getByRole('table', { name: i18n.t('places.topic.threads') });
+  expect(table).toHaveAttribute('aria-rowcount', '1201');
+  expect(within(table).getAllByRole('row').length).toBeLessThan(30);
+  fireEvent.change(screen.getByRole('searchbox', { name: i18n.t('places.topic.findThreads') }), { target: { value: 'Thread 1199' } });
+  const matched = screen.getByRole('table', { name: i18n.t('places.topic.threads') });
+  expect(within(matched).queryByRole('link', { name: 'Thread 0' })).not.toBeInTheDocument();
+  expect(matched).toHaveTextContent('Thread 1199');
+});

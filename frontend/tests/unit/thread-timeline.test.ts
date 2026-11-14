@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { Item, Thread, ThreadInput, Turn } from '@/generated/api-types';
 import type { SendingInput } from '@/features/composer/Draft';
 import { buildRows, foldsByDepth, queuedInputs, recentTurns, type Row, type RowOptions, sendingInTray } from '@/features/timeline/rows';
+import { hiddenConversationItems } from '@/features/timeline/rowKinds';
 import { defaultThreadRead, newThreadReadScope } from '@/realtime/threadScope';
 import { A, B, projection } from './continuation-fixtures';
 import { applyRows, EMPTY_VIEW, type ThreadView, viewFromRows } from '@/realtime/stores/thread';
@@ -32,6 +33,40 @@ function viewOf(items: Item[], turns: Turn[] = [], inputs: ThreadInput[] = [], m
 const options = (more: Partial<RowOptions> = {}): RowOptions => ({ detail: 'steps', hideHistory: false, foldOpened: new Set(), meId: null, ...more });
 
 const kinds = (rows: Row[]): string[] => rows.map((row) => row.kind);
+
+it.each([false, true])('keeps equal progress reports around separate tool steps (diagnostics=%s)', (diagnostics) => {
+  const view = viewOf([
+    agentMessage('first-report', 'Running tests now', { turn: 'reports', phase: 'commentary' }),
+    command('first-check', { command: 'run unit checks', turn: 'reports' }),
+    agentMessage('second-report', 'Running tests now', { turn: 'reports', phase: 'commentary' }),
+    command('second-check', { command: 'run integration checks', turn: 'reports' }),
+    agentMessage('reports-answer', 'Both checks passed', { turn: 'reports' }),
+  ], [turn('reports', { ordinal: 1, state: 'completed', inputId: 'reports-input' })]);
+  const drawn = buildRows(view, options({ diagnostics })).filter((row) => row.kind === 'item').map((row) => row.id);
+  expect(drawn).toContain('first-report');
+  expect(drawn).toContain('second-report');
+});
+
+it('keeps both original messages of an adjacent final echo in Diagnostics', () => {
+  const view = viewOf([
+    agentMessage('before-final', 'The checks passed', { turn: 'echo', phase: 'commentary' }),
+    agentMessage('final-echo', 'The checks passed', { turn: 'echo' }),
+  ], [turn('echo', { ordinal: 1, state: 'completed', inputId: 'echo-input' })]);
+  const drawn = buildRows(view, options({ diagnostics: true })).filter((row) => row.kind === 'item').map((row) => row.id);
+  expect(drawn).toEqual(expect.arrayContaining(['before-final', 'final-echo']));
+});
+
+it.each([false, true])('keeps a completed report when work separates it from equal final text on every conversation surface (diagnostics=%s)', (diagnostics) => {
+  const view = viewOf([
+    agentMessage('earlier-result', 'The checks passed', { turn: 'separate-result', phase: 'commentary' }),
+    command('another-check', { command: 'check another package', turn: 'separate-result' }),
+    agentMessage('later-result', 'The checks passed', { turn: 'separate-result' }),
+  ], [turn('separate-result', { ordinal: 1, state: 'completed', inputId: 'separate-input' })]);
+  const hidden = hiddenConversationItems(view.order, view.items, { diagnostics });
+  expect(hidden.has('earlier-result')).toBe(false);
+  const drawn = buildRows(view, options({ diagnostics })).filter((row) => row.kind === 'item').map((row) => row.id);
+  expect(drawn).toEqual(expect.arrayContaining(['earlier-result', 'later-result']));
+});
 
 it('folds reasoning-only work in Focused while preserving the native inputs, answers and pending question', () => {
   const pending = approvalItem('pending-question', 'question', { turn: 'focus-turn' });

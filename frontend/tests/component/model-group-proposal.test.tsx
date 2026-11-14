@@ -41,7 +41,7 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     expect(model.groups).toEqual(['kept']);
   });
 
-  it('saves only after explicit confirmation and keeps the captured draft when source data refreshes', async () => {
+  it('saves groups without guessing an unknown window and keeps the draft when source data refreshes', async () => {
     const draw = (line: string) => <ModelGroupProposal provider={provider} model={model} observed={observed(line)} manage />;
     const rendered = show(draw('vendor-family'));
     const user = userEvent.setup();

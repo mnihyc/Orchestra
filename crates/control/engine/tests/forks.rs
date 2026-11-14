@@ -1455,12 +1455,12 @@ async fn a_fork_is_its_makers_and_takes_the_history_and_the_source_goes_on_untou
                 title: format!("Sub-agent {name}"),
                 started_at: orch_types::Time::new(rig.world.clock.now()),
                 duration_ms: Some(10),
-                raw: RawCall {
+                raw: Some(RawCall {
                     name: "Task".to_owned(),
                     input: OutputRef::of("Check the redirect"),
                     output: Some(OutputRef::of("Checked")),
                     is_error: false,
-                },
+                }),
             })
             .unwrap();
             let parent_ref = format!("native-{source_segment}-task-{name}");

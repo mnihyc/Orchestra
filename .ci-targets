@@ -1,0 +1,3 @@
+fmt
+clippy
+test -p orch-api-core --test thread_access --test ask --test access_requests --test summaries --test resource_summaries --test document_summary_options --test model_entries
