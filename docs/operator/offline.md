@@ -84,11 +84,11 @@ On another Docker host, run `install.sh --from ./carry-in --mode load` before st
 
 A restricted environment also needs the node's trusted proxy image. Choose the local immutable image ID
 of a verified carried image with `/bin/sh` and the usual core utilities; the carried Debian base works.
-Before the node's first start, set `[node.docker].restricted_proxy_image` to that ID. After the first
-start, driver settings live in the machine's single policy file: use `orch-node policy set drivers` to
-keep its existing driver choices with `configurations.docker.restricted_proxy_image` updated, then restart
-the node. Editing the earlier `orch.toml` does not replace that imported policy. The helper is chosen
-explicitly by the operator; a runtime's image is never automatically trusted as a host proxy.
+Use `orch-node policy set drivers` to retain the existing driver choices with
+`configurations.docker.restricted_proxy_image` set to that image ID, then restart the node.
+Driver policy stays in the machine's single `config.toml`; the deployment file is not another policy
+source. The helper is chosen explicitly by the operator; a runtime's image is never automatically
+trusted as a host proxy.
 
 When that host can reach only the direct gateway door, carry the node executable too. After verifying
 the directory, prepare its ordinary node configuration with that gateway address and its local image

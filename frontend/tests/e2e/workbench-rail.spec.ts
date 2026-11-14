@@ -2,6 +2,7 @@
 import { expect, test } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
 import { ACME, PEOPLE, scenario, signIn, screenAddress } from './support.ts';
+import { restAtEdge, showHiddenBarsOnHover } from './workbench-support.ts';
 
 for (const theme of ['light', 'dark'] as const) {
   test(`rail clicks dock, shortcuts toggle and only the edge peeks at 1440/${theme}`, async ({ page }) => {
@@ -9,6 +10,7 @@ for (const theme of ['light', 'dark'] as const) {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.emulateMedia({ colorScheme: theme });
     await signIn(page, PEOPLE.vera);
+    await showHiddenBarsOnHover(page);
     await page.goto('/org/acme');
     await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
     const rail = page.getByRole('navigation', { name: 'Orgs and your own places', exact: true });
@@ -17,7 +19,6 @@ for (const theme of ['light', 'dark'] as const) {
     const left = page.locator('[data-workbench-bar="left"]');
     const main = page.locator('[data-main-area]');
     const floating = page.getByRole('dialog', { name: 'Left bar', exact: true });
-    const edge = page.locator('[data-bar-edge="left"]');
     const requests: Record<string, string[]> = {};
     let phase = '';
     page.on('request', (request) => {
@@ -73,7 +74,7 @@ for (const theme of ['light', 'dark'] as const) {
     await page.mouse.move(1000, 800);
     await resources.hover();
     await expect(page.getByRole('tooltip')).toHaveText('Show resources');
-    await edge.hover();
+    await restAtEdge(page, 'left');
     await expect(floating).toBeVisible();
     await expect(resources).toHaveAttribute('aria-pressed', 'false');
     expect((await main.boundingBox())?.width).toBe(hiddenWidth);
@@ -82,17 +83,17 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(floating).toHaveCount(0);
     await expect(left).toHaveCount(0);
     await page.mouse.move(1000, 800);
-    await edge.hover();
+    await restAtEdge(page, 'left');
     await expect(floating).toBeVisible();
     await page.mouse.move(1000, 800);
     await expect(floating).toHaveCount(0);
-    await edge.hover();
+    await restAtEdge(page, 'left');
     await expect(floating).toBeVisible();
     await resources.click();
     await expect(floating).toHaveCount(0);
     await expect(left).toHaveAttribute('data-active-container', 'resource-navigation');
     await resources.click();
-    await edge.hover();
+    await restAtEdge(page, 'left');
     await expect(floating).toBeVisible();
     await floating.getByRole('button', { name: 'Keep open as a bar', exact: true }).click();
     await expect(floating).toHaveCount(0);
@@ -109,7 +110,7 @@ for (const theme of ['light', 'dark'] as const) {
     phase = '';
     await organization.click();
     await organization.click();
-    await edge.hover();
+    await restAtEdge(page, 'left');
     await expect(floating).toBeVisible();
     await floating.locator(`a[href="/project/${ACME.infra}"]`).first().click();
     await expect(page).toHaveURL(new RegExp(`/project/${ACME.infra}$`));

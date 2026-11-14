@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ResourcesApi from '@/api/resources';
 import { resourceRows, type ResourceRows } from '@/api/listed';
 import type * as SettingsApi from '@/api/settings';
-import { putSetting } from '@/api/settings';
+import { clearSetting, putSetting } from '@/api/settings';
 import { SettingRow } from '@/features/settings/SettingRow';
 import { withGroup } from '@/features/settings/settingsModel';
 import type { Host, ResolvedSetting, SettingDef, Template } from '@/generated/api-types';
@@ -22,7 +22,7 @@ vi.mock('@/api/resources', async (load) => { const actual = await load<typeof Re
   hostQuery: (id: string) => ({ queryKey: ['selected-host', id], queryFn: () => reads.hostName(id), staleTime: Infinity }),
   templateQuery: (id: string) => ({ queryKey: ['selected-template', id], queryFn: () => reads.templateName(id), staleTime: Infinity }),
   templatesQuery: (kind: string) => ({ queryKey: ['named-template-choices', kind], queryFn: reads.templates, staleTime: Infinity }) }; });
-vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(), putSetting: vi.fn() }));
+vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(), putSetting: vi.fn(), clearSetting: vi.fn() }));
 vi.mock('@/features/settings/sourceAddress', () => ({ useSourceOrgAddress: () => null }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(),
   useLocation: () => ({ pathname: '/resources/example', searchStr: '' }),
@@ -46,15 +46,39 @@ beforeEach(() => {
 });
 afterEach(async () => { cleanup(); useAppearance.setState(initialAppearance); document.documentElement.classList.toggle('dark', wasDark); if (previousTheme === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = previousTheme; await setLocale('en'); });
 
-function draw(key: 'env.template_id' | 'env.host_id' | 'runtime.template_id' | 'runtime.host_id', writable = true, selected: unknown = currentId) {
+function draw(key: 'env.template_id' | 'env.host_id' | 'runtime.template_id' | 'runtime.host_id', writable = true, selected: unknown = currentId, inheritance?: ResolvedSetting['inherited']) {
   const kind = key.startsWith('env.') ? 'environment' : 'provider';
   const target = { kind, id: 'subject' } as const;
   const title = i18n.t(key.endsWith('.template_id') ? 'environments.overview.template' : 'providers.runtime.host');
   const def: SettingDef = { key, title, description: '', group: kind, scopes: [kind], class: 'parameter', merge: 'replace', schema: { type: 'string', format: 'uuid' }, default: null, example: nextId, text_key: null, keywords: [] };
   const setting: ResolvedSetting = { key, value: selected, own: { value: selected, revision: 7, locked: false }, source: { scope: kind === 'provider' ? 'provider_own' : 'environment_own', node: null }, locked_by: null, writable, parts: [] };
+  setting.inherited = inheritance;
+  vi.mocked(clearSetting).mockResolvedValue({ ...setting, own: null, value: inheritance?.value ?? null });
   vi.mocked(putSetting).mockImplementation((_target, _key, write) => Promise.resolve({ ...setting, value: write.value, own: { value: write.value, revision: 8, locked: false } }));
   return { ...show(<SettingRow def={withGroup(def)} setting={setting} target={target} place={{ name: 'Research', owner: null, kind: null, access: { permissions: [`${kind}.manage`] } }} />), target, title };
 }
+
+it.each(['env.template_id', 'env.host_id', 'runtime.template_id', 'runtime.host_id'] as const)('keeps the inherited choice available when the %s inventory fails', async (key) => {
+  reads.hosts.mockRejectedValue(new Error('The inventory is unavailable'));
+  reads.templates.mockRejectedValue(new Error('The inventory is unavailable'));
+  const { title, target } = draw(key, true, currentId, { value: null, source: { scope: 'system', node: null } });
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole('combobox', { name: title }));
+  expect(await screen.findByRole('alert')).toBeVisible();
+  await user.click(screen.getByRole('option', { name: /As the system decides/u }));
+  await waitFor(() => expect(clearSetting).toHaveBeenCalledExactlyOnceWith(target, key, 7));
+  expect(putSetting).not.toHaveBeenCalled();
+});
+
+it('keeps inheritance first when a template inventory is empty', async () => {
+  reads.templates.mockResolvedValue(resourceRows([]));
+  const { title, target } = draw('env.template_id', true, currentId, { value: null, source: { scope: 'system', node: null } });
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('combobox', { name: title }));
+  expect(await screen.findByText(i18n.t('settings.resourceChoice.noTemplates'))).toBeVisible();
+  await user.click(screen.getByRole('option', { name: /As the system decides/u }));
+  await waitFor(() => expect(clearSetting).toHaveBeenCalledExactlyOnceWith(target, 'env.template_id', 7));
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const key of ['env.template_id', 'env.host_id', 'runtime.template_id', 'runtime.host_id'] as const) {
   it(`selects ${key} by name with one guarded write (${locale}/${theme})`, async () => {

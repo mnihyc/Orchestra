@@ -1250,6 +1250,46 @@ async fn a_running_turn_is_waited_for_and_the_switch_goes_on_when_it_ends() {
     assert_eq!(provider, rig.other_provider);
 }
 
+#[tokio::test]
+async fn a_switch_keeps_the_requested_wait_and_health_check_times_above_the_old_limits() {
+    let can = Can {
+        export_native: true,
+        import_native: true,
+        ..Can::default()
+    };
+    let rig = Rig::new(can, "fake", can).await;
+    let thread = rig.world.thread("Long check").await;
+    let request = ForkRequest {
+        options: Some(ChangeOptions {
+            wait_minutes: Some(1_441),
+            verify_timeout_secs: Some(3_601),
+            ..ChangeOptions::default()
+        }),
+        ..rig.to_other()
+    };
+    let plan = rig.plan(thread, &request).await;
+    assert_eq!(plan.options.wait_minutes, 1_441);
+    assert_eq!(plan.options.verify_timeout_secs, 3_601);
+    let mut shortest = request.clone();
+    shortest.options.as_mut().unwrap().verify_timeout_secs = Some(1);
+    assert_eq!(
+        rig.plan(thread, &shortest)
+            .await
+            .options
+            .verify_timeout_secs,
+        1
+    );
+    let mut outside_clock = request;
+    outside_clock.options.as_mut().unwrap().wait_minutes = Some(i64::MAX);
+    assert!(matches!(
+        rig.world
+            .engine()
+            .draft_fork(&rig.caller(), thread, &outside_clock)
+            .await,
+        Err(PlanError::Invalid { .. })
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_running_turn_is_interrupted_at_once_when_the_options_say_so_and_a_wait_that_runs_out_changes_nothing()
  {

@@ -643,3 +643,103 @@ async fn acmes_route(
         .unwrap()
         .id
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unrecognized_quiet_hours_zone_holds_delivery_without_using_utc_or_spending_a_try() {
+    let notifier = Scripted::new("chat", Reaches::Channel);
+    let world = World::new(only(&notifier)).await;
+    let channel = world.channel(Of::System, "chat", json!({}), &[]).await;
+    let person = world
+        .person_with("ada", "en", "Mars/Olympus_Mons", Some("ada@example.org"))
+        .await;
+    world
+        .clock
+        .set(Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap());
+    world.quiet_hours(person, 22 * 60, 7 * 60).await;
+    world
+        .clock
+        .set(Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap());
+    let route = world.route_on(person, &channel).await;
+    let row = world
+        .queue_for_route(
+            &route,
+            "chat",
+            &[world.snapshot("turn.completed", "Keep this message")],
+        )
+        .await;
+    let done = world.outbox().run().await.unwrap();
+    assert_eq!((done.held, done.sent), (1, 0));
+    assert_eq!(notifier.deliveries(), 0);
+    let waiting = world.row(row).await;
+    assert_eq!((waiting.state.as_str(), waiting.attempts), ("pending", 0));
+    assert!(waiting.last_error.as_deref().unwrap().contains("time zone"));
+    assert_eq!(
+        world.route_now(route.id).await.last_error.unwrap()["code"],
+        json!("invalid_timezone")
+    );
+    sqlx::query("UPDATE users SET timezone='UTC' WHERE id=$1")
+        .bind(person)
+        .execute(&world.test.pool)
+        .await
+        .unwrap();
+    world.clock.set(waiting.next_attempt_at);
+    assert_eq!(world.outbox().run().await.unwrap().sent, 1);
+    assert_eq!(notifier.deliveries(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delayed_route_retains_work_and_reports_an_unrecognized_quiet_hours_zone() {
+    let notifier = Scripted::new("chat", Reaches::Channel);
+    let world = World::new(only(&notifier)).await;
+    let channel = world.channel(Of::System, "chat", json!({}), &[]).await;
+    let person = world
+        .person_with("ada", "en", "Mars/Olympus_Mons", Some("ada@example.org"))
+        .await;
+    world
+        .clock
+        .set(Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap());
+    world.quiet_hours(person, 22 * 60, 7 * 60).await;
+    let route = world.route(person, &channel, delayed(15)).await;
+    world
+        .notification(
+            person,
+            "turn.completed",
+            "Still unread",
+            None,
+            Duration::minutes(20),
+        )
+        .await;
+    assert_eq!(
+        serve(&world.db(), &world.clock)
+            .await
+            .unwrap()
+            .notifications,
+        0
+    );
+    assert!(world.rows().await.is_empty());
+    let held = world.route_now(route.id).await;
+    assert!(held.held);
+    assert!(
+        held.failure_episode.is_none(),
+        "a quiet hold is not a failed delivery attempt"
+    );
+    assert_eq!(
+        orch_api_core::routes::notifications::views::failure_view(&held)
+            .unwrap()
+            .code,
+        "invalid_timezone"
+    );
+    assert_eq!(held.last_error.unwrap()["code"], json!("invalid_timezone"));
+    sqlx::query("UPDATE users SET timezone='UTC' WHERE id=$1")
+        .bind(person)
+        .execute(&world.test.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        serve(&world.db(), &world.clock)
+            .await
+            .unwrap()
+            .notifications,
+        1
+    );
+}

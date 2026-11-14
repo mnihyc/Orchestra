@@ -42,8 +42,7 @@ const IDENTITY_DIR: &str = "identity";
 /// How long a request to the daemon for the record of a unit's enrollment may take: it is a small file.
 const PROBE_SECS: u64 = 10;
 
-/// The driver's settings from the operator's `[node.docker]` and `[[node.storage]]`, and from where the node
-/// keeps its tool cache. Everything else is the driver's own default.
+/// The driver's operational settings, storages from the machine policy, and the node's tool cache. Everything else is the driver's own default.
 pub fn config_of(settings: &NodeSettings) -> Result<DockerConfig, DriverError> {
     let docker = &settings.docker;
     let mut labels = docker.labels.clone();
@@ -60,7 +59,6 @@ pub fn config_of(settings: &NodeSettings) -> Result<DockerConfig, DriverError> {
             .live_helper_binary
             .clone()
             .or_else(orch_connector_core::installation::program_path),
-        builds: docker.builds,
         build_args: docker.build_args.clone(),
         offline_images: docker.offline_images.clone(),
         build_timeout_secs: docker.build_timeout_secs,
@@ -247,8 +245,6 @@ pub fn registration(adjust: impl Fn(&mut DockerConfig) + Send + Sync + 'static) 
                 settings.docker = serde_json::from_value(value.clone())
                     .map_err(|error| DriverError::InvalidSpec(error.to_string()))?;
             }
-            // Permission to build is checked live; the driver reports its actual implementation.
-            settings.docker.builds = true;
             let mut config = config_of(&settings)?;
             adjust(&mut config);
             let schema = crate::composition::configuration_schema(
@@ -620,6 +616,36 @@ impl BlobSource for DeskSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "a failed fixture or assertion must fail the test"
+    )]
+    fn build_support_stays_with_the_driver_and_live_policy_alone_permits_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config_of(&NodeSettings::in_dir(directory.path())).unwrap();
+        let sources = orch_driver_docker::descriptor::sources(&config);
+        assert!(sources.contains(&orch_driver_contract::sources::SourceKind::Build));
+        let descriptor = serde_json::from_value(serde_json::json!({
+            "name":NAME,"version":"1","title":"Images","sources":sources,"local_accounts":false
+        }))
+        .unwrap();
+        let spec = serde_json::json!({"build":{"dockerfile":"FROM scratch"}});
+        let mut policy = orch_link_contract::policy::MachineDrivers::managed();
+        policy.images.builds = false;
+        assert!(
+            policy
+                .check(&descriptor, &spec, None, &Default::default())
+                .is_err()
+        );
+        policy.images.builds = true;
+        assert!(
+            policy
+                .check(&descriptor, &spec, None, &Default::default())
+                .is_ok()
+        );
+    }
 
     #[test]
     #[allow(

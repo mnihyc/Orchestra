@@ -1,14 +1,27 @@
 /** Complete choice declarations search locally and preserve committed values, guides and form boundaries. */
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { expect, it, vi } from 'vitest';
 import { ChoiceLocator, type ChoiceLocatorOption } from '@/ui/ChoiceLocator';
 import { Combobox } from '@/ui/Combobox';
+import { restoreFocusQuietly } from '@/ui/focus';
 import { i18n } from '@/i18n';
 import { show } from './support';
 
 const options = Array.from({ length: 12 }, (_, index) => ({ value: `native-${index + 1}`, name: `Choice ${index + 1}`, description: `Description ${index + 1}` }));
+
+it.each([true, false])('restores the acknowledged choice without opening its %s controlled search', async (controlled) => {
+  show(controlled ? <ChoiceLocator label="Mode" value="native-1" options={options} onValueChange={vi.fn()} />
+    : <Combobox label="Mode" query="" onQueryChange={vi.fn()} displayValue="Choice 1" groups={[{ id: 'choices', label: '', options: [{ value: 'native-1', label: 'Choice 1', text: 'Choice 1' }] }]} onSelect={vi.fn()} />);
+  const input = screen.getByRole('combobox', { name: 'Mode' });
+  act(() => { restoreFocusQuietly(input); });
+  expect(input).toHaveFocus();
+  expect(input).toHaveValue('Choice 1');
+  expect(input).toHaveAttribute('aria-expanded', 'false');
+  await userEvent.click(input);
+  expect(screen.getByRole('option', { name: 'Choice 1' })).toBeVisible();
+});
 
 it('searches every supplied name, raw value and description without editing or fetching, and restores an unknown current value', async () => {
   const user = userEvent.setup(), changed = vi.fn();

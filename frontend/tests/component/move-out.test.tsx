@@ -29,7 +29,7 @@ beforeEach(() => { vi.clearAllMocks(); calls.same.mockReturnValue(true); calls.n
 afterEach(async () => { cleanup(); await setLocale('en'); });
 async function choose(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') }));
-  const option = await screen.findByRole('option', { name: 'Other org' }); await waitFor(() => expect(option).not.toHaveAttribute('aria-disabled', 'true')); await user.click(option);
+  const option = await screen.findByRole('treeitem', { name: 'Other org' }); await waitFor(() => expect(option).not.toHaveAttribute('aria-disabled', 'true')); await user.click(option);
 }
 for (const locale of ['en', 'zh-CN'] as const) {
   it(`reviews actual deletion/stop consequences before one cross-org move (${locale})`, async () => {
