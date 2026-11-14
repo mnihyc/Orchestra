@@ -24,6 +24,7 @@ import { AttachmentChips } from '@/features/composer/Attachments';
 import { PersonThingProvider } from '@/features/people/personContext';
 import { readPastedText } from '@/lib/pastedText';
 import { ItemFrame, itemText } from '@/features/timeline/ItemActions';
+import { RecordingNotice } from '@/features/source/RecordingNotice';
 import { RestoreFromTurn } from '@/features/source/Restore';
 import { useTurnChanges } from '@/features/timeline/TurnFiles';
 import { useTimelineContext } from '@/features/timeline/context';
@@ -86,6 +87,13 @@ export function Part({ part, owner, updatedAt, thread: sourceThread }: { part: C
   }
 }
 
+function InputRecordingNotice({ item }: { item: UserItem }) {
+  const { threadId } = useTimelineContext();
+  const turn = useThreadPart(threadId, (view) => item.turn_id === null ? undefined : view.turns.get(item.turn_id));
+  const environmentId = useThreadPart(threadId, (view) => turn === undefined ? undefined : view.segments.find((segment) => segment.id === turn.segment_id)?.environment?.id);
+  return turn?.input_id === item.payload.input_id ? <RecordingNotice environmentId={environmentId} reason={turn.recording_notice} indexing={turn.recording_indexing} /> : null;
+}
+
 export function UserMessage({ item }: { item: UserItem }) {
   const { t } = useTranslation();
   const { source, parts } = item.payload;
@@ -103,6 +111,7 @@ export function UserMessage({ item }: { item: UserItem }) {
               : parts.map((part, index) => (
                 <Part key={index} part={part} owner={item.author ?? undefined} updatedAt={item.created_at} />
               ))}
+            <InputRecordingNotice item={item} />
           </div>
         </div>
       </ItemFrame>
@@ -186,6 +195,7 @@ function HumanMessage({ item }: { item: UserItem }) {
               <Part key={index} part={part} owner={author} updatedAt={item.created_at} />
             ))}
           </div>}
+          <InputRecordingNotice item={item} />
           {!editing && context.inspection === undefined && (mine || (summary?.total ?? 0) > 1) && <div className="flex flex-wrap items-center gap-1">
             {summary !== undefined && <PromptNavigation threadId={threadId} prompt={summary} onSelect={context.onVersionSelect} />}
           </div>}

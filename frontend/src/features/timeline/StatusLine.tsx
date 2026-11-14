@@ -55,7 +55,8 @@ export function StatusLine() {
   else if (thread.state === 'starting') line = words ?? t('timeline.status.starting', { name: thread.binding?.agent.name ?? thread.name, time: since(turn?.started_at ?? askedAt ?? thread.updated_at) });
   // The environment recovery banner owns this reason and its actions above the composer.
   else if (thread.state === 'blocked') line = thread.blocked?.reason === 'environment_unavailable' ? null : words;
-  else if (turn !== null) {
+  // A turn the page still holds as running does not make a thread that says it is idle "Generating".
+  else if (turn !== null && thread.state === 'running') {
     line =
       turn.phase?.kind === 'compacting'
         ? t('timeline.status.compacting', { time: since(turn.phase.since) })

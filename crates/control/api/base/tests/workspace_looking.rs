@@ -12,12 +12,12 @@ mod workspace;
 use http::StatusCode;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::workspace::{
-    ARCHIVE_LIST_LIMIT_MAX, ArchiveEntryKind, ArchiveFormat, EnvironmentArchiveEntryGet,
-    EnvironmentArchiveEntryGetQuery, EnvironmentArchiveList, EnvironmentArchiveListQuery,
-    EnvironmentChangeList, EnvironmentChangeListQuery, EnvironmentFileSearch,
-    EnvironmentFileSearchQuery, EnvironmentFileSearchReply, EnvironmentGitDiffGet,
-    EnvironmentGitDiffGetQuery, EnvironmentGitStatusGet, EnvironmentGitStatusGetQuery,
-    FILE_SEARCH_LIMIT_MAX, FileSearchIn, GIT_DIFF_MAX_BYTES, GitUnavailable, TRUNCATED_HEADER,
+    ArchiveEntryKind, ArchiveFormat, EnvironmentArchiveEntryGet, EnvironmentArchiveEntryGetQuery,
+    EnvironmentArchiveList, EnvironmentArchiveListQuery, EnvironmentChangeList,
+    EnvironmentChangeListQuery, EnvironmentFileSearch, EnvironmentFileSearchQuery,
+    EnvironmentFileSearchReply, EnvironmentGitDiffGet, EnvironmentGitDiffGetQuery,
+    EnvironmentGitStatusGet, EnvironmentGitStatusGetQuery, FileSearchIn, GIT_DIFF_MAX_BYTES,
+    GitUnavailable, TRUNCATED_HEADER,
 };
 use orch_config::ServerConfig;
 use orch_link_contract::commands::{CommandError, CommandKind, ErrorCode as MachineCode};
@@ -271,6 +271,7 @@ async fn search(
 
 fn by_name(q: &str) -> EnvironmentFileSearchQuery {
     EnvironmentFileSearchQuery {
+        cursor: None,
         thread: None,
         q: q.to_owned(),
         scope: None,
@@ -295,7 +296,7 @@ async fn files_are_found_by_name_in_the_last_list_whether_or_not_the_machine_is_
     site.publish_manifest().await;
     for _ in 0..2 {
         let found = match search(&site, &site.vic, by_name("MAIN")).await.ok() {
-            EnvironmentFileSearchReply::Names(entries) => entries,
+            EnvironmentFileSearchReply::Names(page) => page.entries,
             other @ EnvironmentFileSearchReply::Content(_) => panic!("{other:?}"),
         };
         assert_eq!(
@@ -330,16 +331,28 @@ async fn a_search_is_for_at_least_two_characters() {
 }
 
 #[tokio::test]
-async fn names_cannot_be_searched_where_no_list_is_kept_or_none_has_come_yet() {
+async fn filenames_remain_searchable_when_whole_indexing_is_unavailable() {
     let site = live_site().await;
-    // The machine is there and has not sent a list.
-    assert_eq!(
-        search(&site, &site.ada, by_name("main"))
-            .await
-            .problem()
-            .code,
-        ErrorCode::EnvironmentUnavailable
-    );
+    sqlx::query("UPDATE environments SET facts = '{\"index\": \"live\"}' WHERE id = $1")
+        .bind(site.environment)
+        .execute(&site.world.db.pool)
+        .await
+        .unwrap();
+    let found = search(&site, &site.ada, by_name("main")).await.ok();
+    match found {
+        EnvironmentFileSearchReply::Names(page) => {
+            assert_eq!(page.entries[0].path, "web/src/main.rs")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(site.sent(CommandKind::FsSearch), 1);
+}
+
+#[tokio::test]
+async fn an_online_tree_needs_no_manifest_for_names_and_an_offline_tree_reports_its_source() {
+    let site = live_site().await;
+    let found = search(&site, &site.ada, by_name("main")).await.ok();
+    assert!(matches!(found, EnvironmentFileSearchReply::Names(page) if page.entries.len() == 1));
     site.power_off().await;
     assert_eq!(
         search(&site, &site.ada, by_name("main"))
@@ -359,7 +372,7 @@ async fn names_cannot_be_searched_where_no_list_is_kept_or_none_has_come_yet() {
             .await
             .problem()
             .code,
-        ErrorCode::WorkspaceNotIndexed
+        ErrorCode::SourceOffline
     );
 }
 
@@ -428,7 +441,7 @@ async fn a_search_in_the_text_keeps_to_the_directory_asked_for_and_carries_the_o
 }
 
 #[tokio::test]
-async fn how_many_matches_may_be_asked_for_is_bounded() {
+async fn explicit_search_windows_can_exceed_the_default_and_zero_is_still_invalid() {
     let site = live_site().await;
     search(
         &site,
@@ -441,7 +454,7 @@ async fn how_many_matches_may_be_asked_for_is_bounded() {
     .await
     .ok();
     let body = &site.played.as_ref().unwrap().seen_of(CommandKind::FsSearch)[0].body;
-    assert_eq!(body["limit"], FILE_SEARCH_LIMIT_MAX);
+    assert_eq!(body["limit"], 100_000);
     let none = search(
         &site,
         &site.ada,
@@ -571,7 +584,7 @@ async fn what_an_archive_holds_is_read_where_it_lies() {
 }
 
 #[tokio::test]
-async fn how_many_entries_of_an_archive_are_listed_is_bounded_and_a_missing_archive_is_not_found() {
+async fn archive_windows_can_exceed_the_default_and_a_missing_archive_is_not_found() {
     let site = live_site().await;
     site.disk.put("web/pack.zip", b"PK");
     archive_list(&site, &site.ada, "web/pack.zip", Some(1_000_000))
@@ -583,7 +596,7 @@ async fn how_many_entries_of_an_archive_are_listed_is_bounded_and_a_missing_arch
         .unwrap()
         .seen_of(CommandKind::FsArchiveList)[0]
         .body;
-    assert_eq!(body["limit"], ARCHIVE_LIST_LIMIT_MAX);
+    assert_eq!(body["limit"], 1_000_000);
     assert_eq!(
         archive_list(&site, &site.ada, "web/pack.zip", Some(0))
             .await

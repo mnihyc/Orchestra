@@ -27,6 +27,7 @@ import type {
   FetchState,
   FileListSource,
   FileMatch,
+  FileSearchNames,
   FileStat,
   GitStatus,
   Job,
@@ -278,21 +279,17 @@ export function deleteFile(door: Door, path: string, recursive: boolean): Promis
 
 // ---------------------------------------------------------------- searching
 
-/** How many names the search by name lists at most: what the API holds to. */
-export const NAME_SEARCH_MAX = 200;
-/** How many lines the search inside files asks for: the API's own default. */
-export const CONTENT_SEARCH_LIMIT = 200;
+export type NameMatches = FileSearchNames;
 
-export function searchNames(door: Door, text: string, signal?: AbortSignal) {
-  return ok(
-    api.GET('/environments/{id}/files/search', {
-      params: { path: pathOf(door), query: { q: text, in: 'names', ...through(door) } },
-      ...(signal === undefined ? {} : { signal }),
-    }),
-  ) as Promise<DirListing['entries']>;
+export function searchNames(door: Door, text: string, signal?: AbortSignal, cursor?: string): Promise<NameMatches> {
+  return ok(api.GET('/environments/{id}/files/search', {
+    params: { path: pathOf(door), query: { q: text, in: 'names', ...through(door), ...(cursor === undefined ? {} : { cursor }) } },
+    ...(signal === undefined ? {} : { signal }),
+  })) as Promise<NameMatches>;
 }
 
 export interface ContentSearchOptions {
+  cursor?: string;
   /** A directory to stay in; the thread's own unless given. */
   under?: string;
   /** Which file names. */
@@ -302,6 +299,8 @@ export interface ContentSearchOptions {
 }
 
 export interface ContentMatches {
+  next_cursor?: string | null;
+  observed_from?: string | null;
   matches: FileMatch[];
   truncated: boolean;
   searched: number;
@@ -316,7 +315,7 @@ export function searchContent(door: Door, text: string, options: ContentSearchOp
         query: {
           q: text,
           in: 'content',
-          limit: CONTENT_SEARCH_LIMIT,
+          ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
           ...through(door),
           ...(options.under === undefined ? {} : { path: options.under }),
           ...(options.glob === undefined || options.glob === '' ? {} : { glob: options.glob }),

@@ -1365,6 +1365,11 @@ pub(crate) struct AttachWith {
     /// Whether the machine indexes the whole tree for use while it is offline, or only lists it when asked:
     /// the resolved `workspace.index`.
     pub(crate) index: IndexMode,
+    /// Resolved working allowances sent with the same attachment.
+    pub(crate) workspace: orch_link_contract::commands::WorkspaceLimits,
+    /// What the index, the recordings and the listings of the workspace leave out: the resolved
+    /// `workspace.ignore`, patterns written as in a gitignore file.
+    pub(crate) ignore: Vec<String>,
 }
 
 impl Default for AttachWith {
@@ -1382,8 +1387,73 @@ impl Default for AttachWith {
             executors: Vec::new(),
             // The same fallback as attach_with when workspace.index has not been set.
             index: IndexMode::Full,
+            workspace: Default::default(),
+            ignore: Vec::new(),
         }
     }
+}
+
+/// Resolves the same workspace defaults used by native attachment and interactive requests.
+pub async fn workspace_limits(
+    conn: &mut orch_db::Conn,
+    environment: Id,
+) -> Result<orch_link_contract::commands::WorkspaceLimits, EngineError> {
+    let names = [
+        keys::WORKSPACE_DIRECTORY_ENTRIES,
+        keys::WORKSPACE_SEARCH_RESULTS,
+        keys::WORKSPACE_ARCHIVE_RESULTS,
+        keys::WORKSPACE_INDEX_ENTRIES,
+        keys::WORKSPACE_INDEX_SCAN_SECS,
+        keys::WORKSPACE_IGNORE_MAX_BYTES,
+        keys::WORKSPACE_IGNORE_CACHE_BYTES,
+        keys::WORKSPACE_DIRECTORY_IDLE_SECS,
+        keys::WORKSPACE_DIRECTORY_SLOTS,
+        keys::WORKSPACE_DIRECTORY_CACHE_BYTES,
+        keys::WORKSPACE_DIRECTORY_BUILDS,
+        keys::WORKSPACE_DIRECTORY_PAGE_BYTES,
+        keys::WORKSPACE_SEARCH_SLICE_SECS,
+        keys::WORKSPACE_GIT_DIFF_BYTES,
+    ];
+    let defs = names
+        .into_iter()
+        .map(|key| {
+            orch_settings_contract::registry::get(key).ok_or_else(|| {
+                EngineError::unreadable("workspace working allowances are not registered")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let snapshot = orch_settings::Snapshot::load(
+        conn,
+        SettingsPlace::Environment(environment),
+        orch_settings::Wanted::Keys(&defs),
+    )
+    .await?;
+    let value = |key| -> Result<u64, EngineError> {
+        let def = orch_settings_contract::registry::get(key).ok_or_else(|| {
+            EngineError::unreadable("a workspace working allowance is not registered")
+        })?;
+        snapshot
+            .resolve(def)
+            .value
+            .and_then(|value| value.as_u64())
+            .ok_or_else(|| EngineError::unreadable("a workspace working allowance is invalid"))
+    };
+    Ok(orch_link_contract::commands::WorkspaceLimits {
+        directory_entries: value(keys::WORKSPACE_DIRECTORY_ENTRIES)?,
+        search_results: value(keys::WORKSPACE_SEARCH_RESULTS)?,
+        archive_results: value(keys::WORKSPACE_ARCHIVE_RESULTS)?,
+        index_entries: value(keys::WORKSPACE_INDEX_ENTRIES)?,
+        index_scan_secs: value(keys::WORKSPACE_INDEX_SCAN_SECS)?,
+        ignore_max_bytes: value(keys::WORKSPACE_IGNORE_MAX_BYTES)?,
+        ignore_cache_bytes: value(keys::WORKSPACE_IGNORE_CACHE_BYTES)?,
+        directory_idle_secs: value(keys::WORKSPACE_DIRECTORY_IDLE_SECS)?,
+        directory_slots: value(keys::WORKSPACE_DIRECTORY_SLOTS)?,
+        directory_cache_bytes: value(keys::WORKSPACE_DIRECTORY_CACHE_BYTES)?,
+        directory_builds: value(keys::WORKSPACE_DIRECTORY_BUILDS)?,
+        directory_page_bytes: value(keys::WORKSPACE_DIRECTORY_PAGE_BYTES)?,
+        search_slice_secs: value(keys::WORKSPACE_SEARCH_SLICE_SECS)?,
+        git_diff_bytes: value(keys::WORKSPACE_GIT_DIFF_BYTES)?,
+    })
 }
 
 /// Works out what an attach carries, from what the environment and its home node give it.
@@ -1430,6 +1500,13 @@ pub(crate) async fn attach_with(
     )
     .await?
     .unwrap_or(IndexMode::Full);
+    let ignore = setting::<Vec<String>>(
+        conn,
+        SettingsPlace::Environment(environment),
+        keys::WORKSPACE_IGNORE,
+    )
+    .await?
+    .unwrap_or_default();
     let sources = orch_settings::resolve(
         conn,
         SettingsPlace::Environment(environment),
@@ -1479,6 +1556,8 @@ pub(crate) async fn attach_with(
         secrets,
         executors,
         index,
+        workspace: workspace_limits(conn, environment).await?,
+        ignore,
     })
 }
 
@@ -1536,13 +1615,15 @@ pub(crate) fn attach_body(environment: Id, root: Option<&str>, with: &AttachWith
         with.data_sources.clone()
     };
     EnvAttach {
+        workspace: with.workspace.clone(),
+
         resources: with.resources,
         data_generation: with.data_generation,
         storage: with.storage.clone(),
         data_sources,
         environment_id: environment,
         workspace_root: root.map(str::to_owned),
-        ignore: Vec::new(),
+        ignore: with.ignore.clone(),
         index: with.index,
         mounts: root.map(|_| with.mounts.clone()),
         variables: with.variables.clone(),
@@ -1553,6 +1634,99 @@ pub(crate) fn attach_body(environment: Id, root: Option<&str>, with: &AttachWith
 // ---------------------------------------------------------------- directories on people's machines
 
 impl Engine {
+    /// Tells the machine of every environment under `node` what its workspace leaves out and whether it
+    /// indexes, as they are now, without waiting for the environment to be attached again: a changed
+    /// list of ignored paths or index mode would otherwise reach a running environment only at its next
+    /// attach.
+    pub async fn workspace_scope_changed(&self, node: Id) -> Result<(), EngineError> {
+        let mut conn = self.db().acquire().await?;
+        let environments = if node == orch_db::queries::access::SYSTEM_ID {
+            sqlx::query_scalar("SELECT id FROM environments WHERE deleted_at IS NULL ORDER BY id")
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(orch_db::DbError::from)?
+        } else if orch_db::queries::environments::hosting::environment(&mut conn, node)
+            .await?
+            .is_some()
+        {
+            vec![node]
+        } else {
+            orch_db::queries::environments::hosting::environments_under(&mut conn, node).await?
+        };
+        drop(conn);
+        for environment in environments {
+            if let Err(error) = self.resend_workspace_settings(environment).await {
+                tracing::warn!(%error, %environment, "the machine was not told of the changed workspace settings; it learns them at its next attach");
+            }
+        }
+        Ok(())
+    }
+
+    /// The attach the machine was given last, with the ignored paths, the index mode and what its
+    /// commands find in their environment as they are now. False when there is nothing to tell: no
+    /// running environment on a machine that is here.
+    async fn resend_workspace_settings(&self, environment: Id) -> Result<bool, EngineError> {
+        let (machine, generation, body) = {
+            let mut conn = self.db().acquire().await?;
+            let Some(env) =
+                orch_db::queries::environments::hosting::environment(&mut conn, environment)
+                    .await?
+            else {
+                return Ok(false);
+            };
+            let Some(machine) = env.machine_id else {
+                return Ok(false);
+            };
+            if env.deleted_at.is_some()
+                || env.status != "running"
+                || orch_db::queries::resources::machine(&mut conn, machine)
+                    .await?
+                    .is_none_or(|machine| !machine.online || !machine.is_active())
+            {
+                return Ok(false);
+            }
+            let Some(last) =
+                orch_db::queries::resources::mounts::last_attach(&mut conn, environment, machine)
+                    .await?
+            else {
+                return Ok(false);
+            };
+            let with = attach_with(&mut conn, environment, self.inner.clock.now()).await?;
+            let mut body: EnvAttach = serde_json::from_value(last)?;
+            body.ignore = with.ignore;
+            body.index = with.index;
+            body.workspace = with.workspace;
+            body.variables = with.variables;
+            body.secrets = with.secrets;
+            (machine, env.generation, body)
+        };
+        let command = Outgoing::new(
+            orch_types::new_id(),
+            machine,
+            SerialKey::Environment(environment),
+            &body,
+        )?;
+        let Some(Outcome::Succeeded(facts)) = self.ask_bounded(command).await? else {
+            return Ok(false);
+        };
+        let mut conn = self.db().acquire().await?;
+        if orch_db::queries::environments::hosting::environment(&mut conn, environment)
+            .await?
+            .is_some_and(|env| env.machine_id == Some(machine) && env.generation == generation)
+        {
+            orch_db::queries::environments::hosting::record_facts(
+                &mut conn,
+                environment,
+                &facts,
+                None,
+                self.inner.clock.now(),
+            )
+            .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// Brings the status of the environments on people's machines in step with their machines, which
     /// the sweep does each time it comes round: one whose machine has a session that it has not been
     /// attached in is attached; one whose machine has none is `offline`.
@@ -1920,6 +2094,17 @@ mod storage_tests {
         assert!(
             check_initial_program_consent(&json!({(keys::EXEC_VERSION_OVERRIDES):null})).is_err()
         );
+    }
+
+    #[test]
+    fn attaching_carries_the_ignored_paths_of_the_workspace_to_the_machine() {
+        let id = orch_types::new_id();
+        let with = AttachWith {
+            ignore: vec!["bulk/".to_owned(), "target/".to_owned()],
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(attach_body(id, None, &with)).unwrap();
+        assert_eq!(wire["ignore"], serde_json::json!(["bulk/", "target/"]));
     }
 
     #[test]

@@ -26,7 +26,7 @@ const thread = { id: 'thread-1', environment: { id: 'env-1' }, directory: 'src',
 beforeEach(() => {
   for (const call of [calls.directory, calls.search, calls.export, calls.file, calls.document, calls.close, calls.upload, calls.pickFile, calls.pickDocument]) call.mockReset();
   calls.directory.mockResolvedValue({ path: 'src', entries: [file, { ...file, type: 'dir', name: 'tests', path: 'src/tests' }], as_of: file.mtime, mount: null, source: 'live', truncated: false });
-  calls.search.mockResolvedValue([{ ...file, path: 'src/auth/login.ts' }]);
+  calls.search.mockResolvedValue({ entries: [{ ...file, path: 'src/auth/login.ts' }], next_cursor: null, source: 'live', searched: 1, as_of: file.mtime, observed_from: file.mtime });
   calls.export.mockResolvedValue({ name: 'login-design.md', blob: new Blob(['# Login design\nUse redirects.'], { type: 'text/markdown' }), losses: [] });
 });
 

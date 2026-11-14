@@ -261,7 +261,7 @@ impl Native {
     fn record(&self, fixture: &Fixture, snapshot: Id) -> TestResult<FsRecordResult> {
         let index = Index::new(
             orch_link_contract::commands::IndexMode::Full,
-            Limits::default().index_max_entries,
+            orch_link_contract::commands::WorkspaceLimits::default().index_entries,
         );
         self.states.request(
             &self.files.parse("repo")?,
@@ -272,19 +272,31 @@ impl Native {
             self.files.ignore().ok_or("fixture ignore rules absent")?,
         )?;
         self.states.refresh(&self.files, &index, None, true)?;
-        let result = self.states.record(
-            &self.files,
-            &FsRecord {
-                environment_id: fixture.world.environment,
-                snapshot_id: snapshot,
-                directory: "repo".into(),
-                kind: RecordKind::Turn,
-                record_days: 7,
-                max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
-            },
-            self.generation,
-            Time::new(self.clock.now()),
-        )?;
+        let now = Time::new(self.clock.now());
+        self.states
+            .prepare_recordings(&self.files, self.generation, now)?;
+        let result = self
+            .states
+            .capture(
+                &self.files,
+                &FsRecord {
+                    environment_id: fixture.world.environment,
+                    snapshot_id: snapshot,
+                    directory: "repo".into(),
+                    wait_for_indexing: true,
+                    kind: RecordKind::Turn,
+                    record_days: 7,
+                    max_bytes: orch_envhost::file_states::DEFAULT_RECORD_MAX_BYTES,
+                },
+                self.generation,
+                now,
+                &orch_envhost::file_states::RecordOperation {
+                    id: new_id(),
+                    until: Time::new(now.get() + chrono::Duration::minutes(1)),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                },
+            )?
+            .result;
         assert_eq!(result.state, RecordState::Complete);
         Ok(result)
     }
