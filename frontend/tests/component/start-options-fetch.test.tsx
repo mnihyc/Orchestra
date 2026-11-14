@@ -19,7 +19,7 @@ import { show } from './support';
 import { ACME } from '../doubles/fixtures';
 import { World } from '../doubles/world';
 
-interface Request { params: { path: { id: string }; query: { environment_id?: string; environment_new: boolean } }; signal?: AbortSignal }
+interface Request { params: { path: { id: string }; query: { environment_id?: string; environment_new: boolean; template_id?: string; host_id?: string; host_auto?: boolean } }; signal?: AbortSignal }
 interface Reply { data?: StartOptions; error?: unknown; response: Response }
 const calls = vi.hoisted(() => ({ get: vi.fn<(_path: string, _request: Request) => Promise<Reply>>() }));
 vi.mock('@/api/client', async (load) => {
@@ -48,6 +48,8 @@ function Form({ at = 'topic', known, initial = NO_PICKS, audience }: { at?: stri
     <span data-failed>{state.failed === null ? '' : 'failed'}</span>
     <button onClick={() => setPicks((held) => ({ ...held, environment: 'e2' }))}>Choose e2</button>
     <button onClick={() => setPicks((held) => ({ ...held, model: 'm2', effort: 'low' }))}>Choose model</button>
+    <button onClick={() => setPicks((held) => ({ ...held, environment: 'new', newEnvironment: { template_id: 'alternate', host_id: 'quiet' } }))}>Choose template</button>
+    <button onClick={() => setPicks((held) => ({ ...held, newEnvironment: { template_id: 'alternate', host_id: null } }))}>Choose scheduler</button>
     <button onClick={state.retry}>Retry</button>
   </section>;
 }
@@ -62,6 +64,22 @@ function ParentNode({ node, read }: { node: Node; read: Promise<Node> }) {
   useQuery({ queryKey: nodeKey(node.id), queryFn: () => read });
   return <Form at={node.id} />;
 }
+
+it('reads the selected template and host through the real API client and keeps the scheduler in its own cache flight', async () => {
+  calls.get.mockImplementation((_path, request) => Promise.resolve(success(request.params.query.template_id === 'alternate'
+    ? options({ environment_default: 'fresh', providers: [provider(request.params.query.host_auto === true ? 'p3' : 'p2')] }) : options())));
+  const user = userEvent.setup();
+  show(<Form known="e1" />);
+  await waitFor(() => expect(document.querySelector('[data-provider]')).toHaveTextContent('Provider p1'));
+  await user.click(screen.getByRole('button', { name: 'Choose template' }));
+  await waitFor(() => expect(document.querySelector('[data-provider]')).toHaveTextContent('Provider p2'));
+  expect(calls.get.mock.calls.at(-1)?.[1].params.query).toMatchObject({ environment_new: true, template_id: 'alternate', host_id: 'quiet', host_auto: false });
+  await user.click(screen.getByRole('button', { name: 'Choose scheduler' }));
+  await waitFor(() => expect(document.querySelector('[data-provider]')).toHaveTextContent('Provider p3'));
+  const automatic = calls.get.mock.calls.at(-1)?.[1].params.query;
+  expect(automatic).toMatchObject({ environment_new: true, template_id: 'alternate', host_auto: true });
+  expect(automatic).not.toHaveProperty('host_id');
+});
 
 for (const locale of ['en', 'zh-CN'] as const) {
   it(`waits for the pending topic node and sends its default in the first binding read in ${locale}`, async () => {

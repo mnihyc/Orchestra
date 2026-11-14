@@ -62,6 +62,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:models.allowed` | **允许的模型** — 填写在此处允许使用的模型名称模式。 |
 | `setting:services.allowed` | **允许的服务** — 指定此处允许使用的已启用供应商服务名称模式；设置列表的每一层范围都必须允许该服务。 |
 | `setting:providers.allowed` | **允许的提供者** — 用提供者的 Orch 地址匹配规则限制选择；每个设置了列表的位置都必须允许此处工作所用的提供者。 |
+| `setting:models.add_switches_on` | **添加时开启的内容** — 从提供方的目录添加模型时，模型一开始带有什么：它提供的全部内容（全部）、只有强度和上下文大小（基本），或只有它自己的窗口和强度（无）。其余内容之后可由管理者开启。 |
 | `setting:collab.attribution` | **署名** — Orch 编写的输入、停止、拒绝和转发说明是否点名：自动在第二个人的话实际送达后署名、始终署名，或永不署名。永不署名时写作某人或审批人，仍保留来源、时间和备注；聊天和文档中的作者署名不变。 |
 | `setting:collab.default_delivery` | **消息发送方式** — 线程忙碌时，消息排队、送入当前运行，或中断后优先发送。 |
 | `setting:composer.paste_inline_context_share` | **消息中的粘贴文本** — 粘贴文本默认占用剩余上下文的比例。0 表示始终作为文件，100 表示始终放入消息。发送者可以逐次选择。 |
@@ -116,6 +117,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:orch_tools.search_query_chars` | **共享搜索查询预算** — 向本线程智能体公布并供共享搜索使用的查询字符预算。默认为 1000，可调大以支持更长的查询。 |
 | `setting:orch_tools.search_results` | **共享搜索结果预算** — 向本线程智能体公布并供共享搜索使用的结果预算。默认为 200；达到字节或时间预算时仍提供续查游标。 |
 | `setting:orch_tools.search_context` | **共享搜索上下文预算** — 向本线程智能体公布并供共享搜索摘要使用的前后行数预算。默认为 5，可调大以查看更广的上下文。 |
+| `setting:threads.opening_items` | **线程首屏条目** — 首次打开线程时读取的时间线条目数，须为正数，默认 40。请求可明确指定其他初始窗口，较早内容仍可通过游标继续读取。 |
 | `setting:threads.offline_deadline` | **离线回合期限** — 机器离线达到这个秒数后结束当前回合；不设置则一直等待。每次离线沿用它开始时的设置。 |
 | `setting:threads.background_wake` | **后台唤醒** — 后台任务或子代理结束时唤醒代理。关闭后，Codex 的结果随下一次输入送达；Claude Code 不提供后台任务，命令在前台运行。变更在下次会话生效。 |
 | `setting:threads.agent_access` | **智能体访问权限** — 创建会话时显示的初始范围及各区域权限。创建者确认自己可以授予的权限。仅适用于新会话，不改写已有授权。 |
@@ -141,6 +143,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:source.secret_name` | **源代码读取机密** — 现有 HTTPS Git 读取机密的名称；其值仅密封发送给准备命令。 |
 | `setting:workspace.record_days` | **工作轮次文件保留时间** — 在环境中保留完整轮次文件和恢复撤销文件的天数；零表示关闭记录。 |
 | `setting:workspace.record_max_bytes` | **最大记录目录** — 允许进行完整状态记录的文件和链接总字节数；更大的目录使用逐文件撤销。 |
+| `setting:workspace.record_wait_secs` | **等待轮次文件** — 轮次开始前等待记录其文件的秒数；超时仍未就绪时，轮次改用逐文件撤销开始，并在轮次上说明。 |
 | `setting:broadcast.delivery` | **公告送达方式** — 公告如何送达正在运行的线程：中断、在当前轮次中引导，或等待下一轮。 |
 | `setting:broadcast.fallback` | **无法引导时** — 公告原本需要引导当前轮次，但智能体不支持引导时采用的替代方式。 |
 | `setting:broadcast.wake_idle` | **允许唤醒空闲线程** — 此处是否允许发送者唤醒空闲线程，出厂开启。每条公告或线程消息单独选择唤醒，省略时为 false。 |
@@ -318,7 +321,9 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:documents.links.mentions_counted` | **统计的提及数** — 单个来源中统计到多少处对该文档的提及，再显示为“以上”。 |
 | `setting:documents.links.access_checks` | **链接权限检查数** — “被引用”每页检查阅读权限的来源数。被大量引用的文档会用游标继续。 |
 | `setting:documents.links.graph_nodes` | **关系图节点数** — “链接”关系图最多绘制的节点数。 |
+| `setting:documents.readme_blocks` | **README 预览** — 位置的 README 预览显示的顶层块数，同时保留其子块。遇到更早的分页符时结束预览；“打开文档”始终可查看完整页面。 |
 | `setting:chat.attachment_max_bytes` | **聊天附件大小** — 单条聊天消息所附单个文件的最大字节数。 下级只能降低此上限，不能取消上级设定的限制。 |
+| `setting:search.text_chars` | **对话搜索文本** — 每条对话记录脱敏后索引的字符数。更改适用于新文本及重新构建的索引；不索引原始调用、输出、隐藏推理、子线程以及无法读取脱敏所需信息的文本。 |
 | `setting:search.word_recent_candidates` | **近期文本样本** — 探查文本索引前抽样的近期记录数。 |
 | `setting:search.word_candidates` | **文字候选数** — 每个索引字段在权限检查和排序前提取的候选数。 |
 | `setting:search.word_probe_candidates` | **文字索引采样** — 转为按时间扫描前，采样的索引匹配数。 |
@@ -489,10 +494,12 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:ask.retention_min_days` | **Ask 最短保留时间** — 会话根组织的管理员规定的最短历史保留时间。 下级只能提高此下限。 |
 | `setting:ask.retention_max_days` | **Ask 最长保留时间** — 会话根组织的管理员允许的最长历史保留时间。 |
 | `setting:ask.max_steps` | **Ask 每轮模型步骤数** — 每个问题允许的模型步骤数，达到后请提问者选择继续。 |
-| `setting:ask.max_output_tokens` | **Ask 回答令牌数** — 每次 Ask 模型请求允许的最大输出令牌数，也会在安排对话上下文前预留。系统和组织设置中的最小值生效。 |
-| `setting:ask.context_tokens` | **Ask 上下文令牌数** — 未设置时使用所选模型的上下文窗口。设置后仅对 Ask 取较小值，仍需留足输出和工具结果空间。系统和组织设置中的最小值生效。 |
+| `setting:ask.max_output_tokens` | **Ask 回答令牌数** — 每次 Ask 模型请求允许的最大输出令牌数。请求按窗口减去此值来安排，且回答最多占窗口的一半。系统和组织设置中的最小值生效。 |
+| `setting:ask.context_tokens` | **Ask 上下文令牌数** — 未设置时使用所选模型的上下文窗口；未记录窗口的模型不会被当作小窗口。设置后仅对 Ask 取较小值。窗口不超过回答令牌数两倍时，回答占其一半。系统和组织设置中的最小值生效。 |
 | `setting:ask.max_tools` | **Ask 每轮读取操作数** — 每个问题允许的读取操作数，达到后请提问者缩小问题范围。 |
-| `setting:ask.tool_bytes` | **Ask 单个来源大小** — 交给模型的单次读取结果的最大字节数，并提供指向完整来源的标准链接。 |
-| `setting:ask.turn_tool_bytes` | **Ask 每轮来源总量** — 回答一个问题时提供给模型的读取结果总字节数。 |
+| `setting:ask.docs_hits` | **Ask 每次搜索的指南页数** — Ask 每次搜索帮助时交给模型的指南页面数上限；中英文同时匹配时交替给出。 |
+| `setting:ask.docs_excerpt_tokens` | **Ask 指南摘录大小** — Ask 搜索帮助时交给模型的单个指南页面的最大令牌数，并附上该页面的链接。 |
+| `setting:ask.max_operations` | **Ask 每次搜索的操作数** — Ask 每次搜索读取目录时返回的读取操作数上限。 |
+| `setting:ask.max_links` | **Ask 每个来源的链接数** — Ask 在一次读取中保留的标准来源链接数上限。 |
 | `setting:providers.model_groups_max` | **模型分组数** — 每个模型可加入的分组数，默认 8 个，可提高。设为 0 时不允许新加入分组，已有分组不变。 |
 | `option:usage.rates.*.web_fetch_per_call` | 每次成功网页抓取调用的点数。 |

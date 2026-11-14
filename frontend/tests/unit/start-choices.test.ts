@@ -19,10 +19,10 @@ describe('a feasible first suggestion', () => {
       expect(resolved.fresh).toBe(false); expect(resolved.environment?.environment.id).toBe('e1');
     }
   });
-  it('keeps feasible New and refuses an impossible explicit New without substituting another location', () => {
+  it('keeps New open to choose another template while submission still needs a host', () => {
     expect(resolve(options({ environment_default: 'fresh' }), NO_PICKS, dialog).fresh).toBe(true);
     const explicit = resolve(options({ environment_default: 'fresh', hosts: [] }), picked({ environment: NEW_ENVIRONMENT }), dialog);
-    expect(explicit.fresh).toBe(false); expect(explicit.environment).toBeNull();
+    expect(explicit.fresh).toBe(true); expect(explicit.environment).toBeNull();
     expect(explicit.missing).toContainEqual({ kind: 'environment' });
     expect(resolve(options({ environment_default: 'fresh' }), picked({ environment: NEW_ENVIRONMENT }), dialog).fresh).toBe(true);
   });
@@ -88,9 +88,9 @@ describe('a new default still needs a usable host', () => {
     }
   });
 
-  it('keeps an explicit new choice unavailable rather than silently using a different environment', () => {
+  it('keeps an explicit new choice open while marking its missing host', () => {
     const resolved = resolve(options({ hosts: [] }), picked({ environment: NEW_ENVIRONMENT }), dialog);
-    expect(resolved.fresh).toBe(false); expect(resolved.environment).toBeNull();
+    expect(resolved.fresh).toBe(true); expect(resolved.environment).toBeNull();
     expect(resolved.missing).toContainEqual({ kind: 'environment' });
   });
 
