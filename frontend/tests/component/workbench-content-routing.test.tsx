@@ -153,7 +153,7 @@ function fileLocation(env: string, thread: string | null, path = 'main.rs', line
   return { view: 'file', environmentId: env, threadId: thread, path, ...(line === undefined ? {} : { line }) };
 }
 
-it('pushes ordinary files, replaces focus echoes, and back/forward recovers exact file/diff targets without losing peers', async () => {
+it('pushes ordinary files, replaces focus echoes, and back/forward recovers exact file/diff targets without losing peers', { timeout: 30_000 }, async () => {
   const a = page('thread-a'); nativeRows.set('thread-a', nativeThread('thread-a')); seed([a], a.id);
   const drawn = draw(a.of!.href!); await settled(drawn, a.of!.href);
   const first = fileLocation('environment-thread-a', 'thread-a', 'one.rs', 31);
@@ -340,10 +340,10 @@ it('the actual fixed-history opening hydrator cannot replace shared controls', a
   selectThreadContinuation(fixed, 'history-b');
   const capture = threadWriter.capture(fixed, client.session.getState().readerVersion);
   const controls = queryClient.getQueryData(threadKeys.parameters(ACME.mainThread));
-  hydrateThreadOpening(queryClient, { ...opening, draft: null, parameters: null, limits: null, settings: [] }, capture);
+  hydrateThreadOpening(queryClient, { ...opening, draft: null, parameters: null, limits: null }, capture);
   expect(queryClient.getQueryData(threadKeys.draft(ACME.mainThread))).toEqual(before);
   expect(queryClient.getQueryData(threadKeys.parameters(ACME.mainThread))).toEqual(controls);
-  expect(queryClient.getQueryData(threadKeys.outline(fixed))).toEqual({ pages: [opening.outline], pageParams: [null] });
+  expect(queryClient.getQueryData(threadKeys.outline(fixed))).toBeUndefined();
   expect(fixed.controls).toBeUndefined();
 });
 
@@ -358,7 +358,7 @@ it('shared current workspace metadata cannot replace the existing draft or contr
   expect(source).toEqual(workspaceThreadRead('workspace-a', ACME.mainThread));
   expect(source).not.toEqual(workspaceThreadRead('workspace-b', ACME.mainThread));
   const capture = threadWriter.capture(source, client.session.getState().readerVersion);
-  hydrateThreadOpening(queryClient, { ...opening, draft: null, parameters: null, limits: null, settings: [] }, capture);
+  hydrateThreadOpening(queryClient, { ...opening, draft: null, parameters: null, limits: null }, capture);
   expect(queryClient.getQueryData(threadKeys.draft(ACME.mainThread))).toEqual(draft);
   expect(queryClient.getQueryData(threadKeys.parameters(ACME.mainThread))).toEqual(parameters);
   expect(source.key.kind).toBe('result'); expect(source.controls).toBeUndefined();

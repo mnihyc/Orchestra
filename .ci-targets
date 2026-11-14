@@ -1,0 +1,2 @@
+fmt
+test -p orch-api-core --test binding_options --test binding_readiness --test kfix_binding
