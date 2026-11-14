@@ -8,8 +8,8 @@ import type { MachinePolicy,MachinePolicyKey } from '@/generated/api-types';
 import { i18n,setLocale } from '@/i18n';
 import { show } from './support';
 const {read,write,openGuide}=vi.hoisted(()=>({read:vi.fn<()=>Promise<MachinePolicy>>(),write:vi.fn<()=>Promise<MachinePolicy>>(),openGuide:vi.fn()}));
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>openGuide}));
-vi.mock('@/api/resources',()=>({
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>openGuide}));
+vi.mock('@/api/resources',async (loadOriginal) => ({ ...await loadOriginal<object>(),
   machinePolicyQuery:()=>({queryKey:['machine-policy','machine'],queryFn:read}),
   machineQuery:()=>({queryKey:['machine','machine']}),updateMachinePolicy:write,
 }));

@@ -144,14 +144,20 @@ impl Engine {
         at: Time,
     ) -> Result<(), EngineError> {
         self.invalidate_work().await?;
-        let mut tx = self.db().begin().await?;
-        let mut unit = Unit::new(&mut tx, self.inner.clock.now());
-        for thread in source::work_threads(&mut *unit.conn, environment, directory).await? {
+        let candidates = {
+            let mut conn = self.db().acquire().await?;
+            source::work_threads(&mut conn, environment, directory).await?
+        };
+        // Each thread is written in a transaction of its own: the rows of the threads that share a directory are
+        // held one at a time, never all together until the last.
+        for thread in candidates {
+            let mut tx = self.db().begin().await?;
+            let mut unit = Unit::new(&mut tx, self.inner.clock.now());
             let seq = unit.stamp(thread).await?;
             source::reserve_work(&mut *unit.conn, thread, request, at, seq).await?;
+            let finished = unit.finish().await?;
+            self.commit(tx, finished).await?;
         }
-        let finished = unit.finish().await?;
-        self.commit(tx, finished).await?;
         Ok(())
     }
 
@@ -166,21 +172,26 @@ impl Engine {
     ) -> Result<(), EngineError> {
         let work = from_status(status, at);
         let value = serde_json::to_value(work)?;
-        let mut tx = self.inner.db.begin().await?;
-        let mut unit = Unit::new(&mut tx, self.inner.clock.now());
-        let candidates = source::work_threads(&mut *unit.conn, environment, directory).await?;
+        let candidates = {
+            let mut conn = self.inner.db.acquire().await?;
+            source::work_threads(&mut conn, environment, directory).await?
+        };
         for thread in candidates {
-            let Some(row) = threads::lock(&mut *unit.conn, thread).await? else {
-                continue;
+            let mut tx = self.inner.db.begin().await?;
+            let finished = {
+                let mut unit = Unit::new(&mut tx, self.inner.clock.now());
+                let Some(row) = threads::lock(&mut *unit.conn, thread).await? else {
+                    continue;
+                };
+                if row.environment_id != Some(environment) || row.workspace_dir != directory {
+                    continue;
+                }
+                let seq = unit.stamp(thread).await?;
+                source::finish_work(&mut *unit.conn, thread, request, &value, seq).await?;
+                unit.finish().await?
             };
-            if row.environment_id != Some(environment) || row.workspace_dir != directory {
-                continue;
-            }
-            let seq = unit.stamp(thread).await?;
-            source::finish_work(&mut *unit.conn, thread, request, &value, seq).await?;
+            self.commit(tx, finished).await?;
         }
-        let finished = unit.finish().await?;
-        self.commit(tx, finished).await?;
         Ok(())
     }
 

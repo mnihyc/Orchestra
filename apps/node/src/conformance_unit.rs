@@ -78,6 +78,21 @@ pub async fn run(
             "native harness checks need a Linux isolation driver".to_owned(),
         ));
     }
+    let image = config
+        .conformance_image
+        .clone()
+        .unwrap_or_else(|| format!("orch-env-base:{}", env!("ORCH_RELEASE_VERSION")));
+    docker
+        .inspect_image(&image)
+        .await
+        .map_err(|failure| match failure {
+            bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            } => {
+                DriverError::Unsupported(format!("native checks need the preloaded image {image}"))
+            }
+            other => DriverError::Internal(format!("native check image {image}: {other}")),
+        })?;
     let runner = config
         .live_helper_binary
         .clone()
@@ -88,13 +103,6 @@ pub async fn run(
             "native checks need the shipped static node runner".to_owned(),
         ));
     }
-    let image = config
-        .conformance_image
-        .clone()
-        .unwrap_or_else(|| format!("orch-env-base:{}", env!("ORCH_RELEASE_VERSION")));
-    docker.inspect_image(&image).await.map_err(|_| {
-        DriverError::Unsupported(format!("native checks need the preloaded image {image}"))
-    })?;
     let fallback = program
         .parent()
         .ok_or_else(|| error("the cached executable has no directory"))?;

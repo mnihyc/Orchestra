@@ -22,6 +22,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`restores program setup and ch
   await setLocale(locale); const chosen = vi.fn<(config: CreateThread) => void>(), close = vi.fn(), user = userEvent.setup();
   show(<NewThreadDialog parent={parent} open onClose={close} prepare={{ initial: { program: { id: 'orch', model: null }, name: 'Later program', access: 'private' }, onChoose: chosen }} />);
   expect(await screen.findByRole('textbox', { name: i18n.t('start.options.name') })).toHaveValue('Later program');
+  expect(screen.getByText(i18n.t('ask.noEnvironment'))).not.toBeVisible();
   expect(screen.queryByRole('textbox', { name: i18n.t('start.message.title') })).not.toBeInTheDocument();
   const confirm = screen.getByRole('button', { name: i18n.t('sendLater.useSetup') }); await waitFor(() => expect(confirm).toBeEnabled()); await user.click(confirm);
   expect(chosen).toHaveBeenCalledExactlyOnceWith({ program: { id: 'orch' }, name: 'Later program', access: 'private' });
