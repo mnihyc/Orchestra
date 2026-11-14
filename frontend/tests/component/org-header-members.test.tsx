@@ -30,14 +30,14 @@ vi.mock('@/api/firstSteps', () => ({ firstStepsQuery: () => ({ queryKey: ['heade
 } }) }));
 vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof Live>(), useOrgTreeFeed: () => undefined }));
 vi.mock('@/shell/screen', async (original) => ({ ...await original<typeof Screen>(), useScreenHeading: () => undefined }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
 vi.mock('@tanstack/react-router', async (original) => {
   const router = await original<typeof Router>();
   return { ...router, Link: ({ children }: { children: ReactNode }) => <a href="#settings">{children}</a> };
 });
 vi.mock('@/features/org/Activity', () => ({ ActivityFeed: () => null, OrgActivity: () => null }));
-vi.mock('@/features/navigation/NodeMenu', () => ({ NodeMenuButton: () => null }));
-vi.mock('@/features/navigation/OrgSwitcher', () => ({ orgInitial: () => 'R', orgColor: () => 0 }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), NodeMenuButton: () => null }));
+vi.mock('@/features/navigation/OrgSwitcher', async (loadOriginal) => ({ ...await loadOriginal<object>(), orgInitial: () => 'R', orgColor: () => 0 }));
 vi.mock('@/features/topic/TagPicker', () => ({ TagPicker: () => null }));
 vi.mock('@/features/announcements/Composer', () => ({ PlaceAnnouncements: () => null }));
 

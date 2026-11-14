@@ -13,7 +13,7 @@ import { keyOfHit } from '@/features/search/hits';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 const host = vi.hoisted(() => ({ rows: new Map<string, SummarySnapshot>(), pending: new Map<string, Promise<SummarySnapshot>>(), errors: new Map<string, Error>(), ask: vi.fn<typeof Ask.openAskWithDraft>(), refresh: vi.fn() }));
-vi.mock('@/features/ask/open', () => ({ openAskWithDraft: host.ask }));
+vi.mock('@/features/ask/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAskWithDraft: host.ask }));
 vi.mock('@/api/summaries', async (original) => {
   const actual = await original<typeof Summaries>();
   return { ...actual, refreshResourceSummary: host.refresh,

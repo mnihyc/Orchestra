@@ -40,7 +40,7 @@ vi.mock('@/api/access', async (load) => ({ ...await load<typeof AccessApi>(),
 vi.mock('@/api/auth', async (load) => ({ ...await load<typeof AuthApi>(), meQuery: { queryKey: ['people-me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada')) } }));
 vi.mock('@/api/nodes', async (load) => ({ ...await load<typeof NodesApi>(), nodeQuery: (id: string) => ({ queryKey: ['people-node', id], queryFn: () => Promise.resolve(place) }) }));
 vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(), settingsQuery: (id: string) => ({ queryKey: ['people-settings', id], queryFn: () => Promise.resolve([]) }) }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (node: { name?: string | null } | null | undefined) => node?.name ?? null }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabel: () => (node: { name?: string | null } | null | undefined) => node?.name ?? null }));
 vi.mock('@/features/trace/Person', () => ({ useTraceEntry: () => () => [], TracePerson: ({ user }: { user: UserRef }) => <span>{user.display_name}</span> }));
 vi.mock('@/features/access/candidates', async (load) => ({ ...await load<typeof CandidatesApi>(),
   useTargetOrg: () => 'acme',

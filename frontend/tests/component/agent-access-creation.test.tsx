@@ -48,8 +48,8 @@ vi.mock('@/api/access', async (load) => ({ ...await load<typeof AccessApi>(),
 }));
 vi.mock('@/api/resources', async (load) => ({ ...await load<object>(), providersQuery: () => ({ queryKey: ['agent-creation-providers'], queryFn: () => Promise.resolve([]) }), machinesQuery: { queryKey: ['agent-creation-machines'], queryFn: () => Promise.resolve([]) } }));
 vi.mock('@/api/nodes', async (load) => ({ ...await load<object>(), nodeQuery: (id: string) => ({ queryKey: ['agent-creation-node', id], queryFn: () => { state.nodeReads(id); return Promise.resolve(state.topic); } }) }));
-vi.mock('@/features/resources/harnesses', () => ({ useHarnessTitle: () => () => 'Reported harness' }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/resources/harnesses', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHarnessTitle: () => () => 'Reported harness' }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 function topic() { if (state.topic === null) throw new Error('The current topic is required'); return state.topic; }
 beforeEach(() => {

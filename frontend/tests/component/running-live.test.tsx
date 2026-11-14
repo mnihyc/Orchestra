@@ -14,7 +14,7 @@ interface Phase { phase: SocketPhase }
 const source = vi.hoisted(() => ({ sinks: [] as Sink[], phase: 'ready',
   statuses: new Set<(next: Phase, previous: Phase) => void>() }));
 vi.mock('@/api/background', () => ({ fetchBackground: vi.fn() }));
-vi.mock('@/realtime/live', () => ({ socket: {
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: {
   subscribe: (feed: string, options: { onFrame: (frame: FeedFrame) => void }) => {
     const sink = { feed, onFrame: options.onFrame, unsubscribe: vi.fn() };
     source.sinks.push(sink); return { unsubscribe: sink.unsubscribe };

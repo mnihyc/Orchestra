@@ -237,7 +237,9 @@ describe('the profile appearance control', () => {
     await user.click(field);
     await user.click(screen.getByRole('option', { name: 'This device' }));
     await waitFor(() => expect(updateMe).toHaveBeenLastCalledWith({ timezone: 'Asia/Singapore', timezone_mode: 'device' }));
-    expect(screen.getByRole('combobox', { name: 'Time zone' })).toHaveValue('This device (Asia/Singapore, UTC+08:00)');
-    expect(useAppearance.getState()).toMatchObject({ timeZone: 'Asia/Singapore', timeZoneMode: 'device' });
+    await waitFor(() => {
+      expect(screen.getByRole('combobox', { name: 'Time zone' })).toHaveValue('This device (Asia/Singapore, UTC+08:00)');
+      expect(useAppearance.getState()).toMatchObject({ timeZone: 'Asia/Singapore', timeZoneMode: 'device' });
+    });
   });
 });

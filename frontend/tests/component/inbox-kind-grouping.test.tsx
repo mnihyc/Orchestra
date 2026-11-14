@@ -24,7 +24,7 @@ vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useU
 vi.mock('@/features/settings/personal/away/live', () => ({ useAwayLive: () => undefined }));
 vi.mock('@/features/settings/personal/away/Pause', () => ({ PauseControls: () => null }));
 vi.mock('@/features/inbox/presentation', async (load) => ({ ...await load<typeof Presentation>(), useNotificationLabels: () => new Map() }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: () => undefined }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: () => undefined }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 
 const before = useUserStore.getState();

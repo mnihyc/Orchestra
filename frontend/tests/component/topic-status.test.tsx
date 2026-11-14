@@ -18,11 +18,11 @@ import { org } from '../doubles/fixtures';
 import { ADA } from '../unit/general-access-fixtures';
 
 vi.mock('@/api/day100', () => ({ changeTopicStatus: vi.fn() }));
-vi.mock('@/ui/Toast', () => ({ toast: vi.fn(() => vi.fn()) }));
-vi.mock('@/features/navigation/NodeMenu', async () => {
+vi.mock('@/ui/Toast', async (loadOriginal) => ({ ...await loadOriginal<object>(), toast: vi.fn(() => vi.fn()) }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => {
   const { create } = await import('zustand');
   const pending = create<{ ids: ReadonlySet<string> }>(() => ({ ids: new Set() }));
-  return {
+  return { ...await loadOriginal<object>(),
     usePendingPlaces: pending,
     useIsPending: (id: string) => pending((state) => state.ids.has(id)),
   };

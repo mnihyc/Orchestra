@@ -16,7 +16,7 @@ const calls = vi.hoisted(() => ({ read: vi.fn<(cursor: string | null) => Promise
 vi.mock('@/api/shared', () => ({ sharedPageQuery: (cursor: string | null) => ({
   queryKey: ['shared-document-lifecycle', cursor], queryFn: () => calls.read(cursor),
 }) }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: vi.fn() }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeof Router>(),
   Link: ({ to, params, children, className }: { to: string; params?: Record<string, string>; children?: ReactNode; className?: string }) =>
     <a href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, encodeURIComponent(value)), to)} className={className}>{children}</a>,

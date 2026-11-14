@@ -8,7 +8,7 @@ import {ProviderRuntime} from '@/features/resources/providers/Runtime';
 import {planProvider} from '../unit/provider-plan-fixtures';
 import {show} from './support';
 
-vi.mock('@tanstack/react-router',()=>({Link:({children}:{children:ReactNode})=><a href="#machine">{children}</a>}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),Link:({children}:{children:ReactNode})=><a href="#machine">{children}</a>}));
 vi.mock('@/features/resources/machines/Policy',()=>({MachineLimits:()=>null}));
 vi.mock('@/features/resources/providers/RuntimeConfiguration',()=>({RuntimeConfiguration:()=> <section aria-label="Runtime settings">Runtime variables and secrets</section>}));
 vi.mock('@/api/provider-runtime',()=>({startRuntime:vi.fn(),stopRuntime:vi.fn()}));

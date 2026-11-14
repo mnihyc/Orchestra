@@ -1,0 +1,5 @@
+fmt
+clippy
+contracts
+test -p orch-engine --lib
+test -p orch-api-core --test kfix_binding --test provider_harness

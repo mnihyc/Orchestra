@@ -6,8 +6,8 @@
 )]
 
 use orch_testkit::database::{
-    ADMISSION_WAIT_VARIABLE, CONNECTION_BUDGET_VARIABLE, CONNECTION_RESERVATION_VARIABLE,
-    LEASE_DIRECTORY_VARIABLE, RUN_ID_VARIABLE, TestDb, URL_VARIABLE,
+    CONNECTION_BUDGET_VARIABLE, CONNECTION_RESERVATION_VARIABLE, LEASE_DIRECTORY_VARIABLE,
+    RUN_ID_VARIABLE, TestDb, URL_VARIABLE,
 };
 use orch_types::{Id, Json, new_id};
 use sqlx::{Connection, PgConnection, postgres::PgPoolOptions};
@@ -92,7 +92,6 @@ fn worker(directory: &Path, signal: Id, budget: &str) -> Child {
         .env(LEASE_DIRECTORY_VARIABLE, directory)
         .env(CONNECTION_BUDGET_VARIABLE, budget)
         .env(CONNECTION_RESERVATION_VARIABLE, FIXTURE_RESERVATION)
-        .env(ADMISSION_WAIT_VARIABLE, PROOF_WAIT.as_secs().to_string())
         .env(
             RUN_ID_VARIABLE,
             std::env::var(RUN_ID_VARIABLE).unwrap_or_else(|_| new_id().to_string()),
@@ -336,42 +335,72 @@ async fn exit_and_owned_cleanup(process_exit: &str, job_exit: i32) {
 }
 
 #[tokio::test]
-async fn admission_timeout_names_the_lease_it_waited_for_and_creates_no_orphan() {
+async fn a_cancelled_waiting_process_leaves_no_database_and_does_not_block_the_next_fixture() {
     let _proof = PROOFS.lock().await;
     let directory = artifact_directory();
-    let signal = new_id();
-    let mut children = Workers(vec![worker(&directory, signal, FIXTURE_RESERVATION)]);
-    wait_for_file(&directory.join(signal.to_string()).with_extension("ready")).await;
-    let output = tokio::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", WORKER, "--nocapture"])
-        .env(LEASE_DIRECTORY_VARIABLE, &directory)
-        .env(CONNECTION_BUDGET_VARIABLE, FIXTURE_RESERVATION)
-        .env(CONNECTION_RESERVATION_VARIABLE, FIXTURE_RESERVATION)
-        // This test deliberately expires admission while its only slot is owned.
-        .env(ADMISSION_WAIT_VARIABLE, "1")
-        .output()
-        .await
-        .unwrap();
-    assert!(!output.status.success());
-    let diagnostic = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        diagnostic.contains("waiting for a test database lease exceeded"),
-        "{diagnostic}"
-    );
-    assert!(
-        diagnostic.contains("all 1 slots reserve 32 of 32 connections"),
-        "{diagnostic}"
-    );
+    let owner = new_id();
+    let mut children = Workers(vec![worker(&directory, owner, FIXTURE_RESERVATION)]);
+    wait_for_file(&directory.join(owner.to_string()).with_extension("ready")).await;
+    let cancelled = new_id();
+    children
+        .0
+        .push(worker(&directory, cancelled, FIXTURE_RESERVATION));
+    // Observe the actual admission ticket before stopping this exact process.
+    // Its exit releases the kernel lock without running a Rust destructor.
+    tokio::time::timeout(PROOF_WAIT, async {
+        loop {
+            let queued = std::fs::read_dir(&directory)
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    let waiting = entry.path().join("waiting");
+                    waiting.is_dir() && std::fs::read_dir(waiting).unwrap().next().is_some()
+                });
+            if queued {
+                break;
+            }
+            tokio::time::sleep(PROOF_POLL).await;
+        }
+    })
+    .await
+    .expect("the second worker is queued behind the occupied slot");
     assert_eq!(
         lease_records(&directory).len(),
         1,
-        "the timed-out waiter created no database"
+        "the waiter owns no database"
     );
+    assert!(
+        !directory
+            .join(cancelled.to_string())
+            .with_extension("ready")
+            .exists()
+    );
+    children.0[1].kill().unwrap();
+    assert!(!children.0[1].wait().unwrap().success());
+    let next = new_id();
+    children
+        .0
+        .push(worker(&directory, next, FIXTURE_RESERVATION));
+    wait_for_file(
+        &directory
+            .join(next.to_string())
+            .with_extension("attempting"),
+    )
+    .await;
     std::fs::write(
-        directory.join(signal.to_string()).with_extension("release"),
+        directory.join(owner.to_string()).with_extension("release"),
+        "done",
+    )
+    .unwrap();
+    wait_for_file(&directory.join(next.to_string()).with_extension("ready")).await;
+    std::fs::write(
+        directory.join(next.to_string()).with_extension("release"),
         "done",
     )
     .unwrap();
     assert!(wait_for_exit(&mut children.0[0]).await.success());
-    assert_eq!(lease_records(&directory)[0]["state"], "dropped");
+    assert!(wait_for_exit(&mut children.0[2]).await.success());
+    let records = lease_records(&directory);
+    assert_eq!(records.len(), 2, "only admitted workers created databases");
+    assert!(records.iter().all(|record| record["state"] == "dropped"));
 }

@@ -3,6 +3,7 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, expect, it, vi } from 'vitest';
 import { parametersQuery } from '@/api/threads';
+import type * as WorkbenchStore from '@/features/workbench/store';
 import { useStatusValues } from '@/features/status-items/useValues';
 import type { Thread, ThreadParameters, Turn } from '@/generated/api-types';
 import { newOutputCounts, type OutputCounts } from '@/realtime/outputCounts';
@@ -11,12 +12,17 @@ import { turn } from '../doubles/thread-rows';
 import { World } from '../doubles/world';
 
 let current: { thread: Thread; turn: Turn; items: Map<string, unknown>; outputCounts: OutputCounts };
-vi.mock('@/realtime/stores/thread', () => ({
+vi.mock('@/realtime/stores/thread', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   runningTurn: (view: typeof current) => view.turn,
   useThreadPart: (_id: string, select: (view: typeof current) => unknown) => select(current),
 }));
-vi.mock('@/features/workbench/store', () => ({ useWorkbench: (select: (value: { statusItems: { id: string; place: string; shown: boolean }[] }) => unknown) =>
-  select({ statusItems: [{ id: 'speed', place: 'live', shown: true }] }) }));
+vi.mock('@/features/workbench/store', async (loadOriginal) => {
+  const actual = await loadOriginal<typeof WorkbenchStore>();
+  return { ...actual, useWorkbench: Object.assign(
+    (select: (value: { statusItems: { id: string; place: string; shown: boolean }[] }) => unknown) => select({ statusItems: [{ id: 'speed', place: 'live', shown: true }] }),
+    actual.useWorkbench,
+  ) };
+});
 vi.mock('@/features/resource-facts/live', () => ({ useResourceSample: () => null }));
 vi.mock('@/lib/time', async (load) => ({ ...await load<object>(), useRunningClock: () => Date.parse('2026-10-25T00:00:10Z') }));
 

@@ -13,7 +13,7 @@ import { i18n, setLocale } from '@/i18n';
 
 import { show } from './support';
 
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="#provider">{children}</a> }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: ReactNode }) => <a href="#provider">{children}</a> }));
 vi.mock('@/api/admin', async (load) => ({ ...await load<typeof AdminApi>(),
   capabilitiesQuery: { queryKey: ['table-value-capabilities'], queryFn: (): Promise<CapabilityDef[]> => Promise.resolve([capability]) },
 }));

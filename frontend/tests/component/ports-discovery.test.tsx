@@ -23,10 +23,10 @@ vi.mock('@/api/environments', async (load) => {
   const actual = await load<typeof EnvironmentApi>();
   return { ...actual, environmentQuery: (id: string) => ({ queryKey: actual.environmentKey(id), queryFn: () => Promise.resolve(environment), staleTime: Infinity }) };
 });
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => vi.fn(),
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNavigate: () => vi.fn(),
   Link: ({ children, className }: { children: ReactNode; className?: string }) => <a href="#environment" className={className}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/realtime/environmentFeed', () => ({ useEnvironmentFeed: () => undefined }));
 vi.mock('@/features/resources/environments/acts', () => ({ useEnvironmentActs: () => ({
