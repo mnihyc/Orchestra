@@ -43,10 +43,6 @@ use http::header;
 
 use orch_api_contract::common::ErrorCode;
 
-use orch_api_contract::workspace::ARCHIVE_LIST_LIMIT_DEFAULT;
-
-use orch_api_contract::workspace::ARCHIVE_LIST_LIMIT_MAX;
-
 use orch_api_contract::workspace::ArchiveListing;
 
 use orch_api_contract::workspace::EnvironmentArchiveEntryGet;
@@ -78,12 +74,6 @@ use orch_api_contract::workspace::EnvironmentGitDiffGetQuery;
 use orch_api_contract::workspace::EnvironmentGitStatusGet;
 
 use orch_api_contract::workspace::EnvironmentGitStatusGetQuery;
-
-use orch_api_contract::workspace::FILE_SEARCH_LIMIT_DEFAULT;
-
-use orch_api_contract::workspace::FILE_SEARCH_LIMIT_MAX;
-
-use orch_api_contract::workspace::FILE_SEARCH_NAMES_MAX;
 
 use orch_api_contract::workspace::FILE_SEARCH_QUERY_MIN_CHARS;
 
@@ -176,78 +166,189 @@ async fn search(
             &format!("a search is for at least {FILE_SEARCH_QUERY_MIN_CHARS} characters"),
         ));
     }
-    match query.scope.unwrap_or(FileSearchIn::Names) {
-        FileSearchIn::Names => {
-            if !indexed(&door.env) {
-                return Err(ApiError::new(
-                    ErrorCode::WorkspaceNotIndexed,
-                    "the tree is too large to keep a list of; the names of files are not searched",
-                ));
-            }
-            let machine_is_there = live::machine_of(&ctx, &mut conn, &door.env)
-                .await?
-                .is_some();
-            let Some(manifest) = door.env.manifest_blob else {
-                return Err(if machine_is_there {
-                    ApiError::new(
-                        ErrorCode::EnvironmentUnavailable,
-                        "the machine has not uploaded a list of the tree yet",
-                    )
-                } else {
-                    live::offline()
-                });
-            };
-            let tree = ctx
-                .app
-                .cache
-                .manifest_of(&ctx.app.blobs, door.env.id, &manifest)
-                .await
-                .map_err(ApiError::internal)?;
-            let limit = usize::try_from(FILE_SEARCH_NAMES_MAX).unwrap_or(usize::MAX);
-            let mut found: Vec<_> = tree
-                .find(&asked.to_lowercase(), limit)
-                .into_iter()
-                .map(listing::dir_entry)
-                .collect();
-            listing::mark_cached(&mut conn, door.env.id, None, &mut found).await?;
-            Ok(EnvironmentFileSearchReply::Names(found))
-        }
-        FileSearchIn::Content => {
-            let limit = match query.limit {
-                None => FILE_SEARCH_LIMIT_DEFAULT,
-                Some(0) => return Err(ApiError::invalid("limit", "must be at least 1")),
-                Some(limit) => limit.min(FILE_SEARCH_LIMIT_MAX),
-            };
-            // Where to look: the directory asked for, or the thread's own.
-            let path = match &query.path {
-                Some(path) => paths::clean("path", path, true)?,
-                None => door.directory.clone().unwrap_or_default(),
-            };
-            let machine = live::require_live(&ctx, &mut conn, &door.env).await?;
-            drop(conn);
-            let found = live::run(
-                &ctx,
-                machine,
-                SerialKey::None,
-                &FsSearch {
-                    environment_id: door.env.id,
-                    path,
-                    query: asked.to_owned(),
-                    regex: query.regex.unwrap_or(false),
-                    case: query.case.unwrap_or(false),
-                    glob: query.glob.clone().filter(|glob| !glob.trim().is_empty()),
-                    limit,
-                },
-            )
-            .await
-            .map_err(|failure| failure.problem(Doing::Searching))?;
-            Ok(EnvironmentFileSearchReply::Content(FileSearchContent {
-                matches: found.matches,
-                truncated: found.truncated,
-                searched: found.searched,
-            }))
-        }
+    let policy = orch_engine::environments::workspace_limits(&mut conn, door.env.id)
+        .await
+        .map_err(ApiError::internal)?;
+    let limit = query
+        .limit
+        .unwrap_or(u32::try_from(policy.search_results).unwrap_or(u32::MAX));
+    if limit == 0 {
+        return Err(ApiError::invalid("limit", "must be at least 1"));
     }
+    let scope = query.scope.unwrap_or(FileSearchIn::Names);
+    if scope == FileSearchIn::Names
+        && indexed(&door.env)
+        && door.env.manifest_blob.is_some()
+        && !query
+            .cursor
+            .as_deref()
+            .is_some_and(|cursor| cursor.starts_with("live:"))
+    {
+        use base64::Engine as _;
+        let codec = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let blob = door.env.manifest_blob.ok_or_else(super::pages::stale)?;
+        let selection = serde_json::to_string(&(asked.to_lowercase(), &query.path, query.case))
+            .map_err(ApiError::internal)?;
+        let after = query
+            .cursor
+            .as_deref()
+            .map(|text| {
+                let text = text
+                    .strip_prefix("cached:")
+                    .ok_or_else(super::pages::stale)?;
+                let bytes = codec.decode(text).map_err(|_| super::pages::stale())?;
+                let cursor: CachedNames =
+                    serde_json::from_slice(&bytes).map_err(|_| super::pages::stale())?;
+                if cursor.environment != door.env.id
+                    || cursor.generation != door.env.generation
+                    || cursor.manifest != blob
+                    || cursor.selection != selection
+                {
+                    return Err(super::pages::stale());
+                }
+                Ok(cursor.after)
+            })
+            .transpose()?;
+        let tree = ctx
+            .app
+            .cache
+            .manifest_of(&ctx.app.blobs, door.env.id, &blob)
+            .await
+            .map_err(ApiError::internal)?;
+        let all = tree.entries();
+        let start = after.as_ref().map_or(0, |after| {
+            all.partition_point(|entry| entry.path.as_str() <= after.as_str())
+        });
+        let needle = if query.case == Some(true) {
+            asked.to_owned()
+        } else {
+            asked.to_lowercase()
+        };
+        let mut found = Vec::new();
+        let mut more = false;
+        let mut searched = start;
+        for entry in &all[start..] {
+            searched += 1;
+            if query.path.as_ref().is_some_and(|path| {
+                !path.is_empty()
+                    && entry.path != *path
+                    && !entry.path.starts_with(&format!("{path}/"))
+            }) {
+                continue;
+            }
+            let matches = if query.case == Some(true) {
+                entry.path.contains(&needle)
+            } else {
+                entry.path.to_lowercase().contains(&needle)
+            };
+            if !matches {
+                continue;
+            }
+            if found.len() >= limit as usize {
+                more = true;
+                break;
+            }
+            found.push(listing::dir_entry(entry));
+        }
+        let next_cursor = if more {
+            let after = found.last().ok_or_else(super::pages::stale)?.path.clone();
+            Some(format!(
+                "cached:{}",
+                codec.encode(
+                    serde_json::to_vec(&CachedNames {
+                        environment: door.env.id,
+                        generation: door.env.generation,
+                        manifest: blob,
+                        selection,
+                        after,
+                    })
+                    .map_err(ApiError::internal)?
+                )
+            ))
+        } else {
+            None
+        };
+        listing::mark_cached(&mut conn, door.env.id, None, &mut found).await?;
+        let as_of = Time::new(door.env.manifest_at.unwrap_or(ctx.now));
+        return Ok(EnvironmentFileSearchReply::Names(
+            orch_api_contract::workspace::FileSearchNames {
+                entries: found,
+                next_cursor,
+                source: orch_api_contract::forks::FilesSource::Cached,
+                as_of,
+                observed_from: Some(as_of),
+                searched: i64::try_from(searched).unwrap_or(i64::MAX),
+            },
+        ));
+    }
+    let path = match &query.path {
+        Some(path) => paths::clean("path", path, true)?,
+        None if scope == FileSearchIn::Content => door.directory.clone().unwrap_or_default(),
+        None => String::new(),
+    };
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|cursor| {
+            if scope == FileSearchIn::Names {
+                cursor
+                    .strip_prefix("live:")
+                    .map(str::to_owned)
+                    .ok_or_else(super::pages::stale)
+            } else {
+                Ok(cursor.to_owned())
+            }
+        })
+        .transpose()?;
+    let machine = live::require_live(&ctx, &mut conn, &door.env).await?;
+    drop(conn);
+    let found = live::run(
+        &ctx,
+        machine,
+        SerialKey::None,
+        &FsSearch {
+            environment_id: door.env.id,
+            path,
+            scope,
+            cursor,
+            query: asked.to_owned(),
+            regex: query.regex.unwrap_or(false),
+            case: query.case.unwrap_or(false),
+            glob: query.glob.clone().filter(|glob| !glob.trim().is_empty()),
+            limit,
+        },
+    )
+    .await
+    .map_err(|failure| failure.problem(Doing::Searching))?;
+    match scope {
+        FileSearchIn::Names => Ok(EnvironmentFileSearchReply::Names(
+            orch_api_contract::workspace::FileSearchNames {
+                entries: found.names.unwrap_or_default(),
+                next_cursor: found.next_cursor.map(|cursor| format!("live:{cursor}")),
+                source: orch_api_contract::forks::FilesSource::Live,
+                as_of: found.as_of.unwrap_or(Time::new(ctx.now)),
+                observed_from: found.observed_from,
+                searched: found.searched,
+            },
+        )),
+        FileSearchIn::Content => Ok(EnvironmentFileSearchReply::Content(FileSearchContent {
+            matches: found.matches,
+            truncated: found.truncated,
+            searched: found.searched,
+            next_cursor: found.next_cursor,
+            observed_from: found.observed_from,
+        })),
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CachedNames {
+    environment: orch_types::Id,
+    generation: i32,
+    manifest: orch_types::Hash,
+    selection: String,
+    after: String,
 }
 
 // ---------------------------------------------------------------- archives
@@ -267,11 +368,15 @@ async fn archive_list(
         }
         None => None,
     };
-    let limit = match query.limit {
-        None => ARCHIVE_LIST_LIMIT_DEFAULT,
-        Some(0) => return Err(ApiError::invalid("limit", "must be at least 1")),
-        Some(limit) => limit.min(ARCHIVE_LIST_LIMIT_MAX),
-    };
+    let policy = orch_engine::environments::workspace_limits(&mut conn, door.env.id)
+        .await
+        .map_err(ApiError::internal)?;
+    let limit = query
+        .limit
+        .unwrap_or(u32::try_from(policy.archive_results).unwrap_or(u32::MAX));
+    if limit == 0 {
+        return Err(ApiError::invalid("limit", "must be at least 1"));
+    }
     let machine = live::require_live(&ctx, &mut conn, &door.env).await?;
     drop(conn);
     let found = live::run(

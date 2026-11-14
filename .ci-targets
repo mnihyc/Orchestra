@@ -1,0 +1,9 @@
+fmt
+clippy
+test -p orch-envhost --lib
+test -p orch-envhost --test environment
+test -p orch-api-core --test workspace_looking --test workspace_pages --test workspace_connector
+test -p orch-engine --lib -- tools::
+test -p orch-agent-contract --lib
+test -p orch-connector-core --lib -- orch_tools::
+test -p orch-settings-contract --lib

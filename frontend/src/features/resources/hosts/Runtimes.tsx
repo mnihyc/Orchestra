@@ -29,11 +29,11 @@ import { SkeletonRows } from '@/ui/Skeleton';
 import { StatusDot, type DotTone } from '@/ui/StatusDot';
 import { type Column, Table } from '@/ui/Table';
 import { toast } from '@/ui/Toast';
-import { CopyButton } from '@/ui/CopyButton';
+import { copyIdEntry } from '@/ui/CopyId';
 import { UpdateDialog, type UpdateTargets } from '@/features/fleet/UpdateDialog';
 
 function runtimeName(runtime: Runtime, t: TFunction): string {
-  return runtime.environment?.name ?? runtime.provider?.name ?? t('resourceDetails.unitGeneration', { generation: runtime.generation });
+  return runtime.environment?.name ?? runtime.provider?.name ?? t('hosts.runtimes.unowned');
 }
 
 /** How a unit stands, as the colour of its dot: running is well, a failure is not, the rest is quiet. */
@@ -77,9 +77,7 @@ function RemoveRuntimeDialog({ host, runtime, onClose }: { host: Host; runtime: 
     >
       <div className="flex flex-col gap-3 py-2">
         <p className="text-base text-text-muted">{t(runtime.kind === 'provider' ? 'hosts.runtimes.removeProviderBody' : 'hosts.runtimes.removeBody', { host: host.name })}</p>
-        <p className="text-sm text-text-muted">{t('resourceDetails.unitGeneration', { generation: runtime.generation })}</p>
         <Checkbox label={t('hosts.runtimes.volumes')} help={<Hint id="host-volumes" />} checked={volumes} onCheckedChange={setVolumes} disabled={remove.isPending} />
-        <CopyButton value={runtime.unit_name} label={t('resourceDetails.copyId')} />
         <Input label={t('hosts.runtimes.type', { name })} value={typed} onChange={(event) => setTyped(event.target.value)} autoComplete="off" disabled={remove.isPending} />
         {remove.error !== null && <ErrorAlert error={remove.error} />}
         {remove.error instanceof ApiError && remove.error.is('resource.in_use') && <p className="text-sm text-text-muted">{t('hosts.runtimes.inUse')}</p>}
@@ -127,8 +125,6 @@ export function HostRuntimes({ host }: { host: Host }) {
                 <span className="truncate font-medium text-text">{runtimeName(runtime, t)}</span>
               )}
               <Badge>{t(`templates.kind.${runtime.kind}`)}</Badge>
-              {(runtime.environment !== null || runtime.provider !== null) && <span className="text-xs text-text-muted">{t('resourceDetails.unitGeneration', { generation: runtime.generation })}</span>}
-              <CopyButton value={runtime.unit_name} label={t('resourceDetails.copyId')} />
             </span>
             {withoutState && <StatusDot tone={stateTone(runtime.state)} label={words(runtime.state)} showLabel />}
           </div>
@@ -154,13 +150,6 @@ export function HostRuntimes({ host }: { host: Host }) {
     },
     { id: 'driver', header: t('hosts.runtimes.driver'), from: 'lg', className: 'text-text-muted', cell: (runtime) => runtime.driver },
     {
-      id: 'machine',
-      header: t('hosts.runtimes.machine'),
-      from: 'lg',
-      className: 'text-text-muted',
-      cell: (runtime) => runtime.machine?.name ?? '–',
-    },
-    {
       id: 'active',
       header: t('hosts.runtimes.active'),
       from: 'md',
@@ -179,6 +168,8 @@ export function HostRuntimes({ host }: { host: Host }) {
           entries={[
             { id: 'stop', label: t('hosts.runtimes.stop'), icon: <Square aria-hidden />, onSelect: () => stop.mutate({ runtime, interrupt: false }) },
             { id: 'interrupt', label: t('hosts.runtimes.stopInterrupt'), icon: <Square aria-hidden />, onSelect: () => setInterrupting(runtime) },
+            { type: 'separator', id: 'then' },
+            copyIdEntry(t, runtime.unit_name),
             { type: 'separator', id: 'apart' },
             { id: 'remove', label: t('hosts.runtimes.remove'), icon: <Trash2 aria-hidden />, danger: true, onSelect: () => setRemoving(runtime) },
           ]}

@@ -143,6 +143,8 @@ pub fn workspace_on(
             ));
         }
         Ok(CommandResult::FsRecord(FsRecordResult {
+            indexing: None,
+
             state: RecordState::Unavailable,
             tree_ref: None,
             repository_head: None,

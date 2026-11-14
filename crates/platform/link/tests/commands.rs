@@ -222,7 +222,7 @@ async fn commands_with_one_key_run_one_at_a_time_in_the_order_they_came_and_othe
 }
 
 #[tokio::test]
-async fn a_command_whose_deadline_passed_before_its_turn_is_not_started() {
+async fn a_short_command_that_waited_in_line_behind_a_long_one_still_runs_when_its_turn_comes() {
     let rig = rig();
     rig.machine.link.connected().await;
     rig.machine.handler.hold(CommandKind::SessionClose);
@@ -232,21 +232,23 @@ async fn a_command_whose_deadline_passed_before_its_turn_is_not_started() {
         deadline(&rig.clock, 600),
         &SessionClose { thread_id: thread },
     );
-    let late = rig.controller.issue(
+    // Thirty seconds of work, asked while the line is held by a long one.
+    let short = rig.controller.issue(
         &SerialKey::Thread(thread),
         deadline(&rig.clock, 30),
         &SessionClose { thread_id: thread },
     );
     within(10, rig.machine.handler.started(blocker)).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // The line stays held for far longer than the short command's thirty seconds.
     rig.clock.advance(chrono::Duration::seconds(60));
     rig.machine.handler.release();
-    let ended = within(10, rig.controller.wait_command(late)).await;
-    let Progress::Failed(error) = ended else {
-        panic!("{ended:?}")
-    };
-    assert_eq!(error.code, ErrorCode::Timeout.as_str());
-    assert_eq!(rig.machine.handler.runs_of(late), 0);
+    let ended = within(10, rig.controller.wait_command(short)).await;
+    assert!(
+        matches!(ended, Progress::Succeeded(_)),
+        "the time spent waiting is not the command's own: {ended:?}"
+    );
+    assert_eq!(rig.machine.handler.runs_of(short), 1);
 }
 
 #[tokio::test]
@@ -307,15 +309,19 @@ async fn a_command_that_reaches_a_machine_before_it_has_said_what_carries_comman
     );
     // The machine has written it down and said so; the next moments are its chance to fail it.
     within(10, async {
-        while !matches!(controller.progress(command), Some(Progress::Accepted)) {
+        while !controller
+            .progress(command)
+            .is_some_and(|progress| progress.key_phase().is_some())
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(
-        controller.progress(command),
-        Some(Progress::Accepted),
+    assert!(
+        controller
+            .progress(command)
+            .is_some_and(|progress| progress.key_phase().is_some()),
         "it is in hand and waits"
     );
     let handler = Arc::new(ScriptedHandler::default());
@@ -453,7 +459,10 @@ async fn a_command_no_machine_took_expires_at_its_deadline_and_one_a_machine_too
         "the one that waited is sent first"
     );
     assert!(matches!(frames.recv().await, Some(DownFrame::Cmd(_))));
-    issuer.on_cmd_ack(&orch_link_contract::commands::CmdAck { id: taken.id() });
+    issuer.on_cmd_ack(&orch_link_contract::commands::CmdAck {
+        id: taken.id(),
+        key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+    });
     issuer.session_down();
     clock.advance(chrono::Duration::seconds(90));
     issuer.tick(tokio::time::Instant::now());
@@ -685,7 +694,10 @@ async fn a_native_ack_before_local_refusal_wins_but_unacknowledged_first_send_st
         let (issuer, _frames, clock) = issuer();
         let original = command(&clock, 60);
         let handle = issuer.issue(original.clone());
-        let ack = orch_link_contract::commands::CmdAck { id: original.id };
+        let ack = orch_link_contract::commands::CmdAck {
+            id: original.id,
+            key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+        };
         let error = CommandError::new(ErrorCode::Conflict, "current authority was revoked");
         if ack_first {
             issuer.on_cmd_ack(&ack);
@@ -716,7 +728,10 @@ async fn a_locally_suppressed_acknowledged_resend_retires_its_ack_timer() {
         let handle = issuer.issue(original.clone());
         issuer.session_ready();
         assert_eq!(frames.recv().await, Some(DownFrame::Cmd(original.clone())));
-        issuer.on_cmd_ack(&CmdAck { id: original.id });
+        issuer.on_cmd_ack(&CmdAck {
+            id: original.id,
+            key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+        });
         assert_eq!(handle.progress(), Progress::Accepted);
         // Normal reconnection retries the acknowledged identity to recover its result.
         issuer.session_ready();
@@ -739,7 +754,10 @@ async fn a_locally_suppressed_acknowledged_resend_retires_its_ack_timer() {
         // can deliver its actual result. Retiring one local timer is not cancellation.
         issuer.session_ready();
         assert_eq!(frames.recv().await, Some(DownFrame::Cmd(original.clone())));
-        issuer.on_cmd_ack(&CmdAck { id: original.id });
+        issuer.on_cmd_ack(&CmdAck {
+            id: original.id,
+            key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+        });
         let result = json!({"native":"completed after suppression"});
         issuer.on_cmd_res(&CmdRes {
             id: original.id,
@@ -748,4 +766,32 @@ async fn a_locally_suppressed_acknowledged_resend_retires_its_ack_timer() {
         assert_eq!(handle.progress(), Progress::Succeeded(result));
         assert!(issuer.answered(original.id));
     }
+}
+
+#[tokio::test]
+async fn a_replayed_acknowledgement_cannot_reacquire_a_released_key() {
+    use orch_link_contract::commands::{CmdAck, CommandKeyPhase};
+    let (issuer, _frames, clock) = issuer();
+    let original = command(&clock, 60);
+    let handle = issuer.issue(original.clone());
+    for key_phase in [
+        CommandKeyPhase::Queued,
+        CommandKeyPhase::Running,
+        CommandKeyPhase::Released,
+    ] {
+        issuer.on_cmd_ack(&CmdAck {
+            id: original.id,
+            key_phase,
+        });
+        assert_eq!(handle.progress().key_phase(), Some(key_phase));
+    }
+    issuer.on_cmd_ack(&CmdAck {
+        id: original.id,
+        key_phase: CommandKeyPhase::Queued,
+    });
+    assert_eq!(handle.progress(), Progress::Released);
+    assert!(
+        !handle.progress().is_final(),
+        "the upload still owns its result"
+    );
 }

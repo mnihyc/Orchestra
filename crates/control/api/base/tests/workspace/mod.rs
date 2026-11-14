@@ -981,6 +981,22 @@ impl Machine for Disk {
             }
             CommandKind::FsSearch => {
                 let search: FsSearch = serde_json::from_value(body).map_err(bad)?;
+                if search.scope == orch_api_contract::workspace::FileSearchIn::Names {
+                    let paths: Vec<_> = lock(&self.files)
+                        .keys()
+                        .filter(|path| path.to_lowercase().contains(&search.query.to_lowercase()))
+                        .cloned()
+                        .collect();
+                    let names: Vec<_> = paths
+                        .iter()
+                        .filter_map(|path| self.stat_of(path))
+                        .map(|stat| stat.entry)
+                        .take(search.limit as usize)
+                        .collect();
+                    return Ok(
+                        json!({"names":names,"next_cursor":null,"observed_from":null,"as_of":null,"matches":[],"truncated":false,"searched":paths.len()}),
+                    );
+                }
                 let matches = self.matches_in(&search);
                 let limit = usize::try_from(search.limit).unwrap();
                 let truncated = matches.len() > limit;

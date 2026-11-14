@@ -80,25 +80,12 @@ pub const FILES_MAX: usize = 10;
 pub const REASON_MAX_CHARS: usize = 1_000;
 /// The longest query a search takes.
 pub const QUERY_MAX_CHARS: usize = 1_000;
-/// The deepest a listing goes.
-pub const DEPTH_MAX: i64 = 4;
-/// The most edits one `batch` of `edit_document` holds: a change of more places than this is a rewrite.
-pub const BATCH_EDITS_MAX: usize = 100;
-/// The most paths one call of `manage_shared` names: removing is rarely wanted in bulk, and a mistake in bulk is
-/// the costly one.
-pub const MANAGE_PATHS_MAX: usize = 20;
-/// The fewest and the most bytes a read of an entry returns.
-pub const READ_BYTES_MIN: i64 = 1_000;
-/// The most bytes a read of an entry returns: under what a harness passes on whole.
-pub const READ_BYTES_MAX: i64 = 40_000;
 /// The most hits a search returns.
 pub const RESULTS_MAX: i64 = 200;
 /// The most lines around a hit.
 pub const CONTEXT_MAX: i64 = 5;
 /// The highest port number.
 pub const PORT_MAX: i64 = 65_535;
-/// The most rows a page of an agent list holds.
-pub const PAGE_MAX: i64 = 200;
 /// The most characters of a link's label.
 pub const PORT_LABEL_MAX_CHARS: usize = 80;
 
@@ -333,7 +320,7 @@ fn unique(mut schema: Json) -> Json {
 
 /// How many rows a page of an agent list holds.
 fn page_limit() -> Json {
-    bounded_integer("How many rows: 50 when left out.", 1, PAGE_MAX)
+    bounded_integer("How many rows: 50 when left out.", 1, i64::MAX)
 }
 
 /// Where a list that was cut goes on.
@@ -348,6 +335,12 @@ fn list_between(description: &str, items: Json, min: usize, max: usize) -> Json 
     schema
 }
 
+fn list_at_least(description: &str, items: Json, min: usize) -> Json {
+    let mut schema = list_of(description, items, None);
+    schema["minItems"] = json!(min);
+    schema
+}
+
 fn object(properties: Vec<(&str, Json)>, required: &[&str]) -> Json {
     let mut members = serde_json::Map::new();
     for (name, schema) in properties {
@@ -355,9 +348,9 @@ fn object(properties: Vec<(&str, Json)>, required: &[&str]) -> Json {
     }
     members.entry("max_bytes".to_owned()).or_insert_with(|| {
         bounded_integer(
-            "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-            READ_BYTES_MIN,
-            READ_BYTES_MAX,
+            "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+            1,
+            i64::MAX,
         )
     });
     members.insert("ids".to_owned(), boolean("Include optional opaque object ids; false when left out. Required references and positions remain."));
@@ -427,8 +420,8 @@ fn image_schema() -> Json {
             "max_bytes": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 40000,
-                "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000."
+                "maximum": i64::MAX,
+                "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default."
             },
             "images": {
                 "type": "array",
@@ -488,7 +481,7 @@ fn input_schema_of(tool: OrchTool) -> Json {
                     bounded_integer(
                         "How many levels down to list. 1 when left out.",
                         1,
-                        DEPTH_MAX,
+                        i64::from(u32::MAX),
                     ),
                 ),
                 (
@@ -532,9 +525,9 @@ fn input_schema_of(tool: OrchTool) -> Json {
                 (
                     "max_bytes",
                     bounded_integer(
-                        "The most bytes of text to return. 20000 when left out.",
-                        READ_BYTES_MIN,
-                        READ_BYTES_MAX,
+                        "Bytes of text to return; omitted uses the advertised default.",
+                        1,
+                        i64::MAX,
                     ),
                 ),
             ],
@@ -774,7 +767,7 @@ fn input_schema_of(tool: OrchTool) -> Json {
                 ),
                 (
                     "edits",
-                    list_between(
+                    list_at_least(
                         "For batch: the edits in order, each a replace, insert, block_replace, block_insert_after, block_delete or block_move_after with the arguments that command takes. Every address and passage is read as the document stood at seq.",
                         json!({
                             "type": "object",
@@ -794,7 +787,6 @@ fn input_schema_of(tool: OrchTool) -> Json {
                             "required": ["command"]
                         }),
                         1,
-                        BATCH_EDITS_MAX,
                     ),
                 ),
             ],
@@ -820,11 +812,10 @@ fn input_schema_of(tool: OrchTool) -> Json {
                 ),
                 (
                     "paths",
-                    list_between(
-                        "One thread or chat path, or one to twenty document or document-folder paths or id references from list_shared. create_folder takes exactly one new folder path whose parent exists. At most fifty documents and folders, including all descendants, may be affected; overlapping selections are refused. restore also accepts a deleted item or one earlier document version.",
+                    list_at_least(
+                        "One thread or chat path, or document or document-folder paths or id references from list_shared. create_folder takes exactly one new folder path whose parent exists. At most fifty documents and folders, including all descendants, may be affected; overlapping selections are refused. restore also accepts a deleted item or one earlier document version.",
                         json!({ "type": "string" }),
                         1,
-                        MANAGE_PATHS_MAX,
                     ),
                 ),
                 (
@@ -1146,7 +1137,7 @@ fn input_schema_of(tool: OrchTool) -> Json {
                 ),
                 (
                     "limit",
-                    bounded_integer("For list: rows per page, 20 by default.", 1, PAGE_MAX),
+                    bounded_integer("For list: rows per page, 20 by default.", 1, i64::MAX),
                 ),
             ],
             &[],
@@ -1235,6 +1226,7 @@ pub fn definition(tool: OrchTool, messages: &BTreeMap<String, String>) -> ToolDe
         description.push(' ');
         description.push_str(orch_agent_contract::read_tools::OWNER_CONDITION);
     }
+    apply_read_defaults(tool, &mut input_schema, &SearchBudgets::default());
     ToolDefinition {
         tool,
         name: tool.name(),
@@ -1253,10 +1245,20 @@ pub fn definition_with_search_budgets(
     budgets: &SearchBudgets,
 ) -> ToolDefinition {
     let mut definition = definition(tool, messages);
+    apply_read_defaults(tool, &mut definition.input_schema, budgets);
     if tool == OrchTool::SearchShared {
         apply_search_budgets(&mut definition.input_schema, budgets);
     }
     definition
+}
+fn apply_read_defaults(tool: OrchTool, schema: &mut Json, budgets: &SearchBudgets) {
+    if let Some(bytes) = schema.pointer_mut("/properties/max_bytes") {
+        bytes["default"] = json!(budgets.read_bytes);
+    }
+    if tool == OrchTool::ListShared {
+        schema["properties"]["depth"]["default"] = json!(budgets.list_depth);
+        schema["properties"]["limit"]["default"] = json!(budgets.list_rows);
+    }
 }
 fn apply_search_budgets(schema: &mut Json, budgets: &SearchBudgets) {
     schema["properties"]["query"]["maxLength"] = json!(budgets.query_chars);
@@ -1272,6 +1274,7 @@ pub fn definition_at_with_search_budgets(
     budgets: &SearchBudgets,
 ) -> ToolDefinition {
     let mut definition = definition_at(tool, messages, options);
+    apply_read_defaults(tool, &mut definition.input_schema, budgets);
     if tool == OrchTool::SearchShared {
         apply_search_budgets(&mut definition.input_schema, budgets);
     }
@@ -1465,6 +1468,7 @@ pub fn check_arguments_with_search_budgets(
     budgets: &SearchBudgets,
 ) -> Result<(), Refusal> {
     let mut schema = input_schema_of(tool);
+    apply_read_defaults(tool, &mut schema, budgets);
     if tool == OrchTool::SearchShared {
         apply_search_budgets(&mut schema, budgets);
     }
@@ -1736,11 +1740,29 @@ mod tests {
     }
 
     #[test]
+    fn explicit_read_and_list_windows_are_not_limited_to_the_shipped_defaults() {
+        for (tool, args) in [
+            (
+                OrchTool::ReadShared,
+                json!({"path":"code", "max_bytes":80000}),
+            ),
+            (OrchTool::ListShared, json!({"depth":9,"limit":300})),
+            (
+                OrchTool::ManageShared,
+                json!({"command":"copy","paths":vec!["code";21],"to":"dest"}),
+            ),
+        ] {
+            assert!(check_arguments(tool, &args).is_ok(), "{args}");
+        }
+    }
+
+    #[test]
     fn search_explicit_parameters_can_exceed_shipped_defaults_with_one_resolved_budget() {
         let budgets = SearchBudgets {
             query_chars: 2000,
             results: 201,
             context: 6,
+            ..Default::default()
         };
         let declaration =
             definition_with_search_budgets(OrchTool::SearchShared, &BTreeMap::new(), &budgets);
@@ -1917,7 +1939,7 @@ mod tests {
             ])
         );
         assert_eq!(schema["properties"]["paths"]["minItems"], 1);
-        assert_eq!(schema["properties"]["paths"]["maxItems"], 20);
+        assert!(schema["properties"]["paths"]["maxItems"].is_null());
         assert_eq!(schema["properties"]["paths"]["items"]["type"], "string");
         assert_eq!(schema["properties"]["to"]["type"], "string");
         assert_eq!(schema["properties"]["name"]["type"], "string");
@@ -2196,12 +2218,7 @@ mod tests {
             "{}",
             wrong.message
         );
-        let range = check_arguments(OrchTool::ListShared, &json!({ "depth": 9 })).unwrap_err();
-        assert!(
-            range.message.contains("\"depth\" is from 1 to 4"),
-            "{}",
-            range.message
-        );
+        assert!(check_arguments(OrchTool::ListShared, &json!({"depth":9})).is_ok());
         let kind = check_arguments(
             OrchTool::RequestCapability,
             &json!({ "capability": 3, "reason": "r" }),

@@ -449,11 +449,34 @@ pub struct FileMatch {
 /// What a search in content found.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FileSearchContent {
+    /// Continue the same live traversal; null means it reached the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// The beginning of live observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_from: Option<Time>,
     /// The lines that hold it.
     pub matches: Vec<FileMatch>,
     /// Whether there were more than were returned.
     pub truncated: bool,
     /// How many files were searched.
+    pub searched: i64,
+}
+
+/// A filename-search window with its actual source and continuation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileSearchNames {
+    /// Matching paths from this observation.
+    pub entries: Vec<DirEntry>,
+    /// The next window of the same selected search.
+    pub next_cursor: Option<String>,
+    /// Live traversal or the last complete cached manifest.
+    pub source: FilesSource,
+    /// The end of this page's observation.
+    pub as_of: Time,
+    /// The beginning of live traversal, or the cached manifest's observation time.
+    pub observed_from: Option<Time>,
+    /// Entries examined so far; this is not a count of the whole directory.
     pub searched: i64,
 }
 
@@ -617,8 +640,8 @@ pub struct EnvironmentChangeListReply {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum EnvironmentFileSearchReply {
-    /// For a search by name: at most [`FILE_SEARCH_NAMES_MAX`] entries.
-    Names(Vec<DirEntry>),
+    /// Matching names with source coverage and continuation.
+    Names(FileSearchNames),
     /// For a search in content.
     Content(FileSearchContent),
 }
@@ -654,7 +677,7 @@ pub struct EnvironmentFileListQuery {
     /// Opaque continuation of exactly this environment/source/path membership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
-    /// One through 5,000 rows, with an independent two-MiB serialized page bound.
+    /// Positive rows per page; omitted uses the workspace default, with independent wire-byte paging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -843,6 +866,9 @@ pub struct EnvironmentChangeListQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentFileSearchQuery {
+    /// Continue exactly this selected search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
     /// The thread the caller works beside. It gives nothing: what is needed is held on the environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<Id>,
@@ -863,8 +889,7 @@ pub struct EnvironmentFileSearchQuery {
     /// With content: whether case matters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub case: Option<bool>,
-    /// With content: how many matches at most, [`FILE_SEARCH_LIMIT_DEFAULT`] when left out and at
-    /// most [`FILE_SEARCH_LIMIT_MAX`].
+    /// Matches in this page; the workspace's default when omitted. Continuation retains the rest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -1536,8 +1561,12 @@ mod tests {
             by_content,
             EnvironmentFileSearchReply::Content(FileSearchContent { searched: 41, .. })
         ));
-        let by_name: EnvironmentFileSearchReply = serde_json::from_value(json!([])).unwrap();
-        assert!(matches!(by_name, EnvironmentFileSearchReply::Names(names) if names.is_empty()));
+        let by_name: EnvironmentFileSearchReply = serde_json::from_value(json!({
+            "entries":[], "next_cursor":null, "source":"cached", "as_of":"2026-10-08T17:04:05.000Z", "observed_from":null, "searched":0
+        })).unwrap();
+        assert!(
+            matches!(by_name, EnvironmentFileSearchReply::Names(names) if names.entries.is_empty())
+        );
         let query: EnvironmentFileSearchQuery = serde_json::from_value(
             json!({ "q": "parse", "in": "content", "glob": "*.rs", "case": true }),
         )

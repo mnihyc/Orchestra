@@ -1,6 +1,6 @@
 //! Atomic directory-watch installation and rollback, including cancelled first reads.
 
-use super::{DIR_WATCHES_MAX, DirWatch, Environment, lock, signature_of};
+use super::{DirWatch, Environment, lock, signature_of};
 use crate::error::{HostError, Result};
 use crate::files::{DirectoryLocation, Listing};
 use orch_types::{Id, new_id};
@@ -30,7 +30,11 @@ impl Capture {
                 if held(&watches, &captures, &location.path) {
                     watcher.replace_watch_dir(&path)?;
                 } else {
-                    capacity(&watches, &captures)?;
+                    capacity(
+                        &watches,
+                        &captures,
+                        environment.workspace_limits.directory_slots,
+                    )?;
                     watcher.try_watch_dir(&path)?;
                 }
             } else if watcher.is_degraded() {
@@ -97,6 +101,7 @@ fn registered(
 fn capacity(
     watches: &std::collections::HashMap<Id, DirWatch>,
     captures: &[(DirectoryLocation, usize)],
+    maximum: u64,
 ) -> Result<()> {
     // The same physical directory can have many logical readers. Temporary captures share those
     // native registrations and the existing bound; they never create an extra watch allowance.
@@ -105,9 +110,9 @@ fn capacity(
         .map(|watch| &watch.dir)
         .chain(captures.iter().map(|(capture, _)| &capture.path))
         .collect();
-    if directories.len() >= DIR_WATCHES_MAX {
+    if directories.len() as u64 >= maximum {
         return Err(HostError::Busy(format!(
-            "at most {DIR_WATCHES_MAX} directories are watched at once"
+            "at most {maximum} directories are watched at once"
         )));
     }
     Ok(())
@@ -143,9 +148,10 @@ impl Registration {
                 HostError::Unsupported("the environment has no directory watcher".to_owned())
             })?;
             let mut watches = lock(&environment.watches);
-            if watches.len() >= DIR_WATCHES_MAX && !watches.contains_key(&watch) {
+            let maximum = environment.workspace_limits.directory_slots;
+            if watches.len() as u64 >= maximum && !watches.contains_key(&watch) {
                 return Err(HostError::Busy(format!(
-                    "at most {DIR_WATCHES_MAX} directories are watched at once"
+                    "at most {maximum} directories are watched at once"
                 )));
             }
             let captures = lock(&environment.directory_captures);
@@ -155,7 +161,11 @@ impl Registration {
                 let registered = if held(&watches, &captures, &location.path) {
                     watcher.replace_watch_dir(&path)
                 } else {
-                    capacity(&watches, &captures)?;
+                    capacity(
+                        &watches,
+                        &captures,
+                        environment.workspace_limits.directory_slots,
+                    )?;
                     watcher.try_watch_dir(&path)
                 };
                 if let Err(error) = registered {

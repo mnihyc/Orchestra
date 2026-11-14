@@ -351,10 +351,21 @@ pub enum StartingStep {
     Credential,
     /// A session.
     Session,
+    /// The files of the directory, recorded before the turn so that they can be put back.
+    Recording,
     /// Its files.
     Files,
     /// The turn itself.
     Turn,
+}
+
+/// The command a starting thread's step waits for, and the other work that holds it up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StartingWork {
+    /// The kind of command the step waits for, such as `fs.mkdir`, `git.prepare` or `fs.record`.
+    pub command: String,
+    /// The kind of command of other work, on the same machine and in the same line, that it waits behind.
+    pub behind: Option<String>,
 }
 
 /// The `kind` of a thread: always `thread`.
@@ -818,6 +829,12 @@ pub struct Thread {
     pub side_reading: Option<SideReading>,
     /// What a starting thread is waiting for.
     pub starting_step: Option<StartingStep>,
+    /// When the step it is waiting for began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_since: Option<Time>,
+    /// The command that step waits for, and what holds it up; none while it waits for nothing in particular.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_work: Option<StartingWork>,
     /// Why it cannot go on.
     pub blocked: Option<ThreadBlocked>,
     /// What a person's Stop holds of its queue.
@@ -3001,6 +3018,15 @@ pub struct TurnLimit {
     pub retry_after_secs: Option<i64>,
 }
 
+/// The indexing progress observed when a turn starts with per-file restore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TurnRecordingProgress {
+    /// Files examined by the background pass.
+    pub done: u64,
+    /// Files included in that pass.
+    pub total: u64,
+}
+
 /// One turn of the agent: its answer to one input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Turn {
@@ -3018,6 +3044,18 @@ pub struct Turn {
     pub input_id: Id,
     /// The complete or explicitly unavailable recorded files before this turn.
     pub before_snapshot_id: Option<Id>,
+    /// How many paths changed during the turn, from complete recordings or the index journal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_changed: Option<i64>,
+    /// Directory-relative paths from the end observation, independent of tool patches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_changed_paths: Option<Vec<String>>,
+    /// Why whole recording is unavailable, on the thread's first affected turn only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_notice: Option<String>,
+    /// Indexing progress at the turn's first recording fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_indexing: Option<TurnRecordingProgress>,
     /// The model's routing name.
     pub model: String,
     /// The model's display name.
