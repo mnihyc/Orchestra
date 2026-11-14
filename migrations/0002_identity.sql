@@ -184,7 +184,7 @@ CREATE TABLE invitations (
     CONSTRAINT invitations_check3 CHECK (((email IS NULL) OR (max_uses = 1))),
     CONSTRAINT invitations_issuer_origin_check CHECK ((issuer_origin IS NULL OR jsonb_typeof(issuer_origin) = 'object')),
     CONSTRAINT invitations_kind_check CHECK ((kind = ANY (ARRAY['system'::text, 'org'::text, 'node'::text, 'chat'::text]))),
-    CONSTRAINT invitations_max_uses_check CHECK (((max_uses >= 1) AND (max_uses <= 1000))),
+    CONSTRAINT invitations_max_uses_check CHECK ((max_uses >= 1)),
     CONSTRAINT invitations_role_check CHECK ((role = ANY (ARRAY['viewer'::text, 'interactor'::text, 'developer'::text, 'admin'::text]))),
     CONSTRAINT invitations_pkey PRIMARY KEY (id),
     CONSTRAINT invitations_token_hash_key UNIQUE (token_hash),

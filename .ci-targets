@@ -1,0 +1,10 @@
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-link-contract --lib -- policy::drivers::tests::
+test -p orch-worker-core --lib -- quiet_hours::tests::
+test -p orch-worker-core --lib -- schedule::tests::
+test -p orch-worker-core --test routes --test outbox --test upkeep
+test -p orch-node-core --lib -- machine_policy::tests::
+test -p orch-node-core --lib -- settings::tests::
+test -p orch-connector-core --lib -- policy::tests::
+test -p orch-node --lib -- docker::tests::
+test -p orch-node --lib -- composition::tests::

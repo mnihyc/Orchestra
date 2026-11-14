@@ -366,11 +366,24 @@ impl TakenRow {
 
 /// An input that was taken inside a unit of work, with what is left for after its commit.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Taken {
+pub struct Taken {
     /// The input as it stands.
     pub submitted: Submitted,
     /// The turn the input interrupted, whose interrupt is driven once the transaction has committed.
     pub interrupt: Option<Id>,
+}
+
+impl Taken {
+    /// Takes up this input's ordinary delivery effects only after its owning transaction commits.
+    pub async fn after_commit(self, engine: &Engine) -> Result<(), EngineError> {
+        engine.kick();
+        if self.interrupt.is_some() {
+            engine
+                .drive_interrupt(self.submitted.input.thread_id)
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 /// Why an input could not be taken.
@@ -525,7 +538,8 @@ fn validate_request(
     Ok(())
 }
 
-fn delivery_word(delivery: Delivery) -> &'static str {
+/// The canonical stored spelling of an authored input delivery choice.
+pub fn delivery_word(delivery: Delivery) -> &'static str {
     match delivery {
         Delivery::Queue => "queue",
         Delivery::Steer => "steer",
@@ -1115,8 +1129,8 @@ impl Engine {
         .await
     }
 
-    /// Queues ordinary authored work inside the transaction which also owns its schedule occurrence.
-    /// The caller commits the transaction and kicks the engine afterwards; no prior held queue is resumed.
+    /// Accepts authored work inside the transaction which also owns its schedule occurrence.
+    /// The caller commits, then takes up its delivery effects; no prior held queue is resumed.
     pub async fn submit_scheduled_input(
         &self,
         tx: &mut orch_db::Conn,
@@ -1124,12 +1138,12 @@ impl Engine {
         thread: Id,
         request: &InputRequest,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Submitted, InputError> {
+    ) -> Result<Taken, InputError> {
         self.submit_selected_scheduled_input(tx, caller, thread, request, now, None)
             .await
     }
 
-    /// A scheduled selection remains one ordinary queued input under the author's current authority.
+    /// A scheduled selection retains its ordinary authored modes under the author's current authority.
     pub async fn submit_selected_scheduled_input(
         &self,
         tx: &mut orch_db::Conn,
@@ -1138,12 +1152,7 @@ impl Engine {
         request: &InputRequest,
         now: chrono::DateTime<chrono::Utc>,
         selection: Option<&orch_api_contract::input_schedules::NativeInvocation>,
-    ) -> Result<Submitted, InputError> {
-        if request.delivery != Delivery::Queue {
-            return Err(InputError::Invalid(
-                "a scheduled input uses the ordinary queue",
-            ));
-        }
+    ) -> Result<Taken, InputError> {
         let mut unit = Unit::new(tx, now);
         let mut taken = self
             .submit_selected_in(&mut unit, caller, thread, request, selection)
@@ -1156,7 +1165,7 @@ impl Engine {
                 .copied()
                 .unwrap_or(taken.submitted.seq);
         }
-        Ok(taken.submitted)
+        Ok(taken)
     }
 
     /// Accept a real scheduled occurrence using every captured author-definition origin. The
@@ -1175,12 +1184,7 @@ impl Engine {
         request: &InputRequest,
         now: chrono::DateTime<chrono::Utc>,
         selection: Option<&orch_api_contract::input_schedules::NativeInvocation>,
-    ) -> Result<Submitted, InputError> {
-        if request.delivery != Delivery::Queue {
-            return Err(InputError::Invalid(
-                "a scheduled input uses the ordinary queue",
-            ));
-        }
+    ) -> Result<Taken, InputError> {
         let authority = InputAuthority::for_schedule(author, origins, reference)?;
         let mut unit = Unit::new(conn, now);
         let schedule =
@@ -1238,7 +1242,7 @@ impl Engine {
                 .copied()
                 .unwrap_or(taken.submitted.seq);
         }
-        Ok(taken.submitted)
+        Ok(taken)
     }
 
     async fn submit_input_with(
@@ -1789,11 +1793,6 @@ impl Engine {
         selection: Option<&orch_api_contract::input_schedules::NativeInvocation>,
         operands: Option<&InputSourceOperands>,
     ) -> Result<(), InputError> {
-        if request.delivery != Delivery::Queue {
-            return Err(InputError::Invalid(
-                "a scheduled input uses the ordinary queue",
-            ));
-        }
         validate_request(request, selection)?;
         let mut unit = Unit::new(conn, now);
         let thread = threads::lock(unit.conn, thread)

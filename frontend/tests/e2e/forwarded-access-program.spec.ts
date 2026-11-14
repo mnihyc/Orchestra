@@ -36,7 +36,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       const parameters = await response.json() as ThreadParameters;
       await route.fulfill({ response, json: project(parameters) });
     });
-    await page.route(`**/api/v1/threads/${MAIN}/opening?*`, async (route) => {
+    await page.route(`**/api/v1/threads/${MAIN}/opening*`, async (route) => {
       const response = await route.fetch();
       const body = await response.json() as { parameters: ThreadParameters | null };
       await route.fulfill({ response, json: { ...body, parameters: body.parameters === null ? null : project(body.parameters) } });
@@ -62,29 +62,22 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await page.goto(`/thread/${MAIN}`);
     await expect(page.locator('html')).toHaveAttribute('lang', locale);
     await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
-    const prefix = words.composer.model.change.split('{{model}}')[0] ?? '';
-    const model = page.getByRole('button', { name: new RegExp(prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) }).first();
-    await model.click();
-    const dialog = page.getByRole('dialog', { name: words.composer.model.title, exact: true });
-    const access = dialog.getByRole('combobox', { name: words.composer.model.access.title, exact: true });
-    await access.focus();
-    await page.keyboard.press('Enter');
+    // The access program is a control of its own in the row, beside Model and Effort, and shows its value alone.
+    const access = page.getByRole('button', { name: new RegExp(`^${words.composer.model.access.title}`) }).first();
+    await expect(access).toBeVisible();
+    await access.click();
+    const list = page.getByRole('dialog', { name: words.composer.model.access.title, exact: true });
     const blue = locale === 'en' ? 'Daybreak Blue' : 'Daybreak 蓝';
-    await page.getByRole('option', { name: blue, exact: true }).click();
+    await list.getByRole('menuitemradio', { name: blue, exact: true }).click();
     await expect.poll(() => writes).toBe(1);
     await expect(access).toHaveText(blue);
-    await page.keyboard.press('Escape');
-    await expect(dialog).toHaveCount(0);
-    await expect(model).toBeFocused();
+    await expect(list).toHaveCount(0);
     await page.reload();
-    await model.click();
     await expect(access).toHaveText(blue);
     expect(writes).toBe(1);
-    await page.keyboard.press('Escape');
     enabled = false;
     await page.reload();
-    await model.click();
-    await expect(dialog.getByRole('combobox', { name: words.composer.model.access.title, exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: new RegExp(`^${words.composer.model.access.title}`) })).toHaveCount(0);
     expect(writes).toBe(1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
     await info.attach('forwarded-access-program', { body: await page.screenshot({ fullPage: true, animations: 'disabled' }), contentType: 'image/png' });

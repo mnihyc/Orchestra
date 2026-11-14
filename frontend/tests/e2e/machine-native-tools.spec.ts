@@ -3,8 +3,8 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, type Locator, test } from '@playwright/test';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
-import { inspectLayout, type DuplicateAllowance } from '../../e2e/layout-rules-dom';
-import { LAYOUT_INPUT } from '../../e2e/layout-rules-helpers';
+import { type DuplicateAllowance } from '../../e2e/layout-rules-dom';
+import { inspectSettled, LAYOUT_INPUT } from '../../e2e/layout-rules-helpers';
 import { executionDisplay } from '../doubles/thread-display';
 import { RUNS_ON } from '../doubles/fixtures';
 import { ACME, bodySent, replySent, scenario, signIn, arrived } from './support';
@@ -39,7 +39,7 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     const snapshot = async (name: string, allowance?: DuplicateAllowance) => {
       await page.mouse.move(0, 0); await page.evaluate(async () => { await document.fonts.ready; });
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
-      const layout = await page.evaluate(inspectLayout, { ...LAYOUT_INPUT, duplicateAllowList: allowance === undefined ? LAYOUT_INPUT.duplicateAllowList : [...LAYOUT_INPUT.duplicateAllowList, allowance] }); expect(layout.faults).toEqual([]);
+      const layout = await inspectSettled(page, { ...LAYOUT_INPUT, duplicateAllowList: allowance === undefined ? LAYOUT_INPUT.duplicateAllowList : [...LAYOUT_INPUT.duplicateAllowList, allowance] }); expect(layout.faults).toEqual([]);
       const ax = await new AxeBuilder({ page }).analyze();
       expect(ax.violations.filter((row) => row.impact === 'serious' || row.impact === 'critical')).toEqual([]);
       await info.attach(name, { body: await page.screenshot({ fullPage: true, animations: 'disabled' }), contentType: 'image/png' });

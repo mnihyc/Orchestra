@@ -1272,3 +1272,31 @@ async fn only_an_owners_on_start_policy_updates_a_stopped_unit_and_a_failure_sta
     );
     world.engine().stop();
 }
+
+#[tokio::test]
+async fn runtime_updates_keep_longer_and_shorter_health_check_times_with_clock_bounds() {
+    let world = World::new().await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    for seconds in [1, 3_601] {
+        let given = orch_api_contract::forks::ChangeOptions {
+            wait_minutes: Some(1_441),
+            verify_timeout_secs: Some(seconds),
+            ..Default::default()
+        };
+        let applied =
+            orch_engine::updates::options(&mut conn, orch_settings::Place::System, Some(&given))
+                .await
+                .unwrap();
+        assert_eq!(applied.wait_minutes, 1_441);
+        assert_eq!(applied.verify_timeout_secs, seconds);
+    }
+    let outside = orch_api_contract::forks::ChangeOptions {
+        verify_timeout_secs: Some(i64::MAX),
+        ..Default::default()
+    };
+    assert!(matches!(
+        orch_engine::updates::options(&mut conn, orch_settings::Place::System, Some(&outside))
+            .await,
+        Err(UpdateError::Invalid(_))
+    ));
+}
