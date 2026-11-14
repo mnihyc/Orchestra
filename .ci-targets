@@ -1,0 +1,2 @@
+test -p orch-engine --test environments --test provider_runtime --test provider_sign_in
+test -p orch-api-core --test provider_list_scopes --test provider_creation_inline_scopes --test provider_duplicates

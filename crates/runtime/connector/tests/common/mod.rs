@@ -332,7 +332,7 @@ impl Rig {
             "workspace_root": directory, "instruction_root_marker": false,
             "directory": directory, "cwd": directory, "mounts": [],
             "model": "fake-large", "effort": "medium", "params": {},
-            "approval_mode": "on_request", "sandbox_mode": "workspace",
+            "approval_mode": "on_request", "web_action_wait_secs": 120, "sandbox_mode": "workspace",
             "instructions": "You are working inside Orch.", "memory": null,
             "arrangement": "together",
             "provider": { "path": "native", "provider_id": self.provider },

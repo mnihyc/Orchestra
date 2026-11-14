@@ -1878,6 +1878,58 @@ impl Engine {
         Ok(asked)
     }
 
+    /// Ends a job that a person has overruled, where it stands: it is cancelled and none of it is undone,
+    /// so that what the person asks instead takes over what it left. A job that has passed its commit is
+    /// finishing, and is not ended. Returns whether the job is over.
+    pub async fn overrule_job(&self, job: Id, by: Id, why: &str) -> Result<bool, EngineError> {
+        let mut tx = self.inner.db.begin().await?;
+        let Some(row) = rows::lock_cancellation(&mut tx, job).await? else {
+            return Ok(true);
+        };
+        if !row.is_open() {
+            return Ok(true);
+        }
+        if row.plan.get("committed").is_some() {
+            return Ok(false);
+        }
+        let now = self.inner.clock.now();
+        let (progress, log) = read_progress(&row);
+        let error = json!({
+            "code": "overruled",
+            "message": why,
+            "phase": progress.phase,
+            "undone": false,
+            "by": by,
+        });
+        let ended = rows::finish(
+            &mut tx,
+            job,
+            state::CANCELLED,
+            &stored(&progress, log.as_deref()),
+            None,
+            Some(&error),
+            now,
+        )
+        .await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        if ended {
+            tracing::warn!(%job, kind = %row.kind, provider = ?row.provider_id, phase = %progress.phase, %why, "a job was ended where it stood because a person overruled it");
+            if let Some(command) = row
+                .plan
+                .pointer("/active_command/id")
+                .and_then(Json::as_str)
+                .and_then(|value| value.parse::<Id>().ok())
+            {
+                let _ = self.inner.commands.cancel(command).await;
+            }
+            let closed = rows::job(&mut *self.db().acquire().await?, job).await?;
+            if let Some(closed) = closed {
+                self.after_job(&closed).await;
+            }
+        }
+        Ok(true)
+    }
+
     /// Sends the accepted job cancellation to its active machine command without waiting for cleanup.
     pub async fn stop_job_command(&self, job: Id) -> Result<(), EngineError> {
         let row = rows::job(&mut *self.db().acquire().await?, job).await?;

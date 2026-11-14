@@ -46,7 +46,7 @@ async fn scene() -> (World, resources::Company, Id) {
         .call(ProviderCreate, &[])
         .token(&firm.boss.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Backend choices".into(),
             home_id: firm.acme,
             access: None,

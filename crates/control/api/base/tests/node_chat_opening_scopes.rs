@@ -359,7 +359,7 @@ async fn selected_provider(room: &Room) -> Id {
         .call(ProviderCreate, &[])
         .token(&room.ada.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: PROVIDER.into(),
             home_id: home.base.id,
             access: None,
