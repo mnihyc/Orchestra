@@ -539,7 +539,7 @@ async fn prepare_inventory_for(
     readable_only: bool,
 ) -> ApiResult<PreparedInventory> {
     let ids: Vec<Id> = found.iter().map(|row| row.id).collect();
-    let mut hosts = rows::hosting::machine_hosts(conn, &ids).await?;
+    let mut hosts = rows::hosting::hosts_naming(conn, &ids).await?;
     let mut resource_ids = ids.clone();
     resource_ids.extend(hosts.iter().map(|(_, host, _)| *host));
     let mut effective =
@@ -724,6 +724,7 @@ pub(crate) async fn show_inventory_prepared(
                     online: is_online(&ctx.app, row.id, row.online),
                     platform_os: parse(&row.platform_os)?,
                     placement: parse(&row.placement)?,
+                    host_id: row.host_id,
                 },
                 owner: row.owner_id.and_then(|owner| owners.get(&owner).cloned()),
                 platform_arch: row.platform_arch.clone(),
@@ -1040,11 +1041,10 @@ pub(crate) async fn machine_with_readiness(
 }
 orch_api_base::__api_bind_d2ace19f11!();
 
-/// The original native update observations and local-policy gate, before its first write.
+/// The original explicit update target and version observations, before its first write.
 pub(crate) struct PreparedUpdate {
     row: MachineRow,
     view: api::ComponentUpdate,
-    enabled: bool,
 }
 
 impl PreparedUpdate {
@@ -1083,7 +1083,6 @@ pub(crate) async fn prepare_update_on(
         .filter(|row| row.is_active())
         .ok_or_else(ApiError::not_found)?;
     require_machine(conn, principal, row.id, Permission::MachineManage).await?;
-    require_online(ctx, &row)?;
     if row.runtime_id.is_some() {
         return Err(ApiError::new(
             ErrorCode::RequestInvalid,
@@ -1094,9 +1093,7 @@ pub(crate) async fn prepare_update_on(
         .await?
         .remove(&machine)
         .ok_or_else(ApiError::not_found)?;
-    let enabled = reported_policy(conn,&row).await?.ok_or_else(||ApiError::new(ErrorCode::SourceOffline,
-        "This machine has not reported update.auto yet; wait for its policy report, then retry Update now."))?.update_auto;
-    Ok(PreparedUpdate { row, view, enabled })
+    Ok(PreparedUpdate { row, view })
 }
 
 pub(crate) async fn apply_update_on(
@@ -1120,7 +1117,6 @@ pub(crate) async fn apply_update_with_origin(
 ) -> ApiResult<RequestedUpdate> {
     let row = &value.row;
     let machine = row.id;
-    let enabled = value.enabled;
     let mut view = value.view.clone();
     let mut fresh = false;
     // Native drain/state/physical preparation has completed on this same connection.
@@ -1135,24 +1131,10 @@ pub(crate) async fn apply_update_with_origin(
             ctx.now,
         )
         .await?;
-        if !enabled && fresh {
-            let detail = format!(
-                "update.auto is off on this machine. Its local policy refuses Update now. Run `{}` on the machine to update it locally.",
-                view.command
-            );
-            orch_db::queries::component_updates::finish(
-                conn,
-                machine,
-                "refused",
-                Some(&detail),
-                ctx.now,
-            )
-            .await?;
-            view.status = "refused".into();
-            view.detail = Some(detail);
-        } else if fresh {
+        if fresh {
             view.status = "queued".into();
             view.detail = None;
+            view.automatic = false;
         } else {
             view = crate::component_updates::views(&ctx.app.link, conn, &[machine])
                 .await?

@@ -124,3 +124,20 @@ it.each(['en', 'zh-CN'] as const)('keeps the whole command visible on keyboard f
   expect(await screen.findByRole('tooltip')).toHaveTextContent(`$${words}`);
   expect(control).toHaveAttribute('aria-expanded', 'false');
 });
+
+it.each(['en', 'zh-CN'] as const)('never offers Show all when only the inline command tail survived (%s)', async (locale) => {
+  await setLocale(locale);
+  const row = command('lost-output', { command: 'long-running-build', output: 'tail', exit: 0 });
+  if (row.kind !== 'tool_call' || row.payload.tool.kind !== 'command') throw new Error('A command fixture is required');
+  const item = { ...row, thread_id: native.id, segment_id: ended.id, seq_created: 2, seq_updated: 2,
+    payload: { ...row.payload, tool: { ...row.payload.tool, output: { inline: 'tail', total_len: 1_000_000, truncated: true, blob: null } } } };
+  act(() => threadWriter.apply(native.id, { items: [item] }));
+  show(<TimelineContextValue.Provider value={context}><ToolCallRow threadId={native.id} id={item.id} /></TimelineContextValue.Provider>);
+  const commandRow = document.querySelector('[data-tool-row]');
+  if (!(commandRow instanceof HTMLElement)) throw new Error('A retained command row is required');
+  const step = commandRow.closest('[data-step]');
+  if (!(step instanceof HTMLElement)) throw new Error('The command disclosure owns its output');
+  await userEvent.click(within(commandRow).getByRole('button', { expanded: false }));
+  expect(within(step).queryByRole('button', { name: /Show all|显示全部/ })).not.toBeInTheDocument();
+  expect(await within(step).findByText(i18n.t('timeline.command.outputMissing', { from: '0', to: '999996' }))).toBeVisible();
+});

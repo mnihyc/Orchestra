@@ -440,6 +440,7 @@ async fn a_harness_that_is_gone_ends_the_turn_it_ran_and_the_thread_goes_on() {
         .say(
             thread,
             Event::SessionLost(SessionLost {
+                uncertain: false,
                 reason: "the harness process ended with signal 9".to_owned(),
             }),
         )

@@ -23,6 +23,8 @@ export interface Started {
   /** The answer, or `null` before the first one. */
   options: StartOptions | null;
   resolved: Resolved | null;
+  /** Retained choices for display after a refusal; never evidence that submission is ready. */
+  preview: Resolved | null;
   loading: boolean;
   failed: unknown;
   /** The answer shown is the one for another environment, and the one for this is on its way. */
@@ -66,7 +68,7 @@ export function useStartOptions(nodeId: string, picks: Picks, mode: Mode, enable
   const waitingForNode = picks.environment === null && knownEnvironment === undefined && node === undefined && nodeRead.isFetching;
   const settling = picks.environment === null && knownEnvironment === undefined && node === undefined && committed !== scope;
   const paused = waitingForNode || settling;
-  const query = useQuery({ ...startOptionsQuery(nodeId, environment, context), enabled: enabled && !paused });
+  const query = useQuery({ ...startOptionsQuery(nodeId, environment, context, picks.newEnvironment), enabled: enabled && !paused });
   // Preserve the loaded form while its newly chosen environment is being checked.
   // A different place, audience or reader never inherits that display snapshot.
   const options = query.data ?? (held?.scope === scope ? held.options : null);
@@ -104,6 +106,7 @@ export function useStartOptions(nodeId: string, picks: Picks, mode: Mode, enable
     read: query,
     options,
     resolved: failed === null ? judged : null,
+    preview: judged,
     loading: (paused || query.isPending) && options === null,
     failed,
     refreshing: waitingForNode || (settling && options === null) || fallback || redirect || (query.isPending && options !== null),

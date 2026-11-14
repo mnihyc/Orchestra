@@ -2,10 +2,9 @@
  *
  * The command whole in a code block (unless the line above already says all of it), the directory it
  * ran in, and what it printed in mono type with its colours, following the end while it runs. The output is 24 lines tall with its own scroll and
- * can be expanded; where more was printed than is held (the last 16 KiB), "Show all" reads the rest
- * by pages.
+ * can be expanded. Retained output reads in pages; a lost original interval remains explicit.
  */
-import { useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery } from '@tanstack/react-query';
 import { ChevronsDownUp, ChevronsUpDown } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -17,6 +16,7 @@ import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { traceRequest } from '@/api/trace';
 import type { Item } from '@/generated/api-types';
 import { useTimelineContext } from '@/features/timeline/context';
+import { outputRetention } from '@/features/timeline/output';
 import { useRecordedItem } from '@/features/timeline/historical';
 import { describeStep } from '@/features/timeline/titles';
 import { stripAnsi } from '@/lib/ansi';
@@ -44,30 +44,35 @@ export function CommandDisplay({ item }: { item: CommandItem }) {
   const locale = useAppearance((state) => state.locale);
   const tool = item.payload.tool;
   const [tall, setTall] = useState(false);
-  const [pages, setPages] = useState(0);
+  const [readingOutput, setReadingOutput] = useState(false);
   const scroller = useRef<HTMLPreElement>(null);
   const following = useRef(true);
   const running = item.status === 'in_progress' && !recorded;
 
   const output = tool.kind === 'command' ? tool.output : null;
   const total = output?.total_len ?? 0;
-  const held = output === null ? 0 : new TextEncoder().encode(output.inline).length;
-  const more = output !== null && total > held;
+  const retention = output === null ? null : outputRetention(output);
+  const held = retention?.inlineBytes ?? 0;
+  const available = retention?.retainedBytes ?? null;
+  const more = output?.blob !== undefined && output.blob !== null && (available === null || available > held);
 
-  // What the first pages of the whole output come to; read only when asked for.
-  const reading = threadQueryRead(read, ['thread-output', threadId, item.id, pages]);
-  const whole = useQuery({
-    queryKey: inspection === undefined ? reading.key : ['inspection-output', read.key, threadId, item.id, pages, inspection.continuationId ?? null],
-    queryFn: async ({ signal }) => {
-      let text = '';
+  // Every immutable blob page is read once, under the current thread reader's authority.
+  const reading = threadQueryRead(read, ['thread-output', threadId, item.id, output?.blob ?? null]);
+  const whole = useInfiniteQuery({
+    queryKey: inspection === undefined ? reading.key : ['inspection-output', read.key, threadId, item.id, output?.blob ?? null, inspection.continuationId ?? null],
+    initialPageParam: 0,
+    queryFn: async ({ pageParam, signal }) => {
       const captured = inspection === undefined ? await reading.capture(signal) : undefined;
-      for (let page = 0; page < pages; page += 1) text += inspection === undefined ? await fetchOutput(read, item.id, page * OUTPUT_PAGE_BYTES, OUTPUT_PAGE_BYTES, signal, captured) : await (await traceRequest(`/threads/${inspection.threadId}/items/${item.id}/output?inspect_deleted=true&offset=${page * OUTPUT_PAGE_BYTES}&limit=${OUTPUT_PAGE_BYTES}${inspection.continuationId === undefined ? '' : `&continuation_id=${encodeURIComponent(inspection.continuationId)}`}`, { signal })).text();
-      return text;
+      const text = inspection === undefined ? await fetchOutput(read, item.id, pageParam, OUTPUT_PAGE_BYTES, signal, captured, output?.blob ?? undefined)
+        : await (await traceRequest(`/threads/${inspection.threadId}/items/${item.id}/output?inspect_deleted=true&offset=${pageParam}&limit=${OUTPUT_PAGE_BYTES}${output?.blob === null || output?.blob === undefined ? '' : `&expected_blob=${encodeURIComponent(output.blob)}`}${inspection.continuationId === undefined ? '' : `&continuation_id=${encodeURIComponent(inspection.continuationId)}`}`, { signal })).text();
+      return { offset: pageParam, text, bytes: new TextEncoder().encode(text).length };
     },
-    enabled: pages > 0 && (inspection !== undefined || reading.enabled),
+    getNextPageParam: (last) => last.bytes === 0 || available !== null && last.offset + last.bytes >= available ? undefined : last.offset + last.bytes,
+    enabled: readingOutput && output?.blob !== undefined && output.blob !== null && (inspection !== undefined || reading.enabled),
     staleTime: Infinity,
   });
-  const shown = pages > 0 && whole.data !== undefined ? whole.data : (output?.inline ?? '');
+  const shown = readingOutput && whole.data !== undefined ? whole.data.pages.map((page) => page.text).join('') : (output?.inline ?? '');
+  const readBytes = whole.data?.pages.reduce((bytes, page) => bytes + page.bytes, 0) ?? 0;
 
   useEffect(() => {
     const element = scroller.current;
@@ -75,7 +80,6 @@ export function CommandDisplay({ item }: { item: CommandItem }) {
   }, [shown]);
 
   if (tool.kind !== 'command' || output === null) return null;
-  const pagesTotal = Math.ceil(total / OUTPUT_PAGE_BYTES);
   // The row above is the command as it was typed, when that fits it: saying it again would be noise.
   const title = describeStep(item, t);
   const saidAbove = title.command && title.text === tool.command;
@@ -83,7 +87,7 @@ export function CommandDisplay({ item }: { item: CommandItem }) {
     <div className="flex flex-col gap-2">
       {!saidAbove && <CodeBlock code={tool.command} lang="sh" />}
       {tool.cwd !== '' && <p className="text-sm text-text-muted">{t('timeline.command.in', { directory: tool.cwd })}</p>}
-      {(shown !== '' || running) && (
+      {(shown !== '' || running || total > 0 || output.blob !== null) && (
         <div className="overflow-hidden rounded-lg border border-border bg-bg-inset">
           <div className="flex min-h-(--caption-height) items-center justify-between gap-2 border-b border-border px-3 text-xs text-text-muted">
             <span>{t('timeline.command.output')}</span>
@@ -109,11 +113,13 @@ export function CommandDisplay({ item }: { item: CommandItem }) {
           >
             <AnsiText text={shown} />
           </pre>
-          {more && pages < pagesTotal && (
+          {retention?.missing.map(({ from, to }) => <p key={`${from}/${to}`} className="border-t border-border px-3 py-1 text-xs text-text-muted">{t('timeline.command.outputMissing', { from: String(from), to: String(to) })}</p>)}
+          {retention?.unknown === true && <p className="border-t border-border px-3 py-1 text-xs text-text-muted">{t('timeline.command.retainedUnknown')}</p>}
+          {more && (!readingOutput || whole.hasNextPage) && (
             <div className="flex items-center gap-2 border-t border-border px-3 py-1 text-xs text-text-muted">
-              <span>{pages === 0 ? t('timeline.command.tailOnly', { size: formatBytes(held, locale) }) : t('timeline.command.partial', { size: formatBytes(Math.min(total, pages * OUTPUT_PAGE_BYTES), locale), total: formatBytes(total, locale) })}</span>
-              <Button size="sm" variant="ghost" pending={whole.isFetching} onClick={() => setPages((count) => count + 1)}>
-                {pages === 0 ? t('timeline.command.showAll', { size: formatBytes(total, locale) }) : t('timeline.command.showMore')}
+              <span>{!readingOutput ? t('timeline.command.tailOnly', { size: formatBytes(held, locale) }) : t('timeline.command.partial', { size: formatBytes(readBytes, locale), total: formatBytes(available ?? total, locale) })}</span>
+              <Button size="sm" variant="ghost" pending={whole.isFetching} onClick={() => { if (readingOutput) void whole.fetchNextPage(); else setReadingOutput(true); }}>
+                {!readingOutput ? retention?.full === true ? t('timeline.command.showAll', { size: formatBytes(total, locale) }) : t('timeline.command.showRetained') : t('timeline.command.showMore')}
               </Button>
             </div>
           )}

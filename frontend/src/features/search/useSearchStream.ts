@@ -24,6 +24,7 @@ interface State {
   ended: boolean;
   pageSize: number;
   window: number;
+  conversationChars: number | null;
   running: Record<string, boolean>;
   reasons: Record<string, string | null>;
   unavailable: Record<string, boolean>;
@@ -31,7 +32,7 @@ interface State {
   error: unknown;
 }
 const initial = (key = ''): State => ({key, hits: {}, membership: {}, fields: {}, shown: [], base: [], held: null, settled: false, blocked: false,
-  expanded: false, ended: false, pageSize: 0, window: 0, running: {words: true, meaning: true}, reasons: {}, unavailable: {}, cursor: null, error: null});
+  expanded: false, ended: false, pageSize: 0, window: 0, conversationChars: null, running: {words: true, meaning: true}, reasons: {}, unavailable: {}, cursor: null, error: null});
 type Action = {type: 'event'; event: SearchStreamEvent} | {type: 'reset'; key: string} | {type: 'settle'} | {type: 'block'; value: boolean} | {type: 'reveal'} | {type: 'continue'} | {type: 'error'; error: unknown};
 const append = (before: string[], next: string[]) => [...before, ...next.filter((id) => !before.includes(id))];
 function order(state: State, ids: string[]): State {
@@ -59,6 +60,7 @@ function reducer(state: State, action: Action): State {
     case 'event': {
       const event = action.event;
       switch (event.type) {
+        case 'coverage': return { ...state, conversationChars: event.conversation_chars };
         case 'options': return {...state, pageSize: event.page_size, window: event.reorder_window_secs, settled: state.settled || event.reorder_window_secs === 0};
         case 'hit': return {...state, hits: {...state.hits, [event.id]: event.hit}, membership: {...state.membership, [event.id]: state.membership[event.id] ?? event.found_by}};
         case 'order': return order({...state,

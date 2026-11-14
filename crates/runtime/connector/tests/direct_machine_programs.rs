@@ -59,7 +59,7 @@ async fn open(
         "arrangement":"separated","provider":{"path":"native","provider_id":rig.provider},
         "exec":{"executor":"echo-exec","environment_id":rig.environment,"generation":generation,
             "ticket":ticket(rig,thread,version)},
-        "mcp":[],"orch_tools":[],"raw_events":false
+        "mcp":[],"orch_tools":[],"output_capture_bytes":67108864, "web_action_wait_secs":120, "raw_events":false
     }))
     .unwrap();
     rig.succeed(&open).await;
