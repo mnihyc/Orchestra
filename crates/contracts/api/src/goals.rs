@@ -41,6 +41,8 @@ pub enum GoalStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalReason {
+    /// The agent's completion report has not been independently checked and needs a person's decision.
+    Unchecked,
     /// A person paused it.
     Person,
     /// A person stopped the turn that was working on it.
@@ -91,6 +93,8 @@ pub enum GoalReportStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalOutcome {
+    /// The reported completion needs a person's decision because the independent check did not run.
+    Unchecked,
     /// Work going on, or a report that the agent's later words replaced.
     Noted,
     /// The condition was found to hold.
@@ -107,8 +111,8 @@ pub enum GoalOutcome {
 pub enum GoalCheckedBy {
     /// The place's helper model, from the evidence.
     Helper,
-    /// The agent's own report, where the place has no helper model.
-    Agent,
+    /// A person explicitly accepted the unchecked completion report.
+    Person,
 }
 
 /// A goal's saved limits. Omitted values follow the place; zero adds no own cap.
@@ -211,7 +215,7 @@ pub struct ThreadGoal {
     pub budgets: GoalBudgets,
     /// What it has used.
     pub used: GoalUsed,
-    /// Whether a helper model checks a report of "met" in this place; without one the agent's report decides.
+    /// Whether an independent helper is configured; an unchecked report needs a person's decision.
     pub helper: bool,
     /// Whether the thread's agent is given the goal tool, and so can report.
     pub agent_reports: bool,
@@ -285,6 +289,8 @@ pub struct ThreadGoalCreateBody {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalAction {
+    /// A person accepts the evidence of an unchecked completion report.
+    Accept,
     /// Holds it.
     Pause,
     /// Sets a paused, or a stopped, goal going again.

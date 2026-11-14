@@ -6,7 +6,7 @@ import { ApiError } from '@/api/client';
 import { meQuery } from '@/api/auth';
 import { createInputSchedule, inputScheduleQuery, updateInputSchedule, type InputSchedule } from '@/api/inputSchedules';
 import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
-import type { ContentPart, CreateThread, InputScheduleCreateBody, InputScheduleTarget, InputScheduleUpdateBody, NativeInvocation, Thread } from '@/generated/api-types';
+import type { ContentPart, CreateThread, Delivery, InputScheduleCreateBody, InputScheduleTarget, InputScheduleUpdateBody, NativeInvocation, Thread } from '@/generated/api-types';
 import { Part } from '@/features/timeline/items/UserMessage';
 import { editableWords, withEditedWords } from '@/features/composer/queue';
 import { NewThreadDialog } from '@/features/start/BindingDialog';
@@ -29,8 +29,12 @@ import { UserChip } from '@/ui/UserChip';
 import { fieldsForTiming, timingPreview } from './timing';
 
 const WEEKDAYS = ['agentSchedules.weekdays.1', 'agentSchedules.weekdays.2', 'agentSchedules.weekdays.3', 'agentSchedules.weekdays.4', 'agentSchedules.weekdays.5', 'agentSchedules.weekdays.6', 'agentSchedules.weekdays.7'] as const;
-export interface AuthoredScheduleDraft { content: ContentPart[]; nativeAction: NativeInvocation | null }
-export function DraftPreview({ draft, thread }: { draft: AuthoredScheduleDraft; thread?: string }) {
+export interface AuthoredScheduleDraft { content: ContentPart[]; nativeAction: NativeInvocation | null; plan: boolean; delivery: Delivery }
+export function ScheduleModes({ plan, delivery }: { plan: boolean; delivery: Delivery }) {
+  const { t } = useTranslation();
+  return <span className="text-xs text-text-muted">{t(plan ? 'sendLater.plan' : 'sendLater.work')} · {t(`sendLater.deliveryModes.${delivery}`)}</span>;
+}
+export function DraftPreview({ draft, thread }: { draft: Pick<AuthoredScheduleDraft, 'content' | 'nativeAction'>; thread?: string }) {
   const { t } = useTranslation();
   return <div className="flex min-w-0 flex-col gap-3" aria-label={t('sendLater.message')}>
     {draft.content.map((part, index) => <Part key={index} part={part} thread={thread} />)}
@@ -50,6 +54,8 @@ export function ScheduleEditor({ topic, thread, draft, schedule, onClose, onAcce
   const [content] = useState(original?.content ?? draft?.content ?? []);
   const [words, setWords] = useState(() => editableWords(content));
   const [nativeAction, setNativeAction] = useState(original?.native_action ?? draft?.nativeAction ?? null);
+  const [plan, setPlan] = useState(schedule !== undefined ? schedule.plan : draft?.plan ?? false);
+  const [delivery, setDelivery] = useState<Delivery>(schedule !== undefined ? schedule.delivery : draft?.delivery ?? 'queue');
   const [name, setName] = useState(schedule?.name ?? '');
   const [revision, setRevision] = useState(schedule?.revision ?? 0);
   const [current, setCurrent] = useState<InputSchedule | null>(null);
@@ -72,7 +78,7 @@ export function ScheduleEditor({ topic, thread, draft, schedule, onClose, onAcce
     if (!allowed || preview.timing === null || !sameLibraryReader(reader)) throw new DOMException('The schedule is not ready for this reader.', 'AbortError');
     const { first_input: _first, ...choices } = config;
     const target: InputScheduleTarget = targetMode === 'new_thread' ? { kind: 'new_thread', config: defaults ? {} : choices } : { kind: 'thread', thread_id: threadId ?? '' };
-    const definition: InputScheduleCreateBody = { name: name.trim() === '' ? null : name.trim(), target, content: parts, native_action: nativeAction, timing: preview.timing };
+    const definition: InputScheduleCreateBody = { name: name.trim() === '' ? null : name.trim(), target, content: parts, native_action: nativeAction, plan, delivery, timing: preview.timing };
     if (schedule === undefined) return createInputSchedule(topic, definition, key(definition));
     const body: InputScheduleUpdateBody = { ...definition, revision, state: null };
     return updateInputSchedule(schedule.id, body, key(body));
@@ -98,6 +104,11 @@ export function ScheduleEditor({ topic, thread, draft, schedule, onClose, onAcce
           <DraftPreview draft={{ content: parts.filter((part) => !('type' in part) || part.type !== 'text'), nativeAction }} thread={threadId} />
           {nativeAction !== null && <Button size="sm" variant="ghost" disabled={pending} onClick={() => setNativeAction(null)}>{t('sendLater.removeNative')}</Button>}
         </>}
+        <div className="flex flex-wrap items-center gap-3">
+          <Checkbox label={t('sendLater.plan')} checked={plan} onCheckedChange={setPlan} disabled={pending} />
+          <Select label={t('sendLater.delivery')} value={delivery} onValueChange={(choice) => { if (choice === 'queue' || choice === 'steer' || choice === 'interrupt') setDelivery(choice); }} disabled={pending}
+            options={(['queue', 'steer', 'interrupt'] as const).map((choice) => ({ value: choice, name: t(`sendLater.deliveryModes.${choice}`) }))} />
+        </div>
         <Input label={t('sendLater.name')} optional={schedule === undefined} value={name} onChange={(event) => setName(event.target.value)} disabled={pending} />
         <SegmentedControl label={t('sendLater.when')} value={fields.mode} onValueChange={(mode) => updateFields({ mode })}
           segments={[{ value: 'once', label: t('sendLater.once'), disabled: pending }, { value: 'repeat', label: t('sendLater.repeat'), disabled: pending }]} />
@@ -112,7 +123,7 @@ export function ScheduleEditor({ topic, thread, draft, schedule, onClose, onAcce
         {targetMode === 'new_thread' && <div className="flex flex-wrap items-center gap-2"><Checkbox label={t('sendLater.topicDefaults')} checked={defaults} onCheckedChange={setDefaults} disabled={pending} /><Button size="sm" disabled={pending || defaults} onClick={() => setSetup(true)}>{t('sendLater.configure')}</Button></div>}
         {author !== undefined && <p className="flex flex-wrap items-baseline gap-1 text-sm text-text-muted"><Trans i18nKey="sendLater.authority" components={{ person: <UserChip user={author} /> }} /></p>}
         {save.isError && <ErrorAlert error={save.error} />}
-        {current !== null && <div className="flex min-w-0 flex-col gap-3"><details><summary className="cursor-pointer text-sm">{t('sendLater.current')}</summary><DraftPreview draft={{ content: current.definition?.content ?? [], nativeAction: current.definition?.native_action ?? null }} thread={current.destination.thread?.id} /><p className="text-sm text-text-muted">{current.name}</p></details><Button size="sm" onClick={() => { setRevision(current.revision); setCurrent(null); save.reset(); key.reset(); }}>{t('sendLater.useRevision')}</Button></div>}
+        {current !== null && <div className="flex min-w-0 flex-col gap-3"><details><summary className="cursor-pointer text-sm">{t('sendLater.current')}</summary><DraftPreview draft={{ content: current.definition?.content ?? [], nativeAction: current.definition?.native_action ?? null }} thread={current.destination.thread?.id} /><p className="text-sm text-text-muted">{current.name}</p><ScheduleModes plan={current.plan} delivery={current.delivery} /></details><Button size="sm" onClick={() => { setRevision(current.revision); setCurrent(null); save.reset(); key.reset(); }}>{t('sendLater.useRevision')}</Button></div>}
       </div>
     </Dialog>
     {setup && <NewThreadDialog parent={parent} open onClose={() => setSetup(false)} prepare={{ initial: config, onChoose: setConfig }} />}

@@ -41,6 +41,8 @@ pub(super) fn definition(body: &InputScheduleUpdateBody) -> bool {
     body.name.is_some()
         || body.target.is_some()
         || body.content.is_some()
+        || body.plan.is_some()
+        || body.delivery.is_some()
         || body.native_action.is_some()
         || body.timing.is_some()
 }
@@ -250,6 +252,8 @@ fn draft(
             .unwrap_or_else(|| "Scheduled input".into()),
         target: encode(&body.target)?,
         content: encode(&body.content)?,
+        plan: body.plan,
+        delivery: orch_engine::inputs::delivery_word(body.delivery).into(),
         native_action: body.native_action.as_ref().map(encode).transpose()?,
         definition_authority: None,
         timing: encode(&body.timing)?,
@@ -272,6 +276,12 @@ pub(super) fn apply(row: &mut rows::ScheduleRow, body: &InputScheduleUpdateBody)
     }
     if let Some(value) = &body.content {
         row.content = encode(value)?;
+    }
+    if let Some(plan) = body.plan {
+        row.plan = plan;
+    }
+    if let Some(delivery) = body.delivery {
+        row.delivery = orch_engine::inputs::delivery_word(delivery).into();
     }
     if let Some(value) = &body.native_action {
         row.native_action = value.as_ref().map(encode).transpose()?;

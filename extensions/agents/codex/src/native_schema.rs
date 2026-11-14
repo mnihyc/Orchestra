@@ -5,6 +5,11 @@ use std::sync::OnceLock;
 
 pub(crate) const END_UNAVAILABLE: &str = "This Codex version cannot end background terminals.";
 
+/// What a person is told when a build answers the list of background terminals in a form the adapter does not read:
+/// the build is not refused beforehand, and the act fails at its use with this reason and not with the raw answer.
+pub(crate) const FORM_UNKNOWN: &str =
+    "This Codex build answered background terminals in a form Orch does not know.";
+
 fn pinned(version: &str) -> Option<&'static Json> {
     static OLDER: OnceLock<Json> = OnceLock::new();
     static CURRENT: OnceLock<Json> = OnceLock::new();

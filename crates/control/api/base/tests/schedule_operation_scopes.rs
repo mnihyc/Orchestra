@@ -121,6 +121,8 @@ fn once(s: &Scene, target: InputScheduleTarget, words: &str) -> InputScheduleCre
         target,
         content: vec![ContentPart::Text { text: words.into() }],
         native_action: None,
+        plan: false,
+        delivery: orch_api_contract::threads::Delivery::Queue,
         timing: InputTiming::Once {
             at: Time::new(s.rig.world.now() + Duration::minutes(1)),
             zone: "UTC".into(),
