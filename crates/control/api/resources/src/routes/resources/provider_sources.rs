@@ -845,11 +845,8 @@ pub(crate) fn view(
         .and_then(|choice| choice.descriptor.as_ref())
         .is_some_and(|descriptor| descriptor.lists_models());
     states["models"] = json!(orch_provider_contract::MemberState::of(
-        facts
-            .models
-            .as_ref()
-            .is_some_and(|models| !models.is_empty()),
-        facts.models.is_some() || lists_models && facts.field_times.contains_key("models"),
+        facts.models_count.is_some_and(|count| count > 0),
+        facts.models_count.is_some() || lists_models && facts.field_times.contains_key("models"),
         lists_models
     ));
     let project = |choice: &SourceChoice| -> ApiResult<api::SourceChoice> {

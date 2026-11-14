@@ -225,7 +225,7 @@ function FilesPanelContents({ access, environment, failed, binding, paused }: {
   const cached = directory?.source === 'cached';
   const asOf = directory?.asOf ?? null;
   const heading = root === '' ? access.environment.name : t('files.panel.heading', { directory: `${root}/`, environment: access.environment.name });
-  const showSearch = () => { if (liveOnly) setSearch((before) => ({ ...before, mode: 'content' })); setSearchOpen(true); };
+  const showSearch = () => { setSearchOpen(true); };
   const panelEntries: MenuEntry[] = [
     ...actions.emptyEntries(folderOfFocus()).map((entry) => entry.id === 'refresh' ? { id: 'refresh', label: t('files.panel.refresh'), icon: <RefreshCw aria-hidden />, onSelect: refresh } : entry),
     { id: 'search', label: t('files.search.label'), icon: <Search aria-hidden />, onSelect: showSearch },
@@ -295,7 +295,7 @@ function FilesPanelContents({ access, environment, failed, binding, paused }: {
         </Banner>
       )}
       {searchOpen && <div className="shrink-0 border-b border-border pt-1" onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setSearchOpen(false); } }}>
-        <div className="flex items-start"><div className="min-w-0 flex-1"><SearchBox state={search} onChange={setSearch} namesAvailable={!liveOnly} directory={root} autoFocus /></div><IconButton size="sm" label={t('files.search.close')} icon={<X aria-hidden />} onClick={() => setSearchOpen(false)} /></div>
+        <div className="flex items-start"><div className="min-w-0 flex-1"><SearchBox state={search} onChange={setSearch} {...(liveOnly ? { reason: liveIndexReason(t, environment.index_reason, environment.facts) } : {})} directory={root} autoFocus /></div><IconButton size="sm" label={t('files.search.close')} icon={<X aria-hidden />} onClick={() => setSearchOpen(false)} /></div>
       </div>}
       {why !== false && <p className="px-2 py-1 text-xs text-text-muted" data-testid="why-read-only">{why}</p>}
       {(capacity !== null || directory?.capacity !== null && directory?.capacity !== undefined) && <div className="shrink-0 border-b border-border px-2 py-1 text-xs text-text-muted" role="status">
