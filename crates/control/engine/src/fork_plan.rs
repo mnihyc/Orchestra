@@ -105,15 +105,6 @@ pub mod code {
 /// The longest name a thread made by a fork may be given, as a thread's name is bounded.
 const NAME_MAX_CHARS: usize = binding::NAME_MAX_CHARS;
 
-/// The fewest minutes a switch may wait for a turn: it may be told not to wait at all.
-const WAIT_MINUTES_MIN: i64 = 0;
-/// The most minutes a switch may wait for a turn: a day.
-const WAIT_MINUTES_MAX: i64 = 1_440;
-/// The fewest seconds the health checks may be given.
-const VERIFY_SECS_MIN: i64 = 10;
-/// The most seconds the health checks may be given: an hour.
-const VERIFY_SECS_MAX: i64 = 3_600;
-
 /// Why a plan could not be made at all.
 #[derive(Debug, thiserror::Error)]
 pub enum PlanError {
@@ -878,16 +869,16 @@ pub(crate) async fn applied_options(
             .await?
             .unwrap_or(false),
     };
-    if !(WAIT_MINUTES_MIN..=WAIT_MINUTES_MAX).contains(&wait_minutes) {
+    if wait_minutes < 0 || chrono::Duration::try_minutes(wait_minutes).is_none() {
         return Err(PlanError::invalid(
             "options.wait_minutes",
-            format!("is between {WAIT_MINUTES_MIN} and {WAIT_MINUTES_MAX}"),
+            "must be a nonnegative representable duration",
         ));
     }
-    if !(VERIFY_SECS_MIN..=VERIFY_SECS_MAX).contains(&verify_timeout_secs) {
+    if verify_timeout_secs < 1 || chrono::Duration::try_seconds(verify_timeout_secs).is_none() {
         return Err(PlanError::invalid(
             "options.verify_timeout_secs",
-            format!("is between {VERIFY_SECS_MIN} and {VERIFY_SECS_MAX}"),
+            "must be a positive representable duration",
         ));
     }
     Ok(AppliedChangeOptions {
@@ -1977,6 +1968,43 @@ pub async fn prepare_with_access(
     let provider_changes = provider.id != source.provider.id;
     if replace && !provider_changes && matches!(landing, Landing::Same) {
         // nothing is asked about a provider that stays where it is
+    } else if replace && !provider_changes {
+        // A placement under the provider the thread has: whoever places it does not become the one who
+        // runs it, the thread goes on being carried by its first owner's use. So the question is whether
+        // the first owner may use the provider, with the model and effort the thread has, where it would
+        // now run; the placer needs only what placement needs (the environments they manage). A placer
+        // who is not the first owner is told the place and nothing else of that person's entry, and a
+        // refusal for any other reason is for the turns to say, as it was before an entry named places.
+        let carrier = source.thread.owner_id;
+        let answer = access
+            .provider_use(
+                &mut *conn,
+                &ProviderUse {
+                    person: carrier,
+                    node: thread_id,
+                    provider: provider.id,
+                    model: model.as_deref(),
+                    effort: effort.as_deref(),
+                    runs_in: landing.runs_in(Some(judged_in.id)),
+                },
+            )
+            .await
+            .map_err(EngineError::from)?;
+        match answer {
+            Answer::Allowed { arrangements } => entry = arrangements,
+            Answer::Refused(missing) if missing.iter().any(Missing::leaves_out_the_place) => {
+                let missing = if carrier == person {
+                    missing
+                } else {
+                    crate::access::only_the_place(provider.id, missing).missing
+                };
+                blockers.lack(
+                    "the entry through which the thread uses its provider does not let it run where the result would run",
+                    missing,
+                );
+            }
+            Answer::Refused(_) => entry = Some(crate::access::staying_types()),
+        }
     } else if reach == Reach::Seen {
         if !caller.permits(Permission::ProviderUse) {
             blockers.add(
