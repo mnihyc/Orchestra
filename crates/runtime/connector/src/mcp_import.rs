@@ -1,14 +1,14 @@
 //! The MCP servers of the harnesses' own configuration here: names reported, one definition copied into the connector's own directory when it is imported, started from that copy, and forgotten.
 //!
 //! A machine that has a harness set up usually has tool servers in that harness's own configuration. They
-//! are not configured a second time and they are not used unasked: a server is **found**, then
-//! **imported**, then enabled, and only the last step makes an agent act with it.
+//! remain the program's own configuration for local execution. Discovery reports their names independently
+//! of permission to import; importing and enabling adds a managed resource without editing the native file.
 //!
 //! * **Found.** The connector asks the adapter of each harness process it hosts that declares
 //!   `mcp_discovery` for the servers its harness has configured, in its user's own configuration and in the
 //!   environment's workspace, and reports each by name, harness, place and transport in the environment's
-//!   facts ([`McpImports::rediscover`]). No command line, no address and no secret is reported. Where the
-//!   machine's policy lets none be imported, none is reported.
+//!   facts ([`McpImports::rediscover`]). No command line, no address and no secret is reported. Import policy
+//!   governs copies, while native names remain visible.
 //! * **Imported.** One definition is read out of where it was found, through the adapter of that harness, and
 //!   kept as a copy in the connector's own data directory ([`McpImports::import`]). From then on the copy is
 //!   what runs (`mcp.start` with `local`), whatever becomes of the harness's file; `mcp.forget` deletes it.
@@ -100,17 +100,11 @@ impl McpImports {
     }
 
     /// Looks again at what the harnesses here have configured, for one environment, keeps it in the
-    /// environment's facts and says the facts if they changed. Where the machine lets no tool server be
-    /// imported nothing is reported.
+    /// environment's facts and says the facts if they changed. Import restrictions do not hide native names.
     pub async fn rediscover(&self, environment_id: Id) -> Result<EnvironmentFacts, CommandError> {
         let environment = self.host.environment(environment_id)?;
-        let allowed = environment.mcp().import_allowed();
-        let found = if allowed {
-            let root = environment.facts().workspace_root;
-            self.found(&[root]).await
-        } else {
-            Vec::new()
-        };
+        let root = environment.facts().workspace_root;
+        let found = self.found(&[root]).await;
         environment.mcp().set_found(found);
         Ok(self.host.facts_changed(environment_id).await?)
     }

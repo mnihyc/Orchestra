@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-adapter-codex --lib
+test -p orch-adapter-codex --test fake
+test -p orch-adapter-claude-code --lib
+test -p orch-connector-core --test mcp_imports

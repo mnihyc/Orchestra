@@ -218,8 +218,7 @@ async fn a_server_the_harness_configured_is_found_by_name_imported_run_from_its_
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn nothing_is_imported_that_the_harness_does_not_have_and_nothing_is_found_where_the_owner_allows_none()
- {
+async fn import_policy_refuses_copies_without_hiding_the_programs_native_configuration() {
     let (mut rig, workspace) = rig_with_a_configured_server().await;
     rig.attach(&workspace).await;
     let missing = rig
@@ -242,10 +241,11 @@ async fn nothing_is_imported_that_the_harness_does_not_have_and_nothing_is_found
     .unwrap();
     closed.succeed(&start).await;
     let facts = closed.attach(&workspace).await;
-    assert_eq!(
-        facts["mcp_found"],
-        json!([]),
-        "none is reported where none may be imported"
+    assert_eq!(facts["mcp_found"].as_array().unwrap().len(), 1);
+    assert_eq!(facts["mcp_found"][0]["name"], "github");
+    assert!(
+        !facts.to_string().contains("command"),
+        "only safe native configuration facts are reported"
     );
     assert_eq!(
         closed.fail(&import_of(&closed, new_id(), "github")).await,
