@@ -215,6 +215,7 @@ orch_api_base::__api_bind_3dde7fe764!();
 
 pub(crate) fn entries(
     ctx: &Ctx,
+    public_url: &str,
     env: Id,
     port: u16,
     methods: &[PortEntryMethod],
@@ -234,9 +235,9 @@ pub(crate) fn entries(
                 identity_methods:vec![PortIdentityMethod::HttpHeaders,PortIdentityMethod::PeerLookup],
             }),
             PortEntryMethod::Helper=>Some(PortEntry {
-                method:*method,transports:transports.to_vec(),address:Some(ctx.app.config.system.public_url.clone()),
+                method:*method,transports:transports.to_vec(),address:Some(public_url.to_owned()),
                 command:Some(if needs==PortEntryNeeds::Link {format!("orch-connector port forward --link-stdin --transport {transport}")}
-                    else {format!("orch-connector port forward --environment {env} --port {port} --transport {transport} --token-stdin --url {}", ctx.app.config.system.public_url.trim_end_matches('/'))}),
+                    else {format!("orch-connector port forward --environment {env} --port {port} --transport {transport} --token-stdin --url {}", crate::public_addresses::shell_word(public_url.trim_end_matches('/')))}),
                 needs,identity_methods:if program.proxy_protocol && transports.contains(&PortTransport::Tcp) {vec![PortIdentityMethod::ProxyV2Tcp,PortIdentityMethod::PeerLookup]} else {vec![PortIdentityMethod::PeerLookup]},
             }),
             PortEntryMethod::Browser|PortEntryMethod::Host=>None,
@@ -426,6 +427,10 @@ async fn opening_view_prepared(
         entry_methods: methods.clone(),
         entries: entries(
             ctx,
+            &crate::public_addresses::read(&ctx.app, conn)
+                .await?
+                .addresses
+                .public_url,
             env.id,
             port,
             &methods,
@@ -690,6 +695,10 @@ async fn target_captured(
         reason,
         own_entries: entries(
             ctx,
+            &crate::public_addresses::read(&ctx.app, conn)
+                .await?
+                .addresses
+                .public_url,
             env.id,
             port,
             &[PortEntryMethod::Browser, PortEntryMethod::Helper],

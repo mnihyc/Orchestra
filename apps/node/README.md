@@ -38,9 +38,10 @@ The helper enters only its owned unit's PID/mount namespace, has no Docker socke
 uses the default seccomp profile, and has SYS_ADMIN/SYS_CHROOT with AppArmor unconfined.
 Device creation additionally has its exact character-device mknod rule. The ordinary unit has no extra helper capabilities.
 
-Native build checks use the runner carried in this same node binary and a preloaded environment base image.
-`[node.docker] conformance_image` can name another trusted preloaded image. The check never pulls an image;
-without one it reports that the build remains untested. Its disposable unit has no network, no shared home,
+Native build checks use the runner carried in this same node binary and the release's environment base image.
+A fresh host automatically prepares that image from the shipped recipe through its ordinary image cache.
+`[node.docker] conformance_image` can name another trusted preloaded image. Image preparation and the check
+share the command's deadline and cancellation. Its disposable unit has no network, no shared home,
 and no provider credentials, and each native case talks only to the scripted model inside it.
 The conformance unit test accepts `ORCH_TEST_CONFORMANCE_NODE` for the prebuilt static node executable;
 use it when the host's C library is newer than the test image's. The test never starts a compiler itself.

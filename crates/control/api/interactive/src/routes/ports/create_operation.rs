@@ -334,7 +334,11 @@ impl Apply for Create {
             {
                 let helper = format!(
                     "{}/api/v1/ports/links/{}#{proof}",
-                    ctx.app.config.system.public_url.trim_end_matches('/'),
+                    crate::public_addresses::read(&ctx.app, conn)
+                        .await?
+                        .addresses
+                        .public_url
+                        .trim_end_matches('/'),
                     row.id
                 );
                 let browser = row

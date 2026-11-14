@@ -30685,6 +30685,92 @@
             }
           }
         ]
+      },
+      "put": {
+        "operationId": "MachineGatewaySet",
+        "summary": "Saves the primary gateway choice on its actual machine; the native reply is durable before reconnect.",
+        "x-orch-access": "rule",
+        "x-orch-tokens": true,
+        "x-orch-legacy-access-tokens": true,
+        "x-orch-operation": {
+          "operation_id": "MachineGatewaySet",
+          "method": "PUT",
+          "path": "/machines/{machine_id}/gateway",
+          "title": "Saves the primary gateway choice on its actual machine; the native reply is durable before reconnect.",
+          "delegation": "business",
+          "variants": [
+            {
+              "legacy_tokens": true,
+              "operation": "MachineGatewaySet",
+              "name": "",
+              "selector": "",
+              "facets": [
+                {
+                  "action": "manage",
+                  "resources": [
+                    "machine"
+                  ],
+                  "target": {
+                    "kind": "typed_path",
+                    "value": {
+                      "parameter": "machine_id",
+                      "kind": "machine"
+                    }
+                  },
+                  "usage": "required"
+                }
+              ]
+            }
+          ]
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MachineGatewaySetReceipt"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem, with a code a client can act on.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-orch-rule": "machine.manage, or host.manage on its node facade",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MachineGatewaySetBody"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "machine_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
       }
     },
     "/threads/{thread_id}/gateway": {
@@ -51509,6 +51595,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "notify",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Tell affected people once; omitted is silent."
+            }
           }
         ]
       }
@@ -52004,11 +52102,11 @@
                 "string",
                 "null"
               ],
-              "description": "A short one-line note shown to people whose threads wait on the resource."
+              "description": "A short note shown beside the resource stop."
             }
           },
           {
-            "name": "run_waiting",
+            "name": "notify",
             "in": "query",
             "required": false,
             "schema": {
@@ -52016,7 +52114,7 @@
                 "boolean",
                 "null"
               ],
-              "description": "On Enable, run eligible waiting messages; absent or false keeps them held for Resume."
+              "description": "Tell affected people once; omitted is silent."
             }
           }
         ]
@@ -57603,6 +57701,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "notify",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Tell affected people once; omitted is silent."
+            }
           }
         ]
       }
@@ -62210,11 +62320,23 @@
                   "resources": [
                     "provider",
                     "agent",
-                    "environment"
+                    "environment",
+                    "mcp_server"
                   ],
                   "target": {
                     "kind": "resolved",
                     "value": "requested_resources"
+                  },
+                  "usage": "required"
+                },
+                {
+                  "action": "read",
+                  "resources": [
+                    "environment"
+                  ],
+                  "target": {
+                    "kind": "resolved_collection",
+                    "value": "library_owned_environments"
                   },
                   "usage": "required"
                 },
@@ -78171,6 +78293,19 @@
           }
         ],
         "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid",
+              "description": "One exact identity, independent of recent visits; the same current visibility checks still apply."
+            }
+          },
           {
             "name": "starred",
             "in": "query",
@@ -112617,6 +112752,25 @@
             ],
             "description": "What a starting thread is waiting for."
           },
+          "starting_since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the step it is waiting for began."
+          },
+          "starting_work": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StartingWork"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The command that step waits for, and what holds it up; none while it waits for nothing in particular."
+          },
           "blocked": {
             "anyOf": [
               {
@@ -113256,6 +113410,11 @@
           },
           {
             "type": "string",
+            "const": "recording",
+            "description": "The files of the directory, recorded before the turn so that they can be put back."
+          },
+          {
+            "type": "string",
             "const": "files",
             "description": "Its files."
           },
@@ -113266,6 +113425,27 @@
           }
         ],
         "description": "What a starting thread is waiting for."
+      },
+      "StartingWork": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The kind of command the step waits for, such as `fs.mkdir`, `git.prepare` or `fs.record`."
+          },
+          "behind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The kind of command of other work, on the same machine and in the same line, that it waits behind."
+          }
+        },
+        "required": [
+          "command",
+          "behind"
+        ],
+        "description": "The command a starting thread's step waits for, and the other work that holds it up."
       },
       "ThreadBlocked": {
         "type": "object",
@@ -113403,6 +113583,14 @@
           "placement": {
             "$ref": "#/components/schemas/Placement",
             "description": "Whether it is a person's own machine or one the system manages."
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The host of a managed machine, independent of the host's displayed name."
           }
         },
         "required": [
@@ -116922,6 +117110,16 @@
       "PagePreview": {
         "type": "object",
         "properties": {
+          "server_host_use": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ServerHostUseDisclosure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "owner_reads": {
             "anyOf": [
               {
@@ -116973,6 +117171,25 @@
           "more"
         ],
         "description": "The effect a change would have, worked out before it is made."
+      },
+      "ServerHostUseDisclosure": {
+        "type": "object",
+        "properties": {
+          "hosts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Protected server hosts gaining or changing a native grant; no identities or names are included."
+          },
+          "confirmation": {
+            "type": "string",
+            "description": "Acknowledgement of this exact intent and current native grant set; not an access grant."
+          }
+        },
+        "required": [
+          "hosts",
+          "confirmation"
+        ],
+        "description": "Informed Host Use on the host originally installed with the server."
       },
       "OwnerReadDisclosure": {
         "type": "object",
@@ -131997,6 +132214,14 @@
             "$ref": "#/components/schemas/Placement",
             "description": "Whether it is a person's own machine or one the system manages."
           },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The host of a managed machine, independent of the host's displayed name."
+          },
           "owner": {
             "anyOf": [
               {
@@ -132409,6 +132634,10 @@
       "Host": {
         "type": "object",
         "properties": {
+          "bundled_with_server": {
+            "type": "boolean",
+            "description": "Enrolled through the protected token installed with the server; immutable across rename or home changes."
+          },
           "origin_machine": {
             "anyOf": [
               {
@@ -132626,6 +132855,7 @@
           }
         },
         "required": [
+          "bundled_with_server",
           "origin_machine",
           "availability",
           "id",
@@ -135235,6 +135465,13 @@
             },
             "description": "The other parameters that are eligible and enabled."
           },
+          "withheld": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WithheldParameter"
+            },
+            "description": "The speeds, access programs and context sizes that the model's managers opened and that this thread cannot use, each with why."
+          },
           "approval_mode": {
             "type": "string",
             "description": "The resolved native permission mode, independent of boundary requests."
@@ -135668,6 +135905,152 @@
           }
         ],
         "description": "When a changed parameter takes effect."
+      },
+      "WithheldParameter": {
+        "type": "object",
+        "properties": {
+          "choice": {
+            "$ref": "#/components/schemas/WithheldChoice",
+            "description": "Which choice it is."
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The key of the agent's parameter that stands for it; none where the agent declares no such parameter."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/WithheldReason",
+            "description": "Why the thread cannot make it."
+          }
+        },
+        "required": [
+          "choice",
+          "reason"
+        ],
+        "description": "A choice that a model's managers opened and that this thread cannot make, with the reason."
+      },
+      "WithheldChoice": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "speed",
+            "description": "A speed beside the ordinary one."
+          },
+          {
+            "type": "string",
+            "const": "access",
+            "description": "An access program."
+          },
+          {
+            "type": "string",
+            "const": "context",
+            "description": "A context larger than the model's own window."
+          }
+        ],
+        "description": "The three choices of a thread that a model's entry opens, and that a thread's agent may not offer."
+      },
+      "WithheldReason": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "agent"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The thread's agent takes no such choice."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "access"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs another way of reaching the model: the credential has to stay with the provider."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "placement"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs the other kind of environment: one Orch manages, or a person's own machine."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "provider_kind"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs the other kind of provider: a subscription or a key."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "feature": {
+                "type": "string",
+                "description": "The feature, as `agent.features` names it."
+              },
+              "why": {
+                "type": "string",
+                "const": "feature"
+              }
+            },
+            "required": [
+              "why",
+              "feature"
+            ],
+            "description": "A feature of agents that is off where the thread runs, as `agent.features` says."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "provider"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The provider's own rule for the model leaves the choice out."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "condition"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "Another condition the agent declares for the choice does not hold."
+          }
+        ],
+        "description": "Why a choice that a manager of the provider switched on for the model is not one this thread can make."
       },
       "ApprovalReviewer": {
         "type": "object",
@@ -154440,6 +154823,14 @@
             "format": "uuid",
             "description": "The complete or explicitly unavailable recorded files before this turn."
           },
+          "files_changed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many included files the turn changed, whoever changed them: the difference of the files recorded\nbefore it and the files observed at its end. `null` while either is missing (the files were not\nrecorded, or the end has not been observed yet)."
+          },
           "model": {
             "type": "string",
             "description": "The model's routing name."
@@ -158435,6 +158826,57 @@
         ],
         "description": "The median of three verified entrance round trips, measured on the connector."
       },
+      "MachineGatewaySetBody": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "selection": {
+            "$ref": "#/components/schemas/ConnectorGatewaySelection"
+          },
+          "gateway_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "selection"
+        ],
+        "description": "Save one primary selection on the enrolled machine without replacing its identity."
+      },
+      "MachineGatewaySetReceipt": {
+        "type": "object",
+        "properties": {
+          "projection": {
+            "$ref": "#/components/schemas/ReceiptProjection"
+          },
+          "machine_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "selection": {
+            "$ref": "#/components/schemas/ConnectorGatewaySelection"
+          },
+          "gateway_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "changed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "projection",
+          "machine_id",
+          "selection",
+          "gateway_id",
+          "changed"
+        ],
+        "description": "The accepted native choice, without reading the machine's existing configuration."
+      },
       "ThreadMovePreviewBody": {
         "type": "object",
         "additionalProperties": false,
@@ -159427,6 +159869,17 @@
             "$ref": "#/components/schemas/EnvironmentDefault",
             "description": "What a new thread does about its environment unless told."
           },
+          "default_environment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BindingDefaultEnvironment"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The environment the nearest setting names as the default, wherever it is set, and why the caller cannot use\nit when they cannot; absent when no setting names one and when rebinding an existing thread."
+          },
           "source": {
             "$ref": "#/components/schemas/BindingSource",
             "description": "Safe resolved repository settings and the place supplying the repository address."
@@ -160019,7 +160472,7 @@
           },
           "is_default": {
             "type": "boolean",
-            "description": "Whether it is the topic's default."
+            "description": "Whether it is the default of the threads started here: the environment the nearest setting of\n`env.default_id` names (the topic's own, else its project's, else its org's), and the caller may use it."
           },
           "used": {
             "$ref": "#/components/schemas/EnvironmentUse",
@@ -160101,6 +160554,40 @@
           }
         ],
         "description": "What `env.thread_default` resolves to."
+      },
+      "BindingDefaultEnvironment": {
+        "type": "object",
+        "properties": {
+          "environment": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The environment the setting names."
+          },
+          "from": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NodeRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The place whose setting it is, when that is not the place asked about itself: a project or org above it."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the caller cannot start a thread in it, when they cannot: the reason of its row among the environments,\nor `environment_not_seen` when it is not among those the caller may see."
+          }
+        },
+        "required": [
+          "environment",
+          "from",
+          "reason"
+        ],
+        "description": "The environment that the nearest setting of `env.default_id` names for the threads started here, whoever may use it."
       },
       "BindingSource": {
         "type": "object",
@@ -177374,6 +177861,41 @@
         },
         "description": "Brings a handed-over credential home."
       },
+      "ResourceDeleteQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "notify": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Tell affected people once; omitted is silent."
+          }
+        },
+        "description": "Deletion keeps notices an explicit choice."
+      },
+      "ProviderPauseQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A short note shown beside the resource stop."
+          },
+          "notify": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Tell affected people once; omitted is silent."
+          }
+        },
+        "description": "An explicit optional notice while switching a provider off."
+      },
       "ProviderStartStopBody": {
         "type": "object",
         "additionalProperties": false,
@@ -178560,7 +179082,7 @@
         "required": [
           "model_names"
         ],
-        "description": "Accepts models that discovery suggested. Each is added with what its suggestion says of it,\nexcept that the service tiers and access programs it lists and a context larger than the usual\none become `parameters.offered`, and none of them is enabled."
+        "description": "Accepts models that discovery suggested. Each is added with what its suggestion says of it, and what\nthe organization chose to switch on (`models.add_switches_on`) is enabled: by default every effort, the\nwindow, every context size, speed and access program it lists. Whatever is left off stays under\n`parameters.offered`, and what a thread starts with is never taken from a suggestion."
       },
       "ProviderModelSuggestionAcceptResponse": {
         "anyOf": [
@@ -181588,6 +182110,10 @@
       "HostListedContent": {
         "type": "object",
         "properties": {
+          "bundled_with_server": {
+            "type": "boolean",
+            "description": "Enrolled through the protected token installed with the server; immutable across rename or home changes."
+          },
           "origin_machine": {
             "anyOf": [
               {
@@ -181810,6 +182336,7 @@
           }
         },
         "required": [
+          "bundled_with_server",
           "origin_machine",
           "availability",
           "id",
@@ -182995,6 +183522,17 @@
             "type": "boolean",
             "description": "A previously accepted stop still has native work to finish."
           },
+          "notification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResourceOperationNotification"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A provider-wide pause, provider deletion or MCP deletion can notify this current audience."
+          },
           "thread_displays": {
             "type": "object",
             "additionalProperties": {
@@ -183077,6 +183615,24 @@
           "since"
         ],
         "description": "Current work counted once by the dependents service, before names are projected."
+      },
+      "ResourceOperationNotification": {
+        "type": "object",
+        "properties": {
+          "audience": {
+            "$ref": "#/components/schemas/UpdateAudience",
+            "description": "Visible people and the count whose association remains private."
+          },
+          "default_on": {
+            "type": "boolean",
+            "description": "The inherited Operation notices default; the confirmer may change it."
+          }
+        },
+        "required": [
+          "audience",
+          "default_on"
+        ],
+        "description": "The current affected people and the configured initial notification choice."
       },
       "LibraryReadBody": {
         "type": "object",
@@ -192825,6 +193381,14 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "One exact identity, independent of recent visits; the same current visibility checks still apply."
+          },
           "starred": {
             "type": [
               "boolean",

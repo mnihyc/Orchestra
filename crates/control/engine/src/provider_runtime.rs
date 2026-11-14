@@ -505,10 +505,13 @@ impl Engine {
             let live = rows::live_runtime(&mut tx, provider).await?;
             if renew
                 && live.as_ref().is_none_or(|runtime| {
-                    !matches!(
-                        runtime.state.as_str(),
-                        runtime_state::RUNNING | runtime_state::STOPPED | runtime_state::CREATING
-                    )
+                    runtime.loss_missing
+                        || !matches!(
+                            runtime.state.as_str(),
+                            runtime_state::RUNNING
+                                | runtime_state::STOPPED
+                                | runtime_state::CREATING
+                        )
                 })
             {
                 return Err(RuntimeError::Unavailable(
@@ -531,7 +534,9 @@ impl Engine {
                     }
                 }
                 Some(runtime_state::STOPPED) => {
-                    if renew {
+                    if live.as_ref().is_some_and(|runtime| runtime.loss_missing) {
+                        Mode::Make
+                    } else if renew {
                         Mode::Renew
                     } else {
                         Mode::Start
@@ -999,6 +1004,9 @@ impl Engine {
             let host = host_rows::host(&mut conn, row.host_id).await?;
             (row, host)
         };
+        if row.state != runtime_state::STOPPING {
+            return Ok(());
+        }
         let Some(host) = host else {
             return Err(RuntimeError::Host("the host is gone".to_owned()));
         };
@@ -1030,6 +1038,12 @@ impl Engine {
         let now = self.inner.clock.now();
         let mut tx = self.inner.db.begin().await?;
         rows::lock(&mut tx, provider).await?;
+        let current = env_rows::runtime(&mut tx, runtime).await?;
+        if current.as_ref().is_none_or(|current| {
+            current.state != runtime_state::STOPPING || current.updated_at != row.updated_at
+        }) {
+            return Ok(());
+        }
         match waited {
             Ok(Ok(Outcome::Succeeded(_))) => {
                 let detail = env_rows::runtime(&mut tx, runtime)

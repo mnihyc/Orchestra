@@ -61,8 +61,8 @@ pub fn decisions_since(now: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<c
 pub struct Deployment {
     /// What the system calls itself (`[system] name`).
     pub name: String,
-    /// The origin a browser opens (`[system] public_url`).
-    pub url: String,
+    /// File addresses only seed the system store; export admission reads the effective revision.
+    pub address_seed: orch_api_contract::public_addresses::PublicAddresses,
     /// The version of the product that wrote the package.
     pub version: String,
 }
@@ -73,7 +73,7 @@ impl Deployment {
     pub fn of(config: &ServerConfig) -> Self {
         Self {
             name: config.system.name.clone(),
-            url: config.system.public_url.clone(),
+            address_seed: config.system.address_seed(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
         }
     }

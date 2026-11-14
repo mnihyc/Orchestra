@@ -227,7 +227,14 @@ pub(super) async fn finish(
         endpoints: super::endpoints_for_machine(conn, machine, &advertisement.endpoints).await?,
         system: EnrollReplySystem {
             name: inner.settings.system_name.clone(),
-            public_url: inner.settings.public_url.clone(),
+            public_url: orch_db::queries::public_addresses::read(
+                conn,
+                &inner.settings.address_seed,
+                now,
+            )
+            .await?
+            .addresses
+            .public_url,
         },
         protocol_version: validated.protocol_version,
     })

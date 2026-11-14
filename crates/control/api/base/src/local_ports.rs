@@ -144,12 +144,13 @@ pub(crate) async fn answer(app: &App, machine: Id, ask: PortLocalAsk) -> PortLoc
 }
 
 async fn read(app: &App, machine: Id, ask: &PortLocalAsk) -> ApiResult<PortLocalData> {
+    let mut conn = app.db.acquire().await?;
     if matches!(ask.read, PortLocalRead::Keys) {
+        let addresses = crate::public_addresses::read(app, &mut conn).await?;
         return Ok(PortLocalData::Keys {
-            keys: port_entry::assertion_keys(app),
+            keys: port_entry::assertion_keys(&addresses.addresses.public_url),
         });
     }
-    let mut conn = app.db.acquire().await?;
     let mut env = scope(&mut conn, machine, ask).await?;
     let ctx = Ctx::for_tool(
         app.clone(),
@@ -248,7 +249,8 @@ async fn read(app: &App, machine: Id, ask: &PortLocalAsk) -> ApiResult<PortLocal
                     .parse::<std::net::IpAddr>()
                     .ok()
                     .map(|ip| ip.to_canonical());
-            let keys = port_entry::assertion_keys(app);
+            let addresses = crate::public_addresses::current(app).await?;
+            let keys = port_entry::assertion_keys(&addresses.addresses.public_url);
             if row.ended_at.is_some()
                 || row.environment_id != env.id
                 || row.generation != ask.generation
@@ -297,10 +299,12 @@ async fn read(app: &App, machine: Id, ask: &PortLocalAsk) -> ApiResult<PortLocal
                 },
                 PortCaller::Address => AssertedCaller::Address,
             };
+            let addresses = crate::public_addresses::read(app, &mut tx).await?;
+            let keys = port_entry::assertion_keys(&addresses.addresses.public_url);
             let assertion = port_entry::port_signer()
                 .sign(
                     &PortAssertion {
-                        issuer: app.config.system.public_url.clone(),
+                        issuer: keys.issuer.clone(),
                         environment_id: env.id,
                         port: *port,
                         transport: match transport {
@@ -332,7 +336,12 @@ async fn read(app: &App, machine: Id, ask: &PortLocalAsk) -> ApiResult<PortLocal
             })
         }
         PortLocalRead::Keys => Ok(PortLocalData::Keys {
-            keys: port_entry::assertion_keys(app),
+            keys: port_entry::assertion_keys(
+                &crate::public_addresses::read(app, &mut conn)
+                    .await?
+                    .addresses
+                    .public_url,
+            ),
         }),
     }
 }

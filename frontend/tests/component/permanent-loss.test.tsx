@@ -1,5 +1,5 @@
 /** Permanent loss requires exact consent, and independent recovery and batch destinations retain their reviewed choices. */
-import { screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { DeclareLostDialog } from '@/features/resources/DeclareLost';
@@ -29,6 +29,18 @@ beforeEach(() => {
   calls.batch.mockResolvedValue({ preflight_id: 'batch-plan', executable: 0, plans: [], skipped: [], turns_running: 0, options: { wait_minutes: 10 }, estimate: { seconds_low: 1, seconds_high: 2 } });
 });
 afterEach(async () => { await setLocale('en'); });
+
+it('keeps every visible loss-plan resource destination in the current application document',async()=>{
+  const view=show(<DeclareLostDialog target={{type:'host',id:'host'}} name="host-2" onClose={vi.fn()}/>);
+  await screen.findByRole('textbox',{name:i18n.t('loss.typeName',{name:'host-2'})});
+  for(const group of view.baseElement.querySelectorAll('details'))group.open=true;
+  for(const link of screen.getAllByRole('link',{name:'Main'})){
+    const event=new MouseEvent('click',{bubbles:true,cancelable:true,button:0});
+    fireEvent(link,event);
+    expect(event.defaultPrevented).toBe(true);
+  }
+  expect(calls.declare).not.toHaveBeenCalled();
+});
 
 it('keeps the destructive confirmation and its name disabled while permanent loss is being committed',async()=>{
   calls.declare.mockImplementation(()=>new Promise<LossPlan>(()=>undefined));

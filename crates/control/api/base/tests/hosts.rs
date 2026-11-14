@@ -27,6 +27,106 @@ use resources::{Company, company, name_person};
 use serde_json::json;
 use support::{Statements, World};
 
+#[tokio::test]
+async fn giving_use_on_the_server_host_requires_its_exact_confirmation_and_leaves_no_unconfirmed_grant()
+ {
+    use orch_api_contract::access::PermissionPageUpdate;
+    let world = World::new().await;
+    let c = company(&world).await;
+    let host = a_host(&world, &c.boss, Some(c.acme), "Server host").await;
+    sqlx::query("UPDATE hosts SET bundled_with_server=true WHERE id=$1")
+        .bind(host)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    assert!(read(&world, &c.boss, host).await.bundled_with_server);
+    let body = json!({"rows":[{"permission":"host.use","inherit":false,"add":[{"holder":{"kind":"user","id":c.viewer.id()}}]}]});
+    let refused = world
+        .app
+        .call(PermissionPageUpdate, &[&"hosts", &host])
+        .token(&c.boss.token)
+        .raw_body(&body)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::ConflictConfirmationRequired);
+    let proof = refused.extra["server_host_use"]["confirmation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(refused.extra["server_host_use"]["hosts"], json!(1));
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM permission_entries WHERE object_id=$1 AND permission='host.use' AND holder_id=$2 AND removed_at IS NULL")
+        .bind(host).bind(c.viewer.id()).fetch_one(&world.db.pool).await.unwrap();
+    assert_eq!(count, 0);
+    let changed = json!({"rows":[{"permission":"host.use","inherit":false,"add":[{"holder":{"kind":"user","id":c.admin.id()}}]}]});
+    let wrong = world
+        .app
+        .call(PermissionPageUpdate, &[&"hosts", &host])
+        .token(&c.boss.token)
+        .header("orch-server-host-use-confirmed", &proof)
+        .raw_body(&changed)
+        .send()
+        .await
+        .problem();
+    assert_eq!(wrong.code, ErrorCode::ConflictConfirmationRequired);
+    world
+        .app
+        .call(PermissionPageUpdate, &[&"hosts", &host])
+        .token(&c.boss.token)
+        .header("orch-server-host-use-confirmed", &proof)
+        .raw_body(&body)
+        .send()
+        .await
+        .ok();
+    let access = read(&world, &c.viewer, host).await;
+    assert!(
+        access
+            .access
+            .permissions
+            .iter()
+            .any(|permission| permission == "host.use")
+    );
+    assert!(access.bundled_with_server);
+}
+
+#[tokio::test]
+async fn system_defaults_cannot_give_use_of_a_server_host_without_the_same_informed_confirmation() {
+    use orch_api_contract::admin::AdminDefaultsUpdate;
+    let world = World::new().await;
+    let c = company(&world).await;
+    let root = admin(&world, "server-guardian").await;
+    let host = a_host(&world, &root, None, "Server host").await;
+    sqlx::query("UPDATE hosts SET bundled_with_server=true WHERE id=$1")
+        .bind(host)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let body = json!({"rows":[{"permission":"host.use","add":[{"holder":{"kind":"user","id":c.viewer.id()}}]}]});
+    let refused = world
+        .app
+        .call(AdminDefaultsUpdate, &[])
+        .token(&root.token)
+        .raw_body(&body)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::ConflictConfirmationRequired);
+    assert_eq!(refused.extra["server_host_use"]["hosts"], json!(1));
+    let proof = refused.extra["server_host_use"]["confirmation"]
+        .as_str()
+        .unwrap();
+    world
+        .app
+        .call(AdminDefaultsUpdate, &[])
+        .token(&root.token)
+        .header("orch-server-host-use-confirmed", proof)
+        .raw_body(&body)
+        .send()
+        .await
+        .ok();
+    assert!(read(&world, &c.viewer, host).await.bundled_with_server);
+}
+
 /// A host named `name` at home in `home` (none: the system's), first owned by `owner`, as the
 /// node of a machine would have reported it.
 async fn a_host(world: &World, owner: &Who, home: Option<Id>, name: &str) -> Id {

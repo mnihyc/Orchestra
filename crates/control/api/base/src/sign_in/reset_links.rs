@@ -115,7 +115,14 @@ pub async fn make(
     audit::append(conn, &entry, origin, now).await?;
     Ok(Made {
         id,
-        url: link(config, RESET_PAGE, &secret),
+        url: link(
+            &orch_db::queries::public_addresses::read(conn, &config.system.address_seed(), now)
+                .await?
+                .addresses
+                .public_url,
+            RESET_PAGE,
+            &secret,
+        ),
         expires_at,
     })
 }

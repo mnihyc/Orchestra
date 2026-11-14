@@ -274,3 +274,38 @@ async fn the_making_of_a_link_is_in_the_trail_under_the_actor_that_made_it() {
     assert_eq!((lines[1].1.as_str(), lines[1].2), ("user", Some(boss.id)));
     assert_eq!(lines[1].3["clear_second_step"], false);
 }
+
+#[tokio::test]
+async fn a_new_recovery_link_uses_the_published_origin_and_an_issued_link_keeps_its_admitted_origin()
+ {
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::queries::public_addresses::{self, Write};
+    let world = World::new().await;
+    let ada = world.person("ada").await;
+    let before_link = link_for(&world, &ada, false, Actor::System).await;
+    let before_url = before_link.url.clone();
+    let seed = world.app.app.config.system.address_seed();
+    let before = public_addresses::read(&mut *world.conn().await, &seed, world.now())
+        .await
+        .unwrap();
+    let selected = PublicAddresses {
+        public_url: "https://changed.example.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    assert!(matches!(
+        public_addresses::publish(
+            &mut *world.conn().await,
+            &selected,
+            before.revision,
+            None,
+            world.now()
+        )
+        .await
+        .unwrap(),
+        Write::Written(_)
+    ));
+    let after = link_for(&world, &ada, false, Actor::System).await;
+    assert!(after.url.starts_with("https://changed.example.test/reset/"));
+    assert_eq!(before_link.url, before_url);
+    assert!(before_url.starts_with("https://orch.test/reset/"));
+}

@@ -1430,6 +1430,12 @@ impl Outbox {
         (snapshots, sources): (&[Snapshot], &[person_notices::Opened]),
     ) -> Result<Result<render::Message, render::RenderFault>, OutboxError> {
         let surroundings = &self.inner.surroundings;
+        let addresses = orch_db::queries::public_addresses::read(
+            conn,
+            &surroundings.address_seed,
+            self.inner.clock.now(),
+        )
+        .await?;
         let node_ids: Vec<Id> = snapshots.iter().filter_map(|each| each.node_id).collect();
         let places = people::places(conn, &node_ids).await?;
         let org_name = match snapshots.last() {
@@ -1472,7 +1478,7 @@ impl Outbox {
                 notifications: snapshots,
                 places: &places,
                 org_name: &org_name,
-                public_url: &self.inner.surroundings.public_url,
+                public_url: &addresses.addresses.public_url,
             },
             &bounds,
         ))

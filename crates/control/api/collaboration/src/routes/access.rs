@@ -1001,6 +1001,11 @@ async fn change_page(
         Vec::new()
     };
     link_origin::check(&mut tx, &principal, body.link_origin).await?;
+    let server_hosts = if matches!(which, Which::Defaults) {
+        Some(crate::server_host_use::Before::defaults(&mut tx, &principal, Some(id), body).await?)
+    } else {
+        None
+    };
     let prepared = guard.operation_data::<page_operations::PreparedTarget>()?;
     let disclosure = &prepared.disclosure;
     let accepted_revision;
@@ -1056,6 +1061,9 @@ async fn change_page(
         Err(pages::ChangeFailure::BeforeEffect(error)) => return Err(error),
     }
     disclosure.require(ctx, &mut tx).await?;
+    if let Some(before) = server_hosts {
+        before.require(ctx, &mut tx, &principal).await?;
+    }
     if !people.is_empty() {
         crate::routes::notifications::person::tell(
             ctx,

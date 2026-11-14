@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 http.workspace = true
 ipnet.workspace = true
+orch-api-contract.workspace = true
 orch-plugin-contract.workspace = true
 orch-agent-programs.workspace = true
 orch-link-contract.workspace = true

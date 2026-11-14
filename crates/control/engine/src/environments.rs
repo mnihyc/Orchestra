@@ -560,15 +560,16 @@ pub async fn start(
     if state.remove_at.is_some() {
         return Err(StartError::BeingRemoved);
     }
-    if rows::live_runtime(conn, environment)
-        .await?
+    let runtime = rows::live_runtime(conn, environment).await?;
+    if runtime
+        .as_ref()
         .is_some_and(|runtime| runtime.state == "stopping")
     {
         return Err(StartError::Unavailable(
             "the host has not confirmed the previous stop".to_owned(),
         ));
     }
-    if let Some(runtime) = rows::live_runtime(conn, environment).await?
+    if let Some(runtime) = &runtime
         && let Some(blocked) = crate::network::blocked(conn, runtime.id).await?
     {
         return Err(StartError::Unavailable(
@@ -579,7 +580,10 @@ pub async fn start(
         status::RUNNING => return Ok(Starting::Up),
         status::NONE | status::FAILED => Mode::Make,
         status::STOPPED => {
-            if rows::live_runtime(conn, environment).await?.is_some() {
+            if runtime
+                .as_ref()
+                .is_some_and(|runtime| !runtime.loss_missing)
+            {
                 Mode::Start
             } else {
                 Mode::Make
@@ -1202,6 +1206,9 @@ impl Engine {
             let host = host_rows::host(&mut conn, row.host_id).await?;
             (row, host)
         };
+        if row.state != runtime_state::STOPPING {
+            return Ok(());
+        }
         let Some(host) = host else {
             return Err(StopError::Host("the host is gone".to_owned()));
         };
@@ -1231,11 +1238,18 @@ impl Engine {
         )
         .await;
         let now = self.inner.clock.now();
-        let mut conn = self.inner.db.acquire().await?;
+        let mut tx = self.inner.db.begin().await?;
+        rows::lock_environment(&mut tx, environment).await?;
+        let current = rows::runtime(&mut tx, runtime).await?;
+        if current.as_ref().is_none_or(|current| {
+            current.state != runtime_state::STOPPING || current.updated_at != row.updated_at
+        }) {
+            return Ok(());
+        }
         match waited {
             Ok(Ok(crate::commands::Outcome::Succeeded(_))) => {
                 rows::set_runtime_state(
-                    &mut conn,
+                    &mut tx,
                     runtime,
                     &[runtime_state::STOPPING],
                     runtime_state::STOPPED,
@@ -1244,7 +1258,7 @@ impl Engine {
                 )
                 .await?;
                 rows::set_status(
-                    &mut conn,
+                    &mut tx,
                     environment,
                     &[status::RUNNING, status::OFFLINE],
                     status::STOPPED,
@@ -1252,12 +1266,13 @@ impl Engine {
                     now,
                 )
                 .await?;
-                rows::close_shells(&mut conn, environment, now).await?;
+                rows::close_shells(&mut tx, environment, now).await?;
+                tx.commit().await.map_err(DbError::from)?;
                 Ok(())
             }
             Ok(Ok(crate::commands::Outcome::Failed(error))) => {
                 rows::set_runtime_state(
-                    &mut conn,
+                    &mut tx,
                     runtime,
                     &[runtime_state::STOPPING],
                     runtime_state::RUNNING,
@@ -1265,6 +1280,7 @@ impl Engine {
                     now,
                 )
                 .await?;
+                tx.commit().await.map_err(DbError::from)?;
                 Err(StopError::Host(format!("{}: {}", error.code, error.detail)))
             }
             Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
@@ -1365,6 +1381,9 @@ pub(crate) struct AttachWith {
     /// Whether the machine indexes the whole tree for use while it is offline, or only lists it when asked:
     /// the resolved `workspace.index`.
     pub(crate) index: IndexMode,
+    /// What the index, the recordings and the listings of the workspace leave out: the resolved
+    /// `workspace.ignore`, patterns written as in a gitignore file.
+    pub(crate) ignore: Vec<String>,
 }
 
 impl Default for AttachWith {
@@ -1382,6 +1401,7 @@ impl Default for AttachWith {
             executors: Vec::new(),
             // The same fallback as attach_with when workspace.index has not been set.
             index: IndexMode::Full,
+            ignore: Vec::new(),
         }
     }
 }
@@ -1430,6 +1450,13 @@ pub(crate) async fn attach_with(
     )
     .await?
     .unwrap_or(IndexMode::Full);
+    let ignore = setting::<Vec<String>>(
+        conn,
+        SettingsPlace::Environment(environment),
+        keys::WORKSPACE_IGNORE,
+    )
+    .await?
+    .unwrap_or_default();
     let sources = orch_settings::resolve(
         conn,
         SettingsPlace::Environment(environment),
@@ -1479,6 +1506,7 @@ pub(crate) async fn attach_with(
         secrets,
         executors,
         index,
+        ignore,
     })
 }
 
@@ -1542,7 +1570,7 @@ pub(crate) fn attach_body(environment: Id, root: Option<&str>, with: &AttachWith
         data_sources,
         environment_id: environment,
         workspace_root: root.map(str::to_owned),
-        ignore: Vec::new(),
+        ignore: with.ignore.clone(),
         index: with.index,
         mounts: root.map(|_| with.mounts.clone()),
         variables: with.variables.clone(),
@@ -1920,6 +1948,17 @@ mod storage_tests {
         assert!(
             check_initial_program_consent(&json!({(keys::EXEC_VERSION_OVERRIDES):null})).is_err()
         );
+    }
+
+    #[test]
+    fn attaching_carries_the_ignored_paths_of_the_workspace_to_the_machine() {
+        let id = orch_types::new_id();
+        let with = AttachWith {
+            ignore: vec!["bulk/".to_owned(), "target/".to_owned()],
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(attach_body(id, None, &with)).unwrap();
+        assert_eq!(wire["ignore"], serde_json::json!(["bulk/", "target/"]));
     }
 
     #[test]

@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 chrono.workspace = true
+http.workspace = true
 orch-access-contract.workspace = true
 orch-agent-programs.workspace = true
 orch-driver-contract.workspace = true

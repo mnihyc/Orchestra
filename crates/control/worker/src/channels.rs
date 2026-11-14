@@ -397,8 +397,8 @@ impl TestOutcome {
 pub struct Surroundings {
     /// What the system calls itself.
     pub system_name: String,
-    /// The origin a browser opens.
-    pub public_url: String,
+    /// File addresses seed the system store; a message reads its committed address at rendering.
+    pub address_seed: orch_api_contract::public_addresses::PublicAddresses,
 }
 
 /// The notification a sample message tells.
@@ -724,6 +724,9 @@ pub async fn prepare_test(
         }
     }
     let notification = [sample(tools.surroundings, &channel.name, now)];
+    let addresses =
+        orch_db::queries::public_addresses::read(conn, &tools.surroundings.address_seed, now)
+            .await?;
     let message = match render::render(
         orch_types::new_id(),
         &Rendering {
@@ -734,7 +737,7 @@ pub async fn prepare_test(
             notifications: &notification,
             places: &[],
             org_name: &tools.surroundings.system_name,
-            public_url: &tools.surroundings.public_url,
+            public_url: &addresses.addresses.public_url,
         },
     ) {
         Ok(message) => message,
@@ -789,6 +792,9 @@ pub async fn prepare_destination_test(
     let config = config_of_destination(conn, tools.master, destination).await?;
     let env = tools.surroundings;
     let notification = [sample(env, &destination.name, now)];
+    let addresses =
+        orch_db::queries::public_addresses::read(conn, &tools.surroundings.address_seed, now)
+            .await?;
     let message = match render::render(
         orch_types::new_id(),
         &Rendering {
@@ -799,7 +805,7 @@ pub async fn prepare_destination_test(
             notifications: &notification,
             places: &[],
             org_name: &env.system_name,
-            public_url: &env.public_url,
+            public_url: &addresses.addresses.public_url,
         },
     ) {
         Ok(message) => message,

@@ -521,7 +521,7 @@ pub async fn run(services: Services, stop: CancellationToken) -> Result<(), DbEr
         master: services.master.clone(),
         surroundings: Surroundings {
             system_name: services.config.system.name.clone(),
-            public_url: services.config.system.public_url.clone(),
+            address_seed: services.config.system.address_seed(),
         },
         retry: services
             .config

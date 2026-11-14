@@ -249,7 +249,8 @@ async fn request_outcome(
     if waited.created
         && let Some(arguments) = budget
     {
-        crate::port_tools::check_open_budget(ctx, &waited.opening, &reply, arguments)?;
+        crate::port_tools::check_open_budget(ctx, &mut tx, &waited.opening, &reply, arguments)
+            .await?;
     }
     crate::routes::ports::request_operation::observe(
         &mut tx,
@@ -380,7 +381,8 @@ async fn automatic(
     if produced.created
         && let Some(arguments) = budget
     {
-        crate::port_tools::check_open_budget(ctx, &produced.opening, &reply, arguments)?;
+        crate::port_tools::check_open_budget(ctx, &mut tx, &produced.opening, &reply, arguments)
+            .await?;
     }
     crate::routes::ports::request_operation::observe(
         &mut tx,
@@ -700,7 +702,11 @@ pub(crate) async fn decide(
             let port = opening.port;
             let helper = format!(
                 "{}/api/v1/ports/links/{}#{proof}",
-                ctx.app.config.system.public_url.trim_end_matches('/'),
+                crate::public_addresses::read(&ctx.app, &mut tx)
+                    .await?
+                    .addresses
+                    .public_url
+                    .trim_end_matches('/'),
                 opening.id
             );
             let browser = if opening.entry_methods.contains(&PortEntryMethod::Browser) {

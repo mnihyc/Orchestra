@@ -7,7 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as AccessApi from '@/api/access';
 import type { AccessKind, AccessTarget } from '@/api/access';
 import { ApiError } from '@/api/client';
-import { AccessDialog } from '@/features/access/AccessDialog';
+import { AccessDialog } from '@/features/access/AccessDialogBody';
 import { ViewAs } from '@/features/access/ViewAs';
 import type { Candidates } from '@/features/access/candidates';
 import type { EffectiveAccess } from '@/generated/api-types';

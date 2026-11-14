@@ -191,12 +191,19 @@ pub(crate) async fn on_connection(
     // signed in may not, and a token that does not hold is nobody here, as anywhere public.
     let may_create_org = caller.is_some_and(|caller| may_make_org(policy.org_creation, caller));
     let build = ctx.app.build;
+    let addresses = orch_db::queries::public_addresses::read(
+        conn,
+        &ctx.app.config.system.address_seed(),
+        ctx.now,
+    )
+    .await?
+    .addresses;
     Ok(Meta {
         name: ctx.app.config.system.name.clone(),
         version: build.version.to_owned(),
         build: build.build_number.to_owned(),
-        public_url: ctx.app.config.system.public_url.clone(),
-        alternate_urls: ctx.app.config.system.alternate_urls.clone(),
+        public_url: addresses.public_url,
+        alternate_urls: addresses.alternate_urls,
         needs_setup,
         registration_mode: policy.registration,
         org_creation: policy.org_creation,

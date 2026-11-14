@@ -13,7 +13,7 @@ export function enrollmentMachine(id: string, online: boolean): Machine {
 }
 
 export function enrollmentHost(id: string, online: boolean): Host {
-  return { ...unjudgedProvenance(),
+  return { bundled_with_server: false, ...unjudgedProvenance(),
     id, name: 'build-node', address: 'build-node', owner: null, org_id: null, home: null,
     machine: { id: 'node-machine-id', name: 'build-node', online, platform_os: 'linux', placement: 'connected' },
     labels: [], drivers: [], ports: null, ports_revision: 1, ports_proposal: null,

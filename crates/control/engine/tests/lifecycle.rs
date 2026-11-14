@@ -50,6 +50,133 @@ async fn a_person_stops_an_environment_and_its_unit_and_volumes_are_kept() {
 }
 
 #[tokio::test]
+async fn a_host_report_finishes_an_environment_stop_while_its_command_reply_is_held() {
+    for state in ["absent", "stopped", "failed"] {
+        let world = World::new().await;
+        serve(&world);
+        let host = ScriptedHost::on(&world, "Reporting host", 16_384).await;
+        let template = template(&world).await;
+        let (environment, runtime, _) = running(&world, &host, template, "Stopped workspace").await;
+        host.added.machine.handler.hold(K::NodeRuntimeStop);
+        let engine = world.engine();
+        let by = world.ada;
+        let stopping = tokio::spawn(async move {
+            engine
+                .stop_environment(environment, false, StopReason::Person(by))
+                .await
+        });
+        host.wait_began(K::NodeRuntimeStop, 1).await;
+        host.tell(runtime, state, None).await;
+        eventually(
+            "the reported stop to settle before the command reply",
+            || async { status(&world, environment).await.0 == "stopped" },
+        )
+        .await;
+        let row: (String, bool) =
+            sqlx::query_as("SELECT state,loss_missing FROM runtimes WHERE id=$1")
+                .bind(runtime)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap();
+        assert_eq!(row, ("stopped".into(), state == "absent"));
+        host.added.machine.handler.release();
+        stopping.await.unwrap().unwrap();
+        assert_eq!(status(&world, environment).await.0, "stopped");
+    }
+}
+
+#[tokio::test]
+async fn a_late_stop_reply_keeps_the_environment_of_a_newer_start_running() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Reporting host", 16_384).await;
+    let template = template(&world).await;
+    let (environment, runtime, _) = running(&world, &host, template, "Restarted workspace").await;
+    host.added.machine.handler.hold(K::NodeRuntimeStop);
+    let engine = world.engine();
+    let by = world.ada;
+    let stopping = tokio::spawn(async move {
+        engine
+            .stop_environment(environment, false, StopReason::Person(by))
+            .await
+    });
+    host.wait_began(K::NodeRuntimeStop, 1).await;
+    // A completed stop report and a subsequent start can be committed before the first waiter's reply.
+    let mut tx = world.pool.begin().await.unwrap();
+    orch_db::queries::environments::hosting::lock_environment(&mut tx, environment)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE runtimes SET state='running',updated_at=updated_at+interval '1 second' WHERE id=$1",
+    )
+    .bind(runtime)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    host.added.machine.handler.release();
+    stopping.await.unwrap().unwrap();
+    assert_eq!(status(&world, environment).await.0, "running");
+    let state: String = sqlx::query_scalar("SELECT state FROM runtimes WHERE id=$1")
+        .bind(runtime)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(state, "running");
+}
+
+#[tokio::test]
+async fn starting_after_a_reported_absent_stop_makes_an_environment_unit_on_the_same_owned_volumes()
+{
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Reporting host", 16_384).await;
+    let template = template(&world).await;
+    let (environment, runtime, _) = running(&world, &host, template, "Missing workspace").await;
+    let volumes: serde_json::Value = sqlx::query_scalar("SELECT volumes FROM runtimes WHERE id=$1")
+        .bind(runtime)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE runtimes SET state='stopping' WHERE id=$1")
+        .bind(runtime)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    host.tell(runtime, "absent", None).await;
+    eventually("the absent stop to settle", || async {
+        status(&world, environment).await.0 == "stopped"
+    })
+    .await;
+    let orch_engine::environments::Starting::Job(job) = world
+        .engine()
+        .start_environment(environment, Some(world.ada))
+        .await
+        .unwrap()
+    else {
+        panic!("a unit reported absent must be made again");
+    };
+    assert_eq!(
+        job.plan["mode"], "make",
+        "Start cannot target a unit the host has reported absent"
+    );
+    host.wait_for(K::NodeRuntimeStart, 2).await;
+    let replacement = host.started().unwrap();
+    assert_ne!(runtime, replacement);
+    let _replacement = hosting::enroll(&world, replacement).await;
+    let (state, _, error) = hosting::wait_over(&world, job.id).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    let kept: serde_json::Value = sqlx::query_scalar("SELECT volumes FROM runtimes WHERE id=$1")
+        .bind(replacement)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(volumes, kept);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
+    assert_eq!(status(&world, environment).await.0, "running");
+}
+
+#[tokio::test]
 async fn an_environment_with_a_turn_running_is_not_stopped_unless_the_turns_are_interrupted() {
     let world = World::new().await;
     serve(&world);

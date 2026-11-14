@@ -3266,6 +3266,8 @@ pub async fn identity_provider_by_key(
 /// `session_id` (`sensitive_purpose`).
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct SignInState {
+    /// Exact callback admitted when this login began, retained across an address publication.
+    pub callback_url: String,
     /// The terms hash acknowledged for this explicitly composed invitation acceptance.
     pub accepted_terms_hash: Option<String>,
     /// Names the sign-in; the browser brings it back.
@@ -3305,8 +3307,8 @@ pub async fn begin_sign_in(conn: &mut Conn, row: &SignInState) -> Result<(), DbE
     sqlx::query(
         "INSERT INTO oidc_states (state, identity_provider_id, nonce, pkce_verifier, redirect_path,
                                   link_user_id, invitation, session_id, sensitive_purpose,
-                                  service_account_id, browser_hash, started_at, expires_at, accept_invitation, link_authority, accepted_terms_hash)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+                                  service_account_id, browser_hash, started_at, expires_at, accept_invitation, link_authority, accepted_terms_hash, callback_url)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
     )
     .bind(&row.state)
     .bind(row.identity_provider_id)
@@ -3324,6 +3326,7 @@ pub async fn begin_sign_in(conn: &mut Conn, row: &SignInState) -> Result<(), DbE
     .bind(row.accept_invitation)
     .bind(&row.link_authority)
     .bind(&row.accepted_terms_hash)
+    .bind(&row.callback_url)
     .execute(conn)
     .await?;
     Ok(())
@@ -3336,7 +3339,7 @@ pub async fn take_sign_in(conn: &mut Conn, state: &str) -> Result<Option<SignInS
         "DELETE FROM oidc_states WHERE state = $1
          RETURNING state, identity_provider_id, nonce, pkce_verifier, redirect_path, link_user_id,
                    invitation, session_id, sensitive_purpose, service_account_id, browser_hash,
-                   started_at, expires_at, accept_invitation, link_authority, accepted_terms_hash",
+                   started_at, expires_at, accept_invitation, link_authority, accepted_terms_hash, callback_url",
     )
     .bind(state)
     .fetch_optional(conn)

@@ -92,7 +92,11 @@ fn browser() -> Browser {
 
 fn the_systems_key() -> Vapid {
     let key = rcgen::KeyPair::generate().unwrap();
-    Vapid::read(&key.serialize_pem(), "https://orch.example").unwrap()
+    Vapid::read(&key.serialize_pem()).unwrap()
+}
+
+fn contact() -> orch_notifier_push::Contact {
+    orch_notifier_push::Contact::new(|| async { Ok("https://orch.example".to_owned()) })
 }
 
 fn delivery(endpoint: &str, browser: &Browser, allowed: Value) -> Delivery {
@@ -118,7 +122,7 @@ async fn a_push_is_encrypted_to_the_browser_signed_by_the_system_and_says_what_t
     let (port, log) = push_service().await;
     let vapid = the_systems_key();
     let public = URL_SAFE_NO_PAD.decode(vapid.public_key()).unwrap();
-    let notifier = PushNotifier::new(vapid);
+    let notifier = PushNotifier::new(vapid, contact());
     let browser = browser();
     let endpoint = format!("http://127.0.0.1:{port}/push/ok");
     notifier
@@ -185,7 +189,7 @@ fn chrono_now() -> u64 {
 async fn a_subscription_the_push_service_no_longer_knows_is_gone_and_a_service_that_is_slow_or_down_is_tried_again()
  {
     let (port, _) = push_service().await;
-    let notifier = PushNotifier::new(the_systems_key());
+    let notifier = PushNotifier::new(the_systems_key(), contact());
     let browser = browser();
     let post = |path: &str| {
         let endpoint = format!("http://127.0.0.1:{port}/push/{path}");
@@ -220,7 +224,7 @@ async fn a_subscription_the_push_service_no_longer_knows_is_gone_and_a_service_t
 async fn an_endpoint_on_a_private_network_is_refused_even_for_the_systems_own_channel_unless_listed()
  {
     let (port, log) = push_service().await;
-    let notifier = PushNotifier::new(the_systems_key());
+    let notifier = PushNotifier::new(the_systems_key(), contact());
     let browser = browser();
     let endpoint = format!("http://127.0.0.1:{port}/push/ok");
     for held in [Value::Null, json!([]), json!(["10.0.0.0/8"])] {
@@ -248,7 +252,7 @@ async fn an_endpoint_on_a_private_network_is_refused_even_for_the_systems_own_ch
 #[tokio::test(flavor = "multi_thread")]
 async fn what_is_stored_of_a_browser_that_can_never_work_makes_the_browser_gone() {
     let (port, log) = push_service().await;
-    let notifier = PushNotifier::new(the_systems_key());
+    let notifier = PushNotifier::new(the_systems_key(), contact());
     let good = browser();
     let endpoint = format!("http://127.0.0.1:{port}/push/ok");
     let mut keys_broken = delivery(&endpoint, &good, json!(["127.0.0.1"]));

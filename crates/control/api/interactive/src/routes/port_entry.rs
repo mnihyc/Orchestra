@@ -145,14 +145,19 @@ orch_api_base::__api_bind_36aa4772f8!();
 
 /// `GET /ports/assertion-keys`: the public verification keys and their audience template.
 async fn keys(ctx: Ctx, (): (), (): ()) -> ApiResult<PortAssertionKeys> {
-    Ok(assertion_keys(&ctx.app))
+    Ok(assertion_keys(
+        &crate::public_addresses::current(&ctx.app)
+            .await?
+            .addresses
+            .public_url,
+    ))
 }
 
 /// Public verification context shared by HTTP and the authenticated inside read path.
-pub(crate) fn assertion_keys(app: &crate::state::App) -> PortAssertionKeys {
+pub(crate) fn assertion_keys(public_url: &str) -> PortAssertionKeys {
     let signer = port_signer();
     PortAssertionKeys {
-        issuer: app.config.system.public_url.clone(),
+        issuer: public_url.to_owned(),
         audience_template: AUDIENCE_TEMPLATE.to_owned(),
         keys: vec![PortAssertionKey {
             kty: PortAssertionKeyType::Okp,
@@ -259,6 +264,10 @@ async fn inspect(ctx: Ctx, (): (), body: PortLinkInspectBody) -> ApiResult<PortL
         state,
         entries: entries(
             &ctx,
+            &crate::public_addresses::read(&ctx.app, &mut conn)
+                .await?
+                .addresses
+                .public_url,
             env.id,
             port,
             &methods,

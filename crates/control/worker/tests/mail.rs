@@ -63,6 +63,7 @@ async fn a_code_written_by_signing_in_is_delivered_to_the_smtp_server_and_blanke
     let expires = world.now() + Duration::minutes(10);
     let row = payload(
         &config,
+        &config.system.public_url,
         &to,
         &Message::SignInCode {
             code: "ABCD-1234",
@@ -154,6 +155,7 @@ async fn each_message_signing_in_writes_is_delivered_in_the_language_of_the_pers
     };
     let verify = payload(
         &config,
+        &config.system.public_url,
         &Addressee {
             user_id: bo,
             email: "bob@example.org",
@@ -177,6 +179,7 @@ async fn each_message_signing_in_writes_is_delivered_in_the_language_of_the_pers
     .unwrap();
     let notice = payload(
         &config,
+        &config.system.public_url,
         &Addressee {
             user_id: ada,
             email: "ada@example.org",

@@ -444,10 +444,7 @@ async fn a_unit_is_told_to_fetch_the_default_build_of_each_harness_it_is_to_run_
     let (release, config) = release_with_builds();
     let world = World::with(config).await;
     let c = cast(&world).await;
-    let catalog = ReleaseBuilds::at(
-        release.path().join("connectors"),
-        "https://orch.example.com",
-    );
+    let catalog = ReleaseBuilds::at(release.path().join("connectors"));
     let kinds = ["codex".to_owned(), "claude-code".to_owned()];
     let fetched = |tools: Vec<orch_engine::hosting::ToolBuild>| {
         tools

@@ -298,6 +298,136 @@ async fn metadata_publishes_the_deployments_browser_addresses_without_guessing_i
 }
 
 #[tokio::test]
+async fn browser_metadata_reads_one_committed_address_revision_without_restarting_the_api() {
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::queries::public_addresses::{self, Write};
+
+    let world = World::new().await;
+    let before = world.app.call(MetaGet, &[]).send().await.ok();
+    let seed = PublicAddresses {
+        public_url: before.public_url.clone(),
+        alternate_urls: before.alternate_urls.clone(),
+    };
+    let initial = public_addresses::read(&mut *world.conn().await, &seed, world.now())
+        .await
+        .unwrap();
+    let candidate = PublicAddresses {
+        public_url: "https://changed.example.test".into(),
+        alternate_urls: vec!["https://inside.example.test:8443".into()],
+    };
+    let mut tx = world.app.app.db.begin().await.unwrap();
+    let Write::Written(published) =
+        public_addresses::publish(&mut tx, &candidate, initial.revision, None, world.now())
+            .await
+            .unwrap()
+    else {
+        panic!("the first publication holds its seed revision")
+    };
+    let held = world.app.call(MetaGet, &[]).send().await.ok();
+    assert_eq!(
+        (held.public_url, held.alternate_urls),
+        (before.public_url, before.alternate_urls)
+    );
+    tx.commit().await.unwrap();
+
+    let after = world.app.call(MetaGet, &[]).send().await.ok();
+    assert_eq!(
+        (after.public_url, after.alternate_urls),
+        (
+            candidate.public_url.clone(),
+            candidate.alternate_urls.clone()
+        )
+    );
+    let restarted = public_addresses::read(
+        &mut *world.conn().await,
+        &PublicAddresses {
+            public_url: "https://different-file.example.test".into(),
+            alternate_urls: Vec::new(),
+        },
+        world.now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(restarted.addresses, candidate);
+    assert_eq!(restarted.revision, published.revision);
+    assert!(!restarted.from_file_seed);
+}
+
+#[tokio::test]
+async fn a_stale_or_invalid_address_draft_cannot_replace_either_effective_address() {
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::queries::public_addresses::{self, Write};
+
+    let world = World::new().await;
+    let seed = PublicAddresses {
+        public_url: "https://seed.example.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    let before = public_addresses::read(&mut *world.conn().await, &seed, world.now())
+        .await
+        .unwrap();
+    let chosen = PublicAddresses {
+        public_url: "https://chosen.example.test".into(),
+        alternate_urls: vec!["http://192.0.2.15:8080".into()],
+    };
+    let Write::Written(published) = public_addresses::publish(
+        &mut *world.conn().await,
+        &chosen,
+        before.revision,
+        None,
+        world.now(),
+    )
+    .await
+    .unwrap() else {
+        panic!("current revision")
+    };
+    assert!(matches!(
+        public_addresses::publish(
+            &mut *world.conn().await,
+            &seed,
+            before.revision,
+            None,
+            world.now()
+        )
+        .await
+        .unwrap(),
+        Write::Stale
+    ));
+    for address in [
+        "https://person@invalid.test",
+        "https://invalid.test/path",
+        "https://invalid.test#fragment",
+        "https://invalid.test:0",
+        "https://invalid.test:99999",
+        "https://invalid.test:",
+        "",
+    ] {
+        let invalid = PublicAddresses {
+            public_url: address.into(),
+            alternate_urls: seed.alternate_urls.clone(),
+        };
+        assert!(
+            public_addresses::publish(
+                &mut *world.conn().await,
+                &invalid,
+                published.revision,
+                None,
+                world.now()
+            )
+            .await
+            .is_err(),
+            "{address}"
+        );
+    }
+    assert_eq!(
+        public_addresses::read(&mut *world.conn().await, &seed, world.now())
+            .await
+            .unwrap(),
+        published
+    );
+}
+
+#[tokio::test]
 async fn the_first_setup_makes_the_first_administrator_with_a_session_and_works_only_once() {
     let world = World::new().await;
     let reply = setup(&world, "root").await;

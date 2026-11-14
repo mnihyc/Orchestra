@@ -23,6 +23,7 @@ orch-config.workspace = true
 orch-db.workspace = true
 orch-identity-oidc.workspace = true
 orch-image-backends.workspace = true
+orch-notifier-contract.workspace = true
 orch-notifier-email.workspace = true
 orch-notifier-push.workspace = true
 orch-notifier-telegram.workspace = true

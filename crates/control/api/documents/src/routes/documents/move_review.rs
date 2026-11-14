@@ -326,6 +326,7 @@ async fn render(conn: &mut Conn, plan: &documents::MovePlan) -> ApiResult<PagePr
     let (gaining, more_gaining) = shown(&plan.gaining);
     let (losing, more_losing) = shown(&plan.losing);
     Ok(PagePreview {
+        server_host_use: None,
         owner_reads: None,
         pages: 1,
         orgs: None,

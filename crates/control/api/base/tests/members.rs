@@ -1478,3 +1478,78 @@ async fn the_holdings_and_the_plan_cost_the_same_statements_whatever_the_person_
         "{few_plan} statements with 1 role elsewhere, {many_plan} with 5"
     );
 }
+
+#[tokio::test]
+async fn a_member_manager_cannot_move_someone_with_a_role_they_cannot_give_at_the_destination() {
+    use orch_db::queries::access::{self, PageKey, testing};
+    let world = World::new().await;
+    let s = setup(&world).await;
+    let mut conn = world.conn().await;
+    for place in [s.research, s.sales] {
+        testing::add_entry(
+            &mut conn,
+            &PageKey::new("node", place, "live"),
+            "any",
+            "members.manage",
+            ("user", Some(s.dan.id()), None),
+            None,
+            world.now(),
+        )
+        .await
+        .unwrap();
+    }
+    drop(conn);
+    for wanted in [
+        None,
+        Some(Role::Interactor),
+        Some(Role::Developer),
+        Some(Role::Admin),
+    ] {
+        let denied = move_to(&world, &s.dan, s.acme, s.eve.id(), &to(s.sales, wanted))
+            .await
+            .problem();
+        assert_eq!(denied.code, ErrorCode::AuthzDenied);
+        let mut conn = world.conn().await;
+        let domain: Id =
+            sqlx::query_scalar("SELECT domain_id FROM org_members WHERE org_id=$1 AND user_id=$2")
+                .bind(s.acme)
+                .bind(s.eve.id())
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+        assert_eq!(
+            domain, s.research,
+            "a refused role leaves the native membership unchanged"
+        );
+        assert_eq!(
+            access::role_at(&mut conn, s.research, s.eve.id())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("developer")
+        );
+        assert!(
+            access::role_at(&mut conn, s.sales, s.eve.id())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    move_to(
+        &world,
+        &s.dan,
+        s.acme,
+        s.eve.id(),
+        &to(s.sales, Some(Role::Viewer)),
+    )
+    .await
+    .ok();
+    let mut conn = world.conn().await;
+    assert_eq!(
+        access::role_at(&mut conn, s.sales, s.eve.id())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("viewer")
+    );
+}

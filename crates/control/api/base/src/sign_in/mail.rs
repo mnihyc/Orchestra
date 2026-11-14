@@ -110,20 +110,22 @@ impl Message<'_> {
 /// The address of the page that takes a link's secret: the origin a browser
 /// opens, `/verify-email/<token>` or `/reset/<token>`.
 #[must_use]
-pub fn link(config: &ServerConfig, path: &str, token: &str) -> String {
-    format!(
-        "{}/{path}/{token}",
-        config.system.public_url.trim_end_matches('/')
-    )
+pub fn link(public_url: &str, path: &str, token: &str) -> String {
+    format!("{}/{path}/{token}", public_url.trim_end_matches('/'))
 }
 
 /// The row for the outbox: the message, to whom, and the same in English.
 #[must_use]
-pub fn payload(config: &ServerConfig, to: &Addressee<'_>, message: &Message<'_>) -> Json {
+pub fn payload(
+    config: &ServerConfig,
+    public_url: &str,
+    to: &Addressee<'_>,
+    message: &Message<'_>,
+) -> Json {
     let system = &config.system.name;
     let (data, subject, body) = match message {
         Message::VerifyEmail { token, expires_at } => {
-            let url = link(config, "verify-email", token);
+            let url = link(public_url, "verify-email", token);
             (
                 json!({ "token": token, "url": url, "expires_at": Time::new(*expires_at) }),
                 format!("Confirm your address for {system}"),
@@ -134,7 +136,7 @@ pub fn payload(config: &ServerConfig, to: &Addressee<'_>, message: &Message<'_>)
             )
         }
         Message::ResetPassword { token, expires_at } => {
-            let url = link(config, "reset", token);
+            let url = link(public_url, "reset", token);
             (
                 json!({ "token": token, "url": url, "expires_at": Time::new(*expires_at) }),
                 format!("Reset your password for {system}"),
@@ -244,7 +246,15 @@ pub async fn send_link(
                 expires_at,
             },
         };
-        payload(&ctx.app.config, &link.to, &message)
+        payload(
+            &ctx.app.config,
+            &crate::public_addresses::read(&ctx.app, conn)
+                .await?
+                .addresses
+                .public_url,
+            &link.to,
+            &message,
+        )
     } else {
         Json::Null
     };
@@ -289,6 +299,10 @@ pub async fn send_code(
     let row = if go {
         payload(
             &ctx.app.config,
+            &crate::public_addresses::read(&ctx.app, conn)
+                .await?
+                .addresses
+                .public_url,
             to,
             &Message::SignInCode {
                 code: &codes::display(&code),
@@ -328,7 +342,15 @@ pub async fn send_notice(
     let Some(channel) = channel else {
         return Ok(false);
     };
-    let row = payload(&ctx.app.config, to, message);
+    let row = payload(
+        &ctx.app.config,
+        &crate::public_addresses::read(&ctx.app, conn)
+            .await?
+            .addresses
+            .public_url,
+        to,
+        message,
+    );
     identity::queue_mail(conn, CHANNEL_KIND, channel, &row, ctx.now).await?;
     Ok(true)
 }
@@ -349,11 +371,11 @@ pub mod tests {
     #[cfg(any(test, feature = "test-support"))]
     fn a_link_is_the_public_origin_the_page_and_the_secret() {
         assert_eq!(
-            link(&config(), "reset", "oem_abc"),
+            link(&config().system.public_url, "reset", "oem_abc"),
             "https://orch.acme.example/reset/oem_abc"
         );
         assert_eq!(
-            link(&config(), "verify-email", "oem_abc"),
+            link(&config().system.public_url, "verify-email", "oem_abc"),
             "https://orch.acme.example/verify-email/oem_abc"
         );
     }
@@ -375,6 +397,7 @@ pub mod tests {
             .unwrap();
         let row = payload(
             &config(),
+            &config().system.public_url,
             &to,
             &Message::SignInCode {
                 code: "ABCD-1234",
@@ -390,6 +413,7 @@ pub mod tests {
 
         let reset = payload(
             &config(),
+            &config().system.public_url,
             &to,
             &Message::ResetPassword {
                 token: "oem_secret",

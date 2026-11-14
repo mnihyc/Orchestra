@@ -358,7 +358,7 @@ pub struct DockerConfig {
     /// Milliseconds between retries when a cancelled helper cannot yet be removed from its daemon.
     #[serde(default = "default_helper_cleanup_retry")]
     pub helper_cleanup_retry_ms: u64,
-    /// Preloaded image used for isolated native harness checks.
+    /// Explicit trusted preloaded image; absent prepares the shipped recipe for native harness checks.
     #[serde(default)]
     pub conformance_image: Option<String>,
     /// Restricted units: where their proxies keep their files, and the pool of their networks.

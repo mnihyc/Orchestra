@@ -890,3 +890,46 @@ async fn removing_a_channel_keeps_its_routes_as_records_cancels_what_waited_and_
     );
     assert_eq!(world.route_now(off.id).await.health, "channel_removed");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_already_running_uses_the_published_address_when_it_delivers_a_waiting_notice() {
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::queries::public_addresses::{self, Write};
+    let notifier = Scripted::new("hook", Reaches::Channel);
+    let world = World::new(only(&notifier)).await;
+    let worker = world.outbox();
+    let channel = world.channel(Of::System, "hook", json!({}), &[]).await;
+    let ada = world.person("ada").await;
+    let route = world.route_on(ada, &channel).await;
+    world
+        .queue_for_route(&route, "hook", &[world.snapshot("turn.completed", "Ready")])
+        .await;
+    let seed = PublicAddresses {
+        public_url: "https://orch.example".into(),
+        alternate_urls: Vec::new(),
+    };
+    let mut conn = world.test.pool.acquire().await.unwrap();
+    let before = public_addresses::read(&mut conn, &seed, world.now())
+        .await
+        .unwrap();
+    let selected = PublicAddresses {
+        public_url: "https://changed.example.test".into(),
+        alternate_urls: vec!["https://inside.example.test".into()],
+    };
+    assert!(matches!(
+        public_addresses::publish(&mut conn, &selected, before.revision, None, world.now())
+            .await
+            .unwrap(),
+        Write::Written(_)
+    ));
+    drop(conn);
+    assert_eq!(worker.run().await.unwrap().sent, 1);
+    let delivered = notifier.delivered();
+    assert!(
+        delivered[0].notifications[0]
+            .url
+            .starts_with("https://changed.example.test/"),
+        "{}",
+        delivered[0].notifications[0].url
+    );
+}

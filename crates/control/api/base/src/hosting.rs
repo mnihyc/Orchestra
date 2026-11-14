@@ -234,13 +234,13 @@ impl ReleaseBuilds {
     /// The builds of the payload `config` names, reached at its public address.
     #[must_use]
     pub fn of(config: &ServerConfig) -> Self {
-        Self::at(downloads::payload_dir(config), &config.system.public_url)
+        Self::at(downloads::payload_dir(config))
     }
 
     /// The builds in the payload directory `payload` (the one that holds the connectors), reached at
     /// the node's authenticated connection.
     #[must_use]
-    pub fn at(payload: PathBuf, _public_url: &str) -> Self {
+    pub fn at(payload: PathBuf) -> Self {
         Self { payload }
     }
 
@@ -993,7 +993,7 @@ pub mod tests {
     #[cfg(any(test, feature = "test-support"))]
     async fn a_unit_runs_the_connector_of_the_release_at_the_address_anybody_downloads_it_from() {
         let dir = a_release(b"abc");
-        let catalog = ReleaseBuilds::at(dir.path().to_owned(), "https://orch.example.com/");
+        let catalog = ReleaseBuilds::at(dir.path().to_owned());
         assert_eq!(
             catalog.builds("linux", "x86_64").await.unwrap(),
             [ToolBuild {
@@ -1018,7 +1018,7 @@ pub mod tests {
     #[cfg(any(test, feature = "test-support"))]
     async fn a_connector_that_was_replaced_is_another_version_with_a_hash_of_its_own() {
         let dir = a_release(b"abc");
-        let catalog = ReleaseBuilds::at(dir.path().to_owned(), "https://orch.example.com");
+        let catalog = ReleaseBuilds::at(dir.path().to_owned());
         let before = catalog.builds("linux", "x86_64").await.unwrap();
         std::fs::write(dir.path().join("orch-connector-linux-x86_64-musl"), b"abcd").unwrap();
         let after = catalog.builds("linux", "x86_64").await.unwrap();
@@ -1040,7 +1040,7 @@ pub mod tests {
     #[cfg(any(test, feature = "test-support"))]
     async fn a_system_that_was_not_started_from_a_release_has_no_connector_to_put_in_a_unit() {
         let dir = tempfile::tempdir().unwrap();
-        let catalog = ReleaseBuilds::at(dir.path().join("connectors"), "https://orch.example.com");
+        let catalog = ReleaseBuilds::at(dir.path().join("connectors"));
         let refused = catalog.builds("linux", "x86_64").await.unwrap_err();
         assert!(
             refused.to_string().contains("not started from a release"),
@@ -1060,7 +1060,7 @@ pub mod tests {
     async fn a_release_without_a_connector_for_the_platform_of_the_host_has_nothing_to_put_in_a_unit()
      {
         let dir = a_release(b"abc");
-        let catalog = ReleaseBuilds::at(dir.path().to_owned(), "https://orch.example.com");
+        let catalog = ReleaseBuilds::at(dir.path().to_owned());
         let refused = catalog.builds("linux", "aarch64").await.unwrap_err();
         assert!(
             refused

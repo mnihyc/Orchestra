@@ -818,3 +818,77 @@ async fn a_prepared_archive_checks_the_writer_cut_before_any_export_or_job_inser
     assert!(rows::get(&mut tx, made.export.id).await.unwrap().is_some());
     tx.rollback().await.unwrap();
 }
+
+#[tokio::test]
+async fn an_export_captures_the_committed_public_address_when_it_is_admitted() {
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::queries::public_addresses::{self, Write};
+    let o = office(World::new().await).await;
+    let document = o
+        .world
+        .document_beside(o.world.topic, "Address provenance", &["Preserved"])
+        .await;
+    let seed = PublicAddresses {
+        public_url: "https://initial.example.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    let mut conn = o.world.pool.acquire().await.unwrap();
+    let initial = public_addresses::read(&mut conn, &seed, o.world.clock.now())
+        .await
+        .unwrap();
+    let selected = PublicAddresses {
+        public_url: "https://admitted.example.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    let Write::Written(admitted) = public_addresses::publish(
+        &mut conn,
+        &selected,
+        initial.revision,
+        None,
+        o.world.clock.now(),
+    )
+    .await
+    .unwrap() else {
+        panic!("current revision")
+    };
+    drop(conn);
+    let mut request = everything();
+    request.what = ExportWhat::Chosen(orch_api_contract::exports::ExportChosen {
+        documents: Some(vec![document]),
+        ..Default::default()
+    });
+    request.package = Some(true);
+    let caller = Caller::session(o.world.ada);
+    let made = o
+        .world
+        .engine()
+        .make_export(&caller, &Origin::default(), o.world.root, &request)
+        .await
+        .unwrap();
+    assert_eq!(
+        made.job.plan["source"]["url"],
+        "https://admitted.example.test"
+    );
+    let later = PublicAddresses {
+        public_url: "https://later.example.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    assert!(matches!(
+        public_addresses::publish(
+            &mut *o.world.pool.acquire().await.unwrap(),
+            &later,
+            admitted.revision,
+            None,
+            o.world.clock.now()
+        )
+        .await
+        .unwrap(),
+        Write::Written(_)
+    ));
+    let ended = o.ended(&made).await;
+    assert_eq!(ended.state, "succeeded", "{:?}", ended.error);
+    let held = o.contents(o.world.ada, made.export.id).await;
+    let manifest: orch_api_contract::package::PackageManifest =
+        serde_json::from_slice(entry(&held, orch_api_contract::package::PACKAGE_MANIFEST)).unwrap();
+    assert_eq!(manifest.header.source.url, "https://admitted.example.test");
+}

@@ -120,7 +120,10 @@ async fn pw_01_a_real_route_delivers_each_accepted_discussion_once_and_drops_a_r
         master: MasterKey::new([7; 32]),
         surroundings: Surroundings {
             system_name: "Orch".into(),
-            public_url: "https://orch.example".into(),
+            address_seed: orch_api_contract::public_addresses::PublicAddresses {
+                public_url: "https://orch.example".into(),
+                alternate_urls: Vec::new(),
+            },
         },
         retry: DEFAULT_RETRY_SCHEDULE.to_vec(),
         metrics: Arc::new(Metrics::new()),

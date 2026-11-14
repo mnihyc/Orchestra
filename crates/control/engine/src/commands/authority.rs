@@ -102,6 +102,8 @@ pub enum CommandAuthority {
     MachinePrograms(Box<super::MachineProgramsAuthority>),
     /// Original delegated role selection.
     MachineRoles(Box<super::MachineRolesAuthority>),
+    /// Original primary gateway selection.
+    MachineGateway(Box<super::MachineGatewayAuthority>),
     /// Original key-by-key policy choice.
     MachinePolicy(Box<super::MachinePolicyAuthority>),
     /// Actual Host operation retained on its native policy synchronization.
@@ -311,6 +313,13 @@ impl Serialize for CommandAuthority {
                 let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
                 value.serialize_field("version", &1_u8)?;
                 value.serialize_field("kind", "machine_roles")?;
+                value.serialize_field("authority", authority)?;
+                value.end()
+            }
+            Self::MachineGateway(authority) => {
+                let mut value = serializer.serialize_struct("CommandAuthority", 3)?;
+                value.serialize_field("version", &1_u8)?;
+                value.serialize_field("kind", "machine_gateway")?;
                 value.serialize_field("authority", authority)?;
                 value.end()
             }
@@ -566,6 +575,9 @@ impl<'de> Deserialize<'de> for CommandAuthority {
                 "machine_roles" => serde_json::from_value(value.authority)
                     .map(|value| Self::MachineRoles(Box::new(value)))
                     .map_err(D::Error::custom),
+                "machine_gateway" => serde_json::from_value(value.authority)
+                    .map(|value| Self::MachineGateway(Box::new(value)))
+                    .map_err(D::Error::custom),
                 "machine_policy" => serde_json::from_value(value.authority)
                     .map(|value| Self::MachinePolicy(Box::new(value)))
                     .map_err(D::Error::custom),
@@ -670,6 +682,7 @@ impl CommandAuthority {
             Self::MachineProbe(authority) => authority.lock_source(conn).await,
             Self::MachinePrograms(authority) => authority.lock_source(conn).await,
             Self::MachineRoles(authority) => authority.lock_source(conn).await,
+            Self::MachineGateway(authority) => authority.lock_source(conn).await,
             Self::MachinePolicy(authority) => authority.lock_source(conn).await,
             Self::HostPolicy(authority) => authority.lock_source(conn).await,
             Self::CapabilityRecreation(authority) => authority.lock_source(conn).await,
@@ -707,6 +720,7 @@ impl CommandAuthority {
                 | Self::MachineProbe(_)
                 | Self::MachinePrograms(_)
                 | Self::MachineRoles(_)
+                | Self::MachineGateway(_)
                 | Self::MachinePolicy(_)
                 | Self::HostPolicy(_)
                 | Self::ComponentUpdate(_)
@@ -824,6 +838,9 @@ impl CommandAuthority {
                 authority.current_issue_callers(conn, command, clock).await
             }
             Self::MachineRoles(authority) => {
+                authority.current_issue_callers(conn, command, clock).await
+            }
+            Self::MachineGateway(authority) => {
                 authority.current_issue_callers(conn, command, clock).await
             }
             Self::MachinePolicy(authority) => {
@@ -1023,6 +1040,9 @@ impl CommandAuthority {
         if let Self::MachineRoles(value) = self {
             return value.current_callers(conn, command, clock).await;
         }
+        if let Self::MachineGateway(value) = self {
+            return value.current_callers(conn, command, clock).await;
+        }
         if let Self::MachinePolicy(value) = self {
             return value.current_callers(conn, command, clock).await;
         }
@@ -1097,6 +1117,7 @@ impl CommandAuthority {
             | Self::MachineProbe(_)
             | Self::MachinePrograms(_)
             | Self::MachineRoles(_)
+            | Self::MachineGateway(_)
             | Self::MachinePolicy(_)
             | Self::HostPolicy(_)
             | Self::ComponentUpdate(_)
@@ -1192,6 +1213,10 @@ impl CommandAuthority {
     /// Retain the exact delegated role request.
     pub fn machine_roles(value: super::MachineRolesAuthority) -> Self {
         Self::MachineRoles(Box::new(value))
+    }
+    /// Retain the exact primary gateway request.
+    pub fn machine_gateway(value: super::MachineGatewayAuthority) -> Self {
+        Self::MachineGateway(Box::new(value))
     }
     /// Retain the exact key-by-key Machine request.
     pub fn machine_policy(value: super::MachinePolicyAuthority) -> Self {
@@ -1428,6 +1453,7 @@ impl CommandAuthority {
             Self::MachineProbe(_) => "machine.probe",
             Self::MachinePrograms(_) => "machine.programs",
             Self::MachineRoles(_) => "machine.roles.set",
+            Self::MachineGateway(_) => "machine.gateway.set",
             Self::MachinePolicy(_) | Self::HostPolicy(_) => "machine.policy.set",
             Self::ComponentUpdate(_) => "machine.update.now",
             Self::TemplateImport(_) => "node.template.import",
@@ -1509,6 +1535,7 @@ impl CommandAuthority {
             | Self::MachineProbe(_)
             | Self::MachinePrograms(_)
             | Self::MachineRoles(_)
+            | Self::MachineGateway(_)
             | Self::MachinePolicy(_)
             | Self::HostPolicy(_)
             | Self::ComponentUpdate(_)

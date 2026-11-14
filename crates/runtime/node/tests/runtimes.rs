@@ -808,6 +808,28 @@ async fn a_runtime_the_node_never_heard_of_cannot_be_started_or_stopped_and_is_a
 }
 
 #[tokio::test]
+async fn stopping_a_known_unit_that_has_already_gone_succeeds_and_keeps_its_volume_records() {
+    let mut rig = Rig::new();
+    rig.have_connector();
+    rig.start().await;
+    let spec = rig.spec(RuntimeKind::Environment, "Missing workspace");
+    rig.made(&spec).await;
+    rig.start_runtime(spec.runtime_id).await;
+    let unit = rig.driver.unit(&spec.name).unwrap().unit;
+    EnvironmentDriver::remove(rig.driver.as_ref(), &unit)
+        .await
+        .unwrap();
+    assert!(matches!(
+        rig.stop_runtime(spec.runtime_id).await,
+        Progress::Succeeded(_)
+    ));
+    rig.wait_state(spec.runtime_id, "absent").await;
+    assert!(rig.role().ledger().get(spec.runtime_id).is_some());
+    assert!(rig.driver.targets_of(Operation::RemoveVolume).is_empty());
+    rig.stop().await;
+}
+
+#[tokio::test]
 async fn a_unit_the_node_has_no_record_of_is_found_by_the_label_of_its_system_and_removed_without_its_volumes()
  {
     let mut rig = Rig::new();

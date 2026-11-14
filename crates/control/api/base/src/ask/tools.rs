@@ -373,7 +373,9 @@ async fn read(
         }
         sources.targets.clone()
     };
-    let citations = source_links(&targets, parameters, &data, route.summary);
+    let links =
+        usize::try_from(tool_size(origin, "ask.max_links", 50).await?).unwrap_or(usize::MAX);
+    let citations = source_links(&targets, parameters, &data, route.summary, links);
     Ok(ReadReply { data, citations })
 }
 
@@ -430,16 +432,18 @@ fn reference_reader(tool: &str, kind: &str) -> ApiResult<Route> {
 
 /// Use exactly the deployment addresses advertised to LINKS and the address of
 /// this request. Gateway URLs are converted to their corresponding web origins.
-fn own_address(ctx: &Ctx, value: &str) -> ApiResult<url::Url> {
-    own_address_with(&ctx.app, Some(&ctx.headers), value)
+async fn own_address(ctx: &Ctx, conn: &mut Conn, value: &str) -> ApiResult<url::Url> {
+    let addresses = crate::public_addresses::read(&ctx.app, conn).await?;
+    own_address_with(&ctx.app, Some(&ctx.headers), value, &addresses.addresses)
 }
 
 fn own_address_with(
     app: &crate::state::App,
     headers: Option<&http::HeaderMap>,
     value: &str,
+    addresses: &orch_api_contract::public_addresses::PublicAddresses,
 ) -> ApiResult<url::Url> {
-    let public = super::addresses::web(&app.config.system.public_url)
+    let public = super::addresses::web(&addresses.public_url)
         .ok_or_else(|| ApiError::internal("the public deployment address is invalid"))?;
     let host = headers
         .and_then(|headers| headers.get(http::header::HOST))
@@ -458,7 +462,7 @@ fn own_address_with(
         })
         .unwrap_or_else(|| public.clone());
     let mut declared = vec![public.to_string()];
-    declared.extend(app.config.system.alternate_urls.iter().cloned());
+    declared.extend(addresses.alternate_urls.iter().cloned());
     for endpoint in app
         .link
         .certificates()
@@ -484,19 +488,21 @@ fn own_address_with(
         .ok_or_else(|| denied("Use an Orch address or reference"))
 }
 
-pub(crate) fn own_path(ctx: &Ctx, value: &str) -> ApiResult<String> {
-    Ok(own_address(ctx, value)?.path().to_owned())
+pub(crate) async fn own_path(ctx: &Ctx, conn: &mut Conn, value: &str) -> ApiResult<String> {
+    Ok(own_address(ctx, conn, value).await?.path().to_owned())
 }
 
 /// Parse only relative pages or the current deployment origin. Never fetch an address.
-pub(crate) fn reference(ctx: &Ctx, value: &str) -> ApiResult<Reference> {
-    reference_with(&ctx.app, Some(&ctx.headers), value)
+pub(crate) async fn reference(ctx: &Ctx, value: &str) -> ApiResult<Reference> {
+    let addresses = crate::public_addresses::current(&ctx.app).await?;
+    reference_with(&ctx.app, Some(&ctx.headers), value, &addresses.addresses)
 }
 
 fn reference_with(
     app: &crate::state::App,
     headers: Option<&http::HeaderMap>,
     value: &str,
+    addresses: &orch_api_contract::public_addresses::PublicAddresses,
 ) -> ApiResult<Reference> {
     let value = value.trim();
     if let Some((kind, id)) = value.split_once(':').filter(|(kind, _)| {
@@ -509,7 +515,7 @@ fn reference_with(
         }
         return Err(denied("Use a complete Orch reference"));
     }
-    let address = own_address_with(app, headers, value)?;
+    let address = own_address_with(app, headers, value, addresses)?;
     references::address(&address)
 }
 
@@ -520,7 +526,8 @@ pub(crate) async fn reference_id(
     conn: &mut Conn,
     value: &str,
 ) -> ApiResult<(String, Id, String)> {
-    let reference = reference(ctx, value)?;
+    let addresses = crate::public_addresses::read(&ctx.app, conn).await?;
+    let reference = reference_with(&ctx.app, Some(&ctx.headers), value, &addresses.addresses)?;
     let (kind, id) = match reference.target {
         ReferenceTarget::Object { kind, id } if kind == "node" => (
             hierarchy::node(conn, id)
@@ -540,9 +547,19 @@ pub(crate) async fn reference_id(
     Ok((kind, id, reference.url))
 }
 
-/// Public bundled documentation, shared with ordinary native tools without a person credential.
+/// Public bundled documentation, shared with ordinary native tools without a person credential. Where there
+/// is no organization to read the sizes from, it gives what the settings start with.
 pub(crate) fn documentation(arguments: &Json) -> ApiResult<Json> {
-    documentation::search(arguments)
+    documentation::search(arguments, documentation::Sizes::default())
+}
+
+/// A number inside the read tools, as the settings of the conversation's root organization have it.
+async fn tool_size(origin: &ReadContext, key: &str, default: i64) -> ApiResult<i64> {
+    let mut conn = origin.app().db.acquire().await?;
+    Ok(setting::<i64>(&mut conn, Place::Node(origin.root()), key)
+        .await
+        .map_err(ApiError::internal)?
+        .unwrap_or(default))
 }
 
 /// The sealed native call delegates only the current owner's ordinary reads in its real root.
@@ -599,6 +616,7 @@ async fn execute_for(
             .and_then(Json::as_str)
             .ok_or_else(|| denied(format!("Missing {key}")))
     };
+    let addresses = crate::public_addresses::current(origin.app()).await?;
     let mut context_node = None;
     let (operation, parameters) = match name {
         "read" => {
@@ -611,9 +629,13 @@ async fn execute_for(
         }
         "open" | "history" => {
             if name == "open"
-                && let Ok(address) =
-                    own_address_with(origin.app(), origin.headers(), string("reference")?)
-                        .map(|address| address.path().to_owned())
+                && let Ok(address) = own_address_with(
+                    origin.app(),
+                    origin.headers(),
+                    string("reference")?,
+                    &addresses.addresses,
+                )
+                .map(|address| address.path().to_owned())
             {
                 let parts: Vec<_> = address.trim_matches('/').split('/').collect();
                 if parts.len() == 7
@@ -631,18 +653,21 @@ async fn execute_for(
                         ..Default::default()
                     };
                     let reply = read(origin, "AskAttachmentGet", &parameters, None, None).await?;
-                    return Ok((
-                        json!({"data":reply.data,"citations":[{"url":address,"reference":address}]}),
-                        Some(Trace {
-                            operation: "AskAttachmentGet".into(),
-                            parameters,
-                            projection: None,
-                            context_node: None,
-                        }),
-                    ));
+                    let trace = Trace {
+                        operation: "AskAttachmentGet".into(),
+                        parameters,
+                        projection: None,
+                        context_node: None,
+                    };
+                    return Ok((present(&trace, reply), Some(trace)));
                 }
             }
-            let reference = reference_with(origin.app(), origin.headers(), string("reference")?)?;
+            let reference = reference_with(
+                origin.app(),
+                origin.headers(),
+                string("reference")?,
+                &addresses.addresses,
+            )?;
             let url = reference.url;
             let (kind, id) = match reference.target {
                 ReferenceTarget::Object { kind, id } => (kind, id),
@@ -708,18 +733,14 @@ async fn execute_for(
                     .and_then(|base| base.join(&url))
                     .map_err(ApiError::internal)?;
                 references::selectors(reference_kind, &address, &mut parameters.query)?;
-                let result = read(origin, "ReferencePreviewGet", &parameters, None, None)
-                    .await?
-                    .data;
-                return Ok((
-                    json!({"data":result,"citations":[{"reference":format!("{kind}:{id}"),"url":url,"title":result.get("title").cloned().unwrap_or(Json::Null)}]}),
-                    Some(Trace {
-                        operation: "ReferencePreviewGet".into(),
-                        parameters,
-                        projection: None,
-                        context_node: None,
-                    }),
-                ));
+                let reply = read(origin, "ReferencePreviewGet", &parameters, None, None).await?;
+                let trace = Trace {
+                    operation: "ReferencePreviewGet".into(),
+                    parameters,
+                    projection: None,
+                    context_node: None,
+                };
+                return Ok((present(&trace, reply), Some(trace)));
             }
             let reader = reference_reader(name, &kind)?;
             let (parameters, projection) = parameters::history(&kind, id, args)?;
@@ -781,6 +802,8 @@ async fn execute_for(
         }
         "find_operation" => {
             let query = string("query")?.to_lowercase();
+            let listed = usize::try_from(tool_size(origin, "ask.max_operations", 20).await?)
+                .unwrap_or(usize::MAX);
             let mut found = Vec::new();
             let routes = orch_api_contract::routes::all();
             'operations: for operation in ask_tools::catalogue().map_err(ApiError::internal)? {
@@ -796,14 +819,21 @@ async fn execute_for(
                         continue;
                     }
                     found.push(json!({"operation":variant.operation,"description":route.summary,"selector":variant.selector,"schemas":ask_tools::schemas(route)}));
-                    if found.len() == 20 {
+                    if found.len() >= listed {
                         break 'operations;
                     }
                 }
             }
             return Ok((json!({"operations":found,"citations":[]}), None));
         }
-        "docs" => return Ok((documentation(args)?, None)),
+        "docs" => {
+            let sizes = documentation::Sizes {
+                hits: usize::try_from(tool_size(origin, "ask.docs_hits", 5).await?)
+                    .unwrap_or(usize::MAX),
+                excerpt_tokens: tool_size(origin, "ask.docs_excerpt_tokens", 1000).await?,
+            };
+            return Ok((documentation::search(args, sizes)?, None));
+        }
         _ => return Err(denied("Unknown read tool")),
     };
     let operation = if name == "read" {
@@ -834,8 +864,27 @@ pub(crate) async fn refresh(origin: &Arc<ReadOrigin>, trace: &Trace) -> ApiResul
         trace.context_node,
     )
     .await?;
+    Ok(present(trace, reply))
+}
+
+/// What a read gives the model: its data and the links of its sources. A source's first delivery and each
+/// refresh of it say this the same way, so that a source which has not changed gives the very same text, and
+/// a step that sends it again keeps it as it was first sent.
+fn present(trace: &Trace, reply: ReadReply) -> Json {
     let data = reply.data;
     let mut citations = reply.citations;
+    if trace.operation == "AskAttachmentGet"
+        && let (Some(id), Some(hash)) = (
+            trace.parameters.path.get("id"),
+            trace.parameters.path.get("hash"),
+        )
+    {
+        let address = format!(
+            "{}/ask/conversations/{id}/attachments/{hash}",
+            orch_api_contract::common::BROWSER_BASE_PATH
+        );
+        citations = vec![json!({"url":address,"reference":address})];
+    }
     if trace.operation == "ReferencePreviewGet"
         && let (Some(id), Some(kind)) = (
             data.get("id").and_then(Json::as_str),
@@ -863,9 +912,12 @@ pub(crate) async fn refresh(origin: &Arc<ReadOrigin>, trace: &Trace) -> ApiResul
                 ));
             }
         }
-        citations.push(json!({"reference":url,"url":url,"title":data.get("title")}));
+        let link = json!({"reference":url,"url":url,"title":data.get("title")});
+        if !citations.contains(&link) {
+            citations.push(link);
+        }
     }
-    Ok(json!({"data":data,"citations":citations}))
+    json!({"data":data,"citations":citations})
 }
 
 enum SourceName<'a> {
@@ -905,8 +957,9 @@ fn source_links(
     parameters: &ReadParameters,
     data: &Json,
     description: &str,
+    most: usize,
 ) -> Vec<Json> {
-    let mut links = canonical_links(data);
+    let mut links = canonical_links(data, most);
     for target in targets {
         let Some(id) = target.id else {
             continue;
@@ -949,11 +1002,11 @@ fn source_links(
     }
     links.sort_by_key(Json::to_string);
     links.dedup();
-    links.truncate(50);
+    links.truncate(most);
     links
 }
 
-fn canonical_links(value: &Json) -> Vec<Json> {
+fn canonical_links(value: &Json, most: usize) -> Vec<Json> {
     let mut links = Vec::new();
     fn visit(value: &Json, links: &mut Vec<Json>) {
         match value {
@@ -988,7 +1041,7 @@ fn canonical_links(value: &Json) -> Vec<Json> {
     visit(value, &mut links);
     links.sort_by_key(Json::to_string);
     links.dedup();
-    links.truncate(50);
+    links.truncate(most);
     links
 }
 
@@ -1046,8 +1099,8 @@ pub mod tests {
             path: path(actual),
             ..Default::default()
         };
-        assert!(source_links(&[], &parameters, &data, "Read source").is_empty());
-        let links = source_links(&[source], &parameters, &data, "Read source");
+        assert!(source_links(&[], &parameters, &data, "Read source", 50).is_empty());
+        let links = source_links(&[source], &parameters, &data, "Read source", 50);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0]["url"], format!("/doc/{actual}"));
         assert_eq!(links[0]["title"], "A current source");
@@ -1056,6 +1109,7 @@ pub mod tests {
             &parameters,
             &json!({"id":actual,"content_hidden":true,"title":"Private marker"}),
             "Read source",
+            50,
         );
         assert!(hidden[0]["title"].is_null());
         assert!(

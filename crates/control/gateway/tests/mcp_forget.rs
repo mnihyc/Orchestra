@@ -178,6 +178,28 @@ impl Fixture {
         let stop = CancellationToken::new();
         let socket = tokio::spawn(local_socket::serve(
             Arc::new(LocalState {
+                gateway_control: Arc::new(orch_connector_core::gateway_control::Requests::new(
+                    data.path().to_owned(),
+                    Arc::new(
+                        orch_connector_core::policy::PolicyStore::connected(
+                            orch_config::ConnectorConfig::default(),
+                            Some(
+                                orch_connector_core::enrollment::DataDir::open(data.path())
+                                    .unwrap()
+                                    .config_path(),
+                            ),
+                        )
+                        .unwrap(),
+                    ),
+                    {
+                        let link = machine.link.clone();
+                        Arc::new(move |choice| {
+                            if link.gateway_status().choice != choice {
+                                link.select_gateway(choice);
+                            }
+                        })
+                    },
+                )),
                 identity_reload: None,
                 identity_fingerprint: String::new(),
                 link: machine.link.clone(),
