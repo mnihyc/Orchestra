@@ -17,6 +17,11 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 | `option:ask.models.*.model` | 已启用 API 模型的路由名称，与 provider_id 一起标识一个允许的问一问模型。子级列表可以缩小可选范围，并保留父级顺序。 |
 | `option:ask.models.*.provider_id` | 此项允许的问一问模型所使用的 API 提供方标识。提问者和当前付费人仍须有权在对话所属组织中使用该提供方及模型。 |
 | `option:AccessOptions.models` | 此使用权限涵盖的模型。 |
+| `option:AccessOptions.purposes` | 使用授权允许的工作用途：会话、问一问、摘要、嵌入、审核、网页搜索、网页读取和图像生成。省略时允许所有用途，空列表则全部不允许；同一个条目还必须同时允许模型、强度、部署方式和位置。 |
+| `option:ProviderUse.purposes` | 提供方使用条目中选择的用途。只选择“问一问”即可分享提问能力，不授权会话或其他付费工作；使用者从其他条目获得的授权仍然有效。 |
+| `option:InvitationCreateBody.expires_in_minutes` | 邀请有效时长，以整分钟计。默认时长和最长时长分别由 invitations.default_minutes 和 invitations.max_minutes 决定；到期时刻向下取整到显示的分钟。 |
+| `option:OrgTreeGetQuery.parent_id` | 仅读取指定根组织中该节点的直接子项。续读位置绑定分支和读者；分支使用快照读取，不能同时指定 since 序号。 |
+| `option:OrgTreeGetQuery.limit` | 层级页面的正整数条数。分支默认采用 navigation.tree_page_size，也允许明确请求更大的页面；整树读取保留通常的同步批量默认值。 |
 | `option:AccessOptions.services` | 此使用授权允许的已启用提供方服务，可按名称、系列或分组指定。省略时允许所有已启用服务；它与生成模型列表相互独立。 |
 | `option:AccessOptions.efforts` | 此使用权限涵盖的思考强度。 |
 | `option:AccessOptions.where` | 被拒绝的使用所针对的环境，或将要创建的环境所在的主机或机器；它说明提供方的条目没有覆盖到哪里。 |
@@ -26,6 +31,7 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 | `option:BindingOptions.providers` | 每个提供方及其模型和代理。 |
 | `option:BindingOptions.environments` | 当前读者可管理的已有环境，当前话题的环境优先。 |
 | `option:BindingOptions.environment_default` | 未另行选择时，新线程如何选择环境。 |
+| `option:BindingOptions.default_environment` | 最近一层设置指定的默认环境（无论设在哪一层），以及当前读者无法使用它时的原因；没有设置指定默认环境、或重新绑定现有线程时缺省。 |
 | `option:BindingOptions.source` | 已安全解析的仓库设置及仓库地址的来源位置。 |
 | `option:BindingOptions.access` | 在这里创建的线程最初采用的权限页。 |
 | `option:BindingOptions.agent_access` | 此创建上下文可选的代理权限；重新绑定不会创建新贡献。 |

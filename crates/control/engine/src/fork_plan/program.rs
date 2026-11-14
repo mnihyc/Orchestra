@@ -308,6 +308,7 @@ async fn model(
         .provider_use(
             conn,
             &ProviderUse {
+                purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                 person: input.principal.user(),
                 node: place,
                 provider: id,

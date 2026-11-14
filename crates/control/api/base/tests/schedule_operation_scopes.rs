@@ -1435,6 +1435,7 @@ async fn accepted_source(s: &Scene) -> (Receipt, Key, Key, Id, Id) {
         &access,
         &mut *s.rig.world.conn().await,
         &orch_engine::access::ProviderUse {
+            purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
             person: s.ada.id(),
             node: thread,
             provider: s.on.provider,

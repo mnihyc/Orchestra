@@ -1240,16 +1240,26 @@ async fn an_unavailable_native_approval_mode_starts_no_turn_and_grants_no_bounda
 async fn capability_expiry_uses_the_shared_shortest_request_setting() {
     let world = a_world_with_capabilities().await;
     world
-        .set(world.root, "requests.expiry_hours", json!(3))
+        .set(world.root, "requests.expiry_minutes", json!(180))
         .await;
     world
-        .set(world.topic, "requests.expiry_hours", json!(12))
+        .set(world.topic, "requests.expiry_minutes", json!(720))
         .await;
     let thread = tool_thread(&world, "Short request").await;
     let (_, _, request) = said(&ask(&world, thread, "kvm").await);
     let request: Id = request.unwrap().parse().unwrap();
-    let hours: f64 = world.scalar("SELECT extract(epoch FROM (expires_at - created_at))::float8 / 3600 FROM approvals WHERE id = $1", request).await;
-    assert_eq!(hours, 3.0);
+    let minutes: f64 = world.scalar("SELECT extract(epoch FROM (expires_at - created_at))::float8 / 60 FROM approvals WHERE id = $1", request).await;
+    assert!(
+        (179.0..=180.0).contains(&minutes),
+        "the shortest three-hour policy ends on its displayed minute: {minutes}"
+    );
+    let seconds: f64 = world
+        .scalar(
+            "SELECT extract(second FROM expires_at)::float8 FROM approvals WHERE id = $1",
+            request,
+        )
+        .await;
+    assert_eq!(seconds, 0.0);
 }
 
 #[tokio::test]

@@ -11,7 +11,7 @@ export function RoutingFrame({ children: _children }: { children: ReactNode }) {
   const layout = useVisibleLayout();
   const heading = useCurrentHeading();
   return <FrameReadiness.Provider value={{ ready: true, pending: null }}>
-    <PageRouting ready />
+    <PageRouting />
     <WorkspaceCommands />
     <ViewHost layout={layout} />
     <Board rail={null} top={<output data-testid="focused-caption">{heading?.title}</output>} status={null} />

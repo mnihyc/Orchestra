@@ -1543,8 +1543,8 @@ pub mod access {
     use serde_json::json;
     use std::collections::HashMap;
 
-    /// How many days a request waits for an answer when no setting says.
-    pub(crate) const EXPIRY_DAYS: i64 = 14;
+    /// How many minutes a request waits for an answer when no setting says.
+    pub(crate) const EXPIRY_MINUTES: i64 = 20160;
     /// How many batches of requests one person may have waiting when no setting says.
     pub(crate) const MOST_WAITING: i64 = 10;
     /// How many requests that ran out are let lapse in one look.
@@ -1732,12 +1732,14 @@ pub mod access {
         words.join(", ")
     }
 
-    fn day(span: i64) -> Duration {
-        Duration::days(span)
-    }
-
-    fn expiry(now: DateTime<Utc>, days: i64) -> DateTime<Utc> {
-        now + day(days)
+    fn expiry(now: DateTime<Utc>, minutes: i64) -> DateTime<Utc> {
+        Time::new(
+            Duration::try_minutes(minutes)
+                .and_then(|span| now.checked_add_signed(span))
+                .unwrap_or(DateTime::<Utc>::MAX_UTC),
+        )
+        .to_minute()
+        .get()
     }
 
     impl Engine {
@@ -1812,6 +1814,7 @@ pub mod access {
             for_thread: Option<Id>,
             requested_expires_at: Option<Time>,
         ) -> Result<PreparedAccessRequests, RaiseError> {
+            let requested_expires_at = requested_expires_at.map(Time::to_minute);
             let caller = principal.caller().clone();
             let caller = &caller;
             rows::lock_requester(&mut *conn, caller.user()).await?;
@@ -1823,6 +1826,15 @@ pub mod access {
             };
             let principal = &current;
             let now = principal.now().get();
+            if requested_expires_at.is_some_and(|end| end.get() <= now) {
+                return Err(RaiseError::Item {
+                    index: 0,
+                    error: AskError::Invalid {
+                        path: "expires_at",
+                        message: "must be in a future minute".to_owned(),
+                    },
+                });
+            }
             let mut objects = std::collections::HashSet::new();
             for (index, ask) in asks.iter().enumerate() {
                 if !objects.insert(ask.object.id) {
@@ -1859,14 +1871,14 @@ pub mod access {
                     waiting,
                 });
             }
-            let days: i64 = get(
+            let minutes: i64 = get(
                 &mut *conn,
                 SettingsPlace::System,
-                keys::ACCESS_REQUEST_EXPIRY_DAYS,
+                keys::ACCESS_REQUEST_EXPIRY_MINUTES,
             )
             .await
             .map_err(EngineError::from)?
-            .unwrap_or(EXPIRY_DAYS);
+            .unwrap_or(EXPIRY_MINUTES);
             if let Some(thread) = for_thread
                 && threads::thread(&mut *conn, thread)
                     .await
@@ -1930,7 +1942,7 @@ pub mod access {
                 who,
                 for_thread,
                 requested_expires_at,
-                expires_at: expiry(now, days),
+                expires_at: expiry(now, minutes),
                 items,
             })
         }
@@ -2163,6 +2175,11 @@ pub mod access {
             decided: &Decided,
             origin: &Origin,
         ) -> Result<ApprovalRow, DecideError> {
+            let normalized = Decided {
+                expires_at: decided.expires_at.map(Time::to_minute),
+                ..decided.clone()
+            };
+            let decided = &normalized;
             let body = orch_api_contract::approvals::ApprovalDecision::Capability(
                 orch_api_contract::approvals::CapabilityDecision {
                     approve: decided.approve,

@@ -16,6 +16,11 @@ An option is offered only where its interface or program declares it. Provider l
 | `option:ask.models.*.model` | The enabled API model’s routing name. Together with provider_id it identifies one allowed Ask model; child lists can narrow the choices while retaining the parent’s order. |
 | `option:ask.models.*.provider_id` | The API provider’s identity for this allowed Ask model. The person and current payer must still be allowed to use that provider and model in the conversation’s organization. |
 | `option:AccessOptions.models` | The models. |
+| `option:AccessOptions.purposes` | The work a Use grant permits: turns, Ask, summaries, embeddings, reviews, web search, page fetch and image generation. Omitted allows every purpose; an empty list allows none. A single entry must also permit the model, effort, arrangement and place. |
+| `option:ProviderUse.purposes` | The purposes selected on a provider's Use entry. Select only Ask to share it for questions without authorizing threads or other paid work; other grants a person holds remain effective. |
+| `option:InvitationCreateBody.expires_in_minutes` | Invitation lifetime in whole minutes. The default and longest permitted lifetime come from invitations.default_minutes and invitations.max_minutes. The expiry is rounded down to its displayed minute. |
+| `option:OrgTreeGetQuery.parent_id` | Read only the direct children of this node in the named root organization. Its cursor stays bound to that branch and reader; use a snapshot rather than a since sequence. |
+| `option:OrgTreeGetQuery.limit` | Positive hierarchy page size. Branches default to navigation.tree_page_size; a larger explicit page is allowed. Full-tree reads keep the ordinary sync batch default. |
 | `option:AccessOptions.services` | Enabled provider services this Use grant allows, by name, family or group. Omitted permits every enabled service; this list is independent of generation models. |
 | `option:AccessOptions.efforts` | The efforts. |
 | `option:AccessOptions.where` | The environment, or the host or machine of one that is to be made, that a refused use was asked for; it tells where the provider's entry does not reach. |
@@ -25,6 +30,7 @@ An option is offered only where its interface or program declares it. Provider l
 | `option:BindingOptions.providers` | The providers, each with its models and agents. |
 | `option:BindingOptions.environments` | Every existing environment the caller manages. This topic's come first (its default, then those its threads use or that were made for it), and the rest follow. |
 | `option:BindingOptions.environment_default` | What a new thread does about its environment unless told. |
+| `option:BindingOptions.default_environment` | The environment the nearest setting names as the default, wherever it is set, and why the reader cannot use it when they cannot; absent when no setting names one and when an existing thread is bound again. |
 | `option:BindingOptions.source` | Safe resolved repository settings and the place supplying the repository address. |
 | `option:BindingOptions.access` | The permission page that a thread created here would begin with. |
 | `option:BindingOptions.agent_access` | Agent privilege choices for this creation context. Rebinding an existing holder does not create another contribution and leaves this field absent. |

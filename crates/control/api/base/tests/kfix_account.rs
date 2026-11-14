@@ -149,7 +149,7 @@ fn invitation(kind: InvitationKind, target: Id) -> InvitationCreateBody {
         permissions: None,
         email: None,
         max_uses: None,
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: None,
     }
 }
@@ -391,11 +391,11 @@ async fn chat_invitations_refuse_other_scopes_roles_permissions_and_invalid_life
             ..base.clone()
         },
         InvitationCreateBody {
-            expires_in_hours: Some(0),
+            expires_in_minutes: Some(0),
             ..base.clone()
         },
         InvitationCreateBody {
-            expires_in_hours: Some(721),
+            expires_in_minutes: Some(43260),
             ..base.clone()
         },
         InvitationCreateBody {
@@ -425,7 +425,7 @@ async fn chat_invitations_refuse_other_scopes_roles_permissions_and_invalid_life
         &room.world,
         &room.cai,
         &InvitationCreateBody {
-            expires_in_hours: Some(1),
+            expires_in_minutes: Some(60),
             ..base
         },
     )

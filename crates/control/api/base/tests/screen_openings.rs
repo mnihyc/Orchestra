@@ -365,6 +365,7 @@ async fn the_tree_opening_carries_the_same_authorized_settings_as_the_native_rea
         .call(OrgTreeGet, &[&room.root])
         .token(&room.ada.token)
         .query(&OrgTreeGetQuery {
+            parent_id: None,
             since: Some(tree.seq),
             ..Default::default()
         })

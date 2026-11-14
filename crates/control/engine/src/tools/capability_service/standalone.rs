@@ -274,8 +274,10 @@ impl Engine {
                     &caller,
                     paid.origin.place()?,
                     provider,
-                    &paid.offering,
-                    &paid.groups,
+                    (&paid.offering, &paid.groups),
+                    orch_access_contract::permissions::ProviderPurpose::for_capability(
+                        &paid.capability,
+                    ),
                     self.inner.clock.as_ref(),
                 )
                 .await?

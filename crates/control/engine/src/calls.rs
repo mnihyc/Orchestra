@@ -1947,6 +1947,7 @@ impl Engine {
             .provider_use(
                 conn,
                 &ProviderUse {
+                    purpose: crate::access::provider_purpose(purpose),
                     person: caller.user(),
                     node,
                     provider: candidate.provider_id,

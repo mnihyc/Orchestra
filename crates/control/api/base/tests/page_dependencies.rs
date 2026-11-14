@@ -96,6 +96,9 @@ async fn a_thread_page_names_its_actual_provider_model_and_effort_and_a_page_man
     .await;
     let principal = w.principal(Caller::session(w.boss)).await;
     let options = orch_access_contract::decisions::MissingOptions {
+        purposes: Some(vec![
+            orch_access_contract::permissions::ProviderPurpose::Turn,
+        ]),
         services: None,
         models: Some(vec!["chosen-model".into()]),
         efforts: Some(vec!["high".into()]),

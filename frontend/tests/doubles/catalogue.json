@@ -860,6 +860,16 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "purposes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/$defs/ProviderPurpose"
+            },
+            "description": "What work this entry allows. Left out, every purpose; one entry must allow\nthe purpose, model, effort, arrangement and place together."
+          },
           "models": {
             "type": [
               "array",
@@ -981,6 +991,51 @@
               "id"
             ],
             "description": "One place an entry names: a kind and the identifier of one of that kind."
+          },
+          "ProviderPurpose": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "turn",
+                "description": "Ordinary agent turns."
+              },
+              {
+                "type": "string",
+                "const": "ask",
+                "description": "Personal Ask questions."
+              },
+              {
+                "type": "string",
+                "const": "summary",
+                "description": "Summaries, including handoffs."
+              },
+              {
+                "type": "string",
+                "const": "embeddings",
+                "description": "Semantic indexing and search embeddings."
+              },
+              {
+                "type": "string",
+                "const": "review",
+                "description": "Native permission reviews."
+              },
+              {
+                "type": "string",
+                "const": "web_search",
+                "description": "Web search calls."
+              },
+              {
+                "type": "string",
+                "const": "page_fetch",
+                "description": "Page fetch calls."
+              },
+              {
+                "type": "string",
+                "const": "image_generation",
+                "description": "Image generation calls."
+              }
+            ],
+            "description": "The work a provider entry may pay for, independent of its models and services."
           }
         }
       }

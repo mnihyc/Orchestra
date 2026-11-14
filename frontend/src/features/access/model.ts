@@ -435,7 +435,7 @@ export function nameChange(
   page: PermissionPage,
   choice: AccessChoice,
   holders: readonly HolderInput[],
-  more: { expires_at?: string | null; note?: string; export?: boolean } = {},
+  more: { expires_at?: string | null; note?: string; export?: boolean; options?: unknown } = {},
 ): PageChange {
   const change: PageChange = {
     expected_revision: page.revision,
@@ -447,6 +447,7 @@ export function nameChange(
         ...(more.expires_at === undefined || more.expires_at === null ? {} : { expires_at: more.expires_at }),
         ...(more.note === undefined ? {} : { note: more.note }),
         ...(more.export === false ? { export: false } : {}),
+        ...(more.options === undefined ? {} : { options: more.options }),
       },
     ],
   };

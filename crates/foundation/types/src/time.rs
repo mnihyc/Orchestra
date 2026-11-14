@@ -5,7 +5,7 @@
 //! it is asks a [`Clock`], never the system, so that every rule about time
 //! can be tested without waiting.
 
-use chrono::{DateTime, Duration, SecondsFormat, SubsecRound, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, SubsecRound, Timelike, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::{Arc, Mutex};
@@ -31,6 +31,12 @@ impl Time {
     #[must_use]
     pub fn unix_millis(self) -> i64 {
         self.0.timestamp_millis()
+    }
+
+    /// The start of this minute, for an expiry displayed and chosen to minute precision.
+    #[must_use]
+    pub fn to_minute(self) -> Self {
+        Self(self.0.trunc_subsecs(0) - Duration::seconds(i64::from(self.0.second())))
     }
 }
 
@@ -160,6 +166,18 @@ mod tests {
         );
         let fine: Time = "2026-10-08T17:04:05.123456Z".parse().unwrap();
         assert_eq!(fine.to_string(), "2026-10-08T17:04:05.123Z");
+    }
+
+    #[test]
+    fn expiry_precision_ends_at_the_start_of_its_minute_including_before_the_epoch() {
+        for (given, expected) in [
+            ("2026-10-08T17:04:59.999Z", "2026-10-08T17:04:00.000Z"),
+            ("1969-12-31T23:59:59.999Z", "1969-12-31T23:59:00.000Z"),
+        ] {
+            let instant: Time = given.parse().unwrap();
+            assert_eq!(instant.to_minute().to_string(), expected);
+            assert_eq!(instant.to_minute().to_minute(), instant.to_minute());
+        }
     }
 
     #[test]

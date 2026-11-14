@@ -147,6 +147,49 @@ async fn the_model_a_thread_runs_on_is_shown_with_whether_everyone_who_can_talk_
 }
 
 #[tokio::test]
+async fn someone_who_can_share_only_ask_is_not_offered_a_grant_for_a_threads_turns() {
+    let w = World::new().await;
+    let (owner, giver) = (w.member("model-owner").await, w.user("ask-giver").await);
+    w.give(w.root, giver, Role::Viewer).await;
+    let provider = w.provider(owner, w.root, "Questions").await;
+    w.put(
+        "provider",
+        provider,
+        P::AccessManage,
+        Holder::User { id: giver },
+        json!({}),
+    )
+    .await;
+    w.put(
+        "provider",
+        provider,
+        P::ProviderUse,
+        Holder::User { id: giver },
+        json!({"purposes":["ask"]}),
+    )
+    .await;
+    let dependency = of_thread(&w, giver, w.thread, provider, "big", None).await;
+    assert!(
+        !dependency.can_give,
+        "sharing Ask cannot give ordinary turns"
+    );
+    w.put(
+        "provider",
+        provider,
+        P::ProviderUse,
+        Holder::User { id: giver },
+        json!({"purposes":["turn"]}),
+    )
+    .await;
+    assert!(
+        of_thread(&w, giver, w.thread, provider, "big", None)
+            .await
+            .can_give,
+        "a turn grant permits the ordinary dependency offer"
+    );
+}
+
+#[tokio::test]
 async fn the_offer_is_a_change_of_the_providers_page_for_its_manager_and_a_request_for_anybody_else()
  {
     let w = World::new().await;
@@ -178,7 +221,7 @@ async fn the_offer_is_a_change_of_the_providers_page_for_its_manager_and_a_reque
     );
     assert_eq!(
         change["rows"][0]["add"][0]["options"],
-        json!({ "models": ["big"], "efforts": ["high"] })
+        json!({ "purposes": ["turn"], "models": ["big"], "efforts": ["high"] })
     );
     w.change_thing(ada, "provider", provider, change)
         .await

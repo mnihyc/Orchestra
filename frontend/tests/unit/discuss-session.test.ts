@@ -2,10 +2,11 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import type { SessionEvent } from '@/api/client';
 import type * as Client from '@/api/client';
-import { discussInChat, takeQuotes, useDiscuss } from '@/features/chat/discuss';
+import { discussInChat, mentionInChat, takeMentions, takeQuotes, useDiscuss } from '@/features/chat/discuss';
 import { threadWriter } from '@/realtime/stores/thread';
 import { ACME } from '../doubles/fixtures';
 import { World } from '../doubles/world';
+import { ADA } from './general-access-fixtures';
 
 const session = vi.hoisted(() => ({ listeners: [] as ((event: SessionEvent) => void)[], reveal: vi.fn() }));
 vi.mock('@/api/client', async (load) => {
@@ -25,4 +26,15 @@ it('consumes a delayed same-reader quote once and retires another pending quote 
   discussInChat(thread.id, ['private-intent']);
   for (const listener of session.listeners) listener({ type: 'signed_out' });
   expect(takeQuotes(thread.chat_id)).toEqual([]);
+});
+
+it('asks an owner in the existing thread chat without sending and retires an unsent mention on sign-out', () => {
+  const owner = ADA;
+  mentionInChat('thread', 'thread-chat', owner);
+  expect(session.reveal).toHaveBeenLastCalledWith('chat', { node: 'thread' });
+  expect(takeMentions('thread-chat')).toEqual([{ name: owner.display_name, target: { kind: 'user', id: owner.id } }]);
+  expect(takeMentions('thread-chat')).toEqual([]);
+  mentionInChat('thread', 'thread-chat', owner);
+  for (const listener of session.listeners) listener({ type: 'signed_out' });
+  expect(takeMentions('thread-chat')).toEqual([]);
 });

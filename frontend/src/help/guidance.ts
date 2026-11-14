@@ -6,10 +6,10 @@ export interface Guidance { id: GuideId; title: TranslationKey; settings: readon
 
 export const GUIDANCE: readonly Guidance[] = [
   { id: 'how-approvals-work', title: 'helpRelease.guides.approvals', tutorial: 'approvals-walk',
-    settings: ['approval.mode', 'approval.allowed_modes', 'requests.expiry_hours', 'access.request_expiry_days', 'access.max_pending_requests', 'access.quick_grant_durations', 'capability.policy'],
+    settings: ['approval.mode', 'approval.allowed_modes', 'requests.expiry_minutes', 'access.request_expiry_minutes', 'access.max_pending_requests', 'access.quick_grant_durations', 'capability.policy'],
     words: ['how do I approve', 'ask', 'on request', 'auto', 'bypass', 'reviewer', 'rules', '审批', '请求', '如何批准'] },
   { id: 'let-agents-open-ports', title: 'helpRelease.guides.ports', tutorial: 'ports-walk',
-    settings: ['ports.enabled', 'ports.max_open', 'ports.link_max_secs', 'requests.expiry_hours', 'capability.policy', 'network.allowed_hosts'],
+    settings: ['ports.enabled', 'ports.max_open', 'ports.link_max_secs', 'requests.expiry_minutes', 'capability.policy', 'network.allowed_hosts'],
     words: ['how do I open ports without asking', 'port_place', 'port_host', 'port_link', 'template defaults', '端口', '无需询问', '能力'] },
   { id: 'change-a-running-environment', title: 'helpRelease.guides.liveEnvironment', tutorial: 'live-environment-walk',
     settings: ['env.resources', 'env.needs', 'env.mounts', 'env.storage', 'env.template_id', 'env.update', 'mcp.enabled', 'capability.policy', 'capability.recreate_grace_secs', 'network.allowed_hosts'],
