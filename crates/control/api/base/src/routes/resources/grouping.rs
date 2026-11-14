@@ -28,6 +28,38 @@ use orch_types::Id;
 use std::collections::BTreeSet;
 
 use std::collections::HashMap;
+/// Whether `reader` may open the machine that a resource names as its origin, so that the machine may label the
+/// resource. An origin that cannot be opened labels nothing and fails nothing: a container's machine has no page of
+/// its own (its provider's or environment's page governs it), and a reader who is suspended where it stands, or finds
+/// its place archived, is shown no label. One answer for every list of resources, since a list must never fail whole
+/// for the label of one row; only a fault of the store is an error.
+pub async fn origin_label_allowed(
+    conn: &mut Conn,
+    reader: &Principal,
+    machine: Id,
+) -> ApiResult<bool> {
+    match orch_authz::resources::check_machine(
+        conn,
+        reader,
+        machine,
+        Permission::MachineView,
+        Policy::default(),
+    )
+    .await
+    {
+        Ok(decision) => Ok(decision.is_allowed()),
+        Err(
+            orch_authz::Error::NotFound(_)
+            | orch_authz::Error::Suspended { .. }
+            | orch_authz::Error::Archived { .. },
+        ) => {
+            tracing::debug!(%machine, "an origin machine is not the reader's to open: the row is shown without its label");
+            Ok(false)
+        }
+        Err(error) => Err(ApiError::internal(error)),
+    }
+}
+
 #[derive(Default)]
 pub struct Prepared {
     pub rows: Vec<stored::Row>,
@@ -214,21 +246,8 @@ impl Prepared {
             if machines.is_some_and(|bounds| !bounds.contains(&id)) {
                 continue;
             }
-            match orch_authz::resources::check_machine(
-                conn,
-                principal,
-                id,
-                Permission::MachineView,
-                Policy::default(),
-            )
-            .await
-            {
-                Ok(decision) if decision.is_allowed() => allowed.push(id),
-                Ok(_) => {}
-                // Managed runtime identities need not have an independently readable
-                // Machine page. Withholding that optional label keeps the root option.
-                Err(orch_authz::Error::NotFound(_)) => {}
-                Err(error) => return Err(ApiError::internal(error)),
+            if origin_label_allowed(conn, principal, id).await? {
+                allowed.push(id);
             }
         }
         let origins = super::view::machine_refs(app, conn, &allowed).await?;
