@@ -62,6 +62,27 @@ pub async fn current_boundary(
     .await?)
 }
 
+/// Current key restrictions for an effect-free preliminary selection, without holding its
+/// account or key. A writer must still restore through `current_boundary` before its effect.
+pub async fn preview_boundary(
+    conn: &mut Conn,
+    token: Id,
+    user: Id,
+    now: DateTime<Utc>,
+) -> Result<Option<CurrentBoundary>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT t.scopes,t.node_id,t.operation_scope,t.expires_at FROM api_tokens t
+         JOIN users u ON u.id=t.user_id AND u.status='active'
+         WHERE t.id=$1 AND t.user_id=$2 AND t.revoked_at IS NULL
+           AND (t.expires_at IS NULL OR t.expires_at>$3)",
+    )
+    .bind(token)
+    .bind(user)
+    .bind(now)
+    .fetch_optional(conn)
+    .await?)
+}
+
 /// One place an API token is kept out of: an org with everything inside, or the whole system.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct BlockedAt {

@@ -1126,33 +1126,39 @@ impl Engine {
             return Ok(());
         };
         if turn.is_active() {
-            return self
-                .begin_turn(
-                    unit,
-                    batch.thread_id,
-                    &turn,
-                    started.native_turn_ref.as_deref(),
-                )
-                .await;
+            self.begin_turn(
+                unit,
+                batch.thread_id,
+                &turn,
+                started.native_turn_ref.as_deref(),
+            )
+            .await?;
+            if turn.interrupted_by.is_some() {
+                self.stop_stray(batch, turn.id, started.native_turn_ref.as_deref());
+            }
+            return Ok(());
         }
         // The engine gave this turn up (it was not accepted in time, or it
         // was interrupted before it began), and the harness runs it after all:
         // ask it to stop.
         tracing::warn!(thread = %batch.thread_id, turn = %turn.id, "a harness began a turn that is over; it is asked to stop");
-        self.stop_stray(batch, turn.id);
+        self.stop_stray(batch, turn.id, started.native_turn_ref.as_deref());
         Ok(())
     }
 
     /// Asks the harness to stop a turn it began after the engine gave it up. The command is a row written
     /// on a pooled connection: it is issued on a task of its own, never inside the transaction of the
     /// delivery that heard of the turn, which must wait for no other connection. The delivery does not
-    /// await this task. Its identifier is the turn's, so a second ask is the same
-    /// command, and one whose delivery was undone stops a turn that is over all the same.
-    fn stop_stray(&self, batch: &Batch, turn: Id) {
+    /// await this task. This native start has an identity distinct from an interrupt answered before the
+    /// program had a native turn to stop. Replayed reports reuse it, even if their delivery was undone.
+    fn stop_stray(&self, batch: &Batch, turn: Id, native: Option<&str>) {
         let command = crate::commands::Outgoing::new(
-            crate::ids::turn_interrupt(turn),
+            crate::ids::derived(
+                "turn.interrupt.after-start",
+                &[turn.as_bytes(), native.unwrap_or_default().as_bytes()],
+            ),
             batch.machine,
-            SerialKey::Thread(batch.thread_id),
+            SerialKey::None,
             &orch_link_contract::commands::TurnInterrupt {
                 thread_id: batch.thread_id,
                 turn_id: turn,

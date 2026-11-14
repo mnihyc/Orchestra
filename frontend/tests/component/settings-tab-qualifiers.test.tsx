@@ -148,7 +148,7 @@ it('retains a qualified cached name during a genuine cold settings read and focu
   await waitFor(() => expect(state().named.get(first.id)?.title).toBe('General · Acme'));
   act(() => state().focus(next.id)); await waitFor(() => expect(state().named.get(next.id)?.title).toBe('General · Web'));
   act(() => state().focus(first.id)); await waitFor(() => expect(state().named.get(first.id)?.source).toBe('view'));
-  await act(() => window.dispatchEvent(new Event('pagehide'))); const saved = loadWorkspace(scene.person.me.id, 'page').kept;
+  await act(() => window.dispatchEvent(new Event('pagehide'))); const saved = loadWorkspace(scene.person.me.id).kept;
   expect(saved?.titles?.[first.id]?.title).toBe('General · Acme');
   const before = allTabs(state().layout).map((one) => ({ id: one.id, href: pageAddress(one) }));
   for (const view of views.splice(0)) view.unmount(); state().leave(); forgetHeads(); queryClient.clear(); mounted.length = 0;

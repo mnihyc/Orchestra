@@ -781,6 +781,18 @@ pub(super) fn facts_shown(
     for name in ["plan", "limit_reached", "identity", "credential"] {
         shown.entry(name).or_insert(Json::Null);
     }
+    // The upstream's list of models is no part of a provider's view: the view says how many it holds, and the
+    // list is read apart (`GET /providers/{id}/facts/models`).
+    let listed = shown.remove("models");
+    shown.insert(
+        "models_count".to_owned(),
+        listed
+            .as_ref()
+            .and_then(Json::as_array)
+            .map_or(Json::Null, |models| {
+                json!(i64::try_from(models.len()).unwrap_or(i64::MAX))
+            }),
+    );
     let parsed = serde_json::from_value(Json::Object(shown)).map_err(|error| {
         ApiError::internal(format!("the facts of a provider do not read: {error}"))
     })?;
@@ -1292,7 +1304,7 @@ async fn provider_views_with(
                     spend: Vec::new(),
                     ordinary_usage_allowed: None,
                     credential_verified: None,
-                    models: None,
+                    models_count: None,
                     field_times: std::collections::BTreeMap::new(),
                 },
                 Vec::new(),
@@ -1372,6 +1384,11 @@ async fn provider_views_with(
         } else {
             None
         };
+        let listed = models
+            .iter()
+            .filter(|model| model.provider_id == row.id)
+            .map(model_view)
+            .collect::<ApiResult<Vec<ProviderModel>>>()?;
         views.push(Provider {
             service_catalogue: if can_view {
                 Some(super::provider_services::views(
@@ -1560,11 +1577,8 @@ async fn provider_views_with(
             facts_at: row.facts_at.filter(|_| can_view).map(Time::new),
             facts_requested_at: page.facts_requested_at.filter(|_| can_view).map(Time::new),
             last_reset: last_resets.remove(&row.id).filter(|_| can_view),
-            models: models
-                .iter()
-                .filter(|model| model.provider_id == row.id)
-                .map(model_view)
-                .collect::<ApiResult<_>>()?,
+            models_count: i64::try_from(listed.len()).unwrap_or(i64::MAX),
+            models: listed,
             running_threads: page.running_threads,
             runtime: runtimes.remove(&row.id),
             harnesses: if manages {
@@ -2998,26 +3012,52 @@ async fn provider_refresh(ctx: Ctx, (): (), body: api::ProviderRefreshBody) -> A
     }
     let retry = body.retry == Some(true) && row.status == "error";
     let origin = crate::sign_in::origin(&ctx);
-    let refreshed = if retry {
-        ctx.app
-            .engine
-            .refresh_provider_for_retry_in(tx, &principal, &origin, id)
-            .await
-    } else {
-        ctx.app
-            .engine
-            .refresh_provider_in(tx, &principal, &origin, id)
-            .await
-    }
-    .map_err(ApiError::internal)?;
+    // The read is the engine's and goes on whether or not this connection stays: a page that gives up after thirty
+    // seconds of silence closes it, and a read that was dropped with it would store nothing and leave its lease standing.
+    // The request waits only for the facts: it answers as soon as they are read, with the provider as it now stands, and
+    // not at all longer than the engine's refresh wait where the facts read is itself slow. The model list is another
+    // source, read on by the same task under its own lease; it stores when it ends and keeps its own time limit.
+    let engine = ctx.app.engine.clone();
+    let reader = principal.clone();
+    let (facts_read, facts) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let refreshed = match if retry {
+            engine
+                .refresh_provider_for_retry_in(tx, &reader, &origin, id)
+                .await
+        } else {
+            engine.refresh_provider_in(tx, &reader, &origin, id).await
+        } {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                let _ = facts_read.send(Err(error));
+                return;
+            }
+        };
+        // Discovery is another independent source: its refusal must not erase freshly read plan or key facts, and
+        // nobody waits for it. It stores by itself when it ends, one read at a time.
+        let discover = unreachable_provider(&refreshed).is_none()
+            || (retry && matches!(refreshed, Refreshed::Failed(_)));
+        let _ = facts_read.send(Ok(refreshed));
+        if discover && let Err(error) = engine.discover_provider_models(id).await {
+            tracing::debug!(%id,%error,"the provider's model list could not be refreshed");
+        }
+    });
+    let refreshed = match tokio::time::timeout(ctx.app.engine.refresh_wait(), facts).await {
+        Ok(Ok(read)) => read.map_err(ApiError::internal)?,
+        Ok(Err(gone)) => return Err(ApiError::internal(gone)),
+        Err(_still_reading) => {
+            let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
+            provider_for(&mut tx, &principal, id, Permission::ProviderView).await?;
+            let shown = show(&ctx, &mut tx, &principal, id).await?;
+            tx.commit().await.map_err(DbError::from)?;
+            return Ok(shown);
+        }
+    };
     if let Some(refusal) = unreachable_provider(&refreshed)
         && (!retry || !matches!(refreshed, Refreshed::Failed(_)))
     {
         return Err(refusal);
-    }
-    // Discovery is another independent source: its refusal must not erase freshly read plan or key facts.
-    if let Err(error) = ctx.app.engine.discover_provider_models(id).await {
-        tracing::debug!(%id,%error,"the provider's model list could not be refreshed");
     }
     let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
     provider_for(&mut tx, &principal, id, Permission::ProviderView).await?;
