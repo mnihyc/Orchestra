@@ -73,6 +73,9 @@ pub struct MachineRef {
     pub platform_os: MachineOs,
     /// Whether it is a person's own machine or one the system manages.
     pub placement: Placement,
+    /// The host of a managed machine, independent of the host's displayed name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<Id>,
 }
 
 /// A host, named wherever another thing points at one.
@@ -370,9 +373,11 @@ pub struct ProviderFacts {
     /// True only when the vendor authenticated this facts observation with the provider's credential.
     #[serde(default)]
     pub credential_verified: Option<bool>,
-    /// The last successfully discovered model list; suggestions remain separate from the accepted allowlist.
+    /// How many models the last successful discovery listed; null where no list was read. The list itself
+    /// is not part of a provider's view: it is read from `GET /providers/{id}/facts/models`, by the places
+    /// that draw it.
     #[serde(default)]
-    pub models: Option<Vec<ModelSuggestion>>,
+    pub models_count: Option<i64>,
     /// The last successful observation of each source group; absent groups were never observed.
     #[serde(default)]
     pub field_times: std::collections::BTreeMap<String, Time>,
@@ -845,6 +850,9 @@ pub struct ProviderModel {
     /// Effective provider option schemas, including declared tier/program lists; keyed by protocol.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub option_constraints: std::collections::BTreeMap<String, Json>,
+    /// Declared per-thread option forms, keyed by outgoing interface, shared by thread and place defaults.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_forms: std::collections::BTreeMap<String, Json>,
     /// What its tokenizer comes to, for the estimates where nobody counted.
     pub token_estimate: crate::programs::TokenEstimate,
     /// The groups its managers put it in (`frontier`, `small`): names of their own, by which a cap,
@@ -1132,6 +1140,8 @@ pub struct Provider {
     /// Who last used a reset, while its resulting windows still stand.
     #[serde(default)]
     pub last_reset: Option<ProviderLastReset>,
+    /// How many models it lists. A row of a list carries this and no models: the page of the provider reads them.
+    pub models_count: i64,
     /// The models it lists.
     pub models: Vec<ProviderModel>,
     /// How many turns run on it now.
@@ -1148,6 +1158,32 @@ pub struct Provider {
     pub updated_at: Time,
     /// What the caller holds on it.
     pub access: ResourceAccess,
+}
+
+impl Provider {
+    /// Leaves in the provider what the row of a list draws of it, and out what only its own page does. Its models are
+    /// not listed (`models_count` says how many), the seven days of how each performed and the descriptors of its
+    /// sources are left out, and so are its spending, its resets and its extra usage. The caps stay, for they say at a
+    /// glance that one is reached; the whole view is `GET /providers/{id}`.
+    pub fn thin_for_list(&mut self) {
+        self.models.clear();
+        if let Some(usage) = self.choice_usage.as_mut() {
+            usage.performance.clear();
+        }
+        self.plan_forecasts = None;
+        self.service_catalogue = None;
+        self.service_offerings.clear();
+        self.model_group_options.clear();
+        self.runtime_changes = None;
+        self.sources.facts.descriptor = None;
+        self.sources.models.descriptor = None;
+        if let Some(presenter) = self.sources.presenter.as_mut() {
+            presenter.descriptor = None;
+        }
+        self.facts.spend.clear();
+        self.facts.available_resets = None;
+        self.facts.extra_usage = None;
+    }
 }
 
 /// Safe service metadata and manager choices for the existing provider editor.
@@ -2596,9 +2632,10 @@ pub struct ProviderModelUpdateBody {
     pub enabled: Option<bool>,
 }
 
-/// Accepts models that discovery suggested. Each is added with what its suggestion says of it,
-/// except that the service tiers and access programs it lists and a context larger than the usual
-/// one become `parameters.offered`, and none of them is enabled.
+/// Accepts models that discovery suggested. Each is added with what its suggestion says of it, and what
+/// the organization chose to switch on (`models.add_switches_on`) is enabled: by default every effort, the
+/// window, every context size, speed and access program it lists. Whatever is left off stays under
+/// `parameters.offered`, and what a thread starts with is never taken from a suggestion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderModelSuggestionAcceptBody {
@@ -3913,6 +3950,9 @@ crate::endpoints! {
     /// Lists the models a provider lists.
     ProviderModelList: GET "/providers/{id}/models", Rule("any permission on the provider"), none, none, json Vec<ProviderModel>, 200,
         operation Op::single(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
+    /// Lists the models the provider's source last listed, as it kept them and not as the provider's own list; discovery suggests them and never adds one. Empty where no list was read; `facts_state.models` says why.
+    ProviderFactsModelsGet: GET "/providers/{id}/facts/models", Permission("provider.view"), none, none, json Vec<ModelSuggestion>, 200,
+        operation Op::single(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
     /// Lists explicit capability backends of this provider at a governed place.
     ProviderCapabilityBackendList: GET "/providers/{id}/capability-backends", Permission("provider.view"), query CapabilityBackendQuery, none, json crate::common::Page<CapabilityBackendCandidate>, 200,
         operation Op::facets(crate::settings_sources::CAPABILITY_BACKEND_FACETS);
@@ -4222,7 +4262,7 @@ mod tests {
                     "balances": [{ "id": "plan", "label": "Plan credits", "unit": "credits", "remaining": "12.5",
                                    "total": null, "used": null, "unlimited": false, "parts": null, "expires_at": null }],
                     "spend": [],
-                    "ordinary_usage_allowed": null, "credential_verified": null, "models": null, "field_times": {}
+                    "ordinary_usage_allowed": null, "credential_verified": null, "models_count": null, "field_times": {}
                 },
                 "facts_state": {
                     "identity": "told", "credential": "told", "credential_verified": "not_read_yet", "plan": "told",
@@ -4264,7 +4304,7 @@ mod tests {
                     "token_estimate": { "ascii_prose_x100": 400, "ascii_structured_x100": 300, "other_x100": 100, "image_tokens": 1000, "measured": false },
                     "enabled": true, "source": "suggested"
                 }],
-                "running_threads": 3
+                "models_count": 1, "running_threads": 3
             }),
             json!({
                 "runtime": {

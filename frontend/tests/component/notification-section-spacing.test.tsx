@@ -4,8 +4,11 @@ import userEvent from '@testing-library/user-event';
 import type * as Router from '@tanstack/react-router';
 import type { AnchorHTMLAttributes, ReactNode } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
+import { setNotificationPrefs } from '@/api/notifications';
+import { useAppearance } from '@/lib/appearance';
+import { RouteOutcome } from '@/features/settings/personal/away/Outcome';
 import { Notifications } from '@/features/settings/personal/Notifications';
-import type { NotificationPrefs } from '@/generated/api-types';
+import type { NotificationPrefs, NotificationRoute } from '@/generated/api-types';
 import type * as Screen from '@/shell/screen';
 import { i18n, setLocale } from '@/i18n';
 import { Section } from '@/shell/Page';
@@ -13,6 +16,7 @@ import { show } from './support';
 
 const openHelp = vi.hoisted(() => vi.fn());
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => openHelp }));
+const appearance = useAppearance.getState();
 const prefs: NotificationPrefs = { approvals_always: false, chat_direct_level: 'mentions', chat_node_level: 'mentions', quiet_hours: null, pause_until: null, revision: 1 };
 vi.mock('@/api/notifications', () => ({ notificationPrefsKey: ['spacing-notification-prefs'], setNotificationPrefs: vi.fn(),
   notificationPrefsQuery: { queryKey: ['spacing-notification-prefs'], queryFn: () => Promise.resolve(prefs) },
@@ -22,7 +26,7 @@ vi.mock('@/features/settings/personal/NotificationExceptions', () => ({ Notifica
 vi.mock('@/features/settings/personal/Routes', () => ({ OutsideOrch: () => <p>Outward routes</p> }));
 vi.mock('@/features/settings/personal/away/Pause', () => ({ PauseControls: () => <p>Pause choices</p> }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), Link: ({ to, children, activeOptions: _activeOptions, ...props }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; activeOptions?: unknown; children?: ReactNode }) => <a {...props} href={to}>{children}</a> }));
-afterEach(async () => { cleanup(); openHelp.mockClear(); document.documentElement.removeAttribute('data-theme'); await setLocale('en'); });
+afterEach(async () => { cleanup(); prefs.quiet_hours = null; useAppearance.setState(appearance); vi.mocked(setNotificationPrefs).mockClear(); openHelp.mockClear(); document.documentElement.removeAttribute('data-theme'); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark']) it(`separates all six sections without wrappers or repeated headings in ${locale}/${theme}`, async () => {
   await setLocale(locale); document.documentElement.dataset.theme = theme;
@@ -43,4 +47,27 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
   await userEvent.click(await screen.findByRole('button', { name: i18n.t('help.hint.more') }));
   expect(openHelp).toHaveBeenCalledOnce();
   expect(openHelp).toHaveBeenCalledWith('recover-lost-work', heading);
+});
+
+
+it('keeps an unrecognized quiet-hours zone explicit without replacing it or saving on read', async () => {
+  prefs.quiet_hours = { start_minute: 22 * 60, end_minute: 7 * 60 };
+  useAppearance.setState({ timeZone: 'Mars/Olympus_Mons', timeZoneMode: 'fixed' });
+  show(<Notifications />);
+  expect(await screen.findByRole('alert')).toHaveTextContent(i18n.t('notifications.quiet.invalidZone', { zone: 'Mars/Olympus_Mons' }));
+  expect(screen.getByRole('switch', { name: i18n.t('notifications.quiet.switch') })).toBeChecked();
+  expect(screen.getByLabelText(i18n.t('notifications.quiet.from'))).toHaveValue('22:00');
+  expect(useAppearance.getState().timeZone).toBe('Mars/Olympus_Mons');
+  expect(setNotificationPrefs).not.toHaveBeenCalled();
+});
+
+
+it('shows a worker-reported quiet-zone problem before any delivery has failed', () => {
+  const route: NotificationRoute = { id: 'route', channel_id: 'channel', channel: null, enabled: true, health: 'never', failed_at: null,
+    failure: { code: 'invalid_timezone', message: 'The saved time zone cannot be evaluated.', affected_devices: [] },
+    kinds: [], label: null, last_ok_at: null, last_sent_at: null, link: null, min_interval_minutes: null, needs: null, unread_delay_minutes: null, waiting_count: 1 };
+  show(<RouteOutcome route={route} />);
+  expect(screen.getByRole('alert')).toHaveTextContent(i18n.t('notifications.quiet.zoneProblem'));
+  expect(screen.getByRole('alert')).toHaveTextContent('The saved time zone cannot be evaluated.');
+  expect(screen.queryByRole('button', { name: i18n.t('away.outcome.retryWaiting') })).not.toBeInTheDocument();
 });

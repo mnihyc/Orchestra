@@ -87,9 +87,12 @@ pub struct Resolved {
     pub prompt_cache_ttl: Option<orch_agent_contract::session::PromptCacheTtl>,
     /// Whether background task completion may start an admitted continuation.
     pub background_wake: bool,
+    /// How long a native web action may remain without a reported end.
+    pub web_action_wait_secs: u64,
     /// Whether native image generation is explicitly enabled here.
     pub image_generation: Option<bool>,
     /// The features that are on, by name.
+    // The selected descriptor supplies shipped values when these explicit place choices are consumed.
     pub features: BTreeMap<String, bool>,
     /// The standing instructions scope by scope, outermost first, those that say nothing left out.
     pub standing: Vec<StandingPart>,
@@ -196,6 +199,7 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
         keys::AGENT_PARAMS,
         keys::AGENT_FEATURES,
         keys::THREADS_BACKGROUND_WAKE,
+        keys::AGENTS_WEB_ACTION_WAIT_SECS,
         keys::AGENTS_IMAGE_GENERATION,
         keys::AGENTS_PROMPT_CACHE_TTL,
         keys::AGENT_INSTRUCTIONS,
@@ -236,6 +240,8 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
         prompt_cache_ttl: value(&snapshot, keys::AGENTS_PROMPT_CACHE_TTL)?,
         background_wake: value::<String>(&snapshot, keys::THREADS_BACKGROUND_WAKE)?.as_deref()
             != Some("off"),
+        web_action_wait_secs: value(&snapshot, keys::AGENTS_WEB_ACTION_WAIT_SECS)?
+            .ok_or_else(|| EngineError::unreadable("the web action wait has no default"))?,
         image_generation: value::<String>(&snapshot, keys::AGENTS_IMAGE_GENERATION)?
             .map(|value| value == "on"),
         features: value(&snapshot, keys::AGENT_FEATURES)?.unwrap_or_default(),

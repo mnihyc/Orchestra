@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-xtask
+test -p orch-settings --lib
+test -p orch-settings --test resolution --test writes
+test -p orch-engine --test model_parameters --test summary_targets --test forks --test updates
+test -p orch-model-contract --test provider_ceiling --test thread_options
+test -p orch-config --lib
+test -p orch-node --test program

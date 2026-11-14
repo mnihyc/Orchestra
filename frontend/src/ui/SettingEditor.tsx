@@ -9,6 +9,8 @@ import { restoreFocusQuietly } from '@/ui/focus';
 export interface SettingEditorProps extends Omit<SettingRowProps, 'value'> {
   /** The compact value, shown instead of the editor until it is opened. */
   summary: ReactNode;
+  /** The row's choice stays visible while its editor is opened or closed. */
+  start?: ReactNode;
   label: string;
   children: ReactNode;
   open?: boolean;
@@ -20,7 +22,7 @@ export interface SettingEditorProps extends Omit<SettingRowProps, 'value'> {
   placement?: 'inline' | 'details';
 }
 
-export function SettingEditor({ summary, label, children, open, onOpenChange, disabled = false, pauseEffects = true, placement = 'details', details, ...row }: SettingEditorProps) {
+export function SettingEditor({ summary, start, label, children, open, onOpenChange, disabled = false, pauseEffects = true, placement = 'details', details, ...row }: SettingEditorProps) {
   const id = useId();
   const trigger = useRef<HTMLButtonElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -61,6 +63,7 @@ export function SettingEditor({ summary, label, children, open, onOpenChange, di
   </div>;
   return <SettingRow {...row}
     value={placement === 'inline' ? <div data-setting-inline-editor className="flex min-w-0 max-w-full flex-col gap-2">
+      {start}
       <div className="flex min-w-0 max-w-full items-start gap-2">
         <span id={`${id}-summary`} hidden={expanded} className="min-w-0">{summary}</span>
         <IconButton ref={trigger} data-setting-editor-trigger size="sm" label={label} icon={<Pencil aria-hidden />} aria-expanded={expanded} aria-controls={id}

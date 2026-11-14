@@ -2146,3 +2146,58 @@ async fn explicit_new_keeps_its_placement_refusal_while_implicit_creation_needs_
         "{implicit:?}"
     );
 }
+
+#[tokio::test]
+async fn choosing_another_template_checks_the_agent_and_host_that_will_actually_start() {
+    use orch_api_contract::binding::NodeBindingOptionsGet;
+    let world = World::new().await;
+    let t = team(&world).await;
+    let binding = start_binding(&world, &t).await;
+    let alternate = a_template(&world, &t.c.admin, t.c.acme, "Agent ready").await;
+    sqlx::query("UPDATE env_templates SET spec=jsonb_set(spec,'{exec,offers}','[]') WHERE id=$1")
+        .bind(t.template)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    world
+        .set_at(
+            orch_settings::Target::Node(t.topic),
+            "env.host_id",
+            json!(orch_types::new_id()),
+        )
+        .await;
+    for (template, host, automatic, ready) in [
+        (t.template, Some(t.host), false, false),
+        (alternate, Some(t.host), false, true),
+        (alternate, Some(orch_types::new_id()), false, false),
+        (alternate, None, false, false),
+        (alternate, None, true, true),
+    ] {
+        let mut query =
+            json!({ "environment_new": true, "template_id": template, "host_auto": automatic });
+        if let Some(host) = host {
+            query["host_id"] = json!(host);
+        }
+        let offered = world
+            .app
+            .call(NodeBindingOptionsGet, &[&t.topic])
+            .token(&t.c.admin.token)
+            .query(&query)
+            .send()
+            .await
+            .ok();
+        let agent = offered
+            .providers
+            .iter()
+            .find(|row| row.provider.id == binding.provider_id)
+            .unwrap()
+            .agents
+            .iter()
+            .find(|row| row.agent.id == binding.agent_id)
+            .unwrap();
+        assert_eq!(
+            agent.usable, ready,
+            "the exact chosen template and host decide readiness"
+        );
+    }
+}

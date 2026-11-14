@@ -17,6 +17,7 @@ import { placeStyle, useLayerRoom } from '@/ui/layerRoom';
 import { cardClasses, floatingAttachment, floatingClasses } from '@/ui/Popover';
 import { useTransientLayer } from '@/ui/PromptScope';
 import { isInspectionTarget } from '@/ui/inspection';
+import { InheritedChoiceLabel, type ChoiceInheritance } from '@/ui/InheritedChoice';
 
 export type SelectOption<Value extends string> = ChoiceName & ChoiceDetails & {
   /** The actual resource, when this is a resource option without an inspection preview. */
@@ -33,6 +34,7 @@ export type SelectOption<Value extends string> = ChoiceName & ChoiceDetails & {
 };
 
 export interface SelectProps<Value extends string> extends FieldSlots {
+  inheritance?: ChoiceInheritance | undefined;
   value: Value;
   onValueChange: (value: Value) => void;
   options: readonly SelectOption<Value>[];
@@ -54,7 +56,15 @@ export interface SelectProps<Value extends string> extends FieldSlots {
   className?: string;
 }
 
-export function Select<Value extends string>({
+export function Select<Value extends string>({ inheritance, ...props }: SelectProps<Value>) {
+  if (inheritance === undefined) return <SelectField {...props} />;
+  return <SelectField<string> {...props} value={inheritance.selected ? 'inherit' : `value:${props.value}`}
+    valueLabel={inheritance.selected ? <InheritedChoiceLabel choice={inheritance} /> : props.valueLabel}
+    options={[{ value: 'inherit', name: <InheritedChoiceLabel choice={inheritance} /> }, ...props.options.map((option) => ({ ...option, value: `value:${option.value}` }))]}
+    onValueChange={(next) => { if (next === 'inherit') inheritance.onSelect(); else { const option = props.options.find((option) => `value:${option.value}` === next); if (option !== undefined) props.onValueChange(option.value); } }} />;
+}
+
+function SelectField<Value extends string>({
   value,
   onValueChange,
   options,

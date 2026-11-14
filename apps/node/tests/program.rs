@@ -29,39 +29,47 @@ async fn the_program_enrolls_a_host_holds_its_session_tells_what_the_host_has_an
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("node-data");
     let config = dir.path().join("orch.toml");
-    // The built-in host driver is composed through the same node loader as a container driver.
-    // A previous release's documented file must still start, with its operator settings kept.
-    std::fs::write(
-        &config,
-        format!(
-            r#"
-[node]
-drivers = ["host"]
-[node.hooks]
-pre_up = "/bin/true"
-post_up = "/bin/true"
-pre_down = "/bin/true"
-post_down = "/bin/true"
-timeout_secs = 17
-[[node.storage]]
-name = "fast"
-path = {:?}
-default = true
-[node.docker]
-socket = "/var/run/docker.sock"
-builds = true
-[node.docker.networks]
-pool = "10.199.0.0/16"
-prefix = 28
-[ports]
-incoming_address = "vm.example.test"
-listen = "127.0.0.1"
-ranges = [{{ from = 41000, to = 41010 }}]
-"#,
-            dir.path().join("storage").to_str().unwrap()
-        ),
+    // The host driver and machine policy use the fresh canonical configuration.
+    std::fs::write(&config, "[node]\ndrivers=['host']\n").unwrap();
+    let identity = orch_connector_core::enrollment::DataDir::open(&data).unwrap();
+    let policy = orch_connector_core::policy::PolicyStore::host(
+        identity.config(|_| None).unwrap(),
+        Some(identity.config_path()),
     )
     .unwrap();
+    use orch_link_contract::policy::{LocalPolicy, PolicyDefaults, PolicyKey};
+    policy.delegate(&["*".into()]).unwrap();
+    let mut drivers = LocalPolicy::installed(PolicyDefaults::Managed).drivers;
+    drivers.allowed = vec!["host".into()];
+    policy
+        .set_here(PolicyKey::Drivers, &serde_json::to_value(drivers).unwrap())
+        .unwrap();
+    policy.set_here(PolicyKey::Storages, &serde_json::json!([{"name":"fast","path":dir.path().join("storage").to_string_lossy(),"default":true}])).unwrap();
+    let hooks = orch_link_contract::policy::MachineHooks {
+        pre_up: Some("/bin/true".into()),
+        post_up: Some("/bin/true".into()),
+        pre_down: Some("/bin/true".into()),
+        post_down: Some("/bin/true".into()),
+        timeout_secs: 17,
+    };
+    policy
+        .set_here(
+            PolicyKey::LifecycleHooks,
+            &serde_json::to_value(hooks).unwrap(),
+        )
+        .unwrap();
+    let mut ports = LocalPolicy::installed(PolicyDefaults::Managed).ports;
+    ports.publish = Some(orch_api_contract::ports::HostPorts {
+        incoming_address: "vm.example.test".into(),
+        listen: "127.0.0.1".into(),
+        ranges: vec![orch_api_contract::ports::PortRange {
+            from: 41000,
+            to: 41010,
+        }],
+    });
+    policy
+        .set_here(PolicyKey::Ports, &serde_json::to_value(ports).unwrap())
+        .unwrap();
     let (config, data) = (config.to_str().unwrap(), data.to_str().unwrap());
 
     let version = node(&["version"]);
@@ -79,13 +87,7 @@ ranges = [{{ from = 41000, to = 41010 }}]
         said.contains("not enrolled") && said.contains("host"),
         "{said}"
     );
-    let migration = String::from_utf8_lossy(&before.stderr);
-    for key in ["hooks", "ports", "storages", "drivers"] {
-        assert!(
-            migration.contains(&format!("moved: now `orch-node policy set {key}")),
-            "{migration}"
-        );
-    }
+    assert!(!String::from_utf8_lossy(&before.stderr).contains("moved: now"));
     let policy = orch_node_core::machine_policy::open(
         &orch_node::composition::settings_of(std::path::Path::new(config), Some(data.into()))
             .unwrap()
@@ -143,42 +145,19 @@ ranges = [{{ from = 41000, to = 41010 }}]
     );
     assert!(out.contains("Enrolled program-host"), "{out}");
     let machine = world.wait_enrolled(hint).await;
-    // A configuration written before the node's first start can contain unmarked connector defaults.
-    // Those defaults are not explicit local refusals of the host's capabilities.
-    let old_data =
+    let stored =
         orch_connector_core::enrollment::DataDir::open(std::path::Path::new(data)).unwrap();
-    let mut legacy = old_data.config(|_| None).unwrap();
-    let endpoints = old_data.endpoints(&legacy).unwrap();
+    let current = stored.config(|_| None).unwrap();
+    let endpoints = stored.endpoints(&current).unwrap();
     assert!(
-        legacy.endpoints.is_empty(),
+        current.endpoints.is_empty(),
         "system-advertised addresses are not a local override"
     );
-    assert_eq!(endpoints, old_data.record().unwrap().server_endpoints);
-    assert!(!old_data.record().unwrap().gateways.is_empty());
+    assert_eq!(endpoints, stored.record().unwrap().server_endpoints);
+    assert!(!stored.record().unwrap().gateways.is_empty());
     assert!(
         !endpoints.is_empty(),
         "the enrolled node has its gateway addresses"
-    );
-    legacy.connector.roles = vec!["node".into()];
-    legacy.connector.node_policy_imported = false;
-    legacy.connector.node_policy_import_version = 0;
-    legacy.policy.local_keys = None;
-    legacy.policy.values.clear();
-    legacy.environment.remote_write = false;
-    legacy.environment.terminal = false;
-    legacy.tools.fetch = false;
-    // Serializing local policy keeps the independently enrolled system advertisement.
-    let keys = orch_link_contract::policy::PolicyKey::ALL
-        .iter()
-        .map(|key| key.as_str().to_owned())
-        .collect::<Vec<_>>();
-    let legacy = orch_connector_core::policy::sparse_config(&legacy, &keys).unwrap();
-    std::fs::write(old_data.config_path(), legacy).unwrap();
-    assert_eq!(
-        old_data
-            .endpoints(&old_data.config(|_| None).unwrap())
-            .unwrap(),
-        endpoints
     );
     // The token was single-use: a second enrollment into the same directory is refused before anything is sent.
     let again = node(&[
@@ -200,7 +179,7 @@ ranges = [{{ from = 41000, to = 41010 }}]
         said.contains("program-host") && said.contains(&machine.to_string()),
         "{said}"
     );
-    let upgraded = orch_node_core::machine_policy::open(
+    let current_policy = orch_node_core::machine_policy::open(
         &orch_node::composition::settings_of(std::path::Path::new(config), Some(data.into()))
             .unwrap()
             .1,
@@ -209,11 +188,14 @@ ranges = [{{ from = 41000, to = 41010 }}]
     .policy()
     .unwrap();
     assert!(
-        upgraded.environment_remote_write && upgraded.environment_terminal && upgraded.tools_fetch,
-        "previously Orch-controlled node features remain available after upgrade"
+        current_policy.environment_remote_write
+            && current_policy.environment_terminal
+            && current_policy.tools_fetch,
+        "explicitly delegated features stay available after enrollment"
     );
     assert!(
-        upgraded.local_values.contains_key("hooks") && upgraded.local_values.contains_key("ports")
+        current_policy.local_values.contains_key("hooks")
+            && current_policy.local_values.contains_key("ports")
     );
 
     // It runs: its session stands, and it tells what the host has, with the driver it could not load missing.
