@@ -16,6 +16,7 @@ import type {
   BindingProvider,
   ModelOption,
   NewEnvironment,
+  NodeRef,
   ProviderStatus,
 } from '@/generated/api-types';
 
@@ -44,6 +45,9 @@ export function noHostEnvironment(options: Pick<StartOptions, 'can_create' | 'ho
   return rows.find((row) => row.is_default) ?? rows.find((row) => row.used === 'topic') ?? rows[0] ?? null;
 }
 
+/** What a person says of a new environment: who may use it, the files it starts with, and the host and template it is made from. */
+export type NewPlacement = Pick<NewEnvironment, 'access' | 'files' | 'host_id' | 'template_id'>;
+
 /** What the person chose by hand. Everything left `null` comes from the defaults, or, in a dialog, from a suggestion. */
 export interface Picks {
   provider: string | null;
@@ -54,7 +58,7 @@ export interface Picks {
   environment: string | null;
   arrangement: ArrangementType | null;
   /** These creation choices belong to this draft, never to the remembered setup. */
-  newEnvironment?: Pick<NewEnvironment, 'access' | 'files'>;
+  newEnvironment?: NewPlacement;
 }
 
 export const NO_PICKS: Picks = { provider: null, agent: null, model: null, effort: null, environment: null, arrangement: null };
@@ -136,6 +140,23 @@ export interface MissingArrangement {
 /** What is in the way of starting, in the order a person meets it: a provider, a profile, a model, an environment, an arrangement. */
 export type Missing = MissingProvider | MissingAgent | MissingModel | MissingEnvironment | MissingArrangement;
 
+/** What the person is told about the environment they did not choose by hand: the default that stands, or why it does not. */
+export type EnvironmentNote =
+  /** The dialog starts on the default environment that a place above the topic set. */
+  | { kind: 'inherited'; from: NodeRef | null }
+  /** A default is set and cannot be used by this person, so what stands instead is said with the reason. */
+  | { kind: 'unusable'; name: string | null; reason: string; from: NodeRef | null }
+  /** A default is set, and the place's New threads setting gives every thread its own environment, so it is not used. */
+  | { kind: 'fresh'; name: string | null };
+
+/** A profile the person wanted that the environment shut, and what stands in its place. */
+export interface AgentHere {
+  /** The profile that was picked, or the place's default, or the one last used. */
+  wanted: AgentRow;
+  /** The profile that is used instead, when another can run there. */
+  instead: AgentRow | null;
+}
+
 export interface Resolved {
   origins: Record<keyof Omit<Picks, 'newEnvironment'>, ChoiceOrigin>;
   providers: ProviderRow[];
@@ -155,7 +176,11 @@ export interface Resolved {
   environment: BindingEnvironment | null;
   /** A new environment is made for the thread, from the defaults of the place. */
   fresh: boolean;
-  newEnvironment?: Pick<NewEnvironment, 'access' | 'files'>;
+  newEnvironment?: NewPlacement;
+  /** The default environment, said where the person did not choose; null where they chose or none is set. */
+  environmentNote: EnvironmentNote | null;
+  /** The profile the person wanted is shut by the environment, when it is: said beside the environment, with what stands instead. */
+  agentHere: AgentHere | null;
   /** The environment that was chosen is not in the answer yet: it was made a moment ago and the answer is being asked again. */
   settling: boolean;
   /** Every arrangement of the profile on the provider, the ones that can be had first, in the server's order. */
@@ -205,6 +230,22 @@ function arrangementRows(agent: AgentRow | null): ArrangementRow[] {
   return [...(agent?.entry.arrangements ?? [])]
     .sort((one, other) => one.rank - other.rank)
     .map((entry) => ({ type: entry.type, entry, open: entry.available && entry.permitted }));
+}
+
+/** The ways of an arrangement that the environment, not the provider or the policy, is what shuts. */
+export const ENVIRONMENT_SHUT: readonly string[] = ['executor_missing', 'agent_not_on_that_machine', 'handed_over_elsewhere', 'colocation_impossible'];
+
+/** The default environment, said where the person did not choose one by hand and a default is set. */
+function noteOf(options: StartOptions, picks: Picks, environment: BindingEnvironment | null, shared: BindingEnvironment | null): EnvironmentNote | null {
+  const named = options.default_environment ?? null;
+  if (picks.environment !== null || named === null) return null;
+  const row = options.environments.find((candidate) => candidate.environment.id === named.environment) ?? null;
+  const name = row?.environment.name ?? null;
+  if (options.environment_default === 'fresh') return { kind: 'fresh', name };
+  if (row === null || named.reason !== null || !canUseEnvironment(row)) {
+    return { kind: 'unusable', name, reason: named.reason ?? (row === null ? 'environment_not_seen' : 'closed'), from: named.from };
+  }
+  return environment !== null && environment === shared && named.from !== null ? { kind: 'inherited', from: named.from } : null;
 }
 
 /** Works out what a thread would be bound to. */
@@ -289,6 +330,10 @@ export function resolve(options: StartOptions, picks: Picks, mode: Mode, last: P
   const arrangement = open.find((row) => row.type === picks.arrangement)?.type ?? defaultArrangement;
   if (provider !== null && agent !== null && arrangement === null) missing.push({ kind: 'arrangement', first: arrangements[0] ?? null });
 
+  const wantedAgent = agents.find((row) => row.id === (picks.agent ?? defaults.agent_id ?? previous.agent)) ?? null;
+  const shutHere = wantedAgent !== null && !wantedAgent.startable
+    && wantedAgent.entry.arrangements.some((choice) => !(choice.available && choice.permitted) && ENVIRONMENT_SHUT.includes(choice.reason ?? ''));
+  const agentHere: AgentHere | null = wantedAgent === null || !shutHere ? null : { wanted: wantedAgent, instead: agent !== null && agent.id !== wantedAgent.id ? agent : null };
   const waiting = missing.some((entry) => entry.kind === 'agent' && entry.unreported);
   const origin = (value: string | null | undefined, picked: string | null, configured: string | null, remembered: string | null): ChoiceOrigin =>
     (value === null || value === undefined) ? null : value === picked ? null : value === configured ? 'topic_default' : value === remembered ? 'last_used' : 'suggested';
@@ -316,6 +361,8 @@ export function resolve(options: StartOptions, picks: Picks, mode: Mode, last: P
     environment,
     fresh,
     ...(fresh && picks.newEnvironment !== undefined ? { newEnvironment: picks.newEnvironment } : {}),
+    environmentNote: noteOf(options, picks, environment, shared),
+    agentHere,
     settling,
     arrangements,
     arrangement,

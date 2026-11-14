@@ -15,11 +15,13 @@ pub const ASK_MAX_STEPS: &str = "16";
 pub const ASK_MAX_OUTPUT_TOKENS: &str = "4096";
 pub const ASK_CONTEXT_TOKENS: &str = "120000";
 pub const ASK_MAX_TOOLS: &str = "32";
-pub const ASK_TOOL_BYTES: &str = "65536";
-pub const ASK_TURN_TOOL_BYTES: &str = "262144";
+pub const ASK_DOCS_HITS: &str = "8";
+pub const ASK_DOCS_EXCERPT_TOKENS: &str = "2000";
+pub const ASK_MAX_OPERATIONS: &str = "40";
+pub const ASK_MAX_LINKS: &str = "100";
 pub const AGENT_EFFORT: &str = r#""high""#;
 pub const AGENT_PARAMS: &str = "{}";
-pub const AGENT_FEATURES: &str = r#"{"vision":true}"#;
+pub const AGENT_FEATURES: &str = r#"{"codex.cyber_access":false}"#;
 pub const AGENT_INSTRUCTIONS: &str =
     r#""Run the relevant tests before describing a change as complete.""#;
 /// Joining text, inherited through the existing organization append setting.
@@ -42,6 +44,12 @@ pub const AGENTS_HARNESS_TRUST_MIRROR: &str = "false";
 pub const AGENTS_HARNESS_MIRROR: &str = r#""https://mirror.example.invalid/releases""#;
 /// Unset leaves the native program's cache lifetime unchanged.
 pub const AGENTS_PROMPT_CACHE_TTL: &str = "null";
+/// A slower native action may use a longer wait without changing the turn's execution.
+pub const AGENTS_WEB_ACTION_WAIT_SECS: &str = "240";
+/// Retained evidence has an independent read deadline, in milliseconds.
+pub const AGENTS_NATIVE_RESULT_WAIT_MS: &str = "3000";
+/// A busy session may retain a larger native burst during optional evidence reads.
+pub const AGENTS_NATIVE_RESULT_BUFFER_BYTES: &str = "16777216";
 pub const AGENTS_SUBAGENTS_AT_ONCE: &str = "8";
 pub const AGENTS_SUBAGENT_DEPTH: &str = "1";
 pub const AGENTS_SKILLS: &str = r#"{"019a0000-0000-7000-8000-000000000006":"latest","019a0000-0000-7000-8000-000000000007":"019a0000-0000-7000-8000-000000000008","019a0000-0000-7000-8000-000000000009":"off"}"#;
@@ -102,6 +110,7 @@ pub const SUMMARY_TARGETS: &str = r#"{"thread":{"automatic":true,"on":["turn_com
 pub const SUMMARY_FOLLOW_INTERVAL_SECS: &str = "5";
 pub const SUMMARY_READ_BATCH_SIZE: &str = "100";
 pub const PROVIDERS_ALLOWED: &str = r#"["acme.*"]"#;
+pub const MODELS_ADD_SWITCHES_ON: &str = r#""basic""#;
 pub const COLLAB_ATTRIBUTION: &str = r#""always""#;
 pub const COLLAB_DEFAULT_DELIVERY: &str = r#""queue""#;
 pub const COMPOSER_PASTE_INLINE_CONTEXT_SHARE: &str = "25";
