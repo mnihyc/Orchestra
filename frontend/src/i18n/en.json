@@ -82,6 +82,7 @@
     "noModels": "No API models available here",
     "modelUnavailable": "This model is unavailable here",
     "sources": "Sources",
+    "noAnswer": "No answer was written. Try again.",
     "sourceUnavailable": "Source no longer available",
     "copy": "Copy answer",
     "retry": "Retry answer",
@@ -91,7 +92,6 @@
     "noHistory": "No conversations yet",
     "retention": "Kept for {{days}} days after the last message",
     "expires": "Expires",
-    "adminNotice": "This organization’s admins can inspect and export this conversation",
     "inspection": "Read-only admin inspection",
     "readOnlyTools": "Reads as you · cites sources · makes no changes",
     "paidBy": "Paid by",
@@ -99,8 +99,8 @@
     "privateThread": "Creates a Private permanent thread in this organization",
     "destination": "Destination topic",
     "defaultDestination": "Use the page’s topic or an authorized default",
-    "contextNoRoom": "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves.",
-    "contextTooLong": "This conversation is too long for {{model}}; start a new one or keep it as a thread."
+    "contextTooLong": "This conversation is too long for {{model}}; start a new one or keep it as a thread.",
+    "turnTooLong": "This question and what it read are too long for {{model}}; ask a narrower question or start with fewer sources."
   },
   "viewWindow": {
     "floating": "Open in a floating window",
@@ -4739,21 +4739,29 @@
         "title": "Ask tools per turn",
         "description": "The read operations allowed for one question before it asks the person to narrow the question."
       },
-      "tool_bytes": {
-        "title": "Ask source size",
-        "description": "The most bytes from one read result supplied to the model, with a canonical link to the full source."
+      "docs_hits": {
+        "title": "Ask guide pages per search",
+        "description": "The most guide pages one Ask search of the help gives the model, English and Chinese alternating where both match."
       },
-      "turn_tool_bytes": {
-        "title": "Ask sources per turn",
-        "description": "The total read-result bytes supplied while answering one question."
+      "docs_excerpt_tokens": {
+        "title": "Ask guide excerpt size",
+        "description": "The most tokens of one guide page that Ask's help search gives the model; the page's link comes with it."
+      },
+      "max_operations": {
+        "title": "Ask operations per search",
+        "description": "The most read operations one Ask search of the read catalogue returns."
+      },
+      "max_links": {
+        "title": "Ask links per source",
+        "description": "The most canonical source links Ask keeps from one read."
       },
       "max_output_tokens": {
         "title": "Ask answer tokens",
-        "description": "The most output tokens per Ask model request, also reserved before fitting conversation context. The lowest system or organization value applies."
+        "description": "The most output tokens per Ask model request. The request is fitted to the window less this, and an answer takes half of the window at most. The lowest system or organization value applies."
       },
       "context_tokens": {
         "title": "Ask context tokens",
-        "description": "Unset uses the chosen model's context window. When set, the smaller value applies to Ask only; output and tool-result reserves must still fit. The lowest system or organization value applies."
+        "description": "Unset uses the chosen model's context window; a model that states none is not given a small one. When set, the smaller value applies to Ask only. A window no larger than twice the answer tokens leaves the answer half of it. The lowest system or organization value applies."
       }
     },
     "services": {
@@ -5010,6 +5018,7 @@
       "label": "Context {{used}} of {{window}} ({{percent}}); shortens at {{compact}}",
       "labelBare": "Context {{used}} of {{window}} ({{percent}})",
       "open": "Show what fills the context ({{label}})",
+      "labelUsed": "Context {{used}} used; no window reported",
       "modelLabel": "{{model}}: {{context}}"
     },
     "panel": {
@@ -8610,6 +8619,26 @@
     "authz": {
       "denied": "You do not have access to this. Ask somebody who manages it."
     },
+    "ask": {
+      "not_in_list": "This model is not on this organization’s Ask list. Choose one of the listed models.",
+      "model_disabled": "This model is switched off. Choose another model.",
+      "provider_unavailable": "This model’s provider is not available. Choose another model or ask whoever manages the provider.",
+      "no_interface": "This model’s provider offers no way to hold a conversation. Choose another model.",
+      "options_refused": "The options chosen for this model are not allowed. Change them or use the model’s defaults.",
+      "model_not_allowed": "This organization’s policy does not allow this model. Choose another model.",
+      "provider_not_allowed": "This organization’s policy does not allow this model’s provider. Choose another model.",
+      "payer_unset": "Ask is set to be paid for by whoever set it, and that person is no longer known. Ask an administrator to set who pays.",
+      "no_use": "You may not use this model’s provider in this organization. Ask whoever manages it to let you.",
+      "identity_not_usable": "Your access to this provider does not cover this model’s default options. Choose another model.",
+      "use_excludes": "Your access to this provider leaves out this model or effort. Choose another.",
+      "payer_no_use": "The person who pays for Ask here may not use this provider in this organization. Ask an administrator.",
+      "payer_excludes": "The person who pays for Ask here may not use this model or effort. Choose another.",
+      "no_keeper": "This provider has no machine that keeps its key. Ask whoever manages it to set one.",
+      "keeper_offline": "The machine that keeps this provider’s key is offline. Try again shortly or choose another model.",
+      "cap_reached": "A usage limit for Ask has been reached. Try again after it resets, or ask an administrator.",
+      "other_organization": "This page belongs to another organization. Ask in that organization.",
+      "root_refused": "You cannot open this organization as yourself. Ask answers as you are here, not as an administrator, so As admin does not open it. Use an organization you belong to."
+    },
     "org": {
       "suspended": "Your access to this org is suspended. Ask one of its admins.",
       "too_deep": "Orgs cannot be nested any deeper here. Choose a place nearer the top.",
@@ -9874,7 +9903,11 @@
         "right": "Hide the right bar",
         "bottom": "Hide the bottom"
       },
-      "pin": "Keep open as a bar"
+      "pin": "Keep open as a bar",
+      "peek": {
+        "title": "Bars",
+        "label": "Show hidden bars on hover: {{state}}"
+      }
     },
     "sash": {
       "left": "Width of the left bar",
@@ -9941,9 +9974,10 @@
       "shellsHint": "Your shells in this environment. Open Terminal.",
       "connecting": "Connecting…",
       "connectingHint": "Connecting to live updates.",
-      "reconnectingSince": "Reconnecting… · {{time}}",
       "reconnecting": "Reconnecting…",
       "reconnectingHint": "What is on screen stays and can be read. Approving and steering wait for the connection; typing does not.",
+      "noLive": "No live updates · {{time}}",
+      "noLiveHint": "Live updates cannot connect, so this page reads again every few seconds. If this stays, ask whoever runs this system to check that the HTTPS front passes WebSocket upgrades for /api/v1/ws; orchctl doctor --url shows it as edge-ws.",
       "slow": "Slow connection · {{ms}} ms",
       "slowHint": "Sending, saving and shells take longer. Nothing you type waits."
     },
@@ -23396,6 +23430,9 @@
       "moveOut": "Move to another org",
       "moveOutReason": "Moves with its main thread · Keep it to move it alone"
     },
+    "slash": {
+      "about": "Ask a question on the side, without disturbing the turn"
+    },
     "ask": {
       "title": "Side thread",
       "about": "Starts from {{thread}}'s conversation. Replies stay in this aside.",
@@ -24417,6 +24454,9 @@
     "runtimeCount_other": "{{number}} runtimes",
     "offInBuild": "Off in this version: {{feature}}",
     "caseUnavailable": "Unavailable",
+    "checkedPending_one": "Checked · {{number}} check pending",
+    "checkedPending_other": "Checked · {{number}} checks pending",
+    "casesPending": "Not verified yet: {{names}}",
     "notChecked": "This version has not been checked",
     "checkFailed": "Compatibility check failed · review its results",
     "policySummary": "{{name}}: {{choice}}",
@@ -26192,6 +26232,8 @@
     "resultsRootPending": "The results’ organization cannot be opened",
     "model": "Model summarizer",
     "details": "Summary details",
+    "hide": "Hide summary",
+    "show": "Show summary",
     "inputFacts": "Source items: {{included}} included · {{shortened}} shortened · {{omitted}} omitted",
     "baseRates": "Configured model base rates",
     "noRates": "No base rates reported",
