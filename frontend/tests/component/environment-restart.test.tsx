@@ -8,7 +8,7 @@ import { RestartEnvironmentDialog } from '@/features/resources/environments/Rest
 
 import { show } from './support';
 
-vi.mock('@/api/environments',()=>({restartEnvironment:vi.fn(()=>Promise.reject(new Error('The machine is unavailable.')))}));
+vi.mock('@/api/environments',async(original)=>({...await original<object>(),restartEnvironment:vi.fn(()=>Promise.reject(new Error('The machine is unavailable.')))}));
 
 describe('restarting an environment',()=>{
   beforeEach(()=>vi.clearAllMocks());

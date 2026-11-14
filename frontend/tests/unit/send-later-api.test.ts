@@ -6,7 +6,7 @@ import type { InputScheduleCreateBody } from '@/generated/api-types';
 const calls = vi.hoisted(() => ({ post: vi.fn<(path: string, options: unknown) => Promise<{ data: unknown; response: Response }>>(), patch: vi.fn<(path: string, options: unknown) => Promise<{ data: unknown; response: Response }>>() }));
 vi.mock('@/api/client', async (original) => { const actual = await original<typeof Client>(); return { ...actual, api: { ...actual.api, POST: calls.post, PATCH: calls.patch } }; });
 const receipt = { projection: 'receipt', schedule_id: 'schedule', revision: 2, topic_seq: 8 };
-const body: InputScheduleCreateBody = { name: null, target: { kind: 'thread', thread_id: 'thread' }, content: [{ type: 'text', text: 'Run the audit' }], native_action: null, timing: { kind: 'once', at: '2030-01-01T09:00:00Z', zone: 'UTC' } };
+const body: InputScheduleCreateBody = { name: null, plan: false, delivery: 'queue', target: { kind: 'thread', thread_id: 'thread' }, content: [{ type: 'text', text: 'Run the audit' }], native_action: null, timing: { kind: 'once', at: '2030-01-01T09:00:00Z', zone: 'UTC' } };
 beforeEach(() => { vi.clearAllMocks(); calls.post.mockResolvedValue({ data: receipt, response: new Response(null, { status: 201 }) }); calls.patch.mockResolvedValue({ data: receipt, response: new Response(null, { status: 200 }) }); });
 it('saves the complete definition through the topic operation and keeps a sparse acknowledgement successful', async () => {
   expect(await createInputSchedule('topic', body, 'same-attempt')).toEqual(receipt);

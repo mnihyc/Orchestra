@@ -1,0 +1,2 @@
+# b42i-d: the same assembly: the API's programs, second half, with the opening's byte bounds and the mail lane's
+test -p orch-api-core --test component_updates --test machine_policy_scopes --test machine_registration --test search_names --test search_native_scopes --test documents --test document_list_scopes --test private_documents --test search_content --test threads_start_source --test thread_opening_scopes --test accounts --test notifications_routes

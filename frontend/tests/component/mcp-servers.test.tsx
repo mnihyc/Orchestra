@@ -10,7 +10,7 @@ import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 const { read, restart, jobRead } = vi.hoisted(() => ({ read: vi.fn<() => Promise<EnvironmentMcp>>(), restart: vi.fn<(id: string,name: string) => Promise<Job>>(), jobRead: vi.fn<() => Promise<Job>>() }));
-vi.mock('@/api/environments', () => ({ environmentMcpKey: (id: string) => ['environment-mcp',id], environmentMcpQuery: (id: string) => ({ queryKey: ['environment-mcp',id], queryFn: read }), restartEnvironmentMcpServer: restart }));
+vi.mock('@/api/environments', async (original) => ({ ...await original<object>(), environmentMcpKey: (id: string) => ['environment-mcp',id], environmentMcpQuery: (id: string) => ({ queryKey: ['environment-mcp',id], queryFn: read }), restartEnvironmentMcpServer: restart }));
 vi.mock('@/api/forks', () => ({ jobQuery: (id: string) => ({ queryKey: ['job',id], queryFn: jobRead }) }));
 afterEach(() => vi.clearAllMocks());
 
