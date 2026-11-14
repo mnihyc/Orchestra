@@ -199,7 +199,7 @@ it('keeps a locked or offline aside draft writable but never sends it or interru
 
 it('queues while its own turn runs, and its Stop names only that side turn', async () => {
   seed({}, true);
-  calls.stop.mockResolvedValue({ ...turn('side-turn', { ordinal: 1, inputId: 'side-input', state: 'interrupted' }), seq_updated: 22 });
+  calls.stop.mockResolvedValue({ state: 'stopped', requested_at: new Date().toISOString(), turn: { ...turn('side-turn', { ordinal: 1, inputId: 'side-input', state: 'interrupted' }), seq_updated: 22 } });
   const input = { ...threadInput('queued-side', 'Then check expiry', { author: ADA, position: '1' }), thread_id: SIDE, seq_updated: 23 };
   calls.send.mockResolvedValue({ input, seq: 23 });
   draw();

@@ -2135,6 +2135,11 @@ impl Link {
             }
             match allowed {
                 Ok(false) => {
+                    // A unit that enrolled before its environment names it is not another machine: nothing
+                    // is answered, so that it sends the report again once the environment names it.
+                    if self.awaits_its_environment(machine, &stream).await {
+                        return;
+                    }
                     // A node can still send its own work after discarding another host's report.
                     // Keep consecutive refusals in the link's acknowledgement order, with no DB
                     // cursor. Whole foreign streams and gaps are discarded before ordering.
@@ -2297,6 +2302,7 @@ impl Link {
                     if !matches!(allowed, Ok::<_, DbError>(true)) {
                         if matches!(allowed, Ok(false))
                             && let Ok(stream) = eph.stream.parse::<Stream>()
+                            && !self.awaits_its_environment(entry.id, &stream).await
                         {
                             self.record_report_refusal(entry.id, &stream, 1).await;
                         }
@@ -2346,6 +2352,7 @@ impl Link {
         enum Taken {
             Applied(Option<crate::realtime::raw_traffic::Boundary>),
             Refused,
+            Waits,
             CursorMismatch,
         }
         let stream = delivery.stream.to_string();
@@ -2376,6 +2383,16 @@ impl Link {
             )
             .await?
             {
+                if let Stream::Env { environment_id } = delivery.stream
+                    && orch_db::queries::machine_reports::awaits_attachment(
+                        &mut tx,
+                        machine,
+                        environment_id,
+                    )
+                    .await?
+                {
+                    return Ok(Taken::Waits);
+                }
                 return Ok(Taken::Refused);
             }
             if delivery
@@ -2492,6 +2509,14 @@ impl Link {
                     tracing::debug!(%error, "committed diagnostic or sign-in events could not be forwarded");
                 }
                 true
+            }
+            Ok(Taken::Waits) => {
+                tracing::debug!(
+                    %machine, stream,
+                    "the report of a unit waits until its environment names it; it is sent again"
+                );
+                controller.abandoned(&delivery);
+                false
             }
             Ok(Taken::Refused) => {
                 if let Some(entry) = self.loaded_entry(machine) {
@@ -2736,8 +2761,10 @@ impl Link {
                 state.discarded_through.remove(&stream);
             }
             Ok(false) => {
-                self.record_report_refusal(entry.id, &notice.stream, 1)
-                    .await;
+                if !self.awaits_its_environment(entry.id, &notice.stream).await {
+                    self.record_report_refusal(entry.id, &notice.stream, 1)
+                        .await;
+                }
                 return;
             }
             Err(error) => {

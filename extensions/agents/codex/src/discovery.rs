@@ -570,14 +570,105 @@ pub async fn servers_to_switch_off(
 ) -> Result<BTreeMap<String, Json>, AdapterError> {
     session_configuration(rpc, place)
         .await
-        .map(|(servers, _)| servers)
+        .map(|(servers, _, _)| servers)
+}
+
+/// Native instruction discovery choices, from the same effective cwd configuration as the session.
+pub(crate) struct InstructionConfig {
+    pub filenames: Vec<String>,
+    pub max_bytes: u64,
+    project_filenames: bool,
+    project_budget: bool,
+}
+
+impl InstructionConfig {
+    fn from_read(read: &Json) -> Self {
+        let project_may_override = |key: &str| {
+            !matches!(
+                read["origins"][key]["name"]["type"].as_str(),
+                Some(
+                    "sessionFlags"
+                        | "legacyManagedConfigTomlFromFile"
+                        | "legacyManagedConfigTomlFromMdm"
+                )
+            )
+        };
+        Self {
+            filenames: read["config"]["project_doc_fallback_filenames"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Json::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            max_bytes: read["config"]["project_doc_max_bytes"]
+                .as_u64()
+                .unwrap_or(crate::sessions::PROJECT_DOC_BUDGET),
+            project_filenames: project_may_override("project_doc_fallback_filenames"),
+            project_budget: project_may_override("project_doc_max_bytes"),
+        }
+    }
+
+    /// The process-wide config reader cannot see the trust overrides of thread/start.
+    /// Apply only the accepted workspace's instruction choices, in native ancestor order.
+    pub(crate) fn with_workspace(
+        mut self,
+        root: &str,
+        cwd: &str,
+        answer: Option<orch_agent_contract::session::ConfigTrust>,
+    ) -> Result<Self, AdapterError> {
+        if answer != Some(orch_agent_contract::session::ConfigTrust::Trust) {
+            return Ok(self);
+        }
+        for directory in crate::sessions::instruction_chain(root, cwd)? {
+            let path = directory.join(PROJECT_CONFIG_DIRECTORY).join(CONFIG_FILE);
+            let text = match std::fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    return Err(AdapterError::HarnessError(
+                        "the accepted workspace configuration could not be read".to_owned(),
+                    ));
+                }
+            };
+            let table: toml::Table = toml::from_str(&text).map_err(|_| {
+                AdapterError::HarnessError(
+                    "the accepted workspace configuration is not valid TOML".to_owned(),
+                )
+            })?;
+            if self.project_budget
+                && let Some(budget) = table
+                    .get("project_doc_max_bytes")
+                    .and_then(toml::Value::as_integer)
+                && let Ok(budget) = u64::try_from(budget)
+            {
+                self.max_bytes = budget;
+            }
+            if self.project_filenames
+                && let Some(names) = table
+                    .get("project_doc_fallback_filenames")
+                    .and_then(toml::Value::as_array)
+            {
+                self.filenames = names
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+            }
+        }
+        Ok(self)
+    }
 }
 
 /// Read the same effective configuration once for server isolation and managed-launch observations.
 pub(crate) async fn session_configuration(
     rpc: &Rpc,
     place: Option<(&str, &str)>,
-) -> Result<(BTreeMap<String, Json>, Vec<String>), AdapterError> {
+) -> Result<(BTreeMap<String, Json>, Vec<String>, InstructionConfig), AdapterError> {
     let mut looks: Vec<Json> = Vec::new();
     for directory in place.iter().flat_map(|(directory, cwd)| [*cwd, *directory]) {
         let look = json!({ "includeLayers": false, "cwd": directory });
@@ -590,11 +681,14 @@ pub(crate) async fn session_configuration(
     }
     let mut off = BTreeMap::new();
     let mut mismatches = Vec::new();
+    let mut instructions = None;
     for look in looks {
         let read = rpc
             .call("config/read", look)
             .await
             .map_err(|error| AdapterError::HarnessError(remote_text(&error)))?;
+        // The first lookup is the effective cwd; the directory-only lookup also isolates its servers.
+        let _ = instructions.get_or_insert_with(|| InstructionConfig::from_read(&read));
         for key in crate::process::managed_pin_mismatches(&read["config"]) {
             if !mismatches.contains(&key) {
                 mismatches.push(key);
@@ -609,7 +703,11 @@ pub(crate) async fn session_configuration(
             off.entry(name).or_insert(entry);
         }
     }
-    Ok((off, mismatches))
+    Ok((
+        off,
+        mismatches,
+        instructions.unwrap_or_else(|| InstructionConfig::from_read(&Json::Null)),
+    ))
 }
 
 fn looks_secret(name: &str) -> bool {
@@ -762,6 +860,57 @@ pub fn read_definition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepted_project_instruction_choices_follow_the_native_chain_without_replacing_session_flags()
+     {
+        use orch_agent_contract::session::ConfigTrust;
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        std::fs::create_dir(root.path().join(".codex")).unwrap();
+        std::fs::create_dir_all(child.join(".codex")).unwrap();
+        std::fs::write(
+            root.path().join(".codex/config.toml"),
+            "project_doc_max_bytes = 4\nproject_doc_fallback_filenames = ['ROOT.md']\n",
+        )
+        .unwrap();
+        std::fs::write(
+            child.join(".codex/config.toml"),
+            "project_doc_max_bytes = 6\nproject_doc_fallback_filenames = [' CHILD.md ', '']\n",
+        )
+        .unwrap();
+        let root = root.path().to_str().unwrap();
+        let cwd = child.to_str().unwrap();
+        let native = json!({"config":{"project_doc_max_bytes":64,"project_doc_fallback_filenames":["NATIVE.md"]},"origins":{}});
+        for answer in [None, Some(ConfigTrust::KeepOut)] {
+            let config = InstructionConfig::from_read(&native)
+                .with_workspace(root, cwd, answer)
+                .unwrap();
+            assert_eq!(config.max_bytes, 64);
+            assert_eq!(config.filenames, ["NATIVE.md"]);
+        }
+        let accepted = InstructionConfig::from_read(&native)
+            .with_workspace(root, cwd, Some(ConfigTrust::Trust))
+            .unwrap();
+        assert_eq!(accepted.max_bytes, 6);
+        assert_eq!(accepted.filenames, ["CHILD.md"]);
+        for origin in [
+            "sessionFlags",
+            "legacyManagedConfigTomlFromFile",
+            "legacyManagedConfigTomlFromMdm",
+        ] {
+            let mut protected = native.clone();
+            protected["origins"] = json!({
+                "project_doc_max_bytes":{"name":{"type":origin}},
+                "project_doc_fallback_filenames":{"name":{"type":origin}}
+            });
+            let config = InstructionConfig::from_read(&protected)
+                .with_workspace(root, cwd, Some(ConfigTrust::Trust))
+                .unwrap();
+            assert_eq!(config.max_bytes, 64);
+            assert_eq!(config.filenames, ["NATIVE.md"]);
+        }
+    }
 
     const CONFIG: &str = r#"
 model = "gpt-6-sol"

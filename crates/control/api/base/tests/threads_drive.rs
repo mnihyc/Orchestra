@@ -959,7 +959,7 @@ async fn stopped_inputs_keep_the_hold_through_edits_delivery_changes_and_reorder
         .call(ThreadInterrupt, &[&thread])
         .token(&s.dan.token)
         .body(&ThreadInterruptBody {
-            turn_id: start.turn_id,
+            turn_id: Some(start.turn_id),
         })
         .send()
         .await
@@ -1068,7 +1068,7 @@ async fn messages_sent_after_stop_join_the_held_queue_and_edit_reorder_remove_re
         .call(ThreadInterrupt, &[&thread])
         .token(&s.ada.token)
         .body(&ThreadInterruptBody {
-            turn_id: first.turn_id,
+            turn_id: Some(first.turn_id),
         })
         .send()
         .await
@@ -1463,18 +1463,34 @@ async fn a_turn_is_stopped_while_it_runs_and_cannot_be_once_it_is_over() {
             .app
             .call(ThreadInterrupt, &[&id])
             .token(&s.dan.token)
-            .body(&ThreadInterruptBody { turn_id: turn });
+            .body(&ThreadInterruptBody {
+                turn_id: Some(turn),
+            });
         async move { call.send().await }
     };
     let stopped = stop(start.turn_id).await.ok();
+    assert_eq!(
+        stopped.state,
+        orch_api_contract::threads::StopState::Stopping,
+        "a turn that runs is stopping until the program has stopped"
+    );
+    let stopped = stopped.turn.expect("the answer is the turn it names");
     assert_eq!(stopped.id, start.turn_id);
     assert!(stopped.interrupted_by.is_some());
+    assert!(
+        stopped.interrupted_at.is_some(),
+        "and says when the Stop was asked for"
+    );
     s.rig
         .say(id, turn_ended(start.turn_id, TurnOutcome::Interrupted))
         .await;
     s.rig.wait_turn(start.turn_id, "interrupted").await;
     // A Stop that arrives as its turn ends, with nothing newer begun, answers the turn as it ended.
-    let late = stop(start.turn_id).await.ok();
+    let late = stop(start.turn_id)
+        .await
+        .ok()
+        .turn
+        .expect("the Stop answer names the ended turn");
     assert_eq!(late.id, start.turn_id);
     assert_eq!(late.state, TurnState::Interrupted);
     // Once a newer turn runs, a Stop of the old one changes nothing and names the turn that stands.
@@ -1997,7 +2013,9 @@ async fn every_driving_request_is_refused_to_a_viewer_and_to_a_stranger() {
                 .problem(),
             app.call(ThreadInterrupt, &[&id])
                 .token(token)
-                .body(&ThreadInterruptBody { turn_id: new_id() })
+                .body(&ThreadInterruptBody {
+                    turn_id: Some(new_id()),
+                })
                 .send()
                 .await
                 .problem(),

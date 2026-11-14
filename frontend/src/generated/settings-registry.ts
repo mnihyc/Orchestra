@@ -676,9 +676,11 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "topic"
     ],
     "merge": "map",
-    "default": {},
+    "default": {
+      "codex.cyber_access": true
+    },
     "example": {
-      "vision": true
+      "codex.cyber_access": false
     },
     "text_key": "day100.builtin.agent.features",
     "keywords": []
@@ -1687,6 +1689,30 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "acme.*"
     ],
     "text_key": "day100.builtin.providers.allowed",
+    "keywords": []
+  },
+  {
+    "key": "models.add_switches_on",
+    "title": "Switched on when added",
+    "description": "What a model starts with when it is added from its provider's catalogue: everything it offers (all), only its efforts and context sizes (basic), or only its window and efforts (nothing). A manager can switch on the rest afterwards.",
+    "group": "models",
+    "schema": {
+      "type": "string",
+      "enum": [
+        "all",
+        "basic",
+        "nothing"
+      ]
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "replace",
+    "default": "all",
+    "example": "basic",
+    "text_key": "day100.builtin.models.add_switches_on",
     "keywords": []
   },
   {
@@ -3739,6 +3765,33 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": [],
     "display": {
       "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.record_wait_secs",
+    "title": "Wait for turn files",
+    "description": "Seconds a turn waits for the files before it to be recorded; when they are not ready in time the turn starts with per-file undo, and the turn says so.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 30,
+    "example": 30,
+    "text_key": "day100.builtin.workspace.record_wait_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
       "zero": null
     }
   },
@@ -6525,7 +6578,54 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "thread"
     ],
     "merge": "map",
-    "default": {},
+    "default": {
+      "thread": {
+        "automatic": false,
+        "on": [
+          "turn_completed",
+          "milestone"
+        ],
+        "min_interval_secs": 120,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "topic": {
+        "automatic": false,
+        "on": [
+          "child_changed"
+        ],
+        "min_interval_secs": 900,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "document": {
+        "automatic": false,
+        "on": [
+          "content_changed"
+        ],
+        "min_interval_secs": 300,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "chat": {
+        "automatic": false,
+        "on": [
+          "message_posted"
+        ],
+        "min_interval_secs": 300,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "chat_title": {
+        "automatic": false,
+        "on": [
+          "message_posted"
+        ],
+        "min_interval_secs": 300,
+        "context_tokens": 32000,
+        "output_chars": 80
+      }
+    },
     "example": {
       "thread": {
         "automatic": true,

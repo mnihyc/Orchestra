@@ -85,6 +85,8 @@ pub struct SessionRecord {
     pub workspace_configuration: Option<orch_agent_contract::session::WorkspaceConfiguration>,
     /// A once-per-revision explanation of the pinned resume instruction limitation.
     pub instructions_notice: Option<String>,
+    /// Local native instruction files and the session spec needed only when their bytes change.
+    pub(crate) instruction_reload: Option<crate::sessions::InstructionReload>,
     /// The attached mounts.
     pub mounts: Vec<MountGrant>,
     /// Where the tools are carried out, if that is not where the harness is.
@@ -1247,6 +1249,11 @@ impl Shared {
                     "this native build does not offer exact background command control",
                 ));
             }
+            Err(RpcError::Shape { .. }) => {
+                return Ok(NativeBackground::unsupported(
+                    crate::native_schema::FORM_UNKNOWN,
+                ));
+            }
             Err(error) => return Err(crate::map_rpc(error)),
         };
         let mut items = Vec::new();
@@ -1314,10 +1321,17 @@ impl Shared {
                 reason: None,
             });
         }
-        let (terminals, _) = self
-            .background_terminals(&native)
-            .await
-            .map_err(crate::map_rpc)?;
+        let terminals = match self.background_terminals(&native).await {
+            Ok((terminals, _)) => terminals,
+            Err(RpcError::Shape { .. }) => {
+                return Ok(NativeBackgroundEnd {
+                    id: id.to_owned(),
+                    state: BackgroundEndState::Unknown,
+                    reason: Some(crate::native_schema::FORM_UNKNOWN.into()),
+                });
+            }
+            Err(error) => return Err(crate::map_rpc(error)),
+        };
         let Some(terminal) = terminals.into_iter().find(|terminal| {
             command_identity(&native, &terminal.item_id, &terminal.process_id) == id
         }) else {

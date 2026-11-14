@@ -26,6 +26,34 @@ summary: 线程、提供方或机器旁显示的每种状态的含义。
 | `state:ThreadDisplayState.idle` | 没有工作或未读结果需要状态图标。 |
 | `state:ThreadDisplayState.archived` | 线程或其上级位置已归档。 |
 
+### StopState
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:StopState.stopping` | 停止请求已接受，程序或线程当前的变更尚未完成停止。 |
+| `state:StopState.stopped` | 指定轮次已结束，或尚无轮次的准备过程已撤回。最终结果仍保留在线程中。 |
+
+### BlockedReason
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:BlockedReason.source_failed` | 源码准备失败。源码面板显示已记录的原因，并提供重新准备操作；等待中的消息会保留。 |
+
+### SessionReopenReason
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:SessionReopenReason.unknown` | 无法确认会话仍处于打开状态，例如服务器或程序已经重启。 |
+| `state:SessionReopenReason.instructions` | 此轮次开始前，常驻指令或程序自己的指令文件发生了变化。 |
+| `state:SessionReopenReason.limits` | 会话的子代理限制发生了变化。 |
+| `state:SessionReopenReason.configuration` | 工作目录或其他在打开会话时应用的选择发生了变化。 |
+| `state:SessionReopenReason.mcp` | 提供给会话的 MCP 服务器发生了变化。 |
+| `state:SessionReopenReason.tools` | 提供给会话的 Orch 工具发生了变化。 |
+| `state:SessionReopenReason.skills` | 提供给会话的技能发生了变化。 |
+| `state:SessionReopenReason.program_reloads` | 程序在打开会话时重新加载自己的上下文，此轮次需要执行该操作。 |
+| `state:SessionReopenReason.side_history` | 侧线程需要重新读取父线程的历史。 |
+| `state:MarkerKind.session_reopened` | 时间线记录轮次开始前一次必要的会话打开操作及其原因。 |
+
 ### PageState
 
 | 参考标识 | 含义 |

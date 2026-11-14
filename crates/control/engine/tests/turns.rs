@@ -8,6 +8,10 @@
 mod common;
 #[path = "turns/offline_deadline.rs"]
 mod offline_deadline;
+#[path = "turns/session_kept.rs"]
+mod session_kept;
+#[path = "turns/stop_at_once.rs"]
+mod stop_at_once;
 
 use common::{
     World, eventually, interrupting, meanwhile, message_done, queued, said, steering, turn_ended,
@@ -852,6 +856,19 @@ async fn a_send_racing_a_nonempty_stop_joins_the_hold_whichever_takes_the_thread
     );
     stopped.unwrap();
     let sent = sent.unwrap();
+    eventually(
+        "the accepted Stop has settled before reading its queue",
+        || async {
+            world
+                .count(
+                    "SELECT count(*) FROM thread_stops WHERE thread_id=$1",
+                    thread,
+                )
+                .await
+                == 0
+        },
+    )
+    .await;
     let sync = world.sync(thread).await;
     assert!(sync.thread.queue.held);
     assert_eq!(sync.thread.queue.held_inputs, 2);

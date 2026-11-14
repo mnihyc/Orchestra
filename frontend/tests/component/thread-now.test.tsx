@@ -40,7 +40,7 @@ it.each(['en', 'zh-CN'] as const)('names the current turn, advances its work and
   const stale = command('old-running', { turn: 'old', command: 'Old command' });
   const item = command('current-command', { turn: current.id, command: 'ls', at: new Date(Date.now() - 3000).toISOString() });
   threadWriter.reset(id, { ...source, thread: { ...source.thread, state: 'running', current_turn_id: current.id }, turns: [current], items: [stale, item] }, false);
-  wire.interrupt.mockResolvedValue({ ...current, seq_updated: source.seq + 1, state: 'interrupted', completed_at: new Date().toISOString() });
+  wire.interrupt.mockResolvedValue({ state: 'stopped', requested_at: new Date().toISOString(), turn: { ...current, seq_updated: source.seq + 1, state: 'interrupted', completed_at: new Date().toISOString() } });
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = show(<QueryClientProvider client={cache}><NowLine threadId={id} /></QueryClientProvider>);
   expect(screen.getByRole('status')).toHaveTextContent(i18n.t('thread.now.running', { command: 'ls' }));
@@ -86,7 +86,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const current = turn('compact-now', { ordinal: 1, state: 'running', inputId: 'input', startedAt: new Date().toISOString() });
     const thread = { ...source.thread, display: executionDisplay('running'), state: 'running' as const, current_turn_id: current.id };
     threadWriter.reset(id, { ...source, thread, turns: [current], items: [command('compact-command', { turn: current.id, command: 'ls', at: new Date().toISOString() })] }, false);
-    wire.interrupt.mockResolvedValue({ ...current, state: 'interrupted', seq_updated: source.seq + 1 });
+    wire.interrupt.mockResolvedValue({ state: 'stopped', requested_at: new Date().toISOString(), turn: { ...current, state: 'interrupted', seq_updated: source.seq + 1 } });
     const view = show(<ViewCompactContext.Provider value={width === 400}><div style={{ width }}><ThreadNowProvider threadId={id}><StateFact thread={thread} compact /><NowLine threadId={id} /></ThreadNowProvider></div></ViewCompactContext.Provider>);
     const line = view.container.querySelector('[data-thread-now]');
     const chip = view.container.querySelector('[data-thread-now-chip]');
@@ -97,3 +97,19 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await waitFor(() => expect(wire.interrupt).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(id), current.id));
   });
 }
+
+it.each(['en', 'zh-CN'] as const)('keeps Stop available while an active thread reloads after a stale revision in %s', async (locale) => {
+  await setLocale(locale); const source = snapshot(null); const id = source.thread.id; ids.push(id);
+  const current = { ...turn('reload-turn', { state: 'running', ordinal: 1, inputId: 'input' }), thread_id: id };
+  threadWriter.capture(id, undefined);
+  threadWriter.reset(id, { ...source, thread: { ...source.thread, state: 'running', current_turn_id: current.id }, turns: [current] }, false);
+  wire.interrupt.mockResolvedValue({ state: 'stopping', requested_at: new Date().toISOString(), turn: current });
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  show(<QueryClientProvider client={cache}><NowLine threadId={id} /></QueryClientProvider>);
+  act(() => threadWriter.invalidate(id, false));
+  const stop = screen.getByRole('button', { name: i18n.t('composer.stop') });
+  expect(stop).toBeEnabled();
+  await userEvent.click(stop);
+  await waitFor(() => expect(wire.interrupt).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(id), current.id));
+  cache.clear();
+});
