@@ -5,6 +5,8 @@
  * and the ways out themselves, each a card with its own switch. What a person chose about being notified is
  * theirs and easily undone, so a change shows at once and is put back if the server refuses.
  */
+import { useMemo } from 'react';
+import { InlineAlert } from '@/ui/InlineAlert';
 import { Hint } from '@/features/help/Hint';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
@@ -92,6 +94,10 @@ export function Notifications() {
   const { t } = useTranslation();
   const { query, save, change } = usePrefs();
   const zone = useAppearance((appearance) => appearance.timeZone);
+  const zoneKnown = useMemo(() => {
+    try { return new Intl.DateTimeFormat(undefined, { timeZone: zone }).resolvedOptions().timeZone !== ''; }
+    catch { return false; }
+  }, [zone]);
   const prefs = save.value;
   const quiet = prefs?.quiet_hours ?? null;
 
@@ -126,6 +132,7 @@ export function Notifications() {
 
           <Section id="quiet" title={quiet === null ? t('notifications.quiet.title') : t('notifications.quiet.inZone', { zone })}>
             <div className="flex flex-col gap-3">
+              {quiet !== null && !zoneKnown && <InlineAlert tone="warning">{t('notifications.quiet.invalidZone', { zone })}</InlineAlert>}
               <Switch
                 presentation="compact"
                 label={t('notifications.quiet.switch')}

@@ -21,7 +21,7 @@ import { planProvider } from '../unit/provider-plan-fixtures';
 
 interface Options { params?: { path?: { id?: string }; query?: Record<string, unknown> }; signal?: AbortSignal }
 const calls = vi.hoisted(() => ({ read: vi.fn<(path: string, options?: Options) => Promise<unknown>>(),
-  changed: vi.fn(), edited: vi.fn(), submit: vi.fn(), create: vi.fn() }));
+  changed: vi.fn(), edited: vi.fn(), inherited: vi.fn(), submit: vi.fn(), create: vi.fn() }));
 vi.mock('@/api/client', async (load) => {
   const actual = await load<typeof Client>();
   return { ...actual, api: { ...actual.api, GET: async (path: string, options?: Options) => resourceCardRead(path, options) ?? ({ data: await calls.read(path, options), response: new Response() }) } };
@@ -52,11 +52,13 @@ function deferred<T>() {
   const promise = new Promise<T>((accept) => { resolve = accept; });
   return { promise, resolve };
 }
-function Harness({ value = current.id, disabled = false }: { value?: string | null; disabled?: boolean }) {
+function Harness({ value = current.id, disabled = false, inheritance = false }: { value?: string | null; disabled?: boolean; inheritance?: boolean }) {
   const [selected, setSelected] = useState(value);
+  const [following, setFollowing] = useState(inheritance);
   return <form onSubmit={(event) => { event.preventDefault(); calls.submit(); }}>
     <ProviderDefaultChoice shape={{ type: 'text', maxLength: null, pattern: null }} label={label} value={selected} placeholder="Default: none" disabled={disabled}
-      onEdited={calls.edited} onChange={(next) => { calls.changed(next); setSelected(typeof next === 'string' ? next : null); }} />
+      inheritance={inheritance ? { selected: following, label: 'As Acme decides', value: current.name, onSelect: () => { calls.inherited(); setFollowing(true); } } : undefined}
+      onEdited={calls.edited} onChange={(next) => { calls.changed(next); setFollowing(false); setSelected(typeof next === 'string' ? next : null); }} />
     <select aria-label="Unrelated finite control"><option>One</option><option>Two</option></select>
     <button type="submit">Save fixture</button>
   </form>;
@@ -85,6 +87,35 @@ beforeEach(async () => {
   calls.read.mockImplementation((path) => Promise.resolve(path === '/providers/{id}' ? current : page(first, 'after-first')));
 });
 afterEach(() => { cleanup(); for (const query of clients) query.clear(); clients.length = 0; client.session.setState(session); });
+
+it('can choose the inherited provider explicitly here and return through the row clear', async () => {
+  calls.read.mockImplementation((path) => Promise.resolve(path === '/providers/{id}' ? current : page([current])));
+  const user = userEvent.setup();
+  draw(<Harness inheritance />);
+  expect(field()).toHaveValue('As Acme decides');
+  await user.click(field());
+  expect(screen.getAllByRole('option')[0]).toHaveTextContent('As Acme decides');
+  await user.click(await screen.findByRole('option', { name: current.name }));
+  expect(calls.changed).toHaveBeenCalledExactlyOnceWith(current.id);
+  expect(field()).toHaveValue(current.name);
+  await user.click(field());
+  await user.click(screen.getAllByRole('option')[0]!);
+  expect(calls.inherited).toHaveBeenCalledExactlyOnceWith();
+  expect(calls.changed).toHaveBeenCalledTimes(1);
+});
+
+it('can follow inheritance while the unrelated provider inventory is still loading', async () => {
+  const pending = deferred<EverythingRowPage>();
+  calls.read.mockImplementation((path) => path === '/providers/{id}' ? Promise.resolve(current) : pending.promise);
+  const user = userEvent.setup();
+  draw(<Harness inheritance />);
+  await user.click(field());
+  try {
+    await user.click(screen.getAllByRole('option')[0]!);
+    expect(calls.inherited).toHaveBeenCalledExactlyOnceWith();
+    expect(calls.changed).not.toHaveBeenCalled();
+  } finally { await act(async () => { pending.resolve(page([])); await pending.promise; }); }
+});
 
 it.each(['en', 'zh-CN'] as const)('shows a provider label for an inner recovery or embeddings field (%s)', async (locale) => {
   await setLocale(locale);

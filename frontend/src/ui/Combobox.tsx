@@ -6,7 +6,7 @@
  * it. Enter chooses the one in front, Escape puts the list away, and the field keeps the keyboard
  * throughout.
  */
-import { LoaderCircle } from 'lucide-react';
+import { Check, LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Popover as Primitive } from 'radix-ui';
 import { usePromptCovered } from '@/ui/PromptScope';
@@ -17,6 +17,7 @@ import { cx } from '@/ui/cx';
 import { ChoiceCard, ChoiceInspection, type CardController, type CardPreview } from '@/ui/DetailCard';
 import { EmptyState } from '@/ui/EmptyState';
 import { Field, type FieldSlots } from '@/ui/Field';
+import { InheritedChoiceLabel, type ChoiceInheritance } from '@/ui/InheritedChoice';
 import { fieldBoxClasses } from '@/ui/Input';
 import { FLOATING_MIN_ROWS } from '@/ui/floating';
 import { placeStyle, useLayerRoom } from '@/ui/layerRoom';
@@ -55,6 +56,7 @@ export interface ComboboxGroup<Value extends string> {
 }
 
 export interface ComboboxProps<Value extends string> extends FieldSlots {
+  inheritance?: ChoiceInheritance | undefined;
   /** An action inside the input's end, using the same placement as Input.trailing. */
   trailing?: ReactNode;
   /** Caller-owned paging/recovery actions; never selectable entity options. */
@@ -64,6 +66,8 @@ export interface ComboboxProps<Value extends string> extends FieldSlots {
   onQueryChange: (query: string) => void;
   /** The chosen name while the list is closed; opening leaves the search free to type into. */
   displayValue?: string;
+  /** A styled committed label; the input retains its plain accessible value. */
+  displayContent?: ReactNode;
   /** Full text behind an explicitly shortened committed label, for the existing overflow tooltip. */
   displayFullValue?: string;
   /** Complete-choice fields start on the committed choice; typing still starts at the first match. */
@@ -107,12 +111,31 @@ function revealOption(viewport: HTMLElement, option: HTMLElement) {
   else if (row.bottom > bottom) viewport.scrollTop += Math.min(row.top - top, row.bottom - bottom) / scale;
 }
 
-export function Combobox<Value extends string>({
+export function Combobox<Value extends string>({ inheritance, ...props }: ComboboxProps<Value>) {
+  if (inheritance === undefined) return <ComboboxField {...props} />;
+  // Encode only popup identities; neither this choice nor these identities reach a value writer.
+  const options = new Map<string, ComboboxOption<Value>>(props.groups.flatMap((group) => group.options.map((option) => [`value:${option.value}`, option] as const)));
+  const inherited: ComboboxOption<string> = { value: 'inherit', text: inheritance.label, label: <InheritedChoiceLabel choice={inheritance} />,
+    icon: <span className="flex size-4 shrink-0 items-center justify-center text-accent-text">{inheritance.selected && <Check aria-hidden />}</span> };
+  return <ComboboxField<string> {...props}
+    knownChoice={inherited}
+    displayValue={inheritance.selected ? inheritance.label : props.displayValue}
+    displayContent={inheritance.selected ? <InheritedChoiceLabel choice={inheritance} /> : props.displayContent}
+    initialActiveValue={inheritance.selected ? 'inherit' : props.initialActiveValue === undefined ? undefined : `value:${props.initialActiveValue}`}
+    groups={[{ id: 'inherit', label: '', options: [inherited] }, ...props.groups.map((group) => ({ ...group, options: group.options.map((option) => ({ ...option, value: `value:${option.value}` })) }))]}
+    onSelect={(option) => {
+      if (option.value === 'inherit') { inheritance.onSelect(); props.onQueryChange(''); }
+      else { const current = options.get(option.value); if (current !== undefined) props.onSelect(current); }
+    }} />;
+}
+
+function ComboboxField<Value extends string>({
   trailing,
   footer,
   query,
   onQueryChange,
   displayValue,
+  displayContent,
   displayFullValue,
   initialActiveValue,
   groups,
@@ -137,7 +160,8 @@ export function Combobox<Value extends string>({
   id,
   fieldClassName,
   className,
-}: ComboboxProps<Value>) {
+  knownChoice,
+}: ComboboxProps<Value> & { knownChoice?: ComboboxOption<Value> }) {
   const { t } = useTranslation();
   const covered = usePromptCovered();
   const listId = useId();
@@ -232,7 +256,7 @@ export function Combobox<Value extends string>({
   const attachPopup = useCallback((node: HTMLDivElement | null) => { attachContent(node); attachRoom(node); }, [attachContent, attachRoom]);
 
   const choose = (option: ComboboxOption<Value>) => {
-    if (disabled || loading) return;
+    if (disabled || loading && option !== knownChoice) return;
     if (option.disabled === true || typeof option.disabled === 'string') return;
     onSelect(option);
     requestOpen(false);
@@ -332,6 +356,7 @@ export function Combobox<Value extends string>({
                 value={open ? query : displayValue ?? query}
                 data-overflow-text={open ? undefined : displayFullValue}
                 className={cx(fieldBoxClasses, !open && 'truncate', size === 'sm' && 'h-(--control-sm) px-2 text-sm',
+                  !open && displayContent !== undefined && 'text-transparent!',
                   (loading || trailing !== undefined) && 'pr-10',
                   loading && trailing !== undefined && 'pr-[calc(var(--control-sm)+2.5rem)]', className)}
                 onChange={(event) => {
@@ -354,6 +379,7 @@ export function Combobox<Value extends string>({
                 onPointerDown={(event) => setTouchPreview(event.pointerType === 'touch')}
                 onKeyDown={press}
               />
+              {!open && displayContent !== undefined && <span aria-hidden className={cx('pointer-events-none absolute inset-y-0 left-3 right-3 flex min-w-0 items-center overflow-hidden text-base text-text', size === 'sm' && 'left-2 right-2 text-sm')}>{displayContent}</span>}
               {loading && <LoaderCircle className={cx('absolute top-1/2 -translate-y-1/2 animate-spin text-text-subtle',
                 // Shift the existing spinner slot by the trailing action's standard control width.
                 trailing === undefined ? 'right-3' : 'right-[calc(var(--control-sm)+0.75rem)]')} aria-hidden />}

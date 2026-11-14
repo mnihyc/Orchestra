@@ -17,8 +17,19 @@ reported; Orch measures consumption and does not bill your team.
 The settings page shows the local choice, inherited choice, effective result
 and where that result comes from. Values resolve down the place's hierarchy,
 through organizations and folders to the topic and thing concerned. A resource
-also has its own home and local settings. Reset removes your local override,
-so it follows the inherited value again.
+also has its own home and local settings.
+
+A choice list starts with **As Acme decides** (or the source it follows), with
+the inherited value beside it. It is selected until this place chooses a value.
+For free values and structured editors, choose **Here** to start a local draft
+from what is inherited; the inherited editor is read-only. Choosing the inherited
+state removes the local contribution. Reset in the row menu does the same thing.
+Shared instructions remain read-only above this place's additions, so saving an
+addition never repeats the inherited text.
+
+Object and list edits stay in a draft until **Save** or **Discard**. A hidden view,
+section or page keeps its draft. Closing a view asks about that view's changes;
+saving or discarding it leaves drafts in your other views alone.
 
 Access policies, limits and required protections can only become stricter below
 a scope that sets them, with or without a lock. The smallest limit, highest
@@ -43,6 +54,14 @@ policy.
 
 ## Model choices
 
+In a place's defaults, the selected provider, agent profile and model determine the
+parameter form. **Effort** offers that model's reasoning efforts. **Agent parameters**
+uses the same Speed, Access and Context controls as the composer, together with the
+program's declared fields. **Request options** opens the fields the provider declares
+for the model. These parameter edits stay local until you save the draft. Reset a
+field to follow its inherited value; choosing Standard can override an inherited
+faster speed. Other saved parameters remain under **Other parameters**.
+
 A model's provider entry says what speeds, access programs and context it may
 be used with. A provider manager first enables the offers the provider actually
 has. A thread's setting then chooses among them, independently of the model's
@@ -52,7 +71,15 @@ The access choice and usage reports use the same readable program names as the
 provider's model editor. **None** means no access program; **Standard** is a
 program when the provider offers and enables it.
 
-Model, reasoning effort and parameters apply from the next turn. Steering a
+An agent program may keep a parameter behind a feature, as Codex does for its
+access program. **Agent features** lists each such feature by the program and the
+parameter it opens, with its program-declared shipped state and the source of an override.
+Each program declares which features ship on; the shared registry supplies no program-specific entries.
+The access program of Codex ships on, so a program that a
+manager enabled for a model is offered in a thread; a place that does not want it
+offered switches the feature off there, and the others keep it.
+
+Model and reasoning effort apply from the next turn; each parameter states when it applies. Steering a
 running turn adds a message and does not change that turn's parameters. Stop,
 change and continue when the new setting must take effect sooner. The provider
 page may show a plan window or fast-mode cooldown; an unknown native window
@@ -61,8 +88,10 @@ stays unknown, and an explicit manager-supplied value keeps its source.
 ## Sub-agents
 
 The harness runs its sub-agents inside the thread's provider use and environment
-limits. `agents.subagents_at_once` accepts 1 to 64 and ships as **8**;
-`agents.subagent_depth` accepts 1 to 5 and ships as **1**. Depth 1 lets the main
+limits. `agents.subagents_at_once` ships as **8**;
+`agents.subagent_depth` ships as **1**. Both accept positive counts within their
+native integer representation. Each agent program retains the limits of its own
+protocol and says when a control does not apply. Depth 1 lets the main
 agent start sub-agents, while those sub-agents start none of their own. The
 Parameters panel shows each effective value, where it comes from and when the
 harness takes a change; an unsupported control explains why it does not apply.
@@ -122,7 +151,7 @@ The bell in an org, department, project, folder, topic or thread sets that place
 written on the bell itself; its menu marks the selected choice with a check and a filled row.
 Default follows the nearest level above the place, excluding its own choice. Chat bells show their
 own All, Mentions or Off choice; document bells choose all discussions or those you are involved in.
-The open lists explain the levels. Quiet hours use the time zone shown beside their schedule.
+The open lists explain the levels. Quiet hours use the time zone shown beside their schedule. An unrecognized quiet-hours zone is shown as a problem and keeps outward messages waiting without spending delivery attempts. The Inbox remains available, and a corrected zone is reevaluated automatically.
 
 Inbox is the record inside Orch. Outside Orch sends only through routes you
 switch on: mail, a bot, webhook or this device's push, as offered. A push route

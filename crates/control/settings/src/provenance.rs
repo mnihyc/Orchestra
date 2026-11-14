@@ -8,7 +8,9 @@
 //! [`SettingView::nodes`] lists the identifiers to look up once for a whole
 //! list.
 
-use orch_settings_contract::provenance::{LockedBy, OwnRow, Part, Resolved, ResolvedSetting};
+use orch_settings_contract::provenance::{
+    Inherited, LockedBy, OwnRow, Part, Resolved, ResolvedSetting,
+};
 use orch_settings_contract::registry::SettingDef;
 use orch_types::{Id, Json};
 
@@ -20,6 +22,7 @@ pub struct SettingView {
     def: &'static SettingDef,
     here: Here,
     settable_here: bool,
+    inherited: Option<Resolved<Id>>,
     /// The value and where it comes from.
     pub resolved: Resolved<Id>,
     /// The row at the place itself, where there is one.
@@ -38,9 +41,15 @@ impl SettingView {
             def,
             here,
             settable_here,
+            inherited: None,
             resolved,
             own,
         }
+    }
+
+    pub(crate) fn with_inherited(mut self, inherited: Resolved<Id>) -> Self {
+        self.inherited = Some(inherited);
+        self
     }
 
     /// The registry's definition of the key.
@@ -89,7 +98,12 @@ impl SettingView {
     #[must_use]
     pub fn into_setting(self, permitted: bool) -> ResolvedSetting<Id> {
         let writable = permitted && self.open_to_write();
-        self.resolved.into_setting(self.def.key, self.own, writable)
+        let mut setting = self.resolved.into_setting(self.def.key, self.own, writable);
+        setting.inherited = self.inherited.map(|resolved| Inherited {
+            value: resolved.value,
+            source: resolved.source,
+        });
+        setting
     }
 
     /// Every node this view names: where the value comes from, where each
@@ -118,6 +132,11 @@ impl SettingView {
                     .supplied
                     .iter()
                     .filter_map(|part| part.source.node.as_ref()),
+            )
+            .chain(
+                self.inherited
+                    .iter()
+                    .filter_map(|resolved| resolved.source.node.as_ref()),
             )
             .copied()
             .collect();

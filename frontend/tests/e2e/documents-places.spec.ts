@@ -238,8 +238,9 @@ test('a document is moved beside another place, and each list shows it where it 
   await page.locator('[data-screen="document"]').getByRole('button', { name: /^Actions for / }).click();
   await page.getByRole('menuitem', { name: 'Move to…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Move to…', exact: true });
-  await dialog.getByRole('combobox', { name: 'Destination', exact: true }).fill('Upgrade');
-  await page.getByRole('option', { name: 'Acme / Research / Web / Upgrade deps', exact: true }).click();
+  await dialog.getByRole('combobox', { name: 'Destination', exact: true }).click();
+  await page.getByRole('searchbox', { name: 'Type part of a name…', exact: true }).fill('Upgrade');
+  await page.getByRole('treeitem', { name: 'Acme / Research / Web / Upgrade deps', exact: true }).click();
   // The shared form also supports cross-org moves; this chosen native place and unchanged name retain identity here.
   await expect(dialog.getByRole('button', { name: 'Take away Acme / Research / Web / Upgrade deps', exact: true })).toBeVisible();
   await expect(dialog.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('Rollout plan.md');
