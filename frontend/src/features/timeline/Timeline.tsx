@@ -418,7 +418,7 @@ const ItemRow = memo(function ItemRow({ id, head }: { id: string; head: boolean 
     case 'tool_call':
       return <ToolCallRow threadId={threadId} id={id} />;
     case 'approval':
-      return inspection === undefined ? <ApprovalCard item={item} /> : <InlineAlert tone="info">{t('trace.retainedApproval', { id: item.payload.approval_id })}</InlineAlert>;
+      return inspection === undefined ? <ApprovalCard item={item} /> : <InlineAlert tone="info">{t('trace.retainedApproval')}</InlineAlert>;
     case 'announcement':
       return <AnnouncementCard item={item} />;
     case 'marker':

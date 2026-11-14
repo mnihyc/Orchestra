@@ -1191,10 +1191,15 @@ pub mod thread_engine {
         pub placement: String,
     }
 
-    /// A machine, as a reference to it names it.
+    /// A machine, as a reference to it names it. The machine of a host's container is called by its host's name:
+    /// its own name is the container's hostname, which says nothing to a person.
     pub async fn machine_name(conn: &mut Conn, id: Id) -> Result<Option<MachineName>, DbError> {
         Ok(sqlx::query_as(
-            "SELECT id, name, online, platform_os, placement FROM machines WHERE id = $1",
+            "SELECT m.id,
+                    CASE WHEN m.placement = 'managed' THEN COALESCE(h.name, m.name) ELSE m.name END AS name,
+                    m.online, m.platform_os, m.placement
+               FROM machines m LEFT JOIN hosts h ON h.id = m.host_id
+              WHERE m.id = $1",
         )
         .bind(id)
         .fetch_optional(conn)
@@ -3155,14 +3160,18 @@ pub mod routes {
         )
     }
 
-    /// The machines `ids` that are not deleted, in one statement.
+    /// The machines `ids` that are not deleted, in one statement. The machine of a host's container is called by
+    /// its host's name: its own name is the container's hostname, which says nothing to a person.
     pub async fn machine_names(
         conn: &mut Conn,
         ids: &[Id],
     ) -> Result<Vec<MachineNameRow>, DbError> {
         Ok(sqlx::query_as(
-            "SELECT id, name, online, platform_os, placement FROM machines
-              WHERE id = ANY($1) AND deleted_at IS NULL",
+            "SELECT m.id,
+                    CASE WHEN m.placement = 'managed' THEN COALESCE(h.name, m.name) ELSE m.name END AS name,
+                    m.online, m.platform_os, m.placement
+               FROM machines m LEFT JOIN hosts h ON h.id = m.host_id
+              WHERE m.id = ANY($1) AND m.deleted_at IS NULL",
         )
         .bind(ids)
         .fetch_all(conn)
