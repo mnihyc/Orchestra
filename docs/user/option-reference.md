@@ -96,3 +96,68 @@ An option is offered only where its interface or program declares it. Provider l
 | `option:providers.presets.*.credential_hints.*.prefix` | The plain public beginning of a key format. Matching only proposes a choice; the complete key stays in the form until Save. |
 | `option:providers.presets.*.credential_hints.*.role` | The proposed role: model access or an admin credential for the facts source. A role the client does not recognize requires an explicit supported choice. |
 | `option:providers.presets.*.credential_hints.*.field` | Optional declared secret-field name for the proposed admin credential in the selected facts source. It is kept separate from model access and must be offered by that source. |
+
+
+### Live file reads
+
+| Reference | Meaning |
+| --- | --- |
+| `option:Thread.starting_since` | When the current preparation began; absent when no start is under way. |
+| `option:Thread.starting_work` | The current preparation, its command and what is ahead of it. |
+| `option:StartingWork.command` | The accepted native command for this preparation, when one is running or in line. |
+| `option:StartingWork.behind` | The work that actually holds the serial line ahead; finished capture uploads do not hold later starts. |
+| `option:Turn.files_changed` | Known changed paths at the turn end, from complete before/end coverage or the native change journal; absent means unknown. |
+| `option:Turn.files_changed_paths` | The relative changed paths known for this turn, including changes made without a file-tool patch. |
+| `option:Turn.recording_notice` | The first affected turn keeps its recording-coverage reason; a later refresh does not move the notice. |
+| `option:Turn.recording_indexing` | Indexing progress when this turn started before whole recording was ready; absent progress is not guessed. |
+| `option:TurnRecordingProgress.done` | Entries prepared when the turn started. |
+| `option:TurnRecordingProgress.total` | Entries in that preparation pass; percentage is shown only when this is known. |
+| `option:EnvironmentFileSearchQuery.cursor` | Continue the same names or content query, source and filters; omit it to start fresh. |
+| `option:FileSearchNames.entries` | Matching path observations in this page; their source is stated beside the results. |
+| `option:FileSearchNames.next_cursor` | The next part of the same traversal; null means it reached the end. |
+| `option:FileSearchNames.source` | Live traversal, or the last complete cached file index when that is the source. |
+| `option:FileSearchNames.searched` | Entries checked so far; this is not a claim that the whole directory has this many entries. |
+| `option:FileSearchNames.as_of` | The end of this page observation or the cached manifest time. |
+| `option:FileSearchNames.observed_from` | When the live observation began; cached results retain their own observation time. |
+| `option:FileSearchContent.next_cursor` | Continue text search after this window, including a time slice with no matches. |
+| `option:FileSearchContent.observed_from` | When this live text traversal began. |
+| `option:EnvironmentArchiveListQuery.cursor` | Continue the same open archive and folder without rereading the compressed prefix. |
+| `option:EnvironmentArchiveListQuery.q` | Match child names of the selected archive folder, without regard to case. |
+| `option:ArchiveListing.next_cursor` | Continue the same archive reader; a time slice can return no rows and still continue. |
+| `option:EnvironmentGitDiffGetQuery.cursor` | Continue the output of the same native Git process; omitted starts a fresh difference. |
+| `option:EnvironmentGitDiffGetQuery.max_bytes` | Preferred bytes in this difference page; omitted uses the workspace default and the wire page still applies. |
+| `option:DocumentFileArchiveListQuery.cursor` | Continue this currently authorized immutable document archive. |
+| `option:DocumentFileArchiveListQuery.q` | Filter the selected archive folder by child name. |
+| `option:UploadBlobGetQuery.cursor` | Continue an archive page only after the caller independently holds the source blob again. |
+| `option:UploadBlobGetQuery.q` | Filter child names while listing this draft archive. |
+| `option:UploadBlobGetQuery.limit` | Rows in this archive window; omitted uses the current archive-row default. |
+| `option:EnvAttach.workspace` | Resolved file-reader defaults for this attachment; they do not make large directories unavailable. |
+| `option:FsRecord.wait_for_indexing` | A chosen wait also waits for indexing; the shipped turn default starts without waiting for initial indexing. |
+| `option:FsRecordResult.indexing` | Current preparation progress when whole recording is not ready. |
+| `option:FsRecordResult.reason` | Why whole recording is unavailable; cancelled records a Stop and a resumed input asks again. |
+| `option:FsSearch.scope` | Names or text content, both with live continuation. |
+| `option:FsSearch.cursor` | Continue exactly this live query and attachment. |
+| `option:FsArchiveList.cursor` | Continue the same open archive traversal. |
+| `option:FsArchiveList.query` | A case-insensitive substring of the displayed child name. |
+| `option:GitDiff.cursor` | Continue the same process output instead of running its prefix again. |
+| `option:GitDiff.max_bytes` | Preferred bytes in the next page, within the existing wire representation. |
+| `option:CmdAck.key_phase` | Actual queued, running or released ownership; acceptance alone does not pause a recording deadline. |
+| `option:EnvironmentFacts.recording` | Current whole-recording coverage; incomplete coverage is never reported as a complete state. |
+| `option:EnvironmentFacts.exclusion_problem` | The unapplied exclusion source, line when known and safe reason; no rule contents are disclosed. |
+| `option:ExclusionProblem.path` | The relative exclusion source or configured-rule name that needs correction. |
+| `option:ExclusionProblem.line` | The one-based invalid line when known. |
+| `option:ExclusionProblem.reason` | A safe reason such as unreadable, linked, oversized, invalid encoding or invalid pattern. |
+| `option:WorkspaceLimits.directory_entries` | Resolved workspace.directory_entries default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.search_results` | Resolved workspace.search_results default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.archive_results` | Resolved workspace.archive_results default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.index_entries` | Resolved workspace.index_entries default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.index_scan_secs` | Resolved workspace.index_scan_secs default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.ignore_max_bytes` | Resolved workspace.ignore_max_bytes default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.ignore_cache_bytes` | Resolved workspace.ignore_cache_bytes default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.directory_idle_secs` | Resolved workspace.directory_idle_secs default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.directory_slots` | Resolved workspace.directory_slots default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.directory_cache_bytes` | Resolved workspace.directory_cache_bytes default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.directory_builds` | Resolved workspace.directory_builds default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.directory_page_bytes` | Resolved workspace.directory_page_bytes default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.search_slice_secs` | Resolved workspace.search_slice_secs default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.git_diff_bytes` | Resolved workspace.git_diff_bytes default for this attachment; explicit requests and continuation keep the act available. |

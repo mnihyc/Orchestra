@@ -4,7 +4,7 @@
  * turn recorded and what Git says is uncommitted: the tab of a difference reads the one it was opened
  * for and draws it in the file's own colours, in one column or two, with the words that changed marked.
  */
-import { useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { FileDiff, MessageSquarePlus } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -17,6 +17,7 @@ import { DiffView, type DiffLayout } from '@/ui/DiffView';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
 import { IconButton } from '@/ui/IconButton';
+import { Button } from '@/ui/Button';
 import { SkeletonRows } from '@/ui/Skeleton';
 
 import { addToMessage } from '../AddToMessage';
@@ -54,11 +55,13 @@ export function DifferenceTab({ tab }: ViewProps) {
   useTabName(tab.id, title === '' ? undefined : t('files.difference.tab', { name: title }), FileDiff);
 
   const changes = useQuery({ ...changesQuery(door ?? { environmentId: '', threadId: null }, true, undefined, of?.item === '' ? undefined : of?.item), enabled: of?.kind === 'change' && door !== null });
-  const git = useQuery({
+  const git = useInfiniteQuery({
     queryKey: workspaceKeys.gitDiff(door ?? { environmentId: '', threadId: null }, of?.staged ?? false),
-    queryFn: ({ signal }) => gitDiff(door ?? { environmentId: '', threadId: null }, of?.staged ?? false, signal),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ signal, pageParam }) => gitDiff(door ?? { environmentId: '', threadId: null }, of?.staged ?? false, signal, pageParam),
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
     // The server hands over the difference of the whole repository: the file's part is cut out of it.
-    select: (whole) => ({ text: partOfDiff(whole.text, of?.path ?? ''), truncated: whole.truncated }),
+    select: (whole) => ({ text: partOfDiff(whole.pages.map((page) => page.text).join(''), of?.path ?? ''), truncated: whole.pages.at(-1)?.truncated ?? false }),
     enabled: of?.kind === 'git' && door !== null,
   });
 
@@ -72,6 +75,7 @@ export function DifferenceTab({ tab }: ViewProps) {
     return (
       <div className="flex h-full min-h-0 flex-col">
         <Header path={of.path} threadId={door.threadId} text={git.data.text} />
+        {git.hasNextPage && <Button size="sm" variant="ghost" pending={git.isFetchingNextPage} onClick={() => void git.fetchNextPage()}>{t('files.difference.more')}</Button>}
         <div className="min-h-0 flex-1 overflow-auto p-2" style={FILLS}>
           <ReviewableDiff threadId={door.threadId ?? ''} path={of.path} itemId={null} mayComment={door.threadId !== null} diff={git.data.text === '' ? null : git.data.text} layout={layout} onLayout={setLayout} label={t('files.difference.label', { name: of.path })} truncated={git.data.truncated} />
         </div>

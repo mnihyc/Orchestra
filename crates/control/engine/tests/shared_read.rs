@@ -246,7 +246,7 @@ async fn the_bound_of_bytes_keeps_whole_turns_and_says_what_is_left() {
         "a part larger than everything asked for is cut, and says so"
     );
     assert!(one["text"].as_str().unwrap().len() <= 1_000);
-    let too_small = read(&p, json!({ "path": path, "max_bytes": 10 })).await;
+    let too_small = read(&p, json!({ "path": path, "max_bytes": 0 })).await;
     assert_eq!(refused(&too_small).0, "invalid");
 }
 

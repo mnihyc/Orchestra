@@ -1,0 +1,17 @@
+fmt
+clippy
+contracts
+test -p orch-envhost --lib
+test -p orch-envhost --test environment
+test -p orch-engine --lib -- tools::definitions::
+test -p orch-engine --lib -- jobs::continuation::tests::lifecycle::
+test -p orch-engine --test source --test live_mounts --test shared_read --test orch_tools
+test -p orch-api-core --test workspace_source --test workspace_looking --test workspace_source_scopes --test workspace_pages --test workspace_connector
+test -p orch-api-base --lib -- archives::
+test -p orch-api-environments --lib
+test -p orch-db --lib -- queries::link::
+test -p orch-link-contract --lib
+test -p orch-agent-contract --lib
+test -p orch-settings-contract --lib
+test -p orch-connector-core --lib -- orch_tools::
+test -p orch-connector-core --test recording_keys --test link_cuts

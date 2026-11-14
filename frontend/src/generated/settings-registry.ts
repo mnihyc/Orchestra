@@ -676,9 +676,11 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "topic"
     ],
     "merge": "map",
-    "default": {},
+    "default": {
+      "codex.cyber_access": true
+    },
     "example": {
-      "vision": true
+      "codex.cyber_access": false
     },
     "text_key": "day100.builtin.agent.features",
     "keywords": []
@@ -1690,6 +1692,30 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
+    "key": "models.add_switches_on",
+    "title": "Switched on when added",
+    "description": "What a model starts with when it is added from its provider's catalogue: everything it offers (all), only its efforts and context sizes (basic), or only its window and efforts (nothing). A manager can switch on the rest afterwards.",
+    "group": "models",
+    "schema": {
+      "type": "string",
+      "enum": [
+        "all",
+        "basic",
+        "nothing"
+      ]
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "replace",
+    "default": "all",
+    "example": "basic",
+    "text_key": "day100.builtin.models.add_switches_on",
+    "keywords": []
+  },
+  {
     "key": "collab.attribution",
     "title": "Attribution",
     "description": "Whether Orch's composed input, stop, denial and forwarded text names people: auto once a second person's words are delivered, always, or never (a person/an approver, with source, time and notes kept). Authored chats and documents retain their writers.",
@@ -2666,6 +2692,89 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
+    "key": "orch_tools.read_bytes",
+    "title": "Shared read bytes",
+    "description": "Default UTF-8 bytes in a shared read or tool answer; explicit positive byte windows can differ.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 20000,
+    "example": 80000,
+    "text_key": "day100.builtin.orch_tools.read_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "orch_tools.list_depth",
+    "title": "Shared listing depth",
+    "description": "Default levels in a shared listing; continuation retains the remaining entries.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 1,
+    "example": 9,
+    "text_key": "day100.builtin.orch_tools.list_depth",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "orch_tools.list_rows",
+    "title": "Shared listing rows",
+    "description": "Default rows in a shared listing page; explicit positive windows can differ.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 50,
+    "example": 300,
+    "text_key": "day100.builtin.orch_tools.list_rows",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
     "key": "orch_tools.search_query_chars",
     "title": "Shared search query budget",
     "description": "The query character budget advertised to this thread's agent and used by shared search. Defaults to 1000; increase it for longer queries.",
@@ -3557,7 +3666,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "workspace.ignore",
     "title": "Ignored paths",
-    "description": "Patterns, written as in a gitignore file, for what the index of a workspace leaves out.",
+    "description": "Patterns, written as in a gitignore file, for paths to hide in a workspace: they are absent from its file lists, search, listings of the tree and recorded turn files, and cannot be read or written through Orch. It is for what a person wants hidden, never for speed: a large tree needs no list.",
     "group": "workspace",
     "schema": {
       "type": "array",
@@ -3584,7 +3693,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "workspace.index",
     "title": "Index",
-    "description": "Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online.",
+    "description": "Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online. An online workspace is listed one directory at a time from its machine either way, however large the tree.",
     "group": "workspace",
     "schema": {
       "type": "string",
@@ -3605,6 +3714,369 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "example": "live",
     "text_key": "day100.builtin.workspace.index",
     "keywords": []
+  },
+  {
+    "key": "workspace.index_entries",
+    "title": "Cached file entries",
+    "description": "Path metadata kept in the incremental working set; larger directories remain browsable and searchable live.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 250000,
+    "example": 250000,
+    "text_key": "day100.builtin.workspace.index_entries",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.index_scan_secs",
+    "title": "Indexing slice",
+    "description": "Seconds of initial indexing before retaining incremental coverage and continuing with live reads.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 10,
+    "example": 10,
+    "text_key": "day100.builtin.workspace.index_scan_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.ignore_max_bytes",
+    "title": "Exclusion parsing",
+    "description": "Bytes allowed when parsing one local exclusion file; a file that cannot be applied reports its source and never exposes an unknown scope.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 1048576,
+    "example": 1048576,
+    "text_key": "day100.builtin.workspace.ignore_max_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.ignore_cache_bytes",
+    "title": "Cached exclusion rules",
+    "description": "Source bytes and record metadata retained for parsed exclusion rules; older parses are read again when needed.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 16777216,
+    "example": 16777216,
+    "text_key": "day100.builtin.workspace.ignore_cache_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.directory_idle_secs",
+    "title": "Folder continuation idle time",
+    "description": "Seconds an unused folder observation is kept before transparent renewal when the folder is unchanged.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 300,
+    "example": 300,
+    "text_key": "day100.builtin.workspace.directory_idle_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.directory_slots",
+    "title": "Folder observations",
+    "description": "Folder observations retained on one machine; unused observations are evicted before admitting another reader.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 256,
+    "example": 256,
+    "text_key": "day100.builtin.workspace.directory_slots",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.directory_cache_bytes",
+    "title": "File read cache",
+    "description": "Shared working bytes for directory metadata and live file-read continuation buffers; existing work stays charged until it ends.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 1073741824,
+    "example": 268435456,
+    "text_key": "day100.builtin.workspace.directory_cache_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.directory_builds",
+    "title": "Folder metadata reads",
+    "description": "Concurrent folder metadata builds on one machine; waiting readers retain their place.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 1,
+    "example": 1,
+    "text_key": "day100.builtin.workspace.directory_builds",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.directory_page_bytes",
+    "title": "Folder page bytes",
+    "description": "Default metadata bytes in one folder page; continuation retains all remaining entries.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 2097152,
+    "example": 2097152,
+    "text_key": "day100.builtin.workspace.directory_page_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.directory_entries",
+    "title": "Folder rows",
+    "description": "Default rows in one page; an explicit window can differ and continuation keeps the rest.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 5000,
+    "example": 10000,
+    "text_key": "day100.builtin.workspace.directory_entries",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.search_results",
+    "title": "File search rows",
+    "description": "Default rows in one page; an explicit window can differ and continuation keeps the rest.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 200,
+    "example": 400,
+    "text_key": "day100.builtin.workspace.search_results",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.archive_results",
+    "title": "Archive rows",
+    "description": "Default rows in one page; an explicit window can differ and continuation keeps the rest.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 1000,
+    "example": 2000,
+    "text_key": "day100.builtin.workspace.archive_results",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.search_slice_secs",
+    "title": "File search slice",
+    "description": "Seconds of work in one file-search page; continuation resumes the remaining search.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 20,
+    "example": 20,
+    "text_key": "day100.builtin.workspace.search_slice_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.git_diff_bytes",
+    "title": "Diff bytes",
+    "description": "Default bytes in one diff read; continuation retains the rest of the selected diff.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 2097152,
+    "example": 2097152,
+    "text_key": "day100.builtin.workspace.git_diff_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
   },
   {
     "key": "source.repository_url",
@@ -3739,6 +4211,33 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": [],
     "display": {
       "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.record_wait_secs",
+    "title": "Wait for turn files",
+    "description": "Seconds to wait for a whole recording before a turn. The shipped default skips initial indexing; choosing a wait also waits for indexing. Changed files can still be restored individually when whole recording is not ready.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 5,
+    "example": 5,
+    "text_key": "day100.builtin.workspace.record_wait_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
       "zero": null
     }
   },
@@ -6525,7 +7024,54 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "thread"
     ],
     "merge": "map",
-    "default": {},
+    "default": {
+      "thread": {
+        "automatic": false,
+        "on": [
+          "turn_completed",
+          "milestone"
+        ],
+        "min_interval_secs": 120,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "topic": {
+        "automatic": false,
+        "on": [
+          "child_changed"
+        ],
+        "min_interval_secs": 900,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "document": {
+        "automatic": false,
+        "on": [
+          "content_changed"
+        ],
+        "min_interval_secs": 300,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "chat": {
+        "automatic": false,
+        "on": [
+          "message_posted"
+        ],
+        "min_interval_secs": 300,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "chat_title": {
+        "automatic": false,
+        "on": [
+          "message_posted"
+        ],
+        "min_interval_secs": 300,
+        "context_tokens": 32000,
+        "output_chars": 80
+      }
+    },
     "example": {
       "thread": {
         "automatic": true,

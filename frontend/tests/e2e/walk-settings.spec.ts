@@ -195,7 +195,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
       await expect(start).toBeEnabled();
       await composer.getByRole('button', { name: words.start.quick.change, exact: true }).click();
       const dialog = page.getByRole('dialog', { name: words.start.title.replace('{{parent}}', 'Fix login'), exact: true });
-      await expect(dialog.getByRole('combobox', { name: words.start.agent.title, exact: true })).toHaveValue('Codex');
+      await expect(dialog.getByRole('button', { name: new RegExp(`^${words.composer.row.agentName}`) })).toContainText('Codex');
       expect(reads).toHaveLength(1);
       await dialog.getByRole('button', { name: words.start.options.title, exact: true }).click();
       const draft = dialog.getByRole('textbox', { name: words.start.message.title, exact: true });
@@ -204,7 +204,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
       await page.getByRole('option', { name: 'Sandbox', exact: true }).click();
       await expect.poll(() => reads.length).toBe(2);
       expect(reads[1]?.searchParams.get('environment_id')).toBe(RUNS_ON.sandbox);
-      await expect(dialog.getByRole('combobox', { name: words.start.agent.title, exact: true })).toHaveValue('Codex');
+      await expect(dialog.getByRole('button', { name: new RegExp(`^${words.composer.row.agentName}`) })).toContainText('Codex');
       await expect(draft).toHaveValue('Keep the first paint and this draft');
       await expect(dialog.getByRole('button', { name: words.start.create, exact: true })).toBeDisabled();
       await info.attach('topic-binding-change', { body: await page.screenshot(), contentType: 'image/png' });
@@ -274,12 +274,12 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await page.locator('[data-quick-start]').getByRole('button', { name: words.start.quick.change, exact: true }).click();
     const dialog = page.getByRole('dialog', { name: words.start.title.replace('{{parent}}', 'Fix login'), exact: true });
     await expect(dialog.getByRole('combobox', { name: words.start.where.title, exact: true })).toHaveValue('Workspace');
-    const agent = dialog.getByRole('combobox', { name: words.start.agent.title, exact: true });
-    await expect(agent).toHaveValue('Codex');
+    const agent = dialog.getByRole('button', { name: new RegExp(`^${words.composer.row.agentName}`) });
+    await expect(agent).toContainText('Codex');
     await agent.click();
-    await expect(page.getByRole('option', { name: 'Codex', exact: true })).not.toHaveAttribute('aria-disabled', 'true');
+    await expect(page.getByRole('menuitemradio', { name: /^Codex/ })).toBeEnabled();
     await page.keyboard.press('Escape');
-    await expect(agent).toHaveValue('Codex');
+    await expect(agent).toContainText('Codex');
     expect(judged).toContain(RUNS_ON.workspace);
     await info.attach('reported-agent-selected', { body: await page.screenshot(), contentType: 'image/png' });
     await dialog.getByRole('button', { name: words.start.create, exact: true }).click();
