@@ -19,6 +19,7 @@ use crate::unit::Unit;
 use orch_agent_contract::descriptor::AgentDescriptor;
 use orch_db::queries::resources::binding as resources_binding;
 use orch_db::queries::resources::thread_engine::{self as resources, AgentRow, ProviderRow};
+use orch_db::queries::threads;
 use orch_link_contract::commands::{
     AgentDiscoverSessions, AgentDiscoverSessionsResult, AgentStart, AgentStartResult, AgentStop,
     CommandError, ErrorCode, SerialKey, UnitAfterUp, UnitAfterUpResult,
@@ -89,12 +90,16 @@ pub struct SessionConfiguration {
     pub memory: Option<orch_link_contract::commands::SessionOpenMemory>,
     /// The native executor build named by the accepted tool ticket.
     pub executor_version: Option<String>,
+    /// The accepted workspace configuration and exact files the environment answered for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_configuration: Option<orch_link_contract::commands::WorkspaceConfiguration>,
 }
 
 impl From<&orch_link_contract::commands::SessionOpen> for SessionConfiguration {
     fn from(open: &orch_link_contract::commands::SessionOpen) -> Self {
         Self {
             cwd: open.cwd.clone(),
+            workspace_configuration: open.workspace_configuration.clone(),
             prompt_cache_ttl: open.prompt_cache_ttl,
             background_wake: open.background_wake,
             image_generation: open.image_generation,
@@ -134,6 +139,53 @@ impl From<&orch_link_contract::commands::SessionOpen> for SessionConfiguration {
     }
 }
 
+/// What an accepted opening of a session was asked, as digests: kept with the segment (`segments.session_hints`) so that
+/// a server that starts again knows the sessions that are still open in the harnesses and asks for none of them
+/// again. A record that is out of date (the harness started again meanwhile) costs one turn start that the harness
+/// answers with `SessionNotFound`, after which the session is opened as it always was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionHints {
+    /// The thread the segment belongs to.
+    pub thread: Id,
+    /// The harness process the session was opened in.
+    pub harness: HarnessKey,
+    /// The instructions the opening was given.
+    pub instructions: orch_types::Hash,
+    /// The sub-agent limits the opening was told to enforce.
+    pub subagent_limits: orch_agent_contract::session::SubagentLimits,
+    /// The external MCP definitions the opening was given.
+    pub mcp: orch_types::Hash,
+    /// The Orch tool catalogue the opening was given.
+    pub orch_tools: orch_types::Hash,
+    /// The skill versions the opening was given.
+    pub skills: orch_types::Hash,
+}
+
+impl SessionHints {
+    /// The hints of an opening that was accepted.
+    #[must_use]
+    pub(crate) fn of(
+        thread: Id,
+        harness: HarnessKey,
+        instructions: &str,
+        subagent_limits: orch_agent_contract::session::SubagentLimits,
+        mcp: McpRevision,
+        orch_tools: OrchToolsRevision,
+        skills: orch_types::Hash,
+    ) -> Self {
+        Self {
+            thread,
+            harness,
+            instructions: orch_types::Hash::of(instructions.as_bytes()),
+            subagent_limits,
+            mcp: mcp.0,
+            orch_tools: orch_tools.0,
+            skills,
+        }
+    }
+}
+
 /// The sessions this process saw opened, and in which harness process.
 #[derive(Debug, Default)]
 pub struct OpenSessions {
@@ -143,7 +195,14 @@ pub struct OpenSessions {
     requested_orch_tools: HashMap<Id, OrchToolsRevision>,
     requested_subagent_limits: HashMap<Id, orch_agent_contract::session::SubagentLimits>,
     accepted_configuration: HashMap<Id, SessionConfiguration>,
+    /// What a record kept of the accepted configuration, for a segment this process did not see opened.
+    restored_configuration: HashMap<Id, Json>,
     requested_skills: HashMap<Id, orch_types::Hash>,
+    /// The segments whose session this process has opened, closed or restored: a record kept with a segment is
+    /// read back only for one this process has not seen, so that what this process closed stays closed.
+    seen: std::collections::HashSet<Id>,
+    /// The segments this process closed since their records were last cleared.
+    forgotten: Vec<Id>,
 }
 
 impl OpenSessions {
@@ -155,18 +214,72 @@ impl OpenSessions {
 
     /// The session of a segment of `thread` was opened in `key`.
     pub fn opened(&mut self, segment: Id, thread: Id, key: HarnessKey) {
+        self.seen.insert(segment);
         self.by_segment.insert(segment, (thread, key));
+    }
+
+    /// Whether this process has not opened, closed or restored the session of a segment: a record of an earlier
+    /// opening, kept with the segment, may still say that it is open.
+    pub(crate) fn is_unseen(&self, segment: Id) -> bool {
+        !self.seen.contains(&segment)
+    }
+
+    /// The segments this process closed since the last call, whose records are to be cleared.
+    pub(crate) fn take_forgotten(&mut self) -> Vec<Id> {
+        std::mem::take(&mut self.forgotten)
+    }
+
+    /// Puts segments back whose records could not be cleared.
+    pub(crate) fn put_back_forgotten(&mut self, segments: Vec<Id>) {
+        self.forgotten.extend(segments);
+    }
+
+    /// Says that the sessions of these segments are not open any longer, and that no record may bring them back.
+    fn forget(&mut self, segments: Vec<Id>) {
+        self.seen.extend(segments.iter().copied());
+        self.forgotten.extend(segments);
     }
 
     /// Whether the effective cwd/notes plan differs from the last acknowledged opening.
     #[must_use]
     pub fn configuration_changed(&self, segment: Id, configuration: &SessionConfiguration) -> bool {
-        self.accepted_configuration.get(&segment) != Some(configuration)
+        match self.accepted_configuration.get(&segment) {
+            Some(accepted) => accepted != configuration,
+            None => match self.restored_configuration.get(&segment) {
+                Some(stored) => serde_json::to_value(configuration).ok().as_ref() != Some(stored),
+                None => true,
+            },
+        }
     }
 
-    /// Whether this API process observed the actual successful opening.
+    /// Whether the actual successful opening is known: this process observed it, or a record of it was read back.
     pub(crate) fn configuration_known(&self, segment: Id) -> bool {
         self.accepted_configuration.contains_key(&segment)
+            || self.restored_configuration.contains_key(&segment)
+    }
+
+    /// Takes up what a record of an earlier opening says: the session of `segment` is open in `hints.harness`,
+    /// opened with what the digests say.
+    pub(crate) fn restore(
+        &mut self,
+        segment: Id,
+        hints: SessionHints,
+        configuration: Option<Json>,
+    ) {
+        self.seen.insert(segment);
+        self.by_segment
+            .insert(segment, (hints.thread, hints.harness));
+        self.requested_instructions
+            .insert(segment, hints.instructions);
+        self.requested_subagent_limits
+            .insert(segment, hints.subagent_limits);
+        self.requested_mcp.insert(segment, McpRevision(hints.mcp));
+        self.requested_orch_tools
+            .insert(segment, OrchToolsRevision(hints.orch_tools));
+        self.requested_skills.insert(segment, hints.skills);
+        if let Some(configuration) = configuration {
+            self.restored_configuration.insert(segment, configuration);
+        }
     }
 
     /// Records only an actual successful SessionOpen body, never a requested or refused change.
@@ -242,6 +355,13 @@ impl OpenSessions {
 
     /// No session of the thread is known to be open.
     pub fn forget_thread_sessions(&mut self, thread: Id) {
+        let dropped: Vec<Id> = self
+            .by_segment
+            .iter()
+            .filter(|(_, (held_by, _))| *held_by == thread)
+            .map(|(segment, _)| *segment)
+            .collect();
+        self.forget(dropped);
         self.by_segment.retain(|_, (held_by, _)| *held_by != thread);
         self.requested_instructions
             .retain(|id, _| self.by_segment.contains_key(id));
@@ -253,24 +373,35 @@ impl OpenSessions {
             .retain(|id, _| self.by_segment.contains_key(id));
         self.accepted_configuration
             .retain(|id, _| self.by_segment.contains_key(id));
+        self.restored_configuration
+            .retain(|id, _| self.by_segment.contains_key(id));
         self.requested_skills
             .retain(|id, _| self.by_segment.contains_key(id));
     }
 
     /// The session of a segment is not open any longer.
     pub fn closed(&mut self, segment: Id) {
+        self.forget(vec![segment]);
         self.by_segment.remove(&segment);
         self.requested_instructions.remove(&segment);
         self.requested_mcp.remove(&segment);
         self.requested_orch_tools.remove(&segment);
         self.requested_subagent_limits.remove(&segment);
         self.accepted_configuration.remove(&segment);
+        self.restored_configuration.remove(&segment);
         self.requested_skills.remove(&segment);
     }
 
     /// The harness process `key` was started anew or went away: none of the
     /// sessions it held is known to be open.
     pub fn restarted(&mut self, key: HarnessKey) {
+        let dropped: Vec<Id> = self
+            .by_segment
+            .iter()
+            .filter(|(_, (_, held))| *held == key)
+            .map(|(segment, _)| *segment)
+            .collect();
+        self.forget(dropped);
         self.by_segment.retain(|_, (_, held)| *held != key);
         self.requested_instructions
             .retain(|id, _| self.by_segment.contains_key(id));
@@ -279,6 +410,8 @@ impl OpenSessions {
         self.requested_orch_tools
             .retain(|id, _| self.by_segment.contains_key(id));
         self.accepted_configuration
+            .retain(|id, _| self.by_segment.contains_key(id));
+        self.restored_configuration
             .retain(|id, _| self.by_segment.contains_key(id));
         self.requested_skills
             .retain(|id, _| self.by_segment.contains_key(id));
@@ -297,6 +430,13 @@ impl OpenSessions {
 
     /// Every session on `machine` is gone from view: it went away.
     pub fn machine_lost(&mut self, machine: Id) {
+        let dropped: Vec<Id> = self
+            .by_segment
+            .iter()
+            .filter(|(_, (_, held))| held.machine == machine)
+            .map(|(segment, _)| *segment)
+            .collect();
+        self.forget(dropped);
         self.by_segment
             .retain(|_, (_, held)| held.machine != machine);
         self.requested_mcp
@@ -304,6 +444,8 @@ impl OpenSessions {
         self.requested_orch_tools
             .retain(|id, _| self.by_segment.contains_key(id));
         self.accepted_configuration
+            .retain(|id, _| self.by_segment.contains_key(id));
+        self.restored_configuration
             .retain(|id, _| self.by_segment.contains_key(id));
     }
 }
@@ -807,6 +949,58 @@ impl Engine {
         Box::pin(self.ensure_harness_with_preparation(key, agent, command, None)).await
     }
 
+    /// A thread may withdraw its wait without dropping a process transaction or cancelling the shared start.
+    pub(crate) async fn ensure_harness_for_turn(
+        &self,
+        key: HarnessKey,
+        agent: &AgentRow,
+        command: Id,
+        turn: Id,
+    ) -> Result<Option<Started>, EngineError> {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        lock(&self.inner.start_waits).insert(turn, cancel.clone());
+        let current = async {
+            let mut conn = self.inner.db.acquire().await?;
+            threads::turn(&mut conn, turn).await
+        }
+        .await;
+        match current {
+            Ok(Some(row)) if row.state == "starting" && row.interrupted_by.is_none() => {}
+            other => {
+                lock(&self.inner.start_waits).remove(&turn);
+                return match other {
+                    Err(error) => Err(error.into()),
+                    _ => Ok(None),
+                };
+            }
+        }
+        let engine = self.clone();
+        let agent = agent.clone();
+        let serial = self.harness_serial(key);
+        let withdrawn = cancel.clone();
+        let starting = tokio::spawn(async move {
+            let _held = tokio::select! {
+                biased;
+                () = withdrawn.cancelled() => return Ok(Started::Up),
+                held = serial.lock() => held,
+            };
+            // From here the process serves every waiter. Finish it even if this turn leaves.
+            engine
+                .ensure_harness_locked(key, &agent, command, None)
+                .await
+        });
+        let result = tokio::select! {
+            biased;
+            () = cancel.cancelled() => Ok(None),
+            joined = starting => match joined {
+                Ok(result) => result.map(Some),
+                Err(error) => Err(EngineError::unreadable(format!("the shared process start did not finish: {error}"))),
+            },
+        };
+        lock(&self.inner.start_waits).remove(&turn);
+        result
+    }
+
     /// The profile the program is started with: an option that holds back the end of a turn which the profile does not
     /// set takes its default, or less where `[engine] interrupt_force_secs` leaves less (see
     /// [`orch_agent_contract::turn_end_delays`]). A value the profile sets is kept as it is; the profile that sets one
@@ -853,6 +1047,18 @@ impl Engine {
     ) -> Result<Started, EngineError> {
         let serial = self.harness_serial(key);
         let _held = serial.lock().await;
+        self.ensure_harness_locked(key, agent, command, preparation)
+            .await
+    }
+
+    /// The caller owns the harness serial lock for all process effects and database transactions.
+    async fn ensure_harness_locked(
+        &self,
+        key: HarnessKey,
+        agent: &AgentRow,
+        command: Id,
+        preparation: Option<&preparation::Preparation>,
+    ) -> Result<Started, EngineError> {
         if let Some(source) = preparation {
             source
                 .check_selection(self, preparation::Target::Harness(key))
@@ -1688,6 +1894,7 @@ mod tests {
             restart_sensitive: None,
             memory: None,
             executor_version: None,
+            workspace_configuration: None,
         };
         let mut sessions = OpenSessions::default();
         sessions.opened(segment, thread, process);
@@ -1697,6 +1904,38 @@ mod tests {
         );
         sessions.configuration_accepted(segment, configuration.clone());
         assert!(!sessions.configuration_changed(segment, &configuration));
+        for (answer, files) in [
+            (
+                orch_link_contract::commands::ConfigTrust::Trust,
+                "first-files",
+            ),
+            (
+                orch_link_contract::commands::ConfigTrust::KeepOut,
+                "first-files",
+            ),
+            (
+                orch_link_contract::commands::ConfigTrust::KeepOut,
+                "changed-files",
+            ),
+        ] {
+            let trust = SessionConfiguration {
+                workspace_configuration: Some(
+                    orch_link_contract::commands::WorkspaceConfiguration {
+                        answer,
+                        files: files.to_owned(),
+                    },
+                ),
+                ..configuration.clone()
+            };
+            assert!(
+                sessions.configuration_changed(segment, &trust),
+                "a first answer, changed answer or new file revision reaches the session"
+            );
+            sessions.configuration_accepted(segment, trust.clone());
+            assert!(!sessions.configuration_changed(segment, &trust));
+        }
+        sessions.configuration_accepted(segment, configuration.clone());
+
         let details = SessionConfiguration {
             model_details: Some(
                 serde_json::json!({"model":"current","parameters":{"context_window":40_000}}),

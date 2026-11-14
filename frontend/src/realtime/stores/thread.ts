@@ -144,8 +144,18 @@ export const EMPTY_VIEW: ThreadView = {
 
 const MAIN_STREAM = 'main';
 
-/** Orders two queue positions, which are decimal strings of any length. */
+/** Orders two queue positions, which are decimal strings of any length. A message put first takes the place one below the first that waits,
+ * so a position can be zero or negative: the sign is read before the length is, or the second message put first would stand last. */
 export function comparePositions(one: string, other: string): number {
+  const below = one.startsWith('-');
+  const otherBelow = other.startsWith('-');
+  if (below !== otherBelow) return below ? -1 : 1;
+  const order = comparePlaces(below ? one.slice(1) : one, otherBelow ? other.slice(1) : other);
+  return order === 0 || !below ? order : -order;
+}
+
+/** Orders two unsigned decimal strings. */
+function comparePlaces(one: string, other: string): number {
   const [wholeOne = '0', fractionOne = ''] = one.split('.');
   const [wholeOther = '0', fractionOther = ''] = other.split('.');
   const left = wholeOne.replace(/^0+(?=\d)/, '');
@@ -538,6 +548,12 @@ function accepts(view: ThreadView, threadId: ThreadReadTarget, rows: ThreadRows,
 
 export function threadReadOnly(view: ThreadView): boolean {
   return view.closed !== null || view.read !== null && (view.read.selection !== null || !view.read.ready
+    || view.read.projection !== null && view.read.projection.viewed_continuation_id !== view.read.projection.active_continuation_id);
+}
+
+/** Stop names current work and needs no history revision, even while that history reloads. */
+export function threadStopReadOnly(view: ThreadView): boolean {
+  return view.closed !== null || view.read !== null && (view.read.selection !== null
     || view.read.projection !== null && view.read.projection.viewed_continuation_id !== view.read.projection.active_continuation_id);
 }
 

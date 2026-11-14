@@ -5300,7 +5300,9 @@ async fn a_kept_builtin_thread_accepts_ordinary_input_as_its_current_sender() {
         .app
         .call(ThreadInterrupt, &[&kept.thread_id])
         .token(&s.cai.token)
-        .body(&ThreadInterruptBody { turn_id: new_id() })
+        .body(&ThreadInterruptBody {
+            turn_id: Some(new_id()),
+        })
         .send()
         .await;
     assert!(stale.status.is_client_error());
@@ -5316,10 +5318,14 @@ async fn a_kept_builtin_thread_accepts_ordinary_input_as_its_current_sender() {
         .app
         .call(ThreadInterrupt, &[&kept.thread_id])
         .token(&s.cai.token)
-        .body(&ThreadInterruptBody { turn_id: turn })
+        .body(&ThreadInterruptBody {
+            turn_id: Some(turn),
+        })
         .send()
         .await
-        .ok();
+        .ok()
+        .turn
+        .expect("the answer is the turn it names");
     assert_eq!(stopped.id, turn);
     assert_eq!(
         stopped.state,

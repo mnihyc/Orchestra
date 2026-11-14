@@ -301,7 +301,18 @@ async fn a_pending_or_failed_source_retains_the_first_input_until_explicit_prepa
             .await
             .unwrap();
         if state == SourceState::Failed {
-            world.wait_blocked(thread, "error").await;
+            world.wait_blocked(thread, "source_failed").await;
+            let detail: Option<String> = world
+                .scalar(
+                    "SELECT blocked_detail FROM threads WHERE node_id=$1",
+                    thread,
+                )
+                .await;
+            assert_eq!(
+                detail.as_deref(),
+                Some("Source preparation failed. Choose Prepare again to retry.")
+            );
+            assert!(!detail.unwrap().contains("authentication_failed"));
             world.engine().wake(thread);
             let outcome = world.engine().preflight(thread).await.unwrap();
             assert!(
@@ -792,7 +803,10 @@ async fn complete_before_and_watcher_end_states_make_one_bounded_actual_change_h
         end_pins, 1,
         "the turn retains its verified end manifest for later comparisons"
     );
-    let end_files = turn.files_end_manifest.as_ref().unwrap();
+    let end_files = threads::turn_end_namespace(&mut conn, start.turn_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         end_files["code"]["h"],
         serde_json::to_value(Hash::of(b"after")).unwrap()
@@ -911,7 +925,12 @@ async fn complete_before_and_watcher_end_states_make_one_bounded_actual_change_h
         .unwrap()
         .unwrap();
     assert_eq!(kept_turn.before_snapshot_id, Some(snapshot.id));
-    assert_eq!(kept_turn.files_end_manifest, turn.files_end_manifest);
+    assert_eq!(
+        threads::turn_end_namespace(&mut conn, start.turn_id)
+            .await
+            .unwrap(),
+        Some(end_files.clone())
+    );
     assert!(kept_turn.end_manifest_blob.is_none());
     let expired = storage::snapshot(&mut conn, snapshot.id)
         .await
@@ -932,3 +951,152 @@ async fn complete_before_and_watcher_end_states_make_one_bounded_actual_change_h
 
 #[path = "source/touched_restore.rs"]
 mod touched_restore;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_while_the_files_are_recorded_ends_the_wait_and_holds_the_message_with_no_turn() {
+    let world = World::new().await;
+    world.machine.handler.on(CommandKind::FsRecord, |_| {
+        Ok(CommandResult::FsRecord(fallback()))
+    });
+    world.machine.handler.hold(CommandKind::FsRecord);
+    let thread = world.thread("Stop before the turn").await;
+    let ada = Caller::session(world.ada);
+    let sent = world
+        .engine()
+        .submit_input(&ada, thread, queued("Keep this input"))
+        .await
+        .unwrap();
+    world.wait_began(CommandKind::FsRecord, 1).await;
+    assert_eq!(world.state(thread).await.0, "starting");
+    // There is no turn to name: the Stop is of the start itself.
+    let stopped = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        world.engine().stop_thread(&ada, thread, None),
+    )
+    .await
+    .expect("a Stop is answered while the files are being recorded")
+    .unwrap();
+    assert!(stopped.turn.is_none());
+    world.wait_state(thread, "idle").await;
+    let sync = world.sync(thread).await;
+    assert!(
+        sync.thread.queue.held,
+        "what the Stop holds is the message, which stays"
+    );
+    assert_eq!(world.input_state(sent.input.id).await.0, "pending");
+    assert_eq!(
+        world
+            .count("SELECT count(*) FROM turns WHERE thread_id = $1", thread)
+            .await,
+        0
+    );
+    world.machine.handler.release();
+    common::meanwhile(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        world.turn_starts(thread).len(),
+        0,
+        "nothing starts the turn behind the Stop's back"
+    );
+    assert_eq!(world.began(CommandKind::SessionOpen), 0);
+    world
+        .engine()
+        .resume_queue(&ada, thread, sync.thread.queue.revision)
+        .await
+        .unwrap();
+    let start = world.turn_start(thread, 0).await;
+    assert_eq!(common::words_after_where(&start.text), "Keep this input");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_end_of_a_turn_is_written_down_before_the_threads_row_is_taken_for_the_short_part() {
+    let world = World::new().await;
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        LocalBlobStore::open(directory.path().join("content"))
+            .await
+            .unwrap(),
+    );
+    world.engine().attach_blobs(store.clone());
+    let thread = world.thread("Large end").await;
+    let relative: String = world
+        .scalar(
+            "SELECT workspace_dir FROM threads WHERE node_id = $1",
+            thread,
+        )
+        .await;
+    let header = Header {
+        v: manifest::MANIFEST_VERSION,
+        root: orch_engine::sessions::absolute_directory("/workspace", &relative),
+        generated_at: Time::new(world.clock.now()),
+        generation: 1,
+        case_sensitive: true,
+    };
+    let end = manifest::build(&header, vec![file("code", b"after")]).unwrap();
+    keep(&store, &end).await;
+    let end_hash = end.hash;
+    world.machine.handler.on(CommandKind::FsRecord, |_| {
+        Ok(CommandResult::FsRecord(fallback()))
+    });
+    world
+        .machine
+        .handler
+        .on(CommandKind::WorkspaceObserve, move |_| {
+            Ok(CommandResult::WorkspaceObserve(WorkspaceObserveResult {
+                end_manifest_blob: Some(end_hash),
+            }))
+        });
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Change code"))
+        .await
+        .unwrap();
+    let start = world.turn_start(thread, 0).await;
+    world.machine.handler.hold(CommandKind::WorkspaceObserve);
+    world
+        .say(
+            thread,
+            Event::TurnCompleted(TurnCompleted {
+                turn_id: start.turn_id,
+                status: TurnOutcome::Completed,
+                error: None,
+            }),
+        )
+        .await;
+    world.wait_turn(start.turn_id, "completed").await;
+    world.wait_began(CommandKind::WorkspaceObserve, 1).await;
+    // Another change holds the thread's row while the machine's answer is taken in.
+    let mut holder = world.pool.begin().await.unwrap();
+    threads::lock(&mut holder, thread).await.unwrap();
+    world.machine.handler.release();
+    common::eventually(
+        "the end of the turn, which is as large as the directory, is written while the row is held",
+        || async {
+            world
+                .scalar::<bool>(
+                    "SELECT files_end_manifest IS NOT NULL FROM turns WHERE id = $1",
+                    start.turn_id,
+                )
+                .await
+        },
+    )
+    .await;
+    assert!(
+        world
+            .scalar::<bool>(
+                "SELECT files_end_due FROM turns WHERE id = $1",
+                start.turn_id
+            )
+            .await,
+        "and the observation is not over until the row is taken"
+    );
+    holder.commit().await.unwrap();
+    common::eventually("the observation is over", || async {
+        !world
+            .scalar::<bool>(
+                "SELECT files_end_due FROM turns WHERE id = $1",
+                start.turn_id,
+            )
+            .await
+    })
+    .await;
+}

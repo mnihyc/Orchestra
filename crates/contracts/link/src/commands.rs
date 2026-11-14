@@ -1013,7 +1013,7 @@ commands! {
     /// Adds an input to the turn that is running.
     TurnSteer = "turn.steer": AGENT, Thread, 30, Download, TurnSteer => Empty;
     /// Stops the turn that is running.
-    TurnInterrupt = "turn.interrupt": AGENT, Thread, 30, None, TurnInterrupt => Empty;
+    TurnInterrupt = "turn.interrupt": AGENT, None, 30, None, TurnInterrupt => Empty;
     /// Gives a harness the decision it asked for.
     ApprovalResolve = "approval.resolve": AGENT, Thread, 30, None, ApprovalResolve => Empty;
     /// Gives a harness the outcome of a call to one of the system's own tools.

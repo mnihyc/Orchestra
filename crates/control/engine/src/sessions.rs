@@ -577,6 +577,7 @@ impl StartSnapshot {
     pub fn session_configuration(&self) -> harnesses::SessionConfiguration {
         harnesses::SessionConfiguration {
             cwd: self.cwd(),
+            workspace_configuration: self.workspace_configuration.clone(),
             prompt_cache_ttl: self
                 .settings
                 .prompt_cache_ttl

@@ -8,6 +8,10 @@
 mod common;
 #[path = "turns/offline_deadline.rs"]
 mod offline_deadline;
+#[path = "turns/session_kept.rs"]
+mod session_kept;
+#[path = "turns/stop_at_once.rs"]
+mod stop_at_once;
 
 use common::{
     World, eventually, interrupting, meanwhile, message_done, queued, said, steering, turn_ended,
