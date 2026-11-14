@@ -26,6 +26,7 @@ export function RouteOutcome({ route }: { route: AwayRoute }) {
   return (
     <div className="flex flex-col gap-2" id={route.id === null ? undefined : `route-${route.id}`}>
       <p className="text-sm text-text-muted">{t('away.outcome.lastAccepted')} {route.last_ok_at === null ? <>{t('away.outcome.never')}{route.health === 'never' && <> · {t('away.notTested')}</>}</> : <RelativeTime at={route.last_ok_at} />}</p>
+      {route.failure?.code === 'invalid_timezone' && <InlineAlert tone="warning" title={t('notifications.quiet.zoneProblem')}>{route.failure.message}</InlineAlert>}
       {(failed || rejected || removed) && <InlineAlert tone="warning" title={removed ? t('away.outcome.removed', { name }) : rejected ? t('away.outcome.rejected', { reason: route.failure?.message ?? '' }) : t('away.outcome.failed', { way: name })}>
         {!rejected && route.failure !== null && <p className="wrap-anywhere">{route.failure.message}</p>}
         {route.health === 'partial' && (route.failure?.affected_devices.length ?? 0) > 0 && <p>{t('away.outcome.partial', { devices: route.failure?.affected_devices.join(t('startFlow.separator')) ?? '' })}</p>}

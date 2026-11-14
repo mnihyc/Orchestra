@@ -1,0 +1,15 @@
+test -p orch-engine --test forks -- a_switch_keeps_the_requested_wait_and_health_check_times_above_the_old_limits
+test -p orch-engine --test updates -- runtime_updates_keep_longer_and_shorter_health_check_times_with_clock_bounds
+test -p orch-api-core --test provider_models --test users --test ports_core
+test -p orch-model-contract --test provider_ceiling --test thread_options
+test -p orch-settings-contract --lib
+test -p orch-link-contract --lib
+test -p orch-config --lib
+test -p orch-worker-core --lib -- quiet_hours::tests::
+test -p orch-worker-core --lib -- schedule::tests::
+test -p orch-worker-core --test routes --test outbox --test upkeep
+test -p orch-node-core --lib -- machine_policy::tests::
+test -p orch-node-core --lib -- settings::tests::
+test -p orch-connector-core --lib -- policy::tests::
+test -p orch-node --lib -- composition::tests::
+test -p orch-node --test program

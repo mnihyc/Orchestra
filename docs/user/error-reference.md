@@ -150,3 +150,4 @@ A failed action keeps its human explanation and available recovery. These stable
 | `error:environment.unavailable` | The environment is not ready at the moment. Try again shortly. |
 | `error:network.restricted_unavailable` | The requested network restriction is not verified. Retry the change or choose open in a new plan. |
 | `error:network.host_denied` | The network policy refused this address. Choose an allowed address or ask the machine's owner. |
+| `error:invalid_timezone` | The saved time zone cannot be evaluated. Outward work with quiet hours stays pending without consuming a delivery attempt; the Inbox remains available. A valid zone resumes delivery automatically instead of substituting UTC. |

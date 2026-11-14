@@ -1,5 +1,5 @@
 /** The wizard says its description, result and completion action once in each catalogue. */
-import { screen, within } from '@testing-library/react';
+import { fireEvent, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
 
@@ -53,4 +53,21 @@ it('keeps fork access choices concise and explains them in field help', async ()
 
   await user.click(within(group).getByRole('radio', { name: t('changeCompact.access.private') }));
   expect(onChange).toHaveBeenCalledWith({ page: 'private' });
+});
+
+it('keeps the requested switch times instead of clipping them to shipped limits', async () => {
+  await setLocale('en');
+  const changed = vi.fn();
+  const initial = initialChoices('replace');
+  show(<Options choices={initial} onChange={changed} applied={null} plan={null} topic="Fix login" />);
+  const wait = screen.getByRole('spinbutton', { name: i18n.t('change.options.minutes') });
+  const check = screen.getByRole('spinbutton', { name: i18n.t('change.options.checksSeconds') });
+  fireEvent.change(wait, { target: { value: '1441' } });
+  expect(changed).toHaveBeenLastCalledWith({ options: { ...initial.options, waitMinutes: 1441 } });
+  fireEvent.change(check, { target: { value: '3601' } });
+  expect(changed).toHaveBeenLastCalledWith({ options: { ...initial.options, verifySecs: 3601 } });
+  fireEvent.change(check, { target: { value: '1' } });
+  expect(changed).toHaveBeenLastCalledWith({ options: { ...initial.options, verifySecs: 1 } });
+  expect(wait).not.toHaveAttribute('max');
+  expect(check).not.toHaveAttribute('max');
 });

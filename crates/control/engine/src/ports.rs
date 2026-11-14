@@ -119,6 +119,17 @@ pub struct Policies {
     pub snapshot: Snapshot,
 }
 
+fn request_expiry(
+    at: chrono::DateTime<chrono::Utc>,
+    hours: i64,
+) -> Result<chrono::DateTime<chrono::Utc>, Error> {
+    chrono::Duration::try_hours(hours)
+        .and_then(|life| at.checked_add_signed(life))
+        .ok_or_else(|| {
+            Error::Invalid("requests.expiry_hours is outside the supported clock range".into())
+        })
+}
+
 /// Resolves all port policies together, under the caller's transaction.
 pub async fn policies(conn: &mut Conn, environment: Id) -> Result<Policies, Error> {
     let defs = [
@@ -1525,9 +1536,9 @@ pub async fn reconcile_before(
         if ending.is_none() && opening.state == "waiting" {
             if opening.requested_by.is_none() && opening.requested_by_thread.is_none() {
                 ending = Some("requester_deleted");
-            } else if policy.as_ref().is_some_and(|p| {
-                opening.opened_at + chrono::Duration::hours(p.request_expiry_hours) <= now.get()
-            }) {
+            } else if let Some(policy) = policy.as_ref()
+                && request_expiry(opening.opened_at, policy.request_expiry_hours)? <= now.get()
+            {
                 ending = Some("request_expired");
             }
         }
@@ -1759,8 +1770,8 @@ pub async fn request_waiting(
             vec!["host".to_owned()],
         ),
     };
-    // The card waits a working day, or until the link it asks for would lapse, if sooner.
-    let mut expires = now.get() + chrono::Duration::hours(policy.request_expiry_hours);
+    // An earlier link lapse also ends its pending decision.
+    let mut expires = request_expiry(now.get(), policy.request_expiry_hours)?;
     if let Some(until) = resolved.until {
         expires = expires.min(until.get());
     }
