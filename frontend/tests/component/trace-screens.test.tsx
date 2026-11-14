@@ -20,7 +20,7 @@ vi.mock('@/api/trace', async (original) => ({ ...await original<object>(), trace
   restoreEnvironment: retention.restore,
   retentionJobQuery: (id: string) => ({ queryKey: ['retention-job-test', id], queryFn: retention.job }),
 }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: vi.fn() }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: vi.fn() }));
 vi.mock('@/features/timeline/Timeline', () => ({ StoredTimeline: ({ snapshot }: { snapshot: Pick<ThreadSync, 'thread'> }) => <div data-stored-timeline>{snapshot.thread.name}</div> }));
 

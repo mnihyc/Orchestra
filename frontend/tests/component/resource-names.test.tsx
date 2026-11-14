@@ -31,7 +31,7 @@ function inventory(value: HiddenItem | McpServer | Mount): EverythingRow {
     resource: 'target' in value ? { kind: 'mount', value } : { kind: 'mcp_server', value }, owner: value.owner });
 }
 
-vi.mock('@/api/auth', () => ({ meQuery: { queryKey: ['resource-names-reader'], initialData: () => me(1, 'reader', 'Reader'), queryFn: () => Promise.resolve(me(1, 'reader', 'Reader')) } }));
+vi.mock('@/api/auth', async (loadOriginal) => ({ ...await loadOriginal<object>(), meQuery: { queryKey: ['resource-names-reader'], initialData: () => me(1, 'reader', 'Reader'), queryFn: () => Promise.resolve(me(1, 'reader', 'Reader')) } }));
 
 vi.mock('@/api/client', async (original) => ({
   ...await original<typeof ClientApi>(),
@@ -44,7 +44,7 @@ vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<t
 }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: vi.fn(), rememberList: vi.fn() }));
 vi.mock('@/features/resources/ResourceNav', () => ({ ResourceNav: () => <nav aria-label="Resources" /> }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess }));
 vi.mock('@/features/resources/mcp/Edit', () => ({
   EditMcp: () => <div role="dialog" aria-label="MCP editor" />,
 }));

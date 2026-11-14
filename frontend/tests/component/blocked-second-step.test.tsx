@@ -7,7 +7,7 @@ import { BlockedBanner } from '@/features/thread/BlockedBanner';
 import type { Thread } from '@/generated/api-types';
 import { show } from './support';
 
-vi.mock('@tanstack/react-router', () => ({ Link: ({ to, children, className }: { to: string; children: ReactNode; className?: string }) => <a href={to} className={className}>{children}</a> }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ to, children, className }: { to: string; children: ReactNode; className?: string }) => <a href={to} className={className}>{children}</a> }));
 
 function draw(manages: boolean, detail: string) {
   const thread = { id: 'thread-1', name: 'Repair login', state: 'blocked', lock: null, blocked: { reason: 'binding_invalid', detail }, binding: null, owner: { display_name: 'Dana' }, access: { permissions: manages ? ['thread.view', 'thread.manage'] : ['thread.view'] } } as unknown as Thread;

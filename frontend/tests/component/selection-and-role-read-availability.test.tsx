@@ -12,7 +12,7 @@ import { CATALOGUE, pageFor } from '../unit/general-access-fixtures';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ share: vi.fn(), defaults: vi.fn<() => Promise<PermissionPage>>() }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: vi.fn(), openAccessToMany: calls.share }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: vi.fn(), openAccessToMany: calls.share }));
 vi.mock('@/api/access', async (original) => ({ ...await original<typeof Access>(), permissionsQuery: { queryKey: ['role-read-catalogue'], queryFn: () => Promise.resolve(CATALOGUE.reply) },
   defaultsQuery: () => ({ queryKey: ['role-read-defaults'], queryFn: calls.defaults, retry: false }) }));
 type Row = Pick<EverythingRow, 'kind' | 'id' | 'name' | 'can_share'>;

@@ -12,7 +12,7 @@ vi.mock('@/api/client', async (load) => {
   const actual = await load<typeof Client>();
   return { ...actual, api: { ...actual.api, GET: transport.get, POST: transport.post } };
 });
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 // This case concerns admission and the section's visible state; chart rendering has its own cases.
 vi.mock('@/features/usage/PlanChart', () => ({ PlanChart: () => null }));
 vi.mock('@/features/usage/CreditChart', () => ({ CreditChart: () => null, creditGroups: () => [] }));

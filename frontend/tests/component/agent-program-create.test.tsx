@@ -16,8 +16,8 @@ import { harnessName } from '../doubles/harness-names';
 skipOverflowFallback();
 
 const help=vi.hoisted(()=>vi.fn());
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>help}));
-vi.mock('@tanstack/react-router',()=>({useNavigate:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>help}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),useNavigate:()=>vi.fn()}));
 vi.mock('@/features/resources/HomePicker',()=>({HomePicker:({value,onChange}:Pick<HomePickerProps,'value'|'onChange'>)=><select aria-label="Home" value={value} onChange={(event)=>onChange(event.target.value)}><option value="">Choose</option><option value="org">Acme</option></select>}));
 const machine:Pick<Machine,'id'|'name'|'roles'|'facts'|'online'>={id:'gpu',name:'GPU computer',roles:['agent'],facts:{adapters:[],harnesses:[]},online:true};
 vi.mock('@/api/resources',async(load)=>({...await load<typeof Resources>(),registerAgent:vi.fn(),

@@ -17,7 +17,7 @@ vi.mock('@/api/threads', async (importOriginal) => ({ ...await importOriginal<ty
   parametersQuery: (id: string) => ({ queryKey: ['thread-parameters', id], queryFn: () => { server.parameterReads(); return Promise.resolve(server.parameters); }, staleTime: Infinity }),
   setThreadSetting: (id: string, key: string, body: NodeSettingSetBody) => server.write(id, key, body),
 }));
-vi.mock('@/realtime/live', () => ({ refreshThread: vi.fn() }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), refreshThread: vi.fn() }));
 
 const row = (value: string, revision: number) => nativeModeSetting('approval.mode', value, revision);
 const parameters = modeParameters;

@@ -9,7 +9,7 @@ import type { SettingDef } from '@/generated/api-types';
 import { Spotlight, useSpotlightTarget } from '@/ui/Spotlight';
 import { show } from './support';
 
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/settings', async (original) => ({ ...await original<object>(), targetSettingsQuery: () => ({ queryKey: ['help-source'], queryFn: () => Promise.reject(new Error('Access was removed')) }) }));
 
 const expiry: SettingDef = {

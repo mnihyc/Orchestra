@@ -8,7 +8,7 @@ import { planProvider } from '../unit/provider-plan-fixtures';
 import { show } from './support';
 import { MODEL_ESTIMATE } from '../doubles/fixtures';
 
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 const models:ProviderModel[]=[
   { ...MODEL_ESTIMATE,id:'large',model_name:'Large example model',display_name:'Large example model',enabled:true,source:'suggested',groups:[],parameters:{}},
   { ...MODEL_ESTIMATE,id:'small',model_name:'mock-small',display_name:'Small example model',enabled:true,source:'suggested',groups:[],parameters:{}},

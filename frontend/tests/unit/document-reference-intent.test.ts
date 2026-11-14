@@ -1,18 +1,34 @@
 /** Caret reference reads belong to the current visible editor and reader. */
 import { beforeEach, expect, it, vi } from 'vitest';
+import type * as ClientModule from '@/api/client';
+import type * as QueryModule from '@/api/query';
+import type * as TreeModule from '@/realtime/stores/tree';
 import { referenceChoices, type ReferenceContext } from '@/features/documents/referenceChoices';
 
-const wire = vi.hoisted(() => ({ reader: 1, read: vi.fn<() => Promise<{ pages: { items: { id: string; title: string }[] }[] }>>() }));
-vi.mock('@/api/client', () => ({ client: { session: { getState: () => ({ readerVersion: wire.reader }) } } }));
-vi.mock('@/api/query', () => ({ queryClient: { infiniteQuery: wire.read } }));
-vi.mock('@/api/documents', () => ({ documentsOfNodeQuery: (id: string) => ({ queryKey: ['documents', id] }) }));
-vi.mock('@/realtime/stores/tree', () => ({ useTreeStore: { getState: () => ({ byOrg: new Map([
-  ['root', { nodes: new Map([['topic', { id: 'topic', kind: 'topic', name: 'Visible topic', deleted: false }]]) }],
-]) }) } }));
+interface Page { items: { id: string; title: string }[]; next_cursor: string | null }
+const wire = vi.hoisted(() => ({ reader: 1, read: vi.fn<() => Promise<Page>>() }));
+vi.mock('@/api/client', async (loadOriginal) => {
+  const actual = await loadOriginal<typeof ClientModule>();
+  return { ...actual, client: { ...actual.client, session: { ...actual.client.session,
+    getState: () => ({ ...actual.client.session.getState(), readerVersion: wire.reader }),
+  } } };
+});
+vi.mock('@/api/query', async (loadOriginal) => {
+  const actual = await loadOriginal<typeof QueryModule>();
+  return { ...actual, queryClient: Object.assign(actual.queryClient, { query: wire.read }) };
+});
+vi.mock('@/api/documents', () => ({ documentReferencePageQuery: (id: string, query: string, cursor: string | null) => ({ queryKey: ['documents', id, query, cursor] }) }));
+vi.mock('@/realtime/stores/tree', async (loadOriginal) => {
+  const actual = await loadOriginal<typeof TreeModule>();
+  const state = actual.useTreeStore.getState;
+  return { ...actual, useTreeStore: Object.assign(actual.useTreeStore, { getState: () => ({ ...state(), byOrg: new Map([
+    ['root', { nodes: new Map([['topic', { id: 'topic', kind: 'topic', name: 'Visible topic', deleted: false }]]) }],
+  ]) }) }) };
+});
 
 const document: ReferenceContext['document'] = { id: 'current', node: { id: 'topic', kind: 'topic', name: 'Topic', redacted: false },
   path: [{ id: 'root', kind: 'org', name: 'Root', redacted: false }] };
-beforeEach(() => { wire.reader = 1; wire.read.mockReset().mockResolvedValue({ pages: [{ items: [{ id: 'other', title: 'Visible notes' }] }] }); });
+beforeEach(() => { wire.reader = 1; wire.read.mockReset().mockResolvedValue({ items: [{ id: 'other', title: 'Visible notes' }], next_cursor: null }); });
 
 it('makes no read before a live editor has committed its reference context', async () => {
   expect(await referenceChoices(() => undefined, '')).toEqual([]);
@@ -20,12 +36,12 @@ it('makes no read before a live editor has committed its reference context', asy
 });
 
 it('discards a pending answer when that exact editor is retired', async () => {
-  let finish: (value: { pages: { items: { id: string; title: string }[] }[] }) => void = () => { throw new Error('The reference read did not start'); };
+  let finish: (value: Page) => void = () => { throw new Error('The reference read did not start'); };
   wire.read.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
   let context: ReferenceContext | undefined = { document, enabled: true };
   const pending = referenceChoices(() => context, '');
   context = undefined;
-  finish({ pages: [{ items: [{ id: 'old', title: 'Retired editor choice' }] }] });
+  finish({ items: [{ id: 'old', title: 'Retired editor choice' }], next_cursor: null });
   expect(await pending).toEqual([]);
 });
 
@@ -42,7 +58,7 @@ it('does not read an inactive editor and loads native choices on its actual refe
 });
 
 it.each(['reader', 'document', 'move', 'root', 'ancestry', 'redaction', 'hidden'] as const)('discards an old native answer after the %s boundary changes', async (boundary) => {
-  let finish: (value: { pages: { items: { id: string; title: string }[] }[] }) => void = () => { throw new Error('The reference read did not start'); };
+  let finish: (value: Page) => void = () => { throw new Error('The reference read did not start'); };
   wire.read.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
   const context: ReferenceContext = { document, enabled: true };
   const pending = referenceChoices(() => context, '');
@@ -53,6 +69,28 @@ it.each(['reader', 'document', 'move', 'root', 'ancestry', 'redaction', 'hidden'
   if (boundary === 'ancestry') context.document = { ...document, path: [...document.path, { ...document.node, id: 'new-parent' }] };
   if (boundary === 'redaction') context.document = { ...document, node: { ...document.node, redacted: true } };
   if (boundary === 'hidden') context.enabled = false;
-  finish({ pages: [{ items: [{ id: 'old', title: 'Old native choice' }] }] });
+  finish({ items: [{ id: 'old', title: 'Old native choice' }], next_cursor: null });
   expect(await pending).toEqual([]);
+});
+
+it('offers every matching choice from the loaded page instead of dropping those after the eighth', async () => {
+  wire.read.mockResolvedValueOnce({ items: Array.from({ length: 16 }, (_, index) => ({ id: `note-${index}`, title: `Note ${index}` })), next_cursor: null });
+  const choices = await referenceChoices(() => ({ document, enabled: true }), 'Note');
+  expect(choices).toHaveLength(16);
+  expect(choices.at(-1)).toMatchObject({ kind: 'document', id: 'note-15' });
+});
+
+it('continues a filtered document search past an empty first page without loading the whole collection', async () => {
+  const context = { document, enabled: true };
+  wire.read.mockResolvedValueOnce({ items: [{ id: 'unrelated', title: 'Other notes' }], next_cursor: 'next-page' });
+  const first = await referenceChoices(() => context, 'older');
+  expect(wire.read).toHaveBeenCalledTimes(1);
+  const more = first.find((one) => one.kind === 'more');
+  if (more?.kind !== 'more') throw new Error('An incomplete reference page must offer continuation.');
+  wire.read.mockResolvedValueOnce({ items: [{ id: 'older', title: 'Older handbook' }], next_cursor: null });
+  expect(await more.load()).toEqual([{ id: 'older', kind: 'document', name: 'Older handbook', hint: 'document' }]);
+  expect(wire.read).toHaveBeenLastCalledWith({ queryKey: ['documents', 'topic', 'older', 'next-page'] });
+  context.enabled = false;
+  expect(await more.load()).toEqual([]);
+  expect(wire.read).toHaveBeenCalledTimes(2);
 });

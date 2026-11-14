@@ -8,7 +8,7 @@ import { i18n } from '@/i18n';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ open: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.open }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => calls.open }));
 afterEach(async () => { cleanup(); calls.open.mockClear(); await i18n.changeLanguage('en'); });
 
 it.each(['en', 'zh-CN'] as const)('opens the file preview heading in %s', async (language) => {

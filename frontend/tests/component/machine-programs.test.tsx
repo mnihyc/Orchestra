@@ -10,10 +10,10 @@ import { i18n,setLocale } from '@/i18n';
 import { show } from './support';
 const {read,write}=vi.hoisted(()=>({read:vi.fn<()=>Promise<MachinePrograms>>(),write:vi.fn<(id:string,body:MachineProgramsCommand)=>Promise<MachinePrograms>>()}));
 vi.mock('@/api/machinePrograms',()=>({machineProgramsKey:(id:string)=>['machine-programs',id],machineProgramsQuery:(id:string)=>({queryKey:['machine-programs',id],queryFn:read}),changeMachinePrograms:write}));
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
-vi.mock('@/features/resources/harnesses',()=>({useHarnessTitle:()=>((kind:string)=>kind)}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/resources/harnesses',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHarnessTitle:()=>((kind:string)=>kind)}));
 vi.mock('@/features/resources/machines/Enrollment',()=>({AddMachineDialog:()=>null}));
-vi.mock('@tanstack/react-router',()=>({Link:({children}:{children:ReactNode})=><a href="/resources/machines/machine?tab=policy">{children}</a>}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),Link:({children}:{children:ReactNode})=><a href="/resources/machines/machine?tab=policy">{children}</a>}));
 const machine={id:'machine',facts:{},roles:['agent','provider']};
 function snapshot(remote=true):MachinePrograms {return {entries:[],can_manage:true,config_file:'/var/user/orch/config.toml',capabilities:(['agent','provider_source'] as const).map((kind)=>({kind,supported:true,remote,delegated:remote,enabled:remote,policy_key:kind==='agent'?'agent.programs':'provider.programs',reason:remote?null:'Kept by the operator.'}))};}
 function program(kind:MachineProgramKind):MachineProgram {return {kind,name:'local-program',command:['/opt/my program','--model','local model'],origin:'orch',ready:true,version:'1.0.0',descriptor:kind==='agent'?{kind:'local-agent',harness:{name:'Local agent'},sandbox_modes:['open'],approval_modes:['on_request']}:{title:'GPU service',models:{}},models:null,detail:null};}

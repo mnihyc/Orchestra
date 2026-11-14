@@ -11,7 +11,7 @@ import { show } from './support';
 
 const fake = vi.hoisted(() => ({ answer: undefined as UsageAnalytics | undefined, navigate: vi.fn(), params: [] as unknown[], healthError: null as Error | null, healthCalls: 0, healthLoaded: true }));
 vi.mock('@/api/usage', () => ({ usageQuery: (params: unknown) => { fake.params.push(params); return { queryKey: ['performance-places', params], initialData: fake.answer, staleTime: Number.POSITIVE_INFINITY, queryFn: () => Promise.resolve(fake.answer) }; }, healthQuery: (providerId: string) => ({ queryKey: ['test-health', providerId], initialData: fake.healthLoaded ? fake.answer?.degradation ?? undefined : undefined, queryFn: (): Promise<UsageDegradation> => { fake.healthCalls += 1; if (fake.healthError !== null) return Promise.reject(fake.healthError); const health = fake.answer?.degradation; if (health === undefined || health === null) return Promise.reject(new Error('the fixture supplies health')); return Promise.resolve(health); } }) }));
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => fake.navigate }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNavigate: () => fake.navigate }));
 
 function Hint() { const hint = useChoicePerformance({ topic_id: requestRow().topic.id, binding: { provider: requestRow().provider } }); return <output>{hint('Swift', 'high', 'fast', null)}</output>; }
 

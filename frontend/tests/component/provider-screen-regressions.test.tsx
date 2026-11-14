@@ -24,13 +24,13 @@ beforeAll(async () => { await loadSearchCatalogues(); });
 vi.mock('@/api/resources',async(load)=>({...await load<typeof ResourcesApi>(),providersQuery:()=>({queryKey:['qs-provider-list'],queryFn:()=>Promise.resolve(listed.rows),initialData:listed.rows})}));
 vi.mock('@/features/resources/providers/AddProvider',()=>({AddProviderDialog:()=>null}));
 vi.mock('@/features/resources/providers/acts',()=>({useProviderActs:()=>({list:{bulk:[],dialogs:null}})}));
-vi.mock('@/features/resources/harnesses',()=>({useHarnessTitle:()=>(kind:string)=>kind}));
+vi.mock('@/features/resources/harnesses',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHarnessTitle:()=>(kind:string)=>kind}));
 vi.mock('@/features/resources/HomePicker',()=>({useViewedOrg:()=>null}));
-vi.mock('@/features/navigation/placeLabels',()=>({useKnownPlaces:()=>knownPlaces([
+vi.mock('@/features/navigation/placeLabels',async (loadOriginal) => ({ ...await loadOriginal<object>(),useKnownPlaces:()=>knownPlaces([
   {id:'acme',name:'Acme',above:[]},{id:'beta',name:'Beta',above:[]},
 ])}));
 // The help question beside a column reads the router when it renders (useHelpOpener).
-vi.mock('@tanstack/react-router',()=>({Link:({children,params,to:_to,...props}:ComponentPropsWithRef<'a'> & {params?:{id:string};to?:string})=>
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),Link:({children,params,to:_to,...props}:ComponentPropsWithRef<'a'> & {params?:{id:string};to?:string})=>
   <a {...props} href={'/resources/providers/' + (params?.id ?? '')}>{children}</a>,
   useRouter:()=>({state:{location:{pathname:'/resources/providers'}},history:{push:()=>undefined}})}));
 // The name column is the behavior under review; geometry, row menus and the list frame have their own proofs.

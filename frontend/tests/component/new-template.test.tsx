@@ -9,12 +9,15 @@ import { QuickTemplateFields } from '@/features/resources/templates/QuickTemplat
 import { setLocale } from '@/i18n';
 import { useSelectedOrg } from '@/shell/org';
 import { hostTemplateSchema, templateSchema } from '../doubles/template-specs';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
 import { detailTemplate } from './resource-detail-fixtures';
+
+skipOverflowFallback();
 
 const calls=vi.hoisted(()=>({create:vi.fn<typeof Resources.createTemplate>(),check:vi.fn(),navigate:vi.fn(),close:vi.fn()}));
 vi.mock('@tanstack/react-router',async(original)=>({...await original<object>(),useNavigate:()=>calls.navigate}));
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
 vi.mock('@/api/nodes',async(original)=>({...await original<object>(),orgsQuery:{queryKey:['short-template-orgs'],queryFn:()=>Promise.resolve([{id:'acme',name:'Acme',org_kind:'team'},{id:'beta',name:'Beta',org_kind:'team'}])},fetchTree:()=>Promise.resolve({nodes:[]}),nodeQuery:()=>({queryKey:['short-template-node'],queryFn:()=>Promise.resolve({id:'beta',kind:'org',org_id:'beta',path:[]})})}));
 vi.mock('@/api/resources',async(original)=>({...await original<object>(),createTemplate:calls.create,checkTemplate:calls.check,
@@ -51,7 +54,7 @@ it('choosing Host fills its account and retains its program, leaving advanced co
   expect(screen.getByRole('textbox',{name:'Run as user'})).toHaveValue('agent');
   expect(screen.queryByRole('textbox',{name:'Image reference'})).not.toBeInTheDocument();
   expect(screen.queryByRole('textbox',{name:'Program and arguments · one per line'})).not.toBeInTheDocument();
-  await user.type(screen.getByRole('textbox',{name:'Name'}),'Host tools');await user.click(screen.getByRole('button',{name:'Add template'}));
+  await user.click(screen.getByRole('textbox',{name:'Name'}));await user.paste('Host tools');await user.click(screen.getByRole('button',{name:'Add template'}));
   await waitFor(()=>expect(calls.create).toHaveBeenCalledWith(expect.objectContaining({driver:'host',spec:{run_as:'agent',after_up:[{name:'10-ready',command:['/usr/bin/printf','Host tools are ready.']}]}}),expect.any(String)));
 });
 

@@ -36,7 +36,7 @@ vi.mock('@/api/auth', async (original) => ({ ...await original<typeof Auth>(),
 vi.mock('@/api/users', async (original) => ({ ...await original<typeof Users>(),
   invitationQuery: (token: string) => ({ queryKey: ['terms-invitation', token], queryFn: calls.preview }), acceptInvitation: calls.accept,
 }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabels: () => new Map() }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabels: () => new Map() }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeof Router>(), useRouter: () => ({ navigate: calls.navigate }),
   Link: ({ to, search, children, ...props }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; search?: Record<string, string | undefined> }) => {
     const query = new URLSearchParams(Object.entries(search ?? {}).filter((pair): pair is [string, string] => pair[1] !== undefined));

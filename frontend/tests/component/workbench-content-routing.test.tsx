@@ -77,7 +77,7 @@ vi.mock('@/api/nodes', async (original) => {
 });
 
 // This witness receives the real FileTabs props; actual CodeView dispatch is covered separately.
-vi.mock('@/features/files/lazy', () => ({ lazyPart: () => function FileViewerWitness({ line, lineRequest }: ViewerProps) {
+vi.mock('@/features/files/lazy', async (loadOriginal) => ({ ...await loadOriginal<object>(), lazyPart: () => function FileViewerWitness({ line, lineRequest }: ViewerProps) {
   return <section><output aria-label="Addressed file line" data-line={line ?? 'none'} data-request={lineRequest ?? 'none'} />
     <textarea aria-label="Retained viewer draft" defaultValue="Original file bytes" /></section>;
 } }));

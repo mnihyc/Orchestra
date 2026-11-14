@@ -1,14 +1,11 @@
-/** Template configuration uses the same section navigation at desktop and phone widths. */
+/** Template configuration uses the same section links at desktop and phone widths: a list beside the settings, a strip above them. */
 import { expect, type Page } from '@playwright/test';
 
 export async function templateSection(page: Page, name: string): Promise<void> {
   const nav = page.locator('#template-spec [data-section-nav]');
   await expect(nav).toBeVisible();
-  const chooser = nav.getByRole('combobox');
-  if (await chooser.isVisible()) {
-    await chooser.click();
-    await page.getByRole('option', { name, exact: true }).click();
-  } else await nav.getByRole('link', { name, exact: true }).click();
+  // A list beside the settings or a strip above them: the same names, never a dropdown.
+  await nav.getByRole('link', { name, exact: true }).click();
 }
 
 export async function templateJson(page: Page): Promise<void> {

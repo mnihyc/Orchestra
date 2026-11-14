@@ -36,3 +36,12 @@ it('a move uses the actual current path for descendant lists and never inserts a
   expect(items(cache, list('org-a', true))).toEqual([moved]); expect(items(cache, list('unrelated-org', true))).toEqual([]);
   expect(items(cache, list('project-b', false, false, true))).toEqual([]); cache.clear();
 });
+
+it('a renamed reference leaves a loaded title search while keeping its continuation', async () => {
+  const cache = new QueryClient();
+  const key = [...list('project-a', true), 'references', 'handbook', null];
+  cache.setQueryData(key, { items: [{ ...doc, title: 'Handbook' }], next_cursor: 'older-matches' });
+  await applyChanges([{ row: { kind: 'document', id: doc.id, value: { ...doc, title: 'Other notes' } } }], cache);
+  expect(cache.getQueryData(key)).toEqual({ items: [], next_cursor: 'older-matches' });
+  cache.clear();
+});

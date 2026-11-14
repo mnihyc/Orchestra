@@ -206,11 +206,7 @@ pub async fn turns_between(
     low: i64,
     high: i64,
 ) -> Result<Vec<TurnRow>, DbError> {
-    let sql = format!(
-        "{OWNERS} {TURN_SELECT} WHERE thread_id=$1 AND ordinal::bigint BETWEEN $3 AND $4
-      AND EXISTS(SELECT 1 FROM owners o WHERE o.owner=turns.continuation_id
-        AND turns.ordinal BETWEEN o.first_turn AND o.last_turn) ORDER BY ordinal"
-    );
+    let sql = turns_between_sql(TURN_SELECT);
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(thread)
         .bind(view)
@@ -218,6 +214,15 @@ pub async fn turns_between(
         .bind(high)
         .fetch_all(conn)
         .await?)
+}
+
+/// Fixed projections share the same window selector in the reader and its plan proof.
+pub(super) fn turns_between_sql(select: &'static str) -> String {
+    format!(
+        "{OWNERS} {select} WHERE thread_id=$1 AND ordinal BETWEEN $3 AND $4
+      AND EXISTS(SELECT 1 FROM owners o WHERE o.owner=turns.continuation_id
+        AND turns.ordinal BETWEEN o.first_turn AND o.last_turn) ORDER BY ordinal"
+    )
 }
 
 /// A forward export page bounds segment identities before loading their records.

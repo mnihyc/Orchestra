@@ -43,7 +43,7 @@ vi.mock('@/api/nodes', async (load) => {
   };
 });
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useThreadFeed: reads.thread, useDocumentFeed: reads.document }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
 // Keep actual producers and their frame props, without creating/editing settings or mounting form readers.
 vi.mock('@/features/settings/Frame', () => ({ SettingsFrame: ({ title, current }: SettingsFrameProps) => <section><h1>{title}</h1><output data-testid="body-section">{current}</output></section> }));
 

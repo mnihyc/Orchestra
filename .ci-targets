@@ -1,0 +1,3 @@
+fmt
+clippy
+test -p orch-api-core --test provider_harness

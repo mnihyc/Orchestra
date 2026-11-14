@@ -9,7 +9,7 @@ import { i18n, setLocale } from '@/i18n';
 import { Select } from '@/ui/Select';
 import { show } from './support';
 
-vi.mock('@/features/navigation/places', () => ({
+vi.mock('@/features/navigation/places', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   PlaceLink: ({ place, children, className }: { place: NodeRef; children: ReactNode; className?: string }) => <a href={`/project/${place.id}`} className={className}>{children}</a>,
   usePlaceLookup: () => ({ pathTo: () => [] }),
 }));

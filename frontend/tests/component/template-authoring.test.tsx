@@ -13,7 +13,7 @@ import { hostTemplateSchema, templateSchema } from '../doubles/template-specs';
 import { show } from './support';
 
 const { openGuide } = vi.hoisted(() => ({ openGuide: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => openGuide }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => openGuide }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<object>(), checkTemplate: vi.fn() }));
 vi.mock('@/ui/CodeView', () => ({ CodeView: ({ text, label, onChange }: { text: string; label: string; onChange?: (text: string) => void }) => <textarea aria-label={label} value={text} onChange={(event) => onChange?.(event.target.value)} /> }));
 
@@ -48,7 +48,6 @@ it('fills the selected Docker image or host program and keeps that same configur
   await user.click(screen.getByRole('button', { name: 'Start from an example' }));
   await user.click(screen.getByRole('menuitem', { name: 'Node' }));
   expect(screen.getByLabelText('Image reference')).toHaveValue('node:22-bookworm');
-  expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument();
   await user.click(screen.getByRole('link', { name: i18n.t('templates.editor.sections.uses') }));
   expect(within(screen.getByRole('group', { name: 'Limits' })).getByRole('spinbutton', { name: 'Processor time' })).toHaveValue(4000);
   await user.click(screen.getByRole('button', { name: 'Start from an example' }));

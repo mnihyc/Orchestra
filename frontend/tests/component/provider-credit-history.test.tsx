@@ -18,7 +18,7 @@ import { show } from './support';
 const transport=vi.hoisted(()=>({get:vi.fn<(_path:string,options:{params:{query:{metric?:string}}})=>Promise<ReturnType<typeof answer>>>(),post:vi.fn()}));
 vi.mock('@/api/client',async(load)=>{const actual=await load<typeof Client>();return {...actual,api:{...actual.api,GET:transport.get,POST:transport.post}};});
 vi.mock('@tanstack/react-router',async(load)=>({...await load<typeof RouterModule>(),Link:({to,params,search,hash,children,...anchor}:AnchorHTMLAttributes<HTMLAnchorElement> & {to:string;params?:Record<string,string>;search?:Record<string,string>;hash?:string;children?:ReactNode})=><a {...anchor} href={`${to.replace(/\$(\w+)/g,(_,key:string)=>params?.[key] ?? '')}?${new URLSearchParams(search)}${hash===undefined ? '' : `#${hash}`}`}>{children}</a>}));
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 const span={from:'2026-11-01',to:'2026-11-03',days:3,range:'custom' as const};
 const at='2026-11-03T12:00:00Z';
 function row(patch:Partial<ProviderCreditSeries>={}):ProviderCreditSeries {

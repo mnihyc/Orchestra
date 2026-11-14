@@ -41,7 +41,7 @@ vi.mock('@/api/harnesses', async (load) => ({ ...await load<object>(),
 }));
 vi.mock('@/api/changes', async (load) => ({ ...await load<object>(), planEnvironmentUpdates: () => Promise.resolve(state.plan), startEnvironmentUpdates: state.start, planProviderUpdates: state.providerRead, startProviderUpdates: state.providerStart }));
 vi.mock('@/features/admin/SettingRows', () => ({ useSystemSettings: () => ({ find: () => ({ value: {} }) }), useSettingChange: () => ({ writable: true, save: { variables: undefined, mutate: state.write } }), SettingChangeStatus: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resource-facts/ResourceFacts', () => ({ ResourceChip: ({ subject, children }: { subject: { kind: string; environment?: { name: string }; provider?: { name: string } }; children?: ReactNode }) => <span>{children ?? subject.environment?.name ?? subject.provider?.name}</span> }));
 vi.mock('@/features/change/Progress', () => ({ JobProgress: ({ job }: { job: Job }) => <p>{job.state}</p>, committed: () => false }));
 vi.mock('@/api/forks', async (load) => ({ ...await load<object>(), jobQuery: (id: string) => ({ queryKey: ['job', id], queryFn: () => Promise.resolve({ ...failedStart().job, id }) }) }));
@@ -129,6 +129,9 @@ for (const locale of ['en', 'zh-CN'] as const) it(`names a running program even 
   show(<ProgramBuild program={program} />);
   expect(screen.getByText(`${name} 1.2.3`, { exact: true })).toBeVisible();
   expect(screen.getByText(i18n.t('programVersions.unknownCheck'))).toBeVisible();
+  expect(screen.queryByText(i18n.t('programVersions.unknownCheckWhy'))).toBeNull();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('help.hint.label', { term: i18n.t('programVersions.unknownCheck') }) }));
+  expect(screen.getByText(locale === 'en' ? 'The origin of this installed program is unknown, so its build check cannot be identified.' : '此已安装程序的来源未知，因此无法确定对应的构建检查。')).toBeVisible();
   expect(document.body).not.toHaveTextContent(i18n.t('resources.harnessNameUnknown'));
   expect(document.body).not.toHaveTextContent('named-external');
 });

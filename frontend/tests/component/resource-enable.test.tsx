@@ -9,7 +9,7 @@ import { show } from './support';
 
 const read = vi.hoisted(() => vi.fn<(target: FactTarget) => Promise<ResourceImpact>>());
 vi.mock('@/api/resource-impact', () => ({ resourceImpactQuery: (target: FactTarget) => ({ queryKey: ['enable-review', target], queryFn: () => read(target), retry: false }) }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const target: FactTarget = { object: { kind: 'provider', id: '00000000-0000-4000-8000-000000000001' }, model_id: null };
 function facts(): ResourceImpact {

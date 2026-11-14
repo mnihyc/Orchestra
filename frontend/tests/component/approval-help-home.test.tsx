@@ -18,7 +18,7 @@ import { show } from './support';
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), Link: ({ children }: { children: ReactNode }) => <a href="#thread">{children}</a> }));
 vi.mock('@/ui/UserChip', () => ({ UserChip: ({ user }: { user: { display_name: string } }) => <span>{user.display_name}</span> }));
 vi.mock('@/realtime/stores/tree', async (load) => ({ ...await load<typeof TreeStore>(), useNodePath: () => ({ path: [] }) }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const owner = userRef(me(1, 'ada', 'Ada'));
 const context: TimelineContext = { threadId: 'help-thread', threadName: 'Deploy', detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined,
