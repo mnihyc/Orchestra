@@ -3,7 +3,6 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as ThreadsApi from '@/api/threads';
-import type * as SettingsApi from '@/api/settings';
 import type * as AuthApi from '@/api/auth';
 import type * as ContextApi from '@/api/context';
 import type * as Uploads from '@/lib/uploads';
@@ -12,9 +11,9 @@ import type * as Draft from '@/features/composer/Draft';
 import { Composer } from '@/features/composer/Composer';
 import { composerWriter, useComposerStore } from '@/features/composer/Draft';
 import { client } from '@/api/client';
-import type { ResolvedSetting, Thread, ThreadContext, ThreadParameters, ThreadLimits, LimitReached } from '@/generated/api-types';
+import type { Thread, ThreadContext, ThreadParameters, ThreadLimits, LimitReached } from '@/generated/api-types';
 import type { PastedTextPart } from '@/lib/pastedText';
-import { rememberPaste } from '@/lib/pastedText';
+import { DEFAULT_PASTE_INLINE_CONTEXT_SHARE, rememberPaste } from '@/lib/pastedText';
 import type { CodeViewProps } from '@/ui/CodeView';
 import { currentLocale, i18n, setLocale } from '@/i18n';
 import { isApplePlatform } from '@/lib/shortcuts';
@@ -37,7 +36,6 @@ vi.mock('@/api/threads', async (load) => ({ ...await load<typeof ThreadsApi>(),
   parametersQuery: (id: string) => ({ queryKey: ['keyboard-parameters', id], queryFn: () => Promise.resolve(parameters) }),
   limitsQuery: (id: string) => ({ queryKey: ['keyboard-limits', id], initialData: server.limits, queryFn: () => Promise.resolve(server.limits) }),
 }));
-vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(), settingsQuery: (id: string) => ({ queryKey: ['keyboard-settings', id], queryFn: () => Promise.resolve(settings) }) }));
 vi.mock('@/api/auth', async (load) => ({ ...await load<typeof AuthApi>(), metaQuery: { queryKey: ['keyboard-meta'], queryFn: () => Promise.resolve(meta()) } }));
 vi.mock('@/api/context', async (load) => ({ ...await load<typeof ContextApi>(), threadContextQuery: (id: string, detail: 'kept' | 'count', revision: number) => ({ queryKey: ['keyboard-context', id, detail, revision], queryFn: () => server.context() }) }));
 vi.mock('@/features/composer/ModelEffort', () => ({ ModelEffort: () => <button>Model</button> }));
@@ -53,8 +51,8 @@ vi.mock('@/lib/uploads', async (load) => ({ ...await load<typeof Uploads>(), rel
 
 const parameters: ThreadParameters = { approval_mode: 'on_request', approval_reviewer: null, approval_modes: ['ask', 'on_request', 'bypass'],
   model: { value: null, writable: true, options: [], source: { scope: 'default', node: null } },
-  effort: { value: null, writable: true, supported: false, source: { scope: 'default', node: null } }, parameters: [] };
-const settings: ResolvedSetting[] = [{ key: 'collab.default_delivery', value: 'interrupt', own: null, source: { scope: 'default', node: null }, locked_by: null, writable: true, parts: [] }];
+  effort: { value: null, writable: true, supported: false, source: { scope: 'default', node: null } }, parameters: [],
+  composer: { default_delivery: 'interrupt', paste_inline_context_share: DEFAULT_PASTE_INLINE_CONTEXT_SHARE, plan_first: false, owner_reads: true } };
 let native: Thread;
 let locale = currentLocale();
 let theme: string | null = null;
@@ -394,7 +392,9 @@ it('marks the first-message Plan default and retires the mark after an explicit 
   if (native.binding === null) throw new Error('The fixture needs its reported program');
   native = { ...native, state: 'idle', current_turn_id: null, usage: null, binding: { ...native.binding, plan_mode: true } };
   threadWriter.reset(native.id, { thread: native, turns: [] }, false);
-  settings.push({ key: 'thread.plan_first', value: true, own: null, source: { scope: 'topic', node: null }, locked_by: null, writable: false, parts: [] });
+  const composer = parameters.composer;
+  if (composer === null || composer === undefined) throw new Error('The keyboard fixture needs its native composer facts');
+  composer.plan_first = true;
   try {
     show(<Composer thread={native} />);
     const plan = () => screen.getByRole('button', { name: i18n.t('composer.plan.label') });
@@ -405,5 +405,5 @@ it('marks the first-message Plan default and retires the mark after an explicit 
     expect(within(plan()).queryByText(i18n.t('composer.plan.placeDefault'))).toBeNull();
     await userEvent.type(screen.getByRole('textbox', { name: i18n.t('composer.label') }), 'Work directly{Enter}');
     expect(server.submit).toHaveBeenCalledExactlyOnceWith(defaultThreadRead(native.id), [{ type: 'text', text: 'Work directly' }], 'queue', undefined, undefined, false);
-  } finally { settings.pop(); }
+  } finally { composer.plan_first = false; }
 });

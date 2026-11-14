@@ -124,6 +124,7 @@ export function RegisterProviderDialog({ machine, open, onClose }: { machine: Ma
     >
       {made === null ? (
         <div className="flex flex-col gap-4 py-2">
+          <Input label={t('machines.provider.name')} value={name} error={nameError} onChange={(event) => setName(event.target.value)} autoComplete="off" />
           <span className="flex items-center gap-1 text-sm font-medium text-text">
             {t('machines.provider.uses')}
             <Hint id="machine-provider-source" />
@@ -144,7 +145,6 @@ export function RegisterProviderDialog({ machine, open, onClose }: { machine: Ma
               { value: 'key', ...choiceOption(t, 'providerRegistration.key'), description: t('machines.provider.keyLead'), icon: <KeyRound /> },
             ]}
           />
-          <Input label={t('machines.provider.name')} value={name} error={nameError} onChange={(event) => setName(event.target.value)} autoComplete="off" />
           <HomePicker value={home} onChange={setHome} disabled={pending}
             defaultChoice={t(defaultHomeName===''?'resourceGroups.machineHome':'resourceGroups.machineHomeNamed',{name:defaultHomeName})}
             places={(machineHome.home === null || machineHome.home === undefined) || machineHome.home.redacted ? [] : [{id:machineHome.home.id,name:defaultHomeName}]} />

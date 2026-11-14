@@ -285,6 +285,105 @@ fn working() -> FakeLauncher {
 }
 
 #[tokio::test]
+async fn a_process_warning_is_visible_in_status_and_the_running_session_without_interrupting_it() {
+    let mut setup = setup(working());
+    running_turn(&mut setup).await;
+    let message = "Codex is continuing with the session model.";
+    setup
+        .fake
+        .state
+        .notify("warning", json!({"message":message}));
+    let events = setup
+        .until(|event| {
+            matches!(event, AdapterEvent::Session {
+        event: SessionEvent::ItemCompleted(item), ..
+    } if item.payload["data"]["change"] == "warning")
+        })
+        .await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::Status(status)
+        if status.detail.as_deref() == Some(message) && status.status == HarnessState::Online))
+    );
+    assert!(
+        !session_events(&events)
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnCompleted(_)))
+    );
+    assert!(setup.fake.state.calls("turn/interrupt").is_empty());
+    setup.adapter.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_web_action_times_out_while_codex_says_nothing_and_accepts_its_later_end() {
+    use orch_agent_contract::events::ItemStatus;
+    let clock = Arc::new(orch_types::ManualClock::new(
+        "2026-11-14T08:00:00Z".parse().unwrap(),
+    ));
+    let mut setup = setup(working());
+    setup.adapter = setup.adapter.with_clock(clock.clone());
+    setup
+        .adapter
+        .start(setup.start_request(), setup.sink.clone())
+        .await
+        .unwrap();
+    let thread = new_id();
+    let mut spec = plain_spec(
+        "/workspace/web",
+        new_id(),
+        new_id(),
+        new_id(),
+        thread,
+        SessionMode::New,
+        None,
+    );
+    spec.settings.web_action_wait_secs = 3;
+    setup.adapter.open_session(spec).await.unwrap();
+    setup
+        .adapter
+        .start_turn(TurnStart {
+            native_model: None,
+            native_wake: None,
+            plan: false,
+            thread_id: thread,
+            turn_id: new_id(),
+            text: "Check an announcement".into(),
+            images: Vec::new(),
+            model: "mock-large".into(),
+            effort: None,
+            params: json!({}),
+            approval_mode: ApprovalMode::Bypass,
+            sandbox_mode: orch_agent_contract::descriptor::SandboxMode::Open,
+        })
+        .await
+        .unwrap();
+    setup.fake.state.notify(
+        "turn/started",
+        json!({"threadId":"thr_1","turn":{"id":"turn_1","status":"inProgress"}}),
+    );
+    setup.fake.state.notify("item/started", json!({"threadId":"thr_1","turnId":"turn_1","item":{"type":"webSearch","id":"silent","action":{"type":"other"}}}));
+    setup.until(|event| matches!(event, AdapterEvent::Session { event: SessionEvent::ItemStarted(item), .. } if item.native_ref == "silent")).await;
+    clock.advance(chrono::Duration::seconds(3));
+    let expired = setup.until(|event| matches!(event, AdapterEvent::Session { event: SessionEvent::ItemCompleted(item), .. } if item.payload["code"] == "native_web_no_end")).await;
+    assert!(session_events(&expired).iter().any(|event| matches!(event, SessionEvent::ItemCompleted(item) if item.native_ref == "silent" && item.status == ItemStatus::Failed)));
+    assert!(
+        !session_events(&expired)
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnCompleted(_)))
+    );
+    assert!(setup.fake.state.calls("turn/interrupt").is_empty());
+    setup.fake.state.notify("item/completed", json!({"threadId":"thr_1","turnId":"turn_1","item":{"type":"webSearch","id":"silent","action":{"type":"search","query":"announcement"}}}));
+    let late = setup.until(|event| matches!(event, AdapterEvent::Session { event: SessionEvent::ItemCompleted(item), .. } if item.native_ref == "silent" && item.status == ItemStatus::Completed)).await;
+    assert!(
+        !session_events(&late)
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnCompleted(_)))
+    );
+    setup.adapter.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_resumed_session_explains_pinned_instructions_once_without_reporting_a_failed_item() {
     use orch_agent_contract::events::{ItemContent, ItemStatus, MarkerPayload, TurnOutcome};
     use std::sync::atomic::AtomicUsize;
@@ -605,7 +704,7 @@ async fn a_carried_history_is_told_to_the_new_thread_in_pages_and_in_order() {
 
 #[tokio::test]
 async fn a_harness_older_than_the_range_is_refused_and_a_newer_one_is_untested() {
-    for version in ["0.159.0", "0.162.1"] {
+    for version in ["0.159.0", "0.162.1", "0.166.9"] {
         let mut old = setup(FakeLauncher::plain());
         old.fake.state.set_version(version);
         let error = old

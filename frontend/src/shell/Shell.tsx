@@ -65,7 +65,10 @@ import { ScreenTitleBar } from '@/shell/TitleBar';
 import { useVisibleLayout } from '@/features/workbench/availability';
 import { StatusBar } from '@/ui/StatusBar';
 import { SkipMain } from '@/shell/SkipMain';
+import { mark } from '@/lib/marks';
 import { useShellBootstrap } from '@/shell/bootstrap';
+import { useKeepShell } from '@/shell/keepShell';
+import { uncover } from '@/shell/keptShell';
 import { ScreenLoading } from '@/shell/ScreenLoading';
 import { ErrorState } from '@/ui/ErrorState';
 import { OverlayChoices } from '@/features/workbench/OverlayChoices';
@@ -175,6 +178,9 @@ function ShellFrame({ userId, leavingAdmin, ready }: { userId: string; children:
   const [addressed, setAddressed] = useState(false);
   const admitAddress = useCallback(() => setAddressed(true), []);
   const admitted = ready && addressed;
+  useEffect(() => { mark('start/shell-drawn'); }, []);
+  useEffect(() => { if (admitted) { mark('start/shell-ready'); uncover(); } }, [admitted]);
+  useKeepShell(userId, admitted);
   const readerVersion = useStore(client.session, (state) => state.readerVersion ?? 0);
   const viewAdmission = useRef<ReturnType<typeof holdViewReveals> | null>(null);
   useLayoutEffect(() => {
@@ -199,7 +205,7 @@ function ShellFrame({ userId, leavingAdmin, ready }: { userId: string; children:
 
   return (
     <>
-      <PageRouting ready={ready} onAddressed={admitAddress} />
+      <PageRouting onAddressed={admitAddress} />
       <FrameReadiness.Provider value={{ ready: admitted, pending: frame.pending }}>
       <AdmittedServices ready={admitted}><FrameServices />
       <HelpOverlayHost />

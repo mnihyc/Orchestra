@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { changePage, currentPageOf, pageKey, pageQuery, previewPage } from '@/api/access';
 import { meQuery } from '@/api/auth';
 import { machineKey, machinesKey } from '@/api/resources';
-import type { Machine, PageChange } from '@/generated/api-types';
+import type { MachineListRow as Machine, PageChange } from '@/generated/api-types';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { Button } from '@/ui/Button';
 import { ErrorAlert } from '@/ui/ErrorState';
