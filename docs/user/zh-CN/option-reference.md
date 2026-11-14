@@ -16,6 +16,15 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 | --- | --- |
 | `option:ask.models.*.model` | 已启用 API 模型的路由名称，与 provider_id 一起标识一个允许的问一问模型。子级列表可以缩小可选范围，并保留父级顺序。 |
 | `option:ask.models.*.provider_id` | 此项允许的问一问模型所使用的 API 提供方标识。提问者和当前付费人仍须有权在对话所属组织中使用该提供方及模型。 |
+| `option:Meta.interface_defaults` | 安装级别的最近关闭视图保留数量、加载提示延迟与读取新鲜时间。每个人都可在自己的界面偏好中覆盖这些默认值。 |
+| `option:InterfaceDefaults.kept_closed_tabs` | 额外保留的最近关闭视图数量。打开的视图始终保留。 |
+| `option:InterfaceDefaults.progress_delay_ms` | 读取开始到显示加载图标之间的毫秒数。 |
+| `option:InterfaceDefaults.read_freshness_ms` | 目录、搜索、报表与状态读取的新鲜时间，单位为毫秒。 |
+| `option:PersonalState.interface` | 当前登录者的阅读偏好。未给出的字段使用安装默认值；修改偏好会保留其他字段。显示标签页不会修改偏好。 |
+| `option:PersonalState.interface.kept_closed_tabs` | 该用户额外保留的最近关闭视图数量。零表示不保留这些已关闭视图。 |
+| `option:PersonalState.interface.progress_delay_ms` | 该用户的加载提示延迟，单位为毫秒。零表示立即显示。 |
+| `option:PersonalState.interface.read_freshness_ms` | 该用户对目录、搜索、报表与状态读取的新鲜时间覆盖值，单位为毫秒。 |
+| `state:PersonalStateKey.interface` | 单独保存界面阅读偏好的原生用户状态键，与命名布局、侧栏选择和快捷键配置分开。 |
 | `option:AccessOptions.models` | 此使用权限涵盖的模型。 |
 | `option:AccessOptions.services` | 此使用授权允许的已启用提供方服务，可按名称、系列或分组指定。省略时允许所有已启用服务；它与生成模型列表相互独立。 |
 | `option:AccessOptions.efforts` | 此使用权限涵盖的思考强度。 |
@@ -26,6 +35,7 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 | `option:BindingOptions.providers` | 每个提供方及其模型和代理。 |
 | `option:BindingOptions.environments` | 当前读者可管理的已有环境，当前话题的环境优先。 |
 | `option:BindingOptions.environment_default` | 未另行选择时，新线程如何选择环境。 |
+| `option:BindingOptions.default_environment` | 最近一层设置指定的默认环境（无论设在哪一层），以及当前读者无法使用它时的原因；没有设置指定默认环境、或重新绑定现有线程时缺省。 |
 | `option:BindingOptions.source` | 已安全解析的仓库设置及仓库地址的来源位置。 |
 | `option:BindingOptions.access` | 在这里创建的线程最初采用的权限页。 |
 | `option:BindingOptions.agent_access` | 此创建上下文可选的代理权限；重新绑定不会创建新贡献。 |

@@ -33,7 +33,10 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Switch } from '@/ui/Switch';
+import { Input } from '@/ui/Input';
+import { READING_STATE_KEY, useInterfaceReading } from '@/lib/interfaceReading';
 import { linkSharingPreference } from '@/features/sharing/preference';
+import { useSidebarPreferences } from '@/features/navigation/preferences';
 
 /** The tutorials that ship, by the name each is kept under when it is finished. */
 export const TUTORIALS = [
@@ -123,6 +126,36 @@ function useStateKey(key: string) {
     },
     onSettled: (_data, error) => { if (error !== null) void queryClient.invalidateQueries({ queryKey: meStateKey }); },
   });
+}
+
+/** Whether a hidden bar peeks over the page when the pointer rests at its edge: off unless the person turns it on, and kept with the other choices of the bars. */
+function HiddenBars() {
+  const { t } = useTranslation();
+  const preferences = useSidebarPreferences();
+  return <Section id="interface-bars" title={t('workbench.bars.peek.title')}>
+    <Switch label={t('workbench.bars.peek.label', { state: t(preferences.peek === true ? 'common.on' : 'common.off') })} checked={preferences.peek === true} onCheckedChange={preferences.setPeek} />
+  </Section>;
+}
+
+function Reading() {
+  const { t } = useTranslation();
+  const reading = useInterfaceReading();
+  const write = useStateKey(READING_STATE_KEY);
+  const [recent, setRecent] = useState(String(reading.kept_closed_tabs));
+  const [delay, setDelay] = useState(String(reading.progress_delay_ms));
+  const save = () => {
+    const kept_closed_tabs = Number(recent), progress_delay_ms = Number(delay);
+    if (recent.trim() === '' || delay.trim() === '' || ![kept_closed_tabs, progress_delay_ms].every((value) => Number.isSafeInteger(value) && value >= 0)) return;
+    write.mutate((held) => ({ ...(isRecord(held) ? held : {}), kept_closed_tabs, progress_delay_ms }));
+  };
+  return <Section id="interface-reading" title={t('settings.interface.reading.title')}>
+    <div className="flex flex-wrap items-end gap-3">
+      <Input label={t('settings.interface.reading.recent')} type="number" min={0} step={1} value={recent} onChange={(event) => setRecent(event.target.value)} fieldClassName="w-44" />
+      <Input label={t('settings.interface.reading.delay')} type="number" min={0} step={1} value={delay} onChange={(event) => setDelay(event.target.value)} fieldClassName="w-44" />
+      <Button size="sm" pending={write.isPending} onClick={save}>{t('common.save')}</Button>
+    </div>
+    {write.error !== null && <ErrorAlert error={write.error} />}
+  </Section>;
 }
 
 function LinkSharing({ state }: { state: Record<string, unknown> }) {
@@ -433,6 +466,8 @@ export function InterfaceSettings() {
           )}
           <Keys />
           <LinkSharing state={state.data} />
+          <HiddenBars />
+          <Reading />
           <Viewers state={state.data} />
           <Tutorials state={state.data} />
           <ThisDevice />

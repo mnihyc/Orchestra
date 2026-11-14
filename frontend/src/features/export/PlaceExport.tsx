@@ -158,7 +158,6 @@ export function PlaceExport({ target, open, onClose }: FileDialogProps) {
     enabled: ready && asked !== null,
     placeholderData: keepPreviousData,
     // A plan is a reading of what is there now: asked for again each time, never taken from a minute ago.
-    staleTime: 0,
     gcTime: 30_000,
     retry: false,
     // The dialog is in front: coming back to the window does not make the figures blink and the button go off.

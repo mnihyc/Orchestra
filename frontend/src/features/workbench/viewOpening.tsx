@@ -3,6 +3,8 @@ import { Activity, createContext, type ReactNode, useCallback, useContext, useLa
 
 import { openingId } from '@/lib/opening';
 import { newActKey } from '@/lib/requests';
+import { KeptQueryScope } from '@/features/workbench/KeptQueries';
+import { pageReadShown } from '@/features/workbench/pageReads';
 
 /** Undefined is a page outside the workbench; null is a kept view with no visible slot. */
 export const ViewOpeningContext = createContext<string | null | undefined>(undefined);
@@ -127,8 +129,9 @@ export function ViewOpening({ view, route, children, hold = false }: { view: str
   }, []);
   const nonce = useSyncExternalStore(subscribe, () => visibleOpening(view, route), () => null);
   const started = useSyncExternalStore(subscribe, () => (openings.get(view)?.nonce ?? null) !== null, () => false);
+  useLayoutEffect(() => { if (started) pageReadShown(view, nonce !== null); }, [view, nonce, started]);
   // Unseen views must not even render: hidden Activity alone can pre-render Suspense data/code.
   if (!started) return null;
   // Later hiding preserves drafts/DOM but tears down query observers, timers and live subscriptions.
-  return <ViewOpeningContext.Provider value={nonce}><ViewWorkContext.Provider value={keep}><Activity mode={nonce === null && !hold && work.size === 0 ? 'hidden' : 'visible'}>{children}</Activity></ViewWorkContext.Provider></ViewOpeningContext.Provider>;
+  return <ViewOpeningContext.Provider value={nonce}><ViewWorkContext.Provider value={keep}><KeptQueryScope shown={nonce !== null}><Activity mode={nonce === null && !hold && work.size === 0 ? 'hidden' : 'visible'}>{children}</Activity></KeptQueryScope></ViewWorkContext.Provider></ViewOpeningContext.Provider>;
 }

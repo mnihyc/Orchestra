@@ -1,3 +1,4 @@
+import { READ_NOW } from '@/api/freshness';
 import { ResourcePicker } from '@/ui/ResourcePicker';
 import { CompoundPickerScope } from '@/features/resources/PickerContext';
 /** Add the provider interface: model access, credential, machine, and visible model/fact sources; examples fill those same fields. */
@@ -167,7 +168,7 @@ export function AddProviderDialog({ onClose, initialRuntimeMachine, initialHome,
           ...((presetModel.display_name === null || presetModel.display_name === undefined) ? {} : {display_name:presetModel.display_name}),
           ...((presetModel.groups === null || presetModel.groups === undefined) ? {} : {groups:presetModel.groups}),
           ...((presetModel.parameters === null || presetModel.parameters === undefined) ? {} : {parameters:presetModel.parameters}) });
-        return {...await cache.query({...providerQuery(reply.id), staleTime: 0}), warning: reply.warning};
+        return {...await cache.query({...providerQuery(reply.id), ...READ_NOW}), warning: reply.warning};
       }
       return reply;
     },

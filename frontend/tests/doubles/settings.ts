@@ -194,7 +194,7 @@ export const AUTHENTICATOR_CODE = '135790';
 const AUTHENTICATOR_SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
 
 /** The keys the interface may keep for a person: the nine the server admits. */
-const STATE_KEYS = ['help', 'layouts', 'viewers', 'timeline', 'sidebar', 'project_views', 'keys', 'reactions', 'inbox'] as const;
+const STATE_KEYS = ['help', 'layouts', 'viewers', 'timeline', 'interface', 'sidebar', 'project_views', 'keys', 'reactions', 'inbox'] as const;
 
 /** A person's keys in the shape the server keeps them: the switch, and for each action its keys as text or none. */
 function keysFault(body: Record<string, unknown>): string | null {

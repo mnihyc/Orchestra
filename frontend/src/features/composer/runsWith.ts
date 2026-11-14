@@ -5,6 +5,7 @@
  * changed, including before any history exists; the thread's own choices are asked for only where a control
  * is opened, since they decide who a choice is credited to and what a change of model leaves behind.
  */
+import { READ_NOW } from '@/api/freshness';
 import type { SkeletonRead } from '@/ui/Skeleton';
 import { type QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useViewShown } from '@/features/workbench/viewOpening';
@@ -49,8 +50,9 @@ export function ownChoices(settings: readonly ResolvedSetting[] | undefined): Re
 }
 
 /** Every model chooser keeps compatible thread choices and reports each incompatible choice it removes. */
-export async function changeModelChoice(thread: Pick<Thread, 'id' | 'model'>, choice: { model: string; effort: string | null; option: ModelOption }, states: readonly State[], settings: readonly ResolvedSetting[]) {
-  await setThreadSetting(thread.id, 'agent.model', { value: choice.model, expected_revision: settingOf(settings, 'agent.model').own?.revision ?? 0 });
+export async function changeModelChoice(thread: Pick<Thread, 'id' | 'model'>, choice: { model: string; effort: string | null; option: ModelOption; effortOnly?: boolean }, states: readonly State[], settings: readonly ResolvedSetting[]) {
+  // A change of the effort alone leaves the model's own setting as it is.
+  if (choice.effortOnly !== true) await setThreadSetting(thread.id, 'agent.model', { value: choice.model, expected_revision: settingOf(settings, 'agent.model').own?.revision ?? 0 });
   if (choice.effort !== null) await setThreadSetting(thread.id, 'agent.effort', { value: choice.effort, expected_revision: settingOf(settings, 'agent.effort').own?.revision ?? 0 });
   if (choice.model === thread.model) return { dropped: [], option: choice.option };
   const own = ownChoices(settings) ?? {};
@@ -83,8 +85,8 @@ async function readRefusal(threadId: string, error: unknown, queryClient: QueryC
   const by = error.problem.changed_by;
   refreshThread(threadId);
   const [settings, parameters] = await Promise.all([
-    queryClient.query({ ...settingsQuery(threadId), staleTime: 0 }),
-    queryClient.query({ ...parametersQuery(threadId), staleTime: 0 }),
+    queryClient.query({ ...settingsQuery(threadId), ...READ_NOW }),
+    queryClient.query({ ...parametersQuery(threadId), ...READ_NOW }),
   ]);
   const model = parameters.model.options.find((option) => option.model_name === parameters.model.value);
   const key = isRecord(current) && typeof current.key === 'string' ? current.key : 'agent.model';

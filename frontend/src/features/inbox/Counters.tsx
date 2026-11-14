@@ -12,6 +12,7 @@ import { useUserFeed } from '@/realtime/live';
 import { type Counters, useCounters, useUserStore } from '@/realtime/stores/user';
 import { Badge } from '@/ui/Badge';
 import { useFrameReady } from '@/shell/FrameReadiness';
+import { useViewShown } from '@/features/workbench/viewOpening';
 
 /** The counters, with the person's feed followed for as long as the caller is shown. */
 export function useInboxCounters(): Counters & { loaded: boolean } {
@@ -38,27 +39,19 @@ export function CountBadge({ count, tone, label, className }: { count: number; t
 
 
 /**
- * Opening a thread marks what the person was told about it read, and so does what arrives while they
- * look at it: they are looking at it. A tab that is hidden is not looking.
+ * A new notification delivered while its conversation is visible has been seen. Showing an existing
+ * tab changes nothing: older notifications remain under the Inbox's explicit read controls.
  */
 export function useReadWhenOpened(thread: string | null): void {
   const ready = useFrameReady();
-  const rows = useUserStore((state) => state.rows);
+  const shown = useViewShown();
   useEffect(() => {
-    if (thread === null || !ready) return;
-    const mark = () => {
-      // A ready shell's zero summary is conclusive even before the Inbox inventory is opened.
-      const state = useUserStore.getState();
-      if (!state.loaded && state.counters.unread === 0) return;
-      if (document.visibilityState === 'visible') void markNotificationsRead({ place: thread }, { ask: true });
-    };
-    mark();
-    // Back in front: what came while the tab was hidden was not seen.
-    document.addEventListener('visibilitychange', mark);
-    return () => document.removeEventListener('visibilitychange', mark);
-  }, [thread, ready]);
-  useEffect(() => {
-    // A notification that arrives while the thread is open is read at once.
-    if (thread !== null && ready && document.visibilityState === 'visible') void markNotificationsRead({ place: thread });
-  }, [thread, ready, rows]);
+    if (thread === null || !ready || !shown) return;
+    return useUserStore.subscribe((next, before) => {
+      if (document.visibilityState !== 'visible' || next.loaded !== before.loaded || next.lastSeq <= before.lastSeq) return;
+      const ids = [...next.rows.values()].filter((row) => row.thread_id === thread && row.read_at === null
+        && row.inbox_seq > before.lastSeq && !before.rows.has(row.id)).map((row) => row.id);
+      if (ids.length > 0) void markNotificationsRead({ ids });
+    });
+  }, [thread, ready, shown]);
 }

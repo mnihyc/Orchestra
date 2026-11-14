@@ -36,8 +36,8 @@ export function CopyDocumentDialog({ source, destination, onClose }: { source?: 
   const [closed, setClosed] = useState<Set<string>>(new Set());
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const read = useQuery({ ...documentQuery(sourceId ?? ''), enabled: sourceId !== null, retry: false, staleTime: 0 });
-  const place = useQuery({ ...nodeQuery(target), retry: false, staleTime: 0 });
+  const read = useQuery({ ...documentQuery(sourceId ?? ''), enabled: sourceId !== null, retry: false });
+  const place = useQuery({ ...nodeQuery(target), retry: false });
   const orgs = useQuery(orgsQuery);
   const settings = useQuery(settingsQuery(target));
   const root = rootChoice ?? place.data?.path[0]?.id ?? source?.path[0]?.id ?? selected;

@@ -1,0 +1,6 @@
+fmt
+clippy
+contracts
+test -p orch-settings-contract --lib
+test -p orch-api-contract --lib
+test -p orch-api-core --test bootstrap --test settings --test personal

@@ -1,5 +1,5 @@
 /** A hidden view runs no reader or subscription, and a shown view keeps its draft across hiding and moving. */
-import { useQuery } from '@tanstack/react-query';
+import { QueryClient, useQuery } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
 import { useEffect, useLayoutEffect, useState } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -90,4 +90,85 @@ it('retains the known page identity while a sheet or another tab covers it, with
   expect(read).toHaveBeenCalledTimes(1);
   view.rerender(<PageFrame shown title="Page two" />);
   await waitFor(() => expect(screen.getByTestId('frame-page')).toHaveTextContent('Page two'));
+});
+
+it.each(['List', 'Settings'])('shows a kept %s before its revalidation and preserves its draft and scroll after query collection', async (name) => {
+  const cache = new QueryClient({ defaultOptions: { queries: { gcTime: 0, staleTime: 0, retry: false } } });
+  const beforeContent: string[] = [];
+  const requests = vi.fn(() => {
+    beforeContent.push(screen.queryByTestId('kept-answer')?.textContent ?? '');
+    return Promise.resolve(name);
+  });
+  function KeptBody() {
+    const answer = useQuery({ queryKey: ['kept-answer', name], queryFn: requests });
+    const [draft, setDraft] = useState('');
+    return <div data-testid="kept-scroll"><output data-testid="kept-answer">{answer.data}</output>
+      <input aria-label="Kept draft" value={draft} onChange={(event) => setDraft(event.target.value)} /></div>;
+  }
+  function KeptFrame({ shown }: { shown: boolean }) {
+    return <><ViewOpening view={KEY} route="route"><KeptBody /></ViewOpening>{shown && <Slot />}</>;
+  }
+  const view = show(<KeptFrame shown />, cache);
+  await screen.findByText(name);
+  fireEvent.change(screen.getByRole('textbox', { name: 'Kept draft' }), { target: { value: 'Unfinished' } });
+  const scroll = screen.getByTestId('kept-scroll');
+  scroll.scrollTop = 317;
+  view.rerender(<KeptFrame shown={false} />);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+  await act(async () => { await cache.invalidateQueries({ queryKey: ['kept-answer', name], exact: true }); });
+  expect(requests).toHaveBeenCalledTimes(1);
+  expect(cache.getQueryData(['kept-answer', name])).toBe(name);
+  view.rerender(<KeptFrame shown />);
+  await waitFor(() => expect(requests).toHaveBeenCalledTimes(2));
+  expect(beforeContent).toEqual(['', name]);
+  expect(screen.getByRole('textbox', { name: 'Kept draft' })).toHaveValue('Unfinished');
+  expect(screen.getByTestId('kept-scroll')).toBe(scroll);
+  expect(scroll.scrollTop).toBe(317);
+  view.unmount();
+  cache.clear();
+});
+
+it('pauses hidden reads while an unsaved draft keeps its view effects alive', async () => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const requests = vi.fn(() => Promise.resolve('Kept answer'));
+  function UnsavedBody() {
+    const query = useQuery({ queryKey: ['unsaved-hidden-reader'], queryFn: requests });
+    return <output>{query.data}</output>;
+  }
+  function UnsavedFrame({ shown }: { shown: boolean }) {
+    return <><ViewOpening view={KEY} route="route" hold><UnsavedBody /></ViewOpening>{shown && <Slot />}</>;
+  }
+  const view = show(<UnsavedFrame shown />, cache);
+  await screen.findByText('Kept answer');
+  view.rerender(<UnsavedFrame shown={false} />);
+  await act(async () => { await Promise.resolve(); });
+  await act(async () => { await cache.invalidateQueries({ queryKey: ['unsaved-hidden-reader'], exact: true }); });
+  expect(requests).toHaveBeenCalledTimes(1);
+  view.unmount(); cache.clear();
+});
+
+it('paints a returning answer for a frame before starting its background read', async () => {
+  const frames = new Map<number, FrameRequestCallback>();
+  let next = 0;
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { const id = ++next; frames.set(id, callback); return id; });
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => { frames.delete(id); });
+  const frame = () => { const callbacks = [...frames.values()]; frames.clear(); for (const callback of callbacks) callback(performance.now()); };
+  const cache = new QueryClient({ defaultOptions: { queries: { staleTime: 0, retry: false } } });
+  const requests = vi.fn(() => Promise.resolve('Kept before the read'));
+  function PaintBody() { const query = useQuery({ queryKey: ['return-paint'], queryFn: requests }); return <output>{query.data}</output>; }
+  function PaintFrame({ shown }: { shown: boolean }) { return <><ViewOpening view={KEY} route="route"><PaintBody /></ViewOpening>{shown && <Slot />}</>; }
+  const view = show(<PaintFrame shown />, cache);
+  try {
+    await screen.findByText('Kept before the read');
+    view.rerender(<PaintFrame shown={false} />);
+    await act(async () => { await Promise.resolve(); });
+    view.rerender(<PaintFrame shown />);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText('Kept before the read')).toBeVisible();
+    expect(requests).toHaveBeenCalledTimes(1);
+    await act(async () => { frame(); await Promise.resolve(); });
+    expect(requests).toHaveBeenCalledTimes(1);
+    await act(async () => { frame(); await Promise.resolve(); });
+    await waitFor(() => expect(requests).toHaveBeenCalledTimes(2));
+  } finally { view.unmount(); cache.clear(); vi.unstubAllGlobals(); }
 });

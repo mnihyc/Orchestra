@@ -1,16 +1,17 @@
 /** The actual shell opens Find before its single bootstrap answers; pending screens never own the binding. */
 import type * as LiveModule from '@/realtime/live';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { createMemoryHistory, createRootRoute, createRouter, RouterProvider } from '@tanstack/react-router';
+import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider } from '@tanstack/react-router';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { StrictMode } from 'react';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { type ComponentType, StrictMode, Suspense } from 'react';
+import type * as LazyModule from '@/features/files/lazy';
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '@/api/client';
 import { client } from '@/api/client';
 import { meStateKey } from '@/api/personal';
 import { scheduledReads } from '@/api/readScheduler';
-import { closeFinder, useFinder } from '@/features/finder/store';
+import { closeFinder, openFinder, useFinder } from '@/features/finder/store';
 import { useHelpState } from '@/features/help/state';
 import { i18n, setLocale } from '@/i18n';
 import { SHIPPED_CHOICES } from '@/shell/keyActions';
@@ -18,19 +19,43 @@ import { setKeyChoices } from '@/shell/keys';
 import { Shell } from '@/shell/Shell';
 import { ShellControls } from '@/shell/ShellControls';
 import { ScreenLoading } from '@/shell/ScreenLoading';
+import { queryClient as applicationQueries } from '@/api/query';
+import { installPageReadStarters } from '@/features/workbench/pageReads';
+import { startAddressedPageReads } from '@/shell/pageFirstReads';
+import { useWorkbench } from '@/features/workbench/store';
+import { World } from '../doubles/world';
+import { nodeOverview } from '../doubles/screen-openings';
+import { parsePageAddress } from '@/features/workbench/contentAddress';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ get: vi.fn<(path: string) => Promise<unknown>>(), admitted: vi.fn<() => Promise<void>>() }));
+const calls = vi.hoisted(() => ({ get: vi.fn<(path: string, options?: { params?: { path?: { id?: string }; query?: Record<string, unknown> } }) => Promise<unknown>>(), admitted: vi.fn<() => Promise<void>>() }));
+vi.mock('@/features/topic/Topic', async () => {
+  const { useQuery } = await import('@tanstack/react-query');
+  const { topicQuery } = await import('@/api/nodes');
+  return { Topic: ({ topicId }: { topicId: string }) => { const query = useQuery(topicQuery(topicId)); return query.data === undefined ? <p aria-busy>Topic is loading</p> : <p data-testid="native-topic-body">{query.data.name}</p>; } };
+});
+const chunks = vi.hoisted(() => ({ wait: null as Promise<void> | null, fail: false }));
+vi.mock('@/features/files/lazy', async (loadOriginal) => {
+  const original = await loadOriginal<typeof LazyModule>();
+  return { ...original, lazyPart: <Props extends object>(load: () => Promise<{ default: ComponentType<Props> }>) => original.lazyPart(async () => {
+    if (chunks.wait !== null) await chunks.wait;
+    if (chunks.fail) throw new Error('The requested chunk did not arrive.');
+    return load();
+  }) };
+});
 vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof LiveModule>(), ensurePersonalSource: calls.admitted }));
 vi.mock('@/api/client', async (original) => {
   const actual = await original<typeof ClientModule>();
   return { ...actual, api: { ...actual.api, GET: calls.get }, ok: (request: Promise<unknown>) => request };
 });
+// The finder's code is fetched when it is first opened; here it is fetched before, so that no case waits for it.
+beforeAll(async () => { await import('@/features/finder/Finder'); });
 const session = client.session.getState();
 const finder = useFinder.getState();
 const help = useHelpState.getState();
 const caches: QueryClient[] = [];
 beforeEach(() => {
+  chunks.wait = null; chunks.fail = false;
   scheduledReads.advance();
   calls.admitted.mockReset().mockResolvedValue(undefined);
   calls.get.mockReset();
@@ -60,6 +85,72 @@ function draw(keys?: { single_key: boolean; bindings: { finder: string | null } 
   return show(<StrictMode><QueryClientProvider client={cache}><RouterProvider router={router} /></QueryClientProvider></StrictMode>);
 }
 
+it('shows an addressed topic from its native read while the shell bootstrap is still held', async () => {
+  const world = new World(), person = world.people.get('ada');
+  const row = [...world.trees.values()].flatMap((tree) => [...tree.nodes.values()]).find((node) => node.kind === 'topic');
+  if (person === undefined || row === undefined) throw new Error('The startup world must contain a reader and a topic.');
+  const topic = world.places.topic(person, row);
+  applicationQueries.clear(); localStorage.clear(); useWorkbench.getState().leave();
+  client.session.setState({ status: 'signed_in', userId: person.me.id });
+  calls.get.mockImplementation((path, options) => {
+    if (path === '/me/bootstrap') return new Promise<unknown>(() => undefined);
+    if (path === '/nodes/{id}/overview') {
+      const query = new URLSearchParams(Object.entries(options?.params?.query ?? {}).filter(([, value]) => value !== null && value !== undefined).map(([key, value]) => [key, String(value)]));
+      return nodeOverview(world, person, topic.id, query);
+    }
+    if (path === '/nodes/{id}') return Promise.resolve(topic);
+    if (path === '/topics/{id}/sync') return world.requestFeeds.read(person, `/topics/${topic.id}/sync`).then((reply) => reply.body);
+    return Promise.reject(new Error(`Unexpected addressed read: ${path}`));
+  });
+  installPageReadStarters({ page: startAddressedPageReads });
+  const root = createRootRoute({ shellComponent: ShellControls, component: () => <Shell><p>Unused routed body</p></Shell> });
+  const leaf = createRoute({ getParentRoute: () => root, path: '/topic/$topicId', component: () => null, staticData: { screen: 'topic' } });
+  const router = createRouter({ routeTree: root.addChildren([leaf]), history: createMemoryHistory({ initialEntries: [`/topic/${topic.id}`] }), defaultPendingMs: 0, defaultPendingMinMs: 0 });
+  const view = show(<QueryClientProvider client={applicationQueries}><RouterProvider router={router} /></QueryClientProvider>, applicationQueries);
+  try {
+    const body = await screen.findByTestId('native-topic-body', {}, { timeout: 10_000 });
+    expect(body).toBeVisible(); expect(body).toHaveTextContent(topic.name);
+    expect(applicationQueries.getQueryData(['shell-bootstrap', person.me.id])).toBeUndefined();
+    expect(calls.get.mock.calls.filter(([path]) => path === '/nodes/{id}/overview')).toHaveLength(1);
+    expect(calls.get.mock.calls.some(([path]) => path === '/topics/{id}/sync')).toBe(true);
+  } finally { view.unmount(); applicationQueries.clear(); installPageReadStarters({}); useWorkbench.getState().leave(); }
+});
+
+it('starts a resource list from its address before any list body or bootstrap result', async () => {
+  const target = parsePageAddress('/resources/providers?status=ready&sort=created&direction=desc');
+  if (target === null) throw new Error('The providers address must be registered.');
+  calls.get.mockImplementation((path) => path === '/everything' ? new Promise<unknown>(() => undefined) : Promise.reject(new Error(`Unexpected list opening: ${path}`)));
+  const release = startAddressedPageReads(target, 'early-provider-list');
+  try {
+    await waitFor(() => expect(calls.get).toHaveBeenCalledOnce());
+    expect(calls.get).toHaveBeenCalledWith('/everything', expect.objectContaining({ params: { query: expect.objectContaining({ kinds: 'provider', resource_state: 'ready', sort: 'created', direction: 'desc' }) } }));
+    expect(applicationQueries.getQueryData(['shell-bootstrap', 'loading-reader'])).toBeUndefined();
+  } finally { release(); applicationQueries.clear(); }
+});
+
+it('keeps the conversation visible while first Find loads and retries a failed chunk inside its dialog', async () => {
+  let finish!: () => void;
+  chunks.wait = new Promise<void>((resolve) => { finish = resolve; });
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } }); caches.push(cache);
+  const view = show(<Suspense fallback={<p>The whole workbench is waiting</p>}><ShellControls><p>Conversation stays visible</p></ShellControls></Suspense>, cache);
+  try {
+    act(() => { openFinder(); });
+    const dialog = await screen.findByRole('dialog', { name: i18n.t('finder.title') });
+    expect(screen.getByText('Conversation stays visible')).toBeVisible();
+    expect(within(dialog).getByRole('status')).toBeInTheDocument();
+    chunks.fail = true;
+    await act(async () => { finish(); await Promise.resolve(); });
+    await screen.findByRole('alert');
+    const failedDialog = screen.getByRole('dialog', { name: i18n.t('finder.title') });
+    expect(screen.getByText('Conversation stays visible')).toBeVisible();
+    chunks.fail = false;
+    chunks.wait = new Promise<void>((resolve) => { finish = resolve; });
+    fireEvent.click(within(failedDialog).getByRole('button', { name: i18n.t('common.tryAgain') }));
+    expect(await screen.findByRole('dialog', { name: i18n.t('finder.title') })).toBeVisible();
+    expect(screen.queryByText('The whole workbench is waiting')).not.toBeInTheDocument();
+  } finally { view.unmount(); finish(); chunks.wait = null; chunks.fail = false; closeFinder(); }
+});
+
 it('opens Find even before route admission and the bootstrap reader can mount', async () => {
   let finish: (() => void) | undefined;
   const admission = new Promise<void>((resolve) => { finish = resolve; });
@@ -68,8 +159,7 @@ it('opens Find even before route admission and the bootstrap reader can mount', 
     await screen.findByRole('status', { name: i18n.t('common.loading') });
     expect(calls.get).not.toHaveBeenCalled();
     await userEvent.setup().keyboard('{Control>}k{/Control}');
-    const dialog = await screen.findByRole('dialog', { name: i18n.t('finder.title') });
-    expect(within(dialog).getByRole('combobox', { name: i18n.t('finder.field') })).toHaveFocus();
+    expect(await screen.findByRole('combobox', { name: i18n.t('finder.field') })).toHaveFocus();
     expect(calls.get.mock.calls.every(([path]) => path === '/search/names')).toBe(true);
     expect(calls.get.mock.calls.map(([path]) => path)).not.toContain('/me/bootstrap');
   } finally { cleanup(); finish?.(); }
@@ -89,8 +179,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(calls.get.mock.calls.map(([path]) => path)).toEqual(['/me/bootstrap']);
     const opening = useFinder.getState().opened;
     await user.keyboard('{Control>}k{/Control}');
-    const dialog = await screen.findByRole('dialog', { name: i18n.t('finder.title') });
-    const field = within(dialog).getByRole('combobox', { name: i18n.t('finder.field') });
+    const field = await screen.findByRole('combobox', { name: i18n.t('finder.field') });
     expect(field).toHaveFocus(); expect(useFinder.getState().opened).toBe(opening + 1);
     await user.type(field, 'Acme');
     expect(field).toHaveValue('Acme');

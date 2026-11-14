@@ -1,4 +1,5 @@
 /** One confirmed pause control and explicit time form, shared by the editor, Inbox and scoped bell. */
+import { READ_NOW } from '@/api/freshness';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, Clock, Pause, Play, RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -84,7 +85,7 @@ export function PauseDialog({ open, onOpenChange, initial, mode }: { open: boole
     } catch (failure) {
       setError(failure);
       if (failure instanceof ApiError && failure.is('conflict.stale_revision')) {
-        const current = await client.query({ ...awayPrefsQuery, staleTime: 0 }).catch(() => null);
+        const current = await client.query({ ...awayPrefsQuery, ...READ_NOW }).catch(() => null);
         setStale(current);
       }
     } finally { setSaving(false); }

@@ -1,4 +1,5 @@
 /** Presentation of the server's streamed order; held while a result is read and fixed once the first screen settles. */
+import { READ_NOW } from '@/api/freshness';
 import { useCallback, useEffect, useReducer, useRef } from 'react';
 import { useQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query';
 import { useStore } from 'zustand';
@@ -116,7 +117,7 @@ export function useSearchStream(filters: SearchFilters, enabled: boolean, immedi
   // start a new authorized stream even if an interrupted stream left cached payloads behind.
   // Returning to a cached selection also needs a fresh view-owned order. Focus and reconnect
   // keep the current stream; selection changes, explicit submits and mounts start one.
-  const source = useQuery({queryKey, queryFn: ({signal}) => collect(signal), enabled, staleTime: 0, refetchOnMount: 'always',
+  const source = useQuery({queryKey, queryFn: ({signal}) => collect(signal), enabled, refetchOnMount: 'always',
     refetchOnWindowFocus: false, refetchOnReconnect: false, retry: false});
   useEffect(() => {if (!enabled) request.current?.abort();}, [enabled]);
   useEffect(() => () => request.current?.abort(), []);
@@ -147,7 +148,7 @@ export function useSearchStream(filters: SearchFilters, enabled: boolean, immedi
     else if (held.cursor !== null) {
       dispatch({type: 'continue'});
       const cursor = held.cursor;
-      void cache.query({queryKey: [...queryKey, 'more', cursor], queryFn: ({signal}) => collect(signal, cursor), staleTime: 0, gcTime: 0, retry: false}).catch(() => undefined);
+      void cache.query({queryKey: [...queryKey, 'more', cursor], queryFn: ({signal}) => collect(signal, cursor), ...READ_NOW, gcTime: 0, retry: false}).catch(() => undefined);
     }
   };
   const block = useCallback((value: boolean) => dispatch({type: 'block', value}), [dispatch]);
