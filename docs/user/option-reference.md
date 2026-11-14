@@ -13,6 +13,50 @@ An option is offered only where its interface or program declares it. Provider l
 
 | Reference | Meaning |
 | --- | --- |
+| `option:PublicAddressUpdateBody.expected_revision` | The applied address revision used to prepare this draft. A concurrent publication or local reset refuses the stale draft without returning another system projection. |
+| `option:PublicAddressUpdateBody.public_url` | The complete proposed primary origin, published only after certificate and installation checks succeed. |
+| `option:PublicAddressUpdateBody.alternate_urls` | The complete proposed alternate origin set; omission is invalid, and an empty list clears it atomically with the primary. |
+| `option:PublicAddressSnapshot.using_example` | The effective primary is still the shipped example address, rather than an installation-specific browser origin. |
+| `option:PublicAddressUpdated.projection` | An intrinsic receipt of a prepared address publication. It carries no prior file seed or general system configuration. |
+| `option:PublicAddressUpdated.revision` | The revision committed by this publication. |
+| `option:PublicAddressUpdated.public_url` | The accepted canonical primary origin, derived from this caller’s draft. |
+| `option:PublicAddressUpdated.alternate_urls` | The accepted alternate origins, normalized together with the primary. |
+| `option:PublicAddressUpdated.using_example` | Whether the accepted primary is the shipped example. |
+| `option:Meta.public_address_revision` | The committed revision read atomically with public_url and alternate_urls. A changed revision refreshes readers and a one-line browser notice, without reloading other browsers. |
+| `option:orchctl.public-address.reset` | Restore the validated file primary and alternate seed through the local database, clear the stored override and advance its revision. Restoring an already admitted seed or current address set needs no HTTP hostname. A novel file origin uses the same certificate/origin preparation before commit. No credential is printed. |
+| `option:orchctl.public-address.get` | Print only the committed effective primary address for local scripts. The file is used only if the system store has not been seeded; later file edits do not replace it. |
+| `option:orchctl.doctor.only` | Includes public-address for the stored primary, alternates, revision and seed/override state. Without an explicit --url, selected browser checks use the committed address; default local checks probe the page and API. |
+| `option:headers.X-Orch-Frontend-Generation` | The shipped frontend’s loaded worker certificate generation. Publication verifies this marker, the served TLS leaf and the installation proof before changing the effective addresses. |
+| `option:PublicAddressProofQuery.challenge` | A fresh noncredential UUID challenge for one browser-origin check. |
+| `option:PublicAddressProof.challenge` | The exact challenge given to this origin; a proof for another attempt is refused. |
+| `option:PublicAddressProof.proof` | A purpose-bound keyed proof from this installation’s existing private authority. It signs nobody in and reveals no key or credential. |
+| `option:PublicAddresses.public_url` | The primary HTTP(S) browser origin, validated with its alternates and read from one committed system-store revision for new links, commands and deliveries. |
+| `option:PublicAddresses.alternate_urls` | Other explicit browser origins of this installation. Publication replaces the whole set atomically; a file edit does not replace an already seeded value. |
+| `option:PublicAddressSnapshot.public_url` | The primary address in force at this revision. Already admitted logins, issued claims and exported packages keep their admitted address. |
+| `option:PublicAddressSnapshot.alternate_urls` | The alternate origins committed together with the primary address. |
+| `option:PublicAddressSnapshot.revision` | The monotone revision checked before publishing a prepared address candidate; a stale draft changes nothing. |
+| `option:PublicAddressSnapshot.from_file_seed` | The stored initial seed is in force. The configuration file is read only to create the first snapshot or for an explicit local reset. |
+| `option:MachineGatewaySetBody.selection` | Choose Automatic or a selected advertised gateway without reenrolling or replacing the machine identity. |
+| `option:MachineGatewaySetBody.gateway_id` | Required only for Selected; Automatic omits or clears this value. Addresses outside the installation catalogue are refused. |
+| `option:MachineGatewaySetReceipt.projection` | A receipt for the accepted native choice, without existing machine content. |
+| `option:MachineGatewaySetReceipt.machine_id` | The same enrolled machine named by the request. |
+| `option:MachineGatewaySetReceipt.selection` | The accepted primary selection; actual connection state remains in gateway status. |
+| `option:MachineGatewaySetReceipt.gateway_id` | The selected advertised gateway identity, or null for Automatic. |
+| `option:MachineGatewaySetReceipt.changed` | Whether this native write changed the saved choice; its reply is journaled before reconnecting. |
+| `option:MachineGatewaySet.choice` | Native primary selection, validated against the machine’s deployment-bound advertisement. |
+| `option:MachineGatewaySetResult.choice` | The exact native choice that was saved. |
+| `option:MachineGatewaySetResult.changed` | Whether the saved configuration changed; this does not claim the new connection is already online. |
+| `option:AuditAction.machine.gateway_changed` | Records who changed the primary gateway, its machine, saved choice and native command. |
+| `option:Host.bundled_with_server` | Immutable origin recorded only by the protected server bootstrap token; never inferred from a host name or chosen home. |
+| `option:PagePreview.server_host_use` | Current warning and exact acknowledgement for a Host Use, Manage or ownership grant on the host installed with the server; absent when it gains no new grant. |
+| `option:ServerHostUseDisclosure.hosts` | How many protected server hosts gain or change a native grant through this page or its defaults; no host identities or names are disclosed. |
+| `option:ServerHostUseDisclosure.confirmation` | Acknowledge the exact permission change and current native grants with the orch-server-host-use-confirmed header. Changed intent asks again; this proof grants no access. |
+| `option:ProviderPauseQuery.note` | A short note beside the provider stop, visible in affected threads. |
+| `option:ProviderPauseQuery.notify` | Explicitly send one grouped lifecycle notice per affected person when disabling a provider; omitted is silent. The dialog begins with Operation notices and lets the confirmer change it. |
+| `option:ResourceDeleteQuery.notify` | Explicitly send one grouped lifecycle notice per affected person when deleting a provider or MCP definition; omitted is silent. Provider child-job progress updates the same Inbox item. MCP removal records the definition change while durable machine cleanup continues. |
+| `option:ResourceImpact.notification` | The current notification audience and initial checkbox value for a provider-wide disable, provider deletion or MCP definition deletion; absent for other impact kinds and individual models. |
+| `option:ResourceOperationNotification.audience` | Visible affected people and the count whose association remains private; the confirming person is excluded and each person is counted once. |
+| `option:ResourceOperationNotification.default_on` | The inherited Operation notices default for this consequence; the confirmer may change the choice before acting. |
 | `option:ask.models.*.model` | The enabled API model’s routing name. Together with provider_id it identifies one allowed Ask model; child lists can narrow the choices while retaining the parent’s order. |
 | `option:ask.models.*.provider_id` | The API provider’s identity for this allowed Ask model. The person and current payer must still be allowed to use that provider and model in the conversation’s organization. |
 | `option:AccessOptions.models` | The models. |
@@ -25,6 +69,7 @@ An option is offered only where its interface or program declares it. Provider l
 | `option:BindingOptions.providers` | The providers, each with its models and agents. |
 | `option:BindingOptions.environments` | Every existing environment the caller manages. This topic's come first (its default, then those its threads use or that were made for it), and the rest follow. |
 | `option:BindingOptions.environment_default` | What a new thread does about its environment unless told. |
+| `option:BindingOptions.default_environment` | The environment the nearest setting names as the default, wherever it is set, and why the reader cannot use it when they cannot; absent when no setting names one and when an existing thread is bound again. |
 | `option:BindingOptions.source` | Safe resolved repository settings and the place supplying the repository address. |
 | `option:BindingOptions.access` | The permission page that a thread created here would begin with. |
 | `option:BindingOptions.agent_access` | Agent privilege choices for this creation context. Rebinding an existing holder does not create another contribution and leaves this field absent. |

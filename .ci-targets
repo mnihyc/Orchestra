@@ -1,0 +1,13 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-config --lib
+test -p orch-api-core --test gateways --test accounts --test certificates --test machines --test koidc --test reset_links --test admin_catalogue --test hosts --test ports_core --test host_ports --test ask --test ask_tools_native_origin --test imports --test notifications_channels --test notifications_destinations --test people_discussion_delivery --test people_notify --test chat_duplicates
+test -p orch-worker-core --lib
+test -p orch-worker-core --test outbox --test mail --test channel_setup
+test -p orchctl --test admin --test doctor --test kfix_deploy
+web typecheck
+web lint
+web test -- tests/component/installation-records.test.tsx tests/component/system-banner-dismissal.test.tsx tests/unit/meta-admission-lifetime.test.ts tests/unit/acts.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts

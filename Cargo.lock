@@ -3611,6 +3611,7 @@ dependencies = [
  "orch-db",
  "orch-identity-oidc",
  "orch-image-backends",
+ "orch-notifier-contract",
  "orch-notifier-email",
  "orch-notifier-push",
  "orch-notifier-telegram",
@@ -3932,6 +3933,7 @@ name = "orch-api-contract"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "http",
  "orch-access-contract",
  "orch-agent-programs",
  "orch-driver-contract",
@@ -4635,6 +4637,7 @@ dependencies = [
  "http",
  "ipnet",
  "orch-agent-programs",
+ "orch-api-contract",
  "orch-link-contract",
  "orch-plugin-contract",
  "serde",

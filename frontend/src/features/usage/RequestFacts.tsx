@@ -2,6 +2,7 @@
 import { useTranslation } from 'react-i18next';
 import type { UsageEvent } from '@/generated/api-types';
 import { Facts } from '@/features/resources/Facts';
+import { CopyId } from '@/ui/CopyId';
 import { useFormatContext } from '@/lib/appearance';
 import {purposeLabel} from './words';
 import {serviceQuantityWords,serviceQuoteWords} from './services';
@@ -80,8 +81,8 @@ export function RequestFacts({ event, details = false, speed = false }: { event:
       { name: t('usageRequest.countedCredits'), value: event.credits ?? t('usagePerf.dash') },
     ]),
     ...(!details ? [] : [
-      { name: t('usageRequest.providerId'), value: timing?.provider_request_id ?? t('usagePerf.dash') },
-      { name: t('usageRequest.adapterId'), value: event.request_ref ?? t('usagePerf.dash') },
+      { name: t('usageRequest.providerId'), value: timing?.provider_request_id === undefined || timing.provider_request_id === null ? t('usagePerf.dash') : <CopyId value={timing.provider_request_id} /> },
+      { name: t('usageRequest.adapterId'), value: event.request_ref === null ? t('usagePerf.dash') : <CopyId value={event.request_ref} /> },
       { name: t('usageRequest.owner'), value: ownerName === '' ? t('usagePerf.dash') : ownerName ?? t('usagePerf.dash') },
     ]),
   ];

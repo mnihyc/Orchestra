@@ -937,6 +937,8 @@ commands! {
     MachinePrograms = "machine.programs": ANY, Machine, 120, None, MachineProgramsCommand => MachineFacts;
     /// Saves delegated connector roles, then reconnects through the native supervisor.
     MachineRolesSet = "machine.roles.set": ANY, Machine, 30, None, MachineRolesSet => MachineRolesSetResult;
+    /// Saves a primary choice within the same advertised installation, then reconnects after its durable reply.
+    MachineGatewaySet = "machine.gateway.set": ANY, Machine, 30, None, MachineGatewaySet => MachineGatewaySetResult;
     /// Runs one named command after a managed unit starts, keeping its result for this run.
     /// Its hour-long maximum plus thirty seconds allows bounded drain and durable result storage.
     UnitAfterUp = "unit.after_up": AFTER_UP_HOST, Runtime, 3630, None, UnitAfterUp => UnitAfterUpResult;
@@ -1363,6 +1365,19 @@ pub struct MachineRolesSetResult {
     pub roles: Vec<String>,
     /// False for an idempotent request for the currently active roles.
     pub reconnecting: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MachineGatewaySet {
+    pub choice: crate::gateways::GatewayChoice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MachineGatewaySetResult {
+    pub choice: crate::gateways::GatewayChoice,
+    pub changed: bool,
 }
 
 /// The result of `machine.policy.set`.

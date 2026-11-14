@@ -6,9 +6,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiError } from '@/api/client';
 import { Installation } from '@/features/admin/Installation';
+import { PublicAddressEditor } from '@/features/admin/PublicAddress';
+import type { PublicAddressSnapshot, PublicAddressUpdated, PublicAddressUpdateBody } from '@/generated/api-types';
+import { i18n, setLocale } from '@/i18n';
 import type { BackupRestoreList, DatabaseBackupRecord, InstallationRecords, ReleaseCheck, ResolvedSetting } from '@/generated/api-types';
 
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+// This form verifies commands and drafts; a browser measures its overflow layout.
+skipOverflowFallback();
 
 const { read, settings, check, restore } = vi.hoisted(() => ({
   read: vi.fn<() => Promise<InstallationRecords>>(),
@@ -23,7 +28,7 @@ vi.mock('@/api/admin', async (original) => ({ ...await original<object>(),
   backupRestoreListQuery: { queryKey: ['admin', 'backup-restore-list'], queryFn: restore },
 }));
 
-afterEach(() => { vi.clearAllMocks(); });
+afterEach(async () => { vi.clearAllMocks(); await setLocale('en'); });
 
 const BACKUP: DatabaseBackupRecord = { completed_at: '2026-10-12T08:02:00Z', database_at: '2026-10-12T08:00:00Z', release: '0.1.0', schema: '1', dump_name: 'orch-20261012-backup.dump', bytes: 65_536, hash: 'a'.repeat(64), cause: 'pre_update', database_only: true, last_failure: { at: '2026-10-14T08:00:00Z', reason: 'The backup disk is full.' } };
 const RELEASE: ReleaseCheck = { checked_at: '2026-10-12T09:00:00Z', installed_version: '0.1.0', offered_version: '0.2.0', newer: true, source: 'https://releases.example/latest/download/version.json', error: null, command: './update.sh v0.2.0' };
@@ -121,4 +126,83 @@ describe('installation records', () => {
     expect(await screen.findByText('Coverage not recorded')).toBeVisible();
     expect(screen.queryByText(/^Database only ·/)).not.toBeInTheDocument();
   });
+});
+
+type AddressSave = (body: PublicAddressUpdateBody) => Promise<PublicAddressUpdated>;
+const addressSnapshot = (alternates: string[] = []): PublicAddressSnapshot => ({ public_url: 'https://before.example.test', alternate_urls: alternates, revision: 1, from_file_seed: true, using_example: false });
+const addressReceipt = (primary: string): PublicAddressUpdated => ({ projection: 'receipt', public_url: primary, alternate_urls: [], revision: 2, using_example: false });
+function addressHeld<T>() { let resolve!: (value: T) => void; let reject!: (error: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
+
+it.each(['en', 'zh-CN'] as const)('keeps an address draft and its applied revision when preparation fails in %s', async (locale) => {
+  await setLocale(locale);
+  const held = addressHeld<PublicAddressUpdated>(), save = vi.fn<AddressSave>(() => held.promise), open = vi.fn();
+  show(<PublicAddressEditor snapshot={addressSnapshot()} onSave={save} onOpen={open} />);
+  const primary = screen.getByRole('textbox', { name: i18n.t('publicAddress.primary') });
+  await userEvent.clear(primary); await userEvent.type(primary, 'https://changed.example.test');
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('publicAddress.saveOpen') }));
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('publicAddress.preparing') }));
+  expect(save).toHaveBeenCalledTimes(1);
+  await userEvent.type(primary, '/still-typing');
+  await act(async () => { held.reject(new ApiError({ type: 'orch:error:public_address.frontend_not_ready', title: 'Not ready', code: 'public_address.frontend_not_ready', status: 409, detail: 'The workers did not adopt the certificate', request_id: 'address-draft' }, null)); await held.promise.catch(() => undefined); });
+  expect(primary).toHaveValue('https://changed.example.test/still-typing');
+  expect(screen.getByText(i18n.t('publicAddress.appliedRevision', { revision: '1' }))).toBeVisible();
+  expect(open).not.toHaveBeenCalled();
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
+it.each(['en', 'zh-CN'] as const)('opens only the acting browser after address publication in %s', async (locale) => {
+  await setLocale(locale);
+  const open = vi.fn(), save = vi.fn<AddressSave>(() => Promise.resolve(addressReceipt('https://changed.example.test')));
+  show(<PublicAddressEditor snapshot={addressSnapshot()} onSave={save} onOpen={open} />);
+  const primary = screen.getByRole('textbox', { name: i18n.t('publicAddress.primary') });
+  await userEvent.clear(primary); await userEvent.type(primary, 'https://changed.example.test');
+  expect(open).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('publicAddress.saveOpen') }));
+  await waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith('https://changed.example.test'));
+  expect(save).toHaveBeenCalledWith({ expected_revision: 1, public_url: 'https://changed.example.test', alternate_urls: [] });
+});
+
+it('keeps newer typing instead of navigating it away when a held address save succeeds', async () => {
+  const held = addressHeld<PublicAddressUpdated>(), save = vi.fn<AddressSave>(() => held.promise), open = vi.fn();
+  show(<PublicAddressEditor snapshot={addressSnapshot()} onSave={save} onOpen={open} />);
+  const primary = screen.getByRole('textbox', { name: i18n.t('publicAddress.primary') });
+  await userEvent.clear(primary); await userEvent.type(primary, 'https://changed.example.test');
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('publicAddress.saveOpen') }));
+  await userEvent.clear(primary); await userEvent.type(primary, 'https://next.example.test');
+  await act(async () => { held.resolve(addressReceipt('https://changed.example.test')); await held.promise; });
+  expect(primary).toHaveValue('https://next.example.test');
+  expect(open).not.toHaveBeenCalled();
+  expect(screen.getByText(i18n.t('publicAddress.appliedRevision', { revision: '2' }))).toBeVisible();
+});
+
+it('finds an alternate in a large editable list without drawing the whole list or dropping unshown addresses', async () => {
+  const alternates = Array.from({ length: 1000 }, (_, index) => `https://alternate-${index}.example.test`);
+  const save = vi.fn<AddressSave>(() => Promise.resolve(addressReceipt('https://changed.example.test')));
+  show(<PublicAddressEditor snapshot={addressSnapshot(alternates)} onSave={save} onOpen={vi.fn()} />);
+  expect(screen.getAllByRole('textbox').length).toBeLessThan(100);
+  await userEvent.type(screen.getByRole('searchbox', { name: i18n.t('publicAddress.search') }), 'alternate-999.');
+  const last = await screen.findByDisplayValue('https://alternate-999.example.test');
+  await userEvent.clear(last); await userEvent.type(last, 'https://edited-last.example.test');
+  const primary = screen.getByRole('textbox', { name: i18n.t('publicAddress.primary') });
+  await userEvent.clear(primary); await userEvent.type(primary, 'https://changed.example.test');
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('publicAddress.saveOpen') }));
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  expect(save.mock.calls[0]?.[0]?.alternate_urls).toEqual([...alternates.slice(0, -1), 'https://edited-last.example.test']);
+});
+
+it('retains a stale address draft while adopting the current revision for an explicit retry', async () => {
+  const changed = { ...addressSnapshot(), public_url: 'https://someone-else.example.test', revision: 3 };
+  const stale = new ApiError({ type: 'orch:error:conflict.stale_revision', title: 'Stale', code: 'conflict.stale_revision', status: 409, detail: 'Changed while preparing', request_id: 'stale-address' }, null);
+  const save = vi.fn<AddressSave>().mockRejectedValueOnce(stale).mockResolvedValueOnce({ ...addressReceipt('https://mine.example.test'), revision: 4 });
+  const refresh = vi.fn(() => Promise.resolve(changed)), open = vi.fn();
+  show(<PublicAddressEditor snapshot={addressSnapshot()} onSave={save} onRefresh={refresh} onOpen={open} />);
+  const primary = screen.getByRole('textbox', { name: i18n.t('publicAddress.primary') });
+  await userEvent.clear(primary); await userEvent.type(primary, 'https://mine.example.test');
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('publicAddress.saveOpen') }));
+  await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+  expect(primary).toHaveValue('https://mine.example.test');
+  expect(open).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('publicAddress.saveOpen') }));
+  await waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith('https://mine.example.test'));
+  expect(save.mock.calls[1]?.[0]?.expected_revision).toBe(3);
 });

@@ -24878,6 +24878,37 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "MachineGatewaySet",
+    "method": "PUT",
+    "path": "/machines/{machine_id}/gateway",
+    "title": "Saves the primary gateway choice on its actual machine; the native reply is durable before reconnect.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "MachineGatewaySet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "machine"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "machine_id",
+                "kind": "machine"
+              }
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "MachineGet",
     "method": "GET",
     "path": "/machines/{id}",
@@ -42567,6 +42598,68 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "PublicAddressGet",
+    "method": "GET",
+    "path": "/admin/public-address",
+    "title": "Reads the revision and effective addresses in Management.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "PublicAddressGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "PublicAddressProofGet",
+    "method": "GET",
+    "path": "/public-address/proof",
+    "title": "Proves that this browser origin reaches the same installation without signing anyone in.",
+    "delegation": "public",
+    "variants": []
+  },
+  {
+    "operation_id": "PublicAddressUpdate",
+    "method": "PUT",
+    "path": "/admin/public-address",
+    "title": "Prepares the edge and publishes one current-revision address draft.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "PublicAddressUpdate",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "ReferencePreviewGet",
     "method": "GET",
     "path": "/references/preview",
@@ -42662,11 +42755,23 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "resources": [
               "provider",
               "agent",
-              "environment"
+              "environment",
+              "mcp_server"
             ],
             "target": {
               "kind": "resolved",
               "value": "requested_resources"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "environment"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "library_owned_environments"
             },
             "usage": "required"
           },

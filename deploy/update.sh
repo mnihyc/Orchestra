@@ -12,7 +12,7 @@
 #   ./update.sh dumps remove <name> [--yes]
 #   ./update.sh uninstall [--purge] [--no-backup] [--plan|--yes]
 #
-# Readiness checks the operator's public_url from this host as well as the
+# Readiness checks the committed public address from this host as well as the
 # services inside the stack. ORCH_READY_URL may select the reachable edge URL
 # when this host uses a different route to the same deployment.
 #
@@ -558,19 +558,19 @@ database_start() {
 
 # wait_ready TAG: the services and the operator's web edge serve the release.
 wait_ready() {
-  local version="${1#v}" deadline=$((SECONDS + READY_TIMEOUT)) next=$((SECONDS + 15)) output edge_output edge_url fails skip=()
-  edge_url="${ORCH_READY_URL:-$(env_get ORCH_READY_URL)}"
-  if [ -z "$edge_url" ]; then
-    edge_url="$(sed -n 's/^public_url[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' config/orch.toml | head -n 1)"
-  fi
-  if [ -z "$edge_url" ]; then
-    note "readiness needs [system] public_url or ORCH_READY_URL for the operator's web edge"
-    return 1
-  fi
+  local version="${1#v}" deadline=$((SECONDS + READY_TIMEOUT)) next=$((SECONDS + 15)) output edge_output edge_url operator_edge fails skip=()
+  operator_edge="${ORCH_READY_URL:-$(env_get ORCH_READY_URL)}"
   compose config --services | grep -qx node || skip=(--skip node)
   while :; do
-    if output="$(compose exec -T api /opt/orchctl/orchctl doctor --expect-version "$version" ${skip[@]+"${skip[@]}"} 2>&1)"; then
-      if edge_output="$(runtime/cli/current/orchctl doctor --url "$edge_url" \
+    if output="$(compose exec -T api /opt/orchctl/orchctl doctor --expect-version "$version" --skip edge ${skip[@]+"${skip[@]}"} 2>&1)"; then
+      edge_url="$operator_edge"
+      if [ -z "$edge_url" ]; then
+        # Read again for every attempt: a file edit is only a seed, and publication can change while readiness waits.
+        edge_url="$(compose exec -T api /opt/orchctl/orchctl public-address get 2>/dev/null)" || edge_url=
+      fi
+      if [ -z "$edge_url" ]; then
+        edge_output='FAIL  ready-url        the committed public address could not be read through the local database'
+      elif edge_output="$(runtime/cli/current/orchctl doctor --url "$edge_url" \
         --config config/orch.toml --secrets-dir config/secrets \
         --only edge-page,edge-api,edge-link 2>&1)"; then
         # The edge doctor reports the API version it actually reached. It may

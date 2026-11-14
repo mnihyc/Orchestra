@@ -5,7 +5,8 @@
 //! stack runs (`docker compose exec api orchctl doctor`), it reads the
 //! configuration and the database address that the API has and tries, in turn,
 //! the configuration, the database, the API itself, the gateway's link to the
-//! API, the worker's heartbeat and the node. With `--url` it also tries the
+//! API, the worker's heartbeat and the node. It reports the file seed and stored address separately,
+//! and checks the page and API at the effective browser origin. With `--url` it also tries the
 //! edge in front of the stack from wherever it is run: a page, an API call, a
 //! WebSocket held idle, a body of 8 MiB, the machines' upgrade and one
 //! connection to each endpoint the system advertises, under the trust it is
@@ -47,7 +48,7 @@ const CA_FILE: &str = "orch_ca_cert.pem";
 /// What `orchctl doctor` is asked.
 #[derive(Args, Debug)]
 pub struct Options {
-    /// The public address of the system, to try the edge in front of it as well
+    /// An explicit browser route instead of the stored effective address, for full edge checks
     /// (a page, an API call, a WebSocket held idle for 60 s, a body of 8 MiB,
     /// the machines' upgrade and each advertised endpoint). With it the command
     /// can run anywhere; without a configuration to read it tries only the edge.
@@ -65,7 +66,7 @@ pub struct Options {
     #[arg(long, default_value = ".env", value_name = "FILE")]
     env_file: PathBuf,
     /// Try only these checks (`config`, `database`, `api`, `gateway`, `worker`,
-    /// `node`, `secrets`, and with `--url` `edge-page`, `edge-api`, `edge-body`, `edge-ws`,
+    /// `node`, `secrets`, `public-address`, and at the effective address or `--url` `edge-page`, `edge-api`, `edge-body`, `edge-ws`,
     /// `edge-link`, `edge-endpoints`, `edge-ports`, or `edge` for all of them).
     #[arg(long, value_delimiter = ',', value_name = "CHECKS")]
     only: Vec<String>,
@@ -141,10 +142,11 @@ fn line(id: &str, status: Status, said: impl Into<String>) -> Line {
 }
 
 /// The checks there are, by the name `--only` and `--skip` take.
-const CHECKS: [&str; 14] = [
+const CHECKS: [&str; 15] = [
     "config",
     "secrets",
     "database",
+    "public-address",
     "api",
     "gateway",
     "worker",
@@ -159,6 +161,20 @@ const CHECKS: [&str; 14] = [
 ];
 
 impl Options {
+    fn wants_edge(&self) -> bool {
+        [
+            "edge-page",
+            "edge-api",
+            "edge-body",
+            "edge-ws",
+            "edge-link",
+            "edge-endpoints",
+            "edge-ports",
+        ]
+        .iter()
+        .any(|id| self.wanted(id))
+    }
+
     /// Refuses a name that is no check and a choice that leaves nothing to run:
     /// a typo must not read as a pass.
     fn validate(&self) -> Result<(), String> {
@@ -171,11 +187,18 @@ impl Options {
             }
         }
         let host = [
-            "config", "secrets", "database", "api", "gateway", "worker", "node",
+            "config",
+            "secrets",
+            "database",
+            "public-address",
+            "api",
+            "gateway",
+            "worker",
+            "node",
         ]
         .iter()
         .any(|id| self.wanted(id));
-        let edge = self.url.is_some()
+        let edge = (self.url.is_some() || self.config.is_file())
             && [
                 "edge-page",
                 "edge-api",
@@ -190,7 +213,10 @@ impl Options {
         if host || edge {
             Ok(())
         } else {
-            Err("no check is left to run (the checks of the edge need --url)".to_owned())
+            Err(
+                "no check is left to run (edge checks need --url or a local configuration)"
+                    .to_owned(),
+            )
         }
     }
 
@@ -227,10 +253,13 @@ async fn checks(options: &Options) -> Result<(), String> {
         lines.extend(batch);
     };
 
+    let mut effective_url = None;
     // The stack itself, where there is a stack to read.
     let host = options.config.is_file() || options.url.is_none();
     if host {
-        show(host_checks(options).await, &mut lines);
+        let (batch, address) = host_checks(options).await;
+        effective_url = address;
+        show(batch, &mut lines);
     } else {
         show(
             vec![line(
@@ -246,9 +275,15 @@ async fn checks(options: &Options) -> Result<(), String> {
     }
 
     // The edge in front of it, which waits a minute for the socket.
-    if let Some(url) = &options.url {
+    let automatic = options.url.is_none();
+    if let Some(url) = options.url.as_ref().or(effective_url.as_ref()) {
         let address = Address::parse(url)?;
-        let wanted = |id: &str| options.wanted(id);
+        let wanted = |id: &str| {
+            options.wanted(id)
+                && (!automatic
+                    || !options.only.is_empty()
+                    || matches!(id, "edge-page" | "edge-api"))
+        };
         let edge = edge::Edge {
             address,
             resolve: &resolve,
@@ -276,7 +311,7 @@ async fn checks(options: &Options) -> Result<(), String> {
 }
 
 /// The checks of the stack, in the order that a fault is found.
-async fn host_checks(options: &Options) -> Vec<Line> {
+async fn host_checks(options: &Options) -> (Vec<Line>, Option<String>) {
     let mut lines = Vec::new();
     if options.wanted("secrets") {
         lines.push(secret_permissions(options));
@@ -287,18 +322,46 @@ async fn host_checks(options: &Options) -> Vec<Line> {
             if options.wanted("config") {
                 lines.push(line("config", Status::Fail, error.to_string()));
             }
-            return lines;
+            if options.url.is_none()
+                && (!options.wanted("config"))
+                && (options.wanted("public-address") || options.wants_edge())
+            {
+                lines.push(line(
+                    "public-address",
+                    Status::Fail,
+                    "the effective address needs a readable local configuration",
+                ));
+            }
+            return (lines, None);
         }
     };
     if options.wanted("config") {
+        let seed = config.system.address_seed().validated();
+        let seed_status = if seed.is_ok() {
+            Status::Ok
+        } else {
+            Status::Part
+        };
+        let seed_text = match seed {
+            Ok(seed) => format!(
+                "{}; alternates: {}",
+                seed.public_url,
+                if seed.alternate_urls.is_empty() {
+                    "none".to_owned()
+                } else {
+                    seed.alternate_urls.join(", ")
+                }
+            ),
+            Err(error) => format!("invalid (system.{} {})", error.field, error),
+        };
         lines.push(line(
             "config",
-            Status::Ok,
+            seed_status,
             format!(
-                "read {}: {} at {}. {}",
+                "read {}: {}; file seed: {}. {}",
                 options.config.display(),
                 config.system.name,
-                config.system.public_url,
+                seed_text,
                 if config.api.trusted_proxy_cidrs.is_empty() {
                     "trusted_proxy_cidrs is empty: forwarded headers are ignored; callers behind an unnamed private proxy are counted as the proxy".to_owned()
                 } else {
@@ -308,9 +371,12 @@ async fn host_checks(options: &Options) -> Vec<Line> {
         ));
     }
 
-    let needs_database = ["database", "gateway", "worker", "node"]
-        .iter()
-        .any(|id| options.wanted(id));
+    let address_needed =
+        options.wanted("public-address") || (options.url.is_none() && options.wants_edge());
+    let needs_database = address_needed
+        || ["database", "gateway", "worker", "node"]
+            .iter()
+            .any(|id| options.wanted(id));
     let (database, database_line) = if needs_database {
         let (db, said) = connect(&config).await;
         (db, Some(said))
@@ -341,7 +407,65 @@ async fn host_checks(options: &Options) -> Vec<Line> {
         };
         lines.push(done);
     }
-    lines
+    let effective_url = if address_needed {
+        match &database {
+            Some(db) => {
+                let read = async {
+                    let mut conn = db.acquire().await?;
+                    orch_db::queries::public_addresses::read(
+                        &mut conn,
+                        &config.system.address_seed(),
+                        SystemClock.now(),
+                    )
+                    .await
+                }
+                .await;
+                match read {
+                    Ok(snapshot) => {
+                        lines.push(line(
+                            "public-address",
+                            Status::Ok,
+                            format!(
+                                "stored address {}; revision {}; {}; alternates: {}",
+                                snapshot.addresses.public_url,
+                                snapshot.revision,
+                                if snapshot.from_file_seed {
+                                    "stored file seed"
+                                } else {
+                                    "stored override"
+                                },
+                                if snapshot.addresses.alternate_urls.is_empty() {
+                                    "none".to_owned()
+                                } else {
+                                    snapshot.addresses.alternate_urls.join(", ")
+                                }
+                            ),
+                        ));
+                        Some(snapshot.addresses.public_url)
+                    }
+                    Err(error) => {
+                        lines.push(line(
+                            "public-address",
+                            Status::Fail,
+                            format!("the committed public address could not be read: {error}"),
+                        ));
+                        None
+                    }
+                }
+            }
+            None => {
+                lines.push(line(
+                    "public-address",
+                    Status::Fail,
+                    "the committed public address needs the local database",
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    (lines, effective_url)
 }
 
 /// Inspect permissions without reading or printing any credential contents.
@@ -838,11 +962,16 @@ async fn node(conn: &mut orch_db::Conn) -> Line {
             ID,
             Status::Ok,
             format!(
-                "host {} is online (connector {}); {} of {} hosts have a session",
+                "host {} is online (connector {}); {} of {} hosts have a session{}",
                 host.name,
                 host.connector_version,
                 online.len(),
-                hosts.len()
+                hosts.len(),
+                if host.bundled_with_server {
+                    "; installed with the server; containers may share its kernel; Host Use is private until granted"
+                } else {
+                    ""
+                }
             ),
         );
     }
