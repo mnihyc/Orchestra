@@ -82,6 +82,7 @@
     "noModels": "此处没有可用的 API 模型",
     "modelUnavailable": "此模型在这里不可用",
     "sources": "来源",
+    "noAnswer": "没有写出回答。请重试。",
     "sourceUnavailable": "来源已不可用",
     "copy": "复制回答",
     "retry": "重新回答",
@@ -91,7 +92,6 @@
     "noHistory": "暂无对话",
     "retention": "最后一条消息发出后保留 {{days}} 天",
     "expires": "到期时间",
-    "adminNotice": "此组织的管理员可以查看并导出此对话",
     "inspection": "管理员只读查看",
     "readOnlyTools": "使用你的权限读取 · 标注来源 · 不作修改",
     "paidBy": "付费方",
@@ -99,7 +99,9 @@
     "privateThread": "在此组织中创建永久保留的私有会话",
     "destination": "目标话题",
     "defaultDestination": "使用当前页面的话题或有权限的默认位置",
-    "contextNoRoom": "扣除 ask.max_output_tokens 和 ask.turn_tool_bytes 的预留空间后，ask.context_tokens 已无空间容纳对话历史。请提高 ask.context_tokens，或降低上述预留值。",
+    "contextNoRoom": "为回答预留空间（ask.max_output_tokens）后，ask.context_tokens 已无空间容纳对话。请提高 ask.context_tokens，或降低 ask.max_output_tokens。",
+    "windowNoRoom": "为回答预留空间（ask.max_output_tokens）后，{{model}} 的上下文窗口已无空间容纳对话。请换用窗口更大的模型，或降低 ask.max_output_tokens。",
+    "windowUnknown": "{{model}} 的上下文窗口未记录，按较小的窗口估计；为回答预留空间（ask.max_output_tokens）后已无空间容纳对话。请记录该模型的上下文窗口，或降低 ask.max_output_tokens。",
     "contextTooLong": "这段对话超出了 {{model}} 的上下文容量；请新建对话，或将它保留为线程。"
   },
   "viewWindow": {
@@ -263,8 +265,6 @@
     "environmentManager": "请联系 {{who}} 或环境管理者"
   },
   "switchChoice": {
-    "picker": "代理与提供方",
-    "option": "{{agent}}，使用 {{provider}}",
     "modelUnavailable": "等待可用的模型",
     "hold": "切换期间，新消息会等待。",
     "approvalMode": "审批：{{mode}}"
@@ -362,8 +362,6 @@
     },
     "currentEnvironment": "{{name}} · 保留文件",
     "sharedEnvironment": "{{name}} · 共用文件",
-    "currentModel": "当前模型",
-    "currentEffort": "当前推理强度",
     "startActions": "会话操作",
     "automatic": "自动选择",
     "automaticHost": "自动选择 · {{host}}",
@@ -2917,6 +2915,20 @@
         "description": "没有人说明这份数据是什么。"
       }
     },
+    "modelAddSwitches": {
+      "all": {
+        "name": "它提供的全部内容",
+        "description": "目录列出的强度、窗口、每种上下文大小、速度和访问计划"
+      },
+      "basic": {
+        "name": "强度和上下文",
+        "description": "强度、窗口和每种上下文大小；速度和访问计划保持待开启"
+      },
+      "nothing": {
+        "name": "只有它自己说明的",
+        "description": "模型的窗口和强度；其余保持待开启，直到管理者开启"
+      }
+    },
     "operationNotices": {
       "when_blocking": {
         "name": "阻断工作时",
@@ -3604,6 +3616,10 @@
       }
     },
     "models": {
+      "add_switches_on": {
+        "title": "添加时开启的内容",
+        "description": "从提供方的目录添加模型时，模型一开始带有什么：它提供的全部内容（全部）、只有强度和上下文大小（基本），或只有它自己的窗口和强度（无）。其余内容之后可由管理者开启。"
+      },
       "allowed": {
         "title": "允许的模型",
         "description": "填写在此处允许使用的模型名称模式。"
@@ -5010,6 +5026,7 @@
       "label": "上下文共 {{window}}，已用 {{used}}（{{percent}}），在 {{compact}} 处压缩",
       "labelBare": "上下文共 {{window}}，已用 {{used}}（{{percent}}）",
       "open": "查看上下文的组成（{{label}}）",
+      "labelUsed": "上下文已用 {{used}}；未报告窗口大小",
       "modelLabel": "{{model}}：{{context}}"
     },
     "panel": {
@@ -9874,7 +9891,11 @@
         "right": "隐藏右栏",
         "bottom": "隐藏底栏"
       },
-      "pin": "固定为侧栏"
+      "pin": "固定为侧栏",
+      "peek": {
+        "title": "栏",
+        "label": "悬停时显示已隐藏的栏：{{state}}"
+      }
     },
     "sash": {
       "left": "左栏的宽度",
@@ -9941,9 +9962,10 @@
       "shellsHint": "你在此环境中的 Shell。打开终端。",
       "connecting": "正在连接…",
       "connectingHint": "正在连接实时更新。",
-      "reconnectingSince": "正在重新连接… · {{time}}",
       "reconnecting": "正在重新连接…",
       "reconnectingHint": "页面上的内容仍然可以阅读。审批和干预需要等连接恢复，输入不受影响。",
+      "noLive": "没有实时更新 · {{time}}",
+      "noLiveHint": "实时更新连接不上，所以这个页面每隔几秒重新读取一次。如果一直如此，请让运行这套系统的人检查 HTTPS 前端是否放行 /api/v1/ws 的 WebSocket 升级；orchctl doctor --url 会把它标为 edge-ws。",
       "slow": "连接较慢 · {{ms}} 毫秒",
       "slowHint": "发送、保存和终端会慢一些。你的输入不会被耽搁。"
     },
@@ -10049,7 +10071,7 @@
       "custom": "自定义",
       "back": "恢复 {{place}} 的规则",
       "about": "所有者和已添加的人保留自己的权限；常规选择决定其他人的权限。",
-      "letIn": "允许他们进入环境",
+      "letIn": "查看者可以打开环境",
       "cannotLetIn": "线程的权限已更改，但你不能让其读者访问 {{name}}。请向环境的管理者申请。",
       "changing": "正在更改常规访问",
       "title": "把常规访问更改为“{{choice}}”？",
@@ -13140,7 +13162,6 @@
   },
   "composer": {
     "row": {
-      "provider": "提供方：{{name}}",
       "archived": "线程已归档",
       "sideBinding": "请在主线程中更改代理和提供方",
       "label": "消息控制",
@@ -13153,7 +13174,9 @@
       "empty": "请先写消息或附加文件。",
       "tooLong": "请缩短消息后再发送。",
       "filesWaiting": "请等待附件处理完成。",
-      "waitingForTurn": "正在读取运行中的轮次。"
+      "waitingForTurn": "正在读取运行中的轮次。",
+      "runsWith": "此线程所用的设置",
+      "agentName": "智能体"
     },
     "mode": {
       "title": "审批模式",
@@ -13194,16 +13217,11 @@
       "loading": "正在读取…"
     },
     "model": {
-      "change": "模型与强度：{{model}}。点击更改",
-      "current": "模型与强度：{{model}}",
-      "efforts": "{{model}} 的强度",
       "find": "查找模型",
       "list": "模型",
-      "noEffort": "此智能体没有强度设置。",
       "none": "未设置模型",
       "notAllowed": "此处不可用",
       "readOnly": "更改模型需要此会话的管理权限：{{who}}",
-      "title": "模型与强度",
       "reason": {
         "not_on_provider": "{{provider}} 不提供此模型",
         "disabled": "已被关闭",
@@ -13214,7 +13232,6 @@
       "exampleLarge": "大型示例模型",
       "exampleSmall": "小型示例模型",
       "example": "示例模型",
-      "runsWith": "此会话正在使用的设置",
       "conflict": {
         "title": "此选项已更改",
         "model": "{{name}} 刚刚切换到了 {{model}}。请再次选择以应用你的选项。",
@@ -13300,8 +13317,11 @@
         "context": "选择上下文大小，例如 /context 400k",
         "done": "{{what}}：{{value}}",
         "notOpen": "此模型没有开放{{what}}“{{given}}”。可选：{{list}}。",
-        "sizeInvalid": "请把大小写成 400K、1M 或 400000 这样的形式。"
-      }
+        "sizeInvalid": "请把大小写成 400K、1M 或 400000 这样的形式。",
+        "fast": "开启或关闭快速模式"
+      },
+      "chip": "模型",
+      "window": "{{size}} 上下文"
     },
     "label": "给智能体的消息",
     "placeholder": "给 {{agent}} 发消息…",
@@ -13333,7 +13353,9 @@
     },
     "draft": {
       "saving": "正在保存草稿…",
-      "failed": "草稿未能保存"
+      "failed": "草稿未能保存",
+      "kept": "草稿已保留在本次会话中",
+      "failedNamed": "“{{name}}”的草稿未能保存"
     },
     "queue": {
       "title_one": "排队中（{{count}}）",
@@ -13411,7 +13433,8 @@
       "label": "计划",
       "on": "规划中：智能体先提出计划，在有人确认继续之前不做任何更改。审批模式保持不变。",
       "off": "先规划：智能体先提出计划，在有人确认继续之前不做任何更改。",
-      "checking": "正在读取此位置的规划默认选项…"
+      "checking": "正在读取此位置的规划默认选项…",
+      "slash": "用计划模式处理下一条消息，如 /plan 任务"
     },
     "confinement": {
       "placeDefault": "沙箱默认值",
@@ -13419,6 +13442,67 @@
       "label": "沙箱：{{mode}}",
       "readOnly": "只有管理此对话的人能更改沙箱：{{who}}",
       "notOffered": "代理程序尚未在此提供沙箱选项。"
+    },
+    "pick": {
+      "find": "搜索",
+      "nothing": "没有匹配项",
+      "provider": {
+        "ask": "申请使用",
+        "off": "不可用",
+        "why": {
+          "needs_setup": "需要模型",
+          "ready": "就绪",
+          "exhausted": "已达上限",
+          "error": "报告错误",
+          "offline": "离线",
+          "disabled": "已停用",
+          "notAllowed": "此处不允许",
+          "noUse": "无权使用"
+        }
+      },
+      "agent": {
+        "off": "不能用于 {{provider}}",
+        "only": "唯一能用于此提供方的智能体",
+        "open": "打开智能体",
+        "changed": "智能体已改为 {{agent}}：{{was}} 不能用于 {{provider}}",
+        "why": {
+          "unreported": "尚未报告",
+          "error": "报告错误",
+          "disabled": "已关闭",
+          "noUse": "无权使用",
+          "unavailable": "不可用"
+        }
+      }
+    },
+    "chip": {
+      "value": "{{what}}：{{value}}",
+      "unset": "未设置",
+      "startsWith": "线程从这里开始"
+    },
+    "effort": {
+      "title": "强度",
+      "default": "默认"
+    },
+    "slash": {
+      "fork": "把此线程分叉为新线程",
+      "directory": "选择线程工作的目录"
+    },
+    "where": {
+      "label": "工作位置：{{where}}。更改"
+    },
+    "withheld": {
+      "agent": "{{agent}} 不提供",
+      "access": "仅在凭据留在提供方时可用",
+      "placement": "此类环境不提供",
+      "providerKind": "此类提供方不提供",
+      "feature": "已在代理功能中关闭",
+      "provider": "提供方对此模型不开放",
+      "condition": "此处不提供",
+      "act": {
+        "feature": "在代理功能中开启",
+        "access": "更改运行方式",
+        "placement": "更改运行位置"
+      }
     }
   },
   "thread": {
@@ -13763,7 +13847,6 @@
       "arrangement": "此处没有可以安排这个智能体的连接方式。"
     },
     "provider": {
-      "title": "提供方",
       "none": "目前没有你可以运行工作的提供方。需要由管理提供方的人添加一个，或授权你使用。",
       "locked": "上级位置已固定此处新会话使用的提供方。",
       "notYours": "你无权使用；请联系 {{owner}}",
@@ -13786,10 +13869,7 @@
     },
     "model": {
       "model": "模型",
-      "effort": "强度",
-      "pickProvider": "请先选择提供方。",
-      "none": "此提供方尚未列出你可以选择的模型。",
-      "closed": "此处无法使用它"
+      "none": "此提供方尚未列出你可以选择的模型。"
     },
     "where": {
       "title": "运行位置",
@@ -13951,9 +14031,6 @@
       "model": "没有为 {{place}} 中的新会话选择模型。",
       "environment": "你在此处没有管理任何环境，也不能新建环境。",
       "arrangement": "{{agent}} 在这里无法安排到 {{provider}} 上：{{why}}",
-      "pickProvider": "选择提供方",
-      "pickAgent": "选择智能体",
-      "pickModel": "选择模型",
       "keepFor": "默认值用于",
       "scope": {
         "topic": "此主题",
@@ -17907,7 +17984,7 @@
         "which": "只想留给几个人：设为私有并点名他们。要回到由所在位置决定的状态：选择所在位置的名称。"
       },
       "goes-environment": {
-        "title": "让他们进入环境",
+        "title": "查看者可以打开环境",
         "what": "会话运行在某个环境里，它的文件、进程、浏览器和显示都属于该环境，在环境自己的页面上给出。这会在那里点名刚添加的人，让他们查看；若是“可以管理”该会话，还可以修改文件并打开 shell。"
       },
       "goes-model": {
@@ -21681,7 +21758,8 @@
       "contextBoth": "上下文 {{window}}，最大 {{largest}}",
       "contextLargest": "上下文最大 {{largest}}",
       "offered": "已提供、尚未开启：{{list}}",
-      "suggestionsOffer": "建议所提供的内容（速度、访问计划、更大的上下文）只作为“已提供”保留，添加模型并不会开启其中任何一项。",
+      "offers": "提供：{{list}}",
+      "suggestionsOffer": "添加模型会开启它提供的内容（强度、上下文大小、速度、访问计划），除非组织的设置另有规定。之后可在“编辑选项…”中缩减。",
       "edit": "编辑选项…"
     },
     "editor": {
@@ -21694,6 +21772,8 @@
       "defaultSpeed": "初始速度",
       "defaultProgram": "初始访问计划",
       "defaultContext": "初始上下文",
+      "fromCatalogue": "{{value}}（来自目录）",
+      "none": "无",
       "standard": "标准",
       "noProgram": "无",
       "typedIn": "在这里手动输入：{{source}} 的列表中没有它",
@@ -22760,6 +22840,7 @@
     }
   },
   "change": {
+    "modelApplies": "下一轮生效",
     "steps": {
       "label": "步骤",
       "plan": "方案",
@@ -22806,11 +22887,9 @@
       "made": "原方案已超过 15 分钟，已重新制定。请再看一遍，然后确认。"
     },
     "runs": {
-      "modelUnknown": "未报告模型",
       "unavailable": {
         "profileDisabled": "代理配置已停用",
-        "keeper": "提供方要求使用其保管代理配置",
-        "modelDisabled": "已在提供方中停用"
+        "keeper": "提供方要求使用其保管代理配置"
       },
       "automatic": {
         "profile": {
@@ -22843,7 +22922,6 @@
       "model": "模型",
       "effort": "强度",
       "arrangement": "智能体与提供方的放置方式",
-      "providerNow": "{{name}}（当前）",
       "providerCurrent": "{{name}}（当前提供方）",
       "providerSelected": "{{name}}（所选提供方）"
     },
@@ -23395,6 +23473,9 @@
       "askBoxAbout": "把这条发到旁路会话，不打扰正在进行的轮次。",
       "moveOut": "移到其他组织",
       "moveOutReason": "随主会话一起移动 · 保留后可单独移动"
+    },
+    "slash": {
+      "about": "在旁路会话中提问，不打扰正在进行的轮次"
     },
     "ask": {
       "title": "旁路会话",
@@ -24115,7 +24196,6 @@
     "price": "价格",
     "priceValue": "每百万 token：输入 {{input}} · 输出 {{output}} 点数",
     "applies": "生效时间",
-    "nextTurn": "从下一轮生效",
     "runningEnvironments": "运行中的环境",
     "stoppedEnvironments": "已停止的环境",
     "mine": "我的",
@@ -24417,6 +24497,9 @@
     "runtimeCount_other": "{{number}} 个运行时",
     "offInBuild": "此版本已关闭：{{feature}}",
     "caseUnavailable": "不可用",
+    "checkedPending_one": "已检查 · 另有 {{number}} 项检查待运行",
+    "checkedPending_other": "已检查 · 另有 {{number}} 项检查待运行",
+    "casesPending": "尚未验证：{{names}}",
     "notChecked": "此版本尚未检查",
     "checkFailed": "兼容性检查失败 · 请查看结果",
     "policySummary": "{{name}}：{{choice}}",
@@ -26151,7 +26234,6 @@
       "last_used": "上次使用",
       "shared_default": "共享默认值"
     },
-    "effort": "思考强度 {{value}}",
     "name": "名称 {{value}}",
     "message": "首条消息 {{value}}",
     "sourceUnreported": "未报告来源",
@@ -26192,6 +26274,8 @@
     "resultsRootPending": "无法打开结果所属组织",
     "model": "模型摘要器",
     "details": "摘要详情",
+    "hide": "隐藏摘要",
+    "show": "显示摘要",
     "inputFacts": "源条目：纳入 {{included}} 条 · 缩短 {{shortened}} 条 · 未纳入 {{omitted}} 条",
     "baseRates": "所选模型基础费率",
     "noRates": "未提供基础费率",

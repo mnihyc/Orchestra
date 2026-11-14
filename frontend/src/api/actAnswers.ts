@@ -47,13 +47,16 @@ export function answerChanges(act: Act, p: PathParam, dependencies: readonly Cha
   const related = dependencies.filter((change) => 'relatedViews' in change);
   const outside = dependencies.filter((change) => 'outsideViews' in change);
   const missing = dependencies.filter((change) => 'missing' in change);
-  const native = dependencies.filter((change) => !('relatedViews' in change) && !('outsideViews' in change) && !('missing' in change));
+  // These derived choices have no feed or row receipt; every mounted reader needs its own current answer.
+  const bindings = dependencies.filter((change): change is Stale => 'key' in change && (change.key[0] === 'start-options' || change.key[0] === 'thread-binding-options'));
+  const native = dependencies.filter((change) => !('key' in change && (change.key[0] === 'start-options' || change.key[0] === 'thread-binding-options'))
+    && !('relatedViews' in change) && !('outsideViews' in change) && !('missing' in change));
   const answered = nativeAnswerChanges(act, p, native);
   // An entry that says its membership repair is always needed (an org moved answers with the org, not with who is in the tree it
   // went to) keeps it with whatever the answer made of the row, as the related views and the exact views are kept.
   const membership = native.filter((change) => 'people' in change && change.always === true);
   const kept = answered.some((change) => 'people' in change) ? [] : membership;
-  return [...answered, ...kept, ...related, ...outside, ...missing];
+  return [...answered, ...kept, ...related, ...outside, ...missing, ...(bindings.length === 0 ? [] : [{ missing: bindings, allObserved: true as const, cancelPending: true as const }])];
 }
 
 function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Change[]): Change[] {

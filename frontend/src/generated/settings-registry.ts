@@ -1690,6 +1690,30 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
+    "key": "models.add_switches_on",
+    "title": "Switched on when added",
+    "description": "What a model starts with when it is added from its provider's catalogue: everything it offers (all), only its efforts and context sizes (basic), or only its window and efforts (nothing). A manager can switch on the rest afterwards.",
+    "group": "models",
+    "schema": {
+      "type": "string",
+      "enum": [
+        "all",
+        "basic",
+        "nothing"
+      ]
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "replace",
+    "default": "all",
+    "example": "basic",
+    "text_key": "day100.builtin.models.add_switches_on",
+    "keywords": []
+  },
+  {
     "key": "collab.attribution",
     "title": "Attribution",
     "description": "Whether Orch's composed input, stop, denial and forwarded text names people: auto once a second person's words are delivered, always, or never (a person/an approver, with source, time and notes kept). Authored chats and documents retain their writers.",
