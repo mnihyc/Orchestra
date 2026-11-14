@@ -33,6 +33,7 @@ import type {
   Item,
   LimitBypassRequest,
   NodeSettingSetBody,
+  RawCall,
   ThreadOutlinePage,
   ThreadSegmentPage,
   ThreadTurnPage,
@@ -180,6 +181,18 @@ export function fetchOutput(target: ThreadReadTarget, itemId: string, offset: nu
   return readInThread(captured, (readSignal) => ok(api.GET('/threads/{id}/items/{item_id}/output', {
     params: { path: { id, item_id: itemId }, query: { offset, limit, ...threadReadSelector(captured) } },
     parseAs: 'text', signal: readSignal,
+  })), signal);
+}
+
+/** A tool call exactly as its harness made it, which a thread's items leave out: read when a person opens it, under the same captured history. */
+export function fetchRaw(target: ThreadReadTarget, itemId: string, signal?: AbortSignal,
+  captured = captureThreadRead(target)): Promise<RawCall> {
+  const ref = threadReadTarget(target);
+  const id = ref.threadId;
+  if (!sameThreadRead(captured.ref,ref)) return Promise.reject(threadReadChanged());
+  return readInThread(captured, (readSignal) => ok(api.GET('/threads/{id}/items/{item_id}/raw', {
+    params: { path: { id, item_id: itemId }, query: threadReadSelector(captured) },
+    signal: readSignal,
   })), signal);
 }
 

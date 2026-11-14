@@ -1,0 +1,10 @@
+# n41-reads: the upstream's model listing out of every provider view; a tool call's raw form read on demand; a thin provider row in lists; a small provider row in a thread's parameters; the topic's schedules from their own list; first compile.
+fmt
+clippy
+test -p orch-api-contract --lib
+test -p orch-agent-contract --test api_copies
+test -p orch-engine --lib
+test -p orch-api-core --test provider_models --test provider_harness --test thread_child_windows --test threads_bound --test thread_opening_scopes --test everything_resources --test providers --test provider_plan --test typed_resource_operations --test threads_read --test thread_history_pages --test everything_operation_scopes --test native_resource_family_scopes --test kfix_provider_facts_view
+web typecheck
+web lint
+web test

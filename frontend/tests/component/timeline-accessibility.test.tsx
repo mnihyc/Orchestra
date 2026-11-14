@@ -6,14 +6,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NOT_PICKING, TimelineContextValue, type TimelineContext } from '@/features/timeline/context';
 import { ToolCallRow } from '@/features/timeline/items/ToolCall';
 import { MarkerLine } from '@/features/timeline/items/Marker';
-import { RawCall } from '@/features/timeline/RawCall';
+import { RawCallView } from '@/features/timeline/RawCall';
 import { McpDisplay } from '@/features/timeline/tools/Mcp';
 import { FailureAlert } from '@/features/timeline/FailureAlert';
 import { TurnFooter } from '@/features/timeline/TurnFooter';
 import { effortDisplayName } from '@/features/models/names';
 import { currentLocale, i18n, setLocale } from '@/i18n';
 import { threadWriter } from '@/realtime/stores/thread';
-import { marker, toolCall, turn } from '../doubles/thread-rows';
+import { marker, rawOf, toolCall, turn } from '../doubles/thread-rows';
 import { show } from './support';
 
 const given = vi.hoisted(() => vi.fn<(thread: string, selection: { turn?: string; record?: string }) => void>());
@@ -216,7 +216,7 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
   it('uses level-two tool detail sections beneath the thread’s heading', () => {
     const item = toolCall('mcp-1', { kind: 'mcp', server: 'Issues', tool: 'lookup', arguments: { query: 'login' }, result: { found: true }, error: null }, { title: 'Look up login', turn: 'turn-1' });
     if (item.kind !== 'tool_call') throw new Error('The fixture is a tool call');
-    show(<><h1>Login</h1><RawCall item={item} /><McpDisplay item={item} /></>);
+    show(<><h1>Login</h1><RawCallView item={item} raw={rawOf(item)} /><McpDisplay item={item} /></>);
     const sections = screen.getAllByRole('heading').filter((heading) => heading.tagName !== 'H1');
     expect(sections).toHaveLength(4);
     for (const section of sections) expect(section.tagName).toBe('H2');

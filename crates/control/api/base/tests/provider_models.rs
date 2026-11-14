@@ -13,11 +13,11 @@ mod support;
 
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::resources::{
-    CreateProvider, ModelParameters, ModelSource, Provider, ProviderCreate, ProviderGet,
-    ProviderModel, ProviderModelCreate, ProviderModelCreateBody, ProviderModelDelete,
-    ProviderModelList, ProviderModelSuggestionAccept, ProviderModelSuggestionAcceptBody,
-    ProviderModelSuggestionList, ProviderModelUpdate, ProviderModelUpdateBody, ProviderStatus,
-    ServiceTier, Upstream,
+    CreateProvider, ModelParameters, ModelSource, ModelSuggestion, Provider, ProviderCreate,
+    ProviderFactsModelsGet, ProviderGet, ProviderModel, ProviderModelCreate,
+    ProviderModelCreateBody, ProviderModelDelete, ProviderModelList, ProviderModelSuggestionAccept,
+    ProviderModelSuggestionAcceptBody, ProviderModelSuggestionList, ProviderModelUpdate,
+    ProviderModelUpdateBody, ProviderStatus, ServiceTier, Upstream,
 };
 use orch_api_core::routes::resources::sealing::install_master_key;
 use orch_db::secrets::MasterKey;
@@ -780,4 +780,128 @@ async fn accepted_suggestions_are_added_with_what_they_offer_and_none_of_it_enab
     machine_says.await.unwrap();
     assert!(again.added.is_empty());
     assert_eq!(again.provider.models.len(), 2);
+}
+
+/// What the upstream of a provider lists: 96 models, each with the option schemas a vendor's list carries,
+/// stored as the last discovery left them.
+async fn the_upstream_lists_96_models(world: &World, id: Id) {
+    let listing: Vec<serde_json::Value> = (0..96)
+        .map(|n| {
+            let options: serde_json::Map<String, serde_json::Value> = (0..40)
+                .map(|k| {
+                    (
+                        format!("option_{k}"),
+                        json!({ "type": "string", "description": "x".repeat(80) }),
+                    )
+                })
+                .collect();
+            json!({
+                "model_name": format!("vendor-model-{n:02}"),
+                "display_name": format!("Vendor model {n:02}"),
+                "listed": true,
+                "parameters": {
+                    "efforts": ["low", "high"],
+                    "context_window": 200_000,
+                    "request_options": { "openai-responses": { "type": "object", "properties": options } }
+                }
+            })
+        })
+        .collect();
+    sqlx::query(
+        "UPDATE providers SET facts = facts || jsonb_build_object('models', $2::jsonb) WHERE id = $1",
+    )
+    .bind(id)
+    .bind(serde_json::Value::Array(listing))
+    .execute(&world.db.pool)
+    .await
+    .unwrap();
+}
+
+/// The view of a provider as it goes over the wire: its status and its bytes.
+async fn the_view_on_the_wire(world: &World, id: Id, by: &Who) -> (u16, Vec<u8>) {
+    let reply = world
+        .app
+        .call(ProviderGet, &[&id])
+        .token(&by.token)
+        .send_bytes()
+        .await;
+    (reply.status.as_u16(), reply.raw.to_vec())
+}
+
+#[tokio::test]
+async fn a_providers_view_says_how_many_models_its_upstream_lists_and_not_the_list_which_is_read_apart()
+ {
+    let world = world().await;
+    let c = company(&world).await;
+    let id = provider(&world, &c.boss, c.acme, None).await.base.id;
+    let (status, before) = the_view_on_the_wire(&world, id, &c.boss).await;
+    assert_eq!(status, 200);
+    the_upstream_lists_96_models(&world, id).await;
+    let (status, after) = the_view_on_the_wire(&world, id, &c.boss).await;
+    assert_eq!(status, 200);
+    assert!(
+        after.len() < before.len() + 64,
+        "a list of 96 models adds nothing to the view: {} bytes became {}",
+        before.len(),
+        after.len()
+    );
+    let shown: serde_json::Value = serde_json::from_slice(&after).unwrap();
+    assert!(
+        shown["facts"].get("models").is_none(),
+        "the list is not a member of the facts"
+    );
+    assert_eq!(shown["facts"]["models_count"], 96);
+    assert_eq!(shown["facts_state"]["models"], "told");
+}
+
+#[tokio::test]
+async fn the_models_an_upstream_listed_are_read_apart_by_whoever_may_view_the_provider() {
+    let world = world().await;
+    let c = company(&world).await;
+    let id = provider(&world, &c.boss, c.acme, None).await.base.id;
+    let none: Vec<ModelSuggestion> = world
+        .app
+        .call(ProviderFactsModelsGet, &[&id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        none.is_empty(),
+        "a provider that was never read lists nothing"
+    );
+    the_upstream_lists_96_models(&world, id).await;
+    let listed = world
+        .app
+        .call(ProviderFactsModelsGet, &[&id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(listed.len(), 96);
+    assert_eq!(listed[0].model_name, "vendor-model-00");
+    assert_eq!(listed[95].display_name, "Vendor model 95");
+    assert!(
+        listed[3].parameters.request_options.is_some(),
+        "each one comes with what the list said of it"
+    );
+    // A stranger is refused and told what is missing; a person given View reads the list.
+    let stranger = world
+        .app
+        .call(ProviderFactsModelsGet, &[&id])
+        .token(&c.stranger.token)
+        .send()
+        .await
+        .problem();
+    assert_eq!(stranger.code, ErrorCode::AuthzDenied);
+    assert_eq!(missing_permissions(&stranger), ["provider.view"]);
+    name_person(&world, "provider", id, "provider.view", c.viewer.id()).await;
+    let seen = world
+        .app
+        .call(ProviderFactsModelsGet, &[&id])
+        .token(&c.viewer.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(seen.len(), 96);
 }

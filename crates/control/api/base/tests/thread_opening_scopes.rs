@@ -755,3 +755,43 @@ async fn the_opening_keeps_native_branch_membership_and_cursor_validation_under_
         orch_api_contract::common::ErrorCode::RequestInvalid
     );
 }
+
+#[tokio::test]
+async fn an_opening_carries_the_threads_row_of_its_provider_and_not_the_providers_own_page() {
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    let opened = ok(open(&s, &s.ada.token, thread, &ThreadOpeningGetQuery::default()).await);
+    let provider = &opened["parameters"]["provider"];
+    assert_eq!(provider["id"], json!(s.on.provider));
+    assert!(provider["name"].is_string() && provider["access"].is_object());
+    assert!(
+        provider["models_count"].is_number(),
+        "it says how many models the provider lists"
+    );
+    assert!(provider["facts"].is_object() && provider["facts_state"].is_object());
+    for member in [
+        "models",
+        "sources",
+        "upstreams",
+        "harnesses",
+        "runtime",
+        "service_catalogue",
+        "model_group_options",
+        "arrangements",
+        "config",
+    ] {
+        assert!(
+            provider.get(member).is_none(),
+            "{member} is the provider's own page's, read from GET /providers/id"
+        );
+    }
+    assert!(
+        provider["facts"].get("models").is_none(),
+        "nor is the list its upstream gave"
+    );
+    let ordinary = ok(open(&s, &s.ada.token, thread, &ThreadOpeningGetQuery::default()).await);
+    assert_eq!(
+        provider, &ordinary["parameters"]["provider"],
+        "the same row whoever asks"
+    );
+}

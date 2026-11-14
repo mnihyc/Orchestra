@@ -60,6 +60,8 @@ use orch_api_contract::threads::OutlineEntry;
 
 use orch_api_contract::threads::OutlineKind;
 
+use orch_api_contract::threads::RawCall;
+
 use orch_api_contract::threads::THREAD_SYNC_DEFAULT_LIMIT;
 
 use orch_api_contract::threads::THREAD_SYNC_MAX_LIMIT;
@@ -81,6 +83,8 @@ use orch_api_contract::threads::ThreadItemListReply;
 use orch_api_contract::threads::ThreadItemOutputGet;
 
 use orch_api_contract::threads::ThreadItemOutputGetQuery;
+
+use orch_api_contract::threads::ThreadItemRawGet;
 
 use orch_api_contract::threads::ThreadOutlineGet;
 
@@ -113,6 +117,7 @@ pub fn mount(registry: &mut Registry) {
         .on_with_operation(ThreadSyncGet, read_operation::prepare, sync)
         .on_with_operation(ThreadItemList, read_operation::prepare, item_list)
         .on_with_operation(ThreadItemGet, read_operation::prepare, item_get)
+        .on_with_operation(ThreadItemRawGet, read_operation::prepare, item_raw_get)
         .on_raw_read_with_operation(ThreadItemOutputGet, read_operation::prepare, output_get)
         .on_with_operation(ThreadOutlineGet, read_operation::prepare, outline)
         .on_with_operation(ThreadCatchupGet, read_operation::prepare, catchup)
@@ -352,6 +357,29 @@ async fn item_list(ctx: Ctx, query: ThreadItemListQuery, (): ()) -> ApiResult<Th
         has_older: page.has_older,
         has_newer: page.has_newer,
     })
+}
+
+/// One tool call of the thread exactly as its harness made it: what the thread's own items leave out.
+async fn item_raw_get(ctx: Ctx, query: ThreadReadSelector, (): ()) -> ApiResult<RawCall> {
+    let thread = ctx.id("id")?;
+    let item = ctx.id("item_id")?;
+    let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
+    read_operation::require_current(&ctx, &mut tx).await?;
+    let found = ctx
+        .app
+        .engine
+        .item_raw_in(
+            &mut tx,
+            thread,
+            item,
+            query.continuation_id,
+            query.projection_revision,
+        )
+        .await
+        .map_err(read_failed)?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    read_operation::before_return(&ctx).await?;
+    Ok(found)
 }
 
 /// One item of the thread.

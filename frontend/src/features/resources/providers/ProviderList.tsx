@@ -145,7 +145,7 @@ export function ProviderList({ search, onSearch }: { search: ProvidersSearch; on
       from: 'xl',
       align: 'end',
       className: 'text-right tabular-nums',
-      cell: (provider) => provider.models.length,
+      cell: (provider) => provider.models_count,
     },
   ]; };
 

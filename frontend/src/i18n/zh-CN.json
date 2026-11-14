@@ -82,6 +82,7 @@
     "noModels": "此处没有可用的 API 模型",
     "modelUnavailable": "此模型在这里不可用",
     "sources": "来源",
+    "noAnswer": "没有写出回答。请重试。",
     "sourceUnavailable": "来源已不可用",
     "copy": "复制回答",
     "retry": "重新回答",
@@ -91,7 +92,6 @@
     "noHistory": "暂无对话",
     "retention": "最后一条消息发出后保留 {{days}} 天",
     "expires": "到期时间",
-    "adminNotice": "此组织的管理员可以查看并导出此对话",
     "inspection": "管理员只读查看",
     "readOnlyTools": "使用你的权限读取 · 标注来源 · 不作修改",
     "paidBy": "付费方",
@@ -99,7 +99,9 @@
     "privateThread": "在此组织中创建永久保留的私有会话",
     "destination": "目标话题",
     "defaultDestination": "使用当前页面的话题或有权限的默认位置",
-    "contextNoRoom": "扣除 ask.max_output_tokens 和 ask.turn_tool_bytes 的预留空间后，ask.context_tokens 已无空间容纳对话历史。请提高 ask.context_tokens，或降低上述预留值。",
+    "contextNoRoom": "为回答预留空间（ask.max_output_tokens）后，ask.context_tokens 已无空间容纳对话。请提高 ask.context_tokens，或降低 ask.max_output_tokens。",
+    "windowNoRoom": "为回答预留空间（ask.max_output_tokens）后，{{model}} 的上下文窗口已无空间容纳对话。请换用窗口更大的模型，或降低 ask.max_output_tokens。",
+    "windowUnknown": "{{model}} 的上下文窗口未记录，按较小的窗口估计；为回答预留空间（ask.max_output_tokens）后已无空间容纳对话。请记录该模型的上下文窗口，或降低 ask.max_output_tokens。",
     "contextTooLong": "这段对话超出了 {{model}} 的上下文容量；请新建对话，或将它保留为线程。"
   },
   "viewWindow": {
@@ -5010,6 +5012,7 @@
       "label": "上下文共 {{window}}，已用 {{used}}（{{percent}}），在 {{compact}} 处压缩",
       "labelBare": "上下文共 {{window}}，已用 {{used}}（{{percent}}）",
       "open": "查看上下文的组成（{{label}}）",
+      "labelUsed": "上下文已用 {{used}}；未报告窗口大小",
       "modelLabel": "{{model}}：{{context}}"
     },
     "panel": {
@@ -5131,7 +5134,7 @@
     "requested": "已请求重启"
   },
   "placeReview": {
-    "observedDeleted": "此处已删除，但仍被保留；修订号 {{revision}}。此次读取不是撤销回执。",
+    "observedDeleted": "此处已删除，但仍被保留。此次读取不是撤销回执。",
     "undone": "已撤销",
     "private": "私密位置",
     "privateEnvironment": "私密环境",
@@ -5202,8 +5205,8 @@
     "skipped": "未应用",
     "partial": "部分行未成功。下方逐行显示各自的结果。",
     "uncertainAbout": "写入可能已发生。请读取当前状态；这不等于确认写入，也不会产生撤销凭据。",
-    "observedArchive": "当前归档状态：{{state}}；修订号 {{revision}}。",
-    "observedParent": "当前父级：{{parent}}；修订号 {{revision}}。",
+    "observedArchive": "当前归档状态：{{state}}。",
+    "observedParent": "当前父级：{{parent}}。",
     "notReadable": "目前无法读取此位置。这本身不能证明删除成功。",
     "undoChanged": "更新的修订阻止了撤销。没有覆盖任何内容。",
     "newReviewRequired": "位置或其影响发生变化。请重新审核后再应用。"
@@ -5239,7 +5242,7 @@
     "system": "系统",
     "notAllowed": "不允许此次共享。",
     "changed": "审阅期间权限页已改变。请返回并重新审阅。",
-    "observed": "当前权限页，修订号 {{revision}}。此次读取不能确认丢失回复的写入是否成功。"
+    "observed": "当前权限页。此次读取不能确认丢失回复的写入是否成功。"
   },
   "backupRestore": {
     "none": "没有已验证的恢复清单",
@@ -5260,6 +5263,7 @@
     "inspect_other": "{{count}} 个环境需要核查",
     "noLocations": "此类别未枚举位置。",
     "location": "记录的位置",
+    "identifiers": "标识符",
     "unknownLocation": "未报告位置",
     "copy": "独立备份副本",
     "uninspectedCopy": "尚未核查可用性",
@@ -5294,7 +5298,9 @@
     "title": "保留的已安装文件",
     "lead": "每个环境保留的独有层，包括已归档的环境。大小不包含共享基础镜像；展平后为完整文件系统。",
     "environment": "环境",
-    "generation": "代次",
+    "which": "层",
+    "latest": "最新",
+    "earlier": "较早",
     "size": "保留层大小",
     "carried": "已安装的程序和文件也会迁移：保留层为 {{size}}。镜像归档还包含其基础层。"
   },
@@ -7048,7 +7054,7 @@
       "credits": "点数",
       "summary": "话题的摘要",
       "embeddings": "向量生成",
-      "turn": "轮次 {{id}}",
+      "turn": "轮次 {{number}}",
       "prompt": "提示词有 {{tokens}} 个令牌",
       "noRate": "这个模型没有费率，所以不计算点数。",
       "prices": "按每百万令牌 {{input}} / {{cached}} / {{output}} 点数计（输入 / 缓存输入 / 输出）",
@@ -7909,8 +7915,7 @@
       "history": "历史",
       "refused": "需要当前浏览器登录和 provider.manage 权限。请联系供应商管理者。",
       "review": "重新检查",
-      "windowsMissing": "受影响窗口未报告",
-      "receipt": "本次请求：{{id}}"
+      "windowsMissing": "受影响窗口未报告"
     },
     "recovery": {
       "refused": "供应商拒绝了此供应商的登录凭据。",
@@ -7947,7 +7952,6 @@
       "tokenLink": "管理 API 令牌",
       "failed": "登录失败",
       "expired": "登录请求已到期",
-      "request": "POST /providers/{{id}}/login · 方式：{{method}}",
       "status": "登录状态：{{state}}"
     }
   },
@@ -8268,6 +8272,8 @@
     "copied": "已复制",
     "copyRefused": "浏览器不允许复制",
     "linkCopied": "链接已复制",
+    "copyId": "复制 ID",
+    "idCopied": "ID 已复制",
     "refresh": "刷新"
   },
   "ui": {
@@ -9874,7 +9880,11 @@
         "right": "隐藏右栏",
         "bottom": "隐藏底栏"
       },
-      "pin": "固定为侧栏"
+      "pin": "固定为侧栏",
+      "peek": {
+        "title": "栏",
+        "label": "悬停时显示已隐藏的栏：{{state}}"
+      }
     },
     "sash": {
       "left": "左栏的宽度",
@@ -9941,9 +9951,10 @@
       "shellsHint": "你在此环境中的 Shell。打开终端。",
       "connecting": "正在连接…",
       "connectingHint": "正在连接实时更新。",
-      "reconnectingSince": "正在重新连接… · {{time}}",
       "reconnecting": "正在重新连接…",
       "reconnectingHint": "页面上的内容仍然可以阅读。审批和干预需要等连接恢复，输入不受影响。",
+      "noLive": "没有实时更新 · {{time}}",
+      "noLiveHint": "实时更新连接不上，所以这个页面每隔几秒重新读取一次。如果一直如此，请让运行这套系统的人检查 HTTPS 前端是否放行 /api/v1/ws 的 WebSocket 升级；orchctl doctor --url 会把它标为 edge-ws。",
       "slow": "连接较慢 · {{ms}} 毫秒",
       "slowHint": "发送、保存和终端会慢一些。你的输入不会被耽搁。"
     },
@@ -12792,6 +12803,7 @@
       "copyOutput": "复制原始输出",
       "copyInputShown": "复制显示的输入",
       "copyOutputShown": "复制显示的输出",
+      "readFailure": "无法读取工具原样发出的这次调用。",
       "fullInput": "完整输入",
       "fullOutput": "完整输出",
       "cut": "这里只保存了一部分。",
@@ -12819,6 +12831,11 @@
       "changed_one": "改动了 {{count}} 个文件（+{{added}} −{{removed}}）",
       "changed_other": "改动了 {{count}} 个文件（+{{added}} −{{removed}}）",
       "retry": "重试此轮次"
+    },
+    "start": {
+      "line": "已使用 {{agent}} 在 {{provider}} 上启动",
+      "created": "由 {{by}} 创建",
+      "open": "显示此会话的开始过程"
     },
     "catchup": {
       "title": "自你上次离开以来",
@@ -13518,6 +13535,8 @@
       "focusedAbout": "保留输入、回答和待处理审批，折叠其他工作。",
       "fullAbout": "逐步显示工作，按需展开工具输出。",
       "liveAbout": "实时展开正在执行的工具输出；向上滚动后暂停跟随最新内容。",
+      "diagnostics": "诊断",
+      "diagnosticsAbout": "显示“完整”中的全部内容，以及程序自身的状态行：会话状态、工具服务器、协作模式和 Orch 不解读的事件。",
       "toolCalls_one": "{{count}} 次工具调用",
       "toolCalls_other": "{{count}} 次工具调用",
       "files_one": "更改了 {{count}} 个文件",
@@ -13566,6 +13585,7 @@
     "starting": {
       "none": "正在启动",
       "environment": "正在唤醒环境",
+      "environmentMaking": "正在创建它的环境",
       "source": "正在准备源文件",
       "files": "正在准备环境",
       "provider": "正在启动 {{provider}} 的运行时",
@@ -15991,6 +16011,12 @@
       "renew": "为续期而启动于",
       "updates": "它落后的内容",
       "update": "{{name}}：{{from}} → {{to}}",
+      "toolAdded": "将添加{{name}} {{release}}",
+      "toolRebuilt": "{{name}}：{{release}} 的较新构建",
+      "tools": {
+        "connector": "Orch 连接器",
+        "executor": "Orch 工具"
+      },
       "lastProgramError": "上次程序错误"
     },
     "models": {
@@ -16048,6 +16074,7 @@
       "suggestions": "建议",
       "suggestionsNote": "只有列在这里的模型才能使用。建议是尽力检测出来的。",
       "noSuggestions": "端点没有建议尚未列出的模型。",
+      "suggestionsReadFailure": "无法读取建议的模型列表。",
       "addSelected": "添加所选",
       "addAll": "全部添加",
       "suggestionsAdded_one": "已添加 {{count}} 个模型",
@@ -17522,7 +17549,7 @@
       "labelsHint": "用逗号分隔。",
       "save": "保存设置",
       "changed": "有人先一步更改了这台主机",
-      "changedLead": "已重新读取；现在是第 {{revision}} 版。请查看有何改动，然后再次保存。"
+      "changedLead": "已重新读取，其内容已有更改。请查看有何改动，然后再次保存。"
     },
     "runtimes": {
       "title": "其上运行的内容",
@@ -17532,7 +17559,7 @@
       "unit": "单元",
       "state": "状态",
       "driver": "驱动",
-      "machine": "机器",
+      "unowned": "没有所属者的容器",
       "active": "最近活动",
       "never": "从未",
       "actions": "操作",
@@ -19009,8 +19036,6 @@
     "none": {
       "size": "大小",
       "type": "类型",
-      "hash": "哈希",
-      "copyHash": "复制哈希",
       "openAsText": "以文本打开"
     },
     "edit": {
@@ -19140,9 +19165,8 @@
   },
   "resourceDetails": {
     "copyPath": "复制路径",
-    "copyId": "复制标识符",
+    "copyValue": "复制值",
     "copyCommand": "复制命令",
-    "unitGeneration": "运行单元 {{generation}}",
     "definitionChanged": "运行配置已更改",
     "resourceLimitsChanged": "资源限制已更改",
     "homeChanged": "工作区或家目录的存储已更改",
@@ -20802,7 +20826,6 @@
     "about": "此环境的监听器、开放入口和连接。",
     "exposed": "对外开放",
     "exposedReason": "端口权限持有者以外的人可进入此端口",
-    "generation": "运行代次 {{generation}}",
     "observed": "观测时间",
     "refresh": "刷新",
     "old": "旧观测",
@@ -23235,7 +23258,6 @@
       },
       "plan": {
         "recreate": "一个没有任何新内容的新单元",
-        "update": "{{name}}：{{from}} → {{to}}",
         "staysOwners": "仍归 {{name}} 所有，权限页不变",
         "rollback": {
           "unit": "{{name}} 的原单元恢复原状",
@@ -23395,6 +23417,9 @@
       "askBoxAbout": "把这条发到旁路会话，不打扰正在进行的轮次。",
       "moveOut": "移到其他组织",
       "moveOutReason": "随主会话一起移动 · 保留后可单独移动"
+    },
+    "slash": {
+      "about": "在旁路会话中提问，不打扰正在进行的轮次"
     },
     "ask": {
       "title": "旁路会话",
@@ -24163,7 +24188,7 @@
     "enabledAt": "启用范围",
     "kind": "用于",
     "image": "镜像",
-    "imageDigest": "摘要",
+    "imagePinned": "已固定",
     "usedByLabel": "使用数量",
     "program": "程序",
     "provider": "提供方",
@@ -24417,6 +24442,9 @@
     "runtimeCount_other": "{{number}} 个运行时",
     "offInBuild": "此版本已关闭：{{feature}}",
     "caseUnavailable": "不可用",
+    "checkedPending_one": "已检查 · 另有 {{number}} 项检查待运行",
+    "checkedPending_other": "已检查 · 另有 {{number}} 项检查待运行",
+    "casesPending": "尚未验证：{{names}}",
     "notChecked": "此版本尚未检查",
     "checkFailed": "兼容性检查失败 · 请查看结果",
     "policySummary": "{{name}}：{{choice}}",
@@ -25020,6 +25048,7 @@
       "running": "正在清理",
       "results": "清理结果",
       "outcome": "结果",
+      "itemUnknown": "一个保留项",
       "manageRequired": "需要管理权限",
       "choices": {
         "keep": "保留",
@@ -25827,7 +25856,7 @@
     "measurements": "已测往返延迟",
     "measured": "测量于",
     "milliseconds": "{{value}} 毫秒",
-    "unavailable": "不可用（{{id}}）",
+    "unavailable": "网关不可用",
     "toolConnection": "工具连接",
     "unreachable": "$t(errors.tunnel.gateway_unreachable)",
     "attempted": "已尝试的网关",
@@ -25838,7 +25867,6 @@
       "unavailable": "不可用",
       "unknown": "尚未报告"
     },
-    "revision": "版本 {{revision}}",
     "edit": "编辑",
     "editTitle": "编辑网关",
     "empty": "尚未公布网关",
@@ -25928,7 +25956,7 @@
     "attempt": "尝试次数",
     "tools": "工具调用",
     "toolTime": "工具耗时",
-    "providerId": "提供方请求标识",
+    "providerId": "提供方请求",
     "adapterId": "请求引用",
     "owner": "线程所有者",
     "reasons": {
@@ -25966,6 +25994,7 @@
     "expand": "展开{{name}}",
     "sharingPolicy": "共享规则",
     "from": "来自",
+    "fromContainer": "来自 <host/> 上的容器",
     "current": "分组：{{name}}",
     "noOwner": "所有者信息不可用",
     "selectionUnavailable": "所选资源不可用",
@@ -26192,6 +26221,8 @@
     "resultsRootPending": "无法打开结果所属组织",
     "model": "模型摘要器",
     "details": "摘要详情",
+    "hide": "隐藏摘要",
+    "show": "显示摘要",
     "inputFacts": "源条目：纳入 {{included}} 条 · 缩短 {{shortened}} 条 · 未纳入 {{omitted}} 条",
     "baseRates": "所选模型基础费率",
     "noRates": "未提供基础费率",
