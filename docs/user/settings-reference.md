@@ -213,7 +213,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `option:providers.presets.*.model` | The selected model. |
 | `option:providers.presets.*.dimensions` | Vector dimensions for this index. |
 | `setting:providers.allow_http_upstreams` | **Upstreams without TLS** — Whether an API endpoint may be reached without TLS, as for a model server on a private network. A lower scope can switch this off; it cannot undo a refusal set above. |
-| `setting:providers.expiry_notice_days` | **Expiry notice** — How many days before a token that a provider runs on lapses its managers are told; 0 tells them only once it has lapsed. |
+| `setting:providers.expiry_notice_days` | **Expiry notice** — How many days before a provider token expires its managers are told; 0 tells them only after expiry. A provider may override its home’s value; removing its override follows the home again. |
 | `setting:providers.subscription_harnesses` | **Subscriptions allowed** — The agent programs whose subscriptions may be added as providers here. |
 | `setting:providers.subscription_sharing` | **Subscriptions shared** — The agent programs whose subscriptions may be used by people other than their owner. |
 | `setting:resources.created_by_members` | **Resources members may add** — The kinds of resource that any member may make in an org as their own. |
@@ -248,6 +248,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:binding.prefer` | **Preferred agent setup** — Ways to run an agent, tried first in this order. Other supported options follow. |
 | `setting:binding.allowed` | **Allowed agent setups** — Control where agents may run and whether sign-in access may be shared with an environment. |
 | `setting:credential.refresh_margin_secs` | **Credential refresh margin** — A shared copy of a credential that expires is renewed when fewer than this many seconds remain. |
+| `setting:credential.refresh_min_interval_secs` | **Credential renewal interval** — System default: 30 seconds between automatic renewals of an expiring shared copy; 0 removes this spacing. A harness request for a fresh copy is served immediately after any issue already in progress, regardless of this interval. The provider retains its original sign-in. |
 | `setting:auto.title` | **Titles** — How automatic titles are written: no title, the first input, the agent’s title, or a summary. |
 | `setting:auto.tags` | **Tags** — Whether the summarizer sets a place's tags. |
 | `setting:summary.handoff_input_share` | **Summary input share** — How much of the summary model's context window a hand-off, a fork or a goal check may fill with the conversation it sends: the newest turns first, older ones as their one-line index. A lower scope can only reduce this limit; it cannot remove a limit set above. |

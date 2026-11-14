@@ -1,4 +1,4 @@
-/** UA-21: ordinary picker values are display names; changing one still sends its original identifier. */
+/** Ordinary picker values are display names; changing one still sends its original identifier. */
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
@@ -41,12 +41,12 @@ it.each([true,false])('an exhausted provider remains selectable in the ordinary 
   const thread={model:'private_route_from',model_display:'Earlier Model',effort:null,binding:{provider:{id:'source-provider'},agent:{id:'source-agent'}}} as unknown as Thread;
   const changed=vi.fn();
   show(<RunsOn compact={compact} thread={thread} choices={initialChoices('replace')} onChange={changed}/>);
-  const picker=await screen.findByRole('combobox',{name:i18n.t(compact?'switchChoice.picker':'change.runs.provider')});
+  const picker=await screen.findByRole('combobox',{name:i18n.t('change.runs.provider')});
   await userEvent.click(picker);
-  const option=screen.getByRole('option',{name:compact?'Agent display name on Provider display name':'Provider display name'});
+  const option=screen.getByRole('option',{name:'Provider display name'});
   expect(option).not.toHaveAttribute('aria-disabled','true');
   await userEvent.click(option);
-  expect(changed).toHaveBeenCalledWith({providerId:'target-provider',agentId:'agent',model:null,effort:undefined,arrangement:null,automaticRuns:compact?{}:{profile:{providerId:'target-provider',agentId:'agent',by:'first',previous:'unavailable'}}});
+  expect(changed).toHaveBeenCalledWith({providerId:'target-provider',agentId:'agent',model:null,effort:undefined,arrangement:null,automaticRuns:{profile:{providerId:'target-provider',agentId:'agent',by:'first',previous:'unavailable'}}});
 });
 
 it.each(['needs_setup','error','offline','disabled','no_use'] as const)('keeps %s providers unavailable even when selecting a replacement',async(reason)=>{
@@ -55,14 +55,14 @@ it.each(['needs_setup','error','offline','disabled','no_use'] as const)('keeps %
   const thread={model:'private_route_from',model_display:'Earlier Model',effort:null,binding:{provider:{id:'source-provider'},agent:{id:'source-agent'}}} as unknown as Thread;
   const changed=vi.fn();
   show(<RunsOn compact thread={thread} choices={initialChoices('replace')} onChange={changed}/>);
-  await userEvent.click(await screen.findByRole('combobox',{name:i18n.t('switchChoice.picker')}));
-  const option=screen.getByRole('option',{name:'Agent display name on Provider display name'});
+  await userEvent.click(await screen.findByRole('combobox',{name:i18n.t('change.runs.provider')}));
+  const option=screen.getByRole('option',{name:'Provider display name'});
   expect(option).toHaveAttribute('aria-disabled','true');
   await userEvent.click(option);
   expect(changed).not.toHaveBeenCalled();
 });
 
-for (const locale of ['en', 'zh-CN'] as const) it(`uses one named provider/profile picker for an ordinary switch (${locale})`, async () => {
+for (const locale of ['en', 'zh-CN'] as const) it(`chooses a provider and an agent independently during an ordinary switch (${locale})`, async () => {
   await setLocale(locale);
   const thread = { model: 'private_route_from', model_display: 'Earlier Model', effort: null, binding: { provider: { id: 'source-provider' }, agent: { id: 'source-agent' } } } as unknown as Thread;
   const changed = vi.fn();
@@ -71,15 +71,17 @@ for (const locale of ['en', 'zh-CN'] as const) it(`uses one named provider/profi
     return <RunsOn compact thread={thread} choices={choices} onChange={(patch) => { setChoices((current) => ({ ...current, ...patch })); changed(patch); }} />;
   }
   show(<Form />);
-  const label = locale === 'en' ? 'Agent and provider' : '代理与提供方';
-  const choice = await screen.findByRole('combobox', { name: label });
-  expect(screen.getAllByRole('combobox')).toHaveLength(1);
-  await userEvent.click(choice);
-  const name = locale === 'en' ? 'Agent display name on Provider display name' : 'Agent display name，使用 Provider display name';
-  await userEvent.click(screen.getByRole('option', { name }));
-  expect(changed).toHaveBeenCalledWith({ providerId: 'target-provider', agentId: 'agent', model: null, effort: undefined, arrangement: null, automaticRuns: {} });
-  expect(choice).toHaveValue(name);
-  expect(screen.getByRole('combobox', { name: locale === 'en' ? 'Model' : '模型' })).toBeVisible();
+  const provider = await screen.findByRole('combobox', { name: i18n.t('change.runs.provider') });
+  const agent = screen.getByRole('combobox', { name: i18n.t('change.runs.agent') });
+  expect(screen.getAllByRole('combobox')).toHaveLength(2);
+  await userEvent.click(provider);
+  expect(screen.getAllByRole('option')).toHaveLength(1);
+  await userEvent.click(screen.getByRole('option', { name: 'Provider display name' }));
+  expect(changed).toHaveBeenCalledWith({ providerId: 'target-provider', agentId: 'agent', model: null, effort: undefined, arrangement: null,
+    automaticRuns: { profile: { providerId: 'target-provider', agentId: 'agent', by: 'first', previous: 'unavailable' } } });
+  expect(provider).toHaveValue('Provider display name');
+  expect(agent).toHaveValue('Agent display name');
+  expect(screen.getByRole('combobox', { name: i18n.t('change.runs.model') })).toBeVisible();
 });
 
 it('settles a switch when the new provider lists the same model as the current provider', async () => {

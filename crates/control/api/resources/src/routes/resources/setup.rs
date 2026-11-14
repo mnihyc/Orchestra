@@ -387,7 +387,6 @@ pub(super) async fn prepare_reply(
         ),
     };
     let mut subscriptions = Vec::new();
-    let mut unreported = Vec::new();
     let mut unavailable = Vec::new();
     let mut withheld = Vec::new();
     let mut unshared = Vec::new();
@@ -407,10 +406,9 @@ pub(super) async fn prepare_reply(
                     name: agent.name.clone(),
                     names: crate::programs::shipped_name(&row.harness_kind, None).names,
                 },
-                agent: Some(agent.clone()),
+                agent: Some(agent),
                 reason: api::ProviderSetupSubscriptionUnavailableReason::NotReported,
             });
-            unreported.push(agent);
             continue;
         };
         for protocol in descriptor
@@ -685,7 +683,6 @@ pub(super) async fn prepare_reply(
             grouping: Vec::new(),
             machines: Some(choices),
             subscriptions,
-            subscriptions_unreported: Some(unreported),
             subscriptions_unavailable: Some(unavailable),
             subscriptions_withheld: withheld,
             subscriptions_unshared: unshared,

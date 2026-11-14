@@ -5198,7 +5198,10 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "class": "parameter",
     "scopes": [
       "system",
-      "org"
+      "org",
+      "project",
+      "topic",
+      "provider"
     ],
     "merge": "replace",
     "default": 14,
@@ -6093,6 +6096,30 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "default": 300,
     "example": 300,
     "text_key": "day100.builtin.credential.refresh_margin_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "credential.refresh_min_interval_secs",
+    "title": "Credential renewal interval",
+    "description": "Minimum seconds between automatic renewals of a shared credential. Harness requests are served as soon as the current issue finishes; 0 imposes no interval.",
+    "group": "confinement",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 30,
+    "example": 30,
+    "text_key": "day100.builtin.credential.refresh_min_interval_secs",
     "keywords": [],
     "display": {
       "unit": "seconds",

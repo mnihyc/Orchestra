@@ -13,6 +13,7 @@ import { Hint } from '@/features/help/Hint';
 import type { Host, Runtime } from '@/generated/api-types';
 import { DetailPages } from '@/features/resources/DetailSections';
 import { runtimeDetail } from '@/features/resources/runtimeDetail';
+import { canForce } from '@/features/resources/runtimeForce';
 import { Section } from '@/shell/Page';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
@@ -51,8 +52,9 @@ function RemoveRuntimeDialog({ host, runtime, onClose }: { host: Host; runtime: 
   const name = runtimeName(runtime, t);
   const [typed, setTyped] = useState('');
   const [volumes, setVolumes] = useState(false);
+  const [force, setForce] = useState(false);
   const remove = useMutation({
-    mutationFn: () => removeHostRuntime(host.id, runtime.id, runtime.unit_name, volumes),
+    mutationFn: () => removeHostRuntime(host.id, runtime.id, runtime.unit_name, volumes, force),
     onSuccess: () => {
       toast({ tone: 'success', title: t('hosts.runtimes.removed', { name }) });
       onClose();
@@ -82,6 +84,7 @@ function RemoveRuntimeDialog({ host, runtime, onClose }: { host: Host; runtime: 
         <CopyButton value={runtime.unit_name} label={t('resourceDetails.copyId')} />
         <Input label={t('hosts.runtimes.type', { name })} value={typed} onChange={(event) => setTyped(event.target.value)} autoComplete="off" disabled={remove.isPending} />
         {remove.error !== null && <ErrorAlert error={remove.error} />}
+        {runtime.kind === 'provider' && (force || canForce(remove.error)) && <Checkbox label={t('hosts.runtimes.force')} checked={force} onCheckedChange={setForce} disabled={remove.isPending} />}
         {remove.error instanceof ApiError && remove.error.is('resource.in_use') && <p className="text-sm text-text-muted">{t('hosts.runtimes.inUse')}</p>}
       </div>
     </Dialog>
@@ -96,12 +99,15 @@ export function HostRuntimes({ host }: { host: Host }) {
   const [updating, setUpdating] = useState<UpdateTargets | null>(null);
 
   const stop = useMutation({
-    mutationFn: ({ runtime, interrupt }: { runtime: Runtime; interrupt: boolean }) => stopHostRuntime(host.id, runtime.id, interrupt),
+    mutationFn: ({ runtime, interrupt, force = false }: { runtime: Runtime; interrupt: boolean; force?: boolean }) => stopHostRuntime(host.id, runtime.id, interrupt, force),
     onSuccess: (_stopped, { runtime }) => {
       toast({ tone: 'success', title: t('hosts.runtimes.stopped', { name: runtimeName(runtime, t) }) });
       setInterrupting(null);
     },
   });
+
+  // A stop that was refused for a reason that doing it by force changes is offered again by force.
+  const refusedStop = canForce(stop.error) ? stop.variables : undefined;
 
   if (list.isPending) return <SkeletonRows read={list} rows={4} />;
   if (list.isError) return <ErrorState compact title={t('hosts.runtimes.title')} error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />;
@@ -200,6 +206,11 @@ export function HostRuntimes({ host }: { host: Host }) {
       )}
       {updating !== null && <UpdateDialog targets={updating} onClose={() => setUpdating(null)} />}
       {stop.error !== null && interrupting === null && <ErrorAlert error={stop.error} />}
+      {refusedStop !== undefined && interrupting === null && (
+        <Button className="self-start" size="sm" pending={stop.isPending} onClick={() => stop.mutate({ ...refusedStop, force: true })}>
+          {t('hosts.runtimes.stopForce', { name: runtimeName(refusedStop.runtime, t) })}
+        </Button>
+      )}
       <ConfirmDialog
         open={interrupting !== null}
         onOpenChange={(next) => !next && setInterrupting(null)}

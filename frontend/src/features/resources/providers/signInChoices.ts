@@ -29,11 +29,6 @@ export function signInChoices(setup:ProviderSetup|undefined,t:TFunction,locale:s
       ?name:`${row.agent.name} (${name})`,disabled:true,
       description:t(`providerCreation.subscriptionUnavailable.${row.reason}`),...(row.agent===null?{}:{preview:resourcePreview({kind:'agent',agent:row.agent})})});
   }
-  // Older setup replies still name unread profiles separately. Do not show the same profile twice.
-  for(const agent of setup.subscriptions_unreported ?? []){
-    if(!unavailable.some((row)=>row.agent?.id===agent.id))choices.push({value:`unavailable:${agent.id}`,label:agent.name,disabled:true,
-      description:t('providerCreation.subscriptionUnreported'),preview:resourcePreview({kind:'agent',agent})});
-  }
   for(const row of setup.subscriptions_withheld){
     const value=`withheld:${row.harness.kind}`;
     if(!choices.some((choice)=>choice.value===value))choices.push({value,label:programName(row.harness,locale) ?? t('resources.harnessNameUnknown'),disabled:true,

@@ -53,28 +53,28 @@ export function runsOf(choices: Choices, thread: Thread): Runs {
 export const movesRuns = (choices: Choices): boolean => choices.providerId !== null || choices.agentId !== null;
 
 /**
- * The agent profile that goes with another provider: the thread's own where the provider offers it and its harness has
- * reported what it is, else the first that can be placed; `null` keeps the thread's own.
+ * Keep the currently selected profile when the provider offers it and it has reported its support;
+ * otherwise choose the first available profile. `null` represents the thread's original profile.
  */
-export function agentFor(provider: Provider | undefined, agents: readonly Agent[], thread: Thread): string | null {
-  const chosen = chosenProfileFor(provider, agents, thread);
+export function agentFor(provider: Provider | undefined, agents: readonly Agent[], thread: Thread, selected = thread.binding?.agent.id): string | null {
+  const chosen = chosenProfileFor(provider, agents, selected);
   return chosen === undefined || chosen.id === thread.binding?.agent.id ? null : chosen.id;
 }
 
-function chosenProfileFor(provider: Provider | undefined, agents: readonly Agent[], thread: Thread): Agent | undefined {
+function chosenProfileFor(provider: Provider | undefined, agents: readonly Agent[], selected: string | undefined): Agent | undefined {
   const profiles = profilesFor(provider, agents).filter(hasReported);
-  return profiles.find((agent) => agent.id === thread.binding?.agent.id) ?? profiles[0];
+  return profiles.find((agent) => agent.id === selected) ?? profiles[0];
 }
 
 /** Facts about the profile default, recorded when the selector actually applies it. */
-export function automaticProfileFor(provider: Provider | undefined, agents: readonly Agent[], thread: Thread): AutomaticRuns {
-  const previous = agents.find((agent) => agent.id === thread.binding?.agent.id);
-  const chosen = chosenProfileFor(provider, agents, thread);
+export function automaticProfileFor(provider: Provider | undefined, agents: readonly Agent[], thread: Thread, selected = thread.binding?.agent.id): AutomaticRuns {
+  const previous = agents.find((agent) => agent.id === selected);
+  const chosen = chosenProfileFor(provider, agents, selected);
   if (provider === undefined || chosen === undefined) return {};
   const keeper = provider.protocols.length === 0 && provider.agent?.id === chosen.id;
   return { profile: { providerId: provider.id, agentId: chosen.id,
-    by: keeper ? 'keeper' : chosen.id === thread.binding?.agent.id ? 'retained' : 'first',
-    previous: chosen.id === thread.binding?.agent.id ? null : previous?.disabled === true ? 'disabled' : previous !== undefined && !hasReported(previous) ? 'unreported' : keeper ? 'keeper' : 'unavailable' } };
+    by: keeper ? 'keeper' : chosen.id === selected ? 'retained' : 'first',
+    previous: chosen.id === selected ? null : previous?.disabled === true ? 'disabled' : previous !== undefined && !hasReported(previous) ? 'unreported' : keeper ? 'keeper' : 'unavailable' } };
 }
 
 /** Refused readable profiles stay in the picker; this does not replace native compatibility review. */
@@ -155,7 +155,7 @@ export interface RunsOnProps {
   choices: Choices;
   onChange: (patch: Partial<Choices>) => void;
   focus?: boolean;
-  /** One provider/profile picker for an ordinary switch; native planning still decides whether it can run. */
+  /** Keep model and arrangement controls quiet until an ordinary switch changes its binding. */
   compact?: boolean;
 }
 
@@ -175,7 +175,8 @@ export function RunsOn({ thread, choices, onChange, focus = false, compact = fal
     ...(usable.isFetchedAfterMount && !usable.isError ? usable.data ?? [] : []),
   ].map((candidate) => [candidate.id, candidate])).values()], new Map());
   const ready = known.filter((provider) => usableIds.has(provider.id) && (provider.status === 'ready' || provider.status === 'exhausted'));
-  const unusable = known.filter((provider) => !ready.some((one) => one.id === provider.id));
+  const readyIds = new Set(ready.map((provider) => provider.id));
+  const unusable = known.filter((provider) => !readyIds.has(provider.id));
   const provider = known.find((candidate) => candidate.id === runs.providerId);
   const offered = profilesFor(provider, agents.data ?? []);
 
@@ -185,26 +186,14 @@ export function RunsOn({ thread, choices, onChange, focus = false, compact = fal
   const efforts = model?.parameters.efforts ?? [];
   const waiting = everything.isPending || agents.isPending || (runs.providerId !== '' && models.isPending);
   const ref = useFocusFirst<HTMLDivElement>(focus && !everything.isPending && !agents.isPending);
-  const pairs = [...ready, ...unusable].flatMap((candidate) => (agents.data ?? []).map((agent) => ({
-    value: `${candidate.id}:${agent.id}`, provider: candidate, agent,
-  })));
-  const choosePair = (value: string) => {
-    const pair = pairs.find((candidate) => candidate.value === value);
-    if (pair === undefined || !usableIds.has(pair.provider.id) || providerWhy(pair.provider, true, t) !== null || profileWhy(pair.provider, pair.agent, t) !== null) return;
-    const providerId = pair.provider.id === thread.binding?.provider.id ? null : pair.provider.id;
-    const agentId = pair.agent.id === thread.binding?.agent.id ? null : pair.agent.id;
-    onChange({ providerId, agentId, model: null, effort: undefined, arrangement: null, automaticRuns: {} });
-  };
-
   const choose = (providerId: string) => {
-    const same = providerId === (thread.binding?.provider.id ?? '');
-    if (same) {
-      onChange({ providerId: null, agentId: null, model: null, effort: undefined, arrangement: null, automaticRuns: {} });
-      return;
-    }
+    if (providerId === runs.providerId) return;
     const next = known.find((candidate) => candidate.id === providerId);
     if (next === undefined || !usableIds.has(next.id) || providerWhy(next, true, t) !== null) return;
-    onChange({ providerId, agentId: agentFor(next, agents.data ?? [], thread), model: null, effort: undefined, arrangement: null, automaticRuns: automaticProfileFor(next, agents.data ?? [], thread) });
+    const same = providerId === thread.binding?.provider.id;
+    const agentId = agentFor(next, agents.data ?? [], thread, runs.agentId);
+    onChange({ providerId: same ? null : providerId, agentId, model: null, effort: undefined, arrangement: null,
+      automaticRuns: same && agentId === null ? {} : automaticProfileFor(next, agents.data ?? [], thread, runs.agentId) });
   };
 
   return (
@@ -215,17 +204,6 @@ export function RunsOn({ thread, choices, onChange, focus = false, compact = fal
       {agents.isError && <ErrorState compact error={agents.error} onRetry={() => { void agents.refetch(); }} retrying={agents.isFetching} />}
       {everything.isPending || everything.isError && known.length === 0 ? null : known.length === 0 ? (
         <InlineAlert tone="warning">{t('start.provider.none')}</InlineAlert>
-      ) : compact ? (
-        <div className="flex min-w-0 flex-col gap-1"><ResourcePicker pickerKey="change.RunsOn.switchChoice.picker" label={t('switchChoice.picker')} value={`${runs.providerId}:${runs.agentId}`} onValueChange={choosePair}
-          placeholder={thread.binding === null ? t('thread.blocked.unbound') : t('switchChoice.option', { agent: thread.binding.agent.name, provider: thread.binding.provider.name })}
-          options={pairs.map((pair) => ({ value: pair.value,
-            ...resourceChoice({ kind: 'provider', provider: pair.provider }),
-            name: t('switchChoice.option', { agent: pair.agent.name, provider: names.get(pair.provider.id) ?? pair.provider.name }),
-            disabled: !usableIds.has(pair.provider.id) || (pair.provider.status !== 'ready' && pair.provider.status !== 'exhausted') || profileWhy(pair.provider, pair.agent, t) !== null,
-            description: <><ResourceHint subject={{ kind: 'provider', provider: pair.provider }} />{providerWhy(pair.provider, usableIds.has(pair.provider.id), t) ?? profileWhy(pair.provider, pair.agent, t)}</>,
-          }))} />
-          <AutomaticChoice kind="profile" origins={choices.automaticRuns} runs={runs} />
-        </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2">
           <ResourcePicker pickerKey="change.RunsOn.change.runs.provider"

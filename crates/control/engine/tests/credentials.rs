@@ -946,8 +946,9 @@ async fn a_copy_is_issued_sealed_to_the_machine_of_the_harness_and_given_to_it_b
 }
 
 #[tokio::test]
-async fn a_harness_that_asks_for_a_credential_again_within_thirty_seconds_has_its_turn_failed() {
-    let s = stand().await;
+async fn a_harness_can_renew_a_recent_shared_copy_without_ending_its_turn() {
+    let clock = orch_testkit::clock::manual();
+    let s = stand_on(World::observed_with_clock(Arc::new(clock)).await).await;
     let thread = s.thread(ArrangementType::CredentialShared, "shared").await;
     s.say(thread, "hello").await;
     let start = s.turn_start(thread, 0).await;
@@ -961,18 +962,20 @@ async fn a_harness_that_asks_for_a_credential_again_within_thirty_seconds_has_it
         }),
     )
     .await;
-    s.world.wait_turn(start.turn_id, "failed").await;
-    let error: Json = sqlx::query_scalar("SELECT error FROM turns WHERE id = $1")
-        .bind(start.turn_id)
-        .fetch_one(s.world.pool.pool())
-        .await
-        .unwrap();
-    assert_eq!(error["code"], "provider_unauthorized", "{error}");
+    eventually(
+        "the requested replacement copy to be given without moving the clock",
+        || async { s.audited("provider.credential_issued").await.len() >= 2 },
+    )
+    .await;
+    assert_eq!(s.world.turn_state(start.turn_id).await, "running");
     assert_eq!(
         s.bodies(K::ProviderCredentialIssue).len(),
-        1,
-        "no second copy was issued so soon after the first"
+        2,
+        "the request receives another copy without an arbitrary delay"
     );
+    assert_eq!(s.bodies(K::AgentCredentialSet).len(), 2);
+    assert_eq!(s.holder().await, None, "the provider retains custody");
+    s.finish_turn(thread, &start).await;
 }
 
 #[tokio::test]

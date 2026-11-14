@@ -108,7 +108,11 @@ pub(super) fn views(
                 available: !capabilities.is_empty()
                     && endpoint
                         .and_then(|endpoint| declarations.interfaces.get(&endpoint.interface))
-                        .is_some_and(|interface| interface.implementation == "http-json"),
+                        .is_some_and(|interface| {
+                            orch_provider_contract::services::json_implementation(
+                                &interface.implementation,
+                            )
+                        }),
                 capabilities,
                 enabled: choice.is_some_and(|choice| choice.enabled),
                 groups: choice

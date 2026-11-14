@@ -48,9 +48,9 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       await page.goto(`/thread/${MAIN}`);
       await page.getByRole('button', { name: words.change.menu.switch, exact: true }).click();
       const form = page.getByRole('dialog').filter({ has: page.locator('[data-thread-change-pickers]') });
-      const provider = form.getByRole('combobox', { name: words.switchChoice.picker, exact: true });
-      // The placeholder names the bound pair even while selectable pairs are still loading.
-      const fromOpenAI = (await provider.getAttribute('placeholder'))?.includes('OpenAI key') === true;
+      const provider = form.getByRole('combobox', { name: words.change.runs.provider, exact: true });
+      // The provider control names the current provider independently of the selected profile.
+      const fromOpenAI = (await provider.inputValue()).includes('OpenAI key');
       await provider.click();
       await page.getByRole('option', { name: fromOpenAI ? /Team Anthropic/ : /OpenAI key/ }).first().click();
       await form.locator('[data-change-runs] > details > summary').click();

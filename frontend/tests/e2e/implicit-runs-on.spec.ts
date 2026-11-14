@@ -51,25 +51,32 @@ async function openChange(page: Page, t: TFunction, kind: 'switch' | 'fork') {
   return page.getByRole('dialog', { name: t(kind === 'switch' ? 'change.title.switch' : 'change.title.fork', { name: 'Main thread' }), exact: true });
 }
 for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const) {
-  // Thread → Switch → inspect disabled/unreported/non-keeper pairs → choose a valid pair → retained model/effort → disabled model → explicit different model → native preview → Cancel.
-  // 会话 → 切换 → 查看已停用、未报告及非保管配置的原因 → 选择有效组合 → 沿用模型与推理强度 → 已停用模型 → 手动改选其他模型 → 原生预览 → 取消。
+  // Thread → Switch → inspect refused profiles with each provider → choose a profile → retained model/effort → disabled model → explicit different model → native preview → Cancel.
+  // 会话 → 切换 → 按提供方查看不可用配置的原因 → 选择配置 → 沿用模型与推理强度 → 已停用模型 → 手动改选其他模型 → 原生预览 → 取消。
   test(`switch keeps refusals and explains retained choices ${locale}/${width}/${theme}`, async ({ page, request }, info) => {
     await scenario(); await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme: theme });
     const t = await language(page, request, locale, theme); const { previews, admitted } = await availability(page);
     await page.goto(`/thread/${ACME.mainThread}`); const form = await openChange(page, t, 'switch');
-    const picker = form.getByRole('combobox', { name: t('switchChoice.picker'), exact: true });
+    const provider = form.getByRole('combobox', { name: t('change.runs.provider'), exact: true });
+    const picker = form.getByRole('combobox', { name: t('change.runs.agent'), exact: true });
     await picker.click(); await picker.fill('Scripted agent');
-    const disabled = page.getByRole('option', { name: t('switchChoice.option', { agent: 'Scripted agent', provider: 'OpenAI key' }), exact: true });
+    const disabled = page.getByRole('option', { name: 'Scripted agent', exact: true });
     await expect(disabled).toHaveAttribute('aria-disabled', 'true'); await expect(disabled).toContainText(t('change.runs.unavailable.profileDisabled'));
     await picker.fill('Claude Code');
-    const unreported = page.getByRole('option', { name: t('switchChoice.option', { agent: 'Claude Code', provider: 'OpenAI key' }), exact: true });
+    const unreported = page.getByRole('option', { name: 'Claude Code', exact: true });
     await expect(unreported).toHaveAttribute('aria-disabled', 'true'); await expect(unreported).toContainText(t('start.agent.unreported'));
-    await picker.fill('Codex');
-    const nonKeeper = page.getByRole('option', { name: t('switchChoice.option', { agent: 'Codex', provider: 'Codex subscription' }), exact: true });
+    await picker.press('Escape');
+    await provider.click(); await provider.fill('Codex subscription');
+    await page.getByRole('option', { name: /Codex subscription/ }).first().click();
+    await picker.click(); await picker.fill('Codex');
+    const nonKeeper = page.getByRole('option', { name: 'Codex', exact: true });
     await expect(nonKeeper).toHaveAttribute('aria-disabled', 'true'); await expect(nonKeeper).toContainText(t('change.runs.unavailable.keeper'));
-    await info.attach('switch-refused-pairs', { body: await page.screenshot({ animations: 'disabled' }), contentType: 'image/png' });
-    await picker.fill('Codex on ada-laptop');
-    await page.getByRole('option', { name: t('switchChoice.option', { agent: 'Codex on ada-laptop', provider: 'OpenAI key' }), exact: true }).click();
+    await info.attach('switch-refused-profiles', { body: await page.screenshot({ animations: 'disabled' }), contentType: 'image/png' });
+    await picker.press('Escape');
+    await provider.click(); await provider.fill('OpenAI key');
+    await page.getByRole('option', { name: /OpenAI key/ }).first().click();
+    await picker.click(); await picker.fill('Codex on ada-laptop');
+    await page.getByRole('option', { name: 'Codex on ada-laptop', exact: true }).click();
     await expect(form.locator('[data-automatic-runs="model"]')).toContainText(t('change.runs.automatic.model.retained'));
     await expect(form.locator('[data-automatic-runs="effort"]')).toContainText(t('change.runs.automatic.effort.retained'));
     await expect(form.locator('[data-automatic-runs="profile"]')).toHaveCount(0);

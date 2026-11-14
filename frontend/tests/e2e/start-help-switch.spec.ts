@@ -149,9 +149,9 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
         await held; await route.continue();
       }, { times: 1 });
       try {
-        const provider = form.getByRole('combobox', { name: words.switchChoice.picker, exact: true });
-        await expect(provider).toHaveAttribute('placeholder', /OpenAI key|Team Anthropic/);
-        const fromOpenAI = (await provider.getAttribute('placeholder'))?.includes('OpenAI key') === true;
+        const provider = form.getByRole('combobox', { name: words.change.runs.provider, exact: true });
+        await expect(provider).toHaveValue(/OpenAI key|Team Anthropic/);
+        const fromOpenAI = (await provider.inputValue()).includes('OpenAI key');
         await Promise.all([
           page.waitForRequest('**/api/v1/threads/*/forks/preflight'),
           (async () => { await provider.click(); await page.getByRole('option', { name: fromOpenAI ? /Team Anthropic/ : /OpenAI key/ }).first().click(); })(),

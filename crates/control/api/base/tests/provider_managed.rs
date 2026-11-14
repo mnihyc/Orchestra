@@ -1371,6 +1371,34 @@ async fn the_page_of_a_managed_provider_shows_its_runtime_and_when_it_stops_or_r
 }
 
 #[tokio::test]
+async fn a_provider_shows_whether_its_forced_stop_still_waits_for_its_host() {
+    install_master_key(MasterKey::new(MASTER));
+    let s = Scene::without_supervisor().await;
+    let provider = managed_and_up(&s).await;
+    stopped(&s, provider).await;
+    for reason in [
+        runtime_rows::STOPPED_FORCED,
+        runtime_rows::STOPPED_PERSON,
+        runtime_rows::STOPPED_IDLE,
+        "the host stopped it because its disk is full",
+    ] {
+        sqlx::query("UPDATE runtimes SET state_detail = $2 WHERE provider_id = $1")
+            .bind(provider)
+            .bind(reason)
+            .execute(s.rig.db.pool())
+            .await
+            .unwrap();
+        let runtime = get(&s, provider).await.runtime.unwrap();
+        assert_eq!(runtime.state, "stopped");
+        assert_eq!(
+            runtime.detail.as_deref(),
+            Some(reason),
+            "the page can distinguish a stop that waits for its host from one it confirmed"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_runtime_that_is_stopped_is_started_by_hand_with_a_job_and_a_provider_on_a_persons_machine_has_none()
  {
     let s = scene().await;
@@ -1431,7 +1459,14 @@ async fn a_runtime_is_not_stopped_by_hand_while_a_turn_runs_on_it_unless_the_req
     let provider = managed_and_up(&s).await;
     let stop = |who: &str, interrupt: Option<bool>| {
         let call = s.rig.world.app.call(ProviderStop, &[&provider]).token(who);
-        async move { call.body(&ProviderStartStopBody { interrupt }).send().await }
+        async move {
+            call.body(&ProviderStartStopBody {
+                interrupt,
+                force: None,
+            })
+            .send()
+            .await
+        }
     };
     // Somebody who does not manage the provider cannot.
     let refused = stop(&s.eve.token, None).await.problem();
@@ -1892,6 +1927,44 @@ async fn a_deleted_provider_is_signed_out_first_and_its_runtime_is_retired() {
         bindings_after, bindings,
         "the existing thread binding inventory is unchanged"
     );
+}
+
+#[tokio::test]
+async fn a_provider_whose_unit_is_stopping_failed_or_stopped_is_deleted_and_no_unit_makes_it_not_ready()
+ {
+    for state in ["stopping", "failed", "stopped"] {
+        let s = scene().await;
+        let provider = managed_and_up(&s).await;
+        sqlx::query("UPDATE runtimes SET state = $2 WHERE provider_id = $1")
+            .bind(provider)
+            .bind(state)
+            .execute(s.rig.db.pool())
+            .await
+            .unwrap();
+        let reply = s
+            .rig
+            .world
+            .app
+            .call(ProviderDelete, &[&provider])
+            .token(&s.ada.token)
+            .send()
+            .await;
+        assert!(
+            reply.status.is_success(),
+            "a unit that is {state} does not keep its provider from being deleted: {:?}",
+            reply.body
+        );
+        eventually("the unit to be retired with its provider", || async {
+            let now: String =
+                sqlx::query_scalar("SELECT state FROM runtimes WHERE provider_id = $1")
+                    .bind(provider)
+                    .fetch_one(s.rig.db.pool())
+                    .await
+                    .unwrap();
+            matches!(now.as_str(), "retired" | "removed")
+        })
+        .await;
+    }
 }
 
 #[tokio::test]

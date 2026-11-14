@@ -1,0 +1,9 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --test provider_services --test provider_setup --test provider_setup_scopes
+test -p orch-engine --lib -- tools::source::tests::image_services::
+test -p orch-engine --test provider_sign_in --test provider_fact_reads
+web typecheck
+web lint
+web test -- tests/component/provider-sources.test.tsx tests/component/provider-source-create.test.tsx tests/component/provider-signin-availability.test.tsx tests/component/change-labels.test.tsx tests/component/implicit-runs-on.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts
