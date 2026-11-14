@@ -370,7 +370,9 @@ impl Engine {
                             title: &title,
                             request: &request,
                             approver_scope: &policy.approver_scope,
-                            expires_at: now + Duration::hours(expiry_hours),
+                            expires_at: Duration::try_hours(expiry_hours)
+                                .and_then(|life| now.checked_add_signed(life))
+                                .ok_or_else(|| EngineError::unreadable("requests.expiry_hours is outside the supported clock range"))?,
                             at: now,
                         },
                     )

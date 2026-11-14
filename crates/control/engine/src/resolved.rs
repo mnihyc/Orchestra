@@ -90,6 +90,7 @@ pub struct Resolved {
     /// Whether native image generation is explicitly enabled here.
     pub image_generation: Option<bool>,
     /// The features that are on, by name.
+    // The selected descriptor supplies shipped values when these explicit place choices are consumed.
     pub features: BTreeMap<String, bool>,
     /// The standing instructions scope by scope, outermost first, those that say nothing left out.
     pub standing: Vec<StandingPart>,

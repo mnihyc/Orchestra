@@ -512,9 +512,33 @@ crate::common::full_or_receipt! {
     }
 }
 
+/// Public declarations already read by a place editor, resolved without starting or binding a thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SettingParameterFormBody {
+    /// Native parameter declarations from the selected profile's descriptor.
+    pub definitions: Vec<Json>,
+    /// The selected model's enabled options and effective native constraints.
+    pub model: crate::resources::ModelParameters,
+    /// The selected program's declared shipped feature states.
+    #[serde(default)]
+    pub feature_defaults: std::collections::BTreeMap<String, bool>,
+    /// Explicit features set at the place, overlaid on the program's declaration.
+    #[serde(default)]
+    pub features: std::collections::BTreeMap<String, bool>,
+    /// The selected provider's kind, independently of any future runtime arrangement.
+    pub provider_kind: crate::resources::ProviderKind,
+    /// Restrict to declarations that can be written at this scope; absent lists all scopes.
+    pub scope: Option<String>,
+    /// The selected profile's reported program version, when known.
+    pub harness_version: Option<String>,
+}
+
 crate::endpoints! {
     /// Lists every setting there is, with its schema, class, scopes and merge rule.
     SettingRegistryGet: GET "/settings/registry", User, none, none, json Vec<SettingDef>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
+    /// Resolves supplied native declarations with the same model constraints as thread parameter controls; reads no resource or credential.
+    SettingParameterFormResolve: POST "/settings/parameters/form", User, none, json SettingParameterFormBody, json Vec<Json>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists every setting that is valid at or below a node, as it resolves there.
     NodeSettingList: GET "/nodes/{id}/settings", Permission("node.view"), none, none, json Vec<ResolvedSetting>, 200;

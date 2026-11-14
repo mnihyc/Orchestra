@@ -57,7 +57,10 @@ export function OtherJson({ value, disabled, onChange, objectOnly = false, label
   const id = useId();
   const reportDraft = useContext(SchemaDraftState);
   const technicalDetails = useContext(SchemaTechnicalDetails);
-  useEffect(() => () => reportDraft(id, false), [reportDraft, id]);
+  useEffect(() => {
+    reportDraft(id, error !== undefined);
+    return () => reportDraft(id, false);
+  }, [reportDraft, id, error]);
   const editor = <Textarea label={label ?? t('templates.editor.other')} rows={5} className="font-mono" value={draft ?? JSON.stringify(value ?? {}, null, 2)} disabled={disabled} error={error} onChange={(event) => {
     const typed = event.target.value;
     setDraft(typed);

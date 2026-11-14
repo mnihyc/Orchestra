@@ -1,0 +1,11 @@
+fmt
+test -p orch-xtask
+clippy
+contracts
+test -p orch-agent-contract --lib
+test -p orch-engine --test model_parameters
+test -p orch-api-core --test settings --test threads_settings
+test -p orch-adapter-codex --lib -- descriptor::tests::
+web typecheck
+web lint
+web test -- tests/component/agent-features-setting.test.tsx tests/component/agent-model-setting.test.tsx tests/component/settings-drafts.test.tsx tests/component/summarizer-editor.test.tsx tests/component/summary-targets-editor.test.tsx tests/component/thread-option-controls.test.tsx tests/component/parameters-panel.test.tsx tests/component/provider-options.test.tsx tests/component/request-options-managed-effort.test.tsx tests/component/resource-template-sections.test.tsx tests/component/template-schema-form.test.tsx tests/component/new-template.test.tsx tests/component/template-authoring.test.tsx tests/component/calls-rule-model.test.tsx tests/component/place-picker-reads.test.tsx tests/component/copy-destinations.test.tsx tests/component/tree.test.tsx tests/component/change-controls.test.tsx

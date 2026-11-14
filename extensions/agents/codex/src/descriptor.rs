@@ -275,6 +275,7 @@ pub fn descriptor(version: &str) -> AgentDescriptor {
             background_commands: crate::native_schema::pinned_background_control(version),
             ..capabilities()
         },
+        features: BTreeMap::from([(parameters::CYBER_ACCESS_FEATURE.to_owned(), true)]),
         parameters: parameters::definitions(),
         text: text(),
         extensions: serde_json::from_value(serde_json::json!({
