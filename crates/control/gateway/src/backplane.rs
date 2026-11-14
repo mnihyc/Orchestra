@@ -36,10 +36,18 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
-/// The most bytes of a message of the backplane. The same bound the link's
-/// own sockets have: a frame of a machine is at most a session's limit, and
-/// the wrapper around it is small.
-const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+/// The most bytes of a message of the backplane: the largest message of a machine, whole, with the wrapper
+/// that names the machine and the session. The limits of a session are the system's to state, and the
+/// figure of the last time it did holds until it does again.
+fn ceiling(gateway: &Gateway) -> usize {
+    gateway
+        .inner
+        .api
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .limits
+        .backplane_bytes()
+}
 /// How long the system has to answer the gateway's first word.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// How many of the system's pings may go unheard before it is taken to be
@@ -60,7 +68,7 @@ enum Outbound {
 impl Outbound {
     fn observed_bytes(&self) -> Option<usize> {
         match self {
-            Self::Frame(frame) => frames::encode(frame.as_ref(), MAX_MESSAGE_BYTES)
+            Self::Frame(frame) => frames::encode(frame.as_ref(), usize::MAX)
                 .ok()
                 .map(|text| text.len()),
             Self::Data(bytes) => Some(bytes.len()),
@@ -229,10 +237,10 @@ impl BackplaneHandle {
 
 type Socket = tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<TcpStream>>;
 
-fn websocket_config() -> WebSocketConfig {
+fn websocket_config(ceiling: usize) -> WebSocketConfig {
     WebSocketConfig::default()
-        .max_message_size(Some(MAX_MESSAGE_BYTES))
-        .max_frame_size(Some(MAX_MESSAGE_BYTES))
+        .max_message_size(Some(ceiling))
+        .max_frame_size(Some(ceiling))
 }
 
 /// Why the connection to the system could not be made or kept.
@@ -273,10 +281,13 @@ async fn dial(gateway: &Gateway) -> Result<Socket, Fault> {
             .connect(name, socket)
             .await
             .map_err(|error| Fault::Connect(format!("TLS: {error}")))?;
-        let (socket, _) =
-            tokio_tungstenite::client_async_with_config(request, tls, Some(websocket_config()))
-                .await
-                .map_err(|error| Fault::Connect(format!("WebSocket: {error}")))?;
+        let (socket, _) = tokio_tungstenite::client_async_with_config(
+            request,
+            tls,
+            Some(websocket_config(ceiling(gateway))),
+        )
+        .await
+        .map_err(|error| Fault::Connect(format!("WebSocket: {error}")))?;
         Ok(socket)
     };
     tokio::time::timeout(Duration::from_secs(u64::from(CONNECT_TIMEOUT_SECS)), work)
@@ -284,10 +295,8 @@ async fn dial(gateway: &Gateway) -> Result<Socket, Fault> {
         .map_err(|_| Fault::Connect("it took too long".to_owned()))?
 }
 
-fn text_of(frame: &BackplaneFrame) -> Option<Message> {
-    frames::encode(frame, MAX_MESSAGE_BYTES)
-        .ok()
-        .map(Message::text)
+fn text_of(frame: &BackplaneFrame, ceiling: usize) -> Option<Message> {
+    frames::encode(frame, ceiling).ok().map(Message::text)
 }
 
 /// Reads the system's first word and takes in what it says.
@@ -297,8 +306,8 @@ async fn greet(gateway: &Gateway, socket: &mut Socket) -> Result<(), Fault> {
         version: gateway.inner.settings.version.clone(),
         started_at: Some(gateway.inner.started_at),
     });
-    let message =
-        text_of(&hello).ok_or_else(|| Fault::Protocol("hello cannot be written".to_owned()))?;
+    let message = text_of(&hello, ceiling(gateway))
+        .ok_or_else(|| Fault::Protocol("hello cannot be written".to_owned()))?;
     socket
         .send(message)
         .await
@@ -307,8 +316,7 @@ async fn greet(gateway: &Gateway, socket: &mut Socket) -> Result<(), Fault> {
         loop {
             match socket.next().await {
                 Some(Ok(Message::Text(text))) => {
-                    return match frames::decode::<BackplaneFrame>(text.as_str(), MAX_MESSAGE_BYTES)
-                    {
+                    return match frames::decode::<BackplaneFrame>(text.as_str(), ceiling(gateway)) {
                         Ok(Text::Known(BackplaneFrame::ApiHello(hello))) => Ok(hello),
                         _ => Err(Fault::Protocol(
                             "the system did not begin with its hello".to_owned(),
@@ -339,13 +347,24 @@ fn take_in(gateway: &Gateway, hello: ApiHello) {
             .with(|relay| relay.set_verifier(verifier)),
         Err(error) => tracing::error!(%error, "the key tickets are checked with cannot be read"),
     }
-    let mut api = gateway
-        .inner
-        .api
-        .write()
-        .unwrap_or_else(PoisonError::into_inner);
-    api.limits = hello.limits;
-    api.versions = hello.versions;
+    let changed = {
+        let mut api = gateway
+            .inner
+            .api
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        api.limits = hello.limits;
+        api.versions = hello.versions;
+        gateway.inner.sessions.take_other_limits(hello.limits)
+    };
+    for (machine, entry) in changed {
+        tracing::info!(%machine, "the system changed the session limits; the machine will reconnect");
+        gateway
+            .inner
+            .relay
+            .with(|relay| relay.session_gone(machine, entry.session_id));
+        entry.sender.end();
+    }
 }
 
 /// Keeps the connection to the system for as long as the gateway runs.
@@ -427,9 +446,12 @@ async fn hold(gateway: &Gateway) -> Result<(), Fault> {
                 #[cfg(feature = "test-observers")]
                 let observed_send = observed.selected(outgoing.observed_bytes());
                 let message = match outgoing {
-                    Outbound::Frame(frame) => match text_of(&frame) {
+                    Outbound::Frame(frame) => match text_of(&frame, ceiling(gateway)) {
                         Some(message) => message,
-                        None => continue,
+                        None => {
+                            tracing::error!("a frame for the system could not be written, or is larger than a message of the backplane may be");
+                            continue;
+                        }
                     },
                     Outbound::Data(bytes) => Message::Binary(bytes),
                     Outbound::Datagram(packet) => {
@@ -474,7 +496,7 @@ async fn hold(gateway: &Gateway) -> Result<(), Fault> {
 fn on_message(gateway: &Gateway, message: Message) {
     match message {
         Message::Text(text) => {
-            match frames::decode::<BackplaneFrame>(text.as_str(), MAX_MESSAGE_BYTES) {
+            match frames::decode::<BackplaneFrame>(text.as_str(), ceiling(gateway)) {
                 Ok(Text::Known(frame)) => on_frame(gateway, frame),
                 Ok(Text::Unknown(kind)) => {
                     tracing::debug!(kind, "a frame of an unknown type was passed over");

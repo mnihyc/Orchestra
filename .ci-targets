@@ -1,0 +1,8 @@
+fmt
+clippy
+contracts
+test -p orch-link-contract --lib --test largest_messages
+test -p orch-link --lib --test commands --test large_messages --test streams --test spool --test slow_link
+test -p orch-gateway-core --test large_messages --test commands --test events --test sessions
+test -p orch-image-backends --lib
+test -p orch-engine --lib

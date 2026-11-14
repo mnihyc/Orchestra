@@ -19,10 +19,14 @@ pub const MANIFEST_FILE: &str = "version.json";
 pub const SCHEMA_VERSION: u32 = 1;
 /// The project a manifest belongs to; a file of another project is refused.
 pub const PROJECT: &str = "orch";
-/// The oldest connector release this release accepts. The gateway announces the
-/// same figure to the connectors that reach it; both are raised together, when a
-/// release stops speaking to a connector.
-pub const CONNECTOR_MINIMUM: &str = "0.1.0";
+/// The oldest connector release the release `version` accepts: the figure its own
+/// gateway announces to the connectors that reach it, so that the manifest and the
+/// system say the same. It is raised in the link's contract, when a release stops
+/// speaking to a connector.
+#[must_use]
+pub fn connector_minimum(version: &str) -> String {
+    orch_link_contract::version::ConnectorVersions::of_release(version).min
+}
 /// How much of a file is read at a time while hashing: large enough that the
 /// disk, not the loop, is the limit.
 const HASH_CHUNK_BYTES: usize = 1 << 20;
@@ -376,7 +380,7 @@ mod tests {
                 current: 1,
                 minimum: 1,
             },
-            connector_minimum: CONNECTOR_MINIMUM.to_owned(),
+            connector_minimum: connector_minimum("0.1.0"),
             assets: vec![Asset {
                 name: "orch-frontend-dist.tar.gz".to_owned(),
                 download_url: "orch-frontend-dist.tar.gz".to_owned(),

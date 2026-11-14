@@ -237,6 +237,14 @@ impl ControllerLink {
         self.shared.send_notice(Notice::Offline { session_id });
     }
 
+    /// The gateway finished writing a command on the session it still holds.
+    pub fn command_sent(&self, session_id: Id, id: Id) {
+        let state = self.state();
+        if state.session == Some(session_id) {
+            self.shared.issuer.on_sent(id);
+        }
+    }
+
     /// A text frame that the machine sent on `session_id`.
     pub fn up(&self, session_id: Id, frame: UpFrame) {
         let received = {

@@ -12,8 +12,11 @@
 //! Tunnels go on being carried, because they never needed the system.
 
 use crate::Gateway;
-use orch_link_contract::backplane::{BackplaneFrame, Down, Up, UpFrame};
-use orch_link_contract::frames::{DataFrame, Frame};
+use orch_link::framing::Refused;
+use orch_link_contract::backplane::{
+    BackplaneFrame, Down, DownFrame, DownRefused, DownSent, Up, UpFrame,
+};
+use orch_link_contract::frames::{DataFrame, Frame, Tagged};
 use orch_types::Id;
 use std::sync::atomic::Ordering;
 
@@ -35,6 +38,14 @@ pub(crate) fn from_machine(gateway: &Gateway, machine: Id, session: Id, frame: F
         | Frame::McpImportAsk(_)
         | Frame::PortLocalAsk(_)
         | Frame::PortConnectionsReply(_)) => {
+            if gateway
+                .inner
+                .sessions
+                .primary_session_of(machine)
+                .is_none_or(|(current, _)| current != session)
+            {
+                return;
+            }
             if let Ok(frame) = UpFrame::try_from(frame) {
                 gateway.inner.backplane.send(BackplaneFrame::Up(Up {
                     purpose: orch_link_contract::gateways::SessionPurpose::Primary,
@@ -78,10 +89,58 @@ pub(crate) fn data_from_machine(gateway: &Gateway, machine: Id, session: Id, dat
 }
 
 /// A frame the system sent for a machine. A machine that has no session here
-/// is not told: the system sends again when it has.
+/// is not told: the system sends again when it has. A frame that its session
+/// cannot carry, because it is larger than a message there may be, is told to
+/// the system, which fails the command it was at once with the reason.
 pub(crate) fn to_machine(gateway: &Gateway, down: Down) {
-    let Some(sender) = gateway.inner.sessions.primary_sender_of(down.machine_id) else {
+    let Some((session_id, sender)) = gateway.inner.sessions.primary_session_of(down.machine_id)
+    else {
         return;
     };
-    let _ = sender.send(Frame::from(down.frame));
+    let Down { machine_id, frame } = down;
+    let command = match &frame {
+        DownFrame::Cmd(cmd) => Some(cmd.id),
+        _ => None,
+    };
+    let kind = frame.type_name();
+    let sent = if command.is_some() {
+        sender.send_tracked(Frame::from(frame)).map(Some)
+    } else {
+        sender.send(Frame::from(frame)).map(|()| None)
+    };
+    let refused = match sent {
+        Ok(Some(receipt)) => {
+            if let Some(command) = command {
+                let backplane = gateway.inner.backplane.clone();
+                tokio::spawn(async move {
+                    if receipt.await.is_ok() {
+                        backplane.send(BackplaneFrame::DownSent(DownSent {
+                            machine_id,
+                            session_id,
+                            command,
+                        }));
+                    }
+                });
+            }
+            return;
+        }
+        Ok(None) | Err(Refused::SessionOver) => return,
+        Err(refused) => refused,
+    };
+    let (bytes, limit) = match refused {
+        Refused::TooLarge { bytes, limit } => (bytes, limit),
+        Refused::SessionOver | Refused::Unwritable => (0, sender.max_message_bytes()),
+    };
+    tracing::error!(machine = %machine_id, kind, bytes, limit, "a frame of the system was not put into the machine's session");
+    metrics::counter!("orch_gateway_frames_refused_total").increment(1);
+    gateway
+        .inner
+        .backplane
+        .send(BackplaneFrame::DownRefused(DownRefused {
+            machine_id,
+            command,
+            frame: kind.to_owned(),
+            bytes: bytes as u64,
+            limit: limit as u64,
+        }));
 }

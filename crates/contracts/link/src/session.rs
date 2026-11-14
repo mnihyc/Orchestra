@@ -540,7 +540,7 @@ mod tests {
         assert_eq!(auth.roles, [Role::Agent, Role::Environment]);
         let ready: Ready = round_trip(json!({
             "session_id": SESSION, "session_token": "t0k3n", "heartbeat_secs": 20,
-            "limits": { "max_frame_bytes": 262144, "tunnel_window_bytes": 1048576, "max_channels": 256 },
+            "limits": { "max_frame_bytes": 262144, "max_message_bytes": 16777216, "tunnel_window_bytes": 1048576, "max_channels": 256 },
             "cursors": { "machine": 12, "env:0199c1a0-0000-7000-8000-00000000000c": 43 },
             "versions": { "min": "0.1.0", "recommended": "0.1.3" }
         }));
