@@ -1,7 +1,7 @@
 /** The actual root hook retains an explicit private choice only for its current page. */
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, expect, it } from 'vitest';
-import { useAskRoot } from '@/features/ask/useAskRoot';
+import { askPageRoot, useAskRoot } from '@/features/ask/useAskRoot';
 
 interface Props { pageRoot: string | null; seed: Parameters<typeof useAskRoot>[1] }
 const draw = (props: Props) => renderHook(({ pageRoot, seed }: Props) => useAskRoot(pageRoot, seed), { initialProps: props });
@@ -49,4 +49,29 @@ it('lets a newer explicit source supersede an older pin without transferring it 
   view.unmount();
   const next = draw({ pageRoot: 'root-a', seed: null });
   expect(next.result.current[0]).toBe('root-a');
+});
+
+const mine = [
+  { id: 'personal', org_id: 'personal', org_kind: 'personal' as const },
+  { id: 'team', org_id: 'team', org_kind: 'team' as const },
+];
+
+it('asks in the organization of the page in view, even where the rail shows another', () => {
+  expect(askPageRoot({ own: 'team', heading: undefined }, 'personal', mine)).toBe('team');
+  expect(askPageRoot({ own: undefined, heading: 'team' }, 'personal', mine)).toBe('team');
+});
+
+it('asks, on a page of no organization, in the organization the rail shows when it is one of the person\u2019s', () => {
+  expect(askPageRoot({ own: undefined, heading: undefined }, 'team', mine)).toBe('team');
+});
+
+it('does not follow a stale rail choice to an organization the person is not in, which would refuse every question', () => {
+  // An organization reached through As admin or through sharing stays in the rail while the page is open;
+  // a page opened afresh has no such choice. Management is a page of no organization.
+  expect(askPageRoot({ own: undefined, heading: undefined }, 'reached-as-admin', mine)).toBe('personal');
+});
+
+it('keeps the rail choice until the person\u2019s organizations have arrived', () => {
+  expect(askPageRoot({ own: undefined, heading: undefined }, 'team', [])).toBe('team');
+  expect(askPageRoot({ own: undefined, heading: undefined }, null, [])).toBeNull();
 });

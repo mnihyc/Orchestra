@@ -21,7 +21,6 @@
 //! frames themselves go through a [`Wire`], which is a session for a machine
 //! and the backplane for the system's end of a terminal.
 
-use crate::framing::SessionOver;
 use crate::ports::{Datagram, UdpBudget};
 use crate::session::SessionSender;
 use crate::tunnels::flow::{Gauge, credit_due};
@@ -2207,7 +2206,7 @@ impl HubShared {
                 cid,
                 inside,
             }))
-            .map_err(|SessionOver| OpenError::Interrupted)?;
+            .map_err(|_| OpenError::Interrupted)?;
         Ok(Tunnel::new(channel, events_rx))
     }
 

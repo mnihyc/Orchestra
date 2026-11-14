@@ -6,7 +6,10 @@ import { Link, useNavigate } from '@tanstack/react-router';
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { createProvider, createModel, createTemplate, templatesQuery, providerQuery, providerSetupQuery } from '@/api/resources';
+import { createProvider, createModel, createTemplate, hostsQuery, templatesQuery, providerQuery, providerSetupQuery } from '@/api/resources';
+import type { CreationPlacement } from '@/api/start';
+import { PlacementFields } from '@/features/start/NewEnvironment';
+import { hostUnavailable } from '@/features/resources/choiceAvailability';
 import { ApiError } from '@/api/client';
 import { TaskGuideLink } from '@/features/help/TaskGuideLink';
 import { HomePicker, useHomeChoices } from '@/features/resources/HomePicker';
@@ -65,6 +68,7 @@ export function AddProviderDialog({ onClose, initialRuntimeMachine, initialHome,
   const [faults, setFaults] = useState<Record<string, string>>({});
   const [keyMachine, setKeyMachine] = useState('');
   const [runtimeMachine, setRuntimeMachine] = useState(initialRuntimeMachine ?? '');
+  const [runtimePlacement, setRuntimePlacement] = useState<CreationPlacement>({});
   const [name, setName] = useState('');
   const [nameFault, setNameFault] = useState<string | undefined>();
   const [access, setAccess] = useState<NewResourceAccess>('defaults');
@@ -79,6 +83,8 @@ export function AddProviderDialog({ onClose, initialRuntimeMachine, initialHome,
   const homes = useHomeChoices(home).choices;
   const homeName = homes.find((choice) => choice.id === home)?.label ?? '';
   const data = setup.data;
+  const runtimeHosts = useQuery({ ...hostsQuery(null), enabled: home !== '' && step === 2 && runtimeMachine === '' });
+  const runtimeTemplates = useQuery({ ...templatesQuery('provider', null), enabled: home !== '' && step === 2 && runtimeMachine === '' });
   const signIns=signInChoices(data,t,i18n.resolvedLanguage ?? i18n.language);
   const exampleOptions=[{value:'custom',label:t('providerCreation.custom')},
     ...(data?.presets ?? []).map((row)=>({value:`preset:${row.name}`,label:row.name})),
@@ -118,7 +124,11 @@ export function AddProviderDialog({ onClose, initialRuntimeMachine, initialHome,
   const factsProgram = selectedProgram(details, factsPrograms);
   const modelsProgram = selectedProgram(listing, modelsPrograms);
   const templates = [...new Set([factsProgram?.templateId, modelsProgram?.templateId].filter((id): id is string => typeof id === 'string'))];
-  const templateConflict = templates.length > 1;
+  const templateConflict = templates.length > 1 || runtimeMachine === '' && typeof runtimePlacement.template_id === 'string' && templates.some((id) => id !== runtimePlacement.template_id);
+  const runtimeHost = runtimeHosts.data?.find((host) => host.id === runtimePlacement.host_id);
+  const runtimeHostIssue = runtimeMachine !== '' || typeof runtimePlacement.host_id !== 'string' ? null : runtimeHosts.isPending ? t('start.why.checking')
+    : runtimeHosts.isError ? t('start.why.failed') : runtimeHost === undefined ? t('start.where.hostGone')
+      : hostUnavailable(runtimeHost, t, 'provider', runtimeTemplates.data?.find((row) => row.id === runtimePlacement.template_id)?.driver);
   const credentialKind: SourceFieldsProps['credentialKind'] = native ? 'native' : credential;
   const sourceContext = (programs: typeof factsPrograms, defaultFields = factsDefaultFields) => ({ programs, defaultFields, compact:true, httpAllowed: data?.http_allowed ?? false, canSendCredential: !native && credential === 'key', credentialKind, savedAddress: null, authorizationSet: false, secretFieldsSet: [] });
   const activeFactsFields = details.by === 'default' ? factsDefaultFields : factsProgram?.fields ?? [];
@@ -151,7 +161,7 @@ export function AddProviderDialog({ onClose, initialRuntimeMachine, initialHome,
       const preset = data?.presets.find((row) => example === `preset:${row.name}`);
       let body = given;
       const presetTemplate = preset?.template;
-      if (presetTemplate !== undefined && presetTemplate !== null && given.runtime_machine_id === undefined) {
+      if (presetTemplate !== undefined && presetTemplate !== null && given.runtime_machine_id === undefined && typeof runtimePlacement.template_id !== 'string') {
         const choices = await cache.query(templatesQuery('provider', home));
         const existing = choices.find((row) => row.name === presetTemplate.name && row.home?.id === home)
           ?? choices.find((row) => row.name === presetTemplate.name);
@@ -266,7 +276,7 @@ export function AddProviderDialog({ onClose, initialRuntimeMachine, initialHome,
     if (pending || created || submitting.current) return;
     const trimmed = name.trim();
     setNameFault(trimmed === '' ? t('providers.add.nameEmpty') : undefined);
-    if (trimmed === '' || data === undefined || home === '' || sourcesInvalid || missingAdminField || unresolvedRole || policyError !== undefined || arrangements.length === 0 || native && subscription === undefined) return;
+    if (trimmed === '' || data === undefined || home === '' || sourcesInvalid || missingAdminField || unresolvedRole || policyError !== undefined || runtimeHostIssue !== null || arrangements.length === 0 || native && subscription === undefined) return;
     const built = (native ? [] : credentialRows(endpoints)).map((row) => {
       const one = upstreamOf(row, protocols.find((protocol) => protocol.name === row.protocol));
       // No credential is an explicit access choice even if an older setup reply omits auth's form field.
@@ -284,13 +294,15 @@ export function AddProviderDialog({ onClose, initialRuntimeMachine, initialHome,
     if (details.by !== 'default' || Object.keys(factsChoice.secrets ?? {}).length > 0 || Object.keys(factsChoice.config ?? {}).length > 0) sources.facts = factsChoice;
     const modelsChoice = sourceChoiceSet(listing, listing.by === 'default' ? modelsDefaultFields : modelsProgram?.fields ?? [], modelsPrograms);
     if (listing.by !== 'default' || Object.keys(modelsChoice.secrets ?? {}).length > 0 || Object.keys(modelsChoice.config ?? {}).length > 0) sources.models = modelsChoice;
-    const selectedTemplate = runtimeMachine === '' ? templates[0] ?? subscription?.template.id : undefined;
+    const selectedTemplate = runtimeMachine === '' ? runtimePlacement.template_id ?? templates[0] ?? subscription?.template.id : undefined;
+    const runtimeConfig = { ...(selectedTemplate === undefined ? {} : { 'runtime.template_id': selectedTemplate }),
+      ...(runtimeMachine !== '' || typeof runtimePlacement.host_id !== 'string' ? {} : { 'runtime.host_id': runtimePlacement.host_id }) };
     const common = {
       name: trimmed, home_id: home, access, arrangements,
       ...(runtimeMachine === '' ? {} : { runtime_machine_id: runtimeMachine }),
       ...(keyMachine === '' ? {} : { keeper_machine_id: keyMachine }),
       ...(Object.keys(sources).length === 0 ? {} : { sources }),
-      ...(selectedTemplate === undefined ? {} : { runtime_config: { 'runtime.template_id': selectedTemplate } }),
+      ...(Object.keys(runtimeConfig).length === 0 ? {} : { runtime_config: runtimeConfig }),
     };
     submitting.current=true;setUnplaced(false);setServerFaults({});
     if (native && subscription !== undefined) create.mutate({ kind: 'subscription', ...common, agent_id: subscription.agent.id });
@@ -309,9 +321,10 @@ export function AddProviderDialog({ onClose, initialRuntimeMachine, initialHome,
   </Dialog>;
 
   return <CompoundPickerScope data={data} screen="provider-create" currentHomes={home===''?[]:[home]}>{<Dialog open dismissible={!pending} title={t('providers.add.title')} onOpenChange={(open) => { if (!open && !pending) onClose(); }} footer={<>
+    {step === 2 && runtimeHostIssue !== null && <span className="mr-auto text-sm text-text-muted">{runtimeHostIssue}</span>}
     <TaskGuideLink guide="add-a-provider" heading={example === 'preset:Local embeddings' ? 'local-embeddings' : apiKey.trim() !== '' ? 'key-proposals' : null} />
     <Button disabled={pending} onClick={step === 1 ? onClose : () => setStep(1)}>{t(step === 1 ? 'common.cancel' : 'common.back')}</Button>
-    <Button variant="primary" pending={pending} blocked={created || data === undefined || home === '' || native && subscription === undefined || step === 2 && (sourcesInvalid || missingAdminField || unresolvedRole || policyError !== undefined || arrangements.length === 0)} onClick={step === 1 ? next : finish}>
+    <Button variant="primary" pending={pending} blocked={created || data === undefined || home === '' || native && subscription === undefined || step === 2 && (sourcesInvalid || missingAdminField || unresolvedRole || policyError !== undefined || runtimeHostIssue !== null || arrangements.length === 0)} onClick={step === 1 ? next : finish}>
       {t(step === 1 ? 'common.next' : 'providerCreation.create')}
     </Button>
   </>}>
@@ -358,6 +371,8 @@ export function AddProviderDialog({ onClose, initialRuntimeMachine, initialHome,
         {fixedKeeper !== null && <p className="text-xs text-text-muted">{t('providers.add.nativeKeeperFixed', { machine: fixedKeeper.name })}</p>}
         <ResourcePicker pickerKey="provider-runtime" label={t('providerCreation.runtime')} error={serverFaults.runtime} value={runtimeMachine === '' ? 'unit' : runtimeMachine} onValueChange={(value) => {setRuntimeMachine(value === 'unit' ? '' : value);setServerFaults({});}} disabled={pending}
           options={[{ value: 'unit', label:t('providerCreation.newContainer') }, ...runtimeChoices.map((choice) => ({ value: choice.machine.id, label: choice.machine.name, resource:{kind:'machine',id:choice.machine.id} }))]} />
+        {runtimeMachine === '' && <PlacementFields kind="provider" hosts={runtimeHosts.data ?? []} value={runtimePlacement} onChange={setRuntimePlacement} disabled={pending}
+          defaultTemplate={templates[0] ?? subscription?.template.id} pending={runtimeHosts.isPending} failed={runtimeHosts.error} onRetry={() => void runtimeHosts.refetch()} />}
         <fieldset className="flex min-w-0 flex-col gap-3 border-t border-border pt-3">
           <legend className="text-sm font-medium">{t('providerCreation.sources')}</legend>
           <SourceFields element="facts" value={details} serverError={serverFaults.facts} serverErrors={factsErrors} onChange={(value)=>{setDetails(value);setServerFaults({});}} {...sourceContext(factsPrograms)} defaultTitle={native?t('providerCreation.signedInProgram'):factsDefault?.descriptor?.title ?? t('providerSources.nothing')} defaultSummary={localizedSourceSummary(factsDefault?.descriptor, factsDefault?.descriptor?.summary ?? t('providerSources.nothingAbout'), i18n.resolvedLanguage ?? i18n.language)} disabled={pending} />
