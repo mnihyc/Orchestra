@@ -1607,7 +1607,10 @@ impl Engine {
         // lets a credential be used in is asked as well: it comes before every page.
         let machine_list = binding::machine_arrangements_of(conn, &provider).await?;
         let permission = binding::policy_with_machine(&facts, machine_list.clone()).permission;
-        let arrangement = match binding::choose_with_machine(&facts, machine_list, requested) {
+        // An environment that is being made has reported no executors yet: it is judged by what its
+        // template promises, as at the creation of the thread, and never refused for the lack of a report.
+        let place = binding::initial_place(conn, &facts).await?;
+        let arrangement = match binding::choose_placed(&facts, &place, machine_list, requested) {
             Ok(arrangement) => arrangement,
             Err(why) => {
                 // A role removed from an existing binding is an availability failure.

@@ -154,10 +154,30 @@ impl CapturedCaller {
         Ok(restored.filter(|caller| caller.key_deadline_allows(clock)))
     }
 
+    /// Read the current unadmitted restrictions for effect-free source selection without
+    /// holding account/key rows. Every effect still needs a fresh locked restoration.
+    pub async fn preview_current(
+        &self,
+        conn: &mut Conn,
+        clock: &dyn Clock,
+    ) -> Result<Option<Caller>, Error> {
+        let restored = self.restore_with_lock(conn, clock.time(), false).await?;
+        Ok(restored.filter(|caller| caller.key_deadline_allows(clock)))
+    }
+
     /// Rechecks every original key's current validity and policy. Missing/revoked/expired keys
     /// return None. Invalid stored policy fails closed. Returned callers are unadmitted.
     /// Mutation consumers call this inside their existing action transaction/guard.
     pub async fn restore(&self, conn: &mut Conn, now: Time) -> Result<Option<Caller>, Error> {
+        self.restore_with_lock(conn, now, true).await
+    }
+
+    async fn restore_with_lock(
+        &self,
+        conn: &mut Conn,
+        now: Time,
+        locked: bool,
+    ) -> Result<Option<Caller>, Error> {
         if self.credentials.is_empty() {
             return Err(Error::Stored(
                 "captured caller has no credential boundary".into(),
@@ -182,7 +202,9 @@ impl CapturedCaller {
                     if actual != *transaction {
                         return Ok(None);
                     }
-                    orch_db::queries::transaction_guard::share_machine(conn, *machine).await?;
+                    if locked {
+                        orch_db::queries::transaction_guard::share_machine(conn, *machine).await?;
+                    }
                     let row = orch_db::queries::resources::machine(conn, *machine).await?;
                     if row.is_none_or(|row| {
                         row.owner_id != Some(self.user)
@@ -245,8 +267,11 @@ impl CapturedCaller {
             };
             if let Credential::Token { token_ids, .. } = credential {
                 for token in token_ids {
-                    let current =
-                        tokens::current_boundary(conn, *token, self.user, now.get()).await?;
+                    let current = if locked {
+                        tokens::current_boundary(conn, *token, self.user, now.get()).await?
+                    } else {
+                        tokens::preview_boundary(conn, *token, self.user, now.get()).await?
+                    };
                     let Some(current) = current else {
                         return Ok(None);
                     };

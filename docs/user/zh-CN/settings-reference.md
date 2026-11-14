@@ -252,7 +252,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:auto.title` | **自动标题** — 自动标题的来源：不生成、使用首条输入、使用代理提供的标题，或生成摘要。 |
 | `setting:auto.tags` | **自动标签** — 摘要器是否为位置设置标签。 |
 | `setting:summary.handoff_input_share` | **摘要输入比例** — 交接、分叉或目标核对发送给摘要模型的对话最多占其上下文窗口的比例：先发最新的轮次，更早的只发一行索引。 下级只能降低此上限，不能取消上级设定的限制。 |
-| `setting:auto.summarizer` | **摘要器** — 使用哪个摘要器及其配置。 |
+| `setting:auto.summarizer` | **摘要器** — 摘要器及模型的词元额度。目标字符数另行设置。 |
 | `option:auto.summarizer.kind` | 声明的数据源或内容类型。 |
 | `setting:auto.triggers` | **自动更新的条件** — 何时重新生成自动标题、标签和摘要。 |
 | `option:auto.triggers.on` | 触发此自动操作的事件。 |
@@ -395,6 +395,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:invitations.max_uses` | **共享链接的使用次数** — 一个共享邀请链接最多可以邀请多少人。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:mail.shared` | **共享邮件服务器** — 没有独立邮件服务器的根组织是否通过系统邮件服务器发送邮件。 |
 | `setting:api.idempotency_window` | **创建重试保留时间** — 创建请求的键保留已接受对象标识的小时数；0 表示不保留。可按需要延长，24 小时是默认值。 |
+| `setting:api.read_repeats` | **重复读取次数** — 读取的内容在回答过程中发生变化时，不拒绝而是重新读取的次数；0 表示不重复。 |
 | `setting:release.check_days` | **检查新版发布** — 对管理员配置的发布来源进行只读检查的间隔天数；零表示关闭。检查不发送安装统计，也不安装任何内容。 |
 | `setting:cleanup.release_keep_count` | **保留未使用的发布** — 每次更新后，各载荷保留的未使用发布数量；0 表示全部保留。当前和上一个发布始终保留。 |
 | `setting:cleanup.unused_keep_days` | **清理未使用的缓存** — 没有使用者的镜像和工具版本保留多少天；0 表示关闭自动清理。数据遵循各自的保留期限。 |
@@ -445,6 +446,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:threads.agent_schedule_runs` | **智能体定时任务次数** — 重复定时任务的默认运行次数。智能体可以明确指定其他正数；这是默认值，不是上限。 |
 | `setting:summary.targets` | **摘要目标** — 按目标设置自动刷新、触发时机及输入输出默认值，默认关闭，仍受摘要器选择和共享用量限额约束。帮助和搜索结果使用人工编写或已有的摘要。 |
 | `setting:summary.follow_interval_secs` | **摘要跟踪间隔** — 摘要可运行或正在运行时的免费读取间隔；尚未到期的任务等待实际到期时间。默认 5 秒。 |
+| `setting:summary.read_repeats` | **摘要重新读取次数** — 首次调用模型前免费重新读取来源、重建提示词的次数，每个循环默认 3 次；0 表示不重复。调用模型后来源变化不会自动发起付费重试。 |
 | `setting:summary.read_batch_size` | **摘要读取批量大小** — 一个搜索摘要窗口读取的不同来源数量，其余来源继续读取后续窗口。默认 100。 |
 | `option:agents.web_search_backend.kind` | 选择由模型或接口服务提供搜索的后端。 |
 | `option:agents.web_search_backend.provider_id` | 选定搜索供给所属的已启用提供方。 |

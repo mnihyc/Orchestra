@@ -225,6 +225,8 @@ pub const NOTIFY_OPERATIONS: &str = r#""always""#;
 pub const MESSAGE_BODY_MAX_CHARS: &str = "30000";
 /// A longer replay window illustrates that one day is the default, not a ceiling.
 pub const API_IDEMPOTENCY_WINDOW: &str = "48";
+pub const API_READ_REPEATS: &str = "5";
+pub const SUMMARY_READ_REPEATS: &str = "5";
 pub const BROADCAST_CHAT_MESSAGES_PER_HOUR: &str = "60";
 /// Messages to one thread have an hourly budget of their own, apart from announcements.
 pub const BROADCAST_THREAD_MESSAGES_PER_HOUR: &str = "60";
