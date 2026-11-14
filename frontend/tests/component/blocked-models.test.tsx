@@ -72,6 +72,24 @@ for (const locale of ['en', 'zh-CN'] as const) it.each(['Fable', null])('offers 
   } finally { view.unmount(); cache.clear(); }
 });
 
+it.each(['en', 'zh-CN'] as const)('finds a recovery model in a large native list and keeps the exact chosen model in %s', async (locale) => {
+  await setLocale(locale);
+  const { thread, cache, parameters } = familyLimit('Fable');
+  cache.setQueryData(parametersQuery(thread.id).queryKey, { ...parameters, model: { ...parameters.model,
+    options: [model(thread.model, 'Current choice'), ...Array.from({ length: 12 }, (_, at) => model(`recovery-${at}`, `Recovery model ${at}`))] } });
+  const view = show(<QueryClientProvider client={cache}><BlockedBanner thread={thread} onProceed={() => undefined} /></QueryClientProvider>);
+  try {
+    const picker = screen.getByRole('combobox', { name: i18n.t('thread.blocked.familyChoose') });
+    await userEvent.click(picker);
+    await userEvent.type(picker, 'Recovery model 11');
+    expect(calls.change).not.toHaveBeenCalled();
+    expect(screen.queryByRole('option', { name: 'Recovery model 10' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('option', { name: 'Recovery model 11' }));
+    await waitFor(() => expect(calls.change).toHaveBeenCalledOnce());
+    expect(calls.change.mock.calls[0]?.[1]).toMatchObject({ model: 'recovery-11', effort: null });
+  } finally { view.unmount(); cache.clear(); }
+});
+
 // EN: Family limit → checking model picker → read failure → Try again → choose another model.
 // 中文：模型族限额 → 检查中的模型选择器 → 读取失败 → 重试 → 选择其他模型。
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440] as const) {
@@ -86,13 +104,13 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       const controls = modelControls();
       const picker = screen.getByRole('combobox', { name: i18n.t('thread.blocked.familyChoose') });
       expect(picker).toBeDisabled();
-      expect(picker).toHaveTextContent(i18n.t('thread.blocked.familyChecking'));
+      expect(picker).toHaveAttribute('placeholder', i18n.t('thread.blocked.familyChecking'));
       expect(screen.queryByText(i18n.t('thread.blocked.familyNoOther'))).not.toBeInTheDocument();
       const error = new ApiError({ type: 'orch:error:internal', code: 'internal', status: 503, title: '', detail: 'Private service implementation', request_id: 'model-read' }, null);
       await act(async () => { gate.reject?.(error); await pending.catch(() => undefined); });
       expect(await controls.findByRole('alert')).toHaveTextContent(apiErrorSentence('internal', 503, i18n.t, locale));
       expect(picker).toBeDisabled();
-      expect(picker).toHaveTextContent(i18n.t('thread.blocked.familyReadFailed'));
+      expect(picker).toHaveAttribute('placeholder', i18n.t('thread.blocked.familyReadFailed'));
       expect(view.container).not.toHaveTextContent('Private service implementation');
       expect(calls.change).not.toHaveBeenCalled();
       await userEvent.click(controls.getByRole('button', { name: i18n.t('common.tryAgain') }));
@@ -118,14 +136,14 @@ for (const locale of ['en', 'zh-CN'] as const) {
     const view = show(<QueryClientProvider client={cache}><BlockedBanner thread={thread} onProceed={() => undefined} /></QueryClientProvider>);
     try {
       const picker = screen.getByRole('combobox', { name: i18n.t('thread.blocked.familyChoose') });
-      expect(picker).toHaveTextContent('Portable model');
+      expect(picker).toHaveDisplayValue('Portable model');
       await userEvent.click(picker);
       expect(screen.getByRole('option', { name: 'Portable model' })).toBeVisible();
       await act(async () => { await cache.invalidateQueries({ queryKey: parametersQuery(thread.id).queryKey, exact: true }); });
       expect(await modelControls().findByRole('alert')).toHaveTextContent(apiErrorSentence(problem.code, problem.status, i18n.t, locale));
       expect(picker).toBeDisabled();
-      expect(picker).toHaveTextContent(i18n.t('thread.blocked.familyReadFailed'));
-      expect(picker).not.toHaveTextContent('Portable model');
+      expect(picker).toHaveAttribute('placeholder', i18n.t('thread.blocked.familyReadFailed'));
+      expect(picker).not.toHaveDisplayValue('Portable model');
       expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
       expect(view.container).not.toHaveTextContent('Hidden provider and model');
       expect(view.container).not.toHaveTextContent(i18n.t('thread.blocked.familyNoOther'));
@@ -143,7 +161,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     try {
       const picker = screen.getByRole('combobox', { name: i18n.t('thread.blocked.familyChoose') });
       expect(picker).toBeDisabled();
-      expect(picker).toHaveTextContent(i18n.t('thread.blocked.familyNoOther'));
+      expect(picker).toHaveAttribute('placeholder', i18n.t('thread.blocked.familyNoOther'));
       expect(modelControls().queryByRole('alert')).not.toBeInTheDocument();
       expect(calls.read).not.toHaveBeenCalled(); expect(calls.change).not.toHaveBeenCalled();
     } finally { view.unmount(); cache.clear(); }

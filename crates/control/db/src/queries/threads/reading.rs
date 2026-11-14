@@ -98,6 +98,12 @@ pub struct OutlinePoint {
     pub turn_ordinal: Option<i32>,
     /// This is the turn's first non-marker main item, independently of page boundaries.
     pub starts_turn: bool,
+    /// The immutable author identity, resolved in one batch by the API.
+    pub author_id: Option<Id>,
+    /// Its source turn, independent of which turns the browser holds.
+    pub turn_id: Option<Id>,
+    /// Bounded answer/change/child facts; never raw command or output bodies.
+    pub metadata: Json,
 }
 
 /// One bounded direction of outline points. A before cursor reads latest-first, then returns ascending.
@@ -127,70 +133,129 @@ pub async fn outline_points_view(
     limit: i64,
     title_chars: i64,
 ) -> Result<Vec<OutlinePoint>, DbError> {
-    let order = if forward { "ASC" } else { "DESC" };
-    let comparison = if forward { ">" } else { "<" };
-    let owners = crate::queries::thread_continuations::reading::OWNERS;
-    // The page is chosen in each owner's own order, as `thread_continuations::reading::items` chooses one, so that
-    // a long history is read from its end until a page is found: ordered across the owners' join, every item of the
-    // thread was read and tested to keep the newest fifty (a thread of 10,000 turns read 205,000 blocks to open).
-    let query = format!("{owners},visible AS NOT MATERIALIZED (
-      SELECT i.id,i.thread_id,i.turn_id,i.stream,i.kind,i.seq_created,i.created_at,
-        CASE WHEN o.frozen_at IS NULL OR i.seq_updated<=o.frozen_at THEN i.payload ELSE
-          (SELECT r.body->'payload' FROM thread_item_revisions r WHERE r.item_id=i.id
-            AND r.seq_updated<=o.frozen_at ORDER BY r.seq_updated DESC LIMIT 1) END AS payload
-      FROM owners o JOIN items i ON i.continuation_id=o.owner AND i.thread_id=$1
-      WHERE i.seq_created BETWEEN o.first_seq AND o.last_seq AND (i.turn_id IS NULL OR EXISTS(
-        SELECT 1 FROM turns t WHERE t.id=i.turn_id AND t.ordinal BETWEEN o.first_turn AND o.last_turn))),candidates AS (
-      SELECT selected.* FROM owners o JOIN LATERAL (
-        SELECT i.id,i.seq_created,i.created_at,i.kind,i.turn_id,
-          (i.turn_id IS NOT NULL AND i.kind<>'marker' AND NOT EXISTS(SELECT 1 FROM items prior
-            WHERE prior.thread_id=i.thread_id AND prior.turn_id=i.turn_id AND prior.stream='main'
-              AND prior.kind<>'marker' AND prior.seq_created<i.seq_created)) AS starts_turn
-        FROM items i CROSS JOIN LATERAL (SELECT CASE WHEN o.frozen_at IS NULL OR i.seq_updated<=o.frozen_at THEN i.payload ELSE
-            (SELECT r.body->'payload' FROM thread_item_revisions r WHERE r.item_id=i.id
-              AND r.seq_updated<=o.frozen_at ORDER BY r.seq_updated DESC LIMIT 1) END AS payload) v
-        WHERE i.thread_id=$1 AND i.continuation_id=o.owner AND i.stream='main'
-          AND i.seq_created BETWEEN o.first_seq AND o.last_seq
-          AND ($3::bigint IS NULL OR i.seq_created {comparison} $3)
-          AND (i.turn_id IS NULL OR (SELECT t.ordinal BETWEEN o.first_turn AND o.last_turn
-            FROM turns t WHERE t.id=i.turn_id))
-          AND (i.kind IN ('user_message','agent_message','approval')
+    outline_selected_points_view(
+        conn,
+        thread,
+        view,
+        OutlineWindow {
+            boundary,
+            forward,
+            limit,
+            title_chars,
+            selection: "conversation",
+            q: None,
+            changes: false,
+        },
+    )
+    .await
+}
+
+/// One bounded metadata neighborhood or page, with source-owned selection and literal search.
+#[derive(Debug, Clone, Copy)]
+pub struct OutlineWindow<'a> {
+    /// The exclusive creation cursor, when supplied.
+    pub boundary: Option<Seq>,
+    /// Reads after rather than before that cursor.
+    pub forward: bool,
+    /// Caller-selected source-point count.
+    pub limit: i64,
+    /// The existing outline-title budget.
+    pub title_chars: i64,
+    /// Conversation points, human messages, or child agents.
+    pub selection: &'a str,
+    /// A literal substring; no item bodies are returned for search.
+    pub q: Option<&'a str>,
+    /// Project optional admitted-change counts only when the caller displays them.
+    pub changes: bool,
+}
+
+/// Page within each immutable owner before merging, so old history and large outputs are not scanned to open a list.
+pub async fn outline_selected_points_view(
+    conn: &mut Conn,
+    thread: Id,
+    view: Id,
+    window: OutlineWindow<'_>,
+) -> Result<Vec<OutlinePoint>, DbError> {
+    let kind = match window.selection {
+        "messages" => "i.kind='user_message' AND i.payload->>'source'='user' AND v.payload->>'source'='user'",
+        "agents" => "i.kind='tool_call' AND i.payload #>> '{tool,kind}'='subagent' AND v.payload #>> '{tool,kind}'='subagent'",
+        _ => "i.kind IN ('user_message','agent_message','approval')
             OR (i.kind='announcement' AND v.payload->>'category'='milestone')
-            OR (i.kind='tool_call' AND v.payload #>> '{{tool,kind}}'='orch'
-              AND v.payload #>> '{{tool,tool}}'='announce' AND v.payload #>> '{{tool,arguments,category}}'='milestone')
+            OR (i.kind='tool_call' AND v.payload #>> '{tool,kind}'='orch' AND v.payload #>> '{tool,tool}'='announce'
+              AND v.payload #>> '{tool,arguments,category}'='milestone')
             OR (i.turn_id IS NOT NULL AND i.kind<>'marker' AND NOT EXISTS(SELECT 1 FROM items prior
               WHERE prior.thread_id=i.thread_id AND prior.turn_id=i.turn_id AND prior.stream='main'
-                AND prior.kind<>'marker' AND prior.seq_created<i.seq_created)))
-        ORDER BY i.seq_created {order} LIMIT $4) selected ON true
-      ORDER BY selected.seq_created {order} LIMIT $4)
-      SELECT c.id,c.seq_created,c.created_at,c.kind,c.starts_turn,t.ordinal AS turn_ordinal,
-        CASE c.kind
-          WHEN 'user_message' THEN jsonb_build_object('source',i.payload->'source',
-            'goal_condition',left(i.payload #>> '{{goal,condition}}',$5::int),
-            'parts',CASE WHEN i.payload->>'source'='goal' THEN '[]'::jsonb ELSE COALESCE((SELECT jsonb_agg(
-              jsonb_build_object('type',p.part->'type','text',p.part->'text','name',p.part->'name') ORDER BY p.ordinal)
-              FROM jsonb_array_elements(CASE WHEN jsonb_typeof(i.payload->'parts')='array' THEN i.payload->'parts' ELSE '[]'::jsonb END)
-                WITH ORDINALITY p(part,ordinal)),'[]'::jsonb) END)
-          WHEN 'agent_message' THEN jsonb_build_object('text',(SELECT left(regexp_replace(line,'^[[:space:]]+|[[:space:]]+$','','g'),$5::int)
-            FROM regexp_split_to_table(COALESCE(i.payload->>'text',''),E'\\n') WITH ORDINALITY lines(line,ordinal)
-            WHERE line ~ '[^[:space:]]' ORDER BY ordinal LIMIT 1))
-          WHEN 'announcement' THEN jsonb_build_object('title',left(i.payload->>'title',$5::int),'category',i.payload->'category')
-          WHEN 'approval' THEN jsonb_build_object('approval_id',i.payload->'approval_id')
-          WHEN 'tool_call' THEN CASE WHEN i.payload #>> '{{tool,kind}}'='orch'
-            AND i.payload #>> '{{tool,tool}}'='announce' AND i.payload #>> '{{tool,arguments,category}}'='milestone'
-            THEN jsonb_build_object('tool',jsonb_build_object('tool','announce','arguments',
-              jsonb_build_object('category','milestone','title',left(i.payload #>> '{{tool,arguments,title}}',$5::int))))
-            ELSE '{{}}'::jsonb END
-          ELSE '{{}}'::jsonb END AS payload
-      FROM candidates c JOIN visible i ON i.id=c.id LEFT JOIN turns t ON t.id=c.turn_id AND t.thread_id=$1
-      ORDER BY c.seq_created");
+                AND prior.kind<>'marker' AND prior.seq_created<i.seq_created))",
+    };
+    let query = include_str!("outline_points.sql")
+        .replace(
+            "__OWNERS__",
+            crate::queries::thread_continuations::reading::OWNERS,
+        )
+        .replace("__ORDER__", if window.forward { "ASC" } else { "DESC" })
+        .replace("__COMPARISON__", if window.forward { ">" } else { "<" })
+        .replace("__KIND_FILTER__", kind)
+        .replace(
+            "__STREAM_FILTER__",
+            if window.selection == "agents" {
+                "true"
+            } else {
+                "i.stream='main'"
+            },
+        )
+        .replace(
+            "__MESSAGE_FACTS__",
+            if window.selection == "agents" {
+                "false"
+            } else {
+                "true"
+            },
+        )
+        .replace(
+            "__ANSWER_FACTS__",
+            if window.selection == "conversation" {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .replace(
+            "__COUNT_EDITS__",
+            if window.selection == "messages" && window.changes {
+                "true"
+            } else {
+                "false"
+            },
+        );
+    let pattern = window.q.map(crate::queries::search::substring);
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(thread)
         .bind(view)
-        .bind(boundary)
-        .bind(limit)
-        .bind(title_chars)
+        .bind(window.boundary)
+        .bind(window.limit)
+        .bind(window.title_chars)
+        .bind(pattern)
         .fetch_all(conn)
+        .await?)
+}
+
+/// The complete child count uses the same owner and frozen-body membership, without reading child prompts.
+pub async fn outline_agent_count_view(
+    conn: &mut Conn,
+    thread: Id,
+    view: Id,
+) -> Result<i64, DbError> {
+    let owners = crate::queries::thread_continuations::reading::OWNERS;
+    let query = format!("{owners} SELECT count(*) FROM owners o JOIN items i ON i.thread_id=$1 AND i.continuation_id=o.owner
+        WHERE i.kind='tool_call' AND i.payload #>> '{{tool,kind}}'='subagent'
+        AND i.seq_created BETWEEN o.first_seq AND o.last_seq
+        AND (i.turn_id IS NULL OR EXISTS(SELECT 1 FROM turns t WHERE t.id=i.turn_id AND t.ordinal BETWEEN o.first_turn AND o.last_turn))
+        AND (CASE WHEN o.frozen_at IS NULL OR i.seq_updated<=o.frozen_at THEN i.payload ELSE
+          (SELECT r.body->'payload' FROM thread_item_revisions r WHERE r.item_id=i.id AND r.seq_updated<=o.frozen_at ORDER BY r.seq_updated DESC LIMIT 1) END) #>> '{{tool,kind}}'='subagent'");
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(query))
+        .bind(thread)
+        .bind(view)
+        .fetch_one(conn)
         .await?)
 }
 

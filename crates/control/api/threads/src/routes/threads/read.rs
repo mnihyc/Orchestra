@@ -60,6 +60,10 @@ use orch_api_contract::threads::OutlineEntry;
 
 use orch_api_contract::threads::OutlineKind;
 
+use orch_api_contract::threads::{OutlineAgent, OutlineMessage, OutlineSelection};
+
+use crate::middleware::authorization::refusals;
+
 use orch_api_contract::threads::THREAD_SYNC_DEFAULT_LIMIT;
 
 use orch_api_contract::threads::THREAD_SYNC_MAX_LIMIT;
@@ -537,6 +541,109 @@ fn outline_goal_condition(row: &rows::reading::OutlinePoint) -> Option<String> {
 }
 
 /// The line an item makes in the outline, if its kind makes one.
+fn outline_message(
+    row: &rows::reading::OutlinePoint,
+    people: &std::collections::HashMap<orch_types::Id, orch_api_contract::users::UserRef>,
+) -> Option<OutlineMessage> {
+    if row.kind != "user_message" && row.kind != "agent_message" {
+        return None;
+    }
+    Some(OutlineMessage {
+        author: row.author_id.and_then(|id| people.get(&id).cloned()),
+        source: row
+            .payload
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        turn_id: row.turn_id,
+        added: row
+            .metadata
+            .get("added")
+            .and_then(serde_json::Value::as_i64),
+        removed: row
+            .metadata
+            .get("removed")
+            .and_then(serde_json::Value::as_i64),
+        phase: row
+            .payload
+            .get("phase")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        last_agent_seq: row
+            .metadata
+            .get("last_agent")
+            .and_then(serde_json::Value::as_i64),
+        last_final_seq: row
+            .metadata
+            .get("last_final")
+            .and_then(serde_json::Value::as_i64),
+        last_work_seq: row
+            .metadata
+            .get("last_work")
+            .and_then(serde_json::Value::as_i64),
+        ended: row
+            .metadata
+            .get("ended")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn outline_agent(row: &rows::reading::OutlinePoint) -> Option<OutlineAgent> {
+    if row.kind != "tool_call"
+        || row
+            .payload
+            .pointer("/tool/kind")
+            .and_then(serde_json::Value::as_str)
+            != Some("subagent")
+    {
+        return None;
+    }
+    Some(OutlineAgent {
+        stream: row
+            .payload
+            .pointer("/tool/child_stream")?
+            .as_str()?
+            .to_owned(),
+        turn_id: row.turn_id,
+        name: row
+            .payload
+            .pointer("/tool/name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        state: serde_json::from_value(row.payload.pointer("/tool/state")?.clone()).ok()?,
+        started_at: row
+            .payload
+            .get("started_at")
+            .filter(|value| !value.is_null())
+            .and_then(|value| serde_json::from_value(value.clone()).ok()),
+        duration_ms: row
+            .payload
+            .get("duration_ms")
+            .and_then(serde_json::Value::as_i64),
+        tokens_out: row
+            .metadata
+            .get("tokens_out")
+            .and_then(serde_json::Value::as_i64),
+        result: row
+            .metadata
+            .get("result")
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned),
+        recorded: row
+            .metadata
+            .get("recorded")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        updated_seq: row
+            .metadata
+            .get("updated_seq")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(row.seq_created),
+    })
+}
+
 fn outline_line(
     row: &rows::reading::OutlinePoint,
     approval_titles: &std::collections::HashMap<orch_types::Id, String>,
@@ -557,6 +664,22 @@ fn outline_line(
             ),
         ),
         "agent_message" => (OutlineKind::AgentMessage, said("text")),
+        "tool_call"
+            if row
+                .payload
+                .pointer("/tool/kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("subagent") =>
+        {
+            (
+                OutlineKind::Subagent,
+                row.payload
+                    .pointer("/tool/name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        }
         "announcement"
             if row
                 .payload
@@ -672,40 +795,51 @@ pub(super) async fn outline_in(
         None
     };
     let title_chars = i64::from(OUTLINE_TITLE_CHARS);
+    let selection = match query.selection.unwrap_or(OutlineSelection::Conversation) {
+        OutlineSelection::Conversation => "conversation",
+        OutlineSelection::Messages => "messages",
+        OutlineSelection::Agents => "agents",
+    };
+    let q = query
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let changes = query.include_changes.unwrap_or(selection == "messages");
+    let window = |boundary, forward, limit| rows::reading::OutlineWindow {
+        boundary,
+        forward,
+        limit,
+        title_chars,
+        selection,
+        q,
+        changes,
+    };
     let mut found = if let Some(anchor) = anchor {
         let older = (limit + 1) / 2;
-        let mut points = rows::reading::outline_points_view(
+        let mut points = rows::reading::outline_selected_points_view(
             conn,
             thread,
             view,
-            Some(anchor.saturating_add(1)),
-            false,
-            older,
-            title_chars,
+            window(Some(anchor.saturating_add(1)), false, older),
         )
         .await?;
         points.extend(
-            rows::reading::outline_points_view(
+            rows::reading::outline_selected_points_view(
                 conn,
                 thread,
                 view,
-                Some(anchor),
-                true,
-                limit - older,
-                title_chars,
+                window(Some(anchor), true, limit - older),
             )
             .await?,
         );
         points
     } else {
-        rows::reading::outline_points_view(
+        rows::reading::outline_selected_points_view(
             conn,
             thread,
             view,
-            query.before,
-            false,
-            limit + 1,
-            title_chars,
+            window(query.before, false, limit + 1),
         )
         .await?
     };
@@ -716,14 +850,14 @@ pub(super) async fn outline_in(
     let next_before = if let Some(first) = found.first() {
         let older = extra
             || (anchor.is_some()
-                && !rows::reading::outline_points_view(
+                && !rows::reading::outline_selected_points_view(
                     conn,
                     thread,
                     view,
-                    Some(first.seq_created),
-                    false,
-                    1,
-                    title_chars,
+                    rows::reading::OutlineWindow {
+                        changes: false,
+                        ..window(Some(first.seq_created), false, 1)
+                    },
                 )
                 .await?
                 .is_empty());
@@ -749,10 +883,18 @@ pub(super) async fn outline_in(
             .into_iter()
             .collect()
     };
+    let authors: Vec<orch_types::Id> = found.iter().filter_map(|row| row.author_id).collect();
+    let people = refusals::user_refs(conn, &authors).await?;
+    let total = if selection == "agents" {
+        Some(rows::reading::outline_agent_count_view(conn, thread, view).await?)
+    } else {
+        None
+    };
     let mut lines = Vec::with_capacity(found.len());
     for row in &found {
         let at = Time::new(row.created_at);
-        if row.starts_turn
+        if selection == "conversation"
+            && row.starts_turn
             && let Some(ordinal) = row.turn_ordinal
         {
             lines.push(OutlineEntry {
@@ -763,9 +905,14 @@ pub(super) async fn outline_in(
                 kind: OutlineKind::Turn,
                 turn_ordinal: Some(ordinal),
                 goal_condition: None,
+                message: None,
+                agent: None,
             });
         }
         if let Some((kind, title)) = outline_line(row, &approval_titles) {
+            if kind == OutlineKind::Subagent && selection != "agents" {
+                continue;
+            }
             lines.push(OutlineEntry {
                 item_id: row.id,
                 seq: row.seq_created,
@@ -774,6 +921,8 @@ pub(super) async fn outline_in(
                 kind,
                 turn_ordinal: None,
                 goal_condition: outline_goal_condition(row),
+                message: outline_message(row, &people),
+                agent: outline_agent(row),
             });
         }
     }
@@ -782,6 +931,7 @@ pub(super) async fn outline_in(
         entries: lines,
         next_before,
         seq: head.seq(),
+        total,
     })
 }
 

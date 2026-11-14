@@ -21,7 +21,7 @@ export function openThreadChanges(threadId: string, turnId?: string): void {
   const layout = useWorkbench.getState().layout;
   const panel = allTabs(layout).find((tab) => tab.view === 'changes' && (tab.of?.thread === threadId
     || tab.scope?.mode === 'fixed' && tab.scope.target.kind === 'thread' && tab.scope.target.id === threadId));
-  const target = { thread: threadId, scope: 'thread', ...(turnId === undefined ? {} : { turn: turnId }) };
+  const target = { thread: threadId, scope: turnId === undefined ? 'thread' : 'turn', ...(turnId === undefined ? {} : { turn: turnId }) };
   if (panel === undefined) { revealView('changes', target); return; }
   useWorkbench.getState().change((current) => setTabTarget(current, panel.id, target));
   revealTab(panel.id);

@@ -48,7 +48,7 @@ afterEach(async () => {
 function Detail({ id }: { id: string }) { return <DetailControl preferences={useTimelinePreferences(id)} />; }
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
-  it(`keeps input, answer and one pending card through Full, Focused and Live at ${locale}/${theme}/${width}`, async () => {
+  it(`keeps input, answer and one pending card through Normal, Verbose and the group's own opening at ${locale}/${theme}/${width}`, async () => {
     await setLocale(locale); useAppearance.setState({ locale, theme, resolvedTheme: theme });
     document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
     wire.state = {}; client.session.setState({ status: 'signed_in', userId: 'script-reader', readerVersion: 1 });
@@ -66,18 +66,30 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       { ...ask, payload: { approval_id: approval.id, approval } }, agentMessage(`answer-${tag}`, 'The redirect is repaired.', { turn: current.id }),
     ].map((item) => ({ ...item, thread_id: id, continuation_id: A })) }, false, captureThreadRead(id));
     const view = show(<ViewCompactContext.Provider value={width === 400}><div data-screen="thread" style={{ width }}><Detail id={id} /><Timeline threadId={id} item={null} empty={null} pinApprovals /><PinnedApprovals threadId={id} /></div></ViewCompactContext.Provider>);
-    await waitFor(() => expect(screen.getByRole('combobox')).toHaveTextContent(i18n.t('thread.viewModes.full')));
-    expect(view.container.querySelector(`[data-item="${cmd.id}"]`)).not.toBeNull();
+    await waitFor(() => expect(screen.getByRole('combobox')).toHaveTextContent(i18n.t('thread.viewModes.normal')));
+    // Normal: the turn is at it, so its group is open as a preview of its steps, each a closed row; the question stands under it.
+    const line = view.container.querySelector(`[data-fold="${current.id}"]`);
+    expect(line).toHaveTextContent(i18n.t('timeline.group.working'));
+    expect(line).toHaveTextContent(i18n.t('timeline.group.commands', { count: 1 }));
+    expect(line).toHaveTextContent(i18n.t('timeline.group.edited', { count: 1 }));
+    expect(view.container.querySelector(`[data-work] [data-item="${cmd.id}"]`)).not.toBeNull();
     expect(screen.queryByText('Current streamed output')).not.toBeInTheDocument();
-    const choose = async (mode: 'focused' | 'live') => { await userEvent.click(screen.getByRole('combobox')); await userEvent.click(screen.getByRole('option', { name: i18n.t(`thread.viewModes.${mode}`) })); };
-    await choose('focused');
-    await waitFor(() => expect(view.container.querySelector(`[data-fold="${current.id}"]`)).toHaveTextContent(i18n.t('thread.viewModes.toolCalls', { count: 2 })));
-    expect(view.container.querySelector(`[data-item="${cmd.id}"]`)).toBeNull();
+    expect(view.container.querySelector(`[data-item="ask-${tag}"]`)).not.toBeNull();
+    expect(view.container.querySelector(`[data-work] [data-item="ask-${tag}"]`)).toBeNull();
     expect(screen.getByText('Repair the redirect')).toBeVisible(); expect(screen.getByText('The redirect is repaired.')).toBeVisible();
     expect(screen.getAllByRole('button', { name: `${i18n.t('approvals.allowOnce')} · inspect files` })).toHaveLength(1);
-    expect(view.container.querySelector(`[data-fold="${current.id}"]`)).toHaveTextContent(i18n.t('thread.viewModes.files', { count: 1 }));
-    await choose('live');
+    // What the reader closes by hand stays closed.
+    if (!(line instanceof HTMLElement)) throw new Error('The group has its line');
+    await userEvent.click(line);
+    expect(view.container.querySelector(`[data-item="${cmd.id}"]`)).toBeNull();
+    expect(line).toHaveAttribute('aria-expanded', 'false');
+    await userEvent.click(line);
+    expect(view.container.querySelector(`[data-item="${cmd.id}"]`)).not.toBeNull();
+    // Verbose: every step a row of its own, and the running tool's output open as it prints.
+    await userEvent.click(screen.getByRole('combobox')); await userEvent.click(screen.getByRole('option', { name: i18n.t('thread.viewModes.verbose') }));
     expect(await screen.findByText('Current streamed output')).toBeVisible();
+    expect(view.container.querySelector(`[data-fold="${current.id}"]`)).toBeNull();
+    expect(view.container.querySelector(`[data-item="${cmd.id}"]`)).not.toBeNull();
     const next = command(cmd.id, { turn: current.id, command: 'check files', output: 'Current streamed output\nNext streamed line', exit: null });
     act(() => threadWriter.apply(id, { items: [{ ...next, thread_id: id, continuation_id: A, seq_updated: source.seq + 1 }] }, captureThreadRead(id)));
     expect(await screen.findByText(/Next streamed line/)).toBeVisible();

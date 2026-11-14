@@ -35,7 +35,8 @@ for (const locale of ['en', 'zh-CN'] as const) it(`names the provider's offered 
   expect(within(group).getByRole('switch', { name: 'daybreakGreen' })).not.toBeChecked();
   await user.click(within(group).getByRole('switch', { name: red }));
   await user.click(within(group).getByRole('switch', { name: standard }));
-  await user.click(within(group).getByRole('combobox', { name: i18n.t('models.editor.defaultProgram') }));
+  // The starting program is optional, and its label says so.
+  await user.click(within(group).getByRole('combobox', { name: new RegExp(`^${i18n.t('models.editor.defaultProgram')}`) }));
   await user.click(screen.getByRole('option', { name: standard }));
   const form = changed.mock.lastCall?.[0];
   if (form === undefined) throw new Error('The selected program did not update the model form');
@@ -53,11 +54,31 @@ for (const locale of ['en', 'zh-CN'] as const) it(`shows and selects thread prog
   const choose = vi.fn();
   show(<AccessChoice state={state} writable chooser={null} onChoose={choose} />);
   const picker = screen.getByRole('combobox', { name: i18n.t('composer.model.access.title') });
-  expect(picker).toHaveTextContent(locale === 'en' ? 'Daybreak Blue' : 'Daybreak 蓝');
+  expect(picker).toHaveDisplayValue(locale === 'en' ? 'Daybreak Blue' : 'Daybreak 蓝');
   await userEvent.click(picker);
   expect(screen.getByRole('option', { name: 'daybreakGreen' })).toBeVisible();
   await userEvent.click(screen.getByRole('option', { name: locale === 'en' ? 'Standard' : '标准' }));
   expect(choose).toHaveBeenCalledWith('standard');
+});
+
+it.each(['en', 'zh-CN'] as const)('finds an advertised access program in a large list and sends its exact id in %s', async (locale) => {
+  await setLocale(locale);
+  const programs = Array.from({ length: 12 }, (_, at) => `program-${at}`);
+  const parameters = {
+    model: { value: 'model', options: [{ model_name: 'model', parameters: { access_programs: programs } }] },
+    parameters: [{ key: 'access', def: { key: 'access', options: { from_model: 'access_programs' } }, value: programs[0], source: { scope: 'thread', node: null }, locked_by: null, writable: true, apply: 'next_turn' }],
+  } as unknown as ThreadParameters;
+  const state = statesOf(parameters, { access: programs[0] }).find((one): one is SpeedOrAccess => one.kind === 'access');
+  if (state === undefined) throw new Error('The advertised model programs need their native control');
+  const choose = vi.fn();
+  show(<AccessChoice state={state} writable chooser={null} onChoose={choose} />);
+  const picker = screen.getByRole('combobox', { name: i18n.t('composer.model.access.title') });
+  await userEvent.click(picker);
+  await userEvent.type(picker, 'program-11');
+  expect(choose).not.toHaveBeenCalled();
+  expect(screen.queryByRole('option', { name: 'program-10' })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole('option', { name: 'program-11' }));
+  expect(choose).toHaveBeenCalledExactlyOnceWith('program-11');
 });
 
 for (const locale of ['en', 'zh-CN'] as const) it(`names enabled and offered programs in the provider's model summary (${locale})`, async () => {
