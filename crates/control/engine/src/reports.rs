@@ -101,6 +101,12 @@ impl Engine {
                 return Ok(());
             };
             current
+        } else if let Some(environment) = runtime.environment_id {
+            environments::lock_environment(&mut *unit.conn, environment).await?;
+            let Some(current) = environments::runtime(&mut *unit.conn, runtime.id).await? else {
+                return Ok(());
+            };
+            current
         } else {
             runtime
         };
@@ -129,6 +135,45 @@ impl Engine {
                 _ => "the unit failed".to_owned(),
             });
         let now = unit.now();
+        if runtime.state == runtime_state::STOPPING && gone {
+            let moved = environments::set_runtime_state(
+                &mut *unit.conn,
+                runtime.id,
+                &[runtime_state::STOPPING],
+                runtime_state::STOPPED,
+                runtime.state_detail.as_deref(),
+                now,
+            )
+            .await?;
+            if moved && let Some(provider) = runtime.provider_id {
+                self.provider_unit_failed(
+                    &mut *unit.conn,
+                    provider,
+                    runtime.id,
+                    runtime.machine_id,
+                    now,
+                )
+                .await?;
+            }
+            if moved
+                && let Some(environment) = runtime.environment_id
+                && environments::live_runtime(&mut *unit.conn, environment)
+                    .await?
+                    .is_some_and(|current| current.id == runtime.id)
+            {
+                environments::set_status(
+                    &mut *unit.conn,
+                    environment,
+                    &[status::RUNNING, status::OFFLINE],
+                    status::STOPPED,
+                    None,
+                    now,
+                )
+                .await?;
+                environments::close_shells(&mut *unit.conn, environment, now).await?;
+            }
+            return Ok(());
+        }
         let fails = match runtime.state.as_str() {
             runtime_state::RUNNING => gone,
             runtime_state::CREATING => report.state == "failed",

@@ -856,7 +856,7 @@ impl Engine {
                             path: orch_agent_contract::session::INSTRUCTION_ROOT_MARKER.to_owned(),
                         },
                     )?;
-                    match crate::commands::run(self.inner.commands.as_ref(), marker).await? {
+                    match self.run_noted(thread_id, marker).await? {
                         Outcome::Succeeded(_) => body.instruction_root_marker = true,
                         Outcome::Failed(ref failure)
                             if failure.code == "policy.remote_write_disabled" => {}
@@ -1541,7 +1541,7 @@ impl Engine {
                 path,
             },
         )?;
-        let outcome = crate::commands::run(self.inner.commands.as_ref(), command).await?;
+        let outcome = self.run_noted(snap.thread.node_id, command).await?;
         if !matches!(outcome, Outcome::Succeeded(_)) {
             tracing::info!(thread = %snap.thread.node_id, ?outcome, "the directory of the thread could not be made; the turn goes on");
         }
@@ -3095,8 +3095,10 @@ impl Engine {
                     // is the thread's own (its binding, its place) and still there.
                     thread_state::BLOCKED => {
                         let recovered_source = row.blocked_reason.as_deref() == Some("error")
-                            && row.blocked_detail.as_deref()
-                                == Some(crate::preparation::SOURCE_FAILED)
+                            && row
+                                .blocked_detail
+                                .as_deref()
+                                .is_some_and(crate::preparation::is_source_failed_detail)
                             && crate::source::ready(&row)?;
                         (row.blocked_reason.as_deref() != Some("error") || recovered_source)
                             && row.current_turn_id.is_none()

@@ -22,6 +22,7 @@ use orch_link_contract::streams::{
     Ack, Answer, Eph, Ev, Evb, EvbEntry, Inbox, Nak, Outbox, Reset, ResetReason, Resume, Stream,
     is_diagnostic,
 };
+use orch_link_contract::version::Limits;
 use orch_types::{Json, Seq, Time};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::Path;
@@ -51,12 +52,15 @@ pub enum PublishError {
         /// The stream.
         stream: String,
     },
-    /// One event is larger than a frame may be.
-    #[error("an event of {bytes} bytes is larger than a frame of {max}")]
+    /// One event is larger than a message may be: it travels in parts when it is
+    /// larger than a frame, and not at all beyond what the session carries.
+    #[error(
+        "an event of {bytes} bytes is larger than the {max} bytes a message may have (`max_message_bytes` in the `[link]` section of the settings)"
+    )]
     TooLarge {
         /// Its size as it would be written.
         bytes: usize,
-        /// The most a frame may have.
+        /// The most a message may have.
         max: usize,
     },
     /// The spool failed.
@@ -94,6 +98,9 @@ struct StreamState {
     /// When something last happened to this stream that moves it on: an
     /// acknowledgement, a request to send again, or a frame being sent.
     last_progress: Instant,
+    /// The number of an event that the session in hand cannot carry, at which
+    /// the stream waits until what is before it is acknowledged.
+    held_at: Option<Seq>,
 }
 
 /// The machine's side of its streams.
@@ -103,7 +110,9 @@ pub struct StreamSender {
     streams: HashMap<String, StreamState>,
     roles: Vec<Role>,
     connected: bool,
-    max_frame_bytes: usize,
+    /// What the session in hand carries: the largest frame, which events are
+    /// batched to fit, and the largest message, which an event may be.
+    limits: Limits,
 }
 
 fn entry_of(numbered: &Numbered) -> EvbEntry {
@@ -150,7 +159,7 @@ impl StreamSender {
             streams: HashMap::new(),
             roles,
             connected: false,
-            max_frame_bytes: orch_link_contract::version::MAX_FRAME_BYTES as usize,
+            limits: Limits::default(),
         };
         for stream in sender.spool.streams() {
             let state = sender.state_from_spool(&stream, now);
@@ -175,6 +184,7 @@ impl StreamSender {
             reset_owed: None,
             reset_sent: false,
             last_progress: now,
+            held_at: None,
             outbox,
         }
     }
@@ -188,6 +198,7 @@ impl StreamSender {
                 reset_owed: None,
                 reset_sent: false,
                 last_progress: now,
+                held_at: None,
             };
             self.streams.insert(stream.to_owned(), state);
         }
@@ -239,10 +250,10 @@ impl StreamSender {
         })
         .map_or(usize::MAX, |text| text.len());
         let bytes = Evb::frame_bytes(&name, &[framed]);
-        if bytes > self.max_frame_bytes {
+        if bytes > self.limits.message_bytes() {
             return Err(PublishError::TooLarge {
                 bytes,
-                max: self.max_frame_bytes,
+                max: self.limits.message_bytes(),
             });
         }
         self.state(&name, now);
@@ -279,6 +290,7 @@ impl StreamSender {
                 state.reset_owed = Some((oldest.max(state.outbox.oldest()), reason));
                 state.reset_sent = false;
                 state.next_to_wire = state.next_to_wire.max(oldest);
+                state.held_at = state.held_at.filter(|held| *held >= oldest);
             }
         }
         self.owed_resets()
@@ -309,11 +321,11 @@ impl StreamSender {
     pub fn on_ready(
         &mut self,
         cursors: &BTreeMap<String, Seq>,
-        max_frame_bytes: usize,
+        limits: Limits,
         now: Instant,
     ) -> Result<Vec<Frame>, SpoolError> {
         self.connected = true;
-        self.max_frame_bytes = max_frame_bytes;
+        self.limits = limits;
         let mut frames = Vec::new();
         let names: BTreeSet<String> = self
             .streams
@@ -335,6 +347,8 @@ impl StreamSender {
             let state = self.state(&name, now);
             state.last_progress = now;
             state.reset_sent = false;
+            // The limits of this session may carry what the last one could not.
+            state.held_at = None;
             match resume {
                 Resume::Send { from } => {
                     state.next_to_wire = from;
@@ -388,6 +402,7 @@ impl StreamSender {
         let through = state.outbox.on_ack(ack.seq);
         state.last_progress = now;
         state.next_to_wire = state.next_to_wire.max(through + 1);
+        state.held_at = state.held_at.filter(|held| *held > through);
         if state.reset_owed.is_some_and(|(owed, _)| through >= owed) {
             state.reset_owed = None;
         }
@@ -428,7 +443,9 @@ impl StreamSender {
     pub fn on_stall(&mut self, after: Duration, now: Instant) {
         for (stream, state) in &mut self.streams {
             let outstanding = state.outbox.acknowledged() < self.spool.sent_through(stream);
-            let all_on_the_wire = state.next_to_wire > self.spool.sent_through(stream);
+            // A stream held at an event it cannot carry has sent everything before it.
+            let all_on_the_wire = state.next_to_wire > self.spool.sent_through(stream)
+                || state.held_at.is_some_and(|held| state.next_to_wire >= held);
             if outstanding && all_on_the_wire && now.duration_since(state.last_progress) >= after {
                 state.next_to_wire = state.outbox.acknowledged() + 1;
                 state.last_progress = now;
@@ -473,7 +490,7 @@ impl StreamSender {
         if !self.connected {
             return Ok(Vec::new());
         }
-        let frame_bytes = frame_bytes.min(self.max_frame_bytes);
+        let frame_bytes = frame_bytes.min(self.limits.frame_bytes());
         let mut frames = Vec::new();
         let names: Vec<String> = self.streams.keys().cloned().collect();
         for name in &names {
@@ -552,13 +569,21 @@ impl StreamSender {
                 .iter()
                 .map(|entry| serde_json::to_string(entry).map_or(usize::MAX, |text| text.len()))
                 .collect();
+            // An event larger than a message of this session may be was spooled under a larger limit than the
+            // session states: no frame of it can be sent. What is before it goes.
+            let message_bytes = self.limits.message_bytes();
+            let unsendable = sizes
+                .iter()
+                .position(|size| Evb::frame_bytes(name, &[*size]) > message_bytes);
+            let sendable = unsendable.unwrap_or(entries.len());
             let mut placed = 0;
-            while placed < entries.len() {
-                let fit = Evb::fitting(name, &sizes[placed..], frame_bytes.max(1));
+            while placed < sendable {
+                let fit = Evb::fitting(name, &sizes[placed..sendable], frame_bytes.max(1));
                 // A single event is always sent, even in a frame larger than
-                // the one a thin link prefers: it cannot be cut.
+                // the one a thin link prefers, or than a frame may be: it is not
+                // cut here, and the link carries it in parts.
                 let fit = if fit == 0 {
-                    Evb::fitting(name, &sizes[placed..], self.max_frame_bytes).max(1)
+                    Evb::fitting(name, &sizes[placed..sendable], self.limits.frame_bytes()).max(1)
                 } else {
                     fit
                 };
@@ -579,11 +604,69 @@ impl StreamSender {
                 });
                 placed += fit;
             }
+            if let Some(at) = unsendable {
+                // The stream waits at it until everything before it is acknowledged, so that nothing
+                // before it is lost with it; then it is the oldest the system has not taken, and it is
+                // given up. Nothing after it goes before, so the system finds no hole.
+                let seq = entries[at].seq;
+                let oldest_unacknowledged = self
+                    .streams
+                    .get(name)
+                    .is_some_and(|state| state.outbox.acknowledged() + 1 == seq);
+                if let Some(state) = self.streams.get_mut(name) {
+                    state.next_to_wire = seq;
+                    state.held_at = Some(seq);
+                    // Only frames that were sent are progress: a stream that waits must be sent again once
+                    // the stall time has passed.
+                    if placed > 0 {
+                        state.last_progress = now;
+                    }
+                }
+                if oldest_unacknowledged {
+                    self.give_up(name, seq, sizes[at], now)?;
+                    frames.extend(self.owed_resets());
+                    continue;
+                }
+                return Ok(());
+            }
             if let Some(state) = self.streams.get_mut(name) {
                 state.next_to_wire = batch.last().map_or(state.next_to_wire, |last| last.seq + 1);
                 state.last_progress = now;
             }
         }
+    }
+
+    /// Gives up an event that the session in hand cannot carry, which is the oldest the system has not
+    /// acknowledged: the spool lets it go, and the system is told with a reset that the stream goes on after
+    /// it, so that it asks for what the event reported from where that is kept. It is said here and counted
+    /// by the machine, and the system counts the reset.
+    fn give_up(
+        &mut self,
+        name: &str,
+        seq: Seq,
+        bytes: usize,
+        now: Instant,
+    ) -> Result<(), SpoolError> {
+        let max = self.limits.message_bytes();
+        tracing::error!(
+            stream = name,
+            seq,
+            bytes,
+            max,
+            "an event is larger than a message of this session may be, and is given up; raise \
+             `max_message_bytes` in the `[link]` section of the settings to carry events of this size"
+        );
+        metrics::counter!("orch_link_events_given_up_total").increment(1);
+        self.spool.acknowledge(name, seq)?;
+        let oldest = self.spool.oldest(name);
+        let reason = ResetReason::TooLarge;
+        let state = self.state(name, now);
+        state.outbox.dropped(seq, reason);
+        state.reset_owed = Some((oldest.max(state.outbox.oldest()), reason));
+        state.reset_sent = false;
+        state.next_to_wire = state.next_to_wire.max(seq + 1);
+        state.held_at = None;
+        self.recount_unacknowledged(name)
     }
 
     /// Files to force to disk; the caller does it where blocking is fine.

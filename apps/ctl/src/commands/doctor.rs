@@ -838,11 +838,16 @@ async fn node(conn: &mut orch_db::Conn) -> Line {
             ID,
             Status::Ok,
             format!(
-                "host {} is online (connector {}); {} of {} hosts have a session",
+                "host {} is online (connector {}); {} of {} hosts have a session{}",
                 host.name,
                 host.connector_version,
                 online.len(),
-                hosts.len()
+                hosts.len(),
+                if host.bundled_with_server {
+                    "; installed with the server; containers may share its kernel; Host Use is private until granted"
+                } else {
+                    ""
+                }
             ),
         );
     }
