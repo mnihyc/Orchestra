@@ -1426,7 +1426,7 @@ async fn runtime_list(
     ctx: Ctx,
     query: api::HostRuntimeListQuery,
     (): (),
-) -> ApiResult<Vec<Runtime>> {
+) -> ApiResult<orch_api_contract::common::Page<Runtime>> {
     let host = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     orch_db::queries::resources::hosting::host(&mut conn, host)
@@ -1434,7 +1434,25 @@ async fn runtime_list(
         .ok_or_else(ApiError::not_found)?;
     let found =
         environment_hosting::runtimes_on(&mut conn, host, query.kind.map(unit_kind_word)).await?;
-    runtime_views(&ctx, &mut conn, found).await
+    let rows = runtime_views(&ctx, &mut conn, found).await?;
+    crate::collection::snapshot(
+        &query.collection(),
+        &format!("host-runtimes:{}:{host}:{:?}", ctx.user()?.id(), query.kind),
+        rows,
+        |row| row.id,
+        |row| {
+            format!(
+                "{} {} {} {}",
+                row.environment
+                    .as_ref()
+                    .map_or("", |item| item.name.as_str()),
+                row.provider.as_ref().map_or("", |item| item.name.as_str()),
+                row.driver,
+                row.state
+            )
+        },
+        false,
+    )
 }
 
 /// Stops the selected unit on the host, returning credentials and respecting active work.

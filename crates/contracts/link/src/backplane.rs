@@ -205,6 +205,24 @@ pub struct Down {
     pub frame: DownFrame,
 }
 
+/// A gateway's word that it could not put a frame the system sent into a machine's session, because the
+/// frame is larger than a message the session carries, or cannot be written. The system fails the command
+/// the frame was at once, with the reason, instead of waiting for a machine that never had it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DownRefused {
+    /// The machine.
+    pub machine_id: Id,
+    /// The command the frame was, where it was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Id>,
+    /// What the frame was, by its type as it is written.
+    pub frame: String,
+    /// How many bytes it would take; 0 where it could not be written at all.
+    pub bytes: u64,
+    /// The most bytes of a message the session carries.
+    pub limit: u64,
+}
+
 /// The system's order to end a machine's session now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Kick {
@@ -332,6 +350,8 @@ tagged! {
         Up(Up) = "up",
         /// A text frame that the system sends a machine.
         Down(Down) = "down",
+        /// A gateway's word that it could not put a frame of the system into a machine's session.
+        DownRefused(DownRefused) = "down_refused",
         /// The system's order to end a machine's session.
         Kick(Kick) = "kick",
         /// A gateway's figures.
@@ -376,6 +396,7 @@ impl BackplaneFrame {
             | Self::MachineUp(_)
             | Self::MachineDown(_)
             | Self::Up(_)
+            | Self::DownRefused(_)
             | Self::Stats(_)
             | Self::TunOpenOk(_)
             | Self::TunOpenErr(_)
@@ -621,7 +642,7 @@ mod tests {
         assert!(hello.sent_by(BackplaneSide::Gateway) && !hello.sent_by(BackplaneSide::Api));
         let answer = round_trip(json!({
             "t": "api_hello", "ticket_public_key": "cHVibGljIGtleQ",
-            "limits": { "max_frame_bytes": 262144, "tunnel_window_bytes": 1048576, "max_channels": 256 },
+            "limits": { "max_frame_bytes": 262144, "max_message_bytes": 16777216, "tunnel_window_bytes": 1048576, "max_channels": 256 },
             "versions": { "min": "0.1.0", "recommended": "0.1.3" }
         }));
         assert!(answer.sent_by(BackplaneSide::Api) && !answer.sent_by(BackplaneSide::Gateway));
@@ -649,6 +670,18 @@ mod tests {
             json!({ "t": "stats", "sessions": 12, "channels": 31, "bytes_relayed": 9000000000i64 }),
         );
         round_trip(json!({ "t": "kick", "machine_id": MACHINE, "code": "revoked" }));
+    }
+
+    #[test]
+    fn a_gateway_says_which_frame_of_the_system_it_could_not_put_into_a_session() {
+        let refused = round_trip(json!({
+            "t": "down_refused", "machine_id": MACHINE, "command": OTHER, "frame": "cmd",
+            "bytes": 17000000u64, "limit": 16777216u64
+        }));
+        assert!(refused.sent_by(BackplaneSide::Gateway) && !refused.sent_by(BackplaneSide::Api));
+        round_trip(json!({
+            "t": "down_refused", "machine_id": MACHINE, "frame": "nak", "bytes": 0u64, "limit": 16777216u64
+        }));
     }
 
     #[test]

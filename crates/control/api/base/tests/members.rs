@@ -1054,7 +1054,8 @@ async fn ending_a_membership_passes_what_was_owned_alone_to_the_first_owner_of_t
         .token(&s.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(people.is_empty());
     let again = remove(&world, &s.boss, s.acme, &s.eve.id()).await.problem();
     assert_eq!(again.code, ErrorCode::NotFound, "she is no member now");

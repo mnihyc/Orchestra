@@ -436,8 +436,8 @@ async fn service_rows_use_actual_account_ownership_and_their_own_manage_selectio
             .await,
         StatusCode::OK,
     );
-    assert_eq!(response.as_array().unwrap().len(), 1);
-    assert_eq!(response[0]["user"]["id"], json!(accounts[1]));
+    assert_eq!(response["items"].as_array().unwrap().len(), 1);
+    assert_eq!(response["items"][0]["user"]["id"], json!(accounts[1]));
     let subtree = key(
         &s.world,
         s.boss.id(),
@@ -460,7 +460,7 @@ async fn service_rows_use_actual_account_ownership_and_their_own_manage_selectio
             .await,
         StatusCode::OK,
     );
-    assert_eq!(response.as_array().unwrap().len(), 2);
+    assert_eq!(response["items"].as_array().unwrap().len(), 2);
     sqlx::query("UPDATE api_tokens SET operation_scope=$2 WHERE id=$1")
         .bind(reader.id).bind(json!({"rules":[rule("OrgServiceAccountList", "account", new_id(), "self", "account", &["manage"])]}))
         .execute(&s.world.db.pool).await.unwrap();
@@ -473,7 +473,7 @@ async fn service_rows_use_actual_account_ownership_and_their_own_manage_selectio
             .await,
         StatusCode::OK,
     );
-    assert_eq!(response, json!([]));
+    assert_eq!(response["items"], json!([]));
 }
 
 #[tokio::test]

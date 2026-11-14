@@ -198,7 +198,7 @@ pub fn mount(registry: &mut Registry) {
         .on_snapshot_read_with_optional_operation(
             NotificationChannelList,
             crate::key_operations::native::selected::<channels::list_read::Channels>,
-            crate::key_operations::native::selected_read::<channels::list_read::Channels>,
+            channels::list,
         )
         .on(AdminNotificationChannelCreate, channels::create_system)
         .on(OrgNotificationChannelCreate, channels::create_org)

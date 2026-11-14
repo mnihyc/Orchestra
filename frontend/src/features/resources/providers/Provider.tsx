@@ -106,7 +106,7 @@ export function ProviderScreen({ providerId, tab, onTab,usageSearch,onUsageSearc
     </div> }] : []),
     { value: 'activity' as const, label: t('providers.tabs.activity'), panel: <div className="flex min-w-0 flex-col gap-4">
       <ProviderThreads provider={provider} />
-      {(manage || canUse) && harnessesOfProvider(provider).length > 0 && <HarnessSessions showProvider={false} harnesses={harnessesOfProvider(provider)} />}
+      {(manage || canUse) && harnessesOfProvider(provider).length > 0 && <HarnessSessions scopeKey={"provider:" + provider.id} showProvider={false} harnesses={harnessesOfProvider(provider)} />}
     </div> },
   ];
   // An address that names a tab this reader has none of shows the overview.

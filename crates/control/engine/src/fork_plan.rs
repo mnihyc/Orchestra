@@ -1977,6 +1977,43 @@ pub async fn prepare_with_access(
     let provider_changes = provider.id != source.provider.id;
     if replace && !provider_changes && matches!(landing, Landing::Same) {
         // nothing is asked about a provider that stays where it is
+    } else if replace && !provider_changes {
+        // A placement under the provider the thread has: whoever places it does not become the one who
+        // runs it, the thread goes on being carried by its first owner's use. So the question is whether
+        // the first owner may use the provider, with the model and effort the thread has, where it would
+        // now run; the placer needs only what placement needs (the environments they manage). A placer
+        // who is not the first owner is told the place and nothing else of that person's entry, and a
+        // refusal for any other reason is for the turns to say, as it was before an entry named places.
+        let carrier = source.thread.owner_id;
+        let answer = access
+            .provider_use(
+                &mut *conn,
+                &ProviderUse {
+                    person: carrier,
+                    node: thread_id,
+                    provider: provider.id,
+                    model: model.as_deref(),
+                    effort: effort.as_deref(),
+                    runs_in: landing.runs_in(Some(judged_in.id)),
+                },
+            )
+            .await
+            .map_err(EngineError::from)?;
+        match answer {
+            Answer::Allowed { arrangements } => entry = arrangements,
+            Answer::Refused(missing) if missing.iter().any(Missing::leaves_out_the_place) => {
+                let missing = if carrier == person {
+                    missing
+                } else {
+                    crate::access::only_the_place(provider.id, missing).missing
+                };
+                blockers.lack(
+                    "the entry through which the thread uses its provider does not let it run where the result would run",
+                    missing,
+                );
+            }
+            Answer::Refused(_) => entry = Some(crate::access::staying_types()),
+        }
     } else if reach == Reach::Seen {
         if !caller.permits(Permission::ProviderUse) {
             blockers.add(
