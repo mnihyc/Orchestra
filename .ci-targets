@@ -1,0 +1,8 @@
+# n41-startup: the session asked at script start, the router not waiting for the bootstrap, a page's first read from its address, the shell from what the browser holds, deferred script with the first wave named in the page, HTTP/2 and kept-alive upstreams at the edge, the marks and the measuring script; the whole web suite and the build.
+fmt
+clippy
+test -p orch-api-core --test forwarded_edge --test kfix_deploy
+web typecheck
+web lint
+web test
+web build
