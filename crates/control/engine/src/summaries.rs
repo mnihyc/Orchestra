@@ -14,7 +14,6 @@ pub mod resource;
 pub mod sources;
 
 pub(crate) use budget::InputBudget;
-pub(crate) use budget::UNKNOWN_WINDOW_TOKENS;
 pub(crate) use estimate::handoff_estimate;
 pub use handoff::{
     Carried, IndexedTranscript, handoff, indexed_transcript, notice as handoff_notice,
@@ -250,6 +249,24 @@ impl Engine {
             .unwrap_or_else(PoisonError::into_inner)
             .get(kind)
             .map(|producer| producer.describe().config_schema)
+    }
+
+    /// The registered producers and their configuration forms, including the built-in model producer.
+    pub fn summarizer_descriptors(
+        &self,
+    ) -> Vec<orch_summarizer_contract::descriptor::SummarizerDescriptor> {
+        let mut descriptors = vec![orch_summarizer_model::descriptor::descriptor()];
+        descriptors.extend(
+            self.inner
+                .summarizers
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .filter(|(name, _)| name.as_str() != "model")
+                .map(|(_, producer)| producer.describe()),
+        );
+        descriptors.sort_by(|one, other| one.name.cmp(&other.name));
+        descriptors
     }
 
     fn producer(

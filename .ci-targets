@@ -1,0 +1,12 @@
+fmt
+clippy
+contracts
+test -p orch-access-contract --lib
+test -p orch-authz --lib
+test -p orch-api-base --lib
+test -p orch-engine --lib -- ask::
+test -p orch-engine --lib -- turns::end_work::diagnostics_tests::
+test -p orch-api-core --test ask --test ask_tools_native_origin --test search_native_scopes --test reference_preview --test settings --test thread_access
+web typecheck
+web lint
+web test -- tests/component/summarizer-editor.test.tsx tests/component/settings-drafts.test.tsx tests/component/summary-targets-editor.test.tsx tests/component/settings-required-members.test.tsx tests/component/managed-provider-settings.test.tsx tests/component/access-where-field.test.tsx tests/component/ask-stream-lifetime.test.tsx tests/unit/ask-refusal-words.test.ts tests/unit/ask-root.test.ts tests/unit/entry-beyond-words.test.ts tests/unit/help-summaries.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

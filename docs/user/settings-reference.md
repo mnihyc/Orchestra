@@ -36,6 +36,9 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:agents.harness_trust_mirror` | **Trust mirror checksums** — Allow the release mirror to publish executable checksums of its own. These builds are labelled as mirror checksums, not vendor checksums. |
 | `setting:agents.harness_mirror` | **Release mirror** — A server that serves the vendors' release files where this server cannot reach them. |
 | `setting:agents.prompt_cache_ttl` | **Prompt cache lifetime** — An explicit cache lifetime for the agent program's main conversation. Unset uses the program's own default; programs without this control ignore it. |
+| `setting:agents.web_action_wait_secs` | **Web action wait** — Close a native Codex web row that has not reported its end, with a missing-end explanation. The default is 120 seconds, inherited through the place settings without an upper cap. The turn continues and a later native end can update the row. Applies when the session opens again. |
+| `setting:agents.native_result_wait_ms` | **Native result wait** — System default of 2000 milliseconds for programs that declare a retained-evidence read wait. A profile can choose its own wait within the engine's interrupt window. An expired read keeps the reported action result and leaves unproved usage unknown; other sessions continue. Applies when the program starts again. |
+| `setting:agents.native_result_buffer_bytes` | **Native result buffer** — System default of 8 MiB for later native input retained in order while a session reads optional evidence. A profile may choose another size, including zero. When full, only the optional read ends as unverified; all input is processed. Applies when the program starts again. |
 | `setting:agents.subagents_at_once` | **Sub-agents at once** — How many sub-agents the agent program may run at once. The smallest value at this place or above applies. An unsupported control says why it does not apply. |
 | `setting:agents.subagent_depth` | **Sub-agent depth** — How many layers of sub-agents may start; 1 allows no nesting. The smallest value at this place or above applies. An unsupported control says why it does not apply. |
 | `setting:agents.skills` | **Skills** — Which skills the agents of threads here are given, by skill: off, the latest version or a pinned version; a lower place may change or switch off an inherited one. |
@@ -61,6 +64,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:models.allowed` | **Allowed models** — Patterns naming the models that may be used here at all; a model has to be named by every scope that sets a list. |
 | `setting:services.allowed` | **Allowed services** — Patterns naming enabled provider services that may be used here; every scope that sets a list must admit the service. |
 | `setting:providers.allowed` | **Allowed providers** — Patterns over providers' Orch addresses; every scope that sets a list must admit the provider used for work here. |
+| `setting:models.add_switches_on` | **Switched on when added** — What a model starts with when it is added from its provider's catalogue: everything it offers (all), only its efforts and context sizes (basic), or only its window and efforts (nothing). A manager can switch on the rest afterwards. |
 | `setting:collab.attribution` | **Attribution** — Whether Orch's composed input, stop, denial and forwarded text names people: auto once a second person's words are delivered, always, or never (a person/an approver, with source, time and notes kept). Authored chats and documents retain their writers. |
 | `setting:collab.default_delivery` | **Default delivery** — What an input does when a turn is running, unless its sender says otherwise: wait for the next turn, or steer the running one. |
 | `setting:composer.paste_inline_context_share` | **Pasted text in the message** — The default share of remaining context for pasted text. 0 always sends it as a file; 100 always sends it in the message. The sender can choose for each paste. |
@@ -115,6 +119,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:orch_tools.search_query_chars` | **Shared search query budget** — The query character budget advertised to this thread's agent and used by shared search. Defaults to 1000; increase it for longer queries. |
 | `setting:orch_tools.search_results` | **Shared search result budget** — The result budget advertised to this thread's agent and used by shared search. Defaults to 200; byte and time budgets still produce a continuation. |
 | `setting:orch_tools.search_context` | **Shared search context budget** — The surrounding-line budget advertised to this thread's agent and used by shared-search snippets. Defaults to 5; increase it for wider context. |
+| `setting:threads.opening_items` | **Thread opening items** — Positive number of timeline items read when a thread first opens. Defaults to 40; an explicit request can choose another window, and older items remain available by cursor. |
 | `setting:threads.offline_deadline` | **Offline turn deadline** — End the active turn after this many offline seconds; none keeps waiting. Each outage retains the setting it began with. |
 | `setting:threads.background_wake` | **Background wake** — Wake when background tasks or subagents finish. Off keeps Codex results for the next input. Claude Code background tasks are not offered and commands run in the foreground. Changes apply to the next session. |
 | `setting:threads.agent_access` | **Agent access** — The initial reach and area levels shown when creating a thread. The creator confirms what they may give. Applies to new threads, without rewriting existing grants. |
@@ -140,6 +145,7 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:source.secret_name` | **Source secret** — The name of an existing HTTPS Git reading secret; its value is sealed only to the preparation command. |
 | `setting:workspace.record_days` | **Keep turn files** — Days to keep complete turn and restore undo files in the environment; zero disables recording. |
 | `setting:workspace.record_max_bytes` | **Largest recorded directory** — The included file and link bytes eligible for whole-state recording; larger directories use per-file undo. |
+| `setting:workspace.record_wait_secs` | **Wait for turn files** — Seconds a turn waits for the files before it to be recorded; when they are not ready in time the turn starts with per-file undo, and the turn says so. |
 | `setting:broadcast.delivery` | **Announcement delivery** — How an announcement reaches a thread whose turn is running: it interrupts, steers, or waits for the next turn. |
 | `setting:broadcast.fallback` | **When steering is impossible** — What is done instead when an announcement is to steer an agent that cannot be steered. |
 | `setting:broadcast.wake_idle` | **Allow waking idle threads** — Whether a send may wake an idle thread here; on as shipped. Each announcement or thread message chooses wake explicitly, false when omitted. |
@@ -252,7 +258,13 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:auto.tags` | **Tags** — Whether the summarizer sets a place's tags. |
 | `setting:summary.handoff_input_share` | **Summary input share** — How much of the summary model's context window a hand-off, a fork or a goal check may fill with the conversation it sends: the newest turns first, older ones as their one-line index. A lower scope can only reduce this limit; it cannot remove a limit set above. |
 | `setting:auto.summarizer` | **Summarizer** — Which summarizer is used, and its configuration. |
-| `option:auto.summarizer.kind` | The declared source or content kind. |
+| `option:auto.summarizer.kind` | The registered summarizer chosen in the form; its declaration supplies the configuration fields. `model` selects the built-in API model summarizer. |
+| `option:auto.summarizer.provider_id` | For the `model` kind, the API provider selected by name. The setting writer must have Use for other work on it. |
+| `option:auto.summarizer.model_name` | For the `model` kind, the selected enabled API model. Current model and effort permissions still apply. |
+| `option:auto.summarizer.params` | For the `model` kind, declared request options. Omission uses the current model defaults; Orch owns tools, prompts and credentials. |
+| `option:auto.summarizer.context_tokens` | For the `model` kind, positive input token budget, 32,000 by default, within the model window less output. |
+| `option:auto.summarizer.max_output_tokens` | For the `model` kind, positive answer token budget, 120 by default. Current model limits and usage caps still apply. |
+| `option:auto.summarizer.prompts` | For the `model` kind, optional replacement instructions by field: title, description, tags, rollup, handoff or summary. A null value keeps the built-in instructions. |
 | `setting:auto.triggers` | **Triggers** — When automatic titles, tags and summaries are written again: after a turn, at a milestone or at intervals, and how often at most. |
 | `option:auto.triggers.on` | Events that trigger this automation. |
 | `option:auto.triggers.min_interval_secs` | Minimum gap between automatic runs in seconds. |
@@ -317,7 +329,9 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:documents.links.mentions_counted` | **Mentions counted** — Mentions of the document counted in one source before its count reads “or more”. |
 | `setting:documents.links.access_checks` | **Links access checks** — Sources whose reading access is checked for one page of Referenced by. A very popular document continues with a cursor. |
 | `setting:documents.links.graph_nodes` | **Graph nodes** — The most nodes the Links graph draws. |
+| `setting:documents.readme_blocks` | **README preview** — Top-level blocks shown in a place's README preview, with their children. An earlier page break ends the preview; Open document always reaches the whole page. |
 | `setting:chat.attachment_max_bytes` | **Attachment size** — The largest file attached to a chat message, in bytes. A lower scope can only reduce this limit; it cannot remove a limit set above. |
+| `setting:search.text_chars` | **Conversation search text** — Characters indexed per conversation item after masking. Changes apply to new text and a search rebuild; raw calls, output, hidden reasoning, side threads and text with unavailable masking inputs are excluded. |
 | `setting:search.word_recent_candidates` | **Recent word sample** — Recent rows sampled before probing the text index. |
 | `setting:search.word_candidates` | **Word candidates** — Candidates per indexed field before exact access and ranking. |
 | `setting:search.word_probe_candidates` | **Word index probe** — Indexed matches sampled before switching to a recency scan. |
@@ -488,10 +502,12 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:ask.retention_min_days` | **Shortest Ask retention** — The minimum history retention chosen by administrators of the conversation's root organization. A lower scope can only raise this minimum. |
 | `setting:ask.retention_max_days` | **Longest Ask retention** — The maximum history retention allowed by administrators of the conversation's root organization. |
 | `setting:ask.max_steps` | **Ask steps per turn** — The model steps allowed for one question before it asks the person to continue. |
-| `setting:ask.max_output_tokens` | **Ask answer tokens** — The most output tokens per Ask model request, also reserved before fitting conversation context. The lowest system or organization value applies. |
-| `setting:ask.context_tokens` | **Ask context tokens** — Unset uses the chosen model's context window. When set, the smaller value applies to Ask only; output and tool-result reserves must still fit. The lowest system or organization value applies. |
+| `setting:ask.max_output_tokens` | **Ask answer tokens** — The most output tokens per Ask model request. The request is fitted to the window less this, and an answer takes half of the window at most. The lowest system or organization value applies. |
+| `setting:ask.context_tokens` | **Ask context tokens** — Unset uses the chosen model's context window; a model that states none is not given a small one. When set, the smaller value applies to Ask only. A window no larger than twice the answer tokens leaves the answer half of it. The lowest system or organization value applies. |
 | `setting:ask.max_tools` | **Ask tools per turn** — The read operations allowed for one question before it asks the person to narrow the question. |
-| `setting:ask.tool_bytes` | **Ask source size** — The most bytes from one read result supplied to the model, with a canonical link to the full source. |
-| `setting:ask.turn_tool_bytes` | **Ask sources per turn** — The total read-result bytes supplied while answering one question. |
+| `setting:ask.docs_hits` | **Ask guide pages per search** — The most guide pages one Ask search of the help gives the model, English and Chinese alternating where both match. |
+| `setting:ask.docs_excerpt_tokens` | **Ask guide excerpt size** — The most tokens of one guide page that Ask's help search gives the model; the page's link comes with it. |
+| `setting:ask.max_operations` | **Ask operations per search** — The most read operations one Ask search of the read catalogue returns. |
+| `setting:ask.max_links` | **Ask links per source** — The most canonical source links Ask keeps from one read. |
 | `setting:providers.model_groups_max` | **Model groups** — The maximum number of named groups per model. The default is 8 and can be raised; 0 allows no new group memberships. Existing memberships are kept. |
 | `option:usage.rates.*.web_fetch_per_call` | Credits per successful page-fetch call. |

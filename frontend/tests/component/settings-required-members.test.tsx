@@ -10,6 +10,7 @@ import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 afterEach(async () => { cleanup(); await setLocale('en'); });
+
 for (const locale of ['en', 'zh-CN'] as const) it(`includes the untouched automatic=false member of a new document target in ${locale}`, async () => {
   await setLocale(locale);
   const user = userEvent.setup(), changed = vi.fn();
