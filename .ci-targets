@@ -1,0 +1,4 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --test search_names --test search_native_scopes

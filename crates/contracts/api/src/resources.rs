@@ -73,6 +73,8 @@ pub struct MachineRef {
     pub platform_os: MachineOs,
     /// Whether it is a person's own machine or one the system manages.
     pub placement: Placement,
+    /// The host of a managed machine, independent of the host's displayed name.
+    pub host_id: Option<Id>,
 }
 
 /// A host, named wherever another thing points at one.

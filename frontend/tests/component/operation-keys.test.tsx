@@ -5,17 +5,20 @@ import userEvent from '@testing-library/user-event';
 import { type ReactNode, useState } from 'react';
 import type * as Router from '@tanstack/react-router';
 import type * as Users from '@/api/users';
+import type * as Search from '@/api/search';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Tokens } from '@/features/settings/personal/Tokens';
-import { KeyOperationChoice, KeyRuleSummary } from '@/features/settings/KeyRules';
+import { KeyOperationChoice, KeyRuleSummary, KeyRulesField } from '@/features/settings/KeyRules';
 import { DETAIL_PAGE_ROWS } from '@/features/resources/detailPageSize';
-import type { ApiTokenCreateBody, ApiTokenInfo, KeyOperation, KeyRule, KeyTargetKind, Operation, TokenCreateResponse } from '@/generated/api-types';
+import type { ApiTokenCreateBody, ApiTokenInfo, KeyOperation, KeyRule, KeyTargetKind, NameHit, NameKind, Operation, TokenCreateResponse } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { me } from '../doubles/fixtures';
+import { TOKEN_OPERATIONS } from '../doubles/token-operations';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ create: vi.fn<(body: ApiTokenCreateBody, key: string) => Promise<TokenCreateResponse>>(), revoke: vi.fn<(id: string) => Promise<void>>() }));
+const calls = vi.hoisted(() => ({ create: vi.fn<(body: ApiTokenCreateBody, key: string) => Promise<TokenCreateResponse>>(), revoke: vi.fn<(id: string) => Promise<void>>(), name: vi.fn<(kind: NameKind, id: string) => Promise<NameHit | null>>(), names: vi.fn<() => Promise<NameHit[]>>() }));
 vi.mock('@/api/users', async (load) => ({ ...await load<typeof Users>(), createToken: calls.create, revokeToken: calls.revoke }));
+vi.mock('@/api/search', async (load) => ({ ...await load<typeof Search>(), nameByIdQuery: (kind: NameKind, id: string) => ({ queryKey: ['name-by-id', kind, id], queryFn: () => calls.name(kind, id) }), namesQuery: () => ({ queryKey: ['names-test'], queryFn: calls.names }) }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), Link: ({ to, children }: { to: string; children: ReactNode }) => <a href={to}>{children}</a> }));
 
 const fresh: TokenCreateResponse = { projection: 'receipt', token_id: '00000000-0000-4000-8001-000000000099', token: 'fixture-first-secret', created_at: '2026-10-01T12:00:00Z', expires_at: null, already_created: false };
@@ -30,7 +33,8 @@ function open(rows: ApiTokenInfo[] = []) {
   show(<QueryClientProvider client={client}><Tokens /></QueryClientProvider>);
   return client;
 }
-beforeEach(() => { calls.create.mockReset().mockResolvedValue(fresh); calls.revoke.mockReset().mockResolvedValue(undefined); });
+const target: NameHit = { id: '00000000-0000-4000-8003-000000000002', kind: 'topic', name: 'Release plan', home_path: [], path: [], address: null, avatar: null, archived: false, color: null, custom_color: null, owner: null, recent: false, tag: null, thread_attention: null, username: null };
+beforeEach(() => { calls.create.mockReset().mockResolvedValue(fresh); calls.revoke.mockReset().mockResolvedValue(undefined); calls.name.mockReset().mockImplementation((kind, id) => Promise.resolve({ ...target, kind, id })); calls.names.mockReset().mockResolvedValue([target]); });
 afterEach(async () => { cleanup(); clients.splice(0).forEach((client) => client.clear()); await setLocale('en'); });
 
 it('opens deny-all rules instead of a future-expanding Everything choice and cancellation creates no key', async () => {
@@ -78,13 +82,63 @@ for (const locale of ['en', 'zh-CN'] as const) it(`reviews exact actions and tar
   await user.click(within(shown).getByRole('button', { name: i18n.t('operationKeys.review') }));
   const review = await screen.findByRole('dialog', { name: i18n.t('operationKeys.reviewTitle', { name: row.name }) });
   expect(review).toHaveTextContent('DocumentOpsCreate'); expect(review).toHaveTextContent(i18n.t('operationKeys.action.write'));
-  expect(review).toHaveTextContent(row.rules?.[0]?.target.id ?? 'missing target');
+  expect(await within(review).findByText(target.name)).toBeVisible();
+  expect(review).not.toHaveTextContent(row.rules?.[0]?.target.id ?? 'missing target');
   await user.click(within(review).getByText(i18n.t('common.close'), { selector: 'button' }));
   await user.click(within(shown).getByRole('button', { name: i18n.t('tokens.revoke') }));
   const confirm = await screen.findByRole('alertdialog');
   expect(calls.revoke).not.toHaveBeenCalled();
   await user.click(within(confirm).getByRole('button', { name: i18n.t('tokens.revokeConfirm', { name: row.name }) }));
   await waitFor(() => expect(calls.revoke).toHaveBeenCalledWith(row.id));
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps a target chosen by name readable after saving and reopening while Copy ID retains its exact identity in ${locale}`, async () => {
+  await setLocale(locale);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  clients.push(client);
+  client.setQueryData(['token-operations'], TOKEN_OPERATIONS.filter((entry) => entry.operation_id === 'NodeGet'));
+  const changed = vi.fn();
+  function Rules() {
+    const [rules, setRules] = useState<KeyRule[]>([]);
+    return <KeyRulesField accountId="00000000-0000-4000-8000-000000000001" value={rules} onChange={(next) => { setRules(next); changed(next); }} />;
+  }
+  show(<Rules />, client);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: i18n.t('operationKeys.addRule') }));
+  const editor = await screen.findByRole('dialog');
+  await user.click(within(editor).getByRole('combobox', { name: i18n.t('operationKeys.targetKind') }));
+  await user.click(screen.getByRole('option', { name: i18n.t('operationKeys.kind.topic') }));
+  await user.click(within(editor).getByRole('combobox', { name: i18n.t('operationKeys.target') }));
+  await user.click(await screen.findByRole('option', { name: new RegExp(target.name) }));
+  await user.click(within(editor).getByRole('checkbox', { name: i18n.t('operationKeys.kind.topic') }));
+  await user.click(within(editor).getByRole('button', { name: i18n.t('operationKeys.preset.read') }));
+  await user.click(within(editor).getByRole('button', { name: i18n.t('operationKeys.keepRule') }));
+  expect(changed).toHaveBeenLastCalledWith([{ target: { kind: 'topic', id: target.id, reach: 'self' }, resources: ['topic'], allow: [{ operation: 'NodeGet.read', actions: ['read'] }] }]);
+  const summary = screen.getByRole('region', { name: i18n.t('operationKeys.rules') });
+  expect(await within(summary).findByText(target.name)).toBeVisible();
+  expect(summary).not.toHaveTextContent(target.id);
+  await user.click(within(summary).getByRole('button', { name: i18n.t('common.copyId') }));
+  expect(await navigator.clipboard.readText()).toBe(target.id);
+  await user.click(within(summary).getByRole('button', { name: i18n.t('operationKeys.editRuleButton') }));
+  const reopened = await screen.findByRole('dialog');
+  expect(within(reopened).getByRole('combobox', { name: i18n.t('operationKeys.target') })).toHaveValue(target.name);
+});
+
+it('keeps an unreadable saved target private and editable with its exact identity still available to copy', async () => {
+  calls.name.mockResolvedValue(null);
+  const rule: KeyRule = { target: { kind: 'topic', id: target.id, reach: 'self' }, resources: ['topic'], allow: [{ operation: 'NodeGet.read', actions: ['read'] }] };
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  clients.push(client);
+  client.setQueryData(['token-operations'], TOKEN_OPERATIONS.filter((entry) => entry.operation_id === 'NodeGet'));
+  show(<KeyRulesField accountId="account" value={[rule]} onChange={vi.fn()} />, client);
+  const user = userEvent.setup();
+  expect(await screen.findByText(i18n.t('operationKeys.unnamedTarget'))).toBeVisible();
+  await user.click(screen.getByRole('button', { name: i18n.t('common.copyId') }));
+  expect(await navigator.clipboard.readText()).toBe(target.id);
+  await user.click(screen.getByRole('button', { name: i18n.t('operationKeys.editRuleButton') }));
+  const editor = await screen.findByRole('dialog');
+  expect(within(editor).getByRole('combobox', { name: i18n.t('operationKeys.target') })).toHaveValue(i18n.t('operationKeys.unnamedTarget'));
+  expect(within(editor).getByRole('button', { name: i18n.t('operationKeys.keepRule') })).toBeEnabled();
 });
 
 it('keeps only the current saved-operation page mounted without changing the recorded rule', async () => {
