@@ -92,7 +92,7 @@ function transport() {
     if (match?.[1] !== SIDE || match[2] === undefined) return Promise.reject(new Error('A side read must keep its actual native thread ID'));
     const selected = url.searchParams.get('continuation_id'), id = selected ?? state.active, suffix = match[2];
     if (suffix === '/opening' || suffix === '/sync') {
-      expect(url.searchParams.get('limit')).toBe('200');
+      expect(url.searchParams.get('limit')).toBe(suffix === '/opening' ? null : '200');
       const cut = sideCut(scope(id, selected === null), current(id), state.count, visible.has(id));
       return Promise.resolve(Response.json(suffix === '/opening' ? opening(cut) : cut));
     }

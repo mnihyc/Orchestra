@@ -6,8 +6,11 @@ import { ApiError } from '@/api/client';
 import { MakeEnvironmentDialog } from '@/features/resources/environments/MakeEnvironment';
 import { i18n, setLocale } from '@/i18n';
 import { useSelectedOrg } from '@/shell/org';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
 import { detailHost, detailTemplate } from './resource-detail-fixtures';
+
+skipOverflowFallback();
 
 const server = vi.hoisted(() => ({
   create: vi.fn<(body: Record<string, unknown>, key: string) => Promise<{ id: string; name: string }>>(),
@@ -185,4 +188,12 @@ for (const locale of ['en', 'zh-CN'] as const) it(`retains an unavailable preset
   expect(within(host).getByText(i18n.t('resourceChoices.hostUse'))).toBeVisible();
   await user.click(host);
   expect(server.create).not.toHaveBeenCalled();
+});
+
+
+it.each(['en', 'zh-CN'] as const)('names the new resource before its other setup choices in %s', async (locale) => {
+  await setLocale(locale);
+  show(<MakeEnvironmentDialog onClose={server.close} />);
+  const name = await screen.findByRole('textbox', { name: i18n.t('environments.make.name') });
+  expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],select')).toBe(name);
 });

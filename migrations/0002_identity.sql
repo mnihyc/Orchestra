@@ -294,7 +294,7 @@ CREATE TABLE user_state (
     key text NOT NULL,
     value jsonb NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT user_state_key_check CHECK ((key = ANY (ARRAY['help'::text, 'layouts'::text, 'viewers'::text, 'timeline'::text, 'sidebar'::text, 'inbox'::text, 'keys'::text, 'project_views'::text, 'reactions'::text]))),
+    CONSTRAINT user_state_key_check CHECK ((key = ANY (ARRAY['help'::text, 'layouts'::text, 'viewers'::text, 'timeline'::text, 'interface'::text, 'sidebar'::text, 'inbox'::text, 'keys'::text, 'project_views'::text, 'reactions'::text]))),
     CONSTRAINT user_state_value_check CHECK ((pg_column_size(value) <= 65536)),
     CONSTRAINT user_state_pkey PRIMARY KEY (user_id, key),
     CONSTRAINT user_state_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE

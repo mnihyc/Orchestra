@@ -409,6 +409,7 @@ pub struct Process {
     ctx: Arc<Context>,
     request: Mutex<AgentStart>,
     adapter: tokio::sync::Mutex<Box<dyn AgentAdapter>>,
+    interrupt: Mutex<Option<orch_agent_contract::adapter::Interrupt>>,
     output_directory: Mutex<Option<PathBuf>>,
     adapter_start: AdapterStart,
     resource_group: Option<orch_envhost::process_limits::UserGroup>,
@@ -585,9 +586,20 @@ impl Process {
             ));
         }
         let mut adapter = self.adapter.lock().await;
-        work(adapter.as_mut())
-            .await
-            .map_err(|error| command_error(&error))
+        let result = work(adapter.as_mut()).await;
+        *lock(&self.interrupt) = adapter.interrupt_handle();
+        result.map_err(|error| command_error(&error))
+    }
+
+    /// Stops one exact turn without joining an adapter call that may be exporting or replaying history.
+    pub async fn interrupt(&self, thread: ThreadId, turn: Id) -> Result<(), CommandError> {
+        let handle = lock(&self.interrupt).clone();
+        if let Some(handle) = handle {
+            return handle(thread, turn)
+                .await
+                .map_err(|error| command_error(&error));
+        }
+        self.call(|adapter| adapter.interrupt(thread, turn)).await
     }
 
     async fn publish(&self, stream: Stream, event: Event) {
@@ -1095,6 +1107,7 @@ impl Process {
             .await
             .map_err(|error| command_error(&error))?;
         let output_directory = adapter.output_directory();
+        *lock(&self.interrupt) = adapter.interrupt_handle();
         drop(adapter);
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *lock(&self.output_directory) = output_directory;
@@ -1561,6 +1574,7 @@ impl Hosting {
             }
         };
         let output_directory = adapter.output_directory();
+        let interrupt = adapter.interrupt_handle();
         let process = Arc::new(Process {
             provider_id: request.provider_id,
             agent_id: request.agent_id,
@@ -1568,6 +1582,7 @@ impl Hosting {
             ctx: Arc::clone(&self.ctx),
             request: Mutex::new(request.clone()),
             adapter: tokio::sync::Mutex::new(adapter),
+            interrupt: Mutex::new(interrupt),
             output_directory: Mutex::new(output_directory),
             adapter_start,
             resource_group,
