@@ -1139,13 +1139,13 @@ export class ThreadWorld implements Part {
     return publish(next);
   }
 
-  private interrupt(person: Person, threadId: string, body: Record<string, unknown>): Turn {
+  private interrupt(person: Person, threadId: string, body: Record<string, unknown>): { state: 'stopped'; requested_at: string; turn: Turn } {
     this.places.need(person, threadId, 'thread.interact');
     const held = this.held(threadId);
     const turn = held.turns.get(typeof body.turn_id === 'string' ? body.turn_id : '');
     if (turn === undefined || (turn.state !== 'running' && turn.state !== 'starting')) throw new Refusal(409, 'thread.not_running', 'that turn is not running');
     this.emit(threadId, { turns: [{ ...turn, state: 'interrupted', completed_at: new Date().toISOString(), phase: null, interrupted_by: userRef(person.me) }], thread: { state: 'idle', current_turn_id: null } });
-    return must(held.turns.get(turn.id), 'turn');
+    return { state: 'stopped', requested_at: new Date().toISOString(), turn: must(held.turns.get(turn.id), 'turn') };
   }
 
   private retry(person: Person, threadId: string, turnId: string, body: Record<string, unknown>): { input: ThreadInput; seq: number } {

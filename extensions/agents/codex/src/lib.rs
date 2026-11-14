@@ -883,7 +883,23 @@ impl CodexAdapter {
         // A session is held to the servers it is given: the others the harness would load are switched off.
         let place = (spec.exec.executor.is_none())
             .then_some((spec.settings.directory.as_str(), spec.settings.cwd.as_str()));
-        let (switched_off, pin_mismatches) = discovery::session_configuration(&rpc, place).await?;
+        let (switched_off, pin_mismatches, instruction_fallbacks) =
+            discovery::session_configuration(&rpc, place).await?;
+        let instruction_reload = if spec.exec.executor.is_none() {
+            let paths = sessions::instruction_paths(
+                &spec.settings.workspace_root,
+                &spec.settings.cwd,
+                &instruction_fallbacks,
+            )?;
+            let digest = sessions::check_instruction_files(paths.clone()).await?;
+            Some(sessions::InstructionReload {
+                spec: Box::new(spec.clone()),
+                paths,
+                digest,
+            })
+        } else {
+            None
+        };
         let context = OpenContext {
             switched_off,
             default_provider: running.default_provider.clone(),
@@ -1046,6 +1062,7 @@ impl CodexAdapter {
                     orch_types::Hash::of(settings.instructions.as_bytes())
                 )
             }),
+            instruction_reload,
             mounts: settings.mounts.clone(),
             remote: plan.remote,
             approvals: HashMap::new(),
@@ -1100,6 +1117,77 @@ impl CodexAdapter {
             }
         }
         Ok(opened)
+    }
+
+    /// Local Codex caches project instructions in its loaded conversation. Keep that conversation until
+    /// those candidate files change; remote execution already takes its environment on each turn.
+    async fn refresh_instruction_files(
+        &mut self,
+        thread: ThreadId,
+        turn: TurnId,
+    ) -> Result<(), AdapterError> {
+        let (shared, _) = self.live_session(thread)?;
+        let reload = shared.with_session(thread, |record| {
+            if record.mapper.turn_in_progress() || record.mapper.background_running() {
+                None
+            } else {
+                record.instruction_reload.clone()
+            }
+        })?;
+        let Some(reload) = reload else { return Ok(()) };
+        let digest = sessions::check_instruction_files(reload.paths.clone()).await?;
+        if digest == reload.digest {
+            return Ok(());
+        }
+        let native =
+            shared.with_session(thread, |record| record.mapper.native_thread().to_owned())?;
+        let mut spec = *reload.spec;
+        spec.settings.mode = SessionMode::Resume;
+        spec.settings.native_session_ref = Some(native);
+        spec.settings.upto_turn_ordinal = None;
+        spec.archive = None;
+        spec.history = None;
+        let opened = self.open(spec, None, None).await?;
+        let (shared, _) = self.live_session(thread)?;
+        shared
+            .report(
+                thread,
+                SessionEvent::InstructionSources(orch_agent_contract::events::InstructionSources {
+                    sources: opened.instruction_sources,
+                }),
+            )
+            .await;
+        let marker = orch_agent_contract::events::MarkerPayload::SessionReopened(
+            orch_api_contract::threads::MarkerSessionReopened {
+                reason: orch_api_contract::threads::SessionReopenReason::Instructions,
+            },
+        );
+        let reference = format!("session-instructions:{digest}");
+        shared
+            .report(
+                thread,
+                SessionEvent::ItemStarted(orch_agent_contract::events::ItemStarted {
+                    turn_id: turn,
+                    native_ref: reference.clone(),
+                    stream: "main".to_owned(),
+                    parent_native_ref: None,
+                    content: orch_agent_contract::events::ItemContent::Marker(marker.clone()),
+                }),
+            )
+            .await;
+        shared
+            .report(
+                thread,
+                SessionEvent::ItemCompleted(orch_agent_contract::events::ItemCompleted {
+                    native_ref: reference,
+                    status: orch_agent_contract::events::ItemStatus::Completed,
+                    payload: serde_json::to_value(marker)
+                        .map_err(|error| AdapterError::HarnessError(error.to_string()))?,
+                    output_blob: None,
+                }),
+            )
+            .await;
+        Ok(())
     }
 
     /// Reads the history of a thread from the harness and reports it as events of the session.
@@ -1649,6 +1737,8 @@ impl AgentAdapter for CodexAdapter {
         {
             return Err(AdapterError::Unsupported("Auto is unavailable until its reviewer model has passed the integrator's real trial".to_owned()));
         }
+        self.refresh_instruction_files(turn.thread_id, turn.turn_id)
+            .await?;
         let (shared, _) = self.live_session(turn.thread_id)?;
         shared.with_session(turn.thread_id, |record| {
             // A configuration that appeared since the session was opened, an agent's own included, is refused
@@ -1809,27 +1899,52 @@ impl AgentAdapter for CodexAdapter {
         shared.end_background(thread, command).await
     }
 
+    fn interrupt_handle(&self) -> Option<orch_agent_contract::adapter::Interrupt> {
+        let processes: Vec<_> = self
+            .model_processes
+            .values()
+            .chain(self.running.iter())
+            .map(|running| Arc::clone(&running.shared))
+            .collect();
+        if processes.is_empty() {
+            return None;
+        }
+        Some(Arc::new(move |thread, turn| {
+            let shared = processes
+                .iter()
+                .find(|shared| shared.with_session(thread, |_| ()).is_ok())
+                .cloned();
+            Box::pin(async move {
+                let shared =
+                    shared.ok_or_else(|| AdapterError::SessionNotFound(thread.to_string()))?;
+                let (native, running) = shared.with_session(thread, |record| {
+                    (
+                        record.mapper.native_thread().to_owned(),
+                        record.mapper.running_turn(),
+                    )
+                })?;
+                // A turn that has already ended is interrupted by nothing: the turn ended as it did.
+                let Some((_, native_turn)) = running.filter(|(running, _)| *running == turn) else {
+                    return Ok(());
+                };
+                shared
+                    .rpc()
+                    .call(
+                        "turn/interrupt",
+                        json!({ "threadId": native, "turnId": native_turn }),
+                    )
+                    .await
+                    .map_err(map_rpc)?;
+                Ok(())
+            })
+        }))
+    }
+
     async fn interrupt(&mut self, thread: ThreadId, turn: TurnId) -> Result<(), AdapterError> {
-        let (shared, _) = self.live_session(thread)?;
-        let (native, running) = shared.with_session(thread, |record| {
-            (
-                record.mapper.native_thread().to_owned(),
-                record.mapper.running_turn(),
-            )
-        })?;
-        // A turn that has already ended is interrupted by nothing: the turn ended as it did.
-        let Some((_, native_turn)) = running.filter(|(running, _)| *running == turn) else {
-            return Ok(());
-        };
-        shared
-            .rpc()
-            .call(
-                "turn/interrupt",
-                json!({ "threadId": native, "turnId": native_turn }),
-            )
-            .await
-            .map_err(map_rpc)?;
-        Ok(())
+        let handle = self
+            .interrupt_handle()
+            .ok_or_else(|| AdapterError::HarnessUnavailable("the harness is not running".into()))?;
+        handle(thread, turn).await
     }
 
     async fn resolve_approval(

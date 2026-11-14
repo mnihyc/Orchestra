@@ -36,6 +36,13 @@ use crate::session::{
     ApprovalDecision, SessionOpened, SessionSpec, ThreadId, ToolError, TurnId, TurnStart, TurnSteer,
 };
 
+/// A shared path to the running program's exact turn, independent of mutable session work.
+pub type Interrupt = std::sync::Arc<
+    dyn Fn(ThreadId, TurnId) -> futures::future::BoxFuture<'static, Result<(), AdapterError>>
+        + Send
+        + Sync,
+>;
+
 /// The names of the methods of an adapter on the plugin transport: the agent-role commands of the link.
 pub mod method {
     /// Start the harness or attach to a running one; idempotent. Answers the harness version and the
@@ -846,6 +853,12 @@ pub trait AgentAdapter: Send + 'static {
     async fn steer(&mut self, steer: TurnSteer) -> Result<(), AdapterError> {
         let _ = steer;
         unsupported("steer")
+    }
+
+    /// A Stop can reach the program while export, resync or steer is waiting. The connector refreshes
+    /// this handle after each adapter call and on process restart; implementations share live session state.
+    fn interrupt_handle(&self) -> Option<Interrupt> {
+        None
     }
 
     /// Stops a running turn (`capabilities.interrupt`). The turn ends with `turn.completed` and the status

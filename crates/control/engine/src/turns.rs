@@ -47,7 +47,7 @@ use crate::unit::{Finished, Unit};
 use orch_access_contract::decisions::{Decision, Refusal};
 use orch_access_contract::permissions::Permission;
 use orch_agent_contract::credentials::CredentialPath;
-use orch_api_contract::threads::{ContentPart, Turn};
+use orch_api_contract::threads::{ContentPart, SessionReopenReason, Turn};
 use orch_authz::{Act, Caller, Principal, nodes};
 use orch_db::queries::approvals as approval_queries;
 use orch_db::queries::environments::thread_engine as environments;
@@ -64,6 +64,9 @@ use std::time::Duration;
 
 mod end_work;
 mod offline;
+mod stops;
+
+pub use stops::Stopped;
 
 type TurnText = (instructions::InputText, Vec<ModelBlock>);
 
@@ -688,9 +691,17 @@ impl Engine {
             if !self.harness_is_online(snap.key).await? {
                 self.set_step(thread_id, "harness").await?;
             }
-            let started = self
-                .ensure_harness(snap.key, &snap.agent, ids::agent_start(snap.turn.id))
-                .await?;
+            let Some(started) = self
+                .ensure_harness_for_turn(
+                    snap.key,
+                    &snap.agent,
+                    ids::agent_start(snap.turn.id),
+                    snap.turn.id,
+                )
+                .await?
+            else {
+                return Ok(());
+            };
             if let HarnessStarted::Failed(outcome) = started {
                 let mut failure = classify(&outcome);
                 // A first refused receipt must keep the binding reason of later preflights,
@@ -754,6 +765,8 @@ impl Engine {
                 None,
             )
             .await?;
+            // A server that started again knows the session of this segment from what was kept of its opening.
+            self.restore_session_hints(&snap).await?;
             let (configuration_known, mut configuration_changed) = {
                 let sessions = lock(&self.inner.sessions);
                 (
@@ -778,25 +791,53 @@ impl Engine {
                 self.defer_background_refresh(&snap).await?;
                 return Ok(());
             }
-            let open = !background_running
-                && native_wake.is_none()
-                && {
-                    let sessions = lock(&self.inner.sessions);
-                    snap.segment.native_session_ref.is_none()
-                    || side_unverified
-                    || !sessions.is_open(snap.segment.id, snap.key)
-                    || sessions.instructions_changed(snap.segment.id, &snap.instructions().text)
-                    || sessions.subagent_limits_changed(snap.segment.id, snap.settings.subagent_limits)
-                    || sessions.configuration_changed(snap.segment.id,&configuration)
-                    || sessions.mcp_changed(snap.segment.id, mcp_revision)
-                    || sessions.orch_tools_changed(snap.segment.id, orch_tools_revision)
-                    || sessions.skills_changed(snap.segment.id, &skills_fingerprint)
+            // Whether the session is opened, and why where it had been opened before: a person is told, on the thread,
+            // that a session was opened again and for what.
+            let first = snap.segment.native_session_ref.is_none();
+            let reason = if background_running || native_wake.is_some() {
+                None
+            } else {
+                let sessions = lock(&self.inner.sessions);
+                if side_unverified {
+                    Some(SessionReopenReason::SideHistory)
+                } else if !sessions.is_open(snap.segment.id, snap.key) {
+                    Some(SessionReopenReason::Unknown)
+                } else if sessions.instructions_changed(snap.segment.id, &snap.instructions().text)
+                {
+                    Some(SessionReopenReason::Instructions)
+                } else if sessions
+                    .subagent_limits_changed(snap.segment.id, snap.settings.subagent_limits)
+                {
+                    Some(SessionReopenReason::Limits)
+                } else if sessions.configuration_changed(snap.segment.id, &configuration) {
+                    Some(SessionReopenReason::Configuration)
+                } else if sessions.mcp_changed(snap.segment.id, mcp_revision) {
+                    Some(SessionReopenReason::Mcp)
+                } else if sessions.orch_tools_changed(snap.segment.id, orch_tools_revision) {
+                    Some(SessionReopenReason::Tools)
+                } else if sessions.skills_changed(snap.segment.id, &skills_fingerprint) {
+                    Some(SessionReopenReason::Skills)
+                } else if snap.descriptor.capabilities.session_reload
+                    == orch_agent_contract::descriptor::SessionReload::Turn
+                    && snap.thread.executor.is_none()
+                {
                     // A program that keeps a directory's files while its session is open takes up changes only
                     // when the session is opened again.
-                    || (snap.descriptor.capabilities.session_reload
-                        == orch_agent_contract::descriptor::SessionReload::Turn
-                        && snap.thread.executor.is_none())
-                };
+                    Some(SessionReopenReason::ProgramReloads)
+                } else {
+                    None
+                }
+            };
+            let open = !background_running && native_wake.is_none() && (first || reason.is_some());
+            // A program that opens its session at every turn by its own declaration (it reads the directory's files
+            // then) is not told at every turn: that is how it works, not something that happened to this thread.
+            if open
+                && !first
+                && let Some(reason) = reason
+                && reason != SessionReopenReason::ProgramReloads
+            {
+                self.note_session_reopened(&snap, reason).await?;
+            }
             if open {
                 self.set_step(thread_id, "session").await?;
                 // A session that exists already (a person began it by hand) is opened as one that was adopted
@@ -856,7 +897,7 @@ impl Engine {
                             path: orch_agent_contract::session::INSTRUCTION_ROOT_MARKER.to_owned(),
                         },
                     )?;
-                    match crate::commands::run(self.inner.commands.as_ref(), marker).await? {
+                    match self.run_noted(thread_id, marker).await? {
                         Outcome::Succeeded(_) => body.instruction_root_marker = true,
                         Outcome::Failed(ref failure)
                             if failure.code == "policy.remote_write_disabled" => {}
@@ -983,8 +1024,20 @@ impl Engine {
                             result.approval_reviewer.as_ref(),
                         )
                         .await?;
-                        sqlx::query("UPDATE segments SET background_wake=$2,session_configuration=$3 WHERE id=$1")
+                        // What the opening was asked is kept with the segment: a server that starts again reads it back
+                        // and does not ask for the session again while the harness still holds it.
+                        let hints = crate::harnesses::SessionHints::of(
+                            thread_id,
+                            snap.key,
+                            &snap.instructions().text,
+                            snap.settings.subagent_limits,
+                            mcp_revision,
+                            orch_tools_revision,
+                            skills_fingerprint,
+                        );
+                        sqlx::query("UPDATE segments SET background_wake=$2,session_configuration=$3,session_hints=$4 WHERE id=$1")
                             .bind(snap.segment.id).bind(accepted_configuration.background_wake).bind(serde_json::to_value(&accepted_configuration)?)
+                            .bind(serde_json::to_value(hints)?)
                             .execute(&mut *self.db().acquire().await?).await.map_err(orch_db::DbError::from)?;
                         let mut sessions = lock(&self.inner.sessions);
                         sessions.mcp_requested(snap.segment.id, mcp_revision);
@@ -1350,6 +1403,22 @@ impl Engine {
         let Some(thread) = threads::lock(&mut tx, snap.thread.node_id).await? else {
             return Ok(None);
         };
+        // A Stop that is open is carried out first, and the start is looked at again as it stands after it.
+        let stopped = {
+            let mut unit = Unit::new(&mut tx, self.inner.clock.now());
+            let applied = self
+                .apply_open_stops_in(&mut unit, snap.thread.node_id)
+                .await?;
+            if applied.carried_out {
+                Some(unit.finish().await?)
+            } else {
+                None
+            }
+        };
+        if let Some(finished) = stopped {
+            self.commit(tx, finished).await?;
+            return Ok(None);
+        }
         let turn = threads::turn(&mut tx, snap.turn.id).await?;
         let input = threads::input(&mut tx, snap.input.id).await?;
         if thread.current_turn_id != Some(snap.turn.id)
@@ -1541,7 +1610,7 @@ impl Engine {
                 path,
             },
         )?;
-        let outcome = crate::commands::run(self.inner.commands.as_ref(), command).await?;
+        let outcome = self.run_noted(snap.thread.node_id, command).await?;
         if !matches!(outcome, Outcome::Succeeded(_)) {
             tracing::info!(thread = %snap.thread.node_id, ?outcome, "the directory of the thread could not be made; the turn goes on");
         }
@@ -1838,6 +1907,86 @@ impl Engine {
         Ok(())
     }
 
+    /// Says on the thread that this turn opens the session again, and why: a line of its history, once for the turn.
+    async fn note_session_reopened(
+        &self,
+        snap: &StartSnapshot,
+        reason: SessionReopenReason,
+    ) -> Result<(), EngineError> {
+        let thread_id = snap.thread.node_id;
+        let payload = json!({ "marker": "session_reopened", "data": { "reason": reason } });
+        let mut tx = self.inner.db.begin().await?;
+        let finished = {
+            let mut unit = Unit::new(&mut tx, self.inner.clock.now());
+            if threads::lock(&mut *unit.conn, thread_id).await?.is_none() {
+                return Ok(());
+            }
+            ingest::add_marker(
+                &mut unit,
+                thread_id,
+                snap.segment.id,
+                Some(snap.turn.id),
+                &payload,
+                &format!("session_reopened:{}", snap.turn.id),
+            )
+            .await?;
+            unit.finish().await?
+        };
+        self.commit(tx, finished).await?;
+        Ok(())
+    }
+
+    /// Clears the records of the sessions this process closed, so that no record brings a closed session back.
+    pub(crate) async fn clear_forgotten_sessions(&self) -> Result<(), EngineError> {
+        let forgotten = lock(&self.inner.sessions).take_forgotten();
+        if forgotten.is_empty() {
+            return Ok(());
+        }
+        let cleared = sqlx::query("UPDATE segments SET session_hints=NULL WHERE id = ANY($1)")
+            .bind(&forgotten)
+            .execute(&mut *self.db().acquire().await?)
+            .await;
+        if let Err(error) = cleared {
+            // Looked at again at the next call: the segments are put back to be cleared.
+            lock(&self.inner.sessions).put_back_forgotten(forgotten);
+            return Err(orch_db::DbError::from(error).into());
+        }
+        Ok(())
+    }
+
+    /// Takes up the record of an earlier opening of the segment's session, where this process does not know that
+    /// session: the harness the session was opened in is still the one the thread uses and is online, and then the
+    /// turn is started in it as it was before the server started again. A record that is out of date is found out by
+    /// the harness (`SessionNotFound`), and the session is opened as usual.
+    async fn restore_session_hints(&self, snap: &StartSnapshot) -> Result<(), EngineError> {
+        self.clear_forgotten_sessions().await?;
+        if snap.segment.native_session_ref.is_none()
+            || !lock(&self.inner.sessions).is_unseen(snap.segment.id)
+        {
+            return Ok(());
+        }
+        let kept: Option<(Option<Json>, Option<Json>)> =
+            sqlx::query_as("SELECT session_hints, session_configuration FROM segments WHERE id=$1")
+                .bind(snap.segment.id)
+                .fetch_optional(&mut *self.db().acquire().await?)
+                .await
+                .map_err(orch_db::DbError::from)?;
+        let Some((Some(hints), configuration)) = kept else {
+            return Ok(());
+        };
+        let Ok(hints) = serde_json::from_value::<crate::harnesses::SessionHints>(hints) else {
+            return Ok(());
+        };
+        if hints.harness != snap.key
+            || hints.thread != snap.thread.node_id
+            || !self.harness_is_online(snap.key).await?
+        {
+            return Ok(());
+        }
+        lock(&self.inner.sessions).restore(snap.segment.id, hints, configuration);
+        Ok(())
+    }
+
     /// The harness no longer holds the conversation of a segment: the
     /// segment ends and its successor reconstructs the conversation by the place's switch rule.
     async fn lose_segment(&self, snap: &StartSnapshot) -> Result<(), EngineError> {
@@ -2037,12 +2186,7 @@ impl Engine {
             thread_id: thread,
             turn_id: turn,
         };
-        let command = Outgoing::new(
-            ids::turn_interrupt(turn),
-            machine,
-            SerialKey::Thread(thread),
-            &body,
-        );
+        let command = Outgoing::new(ids::turn_interrupt(turn), machine, SerialKey::None, &body);
         match command {
             Ok(command) => {
                 if let Err(error) = self.inner.commands.issue(command).await {
@@ -2323,15 +2467,20 @@ impl Engine {
         };
         let settings = crate::resolved::load(conn, thread.node_id).await?;
         let content: Vec<ContentPart> = serde_json::from_value(input.content.clone())?;
-        let content = self.prepare_pastes(conn, thread, &content).await?;
+        let content = self.load_pastes(conn, thread, &content).await?;
+        let content = self.prepare_pastes(conn, thread, &content).await?.content;
         let stored = serde_json::to_value(&content)?;
         if stored != input.content {
-            sqlx::query("UPDATE thread_inputs SET content=$2 WHERE id=$1")
+            let changed = sqlx::query("UPDATE thread_inputs SET content=$2 WHERE id=$1 AND content=$3 AND state='delivering'")
                 .bind(input.id)
                 .bind(stored)
+                .bind(&input.content)
                 .execute(&mut *conn)
                 .await
                 .map_err(orch_db::DbError::from)?;
+            if changed.rows_affected() == 0 {
+                return Ok(None);
+            }
         }
         let author = match input.author_id {
             Some(author) => threads::people(conn, &[author]).await?.into_iter().next(),
@@ -2546,119 +2695,20 @@ impl Engine {
 
     // ------------------------------------------------------------ interrupting
 
-    /// Stops the turn `turn_id` of a thread for a person who may drive it.
-    /// A turn the harness has not yet taken is ended on the spot; one it
-    /// runs is asked to stop, and ended by the engine if it does not within
-    /// the wait that is configured.
+    /// Stops the turn `turn_id` of a thread for a person who may drive it. A turn the harness has not yet
+    /// taken is ended on the spot; one it runs is asked to stop, and ended by the engine if it does not within
+    /// the wait that is configured. The Stop is recorded at once and carried out under the thread's row as soon
+    /// as it is free: see [`Engine::stop_thread`].
     pub async fn interrupt(
         &self,
         caller: &Caller,
         thread_id: Id,
         turn_id: Id,
     ) -> Result<Turn, InterruptError> {
-        let mut tx = self.inner.db.begin().await?;
-        let now = self.inner.clock.now();
-        let principal = Principal::load(&mut tx, caller.clone(), Time::new(now)).await?;
-        self.interrupt_guarded(tx, principal, thread_id, turn_id)
-            .await
-    }
-
-    /// As [`Engine::interrupt`], in the transaction of the API's action guard: `principal` was loaded in `tx`
-    /// by that check once the request had come, before any thread was locked, and its caller and its time
-    /// are the ones that stop the turn and hold what waits.
-    pub async fn interrupt_guarded(
-        &self,
-        mut tx: orch_db::Tx,
-        principal: Principal,
-        thread_id: Id,
-        turn_id: Id,
-    ) -> Result<Turn, InterruptError> {
-        let caller = principal.caller().clone();
-        let now = principal.now().get();
-        let (finished, turn) = {
-            let mut unit = Unit::new(&mut tx, now);
-            let Some(thread) = threads::lock(&mut *unit.conn, thread_id).await? else {
-                return Err(InterruptError::NotFound);
-            };
-            match nodes::check(
-                &mut *unit.conn,
-                &principal,
-                thread_id,
-                Permission::ThreadInteract,
-                Act::Use,
-                orch_authz::Policy::default(),
-            )
+        self.stop_thread(caller, thread_id, Some(turn_id))
             .await?
-            {
-                Decision::Allowed { .. } => {}
-                Decision::Refused(refusal) => {
-                    return Err(InterruptError::Denied(Box::new(refusal)));
-                }
-            }
-            let turn = threads::turn(&mut *unit.conn, turn_id)
-                .await?
-                .filter(|turn| turn.thread_id == thread_id)
-                .ok_or(InterruptError::NotFound)?;
-            let owner = threads::segment(unit.conn, turn.segment_id)
-                .await?
-                .ok_or(InterruptError::NotFound)?
-                .continuation_id;
-            if owner != thread.active_continuation_id {
-                return Err(InterruptError::NotRunning {
-                    current_turn_id: thread.current_turn_id,
-                });
-            }
-            if !turn.is_active() {
-                // A Stop of the turn that has just ended, with nothing newer begun, still holds what waits
-                // and answers that turn as it ended; one of an older turn, or while another runs, changes
-                // nothing and names the turn that stands.
-                let current = threads::active_turn(&mut *unit.conn, thread_id).await?;
-                let latest = threads::latest_turn(&mut *unit.conn, thread_id).await?;
-                if current.is_some() || latest.as_ref().map(|latest| latest.id) != Some(turn.id) {
-                    return Err(InterruptError::NotRunning {
-                        current_turn_id: current.map(|current| current.id),
-                    });
-                }
-                self.hold_queue(&mut unit, &thread, caller.user()).await?;
-                self.hold_background_wakes(&mut unit, &thread, turn.id)
-                    .await?;
-                let finished = unit.finish().await?;
-                self.commit(tx, finished).await?;
-                let mut conn = self.inner.db.acquire().await?;
-                let people = crate::views::People::load(&mut conn, turn.interrupted_by).await?;
-                return Ok(crate::views::turn_view(&turn, "", &people)?);
-            }
-            // Stop holds what waits before the harness is asked to stop, in this transaction.
-            self.hold_queue(&mut unit, &thread, caller.user()).await?;
-            self.hold_background_wakes(&mut unit, &thread, turn.id)
-                .await?;
-            let seq = unit.stamp(thread_id).await?;
-            // What cut the turn, for the line its next input is told (T8): a person's Stop.
-            threads::set_interrupt_cause(&mut *unit.conn, turn.id, "person").await?;
-            if threads::mark_interrupted_by(&mut *unit.conn, turn.id, caller.user(), seq).await? {
-                crate::audit_facts::person(
-                    &mut *unit.conn,
-                    caller.user(),
-                    thread_id,
-                    orch_db::audit::name!("turn.interrupted"),
-                    serde_json::json!({"turn":turn.id}),
-                    now,
-                )
-                .await?;
-            }
-            unit.wake(thread_id);
-            let _ = thread;
-            (unit.finish().await?, turn)
-        };
-        self.commit(tx, finished).await?;
-        self.drive_interrupt_turn(thread_id, &turn).await?;
-        let mut conn = self.inner.db.acquire().await?;
-        let row = threads::turn(&mut conn, turn_id)
-            .await?
-            .ok_or(InterruptError::NotFound)?;
-        let people = crate::views::People::load(&mut conn, row.interrupted_by).await?;
-        let display = String::new();
-        Ok(crate::views::turn_view(&row, &display, &people)?)
+            .turn
+            .ok_or(InterruptError::NotFound)
     }
 
     /// Sends the interrupt of a turn that was asked to stop, or ends it where
@@ -3094,12 +3144,12 @@ impl Engine {
                     // when nothing waits any more: it is then idle, unless the cause
                     // is the thread's own (its binding, its place) and still there.
                     thread_state::BLOCKED => {
-                        let recovered_source = row.blocked_reason.as_deref() == Some("error")
-                            && row.blocked_detail.as_deref()
-                                == Some(crate::preparation::SOURCE_FAILED)
-                            && crate::source::ready(&row)?;
-                        (row.blocked_reason.as_deref() != Some("error") || recovered_source)
-                            && row.current_turn_id.is_none()
+                        let may_clear = match row.blocked_reason.as_deref() {
+                            Some("error") => false,
+                            Some("source_failed") => crate::source::ready(&row)?,
+                            _ => true,
+                        };
+                        may_clear && row.current_turn_id.is_none()
                     }
                     _ => false,
                 },

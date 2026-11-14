@@ -189,8 +189,8 @@ pub fn capabilities() -> Capabilities {
         telemetry_off: true,
         memory: MemoryKind::Home,
         agent_terminal: AgentTerminal::None,
-        // This pin caches the files of a directory while a session is open; a native resume reloads them.
-        session_reload: SessionReload::Turn,
+        // The adapter keeps local sessions and resumes only when their instruction-file chain changes.
+        session_reload: SessionReload::OnChange,
         // The harness looks up the tree for its instruction files; Orch's marker stops it at the workspace root.
         instruction_root_marker: true,
         // The adapter hands it the root that holds a thread's skills.

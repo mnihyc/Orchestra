@@ -80,6 +80,100 @@ pub fn instruction_chain(root: &str, cwd: &str) -> Result<Vec<std::path::PathBuf
     Ok(chain)
 }
 
+/// What is needed to refresh a native session only after its instruction files change.
+#[derive(Clone)]
+pub(crate) struct InstructionReload {
+    pub spec: Box<SessionSpec>,
+    pub paths: Vec<std::path::PathBuf>,
+    pub digest: orch_types::Hash,
+}
+
+impl std::fmt::Debug for InstructionReload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstructionReload").finish_non_exhaustive()
+    }
+}
+
+/// Only candidate files on the root-to-cwd chain are read, including absent overrides and configured fallbacks.
+/// Nothing walks the workspace or retains a manifest of its source files.
+pub(crate) fn instruction_paths(
+    root: &str,
+    cwd: &str,
+    fallbacks: &[String],
+) -> Result<Vec<std::path::PathBuf>, AdapterError> {
+    let mut names = vec!["AGENTS.override.md".to_owned(), "AGENTS.md".to_owned()];
+    for name in fallbacks {
+        let mut parts = std::path::Path::new(name).components();
+        if !name.contains('\0')
+            && matches!(parts.next(), Some(std::path::Component::Normal(_)))
+            && parts.next().is_none()
+            && !names.contains(name)
+        {
+            names.push(name.clone());
+        }
+    }
+    Ok(instruction_chain(root, cwd)?
+        .into_iter()
+        .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
+        .collect())
+}
+
+/// Hash bytes so a same-size or timestamp-preserving edit cannot leave cached instructions behind.
+pub(crate) fn instruction_digest(
+    paths: &[std::path::PathBuf],
+) -> Result<orch_types::Hash, AdapterError> {
+    use std::io::Read as _;
+    let mut digest = orch_types::Hash::hasher();
+    for path in paths {
+        let name = path.to_string_lossy();
+        digest.update(&(name.len() as u64).to_le_bytes());
+        digest.update(name.as_bytes());
+        let mut file = match std::fs::File::open(path) {
+            Ok(file) if file.metadata().is_ok_and(|meta| meta.is_file()) => file,
+            Ok(_) => {
+                digest.update(b"not-file");
+                continue;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                digest.update(b"missing");
+                continue;
+            }
+            Err(error) => {
+                return Err(AdapterError::HarnessError(format!(
+                    "an instruction file could not be checked: {error}"
+                )));
+            }
+        };
+        let mut content = orch_types::Hash::hasher();
+        // A streaming I/O buffer, not a bound on instruction-file size.
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let read = file.read(&mut buffer).map_err(|error| {
+                AdapterError::HarnessError(format!(
+                    "an instruction file could not be checked: {error}"
+                ))
+            })?;
+            if read == 0 {
+                break;
+            }
+            content.update(&buffer[..read]);
+        }
+        digest.update(b"file");
+        digest.update(orch_types::Hash::finish(&content).as_bytes());
+    }
+    Ok(orch_types::Hash::finish(&digest))
+}
+
+pub(crate) async fn check_instruction_files(
+    paths: Vec<std::path::PathBuf>,
+) -> Result<orch_types::Hash, AdapterError> {
+    tokio::task::spawn_blocking(move || instruction_digest(&paths))
+        .await
+        .map_err(|error| {
+            AdapterError::HarnessError(format!("instruction-file checks did not finish: {error}"))
+        })?
+}
+
 /// What this Codex build reads of a project's instruction files together, at most, where its configuration sets no
 /// other bound (`project_doc_max_bytes`, 32 KiB): what lies beyond is cut, and the sizes the panel shows of it are
 /// derived from this bound.
@@ -801,6 +895,41 @@ pub fn open_plan(
 mod tests {
     use super::*;
     use orch_agent_contract::descriptor::{ApprovalMode, ArrangementType, SandboxMode};
+
+    #[test]
+    fn unchanged_instruction_files_keep_the_session_while_new_overrides_and_fallbacks_refresh_it() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("nested");
+        std::fs::create_dir(&cwd).unwrap();
+        let paths = super::instruction_paths(
+            root.path().to_str().unwrap(),
+            cwd.to_str().unwrap(),
+            &["RULES.md".into()],
+        )
+        .unwrap();
+        let before = super::instruction_digest(&paths).unwrap();
+        std::fs::write(
+            cwd.join("unrelated.rs"),
+            "changes outside the instruction chain",
+        )
+        .unwrap();
+        assert_eq!(super::instruction_digest(&paths).unwrap(), before);
+        std::fs::write(root.path().join("AGENTS.md"), "first").unwrap();
+        let first = super::instruction_digest(&paths).unwrap();
+        assert_ne!(first, before);
+        std::fs::write(root.path().join("AGENTS.md"), "other").unwrap();
+        assert_ne!(
+            super::instruction_digest(&paths).unwrap(),
+            first,
+            "same-length edits are detected by their bytes"
+        );
+        let changed = super::instruction_digest(&paths).unwrap();
+        std::fs::write(cwd.join("AGENTS.override.md"), "override").unwrap();
+        assert_ne!(super::instruction_digest(&paths).unwrap(), changed);
+        let overridden = super::instruction_digest(&paths).unwrap();
+        std::fs::write(cwd.join("RULES.md"), "fallback").unwrap();
+        assert_ne!(super::instruction_digest(&paths).unwrap(), overridden);
+    }
 
     #[test]
     fn resolved_native_switches_are_carried_without_reconstructing_a_route() {

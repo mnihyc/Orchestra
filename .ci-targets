@@ -1,0 +1,17 @@
+fmt
+clippy
+contracts
+test -p orch-db --test migration_progress --test released_migrations --test approval_settlement
+test -p orch-api-contract --lib
+test -p orch-agent-contract --lib
+test -p orch-link-contract --lib
+test -p orch-engine --lib
+test -p orch-engine --test turns --test approvals --test approval_rules --test paste_delivery --test context_fill --test usage_rows --test source --test notifications
+test -p orch-link --test commands
+test -p orch-connector-core --test agent_role
+test -p orch-adapter-codex --lib
+test -p orch-adapter-codex --test prompt_cases --test sessions
+test -p orch-api-core --test approvals --test approval_operation_scopes --test threads_drive --test thread_continuation_queues --test workspace_connector
+web typecheck
+web lint
+web test -- tests/unit/thread-read-handles.test.ts tests/component/thread-now.test.tsx tests/component/composer-delivery.test.tsx tests/unit/stop-and-queue-order.test.ts tests/unit/waiting-start-steps.test.ts tests/unit/source-words.test.ts tests/unit/org-work.test.ts

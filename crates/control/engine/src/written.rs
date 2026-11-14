@@ -768,6 +768,24 @@ pub fn marker_words(marker: &MarkerPayload) -> String {
         })
     };
     let words = match marker {
+        M::SessionReopened(m) => {
+            use orch_api_contract::threads::SessionReopenReason;
+            format!(
+                "Session opened again: {}",
+                match m.reason {
+                    SessionReopenReason::Unknown =>
+                        "the prior session was no longer known to be open",
+                    SessionReopenReason::Instructions => "instructions changed",
+                    SessionReopenReason::Limits => "sub-agent limits changed",
+                    SessionReopenReason::Configuration => "session settings changed",
+                    SessionReopenReason::Mcp => "MCP servers changed",
+                    SessionReopenReason::Tools => "available tools changed",
+                    SessionReopenReason::Skills => "skills changed",
+                    SessionReopenReason::ProgramReloads => "the program reloaded its directory",
+                    SessionReopenReason::SideHistory => "the parent history changed",
+                }
+            )
+        }
         M::HarnessChanged(m) => {
             let subject = m
                 .subject
@@ -2309,6 +2327,25 @@ pub async fn chat_records_with_names(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_session_reopening_is_named_in_written_history() {
+        use orch_api_contract::threads::{MarkerSessionReopened, SessionReopenReason};
+        for reason in [
+            SessionReopenReason::Unknown,
+            SessionReopenReason::Instructions,
+            SessionReopenReason::Limits,
+            SessionReopenReason::Configuration,
+            SessionReopenReason::Mcp,
+            SessionReopenReason::Tools,
+            SessionReopenReason::Skills,
+            SessionReopenReason::ProgramReloads,
+            SessionReopenReason::SideHistory,
+        ] {
+            let marker = super::MarkerPayload::SessionReopened(MarkerSessionReopened { reason });
+            assert!(super::marker_words(&marker).starts_with("Session opened again: "));
+        }
+    }
+
     use super::*;
     use orch_types::new_id;
     use serde_json::json;

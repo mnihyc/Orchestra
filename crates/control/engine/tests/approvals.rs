@@ -26,6 +26,216 @@ fn option(id: &str) -> ApprovalDecision {
     })
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decision_is_answered_and_delivered_while_another_change_holds_the_thread() {
+    let world = World::new().await;
+    let thread = world.thread("Decide while a change waits").await;
+    let (start, _) = world.running_turn(thread, "Begin").await;
+    world
+        .say(thread, command_asked(start.turn_id, "held-decision"))
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    let mut holder = world.pool.begin().await.unwrap();
+    orch_db::queries::threads::lock(&mut holder, thread)
+        .await
+        .unwrap();
+    let decided = tokio::time::timeout(
+        Duration::from_secs(3),
+        world.engine().decide_approval(
+            &Caller::session(world.ada),
+            approval,
+            &option("allow_once"),
+        ),
+    )
+    .await
+    .expect("the answer never waits for the thread row")
+    .unwrap();
+    assert_eq!(decided.state, "approved");
+    world.wait_ran(CommandKind::ApprovalResolve, 1).await;
+    holder.commit().await.unwrap();
+    world.wait_state(thread, "running").await;
+    common::eventually("the timeline carries the decision", || async {
+        world
+            .scalar::<String>(
+                "SELECT status FROM items WHERE id=(SELECT item_id FROM approvals WHERE id=$1)",
+                approval,
+            )
+            .await
+            == "approved"
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_people_deciding_a_busy_thread_get_one_winner_without_waiting_for_it() {
+    let world = World::new().await;
+    let bob = world.person("bob").await;
+    world.give(bob, "manager").await;
+    let thread = world.thread("Two decisions while busy").await;
+    let (start, _) = world.running_turn(thread, "Begin").await;
+    world
+        .say(thread, command_asked(start.turn_id, "two-decisions"))
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    let mut holder = world.pool.begin().await.unwrap();
+    orch_db::queries::threads::lock(&mut holder, thread)
+        .await
+        .unwrap();
+    let engine = world.engine();
+    let ada = Caller::session(world.ada);
+    let bob = Caller::session(bob);
+    let allow = option("allow_once");
+    let deny = option("deny");
+    let (first, second) = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(
+            engine.decide_approval(&ada, approval, &allow),
+            engine.decide_approval(&bob, approval, &deny)
+        )
+    })
+    .await
+    .expect("both people get their answer while the row stays held");
+    let results = [first, second];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert!(
+        results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .all(|error| matches!(error, ApprovalError::AlreadyDecided))
+    );
+    holder.commit().await.unwrap();
+    world.wait_ran(CommandKind::ApprovalResolve, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decision_and_a_stop_are_both_taken_while_the_thread_is_busy() {
+    let world = World::new().await;
+    let thread = world.thread("Decide and stop while busy").await;
+    let (start, _) = world.running_turn(thread, "Begin").await;
+    world
+        .say(thread, command_asked(start.turn_id, "decision-and-stop"))
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    let mut holder = world.pool.begin().await.unwrap();
+    orch_db::queries::threads::lock(&mut holder, thread)
+        .await
+        .unwrap();
+    let engine = world.engine();
+    let caller = Caller::session(world.ada);
+    let allow = option("allow_once");
+    let (decision, stop) = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(
+            engine.decide_approval(&caller, approval, &allow),
+            engine.stop_thread(&caller, thread, Some(start.turn_id))
+        )
+    })
+    .await
+    .expect("neither action waits for the row");
+    assert_eq!(decision.unwrap().state, "approved");
+    stop.unwrap();
+    holder.commit().await.unwrap();
+    common::eventually("the harness is asked to stop", || async {
+        world.commands.issued_of("turn.interrupt") == 1
+    })
+    .await;
+    assert!(world.sync(thread).await.thread.queue.held);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recorded_decision_settles_once_after_the_server_starts_again() {
+    let world = World::new().await;
+    let thread = world.thread("Recover a recorded decision").await;
+    let (start, _) = world.running_turn(thread, "Begin").await;
+    world
+        .say(
+            thread,
+            command_asked(start.turn_id, "decision-before-restart"),
+        )
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    let mut holder = world.pool.begin().await.unwrap();
+    orch_db::queries::threads::lock(&mut holder, thread)
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        world.engine().decide_approval(
+            &Caller::session(world.ada),
+            approval,
+            &option("allow_once"),
+        ),
+    )
+    .await
+    .expect("recorded before the row is free")
+    .unwrap();
+    world.restart_api().await;
+    holder.commit().await.unwrap();
+    world.wait_state(thread, "running").await;
+    common::eventually("settlement survives restart", || async {
+        world
+            .scalar::<bool>(
+                "SELECT decision_settlement IS NULL FROM approvals WHERE id=$1",
+                approval,
+            )
+            .await
+    })
+    .await;
+    assert_eq!(
+        world
+            .scalar::<String>(
+                "SELECT status FROM items WHERE id=(SELECT item_id FROM approvals WHERE id=$1)",
+                approval
+            )
+            .await,
+        "approved"
+    );
+    assert_eq!(world.scalar::<i64>("SELECT count(*) FROM audit_log WHERE action='approval.decided' AND details->>'approval'=$1::text", approval).await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decision_is_answered_before_its_notification_settlement_can_run() {
+    let world = World::new().await;
+    let thread = world.thread("Decide while notices wait").await;
+    let (start, _) = world.running_turn(thread, "Begin").await;
+    world
+        .say(thread, command_asked(start.turn_id, "notice-contention"))
+        .await;
+    world.wait_state(thread, "waiting_approval").await;
+    let approval: Id = world
+        .scalar("SELECT id FROM approvals WHERE thread_id=$1", thread)
+        .await;
+    let mut holder = world.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE notifications IN SHARE MODE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let decided = tokio::time::timeout(
+        Duration::from_secs(3),
+        world.engine().decide_approval(
+            &Caller::session(world.ada),
+            approval,
+            &option("allow_once"),
+        ),
+    )
+    .await
+    .expect("notices are settled after the answer")
+    .unwrap();
+    assert_eq!(decided.state, "approved");
+    holder.commit().await.unwrap();
+    world.wait_state(thread, "running").await;
+}
+
 fn plan_asked(turn: Id, reference: &str, plan: &str) -> Event {
     let Event::ApprovalRequested(mut asked) = command_asked(turn, reference) else {
         unreachable!("the helper creates an approval request")

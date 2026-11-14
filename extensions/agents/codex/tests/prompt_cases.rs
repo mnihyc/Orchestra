@@ -1342,3 +1342,51 @@ async fn server(model_url: String, result_form: bool) -> Server {
         task,
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unchanged_turns_keep_the_native_session_and_a_changed_instruction_file_is_loaded_once() {
+    let mut rig = common::Rig::start("keep-unchanged-session")
+        .await
+        .expect("the pinned image is required");
+    let root = rig.workspace.path().to_path_buf();
+    std::fs::create_dir(root.join(".orch-root")).unwrap();
+    std::fs::write(root.join("AGENTS.md"), "RULE-ORIGINAL\n").unwrap();
+    let boot = rig.boot().await;
+    assert_eq!(
+        boot.descriptor.capabilities.session_reload,
+        orch_agent_contract::descriptor::SessionReload::OnChange
+    );
+    let thread = new_id();
+    let mut spec = rig.spec(thread, SessionMode::New, None);
+    spec.settings.workspace_root = root.display().to_string();
+    spec.settings.instruction_root_marker = true;
+    spec.settings.cwd = root.display().to_string();
+    spec.settings.directory = root.display().to_string();
+    spec.settings.raw_events = true;
+    let opened = rig.adapter.open_session(spec).await.unwrap();
+    rig.run_turn(thread, "#!mock\nsay First turn\n").await;
+    let second = rig.run_turn(thread, "#!mock\nsay Second turn\n").await;
+    assert!(
+        !second
+            .iter()
+            .any(|event| matches!(event, SessionEvent::SessionOpened(_))),
+        "an unchanged turn does not resume a session: {second:?}"
+    );
+    assert!(!second.iter().any(|event| matches!(event, SessionEvent::RawFrame(raw) if raw.direction == "out" && matches!(raw.payload["method"].as_str(), Some("thread/resume" | "thread/unsubscribe")))));
+    std::fs::write(root.join("AGENTS.md"), "RULE-REFRESHED\n").unwrap();
+    let changed = rig.run_turn(thread, "#!mock\nsay Third turn\n").await;
+    assert_eq!(changed.iter().filter(|event| matches!(event, SessionEvent::SessionOpened(event) if event.resumed && event.native_session_ref == opened.native_session_ref)).count(), 1);
+    assert!(changed.iter().any(|event| matches!(event, SessionEvent::ItemCompleted(item) if item.payload["marker"] == "session_reopened" && item.payload["data"]["reason"] == "instructions")));
+    let request = rig.mock.requests().last().unwrap().body.clone();
+    assert!(
+        request.to_string().contains("RULE-REFRESHED"),
+        "the actual model request sees current native instructions"
+    );
+    let fourth = rig.run_turn(thread, "#!mock\nsay Fourth turn\n").await;
+    assert!(
+        !fourth
+            .iter()
+            .any(|event| matches!(event, SessionEvent::SessionOpened(_)))
+    );
+    rig.adapter.stop().await.unwrap();
+}

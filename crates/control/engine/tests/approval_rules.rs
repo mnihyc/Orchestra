@@ -58,6 +58,7 @@ async fn an_action_allowed_for_a_thread_answers_the_same_request_once_until_it_i
         )
         .await
         .unwrap();
+    world.wait_state(thread, "running").await;
     let rule: Id = world
         .scalar(
             "SELECT id FROM thread_approval_rules WHERE thread_id = $1 AND revoked_at IS NULL",
