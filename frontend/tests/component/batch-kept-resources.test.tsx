@@ -15,7 +15,7 @@ const io = vi.hoisted(() => ({ plan: vi.fn<() => Promise<ForkBatchPlan>>() }));
 vi.mock('@/api/environments', async (load) => ({ ...await load<typeof EnvironmentsApi>(), environmentsQuery: () => ({ queryKey: ['kept-batch-environments'], queryFn: () => Promise.resolve([{ ...detailEnvironment, id: 'destination', name: 'Destination', access: { ...detailEnvironment.access, permissions: ['environment.manage'] } }]) }) }));
 vi.mock('@/api/resources', async (load) => ({ ...await load<typeof ResourcesApi>(), providersQuery: () => ({ queryKey: ['kept-batch-providers'], queryFn: () => Promise.resolve([]) }), agentsQuery: () => ({ queryKey: ['kept-batch-agents'], queryFn: () => Promise.resolve([]) }) }));
 vi.mock('@/api/forks', async (load) => ({ ...await load<typeof ForksApi>(), planBatch: io.plan }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 beforeEach(() => {
   io.plan.mockReset(); const first = resourcePlan('First');
   io.plan.mockResolvedValue({ preflight_id: 'batch-plan', expires_at: first.expires_at, executable: 2, options: first.options, estimate: first.estimate, plans: [first, resourcePlan('Second')], skipped: [], turns_running: 0, to: { provider: null, agent: null, model: null, effort: null } });

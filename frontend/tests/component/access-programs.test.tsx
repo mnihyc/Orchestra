@@ -12,7 +12,7 @@ import type { ModelParameters, ThreadParameters } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
-vi.mock('@/features/resources/harnesses', () => ({ useHarnessTitle: () => () => 'Codex' }));
+vi.mock('@/features/resources/harnesses', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHarnessTitle: () => () => 'Codex' }));
 
 const entry: ModelParameters = { offered: { access_programs: ['daybreakBlue', 'daybreakRed', 'standard', 'daybreakGreen'] }, access_programs: ['daybreakBlue'] };
 afterEach(async () => { await setLocale('en'); });
@@ -35,7 +35,8 @@ for (const locale of ['en', 'zh-CN'] as const) it(`names the provider's offered 
   expect(within(group).getByRole('switch', { name: 'daybreakGreen' })).not.toBeChecked();
   await user.click(within(group).getByRole('switch', { name: red }));
   await user.click(within(group).getByRole('switch', { name: standard }));
-  await user.click(within(group).getByRole('combobox', { name: i18n.t('models.editor.defaultProgram') }));
+  // The starting program is optional, and its label says so.
+  await user.click(within(group).getByRole('combobox', { name: new RegExp(`^${i18n.t('models.editor.defaultProgram')}`) }));
   await user.click(screen.getByRole('option', { name: standard }));
   const form = changed.mock.lastCall?.[0];
   if (form === undefined) throw new Error('The selected program did not update the model form');
