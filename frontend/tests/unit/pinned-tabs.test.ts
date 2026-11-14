@@ -53,5 +53,5 @@ it('preserves pins across groups, normalized insertion, Reset, arrangements and 
     if (choice === 'reset') useWorkbench.getState().reset(); else useWorkbench.getState().choose(choice);
     expect(findTab(useWorkbench.getState().layout, 'everything')?.tab.pinned).toBe(true);
   }
-  for (const version of [2, 3]) expect(parse(serialize({ ...given, version }))?.version).toBe(LAYOUT_VERSION);
+  for (const version of [2, 3]) expect(parse(serialize({ ...given, version }))).toBeNull();
 });

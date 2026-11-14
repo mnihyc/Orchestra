@@ -12,25 +12,35 @@ const session = client.session.getState();
 beforeEach(() => { vi.clearAllMocks(); client.session.setState({ readerVersion: 901 }); });
 afterEach(() => client.session.setState(session));
 
-it('reads the existing complete topic member and paged native run list, with no timer or extra tool operation', async () => {
+it('reads the topic\u2019s own schedule list and paged native run list, with no timer or extra tool operation', async () => {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  wire.get.mockResolvedValueOnce({ data: { input_schedules: [inputSchedule()] }, response: new Response() })
+  wire.get.mockResolvedValueOnce({ data: { items: [inputSchedule()], next_cursor: null }, response: new Response() })
     .mockResolvedValueOnce({ data: { items: [scheduleRun()], next_cursor: 'opaque-next' }, response: new Response() });
   expect(await cache.query(topicSchedulesQuery(SCHEDULE_TOPIC))).toEqual([inputSchedule()]);
-  expect(wire.get.mock.calls[0]?.[0]).toBe('/topics/{id}/sync');
+  expect(wire.get.mock.calls[0]?.[0]).toBe('/topics/{id}/input-schedules');
   expect(await cache.infiniteQuery(inputScheduleRunsQuery(SCHEDULE))).toMatchObject({ pages: [{ items: [scheduleRun()], next_cursor: 'opaque-next' }] });
   expect(wire.get.mock.calls[1]?.[1]).toMatchObject({ params: { path: { id: SCHEDULE }, query: { limit: 100 } } });
   cache.clear();
 });
+it('reads every page of a topic\u2019s schedules and never its whole snapshot', async () => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const first = inputSchedule({ id: 'first' }), second = inputSchedule({ id: 'second' });
+  wire.get.mockResolvedValueOnce({ data: { items: [first], next_cursor: 'page-two' }, response: new Response() })
+    .mockResolvedValueOnce({ data: { items: [second], next_cursor: null }, response: new Response() });
+  expect(await cache.query(topicSchedulesQuery(SCHEDULE_TOPIC))).toEqual([first, second]);
+  expect(wire.get.mock.calls.map((call) => call[0])).toEqual(['/topics/{id}/input-schedules', '/topics/{id}/input-schedules']);
+  expect(wire.get.mock.calls[1]?.[1]).toMatchObject({ params: { path: { id: SCHEDULE_TOPIC }, query: { cursor: 'page-two' } } });
+  cache.clear();
+});
 it('rejects a topic result that arrived after the reader changed', async () => {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  let finish: ((value: { data: { input_schedules: ReturnType<typeof inputSchedule>[] }; response: Response }) => void) | undefined;
+  let finish: ((value: { data: { items: ReturnType<typeof inputSchedule>[]; next_cursor: null }; response: Response }) => void) | undefined;
   wire.get.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
   const pending = cache.query(topicSchedulesQuery(SCHEDULE_TOPIC));
   const settle = finish; if (settle === undefined) throw new Error('Read did not start');
   client.session.setState({ readerVersion: 902 });
   const result = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
-  settle({ data: { input_schedules: [inputSchedule()] }, response: new Response() });
+  settle({ data: { items: [inputSchedule()], next_cursor: null }, response: new Response() });
   await result; expect(cache.getQueryData(topicSchedulesQuery(SCHEDULE_TOPIC).queryKey)).toBeUndefined(); cache.clear();
 });
 it('uses the existing id-only cancellation without cancelling a queued input or reconstructing an author', async () => {

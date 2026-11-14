@@ -225,8 +225,10 @@ describe('the one human-session admin mode', () => {
     draw(<AdminModeControl />);
     await user.click(await screen.findByRole('switch', { name: ADMIN_MODE_NAME }));
     await waitFor(() => expect(calls.write).toHaveBeenCalledOnce());
-    expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).toHaveAttribute('data-as-admin', 'false');
-    expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).not.toBeChecked();
+    await waitFor(() => {
+      expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).toHaveAttribute('data-as-admin', 'false');
+      expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).not.toBeChecked();
+    });
   });
 });
 

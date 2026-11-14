@@ -5,6 +5,7 @@
  * threads, in chats and in documents, newest first, a page at a time. A system that does not answer
  * either says so with a 404, and the screen then has nothing to show of it.
  */
+import { RELEASE_READ } from '@/api/freshness';
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { suppliedRead } from '@/api/readScheduler';
@@ -44,7 +45,6 @@ export const recentsQuery = queryOptions({
   // A system that does not serve it yet is asked again only when the page is loaded anew.
   retry: false,
   retryOnMount: false,
-  staleTime: 60_000,
 });
 
 // ---------------------------------------------------------------- names
@@ -73,9 +73,6 @@ export interface NameSearch {
   participating?: boolean;
 }
 
-/** How long a list of names counts as fresh: a person typing and deleting letters comes back to the same answers. */
-const NAMES_FRESH_MS = 15_000;
-
 export const namesKey = (search: NameSearch) => ['names', search.kinds.join(','), search.q, search.limit ?? NAME_LIMIT_DEFAULT, search.orgId ?? '', search.starred ?? false, search.participating ?? false] as const;
 
 /** The names that match, or with no letters the caller's recents. The answer to the letters before stays up until the next arrives. */
@@ -103,11 +100,21 @@ export const namesQuery = (search: NameSearch) =>
       );
     },
     select: (page: NameSearchPage): NameHit[] => page.items,
-    staleTime: NAMES_FRESH_MS,
     // A lookup made while typing is not made again by itself: the next letter asks anew.
     retry: false,
     placeholderData: (previous, held) => held?.queryKey[4] === (search.orgId ?? '') && held.queryKey.at(-1) === (search.participating ?? false) && held.queryKey.at(-2) === (search.starred ?? false) ? previous : undefined,
   });
+
+/** Resolve a saved choice through the same authorized native names reader as the picker. */
+export const nameByIdQuery = (kind: NameKind, id: string) => queryOptions({
+  queryKey: ['names', 'identity', kind, id] as const,
+  queryFn: async ({ signal }): Promise<NameHit | null> => {
+    const page = await ok(api.GET('/search/names', { params: { query: { id, kinds: kind } }, signal }));
+    return page.items.find((hit) => hit.id === id && hit.kind === kind) ?? null;
+  },
+  staleTime: NAMES_FRESH_MS,
+  retry: false,
+});
 
 // ---------------------------------------------------------------- the registry the finder reads settings from
 
@@ -118,7 +125,7 @@ export const settingRegistryQuery = queryOptions({
     const [registry] = await Promise.all([ok(api.GET('/settings/registry', { signal })), loadSearchCatalogues()]);
     return registry;
   },
-  staleTime: Number.POSITIVE_INFINITY,
+  ...RELEASE_READ,
   retry: false,
 });
 
@@ -230,7 +237,6 @@ export const searchQuery = (filters: SearchFilters, limit: number = SEARCH_PAGE_
       return page;
     },
     getNextPageParam: (last) => last.next_cursor ?? undefined,
-    staleTime: 15_000,
     // A refusal of the query is the answer; only the network is asked again, and the reader can say so.
     retry: false,
   });
@@ -245,7 +251,6 @@ export const searchPreviewQuery = (filters: SearchFilters) =>
     queryKey: ['search-preview', ...searchKey(filters)] as const,
     queryFn: async ({ signal }): Promise<SearchHitPage> =>
       (await ok(api.GET('/search', { params: { query: { q: filters.q.trim(), limit: SEARCH_PREVIEW, ...(filters.scope === undefined ? {} : { scope: filters.scope }), ...(filters.participating === true ? { participating: true } : {}), ...(filters.sort === undefined ? {} : { sort: filters.sort }) } }, signal }))) as SearchHitPage,
-    staleTime: 15_000,
     retry: false,
     // A different org must never paint the previous org's preview.
     placeholderData: undefined,

@@ -35,7 +35,7 @@ export function MoveToTopic({ thread, close }: { thread: Thread; close: () => vo
   const review = useQuery({ queryKey: ['thread-move', thread.id, target], queryFn: ({ signal }) => {
     if (target === null) throw new Error('Choose a topic before reviewing this move.');
     return previewThreadMove(thread.id, target, signal);
-  }, enabled: target !== null, staleTime: 0, retry: false });
+  }, enabled: target !== null, retry: false });
   const move = useMutation({ mutationFn: (plan: ThreadMovePlan) => moveThread(thread.id, plan, key.current), onSuccess: (moved) => {
     threadWriter.apply(thread.id, { thread: moved });
     close();

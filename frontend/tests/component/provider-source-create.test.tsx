@@ -242,3 +242,11 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
     expect(createProvider).toHaveBeenCalledTimes(1);
   });
 });
+
+
+it.each(['en', 'zh-CN'] as const)('names the new resource before its other setup choices in %s', async (locale) => {
+  await setLocale(locale);
+  show(<AddProviderDialog onClose={vi.fn()} />);
+  const name = await screen.findByRole('textbox', { name: i18n.t('providers.add.name') });
+  expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],select')).toBe(name);
+});

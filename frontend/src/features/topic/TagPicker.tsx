@@ -1,4 +1,5 @@
 /** Defines a tag at an authorized place and assigns it separately, preserving a failed name or a created-but-unassigned tag. */
+import { READ_NOW } from '@/api/freshness';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { LoaderCircle, Plus, Tags } from 'lucide-react';
 import { useState } from 'react';
@@ -50,7 +51,7 @@ export function TagPicker({ place, allowed }: { place: Node; allowed: boolean })
       try { return await createPickerTag(scopeId, text, key); }
       catch (error) {
         if (!(error instanceof ApiError) || !error.is('conflict.exists')) throw error;
-        const tags = await client.query({ ...tagsQuery(place.id), staleTime: 0 });
+        const tags = await client.query({ ...tagsQuery(place.id), ...READ_NOW });
         const existing = tags.find((tag) => tag.name.toLocaleLowerCase() === text.toLocaleLowerCase());
         if (existing === undefined) throw error;
         return existing;

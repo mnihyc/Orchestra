@@ -20,6 +20,7 @@ import { Banner } from '@/ui/Banner';
 import { Button } from '@/ui/Button';
 import { useFrameReady } from '@/shell/FrameReadiness';
 import { AdminExitNotice } from '@/shell/AdminExitNotice';
+import { ShellCheckNotice } from '@/shell/ShellCheckNotice';
 import { useViewChoice } from '@/lib/viewChoices';
 
 /** Whether the connection has been gone for longer than a moment. */
@@ -54,6 +55,7 @@ export function Banners() {
   return (
     <>
       <AdminExitNotice />
+      <ShellCheckNotice />
       {notice !== null && !dismissed && (
         <Banner tone={notice.level} onDismiss={() => setDismissed(true)}>
           {notice.text}

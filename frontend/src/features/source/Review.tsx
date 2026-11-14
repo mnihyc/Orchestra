@@ -5,7 +5,9 @@
  * person's draft on the server, so another device shows the same; a save that fails keeps the words in
  * the form. The message they make is shown before it is sent, and goes through the ordinary input.
  */
-import { CancelledError, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { supersededRead } from '@/api/reads';
+import { READ_NOW } from '@/api/freshness';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { MessageSquareCode, Pencil, X } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -51,7 +53,7 @@ function useReviewOwner(threadId: string) {
   const [own] = useState({ reader, threadId });
   const current = () => own.threadId === threadId && own.reader === readerOf(apiClient.session.getState());
   return { valid: own.threadId === threadId && own.reader === reader, current,
-    ensure: () => { if (!current()) throw new CancelledError({ silent: true }); } };
+    ensure: () => { if (!current()) throw supersededRead(); } };
 }
 
 /** Writes the draft's comments anew from what the server holds now, so that another device's comments are kept. */
@@ -112,7 +114,7 @@ function CommentDialog({ threadId, path, diff, itemId, onClose, initialLine, una
     mutationFn: async () => {
       owner.ensure();
       if (hunk === undefined) return null;
-      const current = await client.query({ ...draftQuery(threadId), staleTime: 0 });
+      const current = await client.query({ ...draftQuery(threadId), ...READ_NOW });
       const comment: ReviewComment = { id: crypto.randomUUID(), path, side, from_line: from, to_line: to, diff_hash: await reviewedHash(diff), item_id: itemId, hunk: hunk.text, text: text.trim() };
       owner.ensure();
       return withComments(threadId, (comments) => [...comments, comment], current);
@@ -193,7 +195,7 @@ function OwnedReviewTray({ threadId }: { threadId: string }) {
   const [previewing, setPreviewing] = useState(false);
   const remove = useMutation({
     mutationFn: async (id: string) => {
-      owner.ensure(); const current = await client.query({ ...draftQuery(threadId), staleTime: 0 }); owner.ensure();
+      owner.ensure(); const current = await client.query({ ...draftQuery(threadId), ...READ_NOW }); owner.ensure();
       return withComments(threadId, (comments) => comments.filter((comment) => comment.id !== id), current);
     },
     onSuccess: (saved) => { if (owner.current()) client.setQueryData(threadKeys.draft(threadId), saved); },
@@ -236,7 +238,7 @@ function EditComment({ threadId, comment, onClose }: { threadId: string; comment
   const [text, setText] = useState(comment.text);
   const save = useMutation({
     mutationFn: async () => {
-      owner.ensure(); const current = await client.query({ ...draftQuery(threadId), staleTime: 0 }); owner.ensure();
+      owner.ensure(); const current = await client.query({ ...draftQuery(threadId), ...READ_NOW }); owner.ensure();
       return withComments(threadId, (comments) => comments.map((one) => (one.id === comment.id ? { ...one, text: text.trim() } : one)), current);
     },
     onSuccess: (saved) => {
@@ -272,13 +274,13 @@ function SendReview({ threadId, comments, onClose }: { threadId: string; comment
   const send = useMutation({
     mutationFn: async () => {
       owner.ensure();
-      if (planPending) throw new CancelledError({ silent: true });
+      if (planPending) throw supersededRead();
       const reply = await sendInput(threadId, { content: [{ type: 'text', text }], delivery: 'queue', clientId: key.current, plan: planning });
       owner.ensure();
       threadWriter.apply(threadId, { inputs: [reply.input] });
       // What was sent leaves the draft; comments written meanwhile on another device stay.
       const sent = new Set(comments.map((comment) => comment.id));
-      const current = await client.query({ ...draftQuery(threadId), staleTime: 0 }); owner.ensure();
+      const current = await client.query({ ...draftQuery(threadId), ...READ_NOW }); owner.ensure();
       const saved = await withComments(threadId, (all) => all.filter((comment) => !sent.has(comment.id)), current);
       if (!owner.current()) return;
       client.setQueryData(threadKeys.draft(threadId), saved);

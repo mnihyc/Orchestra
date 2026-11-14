@@ -50,7 +50,7 @@ export function ImportUndo({ id, onClose, onStarted }: { id: string; onClose: ()
   };
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const [changed, setChanged] = useState(false);
-  const plan = useQuery({ queryKey: importKeys.undo(id), queryFn: ({ signal }) => planImportUndo(id, signal), staleTime: 0, retry: false });
+  const plan = useQuery({ queryKey: importKeys.undo(id), queryFn: ({ signal }) => planImportUndo(id, signal), retry: false });
   const act = useMutation({
     mutationFn: async () => {
       if (!owns()) throw new Error('Import reader changed');

@@ -6,13 +6,14 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as References from '@/api/references';
 import type * as Share from '@/api/share';
 import type * as Workspace from '@/api/workspace';
+import type * as Threads from '@/api/threads';
 import { AgentReferences } from '@/features/people/AgentReferences';
 import { TypedChip } from '@/features/people/NamedChip';
 import { attachmentFileReference, environmentFileReference, idReferenceOf, referenceOfAddress, referenceTarget, referenceText, type TypedReference } from '@/features/people/references';
 import { useFileActions } from '@/features/files/FileMenu';
 import { FileLink, workspacePath } from '@/features/files/FileLink';
 import type { EnvironmentWorkspaceAccess } from '@/features/files/door';
-import type { DirEntry, ReferencePreview, ReferencePreviewFile } from '@/generated/api-types';
+import type { DirEntry, ReferencePreview, ReferencePreviewFile, ThreadEnvironment, ThreadParameters } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { Markdown } from '@/ui/Markdown';
 import { ORCH_REFERENCE } from '@/lib/drop';
@@ -27,7 +28,7 @@ const preview: ReferencePreview = {
   part:{part:{line:42},number:42,anchor:null,text:'fn authenticate() {}',by:null},
   file:fileInfo,
 };
-const calls = vi.hoisted(() => ({ preview:vi.fn<(reference:TypedReference) => Promise<ReferencePreview>>(), copy:vi.fn(), open:vi.fn(), mayView:true, cwd:'/workspace/web', environment:{workspace_root:'/workspace',generation:1,facts:{}}, sharedEntries:[] as {id:string;name:string;path:string;kind:string;redacted:boolean;readable:boolean}[] }));
+const calls = vi.hoisted(() => ({ preview:vi.fn<(reference:TypedReference) => Promise<ReferencePreview>>(), copy:vi.fn(), open:vi.fn(), mayView:true, cwd:'/workspace/web', environment:undefined as ThreadEnvironment | undefined, parameters:vi.fn<(id:string) => Promise<Pick<ThreadParameters,'environment'>>>(), fullEnvironment:vi.fn(), sharedEntries:[] as {id:string;name:string;path:string;kind:string;redacted:boolean;readable:boolean}[] }));
 vi.mock('@/api/references', async (original) => {
   const actual = await original<typeof References>();
   return {...actual,referencePreviewQuery:(reference:TypedReference) => ({...actual.referencePreviewQuery(reference),queryFn:() => calls.preview(reference)})};
@@ -38,13 +39,17 @@ vi.mock('@/api/share', async (original) => {
 });
 vi.mock('@/api/workspace', async (original) => {
   const actual=await original<typeof Workspace>();
-  return {...actual,environmentQuery:(id:string) => ({...actual.environmentQuery(id),queryFn:() => Promise.resolve(calls.environment)})};
+  return {...actual,environmentQuery:(id:string) => ({...actual.environmentQuery(id),queryFn:() => { calls.fullEnvironment(id); return Promise.resolve(calls.environment); }})};
+});
+vi.mock('@/api/threads', async (original) => {
+  const actual=await original<typeof Threads>();
+  return {...actual,parametersQuery:(id:string,choices=false) => ({...actual.parametersQuery(id,choices),queryFn:() => calls.parameters(id)})};
 });
 vi.mock('@/realtime/stores/thread', async (original) => ({...await original(),useThreadRow:() => ({cwd:calls.cwd,directory:'web',environment:{id:ENV},environment_permissions:calls.mayView?['files.view']:[]})}));
 vi.mock('@/features/files/FileTabs', async (original) => ({...await original(),openFile:calls.open}));
 vi.mock('@/ui/clipboard', () => ({copyText:calls.copy}));
 
-beforeEach(() => { vi.clearAllMocks(); calls.mayView=true; calls.cwd='/workspace/web'; calls.environment={workspace_root:'/workspace',generation:1,facts:{}}; calls.sharedEntries=[]; calls.preview.mockResolvedValue(preview); });
+beforeEach(() => { vi.clearAllMocks(); calls.mayView=true; calls.cwd='/workspace/web'; calls.environment={id:ENV,registered_root:'/workspace',workspace_root:'/workspace',generation:1}; calls.parameters.mockImplementation(() => Promise.resolve({environment:calls.environment})); calls.sharedEntries=[]; calls.preview.mockResolvedValue(preview); });
 afterEach(() => cleanup());
 
 function RefreshingFileReference() {
@@ -68,8 +73,11 @@ it('shows a file chip with its environment, size and line and copies the same re
 it('keeps unreadable files as locked kind-only chips without a legacy label', async () => {
   calls.preview.mockRejectedValue(new Error('not found'));
   show(<TypedChip reference={{kind:'file',id:FILE,line:2}} />);
-  await waitFor(() => expect(calls.preview).toHaveBeenCalled());
-  expect(screen.getByRole('button',{name:i18n.t('people.reference.kinds.file')})).toHaveAttribute('data-reference-state','no-access');
+  // The chip is a button of its kind from the first drawing; it carries the lock once the refusal has been applied.
+  const kind=i18n.t('people.reference.kinds.file');
+  await waitFor(() => expect(screen.getByRole('button',{name:kind}).querySelector('svg.lucide-lock-keyhole')).not.toBeNull());
+  expect(calls.preview).toHaveBeenCalled();
+  expect(screen.getByRole('button',{name:kind})).toHaveAttribute('data-reference-state','no-access');
   expect(screen.queryByRole('link')).not.toBeInTheDocument();
   expect(screen.queryByText('auth.rs')).not.toBeInTheDocument();
 });
@@ -139,13 +147,15 @@ it('shows an uncounted file size as a dash in the same metadata line', async () 
   expect(owner.closest('[data-reference-file]')).toHaveTextContent('Build environment · web/src/auth.rs · –');
 });
 
-it('opens backquoted workspace paths in prose at the named line', async () => {
+it('opens backquoted workspace paths from compact thread facts at the named line', async () => {
   const user=userEvent.setup();
   const content=<AgentReferences threadId="writer"><Markdown text="Look in `src/auth.rs:42`." /></AgentReferences>;
   show(content);
   const link=await screen.findByRole('button',{name:'src/auth.rs:42'});
   await user.click(link);
   expect(calls.open).toHaveBeenCalledWith({environmentId:ENV,threadId:'writer',path:'web/src/auth.rs',line:42,permanent:false});
+  expect(calls.parameters).toHaveBeenCalledExactlyOnceWith('writer');
+  expect(calls.fullEnvironment).not.toHaveBeenCalled();
 });
 
 it('leaves a prose file link plain without files access', () => {
@@ -176,7 +186,7 @@ it('uses the actual working directory inside the environment when a thread start
 it('uses the current machine workspace spelling for relative and absolute prose paths', async () => {
   const user=userEvent.setup();
   calls.cwd='/registered/web/api';
-  calls.environment={workspace_root:'/registered',generation:7,facts:{generation:7,workspace_root:'/native'}};
+  calls.environment={id:ENV,registered_root:'/registered',workspace_root:'/native',generation:7};
   show(<AgentReferences threadId="writer"><Markdown text="Read `src/auth.rs:2` and `/native/web/api/src/auth.rs:2`." /></AgentReferences>);
   await user.click(await screen.findByRole('button',{name:'src/auth.rs:2'}));
   await user.click(await screen.findByRole('button',{name:'/native/web/api/src/auth.rs:2'}));
@@ -184,10 +194,10 @@ it('uses the current machine workspace spelling for relative and absolute prose 
   for (const [opened] of calls.open.mock.calls) expect(opened).toEqual({environmentId:ENV,threadId:'writer',path:'web/api/src/auth.rs',line:2,permanent:false});
 });
 
-it('does not use a workspace spelling reported by an earlier environment generation', async () => {
+it('uses the registered fallback when the native thread has withdrawn its reported workspace spelling', async () => {
   const user=userEvent.setup();
   calls.cwd='/registered/web';
-  calls.environment={workspace_root:'/registered',generation:7,facts:{generation:6,workspace_root:'/old'}};
+  calls.environment={id:ENV,registered_root:'/registered',workspace_root:'/registered',generation:7};
   show(<AgentReferences threadId="writer"><Markdown text="Read `/registered/web/src/auth.rs:2`." /></AgentReferences>);
   await user.click(await screen.findByRole('button',{name:'/registered/web/src/auth.rs:2'}));
   expect(calls.open).toHaveBeenCalledWith({environmentId:ENV,threadId:'writer',path:'web/src/auth.rs',line:2,permanent:false});

@@ -136,14 +136,12 @@ export function SearchResults({ door, state, directory, onOpenPath, onOpenFolder
     queryKey: workspaceKeys.search(door, text, 'names'),
     queryFn: ({ signal }) => searchNames(door, text, signal),
     enabled: ready && state.mode === 'names',
-    staleTime: 10_000,
     retry: false,
   });
   const content = useQuery({
     queryKey: [...workspaceKeys.search(door, text, 'content'), under, state.regex, state.caseSensitive] as const,
     queryFn: ({ signal }) => searchContent(door, text, { under, regex: state.regex, caseSensitive: state.caseSensitive }, signal),
     enabled: ready && state.mode === 'content',
-    staleTime: 10_000,
     retry: false,
   });
 

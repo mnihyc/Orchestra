@@ -9,7 +9,6 @@ import { Link, useNavigate } from '@tanstack/react-router';
 import { Boxes, LayoutGrid, MoreHorizontal, Share2 } from 'lucide-react';
 import { createContext, type MouseEvent, useContext, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { screenBuilt } from '@/shell/availability';
 
 import type { Org, TreeNode } from '@/generated/api-types';
 import { graphemes, identityColor } from '@/lib/grapheme';
@@ -126,7 +125,7 @@ export function OrgSwitcher({ orgs, current, loading = false, choose = true }: O
   // What the rail has after the last org, where there is a rail: what was shared with the person from elsewhere, and the
   // resources. Both lead to a screen and not to another tree, so the drawer is put away: the screen that was asked for is not left under it.
   entries.push(
-    ...(screenBuilt('/shared') ? [{
+    {
       id: 'shared',
       label: t('screens.shared.title'),
       icon: <Share2 aria-hidden />,
@@ -134,7 +133,7 @@ export function OrgSwitcher({ orgs, current, loading = false, choose = true }: O
         void navigate({ to: '/shared' });
         leaveDrawer();
       },
-    }] : []),
+    },
     {
       id: 'resources',
       label: t('screens.sections.resources'),
