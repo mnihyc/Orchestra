@@ -9,6 +9,7 @@
  */
 import { create } from 'zustand';
 import type { Environment } from '@/generated/api-types';
+import type { Choices } from './choices';
 
 /** What is done to the thing named. */
 export type ChangeKind =
@@ -53,6 +54,8 @@ export interface ChangeOptions {
   toTurn?: number;
   /** For a switch, what the person came for: another provider, or another environment or directory. */
   focus?: 'provider' | 'environment';
+  /** Choices already made in the shared location field, reviewed by the ordinary plan. */
+  placement?: Partial<Pick<Choices, 'where' | 'directory'>>;
   /** For the progress of a job, or of a batch, that was started already. */
   job?: string;
   batch?: string;

@@ -66,7 +66,7 @@ export function useStartOptions(nodeId: string, picks: Picks, mode: Mode, enable
   const waitingForNode = picks.environment === null && knownEnvironment === undefined && node === undefined && nodeRead.isFetching;
   const settling = picks.environment === null && knownEnvironment === undefined && node === undefined && committed !== scope;
   const paused = waitingForNode || settling;
-  const query = useQuery({ ...startOptionsQuery(nodeId, environment, context), enabled: enabled && !paused });
+  const query = useQuery({ ...startOptionsQuery(nodeId, environment, context, picks.newEnvironment), enabled: enabled && !paused });
   // Preserve the loaded form while its newly chosen environment is being checked.
   // A different place, audience or reader never inherits that display snapshot.
   const options = query.data ?? (held?.scope === scope ? held.options : null);

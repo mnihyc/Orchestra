@@ -12,6 +12,7 @@ import { ArrowUp, ChevronsDownUp, FilePlus, FolderPlus, Folder as FolderIcon, In
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { useStore } from 'zustand';
 import { client } from '@/api/client';
+import { ThreadWhere } from '@/features/start/ThreadWhere';
 import { useViewInstance } from '@/features/workbench/instance';
 import { useTranslation } from 'react-i18next';
 
@@ -294,6 +295,7 @@ function FilesPanelContents({ access, environment, failed, binding, paused }: {
           {asOf === null ? t('files.panel.cachedNoTime') : t('files.panel.cached', { time: formatDateTime(asOf, format) })}
         </Banner>
       )}
+      {access.thread !== null && <div className="shrink-0 border-b border-border px-2 py-1"><ThreadWhere key={access.thread.id} thread={access.thread} /></div>}
       {searchOpen && <div className="shrink-0 border-b border-border pt-1" onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setSearchOpen(false); } }}>
         <div className="flex items-start"><div className="min-w-0 flex-1"><SearchBox state={search} onChange={setSearch} namesAvailable={!liveOnly} directory={root} autoFocus /></div><IconButton size="sm" label={t('files.search.close')} icon={<X aria-hidden />} onClick={() => setSearchOpen(false)} /></div>
       </div>}

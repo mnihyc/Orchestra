@@ -10,6 +10,7 @@ import { useMutation } from '@tanstack/react-query';
 import { Box, Play, Square } from 'lucide-react';
 import { Trans, useTranslation } from 'react-i18next';
 import { programNameIn } from '@/features/resources/programNames';
+import { ThreadWhere } from '@/features/start/ThreadWhere';
 
 import { api, ok } from '@/api/client';
 import { startEnvironment, stopEnvironment } from '@/api/workspace';
@@ -104,6 +105,7 @@ function EnvironmentPanel({ access }: { access: WorkspaceAccess }) {
         {environment.job !== null && <p className="text-sm text-text-muted">{t('inspector.environment.job')}</p>}
       </Section>
       <Section title={t('inspector.environment.where')}>
+        <ThreadWhere key={access.thread.id} thread={access.thread} />
         <p className="text-sm text-text">
           {environment.machine === null
             ? environment.host === null

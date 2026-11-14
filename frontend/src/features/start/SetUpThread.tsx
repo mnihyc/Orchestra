@@ -93,9 +93,10 @@ export function SetUpThread({ thread, onClose }: { thread: Thread; onClose: () =
           onValueChange={(model) => pick({ model, effort: null })}
           options={resolved.models.map((model) => ({ value: model.model_name, label: modelName(model), ...resourceChoice({ kind: 'model', model, providerId: resolved.provider?.id ?? '' }) }))} />
         <section className="flex flex-col gap-2"><h3 className="text-sm font-medium">{t('start.where.title')}</h3>
-          <Where compact place={place} options={options} value={resolved.fresh ? NEW_ENVIRONMENT : resolved.environment?.environment.id ?? null}
+          <Where compact assessed place={place} options={options} value={resolved.fresh ? NEW_ENVIRONMENT : resolved.environment?.environment.id ?? null}
             onChange={(environment) => { if (!save.isPending) pick({ environment, arrangement: null }); }} machines={[]} homeId={thread.org_id} requesting={requesting} onRequestingChange={setRequesting} onRefresh={retry}
-            newEnvironment={picks.newEnvironment} onNewEnvironmentChange={(newEnvironment) => { if (!save.isPending) pick({ newEnvironment }); }} />
+            newEnvironment={picks.newEnvironment} onNewEnvironmentChange={(newEnvironment) => { if (!save.isPending) pick({ newEnvironment }); }}
+            note={resolved.environmentNote} agentHere={resolved.agentHere} />
           {resolved.fresh && requesting === null && <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={save.isPending} forThread />}
         </section>
         {requesting === null && <ArrangementSection resolved={resolved} refreshing={refreshing} onChange={(arrangement) => { if (!save.isPending) pick({ arrangement }); }} />}

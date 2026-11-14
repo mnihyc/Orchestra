@@ -70,6 +70,7 @@ export interface ThreadChangeProps {
   kind: 'switch' | 'fork';
   toTurn: number | null;
   focus: 'provider' | 'environment' | null;
+  placement?: Partial<Pick<Choices, 'where' | 'directory'>>;
   /** A job that was started already, whose progress is the first view. */
   job: string | null;
   say: string | null;
@@ -101,7 +102,7 @@ function ThreadChangeContent(props: ThreadChangeProps) {
   return <Body {...props} thread={thread} />;
 }
 
-function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadChangeProps & { thread: Thread }) {
+function Body({ thread, kind, toTurn, focus, placement, job, say, open, onClose }: ThreadChangeProps & { thread: Thread }) {
   const { t } = useTranslation();
   const format = useFormatContext();
   const navigate = useNavigate();
@@ -116,7 +117,7 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
   // A side thread that is forked is kept as a thread of the topic.
   const keeping = fork && thread.side_of !== null;
 
-  const [choices, setChoices] = useState<Choices>(() => initialThreadChoices(thread, fork ? 'new' : 'replace', toTurn));
+  const [choices, setChoices] = useState<Choices>(() => ({ ...initialThreadChoices(thread, fork ? 'new' : 'replace', toTurn), ...placement }));
   const patch = (next: Partial<Choices>) => setChoices((current) => ({ ...current, ...next }));
   // A provider-blocked thread starts with the next usable provider, with every picker directly available.
   const blockedReason = thread.state === 'blocked' && thread.blocked !== null ? thread.blocked.reason : null;

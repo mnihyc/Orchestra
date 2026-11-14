@@ -1,6 +1,8 @@
 /** Status observes shown views' facts; drawing chrome cannot open hidden data readers. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { useChangeHost } from '@/features/change/target';
 import { afterEach, expect, it, vi } from 'vitest';
 import type * as FilesDoor from '@/features/files/door';
 import type * as Usage from '@/api/usage';
@@ -99,11 +101,25 @@ it('renders the native environment without fetching hidden limits, health, Git, 
   vi.useFakeTimers();
   const view = show(<QueryClientProvider client={cache}><ThreadStatusParts /></QueryClientProvider>);
   try {
-    expect(screen.getByText(environment.name)).toBeVisible();
+    expect(screen.getByRole('combobox', { name: i18n.t('start.where.title') })).toHaveDisplayValue(environment.name);
     expect(screen.queryByText('Wrong default workspace')).toBeNull();
     await act(async () => { await cache.invalidateQueries(); });
     expect(calls.read).not.toHaveBeenCalled();
     await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
     expect(calls.read).not.toHaveBeenCalled();
   } finally { view.unmount(); cache.clear(); }
+});
+
+it('offers directory editing in the thread bar and carries it to the ordinary switch plan', async () => {
+  showBlockedStatus(null);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.title') }));
+  await user.click(screen.getByRole('button', { name: i18n.t('change.directory.change') }));
+  const directory = screen.getByRole('textbox', { name: i18n.t('change.directory.label') });
+  await user.clear(directory);
+  await user.type(directory, 'apps/web');
+  await user.click(screen.getByRole('button', { name: i18n.t('start.where.review') }));
+  expect(useChangeHost.getState().current).toMatchObject({ target: { kind: 'thread', id: native.id },
+    options: { kind: 'switch', focus: 'environment', placement: { directory: 'apps/web' } } });
+  useChangeHost.setState({ current: null, open: false });
 });

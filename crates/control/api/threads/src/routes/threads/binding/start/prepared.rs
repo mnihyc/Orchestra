@@ -56,6 +56,12 @@ pub(super) async fn context(
             "choose either an existing environment or a new one",
         ));
     }
+    if !query.environment_new && (query.template_id.is_some() || query.host_id.is_some()) {
+        return Err(invalid(
+            "environment_new",
+            "a template or host describes a new environment",
+        ));
+    }
     let id = ctx.id("id")?;
     let node = require(conn, principal, id, ctx.now).await?;
     let settings = resolved::load(conn, id).await.map_err(ApiError::internal)?;
@@ -114,7 +120,7 @@ pub(super) async fn context(
                 .map_err(ApiError::internal)?;
             (Some((environment, offers)), vec![source])
         }
-        None => match template_ground_source(conn, principal, &node).await? {
+        None => match template_ground_source(conn, principal, &node, query.template_id).await? {
             Some((environment, offers, template)) => (
                 Some((environment, offers)),
                 vec![ObjectRef {

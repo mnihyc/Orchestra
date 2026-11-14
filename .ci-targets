@@ -1,0 +1,5 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --test hosted_environments --test binding_options --test binding_readiness --test kfix_binding --test harness_checks
+test -p orch-node --test conformance

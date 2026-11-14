@@ -156,6 +156,15 @@ pub fn estimate_bytes(bytes: i64, family: Family, kind: TextKind) -> i64 {
     )
 }
 
+/// The most bytes of text of this kind that [`estimate_bytes`] counts as `tokens` tokens or fewer.
+#[must_use]
+pub fn bytes_within_tokens(tokens: i64, family: Family, kind: TextKind) -> i64 {
+    tokens
+        .max(0)
+        .saturating_mul(ascii_bytes_per_token_x100(family, kind))
+        / HUNDRED
+}
+
 /// The tokens of `images` images.
 #[must_use]
 pub fn estimate_images(images: i64, family: Family) -> i64 {

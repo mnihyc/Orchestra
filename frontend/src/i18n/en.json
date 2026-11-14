@@ -82,6 +82,7 @@
     "noModels": "No API models available here",
     "modelUnavailable": "This model is unavailable here",
     "sources": "Sources",
+    "noAnswer": "No answer was written. Try again.",
     "sourceUnavailable": "Source no longer available",
     "copy": "Copy answer",
     "retry": "Retry answer",
@@ -91,7 +92,6 @@
     "noHistory": "No conversations yet",
     "retention": "Kept for {{days}} days after the last message",
     "expires": "Expires",
-    "adminNotice": "This organization’s admins can inspect and export this conversation",
     "inspection": "Read-only admin inspection",
     "readOnlyTools": "Reads as you · cites sources · makes no changes",
     "paidBy": "Paid by",
@@ -99,7 +99,9 @@
     "privateThread": "Creates a Private permanent thread in this organization",
     "destination": "Destination topic",
     "defaultDestination": "Use the page’s topic or an authorized default",
-    "contextNoRoom": "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves.",
+    "contextNoRoom": "ask.context_tokens leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Increase ask.context_tokens or reduce ask.max_output_tokens.",
+    "windowNoRoom": "The context window of {{model}} leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Use a model with a larger window or reduce ask.max_output_tokens.",
+    "windowUnknown": "The context window of {{model}} is not recorded and is assumed to be small, and the answer’s reserve (ask.max_output_tokens) leaves no room for the conversation. Record the model’s context window or reduce ask.max_output_tokens.",
     "contextTooLong": "This conversation is too long for {{model}}; start a new one or keep it as a thread."
   },
   "viewWindow": {
@@ -5010,6 +5012,7 @@
       "label": "Context {{used}} of {{window}} ({{percent}}); shortens at {{compact}}",
       "labelBare": "Context {{used}} of {{window}} ({{percent}})",
       "open": "Show what fills the context ({{label}})",
+      "labelUsed": "Context {{used}} used; no window reported",
       "modelLabel": "{{model}}: {{context}}"
     },
     "panel": {
@@ -7452,7 +7455,8 @@
       "auto": "$t(composer.mode.labels.auto)",
       "bypass": "$t(composer.mode.labels.bypass)"
     },
-    "help": {}
+    "help": {},
+    "notConfirmed": "{{name}} on {{machine}} is not confirmed. The machine’s owner can confirm it on the machine’s page."
   },
   "sandboxReadiness": {
     "summary": "Environment access",
@@ -9874,7 +9878,11 @@
         "right": "Hide the right bar",
         "bottom": "Hide the bottom"
       },
-      "pin": "Keep open as a bar"
+      "pin": "Keep open as a bar",
+      "peek": {
+        "title": "Bars",
+        "label": "Show hidden bars on hover: {{state}}"
+      }
     },
     "sash": {
       "left": "Width of the left bar",
@@ -9941,9 +9949,10 @@
       "shellsHint": "Your shells in this environment. Open Terminal.",
       "connecting": "Connecting…",
       "connectingHint": "Connecting to live updates.",
-      "reconnectingSince": "Reconnecting… · {{time}}",
       "reconnecting": "Reconnecting…",
       "reconnectingHint": "What is on screen stays and can be read. Approving and steering wait for the connection; typing does not.",
+      "noLive": "No live updates · {{time}}",
+      "noLiveHint": "Live updates cannot connect, so this page reads again every few seconds. If this stays, ask whoever runs this system to check that the HTTPS front passes WebSocket upgrades for /api/v1/ws; orchctl doctor --url shows it as edge-ws.",
       "slow": "Slow connection · {{ms}} ms",
       "slowHint": "Sending, saving and shells take longer. Nothing you type waits."
     },
@@ -13808,21 +13817,13 @@
       "chooseFileThread": "Choose a thread",
       "useFiles": "Use these files",
       "clearFiles": "Start empty",
-      "choice": "Environment setup",
       "useExisting": "Use existing",
       "createNew": "Create new",
       "noExisting": "No existing environment",
       "noHost": "No host can make the default environment here",
       "chooseExisting": "Choose an environment",
-      "more": "More…",
-      "moreTitle": "More environments",
       "search": "Find an environment…",
       "noMatches": "No matching environment",
-      "used": {
-        "project": "In this project",
-        "elsewhere": "Elsewhere",
-        "unused": "Not used"
-      },
       "machineTitle": "A directory on one of your machines",
       "machineAbout": "Registering a directory makes it an environment of yours, which this thread then joins. Whoever runs a machine can read what is on it.",
       "allOffline": "Your machines are all offline.",
@@ -13841,9 +13842,11 @@
       "directoryNew": "Will be created",
       "directoryIsFile": "This is not a directory",
       "closed": "It cannot be used now.",
-      "hosts": "Where it would be made",
-      "hostChosen": "chosen unless you pick",
       "hostClosed": "cannot be used",
+      "hostGone": "This host is no longer available",
+      "manageThread": "Manage Thread required",
+      "threadArchived": "Thread archived",
+      "review": "Review change",
       "makeOne": "New environment…",
       "mayNotMake": "You may not make an environment here",
       "threads_one": "{{count}} thread",
@@ -13853,7 +13856,33 @@
       "alsoUsedByMore_other": "also used by {{names}} and {{count}} others",
       "directoryIs": "Where in the environment this thread works. Left empty, it is {{directory}}.",
       "canUse": "Can use",
-      "askAccess": "Ask for access"
+      "askAccess": "Ask for access",
+      "newRow": "New environment…",
+      "newName": "New environment",
+      "unavailable": "Unavailable",
+      "default": "Default",
+      "defaultFrom": "Default environment, set on {{place}}",
+      "defaultFromAbove": "Default environment, set on a place above this one",
+      "defaultUnusable": "The default environment {{name}} cannot be used: {{why}}.",
+      "defaultUnusableUnnamed": "The default environment cannot be used: {{why}}.",
+      "defaultSetOn": "It is set on {{place}}.",
+      "defaultFresh": "Threads here get an environment of their own (the New threads setting), so the default environment {{name}} is not used.",
+      "defaultFreshUnnamed": "Threads here get an environment of their own (the New threads setting), so no default environment is used.",
+      "insteadNew": "A new environment is used instead.",
+      "insteadNamed": "{{name}} is used instead.",
+      "insteadChoose": "Choose where it runs.",
+      "cannotRun": "{{agent}} cannot run in {{where}}:",
+      "aNewEnvironment": "a new environment",
+      "using": "{{agent}} is used instead.",
+      "allowVersions": "Allow other versions",
+      "askOwner": "Ask {{name}} to allow it on the environment’s Tools tab.",
+      "openTools": "Open its tools",
+      "openMachine": "Open the machine",
+      "host": "Host",
+      "hostAuto": "Most room",
+      "hostAutoNamed": "Most room ({{host}})",
+      "template": "Template",
+      "templateDefault": "This place’s template"
     },
     "arrangement": {
       "asChosen": "As its place and the provider decide",
@@ -13908,7 +13937,11 @@
       "not_on_provider": "the provider does not list it",
       "excluded_by_entry": "the entry you use the provider through leaves it out",
       "excluded_by_policy": "a policy of this place leaves it out",
-      "not_allowed_where": "the entry you use the provider through does not allow it in this environment"
+      "not_allowed_where": "the entry you use the provider through does not allow it in this environment",
+      "environment_lost": "it was declared lost",
+      "environment_failed": "its last start failed",
+      "environment_use_required": "you need its Use first",
+      "environment_not_seen": "you cannot see it"
     },
     "made": {
       "topic": "The topic {{name}} was made.",
@@ -17478,12 +17511,12 @@
       "system": "The system's answer"
     },
     "capacity": {
-      "title": "Capacity",
-      "lead": "Full is counted from what the environments here declare they need, not from what they use now. A declaration reserves nothing, so it can pass the whole.",
+      "title": "Promised to environments",
+      "lead": "What the environments here say they need, added up. It reserves nothing, and it is not what the host uses or has free. Whether a host counts as full is decided from it.",
       "cpu": "Processor",
       "memory": "Memory",
       "disk": "Disk",
-      "declared": "{{declared}} declared of {{capacity}}",
+      "declared": "{{declared}} promised of {{capacity}}",
       "over": "More is declared than the host has.",
       "unknown": "The host reports no capacity."
     },
@@ -22859,11 +22892,10 @@
       },
       "place": "Place",
       "noHost": "No host takes a new environment now",
-      "declared": "{{declared}} of {{capacity}} GB declared",
       "hostReason": {
         "unschedulable": "{{name}} takes no new environments",
-        "full": "Full, and {{name}} takes nothing more when it is: {{declared}} of {{capacity}} GB declared",
-        "no_room": "Too little room, and {{name}} takes nothing more then: {{declared}} of {{capacity}} GB declared",
+        "full": "Full, and {{name}} takes nothing more when it is",
+        "no_room": "Too little room, and {{name}} takes nothing more then",
         "driver": "Cannot run this template",
         "source": "Does not build images, and this template is a Dockerfile",
         "labels": "Does not have the labels this template needs",
@@ -22873,7 +22905,7 @@
         "template_not_allowed": "Its owner does not allow this template there"
       },
       "hostWarning": {
-        "full": "Full: what runs there declares {{declared}} of {{capacity}} GB",
+        "full": "Full: what runs there says it needs most of what it has",
         "no_room": "Little room: only part of what this needs is free"
       },
       "name": "Name",
@@ -23395,6 +23427,9 @@
       "askBoxAbout": "Sends this to a side thread and leaves the turn alone.",
       "moveOut": "Move to another org",
       "moveOutReason": "Moves with its main thread · Keep it to move it alone"
+    },
+    "slash": {
+      "about": "Ask a question on the side, without disturbing the turn"
     },
     "ask": {
       "title": "Side thread",
@@ -24097,8 +24132,6 @@
     "offline": "Offline",
     "offlineSince": "Offline since {{time}}",
     "full": "Full",
-    "memoryPercent": "{{percent}} memory",
-    "declaredPercent": "{{percent}} declared",
     "free": "{{size}} free",
     "hostOffline": "Host offline",
     "idleFor": "idle {{time}}",
@@ -24124,7 +24157,6 @@
     "no": "No",
     "memoryNow": "Memory now",
     "cpu": "CPU now",
-    "declaredMemory": "{{used}} of {{total}} declared",
     "host": "Host",
     "threads": "Threads",
     "threadCounts": "{{running}} running · {{idle}} idle · {{blocked}} blocked",
@@ -24184,7 +24216,10 @@
       "draft": "Draft",
       "copy": "Copy"
     },
-    "environmentState": "Environment · {{state}}"
+    "environmentState": "Environment · {{state}}",
+    "memoryFree": "{{free}} free of {{total}} memory",
+    "memoryTotal": "{{total}} memory",
+    "diskFree": "{{free}} of {{total}} GB disk free"
   },
   "statusItems": {
     "textEstimateHint": "Estimated from text length until the usage row arrives",
@@ -24417,6 +24452,9 @@
     "runtimeCount_other": "{{number}} runtimes",
     "offInBuild": "Off in this version: {{feature}}",
     "caseUnavailable": "Unavailable",
+    "checkedPending_one": "Checked · {{number}} check pending",
+    "checkedPending_other": "Checked · {{number}} checks pending",
+    "casesPending": "Not verified yet: {{names}}",
     "notChecked": "This version has not been checked",
     "checkFailed": "Compatibility check failed · review its results",
     "policySummary": "{{name}}: {{choice}}",
@@ -24457,7 +24495,8 @@
       "neutralCarry": "Switches carry history as items, or in the handoff notice when it will not fit",
       "handoff": "Switches carry recent history in the handoff notice, with the full conversation as a file",
       "handoffWithoutNative": "Without native carry, switches use the handoff notice"
-    }
+    },
+    "unknownCheckWhy": "The origin of this installed program is unknown, so its build check cannot be identified."
   },
   "uploadHelp": {
     "messageTitle": "Attachments",
@@ -26192,6 +26231,8 @@
     "resultsRootPending": "The results’ organization cannot be opened",
     "model": "Model summarizer",
     "details": "Summary details",
+    "hide": "Hide summary",
+    "show": "Show summary",
     "inputFacts": "Source items: {{included}} included · {{shortened}} shortened · {{omitted}} omitted",
     "baseRates": "Configured model base rates",
     "noRates": "No base rates reported",

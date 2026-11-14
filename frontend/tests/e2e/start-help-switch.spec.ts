@@ -42,9 +42,8 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
         await expect(form.getByRole('combobox', { name: label, exact: true })).toBeVisible();
       }
       await expect(form.getByRole('textbox')).toHaveCount(0);
-      // Existing and new placement are explicit modes, rather than an entry inside the environment list.
-      await expect(form.getByRole('radiogroup')).toHaveCount(1);
-      await expect(form.getByRole('radio', { name: words.start.where.useExisting, exact: true })).toBeChecked();
+      // Where it runs is one field; a new environment is its first row, not a second control.
+      await expect(form.getByRole('radiogroup')).toHaveCount(0);
       await expectOrdinaryWizardControls(form, 'four initial choices');
       await expectSameActionRow(form.locator('[data-start-actions]'));
       await info.attach('start-four-choices', { body: await page.screenshot(), contentType: 'image/png' });
@@ -112,7 +111,8 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
       await starter.getByRole('button', { name: words.start.quick.change, exact: true }).click();
       const form = page.getByRole('dialog', { name: words.start.title.replace('{{parent}}', 'Fix login'), exact: true });
       const judged = page.waitForResponse((response) => response.url().includes(`/nodes/${ACME.fixLogin}/binding/options`) && new URL(response.url()).searchParams.get('environment_new') === 'true');
-      await form.getByRole('radio', { name: words.start.where.createNew, exact: true }).click();
+      await form.getByRole('combobox', { name: words.start.where.title, exact: true }).click();
+      await page.getByRole('option', { name: words.start.where.newRow, exact: true }).click();
       await judged;
       await expect(form.getByRole('button', { name: words.start.create, exact: true })).toBeDisabled();
       await form.getByRole('combobox', { name: words.start.agent.title, exact: true }).click();
@@ -202,7 +202,6 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const form = page.getByRole('dialog', { name: words.start.title.replace('{{parent}}', 'Fix login'), exact: true });
     await form.getByRole('button', { name: words.start.options.title, exact: true }).click();
     const where = form.locator('[data-start-where]');
-    await where.getByRole('radio', { name: words.start.where.useExisting, exact: true }).click();
     // The selected binding carries its origin in the field heading.
     const heading = form.getByRole('heading').filter({ hasText: words.start.where.title });
     await expect(heading.getByText(words.startImplicit.origin.shared_default, { exact: true })).toBeVisible();

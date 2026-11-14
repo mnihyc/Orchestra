@@ -3,6 +3,8 @@ import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { client } from '@/api/client';
+import { NewThreadDialog } from '@/features/start/BindingDialog';
+import type * as ResourcesApi from '@/api/resources';
 import type * as AccessApi from '@/api/access';
 import { queryClient } from '@/api/query';
 import type { StartOptions } from '@/api/start';
@@ -10,9 +12,9 @@ import { NO_PICKS, resolve } from '@/features/start/choices';
 import { useLastSetup } from '@/features/start/lastSetup';
 import { useStart, type StartPlan } from '@/features/start/start';
 import { bindingReason, runsLine } from '@/features/start/words';
-import type { CreateThread, NewEnvironment } from '@/generated/api-types';
+import type { CreateThread, NewEnvironment, Template } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
-import { agent, arrangement, options, provider } from '../unit/start-fixtures';
+import { agent, arrangement, host, options, provider } from '../unit/start-fixtures';
 import { CATALOGUE } from '../unit/general-access-fixtures';
 import { show } from './support';
 
@@ -24,6 +26,12 @@ const io = vi.hoisted(() => ({
   offered: null as StartOptions | null, reads: vi.fn<(node: string, target: string | null) => void>(),
   defaultEnvironment: vi.fn(), defaultSetting: vi.fn(), navigate: vi.fn(),
   readPage: vi.fn<typeof AccessApi.readPage>(),
+  preview: vi.fn<(placement?: Pick<NewEnvironment, 'template_id' | 'host_id'>) => Promise<StartOptions>>(),
+}));
+vi.mock('@/api/resources', async (original) => ({ ...await original<typeof ResourcesApi>(),
+  templatesQuery: () => ({ queryKey: ['submit-templates'], queryFn: () => Promise.resolve([
+    { id: 'alternate', name: 'Agent ready', enabled: true, access: { permissions: ['template.use'] }, description: '' } as unknown as Template,
+  ]) }),
 }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<object>(), useNavigate: () => io.navigate }));
 vi.mock('@/api/environments', async (original) => ({ ...await original<object>(), createEnvironment: io.environment }));
@@ -33,8 +41,8 @@ vi.mock('@/api/access', async (original) => ({ ...await original<object>(), perm
   queryKey: ['start-submit-permissions'], queryFn: () => Promise.resolve(CATALOGUE.reply),
 }, readPage: io.readPage }));
 vi.mock('@/api/start', async (original) => ({ ...await original<object>(), setDefaultEnvironment: io.defaultEnvironment, setStartDefault: io.defaultSetting,
-  startOptionsQuery: (node: string, target: string | null) => ({ queryKey: ['submit-preview', node, target], queryFn: (): Promise<StartOptions> => {
-    io.reads(node, target); return io.offered === null ? Promise.reject(new Error('No preview')) : Promise.resolve(io.offered);
+  startOptionsQuery: (node: string, target: string | null, _context?: unknown, placement?: Pick<NewEnvironment, 'template_id' | 'host_id'>) => ({ queryKey: ['submit-preview', node, target, placement ?? null], queryFn: (): Promise<StartOptions> => {
+    io.reads(node, target); return io.preview(placement);
   } }),
 }));
 
@@ -83,12 +91,39 @@ beforeEach(() => {
   client.session.setState({ status: 'signed_in', userId: 'starter' });
   io.environment.mockResolvedValue({ id: 'made', name: 'Main' });
   io.offered = options({ environments: [], environment_default: 'fresh' });
+  io.preview.mockImplementation(() => io.offered === null ? Promise.reject(new Error('No preview')) : Promise.resolve(io.offered));
   io.thread.mockResolvedValue({ id: 'thread', topic_id: 'topic', environment: { id: 'made', name: 'Main' } });
   io.topicThread.mockResolvedValue({ id: 'thread', topic_id: 'new-topic', environment: { id: 'made', name: 'Main' } });
   io.topic.mockResolvedValue({ id: 'topic', name: 'Login' });
   io.readPage.mockRejectedValue(new Error('Creation must not read or change a permission page after birth'));
 });
 afterEach(async () => { act(() => client.session.setState({ status: 'signed_out', userId: null })); await setLocale('en'); });
+
+it('checks the selected template before sending its host and template in the real creation body', async () => {
+  const ready = options({ environments: [], environment_default: 'fresh', hosts: [host('quiet', 'Quiet host')] });
+  const blocked = options({ environments: [], environment_default: 'fresh', hosts: [], providers: [provider('p1', { agents: [agent('a1', { reason: 'no_host' })] })] });
+  io.offered = blocked;
+  let complete: (answer: StartOptions) => void = () => undefined;
+  const pending = new Promise<StartOptions>((resolve) => { complete = resolve; });
+  io.preview.mockImplementation((placement) => placement?.template_id === 'alternate' ? placement.host_id === 'quiet' ? Promise.resolve(ready) : pending : Promise.resolve(blocked));
+  const user = userEvent.setup();
+  show(<NewThreadDialog parent={plan().place} open onClose={() => undefined} />);
+  await user.click(await screen.findByRole('combobox', { name: i18n.t('start.where.title') }));
+  await user.click(screen.getByRole('option', { name: i18n.t('start.where.newRow') }));
+  await user.click(await screen.findByRole('combobox', { name: i18n.t('start.where.template') }));
+  await user.click(screen.getByRole('option', { name: 'Agent ready' }));
+  await waitFor(() => expect(io.preview).toHaveBeenCalledWith({ template_id: 'alternate' }));
+  const create = screen.getByRole('button', { name: i18n.t('start.create') });
+  expect(create).toBeDisabled();
+  expect(io.thread).not.toHaveBeenCalled();
+  await act(async () => { complete(ready); await pending; });
+  await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.host') }));
+  await user.click(await screen.findByRole('option', { name: 'Quiet host' }));
+  await waitFor(() => expect(create).toBeEnabled());
+  await user.click(create);
+  await waitFor(() => expect(io.thread).toHaveBeenCalledOnce());
+  expect(io.thread.mock.calls[0]?.[1]).toMatchObject({ environment: { new: { template_id: 'alternate', host_id: 'quiet' } }, binding: { agent_id: 'a1', arrangement: 'separated' } });
+});
 
 for (const locale of ['en', 'zh-CN'] as const) {
   for (const kind of ['topic', 'project'] as const) for (const fresh of [false, true]) for (const viewers of [false, true]) {
