@@ -725,7 +725,7 @@ async fn a_session_open_installs_the_server_raw_floor_before_a_real_connector_re
         "workspace_root": data.path().display().to_string(), "instruction_root_marker": false,
         "directory": data.path().display().to_string(), "cwd": data.path().display().to_string(),
         "mounts": [], "model": "unconfigured", "effort": null, "params": {},
-        "approval_mode": "on_request", "sandbox_mode": "workspace", "instructions": "", "memory": null,
+        "approval_mode": "on_request", "web_action_wait_secs": 120, "sandbox_mode": "workspace", "instructions": "", "memory": null,
         "arrangement": "separated", "provider": { "path": "native", "provider_id": new_id() },
         "exec": { "executor": "codex-exec-server", "tool_set": null, "environment_id": new_id(), "generation": 1, "ticket": null },
         "mcp": [], "orch_tools": [], "raw_events": true, "raw_after": FLOOR

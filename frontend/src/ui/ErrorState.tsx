@@ -9,6 +9,7 @@ import { type ReactNode, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 
 import { ApiError, invitationIssuerAuthorityLost } from '@/api/client';
+import { isReadCancelled } from '@/api/reads';
 import { WhereNames } from '@/features/access/WhereField';
 import { SecondStepGate, waitsForSecondStep } from '@/features/auth/SecondStepGate';
 import type { MissingAccess } from '@/generated/api-types';
@@ -59,6 +60,7 @@ export function ErrorState({
   recovery,
   className,
 }: ErrorStateProps) {
+  if (isReadCancelled(error)) return null;
   // Verification is a workflow, not a generic retry or a second status paragraph.
   if (waitsForSecondStep(error)) return <SecondStepGate error={error} onDone={onRetry} className={className} />;
   return <FailureLine error={error} title={title} titleAs={titleAs} message={message} onRetry={onRetry} onReadback={onReadback} retrying={retrying} compact={compact} action={action} recovery={recovery} className={className} />;
@@ -140,5 +142,6 @@ export interface ErrorAlertProps {
 
 /** A request that was refused, said beside the form that made it. */
 export function ErrorAlert({ error, message, action, onReadback, className }: ErrorAlertProps) {
+  if (isReadCancelled(error)) return null;
   return <FailureLine error={error} message={message} action={action} onReadback={onReadback} compact className={className} />;
 }

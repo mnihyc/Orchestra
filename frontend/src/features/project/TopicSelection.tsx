@@ -1,4 +1,5 @@
 /** A topic selection has one frozen combined review, per-row results and one revision-guarded Undo for confirmed successes. */
+import { READ_NOW } from '@/api/freshness';
 import { useQueryClient } from '@tanstack/react-query';
 import { CircleCheck, CircleDot, RotateCcw, Search, Share2, X } from 'lucide-react';
 import { useState } from 'react';
@@ -57,7 +58,7 @@ export function TopicSelection({ selected, onClear }: { selected: readonly Topic
     setReading(row.id);
     setCheckError(null);
     try {
-      const current = await client.query({ ...topicQuery(row.id), staleTime: 0 });
+      const current = await client.query({ ...topicQuery(row.id), ...READ_NOW });
       // A write whose reply was lost may have happened: this explicit check also rereads its related lists.
       void invalidatePlaces(client, current.org_id);
       setResults((before) => before?.map((result) => result.before.id === row.id ? { ...result, observed: current } : result) ?? null);

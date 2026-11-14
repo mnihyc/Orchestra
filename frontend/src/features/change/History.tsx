@@ -87,7 +87,7 @@ export interface HistoryProps {
 export function HistoryChoices({ threadId, choices, onChange, focus = false, planned }: HistoryProps) {
   const { t, i18n } = useTranslation();
   const turns = useTurns(threadId);
-  const settings = useQuery({ ...settingsQuery(threadId), staleTime: 0 });
+  const settings = useQuery({ ...settingsQuery(threadId) });
   const summary = summaryConfigured(settings.data);
   const history = choices.history;
   const unavailable = planned?.native_import_unavailable;

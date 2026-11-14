@@ -12,6 +12,8 @@ import tailwindcss from '@tailwindcss/vite';
 import { tanstackRouter } from '@tanstack/router-plugin/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
+import { firstWavePlugin } from './build/first-wave';
+import { vocabularyPlugin } from './build/vocabulary';
 import { helpContentPlugin } from './build/help-content';
 import { releaseNoticesPlugin } from './build/release-notices';
 import { servingProxyConfig } from './build/serving-proxy';
@@ -20,8 +22,11 @@ const upstreams = servingProxyConfig(process.env);
 
 export default defineConfig({
   plugins: [
+    vocabularyPlugin(),
     helpContentPlugin(),
     releaseNoticesPlugin(),
+    // The frame is known before the verified reader selects the first vocabulary.
+    firstWavePlugin(),
     // The route tree is generated from the files under `src/routes`; every route is its own chunk.
     tanstackRouter({
       target: 'react',

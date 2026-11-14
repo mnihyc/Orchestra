@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/finder-loading.test.tsx tests/component/workbench-content-routing.test.tsx tests/unit/workbench-content-address.test.ts tests/unit/page-reads-start.test.ts tests/unit/search-org-requests.test.ts tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/catalogue.test.ts tests/unit/catalogue-usage.test.ts tests/unit/thread-timeline.test.ts
