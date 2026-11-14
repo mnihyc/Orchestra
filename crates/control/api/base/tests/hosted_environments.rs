@@ -2043,11 +2043,37 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .query(&HostRuntimeDeleteQuery {
             confirm: "another".to_owned(),
             volumes: None,
+            force: None,
         })
         .send()
         .await
         .problem();
     assert_eq!(wrong.code, ErrorCode::RequestInvalid);
+    // By force is for a provider's unit: for an environment's it is refused with its reason, and changes nothing.
+    let forced = world
+        .app
+        .call(HostRuntimeDelete, &[&t.host, &runtime])
+        .token(&t.c.admin.token)
+        .query(&HostRuntimeDeleteQuery {
+            confirm: "orch-environment-0123456789ab".to_owned(),
+            volumes: None,
+            force: Some(true),
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(forced.code, ErrorCode::PlanBlocked);
+    assert_eq!(
+        forced
+            .extra
+            .get("reason")
+            .and_then(|reason| reason.as_str()),
+        Some("force_environment")
+    );
+    assert_eq!(
+        forced.extra.get("can_force"),
+        Some(&serde_json::Value::Bool(false))
+    );
     world
         .app
         .call(HostRuntimeDelete, &[&t.host, &runtime])
@@ -2055,6 +2081,7 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .query(&HostRuntimeDeleteQuery {
             confirm: "orch-environment-0123456789ab".to_owned(),
             volumes: None,
+            force: None,
         })
         .send()
         .await

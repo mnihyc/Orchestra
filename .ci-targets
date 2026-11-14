@@ -1,0 +1,8 @@
+fmt
+clippy
+contracts
+test -p orch-engine --test provider_runtime --test provider_updates
+test -p orch-api-core --test provider_managed
+web typecheck
+web lint
+web test -- tests/component/provider-runtime-force.test.tsx tests/component/host-runtime-force.test.tsx tests/unit/api-error-words.test.ts

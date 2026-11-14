@@ -118,6 +118,7 @@ pub mod preparation;
 pub mod programs;
 pub mod projections;
 pub mod provider_fact_reads;
+mod provider_force;
 pub mod provider_policy;
 pub mod provider_recovery;
 pub mod provider_runtime;

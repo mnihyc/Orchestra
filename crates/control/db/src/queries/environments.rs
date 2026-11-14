@@ -1731,6 +1731,31 @@ pub mod hosting {
         Ok(())
     }
 
+    /// Whether the host said, the last time it spoke of this runtime, that it holds no unit for it: a unit
+    /// that is stopped and missing is made again by the next start, not started.
+    pub async fn unit_missing(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT COALESCE(loss_missing, false) FROM runtimes WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(conn)
+        .await?
+        .unwrap_or(false))
+    }
+
+    /// Writes down whether the host holds no unit for this runtime: it said so in what it reported, or it answered
+    /// the stop of the unit with "no such unit".
+    pub async fn set_unit_missing(conn: &mut Conn, id: Id, missing: bool) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE runtimes SET loss_missing = $2 WHERE id = $1 AND loss_missing IS DISTINCT FROM $2",
+        )
+        .bind(id)
+        .bind(missing)
+        .execute(conn)
+        .await?;
+        Ok(())
+    }
+
     /// Retires a runtime: replaced, or its environment removed, and waiting for the reaper from `at`.
     pub async fn retire_runtime(
         conn: &mut Conn,
