@@ -28,8 +28,8 @@ it('opens the side conversation and its metadata without borrowing the parent dr
   expect(opening.draft).toBeNull();
   expect(opening.parameters).not.toBeNull();
   expect(opening.gateway).toMatchObject({ status: 'ready', data: { thread_id: side, state: 'unknown' } });
-  expect(opening.outline.entries.some((entry) => entry.title === 'Which tests cover the redirect?')).toBe(true);
-  expect(opening.outline.entries.every((entry) => opening.sync.items.some((item) => item.id === entry.item_id))).toBe(true);
+  expect(opening).not.toHaveProperty('outline');
+  expect(opening).not.toHaveProperty('settings');
 });
 
 it('checks the parent view before opening and projects each viewer’s actual access', async () => {

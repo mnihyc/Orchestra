@@ -26,10 +26,7 @@ export function snapshot(scope: ThreadContinuationProjection | null = projection
 }
 
 export function opening(sync: ThreadSync): ThreadOpening {
-  return { sync, draft: null, parameters: null, limits: null, settings: [],
-    outline: { entries: [], next_before: null, seq: sync.seq,
-      ...(sync.projection === undefined ? {} : { projection: sync.projection }) },
-  };
+  return { sync, draft: null, parameters: null, limits: null };
 }
 
 export function answer(id: string, text: string, owner = A, seq = 10): Item {

@@ -526,7 +526,12 @@ async fn seen(
     else {
         return Ok(None);
     };
-    let object = match machine.host_id {
+    // A host's node and a unit that a host runs are named by that host; a person's own machine has a page.
+    let named_by = match machine.host_id {
+        Some(host) => Some(host),
+        None => orch_db::queries::resources::hosting::host_running(conn, machine_id).await?,
+    };
+    let object = match named_by {
         Some(host) => ObjectRef {
             kind: ResourceKind::Host.into(),
             id: host,

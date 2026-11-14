@@ -1,0 +1,4 @@
+test -p orch-api-core --test thread_opening_scopes --test everything_resources --test everything_operation_scopes
+web typecheck
+web lint
+web test -- tests/component/thread-audience-banner.test.tsx tests/component/side-version-navigation.test.tsx tests/component/composer-keys.test.tsx tests/component/resource-sections.test.tsx tests/component/model-picker-rows.test.tsx tests/component/goal-mode.test.tsx tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts
