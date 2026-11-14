@@ -114,10 +114,21 @@ section! {
     System {
         /// What the system calls itself.
         name: String = s("Orch"),
-        /// The origin a browser opens; used in links and mail.
+        /// First seed of the stored primary browser origin; later edits use Management or the local reset command.
         public_url: String = s("https://orch.example.com"),
-        /// Other browser origins of this installation, including literal IPs only when declared.
+        /// First seed of the stored alternate browser origins, including explicitly declared literal IPs.
         alternate_urls: Vec<String> = Vec::new(),
+    }
+}
+
+impl System {
+    /// File configuration is only the first seed of the installation's committed address snapshot.
+    #[must_use]
+    pub fn address_seed(&self) -> orch_api_contract::public_addresses::PublicAddresses {
+        orch_api_contract::public_addresses::PublicAddresses {
+            public_url: self.public_url.clone(),
+            alternate_urls: self.alternate_urls.clone(),
+        }
     }
 }
 
@@ -365,6 +376,9 @@ section! {
         dead_after_secs: u64 = 60,
         /// The largest frame.
         max_frame_bytes: u64 = 262_144,
+        /// The largest message of any kind, in bytes: one over a frame travels in parts that the
+        /// receiver puts together, and one over this is refused by its sender, who is told.
+        max_message_bytes: u64 = 16_777_216,
         /// How much of a tunnel may be on its way unacknowledged.
         tunnel_window_bytes: u64 = 1_048_576,
         /// How long a tunnel whose session dropped may be taken up again.
@@ -531,7 +545,7 @@ section! {
         live_helper_image: Option<String> = None,
         /// Static orch-node binary; when unset the running node executable is used if it is static.
         live_helper_binary: Option<std::path::PathBuf> = None,
-        /// Preloaded image for native build checks; empty uses the release's environment base image.
+        /// Trusted preloaded image for native checks; absent prepares the release's environment base recipe.
         conformance_image: Option<String> = None,
         /// The Docker daemon's socket.
         socket: String = s("/var/run/docker.sock"),
@@ -852,40 +866,8 @@ impl Validate for ServerConfig {
         if self.version != 1 {
             return Err(invalid("version", "this build reads version 1"));
         }
-        for (key, address) in std::iter::once(("system.public_url", &self.system.public_url)).chain(
-            self.system
-                .alternate_urls
-                .iter()
-                .map(|url| ("system.alternate_urls", url)),
-        ) {
-            if key == "system.public_url" && address.is_empty() {
-                continue;
-            }
-            let message = "must be an HTTP(S) origin without credentials, path, query or fragment";
-            let url = address
-                .parse::<http::Uri>()
-                .map_err(|_| invalid(key, message))?;
-            if !matches!(url.scheme_str(), Some("http" | "https"))
-                || url.host().is_none_or(str::is_empty)
-                || url.authority().is_some_and(|authority| {
-                    let suffix = authority
-                        .as_str()
-                        .strip_prefix(authority.host())
-                        .unwrap_or("");
-                    authority.as_str().contains('@')
-                        || authority.port_u16() == Some(0)
-                        || !suffix.is_empty()
-                            && suffix
-                                .strip_prefix(':')
-                                .is_none_or(|port| port.parse::<u16>().is_err())
-                })
-                || !matches!(url.path(), "" | "/")
-                || url.query().is_some()
-                || address.contains(['#', '\\', '%'])
-            {
-                return Err(invalid(key, message));
-            }
-        }
+        // Browser addresses are validated at first database seeding or explicit local reset.
+        // An unused file seed must not veto an installation's committed address on restart.
         for component in [
             RuntimeComponent::Api,
             RuntimeComponent::Gateway,
@@ -983,6 +965,15 @@ impl Validate for ServerConfig {
                 "link.dead_after_secs",
                 "must be longer than link.heartbeat_secs",
             ));
+        }
+        if self.link.max_message_bytes < self.link.max_frame_bytes {
+            return Err(invalid(
+                "link.max_message_bytes",
+                "must be at least link.max_frame_bytes",
+            ));
+        }
+        if u32::try_from(self.link.max_message_bytes).is_err() {
+            return Err(invalid("link.max_message_bytes", "must be less than 4 GiB"));
         }
 
         if !matches!(self.log.format.as_str(), "text" | "json") {
@@ -1173,7 +1164,7 @@ mod plugin_tests {
             "http://192.0.2.15:8080".to_owned(),
             "https://[2001:db8::15]/".to_owned(),
         ];
-        assert!(config.validate().is_ok());
+        assert!(config.system.address_seed().validated().is_ok());
         for invalid in [
             "inside.example.test",
             "wss://inside.example.test/link",
@@ -1188,10 +1179,20 @@ mod plugin_tests {
             "https://[2001:db8::15]:99999",
         ] {
             config.system.alternate_urls = vec![invalid.to_owned()];
-            assert!(config.validate().is_err(), "{invalid}");
+            assert!(
+                config.system.address_seed().validated().is_err(),
+                "{invalid}"
+            );
+            assert!(
+                config.validate().is_ok(),
+                "an unused seed is admitted only by the database initializer"
+            );
             config.system.alternate_urls.clear();
             config.system.public_url = invalid.to_owned();
-            assert!(config.validate().is_err(), "public {invalid}");
+            assert!(
+                config.system.address_seed().validated().is_err(),
+                "public {invalid}"
+            );
             config.system.public_url = ServerConfig::default().system.public_url;
         }
         let loaded = crate::loader::load_text::<ServerConfig>(

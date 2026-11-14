@@ -1,0 +1,11 @@
+fmt
+clippy
+contracts
+test -p orch-config --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test accounts --test certificates
+test -p orchctl --test admin --test doctor --test kfix_deploy
+web typecheck
+web lint
+web test -- tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts

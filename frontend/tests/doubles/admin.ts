@@ -926,7 +926,7 @@ export class AdminWorld implements Part {
     const systemWhenFull = this.settingValue('hosts.when_full') === 'block' ? 'block' : 'warn';
     const ada = this.world.people.get('ada');
     const vera = this.world.people.get('vera');
-    const host = (n: number, name: string, memory: number, declared: number, more: Partial<Host> = {}): Host => ({ ...unjudgedProvenance(),
+    const host = (n: number, name: string, memory: number, declared: number, more: Partial<Host> = {}): Host => ({ bundled_with_server: false, ...unjudgedProvenance(),
       access: { admin_only: [], participating: false, administers: true, permissions: [], through: [] },
       address: name,
       capacity: { cpu_millis: 16_000, disk_gb: 500, memory_mb: memory },

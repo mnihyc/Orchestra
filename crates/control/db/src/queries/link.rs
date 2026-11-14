@@ -477,6 +477,29 @@ pub async fn finish_command(
     Ok(changed.is_some())
 }
 
+/// The command that holds `command` up: the oldest other command, with the same machine and the same serial
+/// key, that the machine has taken and not answered and that was made before it. Its kind, and when it was
+/// made. None for a command without a key, one the machine has not taken yet (it waits for the machine, not
+/// for other work), and one that is over.
+pub async fn held_up_by(
+    conn: &mut Conn,
+    command: Id,
+) -> Result<Option<(String, DateTime<Utc>)>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT ahead.kind, ahead.created_at
+           FROM commands me
+           JOIN commands ahead ON ahead.machine_id = me.machine_id AND ahead.serial_key = me.serial_key
+          WHERE me.id = $1 AND me.serial_key IS NOT NULL AND me.state = 'accepted'
+            AND ahead.id <> me.id AND ahead.state = 'accepted'
+            AND (ahead.created_at, ahead.id) < (me.created_at, me.id)
+          ORDER BY ahead.created_at, ahead.id
+          LIMIT 1",
+    )
+    .bind(command)
+    .fetch_optional(conn)
+    .await?)
+}
+
 /// Expires the commands that no machine took before their deadline, on any
 /// machine, and returns them. A command the machine has written down stays
 /// open: the machine owes an answer. The commands in `followed` are left to

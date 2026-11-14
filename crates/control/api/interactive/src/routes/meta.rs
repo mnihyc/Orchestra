@@ -97,9 +97,27 @@ pub fn mount(registry: &mut Registry) {
     registry
         .on_raw(HealthGet, health)
         .on(MetaGet, meta)
+        .on(
+            orch_api_contract::public_addresses::PublicAddressProofGet,
+            public_address_proof,
+        )
         .on(SetupCreate, setup);
 }
 orch_api_base::__api_bind_2af41ef4f9!();
+
+async fn public_address_proof(
+    ctx: Ctx,
+    query: orch_api_contract::public_addresses::PublicAddressProofQuery,
+    (): (),
+) -> ApiResult<Answer<orch_api_contract::public_addresses::PublicAddressProof>> {
+    let proof = ctx
+        .app
+        .link
+        .certificates()
+        .public_address_proof(query.challenge)
+        .map_err(ApiError::internal)?;
+    Ok(Answer::from(proof).header(http::header::CACHE_CONTROL, "no-store"))
+}
 
 async fn healthy(app: &App) -> bool {
     let Ok(mut conn) = app.db.acquire().await else {
@@ -191,12 +209,19 @@ pub(crate) async fn on_connection(
     // signed in may not, and a token that does not hold is nobody here, as anywhere public.
     let may_create_org = caller.is_some_and(|caller| may_make_org(policy.org_creation, caller));
     let build = ctx.app.build;
+    let addresses = orch_db::queries::public_addresses::read(
+        conn,
+        &ctx.app.config.system.address_seed(),
+        ctx.now,
+    )
+    .await?
+    .addresses;
     Ok(Meta {
         name: ctx.app.config.system.name.clone(),
         version: build.version.to_owned(),
         build: build.build_number.to_owned(),
-        public_url: ctx.app.config.system.public_url.clone(),
-        alternate_urls: ctx.app.config.system.alternate_urls.clone(),
+        public_url: addresses.public_url,
+        alternate_urls: addresses.alternate_urls,
         needs_setup,
         registration_mode: policy.registration,
         org_creation: policy.org_creation,
