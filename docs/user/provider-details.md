@@ -38,6 +38,21 @@ Anthropic Messages uses `speed: "fast"`, with any required beta header in the en
 headers. Compatible Gemini, DeepSeek and other endpoints use their documented fields;
 choosing a format does not grant a model a speed it does not offer.
 
+Gemini's [OpenAI-compatible API](https://ai.google.dev/gemini-api/docs/openai)
+uses **openai-chat**. Its documented Priority and Flex tiers use the IDs `priority`
+and `flex`; enable the tiers the model offers and choose its default in the same
+model form. Effort uses `reasoning_effort`. Gemini-specific options, such as
+`extra_body.google.cached_content`, use the same nested request-option rules,
+defaults and per-use form as any other declared option.
+
+DeepSeek's [Chat Completions API](https://api-docs.deepseek.com/api/create-chat-completion/)
+also uses **openai-chat**. Its documented effort and `thinking.type` options can
+have model defaults and per-use overrides. Its API does not declare an inference
+tier selector: a model rule with `service_tier: false` leaves that field out.
+There is no need to invent a Fast tier. New documented fields use the existing
+request-option schema and its `default` values; endpoint defaults, model defaults
+and explicit use choices keep the same precedence for every provider.
+
 In a provider's Settings, open **Where its details come from**. Facts
 and Models have their own choices. **Default** explains the actual
 reader: the native adapter for a sign-in, the known OpenRouter or
@@ -136,10 +151,18 @@ require resetting choices that its new entry does not open.
 
 Codex's **Access** choice also works on a forwarded API endpoint when the
 interface supports it and a provider manager enabled the program for the model.
-Choose it in the composer's **Model and effort** dialog. The choice applies to
+Choose it from the composer's **Access** control, which stands beside **Model** and **Effort** where the model has a program switched on. The choice applies to
 the next turn and stays with that turn's lease across retries and restarts.
 Ordinary access adds no program selector to a Responses request. Programs merely
 reported by the provider remain unavailable until a manager enables them.
+
+A speed, an access program or a context size that a manager switched on for the
+model, and that the thread cannot use, still has its control, shown off. It
+says why in a few words: the agent does not offer it, the credential does not
+stay with the provider, the environment or the provider is of the other kind, the
+provider's rule for the model leaves it out, or the **Agent features** setting
+has its feature off. Where you may lift the reason, the control also offers the
+act that does, such as **Switch on in Agent features**.
 
 ## Confirmed values
 
@@ -183,7 +206,12 @@ safe **Could not refresh · Retry** line. A failed details query does
 not turn a working model credential into an authorization failure.
 
 **Refresh** reads facts and model offers now. New models are suggestions
-for a manager to enable; nothing is silently switched on. Orch also
+for a manager to add. Adding one switches on what it offers (its efforts, its
+context sizes, speeds and access programs), as the organization's **Switched on
+when added** setting says: everything it offers, only efforts and context, or
+only its window and efforts. A model with no window of its own takes the largest
+context its source reports, and the model editor marks the window as required
+where neither the catalogue nor the endpoint reports one. Orch also
 reads a minute after a vendor-reported reset. Its compact provider
 caption uses the binding windows, else a first reported balance, else
 a first spend row. Without permitted facts it cannot invent room.
@@ -192,7 +220,7 @@ In **Models → Edit options… → Model report**, read the endpoint's reported
 input and output windows, capability support, model line and retirement
 schedule. A scheduled date is not a statement that a model has retired.
 Missing facts stay absent, and a new report does not switch on search,
-larger contexts or other paid options. Saving the model keeps these facts
+larger contexts or other paid options for a model that is already saved. Saving the model keeps these facts
 separate from the options a manager enabled.
 
 ## Program exits
