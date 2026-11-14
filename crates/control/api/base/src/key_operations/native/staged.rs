@@ -115,6 +115,9 @@ async fn prepare<F: Selected>(ctx: Ctx, query: F::Query) -> ApiResult<Frame<F::V
             "changing native work requires its effect boundary",
         ));
     }
+    // An in-process reader must retain and check this stage's actual source, including genuine
+    // exhaustion. Staged reads do not enter a renderer that would otherwise perform this check.
+    crate::ask::tools::check_plan(&current, &mut tx, &plan).await?;
     let preliminary = plan
         .preparation_principal(&current, &mut tx, &identity.caller)
         .await?;

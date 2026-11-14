@@ -169,7 +169,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "ask.max_output_tokens",
     "title": "Ask answer tokens",
-    "description": "The most output tokens per Ask model request, also reserved before fitting conversation context. The lowest system or organization value applies.",
+    "description": "The most output tokens per Ask model request. The request is fitted to the window less this, and an answer takes half of the window at most. The lowest system or organization value applies.",
     "group": "automation",
     "schema": {
       "type": "integer",
@@ -193,7 +193,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "ask.context_tokens",
     "title": "Ask context tokens",
-    "description": "Unset uses the chosen model's context window. When set, the smaller value applies to Ask only; output and tool-result reserves must still fit. The lowest system or organization value applies.",
+    "description": "Unset uses the chosen model's context window; a model that states none is not given a small one. When set, the smaller value applies to Ask only. A window no larger than twice the answer tokens leaves the answer half of it. The lowest system or organization value applies.",
     "group": "automation",
     "schema": {
       "type": "integer",
@@ -239,14 +239,13 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
-    "key": "ask.tool_bytes",
-    "title": "Ask source size",
-    "description": "The most bytes from one read result supplied to the model, with a canonical link to the full source.",
+    "key": "ask.docs_hits",
+    "title": "Ask guide pages per search",
+    "description": "The most guide pages one Ask search of the help gives the model, English and Chinese alternating where both match.",
     "group": "automation",
     "schema": {
       "type": "integer",
-      "minimum": 1,
-      "x-unit": "bytes"
+      "minimum": 1
     },
     "class": "policy",
     "scopes": [
@@ -254,24 +253,23 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "org"
     ],
     "merge": "min",
-    "default": 65536,
-    "example": 65536,
-    "text_key": "day100.builtin.ask.tool_bytes",
+    "default": 5,
+    "example": 8,
+    "text_key": "day100.builtin.ask.docs_hits",
     "keywords": [],
     "display": {
-      "unit": "bytes",
+      "unit": "raw",
       "zero": null
     }
   },
   {
-    "key": "ask.turn_tool_bytes",
-    "title": "Ask sources per turn",
-    "description": "The total read-result bytes supplied while answering one question.",
+    "key": "ask.docs_excerpt_tokens",
+    "title": "Ask guide excerpt size",
+    "description": "The most tokens of one guide page that Ask's help search gives the model; the page's link comes with it.",
     "group": "automation",
     "schema": {
       "type": "integer",
-      "minimum": 1,
-      "x-unit": "bytes"
+      "minimum": 1
     },
     "class": "policy",
     "scopes": [
@@ -279,12 +277,60 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "org"
     ],
     "merge": "min",
-    "default": 262144,
-    "example": 262144,
-    "text_key": "day100.builtin.ask.turn_tool_bytes",
+    "default": 1000,
+    "example": 2000,
+    "text_key": "day100.builtin.ask.docs_excerpt_tokens",
     "keywords": [],
     "display": {
-      "unit": "bytes",
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "ask.max_operations",
+    "title": "Ask operations per search",
+    "description": "The most read operations one Ask search of the read catalogue returns.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "min",
+    "default": 20,
+    "example": 40,
+    "text_key": "day100.builtin.ask.max_operations",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "ask.max_links",
+    "title": "Ask links per source",
+    "description": "The most canonical source links Ask keeps from one read.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "min",
+    "default": 50,
+    "example": 100,
+    "text_key": "day100.builtin.ask.max_links",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
       "zero": null
     }
   },

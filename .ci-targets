@@ -1,0 +1,8 @@
+fmt
+clippy
+contracts
+test -p orch-api-base --lib
+test -p orch-api-core --test ask --test thread_access
+web typecheck
+web lint
+web test -- tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/help-summaries.test.ts tests/component/settings-required-members.test.tsx

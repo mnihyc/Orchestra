@@ -3,15 +3,50 @@
 use super::*;
 
 use serde::de::DeserializeOwned;
+use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Projection {
     DocumentAfter { version: i64 },
+    DocumentBlock { block: Id },
 }
 
 impl Projection {
     pub(super) fn apply(&self, data: &mut Json) -> ApiResult<()> {
         match self {
+            Self::DocumentBlock { block } => {
+                let rows = data
+                    .get_mut("blocks")
+                    .and_then(Json::as_array_mut)
+                    .ok_or_else(|| ApiError::internal("the document reader returned no blocks"))?;
+                let identity = |row: &Json| {
+                    row.get("id")
+                        .and_then(Json::as_str)
+                        .and_then(|id| id.parse::<Id>().ok())
+                };
+                if !rows.iter().any(|row| identity(row) == Some(*block)) {
+                    return Err(ApiError::not_found());
+                }
+                let mut children: HashMap<Id, Vec<Id>> = HashMap::new();
+                for row in rows.iter() {
+                    if let (Some(id), Some(parent)) = (
+                        identity(row),
+                        row.get("parent_id")
+                            .and_then(Json::as_str)
+                            .and_then(|id| id.parse::<Id>().ok()),
+                    ) {
+                        children.entry(parent).or_default().push(id);
+                    }
+                }
+                let mut kept = std::collections::HashSet::new();
+                let mut pending = vec![*block];
+                while let Some(id) = pending.pop() {
+                    if kept.insert(id) {
+                        pending.extend(children.remove(&id).unwrap_or_default());
+                    }
+                }
+                rows.retain(|row| identity(row).is_some_and(|id| kept.contains(&id)));
+            }
             Self::DocumentAfter { version } => {
                 let rows = data
                     .get_mut("items")
@@ -184,6 +219,30 @@ pub(super) fn history(
 pub mod tests {
 
     use super::*;
+
+    #[test]
+    fn a_selected_document_block_keeps_descendants_and_excludes_neighbouring_text() -> ApiResult<()>
+    {
+        let (selected, child, grandchild, neighbour) = (new_id(), new_id(), new_id(), new_id());
+        let mut data = json!({"blocks":[
+            {"id":grandchild,"parent_id":child,"text":"Deep selected text"},
+            {"id":neighbour,"parent_id":null,"text":"Unrelated neighbouring text"},
+            {"id":selected,"parent_id":null,"text":"Selected text"},
+            {"id":child,"parent_id":selected,"text":"Selected child text"}
+        ]});
+        Projection::DocumentBlock { block: selected }.apply(&mut data)?;
+        assert_eq!(data["blocks"].as_array().map(Vec::len), Some(3));
+        assert!(!data.to_string().contains("Unrelated neighbouring text"));
+        assert!(data.to_string().contains("Deep selected text"));
+        assert!(
+            Projection::DocumentBlock { block: neighbour }
+                .apply(&mut data)
+                .is_err(),
+            "a selector absent from this document never falls back to unrelated content"
+        );
+        Ok(())
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn list_filters_retain_the_native_query_and_cannot_change_the_list_kind() -> ApiResult<()> {
         // EN: Ask > list documents with one row > continue its native cursor.

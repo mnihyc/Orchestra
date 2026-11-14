@@ -146,7 +146,16 @@ it('keeps an authorization draft on a refused save and on a newer provider until
   await waitFor(() => expect(refused).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(screen.getByRole('button',{name:'Save sources'})).toBeEnabled());
   expect(facts.getByLabelText('Authorization value')).toHaveValue('keep-this-draft');
-  const newer=structuredClone(initial);newer.revision+=1;
+  // The provider's revision moves whenever its state or figures are read again: that is no edit of its sources,
+  // so the draft stays, nothing is warned of, and the form can still be saved.
+  const refreshed=structuredClone(initial);refreshed.revision+=1;
+  view.rerender(<SourcesForm provider={refreshed} {...props} />);
+  expect(screen.queryByText(/This provider changed while you were editing/)).toBeNull();
+  expect(screen.getByRole('button',{name:'Save sources'})).toBeEnabled();
+  expect(facts.getByLabelText('Authorization value')).toHaveValue('keep-this-draft');
+  // Somebody else saving other sources under the draft is the conflict.
+  const newer=structuredClone(refreshed);newer.revision+=1;
+  newer.sources.models={...newer.sources.models,by:'program' as const,name:'acme'};
   view.rerender(<SourcesForm provider={newer} {...props} />);
   expect(screen.getByText(/This provider changed while you were editing/)).toBeVisible();
   expect(screen.getByRole('button',{name:'Save sources'})).toBeDisabled();

@@ -33,6 +33,16 @@ fn failed(error: impl std::fmt::Display) -> EngineError {
     EngineError::unreadable(error)
 }
 
+fn refused(error: ApiError) -> EngineError {
+    match error.problem.extra.get("reason").and_then(Json::as_str) {
+        Some(reason) => EngineError::AskRefused {
+            reason: reason.to_owned(),
+            message: error.problem.detail.clone(),
+        },
+        None => failed(&error.problem.detail),
+    }
+}
+
 pub(super) fn prepare<'a>(
     ctx: &'a Ctx,
     conn: &'a mut Conn,
@@ -69,7 +79,9 @@ pub(super) fn prepare<'a>(
 fn model_error(error: orch_engine::ask::model::Error) -> ApiError {
     match error {
         orch_engine::ask::model::Error::Db(error) => error.into(),
-        orch_engine::ask::model::Error::Denied(message) => denied(message),
+        orch_engine::ask::model::Error::Denied(refusal) => {
+            denied_because(refusal.reason, refusal.message)
+        }
         orch_engine::ask::model::Error::Native(error) => ApiError::internal(error),
     }
 }
@@ -82,39 +94,46 @@ async fn choose(
     wanted: Option<api::AskModel>,
     current_turn: Option<Id>,
 ) -> ApiResult<Chosen> {
-    let choices = super::models::resolve(conn, principal, root).await?;
-    if let Some(reason) = choices.blocked_reason {
-        return Err(super::models::blocked(reason));
-    }
-    let model = wanted
-        .or_else(|| choices.default_model.map(Into::into))
-        .ok_or_else(|| super::models::blocked(api::AskModelsBlockedReason::NoUsableModels))?;
-    let configured: Vec<_> = choices
-        .models
-        .iter()
-        .filter(|choice| {
-            choice.selection.provider_id == model.provider_id
-                && choice.selection.model == model.model
-        })
-        .collect();
-    if configured.is_empty() {
-        return Err(ApiError::invalid(
-            "model",
-            "Choose an entry from this root organization's ask.models list",
-        ));
-    }
-    if !configured.iter().any(|choice| choice.model.is_some()) {
-        return Err(ApiError::invalid(
-            "model",
-            "The configured Ask model is unavailable to you",
-        ));
-    }
-    if !configured.iter().any(|choice| choice.allowed) {
-        return Err(ApiError::invalid(
-            "model",
-            "This identity is not usable in ask.models",
-        ));
-    }
+    let model = if current_turn.is_some() {
+        // An admitted turn already has an explicit model. Its current native selection gives the precise
+        // reason if policy, provider Use or availability changed; a picker-wide failure would hide it.
+        wanted.ok_or_else(|| ApiError::internal("The running Ask model is absent"))?
+    } else {
+        let choices = super::models::resolve(conn, principal, root).await?;
+        if let Some(reason) = choices.blocked_reason {
+            return Err(super::models::blocked(reason));
+        }
+        let model = wanted
+            .or_else(|| choices.default_model.map(Into::into))
+            .ok_or_else(|| super::models::blocked(api::AskModelsBlockedReason::NoUsableModels))?;
+        let configured: Vec<_> = choices
+            .models
+            .iter()
+            .filter(|choice| {
+                choice.selection.provider_id == model.provider_id
+                    && choice.selection.model == model.model
+            })
+            .collect();
+        if configured.is_empty() {
+            return Err(ApiError::invalid(
+                "model",
+                "This model is not on this organization's Ask list. Choose one of the listed models.",
+            ));
+        }
+        if !configured.iter().any(|choice| choice.model.is_some()) {
+            return Err(ApiError::invalid(
+                "model",
+                "The configured Ask model is unavailable to you",
+            ));
+        }
+        if !configured.iter().any(|choice| choice.allowed) {
+            return Err(ApiError::invalid(
+                "model",
+                "Your access to this provider does not cover this model's default options. Choose another model.",
+            ));
+        }
+        model
+    };
     let selected = Box::pin(orch_engine::ask::model::select(
         conn,
         principal,
@@ -145,7 +164,10 @@ async fn choose(
         .await
         .map_err(ApiError::internal)?
     {
-        return Err(denied("An Ask usage cap has been reached"));
+        return Err(denied_because(
+            "cap_reached",
+            "A usage limit for Ask has been reached. Try again after it resets, or ask an administrator.",
+        ));
     }
     selected.online(conn).await.map_err(model_error)
 }
@@ -281,11 +303,21 @@ pub(super) async fn accept_in(
             "Stop the current turn or start a new conversation",
         ));
     }
+    // A page that belongs to no organization (Management, Settings, the inbox) is context only and
+    // agrees with the conversation's organization; only a page inside another one disagrees.
     if let Some(context) = body.context.as_deref()
-        && root_of_context(ctx, &mut *conn, &principal, Some(context), None).await?
+        && root_of_context(
+            ctx,
+            &mut *conn,
+            &principal,
+            Some(context),
+            Some(row.root_org_id),
+        )
+        .await?
             != row.root_org_id
     {
-        return Err(denied(
+        return Err(denied_because(
+            "other_organization",
             "This page belongs to another organization. Ask in that organization.",
         ));
     }
@@ -501,6 +533,8 @@ pub(super) async fn accept_in(
         calls: tokio::sync::Mutex::new(HashMap::new()),
         citations: tokio::sync::Mutex::new(Vec::new()),
         portable_history: std::sync::atomic::AtomicBool::new(false),
+        learned_window: std::sync::atomic::AtomicI64::new(0),
+        reduced_output: std::sync::atomic::AtomicI64::new(0),
         opaque_inputs: tokio::sync::Mutex::new(HashMap::new()),
         page_context: tokio::sync::Mutex::new(None),
     });
@@ -558,6 +592,11 @@ struct Host {
     calls: tokio::sync::Mutex<HashMap<Id, Id>>,
     compactions: tokio::sync::Mutex<HashMap<Id, context::Pending>>,
     portable_history: std::sync::atomic::AtomicBool,
+    /// The window, in tokens, that a provider's refusal of a request as too long showed to be too large; zero
+    /// while none has. It bounds this turn's requests below the model's stated window.
+    learned_window: std::sync::atomic::AtomicI64,
+    /// A combined input/output refusal first reduces the requested answer, never the readable input.
+    reduced_output: std::sync::atomic::AtomicI64,
     opaque_inputs: tokio::sync::Mutex<HashMap<Id, bool>>,
     page_context: tokio::sync::Mutex<Option<Json>>,
 }
@@ -628,9 +667,6 @@ async fn run(
     let limits = Limits {
         steps: u32::try_from(get("ask.max_steps", 16).await?).map_err(failed)?,
         tools: u32::try_from(get("ask.max_tools", 32).await?).map_err(failed)?,
-        tool_bytes: usize::try_from(get("ask.tool_bytes", 65536).await?).map_err(failed)?,
-        turn_tool_bytes: usize::try_from(get("ask.turn_tool_bytes", 262144).await?)
-            .map_err(failed)?,
     };
     let input = GenerationInput {
         system: format!(
@@ -667,12 +703,19 @@ async fn finish(
     let error = result.as_ref().err().map(|error| {
         let (code, model) = match error {
             EngineError::AskContextTooLong(model) => ("ask_context_too_long", Some(model.as_str())),
-            EngineError::AskContextNoRoom => ("ask_context_no_room", None),
+            EngineError::AskTurnTooLong(model) => ("ask_turn_too_long", Some(model.as_str())),
             _ => ("ask_unavailable", None),
         };
-        let mut failure = json!({"code":code,"message":error.to_string()});
+        // A turn's error always says whether trying again may help: a turn whose stored error lacked the
+        // member could not be read again, and its conversation failed to open from then on.
+        let mut failure =
+            json!({"code":code,"message":error.to_string(),"retryable":code == "ask_unavailable"});
         if let Some(model) = model {
             failure["model"] = json!(model);
+        }
+        if let EngineError::AskRefused { reason, .. } = error {
+            failure["code"] = json!(format!("ask.{reason}"));
+            failure["retryable"] = json!(false);
         }
         failure
     });
@@ -734,7 +777,7 @@ impl TurnHost for Host {
         let principal = guard.principal().ordinary(&mut tx).await?;
         let row = super::program::opening(ctx, &mut tx, &principal, self.thread, true)
             .await
-            .map_err(failed)?;
+            .map_err(refused)?;
         if row.root_org_id != self.origin.root {
             return Err(failed("The conversation's governing root changed"));
         }
@@ -759,7 +802,7 @@ impl TurnHost for Host {
             Some(self.turn),
         )
         .await
-        .map_err(failed)?;
+        .map_err(refused)?;
         if current.machine != command.machine
             || current.protocol != request.protocol
             || current.model.params != request.params
@@ -774,15 +817,13 @@ impl TurnHost for Host {
             self.origin.root,
             &current.parameters,
             &current.model.model,
+            self.learned_window
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.reduced_output
+                .load(std::sync::atomic::Ordering::Relaxed),
         )
         .await?;
-        let summarizing = self.compactions.lock().await.contains_key(&command.id);
-        let fits = if summarizing {
-            budget.fits_summary(&request.input)?
-        } else {
-            budget.fits(&request.input)?
-        };
-        if request.input.max_output_tokens > budget.output || !fits {
+        if request.input.max_output_tokens > budget.output || !budget.fits(&request.input)? {
             return Err(EngineError::AskContextTooLong(request.model_name.clone()));
         }
         if row.payer_id != Some(current.payer) {
@@ -856,7 +897,7 @@ impl TurnHost for Host {
             .source
             .operation_principal(&mut conn)
             .await
-            .map_err(failed)?
+            .map_err(refused)?
             .ordinary(&mut conn)
             .await?;
         let row = super::program::opening(
@@ -867,7 +908,7 @@ impl TurnHost for Host {
             false,
         )
         .await
-        .map_err(failed)?;
+        .map_err(refused)?;
         if row.root_org_id != self.origin.root {
             return Err(failed("The conversation's governing root changed"));
         }
@@ -888,7 +929,7 @@ impl TurnHost for Host {
         let principal = ctx
             .operation_principal(&mut conn)
             .await
-            .map_err(failed)?
+            .map_err(refused)?
             .ordinary(&mut conn)
             .await?;
         let chosen = choose(
@@ -900,19 +941,12 @@ impl TurnHost for Host {
             Some(self.turn),
         )
         .await
-        .map_err(failed)?;
+        .map_err(refused)?;
         if chosen.protocol != self.protocol {
             return Err(failed(
                 "The dialogue interface changed. Retry the question under its current model.",
             ));
         }
-        context::budget(
-            &mut conn,
-            self.origin.root,
-            &chosen.parameters,
-            &chosen.model.model,
-        )
-        .await?;
         drop(conn);
         ctx.app
             .engine
@@ -923,7 +957,7 @@ impl TurnHost for Host {
         let principal = ctx
             .operation_principal(&mut conn)
             .await
-            .map_err(failed)?
+            .map_err(refused)?
             .ordinary(&mut conn)
             .await?;
         let current = choose(
@@ -935,7 +969,7 @@ impl TurnHost for Host {
             Some(self.turn),
         )
         .await
-        .map_err(failed)?;
+        .map_err(refused)?;
         if current.machine != chosen.machine || current.protocol != chosen.protocol {
             return Err(failed(
                 "The provider location changed before this request started. Retry the question.",
@@ -1035,14 +1069,19 @@ impl TurnHost for Host {
                 }
             }
         }
-        let tool_limit = usize::try_from(
-            setting::<i64>(&mut conn, Place::Node(self.origin.root), "ask.tool_bytes")
-                .await?
-                .unwrap_or(65536),
+        let budget = context::budget(
+            &mut conn,
+            self.origin.root,
+            &chosen.parameters,
+            &chosen.model.model,
+            self.learned_window
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.reduced_output
+                .load(std::sync::atomic::Ordering::Relaxed),
         )
-        .map_err(failed)?;
+        .await?;
         drop(conn);
-        if let Some(context) = context {
+        let mut page = if let Some(context) = context {
             let page = if tools::reference(ctx, &context).is_ok() {
                 match tools::execute(&self.origin, "open", &json!({"reference":context})).await {
                     Ok((value, _)) => {
@@ -1062,25 +1101,13 @@ impl TurnHost for Host {
             }
             *previous = Some(page.clone());
             drop(previous);
-            if let Some(message) = input.messages.iter_mut().rev().find(|message| {
-                message.role == GenerationRole::User
-                    && message.content.iter().any(|part| {
-                        matches!(
-                            part,
-                            GenerationPart::Text { .. }
-                                | GenerationPart::ImageRef { .. }
-                                | GenerationPart::Image { .. }
-                        )
-                    })
-            }) {
-                message.content.insert(
-                    0,
-                    GenerationPart::Text {
-                        text: format!("Page in view, freshly checked untrusted context: {page}"),
-                    },
-                );
-            }
-        }
+            Some((
+                format!("Page in view, freshly checked untrusted context: {page}"),
+                context::first_link(&page),
+            ))
+        } else {
+            None
+        };
         for message in &mut input.messages {
             for part in &mut message.content {
                 if let GenerationPart::ToolResult {
@@ -1110,7 +1137,6 @@ impl TurnHost for Host {
                                 Some(current) => {
                                     self.remember_citations(&current).await;
                                     *content = serde_json::to_string(&current)?;
-                                    orch_engine::ask::bound_tool_result(content, tool_limit);
                                     *is_error = false;
                                 }
                                 None => {
@@ -1132,13 +1158,6 @@ impl TurnHost for Host {
             }
         }
         let mut conn = ctx.app.db.acquire().await?;
-        let budget = context::budget(
-            &mut conn,
-            self.origin.root,
-            &chosen.parameters,
-            &chosen.model.model,
-        )
-        .await?;
         input.max_output_tokens = budget.output;
         history.capture_sources(&input)?;
         let portable = self
@@ -1163,6 +1182,42 @@ impl TurnHost for Host {
                 .engine
                 .mask_ask(&mut conn, self.origin.root, &mut input)
                 .await?;
+        }
+        if let Some((text, _)) = &mut page {
+            let mut page_input = GenerationInput {
+                system: String::new(),
+                messages: vec![GenerationMessage {
+                    role: GenerationRole::User,
+                    content: vec![GenerationPart::Text { text: text.clone() }],
+                    continuation: vec![],
+                }],
+                tools: vec![],
+                max_output_tokens: budget.output,
+            };
+            if ctx
+                .app
+                .engine
+                .mask_ask(&mut conn, self.origin.root, &mut page_input)
+                .await?
+            {
+                opaque_reusable = false;
+                self.portable_history
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                history.portable(&mut input);
+            }
+            if let GenerationPart::Text { text: masked } = &page_input.messages[0].content[0] {
+                *text = masked.clone();
+            }
+        }
+        history.fit_reading(&mut input, budget, &chosen.model.model)?;
+        if let Some((text, link)) = page {
+            history.fit_page(
+                &mut input,
+                budget,
+                &chosen.model.model,
+                text,
+                link.as_deref(),
+            )?;
         }
         let (input, compaction) = match history.plan(&input, budget, &chosen.model.model)? {
             Some((input, pending)) => (input, Some(pending)),
@@ -1277,6 +1332,52 @@ impl TurnHost for Host {
             machine: chosen.machine,
             request,
         })
+    }
+
+    async fn window_exceeded(&self, step: &Step) -> Result<bool, EngineError> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let output = step.request.input.max_output_tokens;
+        if output > 1 {
+            // The provider refused the input plus its answer allowance. Halving the allowance converges
+            // without treating a question that fits with a shorter answer as an oversized input.
+            self.reduced_output.store((output / 2).max(1), Relaxed);
+        } else {
+            // Even the smallest answer was refused: the combined window is at most this input estimate.
+            // Restore the ordinary answer allowance for the shorter request produced by compaction.
+            let below =
+                orch_engine::ask::context::estimate(&step.request.model_name, &step.request.input)?;
+            let known = self.learned_window.load(Relaxed);
+            if below < 1 || (known > 0 && below >= known) {
+                return Ok(false);
+            }
+            self.learned_window.store(below, Relaxed);
+            self.reduced_output.store(0, Relaxed);
+        }
+        // The refused step wrote no answer: its call is settled and the item that stood for its answer ends.
+        let ctx = &self.origin.source;
+        let item = self.calls.lock().await.get(&step.id).copied();
+        let mut tx = ctx.app.db.begin().await?;
+        self.lock_active(&mut tx).await?;
+        rows::settle(&mut tx, step.id).await?;
+        if let Some(item) = item {
+            let seq = orch_db::sequences::next(&mut tx, self.thread)
+                .await?
+                .ok_or_else(|| failed("Ask was deleted"))?;
+            threads::change_item(
+                &mut tx,
+                item,
+                &threads::ItemChange {
+                    status: Some("failed"),
+                    payload: &json!({"text":"","text_len":0,"phase":"commentary"}),
+                    search_text: None,
+                    at: ctx.app.clock.now(),
+                },
+                seq,
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        Ok(true)
     }
 
     async fn assistant(&self, step: &Step, output: &GenerationOutput) -> Result<(), EngineError> {

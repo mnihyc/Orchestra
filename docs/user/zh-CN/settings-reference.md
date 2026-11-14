@@ -253,7 +253,13 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:auto.tags` | **自动标签** — 摘要器是否为位置设置标签。 |
 | `setting:summary.handoff_input_share` | **摘要输入比例** — 交接、分叉或目标核对发送给摘要模型的对话最多占其上下文窗口的比例：先发最新的轮次，更早的只发一行索引。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:auto.summarizer` | **摘要器** — 使用哪个摘要器及其配置。 |
-| `option:auto.summarizer.kind` | 声明的数据源或内容类型。 |
+| `option:auto.summarizer.kind` | 在表单中选择的已注册摘要器，其声明提供配置字段。`model` 选择内置的 API 模型摘要器。 |
+| `option:auto.summarizer.provider_id` | 用于 `model` 类型，按名称选择 API 提供方；设置的写入者必须持有允许其他工作的使用权限。 |
+| `option:auto.summarizer.model_name` | 用于 `model` 类型，选择已启用的 API 模型，当前模型及推理强度权限仍然适用。 |
+| `option:auto.summarizer.params` | 用于 `model` 类型，填写已声明的请求选项。省略时采用模型当前默认值；工具、提示词和凭据由 Orch 管理。 |
+| `option:auto.summarizer.context_tokens` | 用于 `model` 类型，正数的输入令牌预算，默认 32,000，受模型窗口减去输出的约束。 |
+| `option:auto.summarizer.max_output_tokens` | 用于 `model` 类型，正数的回答令牌预算，默认 120，仍受当前模型限制与用量上限约束。 |
+| `option:auto.summarizer.prompts` | 用于 `model` 类型，可按 title、description、tags、rollup、handoff 或 summary 字段替换指令。空值沿用内置指令。 |
 | `setting:auto.triggers` | **自动更新的条件** — 何时重新生成自动标题、标签和摘要。 |
 | `option:auto.triggers.on` | 触发此自动操作的事件。 |
 | `option:auto.triggers.min_interval_secs` | 自动运行之间的最短间隔，单位为秒。 |
@@ -489,10 +495,12 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:ask.retention_min_days` | **Ask 最短保留时间** — 会话根组织的管理员规定的最短历史保留时间。 下级只能提高此下限。 |
 | `setting:ask.retention_max_days` | **Ask 最长保留时间** — 会话根组织的管理员允许的最长历史保留时间。 |
 | `setting:ask.max_steps` | **Ask 每轮模型步骤数** — 每个问题允许的模型步骤数，达到后请提问者选择继续。 |
-| `setting:ask.max_output_tokens` | **Ask 回答令牌数** — 每次 Ask 模型请求允许的最大输出令牌数，也会在安排对话上下文前预留。系统和组织设置中的最小值生效。 |
-| `setting:ask.context_tokens` | **Ask 上下文令牌数** — 未设置时使用所选模型的上下文窗口。设置后仅对 Ask 取较小值，仍需留足输出和工具结果空间。系统和组织设置中的最小值生效。 |
+| `setting:ask.max_output_tokens` | **Ask 回答令牌数** — 每次 Ask 模型请求允许的最大输出令牌数。请求按窗口减去此值来安排，且回答最多占窗口的一半。系统和组织设置中的最小值生效。 |
+| `setting:ask.context_tokens` | **Ask 上下文令牌数** — 未设置时使用所选模型的上下文窗口；未记录窗口的模型不会被当作小窗口。设置后仅对 Ask 取较小值。窗口不超过回答令牌数两倍时，回答占其一半。系统和组织设置中的最小值生效。 |
 | `setting:ask.max_tools` | **Ask 每轮读取操作数** — 每个问题允许的读取操作数，达到后请提问者缩小问题范围。 |
-| `setting:ask.tool_bytes` | **Ask 单个来源大小** — 交给模型的单次读取结果的最大字节数，并提供指向完整来源的标准链接。 |
-| `setting:ask.turn_tool_bytes` | **Ask 每轮来源总量** — 回答一个问题时提供给模型的读取结果总字节数。 |
+| `setting:ask.docs_hits` | **Ask 每次搜索的指南页数** — Ask 每次搜索帮助时交给模型的指南页面数上限；中英文同时匹配时交替给出。 |
+| `setting:ask.docs_excerpt_tokens` | **Ask 指南摘录大小** — Ask 搜索帮助时交给模型的单个指南页面的最大令牌数，并附上该页面的链接。 |
+| `setting:ask.max_operations` | **Ask 每次搜索的操作数** — Ask 每次搜索读取目录时返回的读取操作数上限。 |
+| `setting:ask.max_links` | **Ask 每个来源的链接数** — Ask 在一次读取中保留的标准来源链接数上限。 |
 | `setting:providers.model_groups_max` | **模型分组数** — 每个模型可加入的分组数，默认 8 个，可提高。设为 0 时不允许新加入分组，已有分组不变。 |
 | `option:usage.rates.*.web_fetch_per_call` | 每次成功网页抓取调用的点数。 |
