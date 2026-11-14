@@ -549,8 +549,16 @@ pub(crate) async fn handoff_budget(
     let mut conn = engine.db().acquire().await?;
     match orch_summarizer_model::descriptor::Config::read(&chosen.config) {
         Ok(config) if chosen.kind == "model" => {
-            super::budget::input_budget(&mut conn, thread, config.provider_id, &config.model_name)
-                .await
+            let reasons = super::budget::reasons(&mut conn, &config).await?;
+            let output = config.output_reserve(SummaryField::Handoff, reasons);
+            super::budget::input_budget(
+                &mut conn,
+                thread,
+                config.provider_id,
+                &config.model_name,
+                output,
+            )
+            .await
         }
         _ => Ok(super::budget::budget_of(None, super::budget::DEFAULT_SHARE)),
     }

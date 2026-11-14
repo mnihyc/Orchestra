@@ -282,6 +282,21 @@ pub struct FileStates {
     refreshing: Mutex<()>,
     actions: tokio::sync::Mutex<()>,
     epoch: std::sync::atomic::AtomicU64,
+    /// How many passes that bring baselines up to date are running or about to run.
+    working: std::sync::atomic::AtomicUsize,
+}
+
+/// Background work that brings baselines up to date, for as long as it is held: a recording that finds a
+/// baseline not ready waits only while there is such work.
+#[derive(Debug)]
+pub(crate) struct Working(std::sync::Arc<FileStates>);
+
+impl Drop for Working {
+    fn drop(&mut self) {
+        self.0
+            .working
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// One recorded read, with the exact immutable root pinned while verified bytes are transferred.
@@ -349,7 +364,20 @@ impl FileStates {
             refreshing: Mutex::new(()),
             actions: tokio::sync::Mutex::new(()),
             epoch: std::sync::atomic::AtomicU64::new(0),
+            working: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Notes that a pass that brings baselines up to date is about to run, until the answer is dropped.
+    pub(crate) fn begin_work(self: &std::sync::Arc<Self>) -> Working {
+        self.working
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Working(std::sync::Arc::clone(self))
+    }
+
+    /// Whether a pass that brings baselines up to date is running or about to run.
+    pub(crate) fn work_in_flight(&self) -> bool {
+        self.working.load(std::sync::atomic::Ordering::SeqCst) > 0
     }
 
     /// The environment-owned immutable store, for reads, moves and restore journals.
@@ -1655,6 +1683,24 @@ mod tests {
                 .as_deref(),
             Some("not_ready")
         );
+    }
+
+    #[test]
+    fn a_recording_waits_for_a_baseline_only_while_background_work_is_bringing_it_up_to_date() {
+        let (_dir, _files, _index, states) = setup();
+        let states = Arc::new(states);
+        assert!(
+            states.needs_preparing(&RelPath::root()),
+            "a baseline nobody prepared yet is owed one"
+        );
+        assert!(!states.work_in_flight(), "and nothing is making it");
+        let first = states.begin_work();
+        let second = states.begin_work();
+        assert!(states.work_in_flight());
+        drop(first);
+        assert!(states.work_in_flight(), "one pass is still going");
+        drop(second);
+        assert!(!states.work_in_flight(), "nothing is left to wait for");
     }
 
     #[test]

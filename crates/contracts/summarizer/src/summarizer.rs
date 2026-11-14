@@ -84,6 +84,10 @@ pub struct SummaryRequest {
     pub config: Json,
 }
 
+/// What a summarizer's `Failed` says when the model's answer ran into its output allowance before it was whole:
+/// the one failure that asking again with the same allowance cannot mend.
+pub const OUTPUT_CUT: &str = "the model used its output allowance before finishing";
+
 /// Why a summary was not made.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SummarizeError {

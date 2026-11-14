@@ -14,7 +14,7 @@ export type Balance = Provider['facts']['balances'][number];
 export type Spend = Provider['facts']['spend'][number];
 
 /** Only the source's explicit member state decides whether a block is supported, unread or empty. */
-export function detailState(provider: Provider, member: DetailMember | 'models'): DetailState {
+export function detailState(provider: Pick<Provider, 'facts_state'>, member: DetailMember | 'models'): DetailState {
   return memberState(provider.facts_state[member]);
 }
 

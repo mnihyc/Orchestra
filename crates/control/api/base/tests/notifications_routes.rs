@@ -10,12 +10,14 @@ mod places;
 mod support;
 
 use chrono::Duration;
+use orch_api_contract::auth::{MetaGet, SetupCreate, SetupCreateBody};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::notifications::{
     MeNotificationRouteDelete, MeNotificationRouteLinkCreate, MeNotificationRouteSet,
     MeNotificationRouteSetBody, MePushSubscriptionCreate, MePushSubscriptionCreateBody,
     NotificationChannel, NotificationChannelCreateBody, NotificationChannelDelete,
-    NotificationKind, NotificationRoute, NotificationRouteNeeds, PushSubscriptionKeys,
+    NotificationChannelList, NotificationChannelListQuery, NotificationKind, NotificationRoute,
+    NotificationRouteNeeds, PushSubscriptionKeys,
 };
 use orch_api_core::middleware::authentication::{ACCESS_TOKEN_PREFIX, new_token, token_hash};
 use orch_api_core::testing::Reply;
@@ -28,6 +30,63 @@ use places::Who;
 use serde_json::json;
 use sqlx::postgres::PgListener;
 use std::time::Duration as Wait;
+
+#[tokio::test]
+async fn first_setup_offers_browser_notifications_without_subscribing_the_administrator() {
+    outside::install();
+    orch_api_core::routes::notifications::install_push_public_key(
+        "synthetic-public-push-key".to_owned(),
+    );
+    let world = support::World::new().await;
+    let setup = world
+        .app
+        .call(SetupCreate, &[])
+        .body(&SetupCreateBody {
+            username: "root".to_owned(),
+            display_name: "Root".to_owned(),
+            password: support::PASSWORD.to_owned(),
+            email: None,
+            timezone: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    let channels = world
+        .app
+        .call(NotificationChannelList, &[])
+        .token(&setup.access_token)
+        .query(&NotificationChannelListQuery::default())
+        .send()
+        .await
+        .ok();
+    let push = channels
+        .iter()
+        .find(|channel| channel.kind == "push")
+        .unwrap();
+    assert!(push.enabled);
+    assert!(!push.route.enabled);
+    assert_eq!(push.route.needs, Some(NotificationRouteNeeds::Device));
+    assert!(
+        world
+            .app
+            .call(MetaGet, &[])
+            .send()
+            .await
+            .ok()
+            .push_public_key
+            .is_some()
+    );
+    for table in ["notification_routes", "push_subscriptions", "outbox"] {
+        let count: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                .fetch_one(&world.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "{table}");
+    }
+}
 
 async fn set(
     o: &Outside,

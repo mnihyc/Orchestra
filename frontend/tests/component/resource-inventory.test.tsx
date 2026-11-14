@@ -10,7 +10,7 @@ import type { EverythingFilter } from '@/api/everything';
 import { ResourceList } from '@/features/resources/ResourceList';
 import { resourceReaders } from '@/features/resources/inventory';
 import type { EverythingRow, Host } from '@/generated/api-types';
-import { inventoryRow } from '../doubles/everything-row';
+import { resourceInventoryRow as inventoryRow } from '../doubles/everything-row';
 import { me, userRef } from '../doubles/fixtures';
 import { show, skipOverflowFallback, tableDataRows } from './support';
 
@@ -76,7 +76,7 @@ it('loads one page on demand and preserves rich columns, the owner and native-on
   expect(await screen.findByRole('link', { name: 'Build host' })).toBeVisible();
   expect(screen.queryByRole('link', { name: 'Later host' })).not.toBeInTheDocument();
   expect(requests).toHaveLength(1);
-  expect(requests[0]).toMatchObject({ parent: 'resources', cursor: null, filter: { kinds: ['host'], resource: { state: 'open', details: true } } });
+  expect(requests[0]).toMatchObject({ parent: 'resources', cursor: null, filter: { kinds: ['host'], resource: { state: 'open', rows: true } } });
   expect(within(screen.getByRole('table')).getByText('Docker')).toBeVisible();
   expect(screen.getByText('1 environments · 2 providers')).toBeVisible();
   await user.click(screen.getByRole('button', { name: 'Show more' }));
@@ -120,7 +120,7 @@ it('asks the server for a match outside the loaded page instead of filtering the
   await user.type(screen.getByRole('searchbox', { name: 'Search hosts' }), 'Later');
   expect(await screen.findByRole('link', { name: 'Later host' })).toBeVisible();
   expect(screen.queryByRole('link', { name: 'Build host' })).not.toBeInTheDocument();
-  expect(requests.at(-1)).toMatchObject({ cursor: null, filter: { q: 'Later', resource: { state: 'open', details: true } } });
+  expect(requests.at(-1)).toMatchObject({ cursor: null, filter: { q: 'Later', resource: { state: 'open', rows: true } } });
 });
 
 it('keeps loaded rows on a continuation failure and lets the same pager retry', async () => {
