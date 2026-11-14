@@ -125,7 +125,7 @@ async fn quiet(world: &World) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_goal_runs_turn_after_turn_until_the_agents_report_that_it_is_met_is_taken() {
+async fn a_goal_runs_turn_after_turn_and_an_unchecked_met_report_waits_for_a_person() {
     let world = a_world_whose_agent_takes_tools().await;
     let thread = world.thread("A goal").await;
     let ada = Caller::session(world.ada);
@@ -181,21 +181,44 @@ async fn a_goal_runs_turn_after_turn_until_the_agents_report_that_it_is_met_is_t
     world
         .say(thread, turn_ended(second.turn_id, TurnOutcome::Completed))
         .await;
-    eventually("the goal is met", || async {
-        status(&world, thread).await == GoalStatus::Met
+    eventually("the unchecked report waits for a person", || async {
+        let shown = world.engine().goal_of(thread).await.unwrap().unwrap();
+        shown.status == GoalStatus::Paused && shown.reason == Some(GoalReason::Unchecked)
     })
     .await;
     quiet(&world).await;
     assert_eq!(
         world.turn_starts(thread).len(),
         2,
-        "nothing goes on after it is met"
+        "an unchecked report never starts another goal turn"
     );
     let shown = world.engine().goal_of(thread).await.unwrap().unwrap();
     assert_eq!(shown.used.turns, 2);
     let report = shown.last_report.expect("the last report stands");
     assert_eq!(report.evidence, "npm test: 212 passed, 0 failed");
-    assert_eq!(report.checked_by, Some(GoalCheckedBy::Agent));
+    assert_eq!(report.checked_by, None);
+    assert_eq!(
+        report.outcome,
+        Some(orch_api_contract::goals::GoalOutcome::Unchecked)
+    );
+    let shown = world
+        .engine()
+        .update_goal(
+            &ada,
+            thread,
+            &ThreadGoalUpdateBody {
+                action: Some(GoalAction::Accept),
+                ..update()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(shown.status, GoalStatus::Met);
+    assert_eq!(shown.reason, None);
+    assert_eq!(
+        shown.last_report.unwrap().checked_by,
+        Some(GoalCheckedBy::Person)
+    );
     let lines: i64 = world
         .scalar(
             "SELECT count(*) FROM items WHERE thread_id=$1 AND kind='marker' AND payload->>'marker'='goal_met'",
@@ -203,6 +226,151 @@ async fn a_goal_runs_turn_after_turn_until_the_agents_report_that_it_is_met_is_t
         )
         .await;
     assert_eq!(lines, 1, "one line of history says it was met");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_independent_helpers_verified_result_can_still_finish_the_goal() {
+    use orch_link_contract::commands::Command;
+
+    // The independent call needs an API provider and the setting writer's current use.
+    let world = World::on_a_key("synthetic-goal-check-key").await;
+    native_tools::enable(&world).await;
+    native_tools::existing_workspace(&world);
+    world
+        .set(
+            world.topic,
+            "auto.summarizer",
+            json!({"kind":"model","provider_id":world.provider,"model_name":common::MODEL}),
+        )
+        .await;
+    sqlx::query("UPDATE settings SET updated_by=$2 WHERE node_id=$1 AND key='auto.summarizer'")
+        .bind(world.topic)
+        .bind(world.ada)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    world
+        .machine
+        .handler
+        .on(CommandKind::ProviderComplete, |_| {
+            Ok(
+                orch_link_contract::commands::CommandResult::ProviderComplete(
+                    orch_link_contract::commands::ProviderCompleteResult {
+                        text: "met\nThe recorded command and result show the condition holds."
+                            .into(),
+                        usage: Default::default(),
+                        request_ref: Some("synthetic-goal-check".into()),
+                        timing: Default::default(),
+                    },
+                ),
+            )
+        });
+    let thread = world.thread("Verified evidence").await;
+    world
+        .engine()
+        .set_goal(
+            &Caller::session(world.ada),
+            thread,
+            &goal("Finish the change", "the check passes"),
+        )
+        .await
+        .unwrap();
+    work(
+        &world,
+        thread,
+        0,
+        Some(json!({"command":"update","status":"met","evidence":"The recorded check passed"})),
+    )
+    .await;
+    eventually("the independent helper verifies completion", || async {
+        let shown = world.engine().goal_of(thread).await.unwrap().unwrap();
+        assert_ne!(
+            shown.reason,
+            Some(GoalReason::Unchecked),
+            "the helper fixture must be usable: {:?}",
+            shown
+                .last_report
+                .as_ref()
+                .and_then(|report| report.reason.as_ref())
+        );
+        shown.status == GoalStatus::Met
+    })
+    .await;
+    let shown = world.engine().goal_of(thread).await.unwrap().unwrap();
+    assert_eq!(world.seen.of_kind(CommandKind::ProviderComplete).into_iter()
+        .filter(|command| matches!(command, Command::ProviderComplete(request) if request.input.contains("<condition>")))
+        .count(), 1);
+    assert_eq!(
+        shown.last_report.unwrap().checked_by,
+        Some(GoalCheckedBy::Helper)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unavailable_helper_keeps_met_unchecked_until_a_person_chooses_more_work() {
+    let clock = std::sync::Arc::new(orch_testkit::clock::manual());
+    let world = a_world_with_a_clock_whose_agent_takes_tools(clock.clone()).await;
+    world
+        .set(
+            world.topic,
+            "auto.summarizer",
+            json!({"kind":"model","provider_id":world.provider,"model_name":" "}),
+        )
+        .await;
+    let thread = world.thread("Unchecked evidence").await;
+    let ada = Caller::session(world.ada);
+    world
+        .engine()
+        .set_goal(&ada, thread, &goal("Finish the change", "the check passes"))
+        .await
+        .unwrap();
+    work(
+        &world,
+        thread,
+        0,
+        Some(
+            json!({"command":"update","status":"met","evidence":"The agent says the check passes"}),
+        ),
+    )
+    .await;
+    eventually(
+        "the unavailable independent check leaves a decision",
+        || async {
+            let shown = world.engine().goal_of(thread).await.unwrap().unwrap();
+            shown.status == GoalStatus::Paused && shown.reason == Some(GoalReason::Unchecked)
+        },
+    )
+    .await;
+    clock.advance(chrono::Duration::minutes(15));
+    quiet(&world).await;
+    let shown = world.engine().goal_of(thread).await.unwrap().unwrap();
+    assert_eq!(shown.status, GoalStatus::Paused);
+    let report = shown.last_report.unwrap();
+    assert_eq!(
+        report.outcome,
+        Some(orch_api_contract::goals::GoalOutcome::Unchecked)
+    );
+    assert_eq!(report.checked_by, None);
+    assert!(report.reason.is_some());
+    assert_eq!(world.turn_starts(thread).len(), 1);
+    let resumed = world
+        .engine()
+        .update_goal(
+            &ada,
+            thread,
+            &ThreadGoalUpdateBody {
+                action: Some(GoalAction::Resume),
+                ..update()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, GoalStatus::Active);
+    assert_ne!(
+        resumed.last_report.unwrap().outcome,
+        Some(orch_api_contract::goals::GoalOutcome::Met)
+    );
+    world.turn_start(thread, 1).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

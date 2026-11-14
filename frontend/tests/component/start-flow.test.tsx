@@ -82,13 +82,14 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await waitFor(() => expect(where).toHaveDisplayValue('Env e1'));
     await waitFor(() => expect(state.reads).toHaveBeenCalledWith('e1'));
     expect(state.reads).not.toHaveBeenCalledWith('new');
-    const selectedAgent = screen.getByRole('combobox', { name: i18n.t('start.agent.title') });
-    expect(selectedAgent).toHaveDisplayValue('Agent a1');
+    const selectedAgent = screen.getByRole('button', { name: new RegExp(`^${i18n.t('composer.row.agentName')}`) });
+    await waitFor(() => expect(selectedAgent).toHaveTextContent('Agent a1'));
     await userEvent.click(selectedAgent);
-    const choice = screen.getByRole('option', { name: 'Agent a1' });
-    expect(choice).not.toHaveAttribute('aria-disabled', 'true');
+    const choice = screen.getByRole('menuitemradio', { name: /^Agent a1/ });
+    // Once the existing environment is judged, the agent can be started there.
+    await waitFor(() => expect(choice).toBeEnabled());
     await userEvent.keyboard('{Escape}');
-    expect(selectedAgent).toHaveDisplayValue('Agent a1');
+    expect(selectedAgent).toHaveTextContent('Agent a1');
     await userEvent.click(screen.getByRole('button', { name: i18n.t('start.create') }));
     await waitFor(() => expect(state.start).toHaveBeenCalledOnce());
     expect(submittedPlan()).toMatchObject({ resolved: { fresh: false, environment: { environment: { id: 'e1' } }, agent: { id: 'a1' } } });
@@ -111,10 +112,10 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await setLocale(locale);
     state.answer = options({ providers: [provider('p1', { agents: [{ ...agent('a1', { reason: 'harness_error' }), program_report: { status: 'error', detail: 'The selected executable was not found.' } }] })] });
     await showStarter(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
-    await userEvent.click(await screen.findByRole('combobox', { name: i18n.t('start.agent.title') }));
-    const profile = screen.getByRole('option', { name: 'Agent a1' });
-    expect(profile).toHaveAttribute('aria-disabled', 'true');
-    expect(profile).toHaveAccessibleDescription(i18n.t('start.agent.programFailed'));
+    await userEvent.click(await screen.findByRole('button', { name: new RegExp(`^${i18n.t('composer.row.agentName')}`) }));
+    const profile = screen.getByRole('menuitemradio', { name: /^Agent a1/ });
+    expect(profile).toBeDisabled();
+    expect(profile.closest('li')).toHaveTextContent(i18n.t('composer.pick.agent.why.error'));
     await userEvent.keyboard('{Escape}');
     expect(screen.getByRole('button', { name: i18n.t('start.create') })).toBeDisabled();
     expect(state.start).not.toHaveBeenCalled();
@@ -184,15 +185,13 @@ for (const locale of ['en', 'zh-CN'] as const) {
     show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
     const dialog = await screen.findByRole('dialog');
     const headings = within(dialog).getAllByRole('heading');
-    for (const label of ['start.provider.title', 'start.agent.title', 'start.model.model', 'start.where.title'] as const) {
+    // The provider is the model's, so it has no heading of its own.
+    for (const label of ['start.agent.title', 'start.model.model', 'start.where.title'] as const) {
       const heading = headings.find((row) => row.textContent.startsWith(i18n.t(label)));
       expect(heading).toBeDefined();
       expect(within(heading!).getAllByText(i18n.t('startImplicit.origin.suggested'))).toHaveLength(1);
     }
-    await userEvent.click(within(dialog).getByRole('combobox', { name: i18n.t('start.provider.title') }));
-    await userEvent.click(screen.getByRole('option', { name: /Provider p2/ }));
-    const providerHeading = within(dialog).getAllByRole('heading').find((row) => row.textContent.startsWith(i18n.t('start.provider.title')));
-    expect(providerHeading).not.toHaveTextContent(i18n.t('startImplicit.origin.suggested'));
+    expect(headings.find((row) => row.textContent.startsWith(i18n.t('change.runs.provider')))).toBeUndefined();
   });
 
   it(`starts on Enter with defaults, preserving Shift+Enter and writing no place defaults (${locale})`, async () => {
@@ -228,9 +227,14 @@ for (const locale of ['en', 'zh-CN'] as const) {
     const user = userEvent.setup();
     show(<NewThreadDialog parent={parent} open onClose={() => undefined} draft={{ picks: NO_PICKS, message: 'Keep this message' }} />);
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getAllByRole('combobox')).toHaveLength(4);
-    expect(within(dialog).queryByRole('combobox', { name: i18n.t('start.where.moreTitle') })).toBeNull();
-    expect(within(dialog).getByRole('radiogroup', { name: i18n.t('start.where.choice') })).toBeVisible();
+    // The model (with its effort), the agent and where it runs are asked; the provider is the model's, with no control of its own.
+    for (const control of ['start.model.model', 'composer.effort.title', 'composer.row.agentName'] as const) expect(within(dialog).getByRole('button', { name: new RegExp(`^${i18n.t(control)}`) })).toBeVisible();
+    // Where it runs is the one field with a search; model, effort and agent are chips, and no choice between an existing and a new environment stands beside it.
+    const fields = within(dialog).getAllByRole('combobox');
+    expect(fields).toHaveLength(1);
+    expect(fields[0]).toHaveAccessibleName(i18n.t('start.where.title'));
+    for (const radio of ['start.where.useExisting', 'start.where.createNew'] as const) expect(within(dialog).queryByRole('radio', { name: i18n.t(radio) })).toBeNull();
+    expect(within(dialog).getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.effort.title'), value: i18n.t('choiceCatalog.effort.low.name') }) })).toBeVisible();
     expect(within(dialog).queryByRole('textbox')).toBeNull();
     const more = within(dialog).getByRole('button', { name: i18n.t('start.options.title') });
     expect(more).toHaveAttribute('aria-expanded', 'false');
@@ -242,7 +246,6 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await user.click(more);
     expect(within(dialog).queryByRole('textbox')).toBeNull();
     const summary = dialog.querySelector('[data-start-options-summary]');
-    expect(summary).toHaveTextContent(i18n.t('startImplicit.effort', { value: i18n.t('choiceCatalog.effort.low.name') }));
     expect(summary).toHaveTextContent(i18n.t('choiceCatalog.arrangement.key_separated.name'));
     expect(summary).toHaveTextContent('~/work');
     expect(summary).toHaveTextContent(i18n.t('startImplicit.name', { value: 'Named work' }));
@@ -256,10 +259,10 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await setLocale(locale);
     state.answer = options({ providers: [provider('p1', { agents: [agent('a1', { arrangements: [{ ...arrangement('separated', 1, false, 'executor_missing'), detail: 'No compatible executor is installed.' }] })] })] });
     show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
-    await userEvent.click(await screen.findByRole('combobox', { name: i18n.t('start.agent.title') }));
-    const profile = screen.getByRole('option', { name: 'Agent a1' });
-    expect(profile).toHaveAttribute('aria-disabled', 'true');
-    expect(profile).toHaveAccessibleDescription(/No compatible executor is installed/);
+    await userEvent.click(await screen.findByRole('button', { name: new RegExp(`^${i18n.t('composer.row.agentName')}`) }));
+    const profile = screen.getByRole('menuitemradio', { name: /^Agent a1/ });
+    expect(profile).toBeDisabled();
+    expect(profile.closest('li')).toHaveTextContent(i18n.t('composer.pick.agent.why.unavailable'));
     await userEvent.click(profile);
     await userEvent.keyboard('{Escape}');
     const create = screen.getByRole('button', { name: i18n.t('start.create') });
@@ -273,12 +276,16 @@ for (const locale of ['en', 'zh-CN'] as const) {
     const closed = { ...arrangement('separated', 1, false, 'executor_missing'), detail: null };
     state.freshAnswer = options({ providers: [provider('p1', { agents: [agent('a1', { reason: 'executor_missing', arrangements: [closed] })] })] });
     show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
-    await userEvent.click(await screen.findByRole('radio', { name: i18n.t('start.where.createNew') }));
+    await userEvent.click(await screen.findByRole('combobox', { name: i18n.t('start.where.title') }));
+    await userEvent.click(screen.getByRole('option', { name: i18n.t('start.where.newRow') }));
     await waitFor(() => expect(state.reads).toHaveBeenCalledWith('new'));
-    await userEvent.click(screen.getByRole('combobox', { name: i18n.t('start.agent.title') }));
-    const profile = screen.getByRole('option', { name: 'Agent a1' });
-    expect(profile).toHaveAttribute('aria-disabled', 'true');
-    expect(profile).toHaveAccessibleDescription(new RegExp(i18n.t('start.reason.executor_missing')));
+    await userEvent.click(screen.getByRole('button', { name: new RegExp(`^${i18n.t('composer.row.agentName')}`) }));
+    const profile = screen.getByRole('menuitemradio', { name: /^Agent a1/ });
+    // The reason is the answer about the template: the choice says it once the answer has been applied.
+    await waitFor(() => {
+      expect(profile).toBeDisabled();
+      expect(profile.closest('li')).toHaveTextContent(i18n.t('composer.pick.agent.why.unavailable'));
+    });
     await userEvent.click(profile);
     await userEvent.keyboard('{Escape}');
     expect(screen.getByRole('button', { name: i18n.t('start.create') })).toBeDisabled();
@@ -321,7 +328,6 @@ for (const locale of ['en', 'zh-CN'] as const) it(`never offers a failed Main as
   failed.environment.name = 'Main'; failed.environment.status = 'failed';
   state.answer = options({ environments: [failed] });
   show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
-  await userEvent.click(await screen.findByRole('radio', { name: i18n.t('start.where.useExisting') }));
   const where = await screen.findByRole('combobox', { name: i18n.t('start.where.title') });
   expect(where).not.toHaveTextContent('Main');
   await userEvent.click(where);
@@ -336,32 +342,27 @@ for (const locale of ['en', 'zh-CN'] as const) it(`never offers a failed Main as
   expect(where).not.toHaveTextContent('Main');
 });
 
-for (const locale of ['en', 'zh-CN'] as const) it(`groups environments by home while preserving Use and request access (${locale})`, async () => {
+for (const locale of ['en', 'zh-CN'] as const) it(`lists what can be used, then what asks for access, then what cannot be used, each with its reason (${locale})`, async () => {
   await setLocale(locale);
   const askable = { ...environment('view', { usable: false }), reason: 'environment_use_required' };
   const blocked = environment('blocked', { usable: false });
-  state.answer = options({ environments: [askable, blocked, environment('use', { isDefault: true })].map((row) => ({ ...row, home: TOPIC, home_path: [TOPIC] })) });
+  state.answer = options({ environments: [askable, blocked, environment('use', { isDefault: true })] });
   state.askFor = 'view';
   const user = userEvent.setup();
   await showStarter(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
   await user.click(await screen.findByRole('combobox', { name: i18n.t('start.where.title') }));
   const choices = screen.getByRole('dialog', { name: i18n.t('start.where.title') });
-  const ownedOptions = () => within(choices).queryAllByRole('listbox').flatMap((list) => within(list).queryAllByRole('option'));
-  // Group actions belong to the picker dialog; each permission list owns its actual options.
-  // One Home folds all three permission sections together.
-  expect(ownedOptions()).toHaveLength(3);
-  await user.click(within(choices).getByRole('button', { name: i18n.t('resourceGroups.collapse', { name: TOPIC.name ?? '' }) }));
-  expect(ownedOptions()).toHaveLength(0);
-  await user.click(within(choices).getByRole('button', { name: i18n.t('resourceGroups.expand', { name: TOPIC.name ?? '' }) }));
-  expect(ownedOptions()).toHaveLength(3);
+  // "New environment…" is the first row, before every environment and outside any group.
+  expect(within(choices).getAllByRole('option')[0]).toHaveAccessibleName(i18n.t('start.where.newRow'));
   const usable = within(choices).getByRole('group', { name: i18n.t('start.where.canUse') });
   const askableChoices = within(choices).getByRole('group', { name: i18n.t('start.where.askAccess') });
-  const blockedChoices = within(choices).getByRole('group', { name: TOPIC.name ?? '' });
-  expect(within(within(usable).getByRole('listbox')).getByRole('option', { name: 'Env use' })).not.toHaveAttribute('aria-disabled', 'true');
-  expect(within(within(askableChoices).getByRole('listbox')).getByRole('option', { name: 'Env view' })).not.toHaveAttribute('aria-disabled', 'true');
-  expect(within(within(blockedChoices).getByRole('listbox')).getByRole('option', { name: 'Env blocked' })).toHaveAttribute('aria-disabled', 'true');
-  expect(within(choices).queryByRole('option', { name: i18n.t('choiceCatalog.environmentDestination.new.name') })).toBeNull();
-  await user.click(within(within(askableChoices).getByRole('listbox')).getByRole('option', { name: 'Env view' }));
+  const blockedChoices = within(choices).getByRole('group', { name: i18n.t('start.where.unavailable') });
+  expect(within(usable).getByRole('option', { name: 'Env use' })).not.toHaveAttribute('aria-disabled', 'true');
+  expect(within(askableChoices).getByRole('option', { name: 'Env view' })).not.toHaveAttribute('aria-disabled', 'true');
+  const off = within(blockedChoices).getByRole('option', { name: 'Env blocked' });
+  expect(off).toHaveAttribute('aria-disabled', 'true');
+  expect(off).toHaveAccessibleDescription(expect.stringContaining(i18n.t('start.reason.disabled')));
+  await user.click(within(askableChoices).getByRole('option', { name: 'Env view' }));
   expect(await screen.findByRole('textbox', { name: i18n.t('access.request.reason') })).toBeVisible();
   expect(state.start).not.toHaveBeenCalled();
 });
@@ -371,7 +372,6 @@ for (const locale of ['en', 'zh-CN'] as const) for (const access of ['usable', '
   const row = access === 'usable' ? environment('single') : { ...environment('single', { usable: false }), reason: 'environment_use_required' };
   state.answer = options({ environments: [row] });
   show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
-  await userEvent.click(await screen.findByRole('radio', { name: i18n.t('start.where.useExisting') }));
   await userEvent.click(await screen.findByRole('combobox', { name: i18n.t('start.where.title') }));
   expect(screen.getByRole('option', { name: 'Env single' })).toBeEnabled();
   expect(screen.queryByRole('group', { name: i18n.t('start.where.canUse') })).toBeNull();
@@ -500,7 +500,6 @@ it('does not show new-environment choices or arrangements for an access request'
   const user = userEvent.setup();
   show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
   expect(await screen.findByRole('switch', { name: i18n.t('temporary.name') })).toBeVisible();
-  await user.click(screen.getByRole('radio', { name: i18n.t('start.where.useExisting') }));
   await user.click(screen.getByRole('combobox', { name: i18n.t('start.where.title') }));
   await user.click(screen.getByRole('option', { name: 'Env e2' }));
   expect(screen.queryByRole('switch', { name: i18n.t('temporary.name') })).toBeNull();
@@ -538,7 +537,10 @@ it('reviews a remembered same-place directory against its own native options bef
   rememberSetup('starter', { place: topic.id, picks: { ...NO_PICKS, provider: 'p1', agent: 'a1', model: 'm1', environment: 'e2' } });
   show(<QuickStart node={topic} />);
   await waitFor(() => expect(state.reads).toHaveBeenCalledWith('e2'));
-  await userEvent.type(screen.getByRole('textbox', { name: i18n.t('start.quick.label.topic') }), 'Same location{Enter}');
+  // Starting waits for the answers about the place: Enter is pressed once the button says they are in.
+  await userEvent.type(screen.getByRole('textbox', { name: i18n.t('start.quick.label.topic') }), 'Same location');
+  await waitFor(() => expect(screen.getByRole('button', { name: i18n.t('start.quick.send') })).not.toHaveAttribute('aria-disabled', 'true'));
+  await userEvent.keyboard('{Enter}');
   expect(submittedPlan()).toMatchObject({ resolved: { fresh: false, environment: { environment: { id: 'e2' } } } });
 });
 
@@ -585,18 +587,24 @@ it.each(['en', 'zh-CN'] as const)('asks nothing about Git in a place without a r
   expect(submittedPlan()).toMatchObject({ prepareSource: false });
 });
 
-it.each(['en', 'zh-CN'] as const)('says why a host cannot take a new environment and what to know of one that can (%s)', async (locale) => {
+it.each(['en', 'zh-CN'] as const)('chooses the host of a new environment from a menu that says why one cannot take it and what to know of one that can (%s)', async (locale) => {
   await setLocale(locale);
   state.answer = options({ environment_default: 'fresh', hosts: [
     host('roomy', 'Roomy host', { automatic: true, warnings: ['no_room'] }),
     host('closed', 'Closed host', { usable: false, reasons: ['template_not_allowed'] }),
   ] });
+  const user = userEvent.setup();
   show(<NewThreadDialog parent={parent} open onClose={() => undefined} />);
-  await screen.findByRole('radio', { name: i18n.t('start.where.createNew') });
-  const list = document.querySelector<HTMLElement>('[data-start-hosts]');
-  if (list === null) throw new Error('the new environment option lists the hosts it could be made on');
-  const hosts = within(list);
-  expect(hosts.getByText(i18n.t('change.where.hostReason.template_not_allowed'))).toBeVisible();
-  expect(hosts.getByText(i18n.t('change.where.hostWarning.no_room'))).toBeVisible();
-  expect(hosts.queryByText(i18n.t('start.where.hostClosed'))).toBeNull();
+  expect(await screen.findByRole('combobox', { name: i18n.t('start.where.title') })).toHaveDisplayValue(i18n.t('start.where.newName'));
+  const menu = screen.getByRole('combobox', { name: i18n.t('start.where.host') });
+  // Left alone it is the host the scheduler would take, and the name says which.
+  expect(menu).toHaveTextContent(i18n.t('start.where.hostAutoNamed', { host: 'Roomy host' }));
+  await user.click(menu);
+  expect(screen.getByText(i18n.t('change.where.hostReason.template_not_allowed'))).toBeVisible();
+  expect(screen.getByText(i18n.t('change.where.hostWarning.no_room'))).toBeVisible();
+  expect(screen.getByRole('option', { name: 'Closed host' })).toHaveAttribute('data-disabled');
+  await user.click(screen.getByRole('option', { name: 'Roomy host' }));
+  await user.click(screen.getByRole('button', { name: i18n.t('start.create') }));
+  await waitFor(() => expect(state.start).toHaveBeenCalledOnce());
+  expect(submittedPlan()).toMatchObject({ resolved: { fresh: true, newEnvironment: { host_id: 'roomy' } } });
 });
