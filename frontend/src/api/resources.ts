@@ -11,6 +11,7 @@
  * makes nothing twice. A change to something with a revision carries the revision the person saw, and
  * a stale one comes back as `conflict.stale_revision`, which the screen shows and never retries alone.
  */
+import { RELEASE_READ } from '@/api/freshness';
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { api, done, ok, repeatable } from '@/api/client';
@@ -233,7 +234,6 @@ export const providerSuggestionsQuery = (id: string) =>
     queryFn: ({ signal }): Promise<ModelSuggestion[]> =>
       ok(api.GET('/providers/{id}/models/suggestions', { params: { path: { id } }, signal })),
     // A discovery is a question put to the vendor: it is asked when the reader asks, not on every visit.
-    staleTime: 5 * 60_000,
     retry: false,
   });
 
@@ -371,10 +371,11 @@ export const agentQuery = (id: string) =>
     queryFn: ({ signal }): Promise<Agent> => ok(api.GET('/agents/{id}', { params: { path: { id } }, signal })),
   });
 
-/** The harnesses the system has an adapter for, with the builds there are. */
+/** The harnesses the system has an adapter for, with the builds there are. It changes with a release or an administrator's own act, which says so: it is read once. */
 export const harnessKindsQuery = queryOptions({
   queryKey: harnessKindsKey,
   queryFn: ({ signal }): Promise<HarnessKindInfo[]> => ok(api.GET('/harness-kinds', { signal })),
+  ...RELEASE_READ,
 });
 
 /** Makes a profile for a harness in an org. */
@@ -468,13 +469,14 @@ export const templateQuery = (id: string) =>
 export const driversQuery = queryOptions({
   queryKey: driversKey,
   queryFn: ({ signal }): Promise<DriverInfo[]> => ok(api.GET('/drivers', { signal })),
+  ...RELEASE_READ,
 });
 
 /** What an environment may be granted beyond the ordinary, each with its risk. */
 export const capabilitiesQuery = queryOptions({
   queryKey: capabilitiesKey,
   queryFn: ({ signal }): Promise<CapabilityDef[]> => ok(api.GET('/capabilities', { signal })),
-  staleTime: Number.POSITIVE_INFINITY,
+  ...RELEASE_READ,
 });
 
 export function createTemplate(body: TemplateCreateBody, key: string): Promise<Template> {

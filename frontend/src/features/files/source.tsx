@@ -1,4 +1,5 @@
 /** Authorized file sources adapt attachments to the workspace's existing viewers without copying their rendering. */
+import { READ_NOW } from '@/api/freshness';
 import { linkTo, referenceTo, type LinkPart } from '@/lib/links';
 import { queryOptions } from '@tanstack/react-query';
 import { createContext, useContext } from 'react';
@@ -64,7 +65,7 @@ export const useFileSource = () => useContext(FileSourceContext);
 
 /** Every derived cache of administrative bytes has the same retirement policy as its preview. */
 export const sourceReaderKey = (source: FileSource | null | undefined) => source?.adminOnly === true ? [libraryReader()] : [];
-export const sourceQueryAuthority = (source: FileSource | null | undefined) => source?.adminOnly === true ? { ...ADMIN_QUERY, staleTime: 0, gcTime: 0 } : {};
+export const sourceQueryAuthority = (source: FileSource | null | undefined) => source?.adminOnly === true ? { ...ADMIN_QUERY, gcTime: 0 } : {};
 function currentSource(source: FileSource, reader: ReturnType<typeof libraryReader>, signal?: AbortSignal): void {
   signal?.throwIfAborted();
   if (source.adminOnly === true && (!sameLibraryReader(reader) || !queryAuthorityAllows(queryClient, ADMIN_QUERY.meta))) throw new DOMException('The administrative file reader changed', 'AbortError');
@@ -154,15 +155,15 @@ export const sourceHeadQuery = (source: FileSource) => queryOptions({
   ...sourceQueryAuthority(source),
   queryKey: ['file-source-head', source.url, source.version ?? null, ...sourceReaderKey(source)] as const,
   queryFn: async ({ client }): Promise<FileHead> => {
-    if (source.workspace !== undefined) return client.query({ ...headQuery(source.workspace.door, source.workspace.path), staleTime: 0 });
+    if (source.workspace !== undefined) return client.query({ ...headQuery(source.workspace.door, source.workspace.path), ...READ_NOW });
     // Opening rechecks authority; a cached thumbnail alone never authorizes a new original view.
-    const preview = await client.query({ ...previewQuery(source), staleTime: 0 });
+    const preview = await client.query({ ...previewQuery(source), ...READ_NOW });
     return {
       stat: { name: source.name, path: source.url, type: 'file', size: preview.size, mtime: '', mode: 0, link_target: null, cached: true,
         hash: preview.hash, media_type: preview.media_type, is_text: preview.is_text },
       brought: { state: 'ready', hash: preview.hash ?? source.hash ?? source.url, size: preview.size },
     };
-  }, retry: false, staleTime: 0, gcTime: 0,
+  }, retry: false, gcTime: 0,
 });
 
 export function sourceReference(source: FileSource, line?: number): string {

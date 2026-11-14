@@ -15,11 +15,13 @@ pub const ASK_MAX_STEPS: &str = "16";
 pub const ASK_MAX_OUTPUT_TOKENS: &str = "4096";
 pub const ASK_CONTEXT_TOKENS: &str = "120000";
 pub const ASK_MAX_TOOLS: &str = "32";
-pub const ASK_TOOL_BYTES: &str = "65536";
-pub const ASK_TURN_TOOL_BYTES: &str = "262144";
+pub const ASK_DOCS_HITS: &str = "8";
+pub const ASK_DOCS_EXCERPT_TOKENS: &str = "2000";
+pub const ASK_MAX_OPERATIONS: &str = "40";
+pub const ASK_MAX_LINKS: &str = "100";
 pub const AGENT_EFFORT: &str = r#""high""#;
 pub const AGENT_PARAMS: &str = "{}";
-pub const AGENT_FEATURES: &str = r#"{"vision":true}"#;
+pub const AGENT_FEATURES: &str = r#"{"codex.cyber_access":false}"#;
 pub const AGENT_INSTRUCTIONS: &str =
     r#""Run the relevant tests before describing a change as complete.""#;
 /// Joining text, inherited through the existing organization append setting.
@@ -102,6 +104,7 @@ pub const SUMMARY_TARGETS: &str = r#"{"thread":{"automatic":true,"on":["turn_com
 pub const SUMMARY_FOLLOW_INTERVAL_SECS: &str = "5";
 pub const SUMMARY_READ_BATCH_SIZE: &str = "100";
 pub const PROVIDERS_ALLOWED: &str = r#"["acme.*"]"#;
+pub const MODELS_ADD_SWITCHES_ON: &str = r#""basic""#;
 pub const COLLAB_ATTRIBUTION: &str = r#""always""#;
 pub const COLLAB_DEFAULT_DELIVERY: &str = r#""queue""#;
 pub const COMPOSER_PASTE_INLINE_CONTEXT_SHARE: &str = "25";
@@ -159,6 +162,7 @@ pub const SOURCE_BRANCH: &str = r#""release""#;
 pub const SOURCE_SECRET_NAME: &str = r#""REPOSITORY_TOKEN""#;
 pub const WORKSPACE_RECORD_DAYS: &str = "7";
 pub const WORKSPACE_RECORD_MAX_BYTES: &str = "1073741824";
+pub const WORKSPACE_RECORD_WAIT_SECS: &str = "30";
 pub const BROADCAST_DELIVERY: &str = r#""steer""#;
 pub const BROADCAST_FALLBACK: &str = r#""next_turn""#;
 pub const BROADCAST_WAKE_IDLE: &str = "false";
@@ -225,6 +229,13 @@ pub const NOTIFY_OPERATIONS: &str = r#""always""#;
 pub const MESSAGE_BODY_MAX_CHARS: &str = "30000";
 /// A longer replay window illustrates that one day is the default, not a ceiling.
 pub const API_IDEMPOTENCY_WINDOW: &str = "48";
+/// Retain a larger recently closed working set without changing open tabs.
+pub const INTERFACE_KEPT_CLOSED_TABS: &str = "20";
+/// A longer delay avoids a loading indication on short reads.
+pub const INTERFACE_PROGRESS_DELAY_MS: &str = "300";
+/// Status may be checked more often while directory answers remain useful longer.
+pub const INTERFACE_READ_FRESHNESS_MS: &str =
+    r#"{"directory":120000,"lookup":30000,"report":60000,"status":2000}"#;
 pub const BROADCAST_CHAT_MESSAGES_PER_HOUR: &str = "60";
 /// Messages to one thread have an hourly budget of their own, apart from announcements.
 pub const BROADCAST_THREAD_MESSAGES_PER_HOUR: &str = "60";

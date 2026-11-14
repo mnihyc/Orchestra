@@ -1,6 +1,8 @@
 /** Admission/aggregate ownership controls, independent of HTTP timing and screen counts. */
 import { expect, it, vi } from 'vitest';
 import { ReadScheduler } from '@/api/readScheduler';
+import { LiveQueryClient } from '@/api/query';
+import { supersededRead } from '@/api/reads';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -39,4 +41,32 @@ it('one aggregate supplies exact native pages until an authority cut and keeps t
   scheduler.advance(); expect(scheduler.owns(page)).toBe(false); expect(scheduler.owner(page)).toEqual(owner);
   scheduler.supply(owner, [page]); expect(scheduler.owns(page)).toBe(true);
   scheduler.release(owner); expect(scheduler.owner(page)).toBeUndefined();
+});
+
+it('drops a superseded read without an error or a stuck loading state and reads the same key on return', async () => {
+  const cache = new LiveQueryClient({ defaultOptions: { queries: { retry: false } } });
+  const key = ['superseded-section', 'kept-view'];
+  try {
+    await expect(cache.query({ queryKey: key, queryFn: () => Promise.reject(supersededRead()) })).rejects.toBeInstanceOf(Error);
+    expect(cache.getQueryState(key)).toMatchObject({ status: 'pending', fetchStatus: 'idle', error: null });
+    expect(await cache.query({ queryKey: key, queryFn: () => Promise.resolve('Newest answer') })).toBe('Newest answer');
+  } finally { cache.clear(); }
+});
+
+it('lets a newer read finish when an older transport ignores cancellation and rejects late', async () => {
+  const cache = new LiveQueryClient({ defaultOptions: { queries: { retry: false } } });
+  const key = ['superseded-section', 'same-key'];
+  const older = deferred<string>(), newer = deferred<string>();
+  cache.setQueryData(key, 'Kept answer');
+  try {
+    const former = cache.query({ queryKey: key, staleTime: 0, queryFn: async () => { await older.promise; throw supersededRead(); } }).catch(() => undefined);
+    await cache.cancelQueries({ queryKey: key, exact: true });
+    const latest = cache.query({ queryKey: key, staleTime: 0, queryFn: () => newer.promise });
+    older.resolve('Former answer');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(cache.getQueryState(key)?.fetchStatus).toBe('fetching');
+    newer.resolve('Newest answer');
+    expect(await latest).toBe('Newest answer');
+    await former;
+  } finally { newer.resolve('Newest answer'); older.resolve('Former answer'); cache.clear(); }
 });

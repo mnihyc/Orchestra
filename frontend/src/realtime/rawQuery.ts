@@ -1,4 +1,5 @@
 /** ACK-gated raw observations. Native source identity and local read ownership stay separate. */
+import { supersededRead } from '@/api/reads';
 import { CancelledError, infiniteQueryOptions, type InfiniteData, type Query, type QueryClient, type QueryKey } from '@tanstack/react-query';
 import { api, client, ok } from '@/api/client';
 import { assertThreadRead, isCurrentThreadRead, readInThread, receiveThreadRead, threadQueryRead,
@@ -47,7 +48,7 @@ function publicationAuthority(query: Query): object {
   if (held !== undefined) return held;
   const authority = {}; publicationAuthorities.set(query, authority); return authority;
 }
-const retiredPublication = () => new CancelledError({ silent: true, revert: false });
+const retiredPublication = () => supersededRead();
 
 /** Retire a cancelled attempt even if an already-dispatched HTTP implementation settles late.
  * The request still receives the same abort signal; its late completion has a rejection handler. */

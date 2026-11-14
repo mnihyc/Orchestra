@@ -10,7 +10,6 @@ const IMPACT_REFRESH_MS=DEFAULT_RESOURCE_IMPACT_POLL_MS;
 export const resourceImpactQuery=(target:FactTarget)=>queryOptions({
   queryKey:['resource-impact',target] as const,
   queryFn:({signal}):Promise<ResourceImpact>=>ok(api.POST('/resources/impact',{body:target,signal})),
-  staleTime:0,
   refetchInterval:IMPACT_REFRESH_MS,
   gcTime:0,
   retry:false,

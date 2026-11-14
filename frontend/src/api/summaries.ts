@@ -28,7 +28,6 @@ export const documentSummaryOptionsQuery = (id: string) => {
       if (reply.target.kind !== 'document' || reply.target.id !== id) throw new NetworkError('malformed');
       return reply;
     },
-    staleTime: 0,
     retry: false,
   });
 };
@@ -65,7 +64,7 @@ export const resourceSummaryQuery = (target: ResourceSummaryTarget, range?: Reso
       if (reply.target.kind !== target.kind || reply.target.id !== target.id || reply.root_org_id === '') throw new NetworkError('malformed');
       return reply;
     },
-    staleTime: 0, retry: false,
+    retry: false,
     refetchOnMount: (query) => refetchSummaryOpening(query.state.data, query.getObserversCount(), query.state.isInvalidated),
     // Only the server's pending-work pace follows free reads; it never submits/retries paid work.
     refetchInterval: (query) => {

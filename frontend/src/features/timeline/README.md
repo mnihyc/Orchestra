@@ -40,6 +40,7 @@ the actual Review changes action rather than repeating a paragraph on every turn
 
 - `Timeline.tsx`: Virtualized main stream, history loading and stable scroll anchors.
 - `rows.ts`: The rows the conversation is drawn as: which items stand alone, which are folded into one line for their turn, and where the lines that belong to no item go.
+- `rowKinds.ts`: What each item is to the reader: the conversation, the agent's work, or the program's own state (diagnostics), which is kept and drawn only when the reader asked for it.
 - `titles.ts`: The words and the figure of a step's row, made from what the tool call was and not from the server's own line: so they come in the reader's language.
 - `waiting.ts`: What a thread is waiting for, in words: the step of its start, the reason it is blocked, the job that holds it.
 - `turnTime.ts`: A turn's working time excludes the human waits recorded by its live feed.

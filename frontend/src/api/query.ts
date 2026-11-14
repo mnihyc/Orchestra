@@ -14,14 +14,8 @@ import { ApiError } from '@/api/client';
 import { scheduledReads } from '@/api/readScheduler';
 import { NetworkError, retryPause, retryRead } from '@/lib/requests';
 import { setOrchLinkSource, type OrchLinkAddresses } from '@/lib/orchLinks';
-
-/**
- * How long an answer counts as fresh. Within it a screen that is opened again shows what it has and
- * asks nothing; after it the screen shows what it has and asks behind it. Half a minute covers going
- * back and forth between two screens without a request each time, and nothing a person acts on is
- * read from here alone: what changes while they look arrives by the live connection.
- */
-const FRESH_FOR_MS = 30_000;
+import { readFreshness, readFreshnessSettings } from '@/api/freshness';
+import { queryRead } from '@/api/reads';
 
 /** How long an answer nobody shows is kept: long enough to come back to a screen and find it there. */
 const KEPT_FOR_MS = 5 * 60_000;
@@ -36,6 +30,16 @@ export interface ReadOptions {
  * A person's explicit Retry/Refresh still calls that query's refetch directly.
  */
 export class LiveQueryClient extends QueryClient {
+  private wrapped = new WeakSet<object>();
+  override defaultQueryOptions: QueryClient['defaultQueryOptions'] = (options) => {
+    const defaults = super.defaultQueryOptions(options);
+    const read = defaults.queryFn;
+    if (typeof read !== 'function' || this.wrapped.has(read)) return defaults;
+    const wrapped: typeof read = (context) => queryRead(this, context.queryKey, () => read(context));
+    this.wrapped.add(wrapped);
+    return { ...defaults, queryFn: wrapped };
+  };
+
   override async invalidateQueries<Key extends QueryKey = QueryKey>(filters: InvalidateQueryFilters<Key> = {}, options?: InvalidateOptions): Promise<void> {
     if (filters.exact !== true) return;
     await super.invalidateQueries(filters, options);
@@ -45,7 +49,7 @@ export class LiveQueryClient extends QueryClient {
 export const queryClient = new LiveQueryClient({
   defaultOptions: {
     queries: {
-      staleTime: FRESH_FOR_MS,
+      staleTime: (query) => readFreshness(query.queryKey),
       gcTime: KEPT_FOR_MS,
       retry: retryRead,
       retryDelay: (attempt) => retryPause(attempt),
@@ -65,6 +69,10 @@ export const queryClient = new LiveQueryClient({
 });
 
 setOrchLinkSource(() => queryClient.getQueryData<OrchLinkAddresses>(['meta']));
+readFreshnessSettings(() => {
+  const meta = queryClient.getQueryData<{ interface_defaults?: { read_freshness_ms?: Record<string, unknown> } }>(['meta']);
+  return meta?.interface_defaults?.read_freshness_ms ?? {};
+});
 
 queryClient.getQueryCache().subscribe((event) => {
   if (event.type === 'removed') {

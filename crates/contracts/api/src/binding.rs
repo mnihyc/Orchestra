@@ -354,7 +354,8 @@ pub struct BindingEnvironment {
     pub usable: bool,
     /// Why not, when not.
     pub reason: Option<String>,
-    /// Whether it is the topic's default.
+    /// Whether it is the default of the threads started here: the environment the nearest setting of
+    /// `env.default_id` names (the topic's own, else its project's, else its org's), and the caller may use it.
     pub is_default: bool,
     /// How it is used at present, from the point of view of this topic.
     pub used: EnvironmentUse,
@@ -364,6 +365,18 @@ pub struct BindingEnvironment {
     pub topics_hidden: i64,
     /// The directory a thread would get there.
     pub directory: String,
+}
+
+/// The environment that the nearest setting of `env.default_id` names for the threads started here, whoever may use it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BindingDefaultEnvironment {
+    /// The environment the setting names.
+    pub environment: Id,
+    /// The place whose setting it is, when that is not the place asked about itself: a project or org above it.
+    pub from: Option<NodeRef>,
+    /// Why the caller cannot start a thread in it, when they cannot: the reason of its row among the environments,
+    /// or `environment_not_seen` when it is not among those the caller may see.
+    pub reason: Option<String>,
 }
 
 /// What `env.thread_default` resolves to.
@@ -413,6 +426,10 @@ pub struct BindingOptions {
     pub environments: Vec<BindingEnvironment>,
     /// What a new thread does about its environment unless told.
     pub environment_default: EnvironmentDefault,
+    /// The environment the nearest setting names as the default, wherever it is set, and why the caller cannot use
+    /// it when they cannot; absent when no setting names one and when rebinding an existing thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_environment: Option<BindingDefaultEnvironment>,
     /// Safe resolved repository settings and the place supplying the repository address.
     pub source: BindingSource,
     /// The permission page that a thread created here would begin with.

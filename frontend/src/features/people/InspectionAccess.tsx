@@ -9,7 +9,7 @@ import { usePlaceLabel } from '@/features/navigation/placeLabels';
 export function InspectionAccess({ orgId }: { orgId: string }) {
   const { t } = useTranslation();
   const label = usePlaceLabel();
-  const read = useQuery({ ...pageQuery({ kind: 'org', id: orgId }), retry: false, staleTime: 0 });
+  const read = useQuery({ ...pageQuery({ kind: 'org', id: orgId }), retry: false });
   const row = read.data?.rows.find((row) => row.permission === 'directs.view');
   const holders = row === undefined ? null : [...row.entries.map((entry) => entry.holder), ...(row.inherited?.holders ?? [])];
   const names = holders === null ? null : [...new Set(holders.map((holder) => holderName(t, holder, '',false,label)))];
