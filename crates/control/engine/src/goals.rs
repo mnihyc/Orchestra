@@ -16,8 +16,8 @@
 //! has work in hand.
 //!
 //! **"Met"** is the agent's report, checked by the place's helper model against the condition where there is one
-//! (`check`); a "not yet" starts the next turn with its reason. Without a helper model the report decides, and the
-//! goal's line says so.
+//! (`check`); a "not yet" starts the next turn with its reason. Without an independent check, the report stays
+//! unchecked and the goal waits for a person's decision to mark it met or keep working.
 //!
 //! **Limits** (`thread.goal.max_turns`, `thread.goal.max_minutes` and `thread.goal.max_credits`) default to none. A
 //! goal may tighten a place's limit but cannot raise it; reaching one that is set stops the goal and says which.
@@ -592,7 +592,30 @@ pub(crate) async fn pause_in(
     Ok(true)
 }
 
-/// Ends a goal that was met, with the evidence that showed it.
+/// Holds an unverified completion report for an explicit person's decision.
+pub(crate) async fn unchecked_in(
+    unit: &mut Unit<'_>,
+    thread: &ThreadRow,
+    goal: &GoalRow,
+    report: &ReportRow,
+    reason: &str,
+) -> Result<bool, EngineError> {
+    let now = unit.now();
+    if !rows::decide_report(unit.conn, report.id, "unchecked", None, Some(reason), now).await? {
+        return Ok(false);
+    }
+    pause_in(
+        unit,
+        thread,
+        goal,
+        GoalReason::Unchecked,
+        Some(reason),
+        None,
+    )
+    .await
+}
+
+/// Ends a goal only after an independent check or an explicit person decision.
 pub(crate) async fn met_in(
     unit: &mut Unit<'_>,
     thread: &ThreadRow,
@@ -600,6 +623,7 @@ pub(crate) async fn met_in(
     report: &ReportRow,
     checked_by: GoalCheckedBy,
     reason: Option<&str>,
+    by_user: Option<Id>,
 ) -> Result<bool, EngineError> {
     let now = unit.now();
     if !rows::end(unit.conn, goal.id, status::MET, None, None, now).await? {
@@ -627,7 +651,7 @@ pub(crate) async fn met_in(
     audit(
         unit,
         thread.node_id,
-        None,
+        by_user,
         orch_db::audit::name!("thread.goal_ended"),
         json!({ "goal_id": goal.id, "how": "met", "checked_by": checked_by }),
     )
@@ -982,6 +1006,30 @@ impl Engine {
                 .await?
                 .ok_or(GoalError::NotFound)?;
             match body.action {
+                Some(GoalAction::Accept) => {
+                    let report = rows::latest_report(&mut *unit.conn, goal.id)
+                        .await?
+                        .filter(|report| {
+                            report.status == "met" && report.outcome.as_deref() == Some("unchecked")
+                        })
+                        .filter(|_| {
+                            goal.status == status::PAUSED
+                                && goal.reason.as_deref() == Some("unchecked")
+                        })
+                        .ok_or(GoalError::Invalid(
+                            "only an unchecked completion report can be accepted",
+                        ))?;
+                    met_in(
+                        &mut unit,
+                        &thread,
+                        &goal,
+                        &report,
+                        GoalCheckedBy::Person,
+                        None,
+                        Some(caller.user()),
+                    )
+                    .await?;
+                }
                 Some(GoalAction::Pause) if goal.status == status::ACTIVE => {
                     pause_in(
                         &mut unit,
@@ -1005,6 +1053,21 @@ impl Engine {
                         return Err(GoalError::LimitReached);
                     }
                     if rows::resume(&mut *unit.conn, goal.id, now).await? {
+                        if goal.reason.as_deref() == Some("unchecked")
+                            && let Some(report) =
+                                rows::latest_report(&mut *unit.conn, goal.id).await?
+                            && report.outcome.as_deref() == Some("unchecked")
+                        {
+                            rows::decide_report(
+                                &mut *unit.conn,
+                                report.id,
+                                "not_yet",
+                                None,
+                                None,
+                                now,
+                            )
+                            .await?;
+                        }
                         let who = by(&mut *unit.conn, caller.user()).await?;
                         marker(
                             &mut unit,

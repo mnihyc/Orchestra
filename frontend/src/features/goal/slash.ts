@@ -17,10 +17,10 @@ import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { toast } from '@/ui/Toast';
 
 /** The `/goal` command, with the current reason where this thread cannot hold a goal. */
-export function useGoalCommand(thread: Thread): SlashCommand[] {
+export function useGoalCommand(thread: Thread, currentPlan?: boolean): SlashCommand[] {
   const { t } = useTranslation();
   const read = useThreadReadRef(thread.id);
-  const plan = useGoalPlans(thread);
+  const plan = useGoalPlans(thread, currentPlan);
   const set = useMutation({
     mutationFn: (words: string) => setGoal(read, { objective: words, condition: words, notify_on_end: false, plan }),
     onSuccess: (goal) => toast({

@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/composer-keys.test.tsx tests/component/model-picker-rows.test.tsx tests/component/goal-mode.test.tsx tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

@@ -1,9 +1,10 @@
 /** Page selection lives in the table header; its reviewed results survive clearing the selection. */
-import { screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { changeTopicStatus } from '@/api/day100';
+import { TopicList } from '@/features/project/TopicList';
 import { Topics } from '@/features/project/Topics';
 import type { Project, Topic } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
@@ -31,7 +32,7 @@ vi.mock('@/features/navigation/places', async (original) => ({ ...await original
 }));
 const appearance = useAppearance.getState();
 beforeEach(() => { vi.clearAllMocks(); });
-afterEach(async () => { useAppearance.setState(appearance); await setLocale('en'); });
+afterEach(async () => { vi.restoreAllMocks(); useAppearance.setState(appearance); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it(`selects one loaded page with a mixed state, then clears only that page (${locale}/${theme})`, async () => {
@@ -82,3 +83,26 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(screen.getByRole('checkbox', { name: i18n.t('day100.batch.selectPage') })).not.toBeChecked();
   });
 }
+
+
+it('keeps selection while a long topic list scrolls to its final loaded row', () => {
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) { return this.tagName === 'TR' ? 72 : 384; });
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(600);
+  const rows = Array.from({ length: 1_200 }, (_, index) => makeTopic('long-' + String(index), 'Topic ' + String(index)));
+  function List() {
+    const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+    return <><output aria-label="Selected count">{selected.size}</output><TopicList topics={rows} selection={{ selected, toggle: (id, on) => setSelected((before) => {
+      const next = new Set(before); if (on) next.add(id); else next.delete(id); return next;
+    }) }} /></>;
+  }
+  show(<List />);
+  const table = screen.getByRole('table', { name: i18n.t('places.topics.title') });
+  expect(table).toHaveAttribute('aria-rowcount', '1201');
+  expect(within(table).getAllByRole('row').length).toBeLessThan(30);
+  fireEvent.click(within(table).getByRole('checkbox', { name: i18n.t('day100.batch.selectRow', { name: 'Topic 0' }) }));
+  expect(screen.getByLabelText('Selected count')).toHaveTextContent('1');
+  fireEvent.scroll(screen.getByRole('region', { name: i18n.t('places.topics.title') }), { target: { scrollTop: 1_197 * 72 } });
+  expect(within(table).getByText('Topic 1199')).toBeVisible();
+  expect(screen.getByLabelText('Selected count')).toHaveTextContent('1');
+  expect(within(table).getAllByRole('row').length).toBeLessThan(30);
+});

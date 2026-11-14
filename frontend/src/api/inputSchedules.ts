@@ -1,11 +1,11 @@
-/** Managed future inputs use the existing topic snapshot, schedule history and cancellation routes. */
+/** Managed future inputs use the topic's own schedule list, the schedule history and cancellation routes. */
 import { infiniteQueryOptions, queryOptions, type QueryClient, type QueryKey } from '@tanstack/react-query';
 import { ApiError, accepted, api, done, ok, repeatable } from '@/api/client';
 import { feedSequences, record } from '@/api/cache';
 import { supplyOverviewPart, type NativeOverviewPart } from '@/api/overviewParts';
 import { scheduledReads, suppliedRead } from '@/api/readScheduler';
 import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
-import type { InputSchedule as NativeSchedule, InputScheduleCreateBody, InputScheduleUpdateBody, InputScheduleWriteResponse, InputScheduleRunPage, InputTiming as NativeTiming, Problem } from '@/generated/api-types';
+import type { InputSchedule as NativeSchedule, InputScheduleCreateBody, InputSchedulePage, InputScheduleUpdateBody, InputScheduleWriteResponse, InputScheduleRunPage, InputTiming as NativeTiming, Problem } from '@/generated/api-types';
 
 /** Additive native fields until central contract generation; people's existing rows keep their shape. */
 export type InputTiming = NativeTiming | { kind: 'cron'; expression: string; zone: string };
@@ -30,8 +30,16 @@ export const topicSchedulesQuery = (topic: string) => {
   return queryOptions({ queryKey: [...scheduleKeys.topic(topic), reader] as const,
     queryFn: async ({ signal }): Promise<InputSchedule[]> => {
       current(reader, signal);
-      const state = await ok(api.GET('/topics/{id}/sync', { params: { path: { id: topic } }, signal }));
-      current(reader, signal); return state.input_schedules;
+      // The topic's schedules alone, a page at a time until none is left: not its snapshot of threads, jobs and announcements.
+      const found: InputSchedule[] = [];
+      let cursor: string | null = null;
+      do {
+        const page: InputSchedulePage = await ok(api.GET('/topics/{id}/input-schedules', { params: { path: { id: topic }, query: { state: null, ...(cursor === null ? {} : { cursor }) } }, signal }));
+        current(reader, signal);
+        found.push(...page.items);
+        cursor = page.next_cursor;
+      } while (cursor !== null);
+      return found;
     }, retry: false });
 };
 
