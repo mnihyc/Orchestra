@@ -39,7 +39,7 @@ it.each(['en', 'zh-CN'] as const)('edits the served writable value once in its r
   expect(screen.getAllByRole('switch')).toHaveLength(1);
   await user.click(field);
   await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, def.key, { value: true, expectedRevision: 2 }));
-  expect(screen.getByRole('switch', { name: def.title })).toBeChecked();
+  await waitFor(() => expect(screen.getByRole('switch', { name: def.title })).toBeChecked());
 });
 
 it('keeps a declared apply constraint once in the same row', async () => {

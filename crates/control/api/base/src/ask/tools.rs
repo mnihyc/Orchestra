@@ -373,7 +373,9 @@ async fn read(
         }
         sources.targets.clone()
     };
-    let citations = source_links(&targets, parameters, &data, route.summary);
+    let links =
+        usize::try_from(tool_size(origin, "ask.max_links", 50).await?).unwrap_or(usize::MAX);
+    let citations = source_links(&targets, parameters, &data, route.summary, links);
     Ok(ReadReply { data, citations })
 }
 
@@ -540,9 +542,19 @@ pub(crate) async fn reference_id(
     Ok((kind, id, reference.url))
 }
 
-/// Public bundled documentation, shared with ordinary native tools without a person credential.
+/// Public bundled documentation, shared with ordinary native tools without a person credential. Where there
+/// is no organization to read the sizes from, it gives what the settings start with.
 pub(crate) fn documentation(arguments: &Json) -> ApiResult<Json> {
-    documentation::search(arguments)
+    documentation::search(arguments, documentation::Sizes::default())
+}
+
+/// A number inside the read tools, as the settings of the conversation's root organization have it.
+async fn tool_size(origin: &ReadContext, key: &str, default: i64) -> ApiResult<i64> {
+    let mut conn = origin.app().db.acquire().await?;
+    Ok(setting::<i64>(&mut conn, Place::Node(origin.root()), key)
+        .await
+        .map_err(ApiError::internal)?
+        .unwrap_or(default))
 }
 
 /// The sealed native call delegates only the current owner's ordinary reads in its real root.
@@ -781,6 +793,8 @@ async fn execute_for(
         }
         "find_operation" => {
             let query = string("query")?.to_lowercase();
+            let listed = usize::try_from(tool_size(origin, "ask.max_operations", 20).await?)
+                .unwrap_or(usize::MAX);
             let mut found = Vec::new();
             let routes = orch_api_contract::routes::all();
             'operations: for operation in ask_tools::catalogue().map_err(ApiError::internal)? {
@@ -796,14 +810,21 @@ async fn execute_for(
                         continue;
                     }
                     found.push(json!({"operation":variant.operation,"description":route.summary,"selector":variant.selector,"schemas":ask_tools::schemas(route)}));
-                    if found.len() == 20 {
+                    if found.len() >= listed {
                         break 'operations;
                     }
                 }
             }
             return Ok((json!({"operations":found,"citations":[]}), None));
         }
-        "docs" => return Ok((documentation(args)?, None)),
+        "docs" => {
+            let sizes = documentation::Sizes {
+                hits: usize::try_from(tool_size(origin, "ask.docs_hits", 5).await?)
+                    .unwrap_or(usize::MAX),
+                excerpt_tokens: tool_size(origin, "ask.docs_excerpt_tokens", 1000).await?,
+            };
+            return Ok((documentation::search(args, sizes)?, None));
+        }
         _ => return Err(denied("Unknown read tool")),
     };
     let operation = if name == "read" {
@@ -905,8 +926,9 @@ fn source_links(
     parameters: &ReadParameters,
     data: &Json,
     description: &str,
+    most: usize,
 ) -> Vec<Json> {
-    let mut links = canonical_links(data);
+    let mut links = canonical_links(data, most);
     for target in targets {
         let Some(id) = target.id else {
             continue;
@@ -949,11 +971,11 @@ fn source_links(
     }
     links.sort_by_key(Json::to_string);
     links.dedup();
-    links.truncate(50);
+    links.truncate(most);
     links
 }
 
-fn canonical_links(value: &Json) -> Vec<Json> {
+fn canonical_links(value: &Json, most: usize) -> Vec<Json> {
     let mut links = Vec::new();
     fn visit(value: &Json, links: &mut Vec<Json>) {
         match value {
@@ -988,7 +1010,7 @@ fn canonical_links(value: &Json) -> Vec<Json> {
     visit(value, &mut links);
     links.sort_by_key(Json::to_string);
     links.dedup();
-    links.truncate(50);
+    links.truncate(most);
     links
 }
 
@@ -1046,8 +1068,8 @@ pub mod tests {
             path: path(actual),
             ..Default::default()
         };
-        assert!(source_links(&[], &parameters, &data, "Read source").is_empty());
-        let links = source_links(&[source], &parameters, &data, "Read source");
+        assert!(source_links(&[], &parameters, &data, "Read source", 50).is_empty());
+        let links = source_links(&[source], &parameters, &data, "Read source", 50);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0]["url"], format!("/doc/{actual}"));
         assert_eq!(links[0]["title"], "A current source");
@@ -1056,6 +1078,7 @@ pub mod tests {
             &parameters,
             &json!({"id":actual,"content_hidden":true,"title":"Private marker"}),
             "Read source",
+            50,
         );
         assert!(hidden[0]["title"].is_null());
         assert!(
