@@ -16,6 +16,7 @@ pub async fn manual_default(
     conn: &mut Conn,
     principal: &Principal,
     place: Id,
+    field: orch_summarizer_contract::descriptor::SummaryField,
     now: Time,
 ) -> Result<ManualDefault, EngineError> {
     let preferred = orch_settings::get::<Id>(
@@ -65,7 +66,7 @@ pub async fn manual_default(
             };
             let Ok(tokens) = orch_summarizer_model::context::fit_window(
                 config.context_tokens,
-                config.max_output_tokens,
+                config.output_reserve(field, parameters.needs_reasoning_room()),
                 parameters
                     .context_open()
                     .or(parameters.context_window.filter(|window| *window > 0)),

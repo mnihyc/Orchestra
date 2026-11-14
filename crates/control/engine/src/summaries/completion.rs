@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use orch_db::queries::{resources::thread_engine as resources, threads};
 use orch_db::{Conn, DbError};
 use orch_link_contract::commands::{ProviderComplete, ProviderCompleteResult, SerialKey};
-use orch_summarizer_contract::summarizer::SummarizeError;
-use orch_summarizer_model::Complete;
+use orch_summarizer_contract::summarizer::{OUTPUT_CUT, SummarizeError};
+use orch_summarizer_model::{Complete, Reasoning};
 use orch_types::{Id, Json};
 use serde_json::json;
 
@@ -39,6 +39,24 @@ pub(super) fn stable_pause(reason: &str) -> bool {
             | "Environment removed"
             | "Resource switched off"
     )
+}
+
+/// A model's efforts from the lowest up: the names the vendors use, in their order, and any other after them in
+/// the order the model lists them.
+fn lowest_first(efforts: &[String]) -> Vec<&str> {
+    const KNOWN: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    let mut ranked: Vec<(usize, &str)> = efforts
+        .iter()
+        .map(|effort| {
+            let rank = KNOWN
+                .iter()
+                .position(|known| known == effort)
+                .unwrap_or(KNOWN.len());
+            (rank, effort.as_str())
+        })
+        .collect();
+    ranked.sort_by_key(|(rank, _)| *rank);
+    ranked.into_iter().map(|(_, effort)| effort).collect()
 }
 
 fn effort_is_offered(params: &Json, model: &Json) -> bool {
@@ -456,10 +474,15 @@ impl Host {
         // Admission uses the final redacted bytes and current allowance. A masking replacement or a changed model
         // window cannot make a previously fitted handoff or goal check exceed the place's input share.
         if matches!(self.task, "handoff" | "goal_check") {
-            let budget =
-                super::budget::input_budget(&mut tx, node, provider.id, &request.model_name)
-                    .await
-                    .map_err(internal)?;
+            let budget = super::budget::input_budget(
+                &mut tx,
+                node,
+                provider.id,
+                &request.model_name,
+                request.max_output_tokens,
+            )
+            .await
+            .map_err(internal)?;
             if request.system.len().saturating_add(request.input.len()) > budget.bytes {
                 return Err(SummarizeError::Skipped(
                     "the summary model's input allowance cannot hold the rendered material"
@@ -497,8 +520,10 @@ impl Host {
                 .check(self.engine.inner.clock.as_ref())
                 .map_err(internal)?;
         }
-        sqlx::query("INSERT INTO summary_calls (id,node_id,topic_id,thread_id,provider_id,person_id,model_name,created_at,agent_id,environment_id,issued_by,entry_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id) DO NOTHING")
-            .bind(call.id).bind(node).bind(call.topic_id).bind(call.thread_id).bind(call.provider_id).bind(call.person_id).bind(&call.model_name).bind(call.created_at).bind(agent).bind(environment).bind(call.issued_by).bind(call.entry_id).execute(&mut *tx).await.map_err(DbError::from).map_err(internal)?;
+        sqlx::query("INSERT INTO summary_calls (id,node_id,topic_id,thread_id,provider_id,person_id,model_name,created_at,agent_id,environment_id,issued_by,entry_id,resource_request_id,resource_call_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(id) DO NOTHING")
+            .bind(call.id).bind(node).bind(call.topic_id).bind(call.thread_id).bind(call.provider_id).bind(call.person_id).bind(&call.model_name).bind(call.created_at).bind(agent).bind(environment).bind(call.issued_by).bind(call.entry_id)
+            .bind(resource.as_ref().map(super::resource::Work::request)).bind(resource.as_ref().map(super::resource::Work::call))
+            .execute(&mut *tx).await.map_err(DbError::from).map_err(internal)?;
         let admitted: Call = sqlx::query_as("SELECT id,node_id,topic_id,thread_id,provider_id,person_id,issued_by,entry_id,model_name,created_at FROM summary_calls WHERE id=$1 AND purpose='summary' AND cancel_reason IS NULL")
             .bind(call.id).fetch_one(&mut *tx).await.map_err(DbError::from).map_err(internal)?;
         let mut expected = call;
@@ -759,6 +784,13 @@ impl Host {
                     .and_then(|raw| raw.pointer("/model_request/outcome/said"))
                     .cloned()
                     .unwrap_or(orch_types::Json::Null);
+                // The answer ran into its output allowance: a retry with the same allowance runs into it
+                // again, so this is told as what it is, whatever the call rules then do.
+                let cut = failure
+                    .as_object_mut()
+                    .and_then(|failure| failure.remove("output_limit"))
+                    .and_then(|limit| limit.as_bool())
+                    .unwrap_or(false);
                 let context = self.recovery_context(&call, root_call, configured, &request, writer);
                 let recovery = crate::calls::reserve(
                     &mut tx,
@@ -775,6 +807,12 @@ impl Host {
                 self.engine
                     .settle_node_model_input(node, model_input, crate::model_inputs::Sent::Refused)
                     .await;
+                if cut {
+                    return Err(SummarizeError::Failed {
+                        message: OUTPUT_CUT.to_owned(),
+                        retryable: recovery.is_some(),
+                    });
+                }
                 if recovery.is_none() {
                     return Err(SummarizeError::Skipped(NO_RULE.to_owned()));
                 }
@@ -853,6 +891,73 @@ impl Host {
 
 #[async_trait]
 impl Complete for Host {
+    /// Whether the model reasons (its parameters take efforts, or a reasoning mode is on) and the lowest effort
+    /// it offers that the setting writer may use here. Nothing is written.
+    async fn reasoning(
+        &self,
+        node: Id,
+        provider_id: Id,
+        model_name: &str,
+    ) -> Result<Reasoning, SummarizeError> {
+        let mut tx = self.engine.db().begin().await.map_err(internal)?;
+        let Some(provider) = resources::provider(&mut tx, provider_id)
+            .await
+            .map_err(internal)?
+        else {
+            return Ok(Reasoning::default());
+        };
+        let Some(protocol) =
+            super::resource::completion_protocol(&provider.protocols).map_err(internal)?
+        else {
+            return Ok(Reasoning::default());
+        };
+        let Some(model) = resources::model(&mut tx, provider_id, model_name)
+            .await
+            .map_err(internal)?
+        else {
+            return Ok(Reasoning::default());
+        };
+        let parameters = orch_provider_contract::models::composed_model_parameters(
+            &model.parameters,
+            &model.groups,
+            &model.option_layers,
+            Some(&protocol),
+        )
+        .map_err(internal)?;
+        let mut reasoning = Reasoning {
+            reasons: parameters.needs_reasoning_room(),
+            lowest_effort: None,
+        };
+        if reasoning.reasons
+            && let Some(writer) = self.writer
+        {
+            for effort in lowest_first(parameters.efforts()) {
+                let allowed = self
+                    .engine
+                    .inner
+                    .access
+                    .background_provider_use(
+                        &mut tx,
+                        &ProviderUse {
+                            person: writer,
+                            node,
+                            provider: provider_id,
+                            model: Some(model_name),
+                            effort: Some(effort),
+                            // A summary runs in no environment.
+                            runs_in: None,
+                        },
+                    )
+                    .await;
+                if allowed.is_ok_and(|allowed| allowed.is_allowed()) {
+                    reasoning.lowest_effort = Some(effort.to_owned());
+                    break;
+                }
+            }
+        }
+        Ok(reasoning)
+    }
+
     async fn complete(
         &self,
         node: Id,

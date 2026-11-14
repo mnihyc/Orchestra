@@ -172,6 +172,7 @@ impl native::Selected for Sessions {
     type Query = PageQuery;
     type Value = Selected;
     type Reply = Page<AdminSession>;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::USER_SESSIONS;
     const WATCH_ORDINARY: bool = true;
     fn select<'a>(

@@ -79,6 +79,7 @@ impl native::Selected for Options {
     type Query = NodeBindingOptionsGetQuery;
     type Value = Selected;
     type Reply = BindingOptions;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::OPTIONS;
     fn select<'a>(
         ctx: &'a Ctx,

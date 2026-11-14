@@ -103,7 +103,10 @@ impl Forwarder {
                 |protocol, options| {
                     build_generation_with_auxiliary(protocol, options, request, auxiliary)
                 },
-                |_, body| read_generation(body, request.capture_native_result),
+                |_, body| {
+                    read_generation(body, request.capture_native_result)
+                        .map_err(super::Unread::from)
+                },
                 Some(command_id),
             )
             .await?;

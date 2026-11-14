@@ -1,0 +1,7 @@
+fmt
+clippy
+test -p orch-api-core --lib -- command_admission_tests
+test -p orch-api-core --lib -- key_operations::publication::
+test -p orch-api-core --lib -- response_body::
+test -p orch-api-core --test summaries --test resource_summaries --test admin_messages --test admin_token_inventory --test document_summary_options --test kfix_schemas
+test -p orch-api-core --test kfix_upload --test terminal_recording_scopes --test chat_list_scopes --test machine_get_scopes --test machine_list_scopes --test mount_use_scopes
