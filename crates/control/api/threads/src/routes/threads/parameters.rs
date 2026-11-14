@@ -362,6 +362,9 @@ pub(super) async fn parameters_in(
             .unwrap_or_default(),
         harness_version: None,
     });
+    let features = descriptor
+        .map(|descriptor| descriptor.feature_values(&settings.features))
+        .unwrap_or_else(|| settings.features.clone());
     let declared: Vec<_> = descriptor
         .map(|descriptor| descriptor.parameters.clone())
         .unwrap_or_default()
@@ -369,7 +372,7 @@ pub(super) async fn parameters_in(
         .filter(|def| {
             eligibility
                 .as_ref()
-                .is_some_and(|eligibility| def.is_shown(eligibility, &settings.features))
+                .is_some_and(|eligibility| def.is_shown(eligibility, &features))
         })
         .collect();
     let values = params.value.clone().unwrap_or(Value::Null);

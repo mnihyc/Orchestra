@@ -19,7 +19,8 @@ use crate::{
     bot_links, catalogue, exports, provider_renewals, purge, reconciliation, reminders, retention,
     rollup, routes, side_threads,
 };
-use orch_config::ServerConfig;
+use orch_config::loader::Validate;
+use orch_config::{ConfigError, ServerConfig};
 use orch_db::queries::notifications::upkeep;
 use orch_db::secrets::MasterKey;
 use orch_db::{Db, DbError, Tx};
@@ -161,41 +162,27 @@ impl Job {
     }
 }
 
-/// The interval of a job: the one the operator named for its key, which is
-/// never less than a second, or the one it ships with.
-#[must_use]
-pub fn interval(job: Job, named: &BTreeMap<String, u64>) -> Duration {
-    named.get(job.key()).map_or_else(
-        || job.default_interval(),
-        |secs| Duration::from_secs((*secs).max(1)),
-    )
+/// The configured positive interval, or the job's shipped interval when omitted.
+pub fn interval(job: Job, named: &BTreeMap<String, u64>) -> Result<Duration, ConfigError> {
+    match named.get(job.key()) {
+        Some(0) => Err(ConfigError::Invalid {
+            key: format!("schedule.{}", job.key()),
+            message: "must be a positive interval in seconds".to_owned(),
+        }),
+        Some(seconds) => Ok(Duration::from_secs(*seconds)),
+        None => Ok(job.default_interval()),
+    }
 }
 
-/// The keys of the jobs that are not the worker's own, which `[schedule]` may
-/// name too: the API's, and the two of the documents.
-const OTHER_JOBS: [&str; 10] = [
-    "approval_expiry",
-    "idle_stop",
-    "machine_liveness",
-    "quota_release",
-    "retention",
-    "shell_detached",
-    "summaries",
-    "cache_eviction",
-    "blob_gc",
-    "provider_expiry",
-];
-
-/// Keys in `[schedule]` that name no job of the system: the operator's
-/// misspellings, for a start to warn about.
-#[must_use]
-pub fn unknown_keys(config: &ServerConfig) -> Vec<String> {
-    config
-        .schedule
-        .keys()
-        .filter(|key| Job::named(key).is_none() && !OTHER_JOBS.contains(&key.as_str()))
-        .cloned()
-        .collect()
+/// A schedule is validated before any background job is started.
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    /// A deployment interval or job name is invalid.
+    #[error("{0}")]
+    Config(#[from] ConfigError),
+    /// The job database could not be used.
+    #[error("{0}")]
+    Database(#[from] DbError),
 }
 
 /// Begins the transaction of a run of `job` and takes the job's lock in it.
@@ -507,10 +494,8 @@ async fn step(
 /// this one is alive, and then runs every job at its interval until `stop` is
 /// asked for. When it is, a step that is under way is finished, and this
 /// returns when all are.
-pub async fn run(services: Services, stop: CancellationToken) -> Result<(), DbError> {
-    for key in unknown_keys(&services.config) {
-        tracing::warn!(key, "[schedule] names a job that does not exist");
-    }
+pub async fn run(services: Services, stop: CancellationToken) -> Result<(), RunError> {
+    services.config.validate()?;
     let recovered = reconciliation::at_start(&services.db, &*services.clock).await?;
     tracing::info!(?recovered, "the worker starts");
     heartbeat::beat(&services.db, &*services.clock, &services.who).await?;
@@ -534,7 +519,7 @@ pub async fn run(services: Services, stop: CancellationToken) -> Result<(), DbEr
     });
     let mut jobs = tokio::task::JoinSet::new();
     for job in Job::ALL {
-        let every = interval(job, &services.config.schedule);
+        let every = interval(job, &services.config.schedule)?;
         let (services, outbox, stopping) = (services.clone(), outbox.clone(), stop.clone());
         jobs.spawn(async move {
             let again = stopping.clone();
@@ -597,20 +582,24 @@ mod tests {
     }
 
     #[test]
-    fn an_operator_names_another_interval_by_the_key_of_a_job_and_never_below_a_second() {
+    fn an_operator_names_a_positive_interval_and_zero_is_refused() {
         let named = BTreeMap::from([("routes".to_owned(), 300), ("outbox".to_owned(), 0)]);
-        assert_eq!(interval(Job::Routes, &named), Duration::from_secs(300));
-        assert_eq!(interval(Job::Outbox, &named), Duration::from_secs(1));
-        assert_eq!(interval(Job::Heartbeat, &named), Duration::from_secs(15));
+        assert_eq!(
+            interval(Job::Routes, &named).unwrap(),
+            Duration::from_secs(300)
+        );
+        assert!(interval(Job::Outbox, &named).is_err());
+        assert_eq!(
+            interval(Job::Heartbeat, &named).unwrap(),
+            Duration::from_secs(15)
+        );
     }
 
     #[test]
-    fn a_key_that_names_no_job_of_the_system_is_reported_but_the_apis_are_not() {
-        let mut config = ServerConfig::default();
-        config.schedule.insert("routes".into(), 30);
-        config.schedule.insert("blob_gc".into(), 7_200);
-        config.schedule.insert("routs".into(), 30);
-        assert_eq!(unknown_keys(&config), ["routs"]);
+    fn every_worker_job_has_a_registered_configuration_name() {
+        for job in Job::ALL {
+            assert!(orch_config::server::SCHEDULE_JOB_NAMES.contains(&job.key()));
+        }
     }
 
     #[tokio::test]

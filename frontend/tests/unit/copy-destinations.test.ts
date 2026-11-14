@@ -22,3 +22,16 @@ it('preserves needs_choice without inventing a denial or an allowed result', asy
   const reply = { subject: request.subject, intent: request.intent, source_owned: true, destinations: [{ destination: request.destinations[0], cross_root: true, outcome: { state: 'needs_choice', choice: 'mcp_machine' } }] };
   calls.json.mockResolvedValue(reply); expect(await judgeCopyDestinations(request)).toEqual(reply);
 });
+
+it('judges every visible destination by native batches instead of dropping later choices', async () => {
+  const destinations: CopyDestinationsRequest['destinations'] = Array.from({ length: 251 }, (_, at) => ({ kind: 'node', id: `place-${at}` }));
+  calls.json.mockImplementation((_path, options) => {
+    const batch = (options as { body: CopyDestinationsRequest }).body;
+    expect(batch.destinations.length).toBeLessThanOrEqual(100);
+    return Promise.resolve({ subject: batch.subject, intent: batch.intent, source_owned: false,
+      destinations: batch.destinations.map((destination) => ({ destination, cross_root: true, outcome: { state: 'allowed' } })) });
+  });
+  const reply = await judgeCopyDestinations({ ...request, destinations });
+  expect(reply.destinations.map((row) => row.destination)).toEqual(destinations);
+  expect(calls.json).toHaveBeenCalledTimes(3);
+});

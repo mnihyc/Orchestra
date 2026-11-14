@@ -88,10 +88,9 @@ export function Options({ choices, onChange, applied, plan, topic, defaultPage =
                 label={t('change.options.minutes')}
                 type="number"
                 min={0}
-                max={1440}
                 inputMode="numeric"
                 value={String(o.waitMinutes ?? start.wait_minutes)}
-                onChange={(event) => set({ waitMinutes: Math.min(1_440, Math.max(0, Number(event.target.value) || 0)) })}
+                onChange={(event) => set({ waitMinutes: Math.max(0, Number(event.target.value) || 0) })}
                 fieldClassName="w-(--field-narrow)"
               />
             )}
@@ -102,11 +101,10 @@ export function Options({ choices, onChange, applied, plan, topic, defaultPage =
         <Input
           label={t('change.options.checksSeconds')}
           type="number"
-          min={10}
-          max={3600}
+          min={1}
           inputMode="numeric"
           value={String(o.verifySecs ?? start.verify_timeout_secs)}
-          onChange={(event) => set({ verifySecs: Math.min(3_600, Math.max(10, Number(event.target.value) || 10)) })}
+          onChange={(event) => set({ verifySecs: Math.max(1, Number(event.target.value) || 1) })}
           fieldClassName="w-(--field-narrow)"
         />
       </Row>
