@@ -33,6 +33,8 @@ async fn a_port_read_returns_only_acceptance_and_its_fresh_generation_bound_snap
     let environment_id = new_id();
     host.env_attach(
         &EnvAttach {
+            workspace: Default::default(),
+
             resources: None,
             data_generation: None,
             storage: None,

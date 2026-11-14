@@ -1977,6 +1977,8 @@ mod tests {
         let policy = here();
         let attach = |root: &str| {
             Command::EnvAttach(EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: None,
                 storage: None,

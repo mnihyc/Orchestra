@@ -308,12 +308,12 @@ async fn known_writers(
     for writer in writers.iter().filter_map(|writer| writer.thread.as_ref()) {
         let mut before_ordinal: Option<i32> = None;
         loop {
-            let turns: Vec<(i32, Id, Json)> = {
+            let turns: Vec<(i32, Id, Vec<u8>)> = {
                 let mut conn = ctx.app.db.acquire().await?;
                 sqlx::query_as(
-                "SELECT t.ordinal, t.before_snapshot_id, t.files_end_manifest FROM turns t
+                "SELECT t.ordinal, t.before_snapshot_id, t.end_manifest_blob FROM turns t
                  JOIN snapshots s ON s.id = t.before_snapshot_id JOIN segments g ON g.id = t.segment_id
-                 WHERE t.thread_id = $1 AND t.completed_at IS NOT NULL AND t.files_end_manifest IS NOT NULL
+                 WHERE t.thread_id = $1 AND t.completed_at IS NOT NULL AND t.end_manifest_blob IS NOT NULL
                    AND s.environment_id = $2 AND g.environment_id = $2 AND s.env_generation = g.env_generation
                    AND s.storage = 'environment' AND s.state = 'complete' AND s.manifest_blob IS NOT NULL
                    AND (t.started_at > $3 OR t.thread_id = $4 AND t.ordinal > $5)
@@ -369,6 +369,12 @@ async fn known_writers(
                 if manifest.header().generation != i64::from(recorded.env_generation) {
                     continue;
                 }
+                let Ok(end_hash) = Hash::from_slice(&end) else {
+                    continue;
+                };
+                let Ok(end) = ctx.app.engine.read_end_namespace(end_hash).await else {
+                    continue;
+                };
                 attribute(
                     paths,
                     directory,

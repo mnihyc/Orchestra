@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-api-core --test workspace_looking
+test -p orch-api-environments --lib

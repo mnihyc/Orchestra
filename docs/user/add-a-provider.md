@@ -28,6 +28,10 @@ machine that reaches the model. Its local policy must allow that address. `local
 that machine, not your browser. **Run the connection on** is a separate choice; both can use
 the same machine or the new container.
 Only choose a sign-in program on a machine that offers it.
+A new container carries only what its image brings. An agent that needs its own program (the
+built-in agent `dsh`, Claude Code and Codex all do) runs there when the container's
+`agent.harnesses` policy lists that program. A container that lists none is not asked to start
+one, and that agent stays unreported on the provider.
 
 ## Key proposals
 
