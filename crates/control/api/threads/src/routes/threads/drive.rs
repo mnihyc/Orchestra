@@ -78,6 +78,8 @@ use orch_api_contract::threads::ThreadInputUpdateReply;
 
 use orch_api_contract::threads::ThreadInterrupt;
 
+use orch_api_contract::threads::StopState;
+
 use orch_api_contract::threads::ThreadInterruptBody;
 
 use orch_api_contract::threads::ThreadItemPin;
@@ -96,11 +98,11 @@ use orch_api_contract::threads::ThreadQueueResume;
 
 use orch_api_contract::threads::ThreadQueueResumeBody;
 
+use orch_api_contract::threads::ThreadStop;
+
 use orch_api_contract::threads::ThreadTurnRetry;
 
 use orch_api_contract::threads::ThreadTurnRetryBody;
-
-use orch_api_contract::threads::Turn;
 
 use orch_authz::Caller;
 
@@ -317,9 +319,11 @@ async fn queue_resume(ctx: Ctx, (): (), body: ThreadQueueResumeBody) -> ApiResul
     }
 }
 
-/// Stops a turn that is under way. Nothing is asked of the caller on the
-/// provider: stopping is driving.
-async fn interrupt(ctx: Ctx, (): (), body: ThreadInterruptBody) -> ApiResult<Turn> {
+/// Stops a turn that is under way, or the start of the next one. Nothing is asked of the caller on the
+/// provider: stopping is driving. The Stop is recorded and answered at once, whatever else holds the thread: where
+/// the thread cannot carry it out that moment, the answer says that it is stopping and the engine carries it out
+/// as soon as it can.
+async fn interrupt(ctx: Ctx, (): (), body: ThreadInterruptBody) -> ApiResult<ThreadStop> {
     let thread = ctx.id("id")?;
     let builtin = {
         let mut conn = ctx.app.db.acquire().await?;
@@ -334,10 +338,10 @@ async fn interrupt(ctx: Ctx, (): (), body: ThreadInterruptBody) -> ApiResult<Tur
     match ctx
         .app
         .engine
-        .interrupt_guarded(tx, guard.into_principal(), thread, body.turn_id)
+        .stop_guarded(tx, guard.into_principal(), thread, body.turn_id)
         .await
     {
-        Ok(turn) => Ok(turn),
+        Ok(stopped) => Ok(stop_answer(stopped)),
         Err(InterruptError::NotFound) => Err(ApiError::not_found()),
         Err(InterruptError::NotRunning { current_turn_id }) => {
             let refusal = ApiError::new(ErrorCode::ThreadNotRunning, "that turn is not under way");
@@ -353,6 +357,29 @@ async fn interrupt(ctx: Ctx, (): (), body: ThreadInterruptBody) -> ApiResult<Tur
         Err(InterruptError::Internal(error)) => {
             Err(read_failed(orch_engine::views::ReadError::Internal(error)))
         }
+    }
+}
+
+/// What a Stop is answered with: stopping until the program has stopped, stopped when nothing is left to wait for.
+fn stop_answer(stopped: orch_engine::turns::Stopped) -> ThreadStop {
+    let state = match &stopped.turn {
+        Some(turn)
+            if matches!(
+                turn.state,
+                orch_api_contract::threads::TurnState::Starting
+                    | orch_api_contract::threads::TurnState::Running
+            ) =>
+        {
+            StopState::Stopping
+        }
+        Some(_) => StopState::Stopped,
+        None if stopped.applied => StopState::Stopped,
+        None => StopState::Stopping,
+    };
+    ThreadStop {
+        state,
+        requested_at: Time::new(stopped.since),
+        turn: stopped.turn,
     }
 }
 

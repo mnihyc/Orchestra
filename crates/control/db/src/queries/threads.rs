@@ -68,7 +68,7 @@ pub mod turn_state {
 /// The columns of a thread and of its node that the engine reads.
 const THREAD_SELECT: &str = "SELECT t.node_id, t.topic_id, t.environment_id, t.workspace_dir, t.state, t.blocked_reason,
         t.source, t.links, t.work_observed,
-        t.blocked_detail, t.starting_step, t.agent_id, t.provider_id, t.arrangement, t.executor, t.tool_set,
+        t.blocked_detail, t.starting_step, t.starting_step_at, t.starting_command, t.starting_behind, t.agent_id, t.provider_id, t.arrangement, t.executor, t.tool_set,
         t.current_segment_id, t.current_turn_id, t.active_continuation_id, t.execution_revision, t.next_seq, t.seq_state, t.activity_seq,
         COALESCE((SELECT jsonb_agg(notice ORDER BY position) FROM
           (SELECT notice,position FROM thread_pending_notices WHERE thread_id=t.node_id ORDER BY position LIMIT 64) head),'[]'::jsonb) AS pending_notices,
@@ -102,6 +102,12 @@ pub struct ThreadRow {
     pub blocked_detail: Option<String>,
     /// What a starting thread waits for.
     pub starting_step: Option<String>,
+    /// When that step began.
+    pub starting_step_at: Option<DateTime<Utc>>,
+    /// The kind of command the step waits for, while one is out.
+    pub starting_command: Option<String>,
+    /// The kind of command, of other work in the same line on the machine, that command waits behind.
+    pub starting_behind: Option<String>,
     /// Its agent profile.
     pub agent_id: Option<Id>,
     /// Its provider.
@@ -294,6 +300,30 @@ pub async fn set_starting_step(
     )
     .bind(thread)
     .bind(step)
+    .bind(seq)
+    .execute(conn)
+    .await?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Says which command a `starting` thread's step waits for and which other work, in the same line on the
+/// machine, holds it up (both none for none); nothing is done to a thread in another state or without a
+/// step. The answer says whether anything changed, so that a number is spent only on a change.
+pub async fn set_starting_work(
+    conn: &mut Conn,
+    thread: Id,
+    command: Option<&str>,
+    behind: Option<&str>,
+    seq: Seq,
+) -> Result<bool, DbError> {
+    let done = sqlx::query(
+        "UPDATE threads SET starting_command = $2, starting_behind = $3, seq_state = $4
+          WHERE node_id = $1 AND state = 'starting' AND starting_step IS NOT NULL
+            AND (starting_command IS DISTINCT FROM $2 OR starting_behind IS DISTINCT FROM $3)",
+    )
+    .bind(thread)
+    .bind(command)
+    .bind(behind)
     .bind(seq)
     .execute(conn)
     .await?;
@@ -1836,8 +1866,8 @@ pub async fn count_delivering_authors(conn: &mut Conn, thread: Id) -> Result<i64
 // ---------------------------------------------------------------- turns
 
 pub(crate) const TURN_SELECT: &str = "SELECT id, thread_id, segment_id, ordinal, state, input_id, model, effort, params, lease_id,
-        before_snapshot_id, end_manifest_blob, files_end_manifest,
-        native_turn_ref, error, usage, usage_detail, context, limit_bypass, phase, phase_at, phase_attempt, interrupted_by, command_cleanup,
+        before_snapshot_id, end_manifest_blob, files_changed,
+        native_turn_ref, error, usage, usage_detail, context, limit_bypass, phase, phase_at, phase_attempt, interrupted_by, interrupted_at, command_cleanup,
         waiting_since, waited_ms, started_at, completed_at, created_at, seq_updated, plan
    FROM turns";
 
@@ -1860,8 +1890,15 @@ pub struct TurnRow {
     pub before_snapshot_id: Option<Id>,
     /// The turn's verified end manifest blob, or unknown coverage.
     pub end_manifest_blob: Option<Vec<u8>>,
-    /// Included end hashes/types/executable bits, or unknown watcher coverage.
+    /// Included end hashes/types/executable bits, or unknown watcher coverage. A turn read leaves it out (the
+    /// whole list of a large directory is megabytes, and every act on a thread reads turns): read it with
+    /// [`turn_end_namespace`].
+    #[sqlx(default)]
     pub files_end_manifest: Option<Json>,
+    /// How many included files the turn changed, from its recorded before-state and its observed end; unknown
+    /// until both exist.
+    #[sqlx(default)]
+    pub files_changed: Option<i32>,
     /// The model it ran with.
     pub model: String,
     /// The effort it ran with.
@@ -1896,6 +1933,9 @@ pub struct TurnRow {
     pub waited_ms: i64,
     /// Who stopped it.
     pub interrupted_by: Option<Id>,
+    /// When the stop was asked for.
+    #[sqlx(default)]
+    pub interrupted_at: Option<DateTime<Utc>>,
     /// Actual stopped-turn command outcomes, including a native report after its completion.
     #[sqlx(default)]
     pub command_cleanup: Option<Json>,
@@ -2098,7 +2138,7 @@ pub async fn mark_interrupted_by(
     seq: Seq,
 ) -> Result<bool, DbError> {
     let done = sqlx::query(
-        "UPDATE turns SET interrupted_by = $2, seq_updated = $3
+        "UPDATE turns SET interrupted_by = $2, interrupted_at = now(), seq_updated = $3
           WHERE id = $1 AND state IN ('starting', 'running') AND interrupted_by IS NULL",
     )
     .bind(turn)
@@ -2121,6 +2161,156 @@ pub async fn set_interrupt_cause(conn: &mut Conn, turn: Id, cause: &str) -> Resu
     .execute(conn)
     .await?;
     Ok(())
+}
+
+/// Says when the Stop of a turn was asked for, where the turn was marked later than that because the Stop waited
+/// for the thread's row: the earlier of the two stands.
+pub async fn set_interrupted_at(
+    conn: &mut Conn,
+    turn: Id,
+    at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE turns SET interrupted_at = LEAST(interrupted_at, $2) WHERE id = $1 AND interrupted_by IS NOT NULL",
+    )
+    .bind(turn)
+    .bind(at)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// The end of a turn as its observation kept it: every included path with its hash, type and executable bit, or
+/// none where the coverage is unknown. Read on its own, because it is as large as the directory.
+pub async fn turn_end_namespace(conn: &mut Conn, turn: Id) -> Result<Option<Json>, DbError> {
+    Ok(
+        sqlx::query_scalar::<_, Option<Json>>("SELECT files_end_manifest FROM turns WHERE id = $1")
+            .bind(turn)
+            .fetch_optional(conn)
+            .await?
+            .flatten(),
+    )
+}
+
+/// A person's Stop that was asked for and is not carried out yet.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct StopRow {
+    /// Its identifier.
+    pub id: Id,
+    /// The thread.
+    pub thread_id: Id,
+    /// The turn it names; none for the Stop of the thread's start, before any turn exists.
+    pub turn_id: Option<Id>,
+    /// Who asked.
+    pub requested_by: Id,
+    /// When it was asked.
+    pub requested_at: DateTime<Utc>,
+}
+
+const STOP_SELECT: &str = "SELECT id, thread_id, NULLIF(turn_id, '00000000-0000-0000-0000-000000000000'::uuid) AS turn_id,
+        requested_by, requested_at FROM thread_stops";
+
+/// Records a person's Stop of `thread`, of the turn `turn` or, with none, of its start, and answers the open Stop
+/// that stands for it: this one, or the one asked before it for the same. It takes no lock on the thread, and
+/// waits for nobody but a Stop of the same thread being written at the same moment. Answers nothing where
+/// the thread's own change carried that Stop out between the two statements, which is as good as done.
+pub async fn record_stop(
+    conn: &mut Conn,
+    id: Id,
+    thread: Id,
+    turn: Option<Id>,
+    by: Id,
+    at: DateTime<Utc>,
+) -> Result<Option<StopRow>, DbError> {
+    sqlx::query(
+        "INSERT INTO thread_stops (id, thread_id, turn_id, requested_by, requested_at)
+         VALUES ($1, $2, COALESCE($3, '00000000-0000-0000-0000-000000000000'::uuid), $4, $5)
+         ON CONFLICT (thread_id, turn_id) DO NOTHING",
+    )
+    .bind(id)
+    .bind(thread)
+    .bind(turn)
+    .bind(by)
+    .bind(at)
+    .execute(&mut *conn)
+    .await?;
+    let sql = format!(
+        "{STOP_SELECT} WHERE thread_id = $1 AND turn_id = COALESCE($2, '00000000-0000-0000-0000-000000000000'::uuid)"
+    );
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(thread)
+        .bind(turn)
+        .fetch_optional(conn)
+        .await?)
+}
+
+/// The Stops of `thread` that are not carried out yet, in the order they were asked.
+pub async fn open_stops(conn: &mut Conn, thread: Id) -> Result<Vec<StopRow>, DbError> {
+    let sql = format!("{STOP_SELECT} WHERE thread_id = $1 ORDER BY requested_at, id");
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(thread)
+        .fetch_all(conn)
+        .await?)
+}
+
+/// Forgets the Stops that were carried out.
+pub async fn close_stops(conn: &mut Conn, ids: &[Id]) -> Result<(), DbError> {
+    sqlx::query("DELETE FROM thread_stops WHERE id = ANY($1)")
+        .bind(ids)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// The threads that have a Stop not carried out yet, the oldest asked first, for the engine to look at.
+pub async fn threads_with_open_stops(conn: &mut Conn, limit: i64) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT thread_id FROM thread_stops GROUP BY thread_id ORDER BY MIN(requested_at) LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// When the oldest Stop of `thread` that is not carried out yet was asked for.
+pub async fn open_stop_since(
+    conn: &mut Conn,
+    thread: Id,
+) -> Result<Option<DateTime<Utc>>, DbError> {
+    Ok(sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        "SELECT MIN(requested_at) FROM thread_stops WHERE thread_id = $1",
+    )
+    .bind(thread)
+    .fetch_one(conn)
+    .await?)
+}
+
+/// Since when `thread` is being stopped: the oldest Stop that is open, and the turn under way that was asked to stop.
+pub async fn stopping_since(conn: &mut Conn, thread: Id) -> Result<Option<DateTime<Utc>>, DbError> {
+    Ok(sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+        "SELECT MIN(at) FROM (
+            SELECT requested_at AS at FROM thread_stops WHERE thread_id = $1
+            UNION ALL
+            SELECT interrupted_at FROM turns
+             WHERE id = (SELECT current_turn_id FROM threads WHERE node_id = $1)
+               AND interrupted_by IS NOT NULL AND state IN ('starting', 'running')
+         ) stopping",
+    )
+    .bind(thread)
+    .fetch_one(conn)
+    .await?)
+}
+
+/// Takes the row of `thread` if no other transaction holds it, and says whether it did: a change that must not
+/// wait for the row asks again after a short pause, and a row that is not there is one that is not held.
+pub async fn lock_if_free(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
+    Ok(sqlx::query_scalar::<_, Id>(
+        "SELECT node_id FROM threads WHERE node_id = $1 FOR UPDATE SKIP LOCKED",
+    )
+    .bind(id)
+    .fetch_optional(conn)
+    .await?
+    .is_some())
 }
 
 /// A cut the next input has not been told of: the turn before `ordinal`, where it was cut with a recorded cause and

@@ -19,7 +19,7 @@ pub const ASK_TOOL_BYTES: &str = "65536";
 pub const ASK_TURN_TOOL_BYTES: &str = "262144";
 pub const AGENT_EFFORT: &str = r#""high""#;
 pub const AGENT_PARAMS: &str = "{}";
-pub const AGENT_FEATURES: &str = r#"{"vision":true}"#;
+pub const AGENT_FEATURES: &str = r#"{"codex.cyber_access":false}"#;
 pub const AGENT_INSTRUCTIONS: &str =
     r#""Run the relevant tests before describing a change as complete.""#;
 /// Joining text, inherited through the existing organization append setting.
@@ -102,6 +102,7 @@ pub const SUMMARY_TARGETS: &str = r#"{"thread":{"automatic":true,"on":["turn_com
 pub const SUMMARY_FOLLOW_INTERVAL_SECS: &str = "5";
 pub const SUMMARY_READ_BATCH_SIZE: &str = "100";
 pub const PROVIDERS_ALLOWED: &str = r#"["acme.*"]"#;
+pub const MODELS_ADD_SWITCHES_ON: &str = r#""basic""#;
 pub const COLLAB_ATTRIBUTION: &str = r#""always""#;
 pub const COLLAB_DEFAULT_DELIVERY: &str = r#""queue""#;
 pub const COMPOSER_PASTE_INLINE_CONTEXT_SHARE: &str = "25";
@@ -159,6 +160,7 @@ pub const SOURCE_BRANCH: &str = r#""release""#;
 pub const SOURCE_SECRET_NAME: &str = r#""REPOSITORY_TOKEN""#;
 pub const WORKSPACE_RECORD_DAYS: &str = "7";
 pub const WORKSPACE_RECORD_MAX_BYTES: &str = "1073741824";
+pub const WORKSPACE_RECORD_WAIT_SECS: &str = "30";
 pub const BROADCAST_DELIVERY: &str = r#""steer""#;
 pub const BROADCAST_FALLBACK: &str = r#""next_turn""#;
 pub const BROADCAST_WAKE_IDLE: &str = "false";

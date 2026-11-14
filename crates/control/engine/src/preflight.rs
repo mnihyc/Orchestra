@@ -281,6 +281,18 @@ impl Engine {
         else {
             return Ok(Outcome::Gone);
         };
+        // A Stop that is open is carried out before anything else: no turn is made behind its back.
+        let thread = if Self::preflight_phase(|| self.apply_open_stops_in(unit, thread_id))
+            .await?
+            .carried_out
+        {
+            match threads::thread(unit.conn, thread_id).await? {
+                Some(thread) => thread,
+                None => return Ok(Outcome::Gone),
+            }
+        } else {
+            thread
+        };
         if Self::preflight_phase(|| orch_db::queries::ask::get(unit.conn, thread_id, false))
             .await?
             .is_some()
@@ -810,7 +822,12 @@ impl Engine {
             }
             // A terminal source failure keeps the same input without re-entering preparation on every wake.
             if crate::preparation::source_failed(&thread)? {
-                let blocked = Blocked::new("error", crate::preparation::SOURCE_FAILED);
+                let blocked = Blocked::new(
+                    "error",
+                    crate::preparation::source_failed_detail(
+                        crate::preparation::source_failure_reason(&thread).as_deref(),
+                    ),
+                );
                 Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
                 return Ok(Outcome::Blocked(blocked));
             }
@@ -1607,7 +1624,10 @@ impl Engine {
         // lets a credential be used in is asked as well: it comes before every page.
         let machine_list = binding::machine_arrangements_of(conn, &provider).await?;
         let permission = binding::policy_with_machine(&facts, machine_list.clone()).permission;
-        let arrangement = match binding::choose_with_machine(&facts, machine_list, requested) {
+        // An environment that is being made has reported no executors yet: it is judged by what its
+        // template promises, as at the creation of the thread, and never refused for the lack of a report.
+        let place = binding::initial_place(conn, &facts).await?;
+        let arrangement = match binding::choose_placed(&facts, &place, machine_list, requested) {
             Ok(arrangement) => arrangement,
             Err(why) => {
                 // A role removed from an existing binding is an availability failure.

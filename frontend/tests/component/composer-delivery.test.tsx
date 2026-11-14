@@ -18,12 +18,12 @@ vi.mock('@/realtime/stores/thread', async (load) => { const actual = await load<
 function Harness({ active = true, empty = false, mayDrive = true, live = true, noSteer = false, waitingFiles = false, side = false, sideUnavailable = false, missingTurn = false, schedule = false }: { active?: boolean; empty?: boolean; mayDrive?: boolean; live?: boolean; noSteer?: boolean; waitingFiles?: boolean; side?: boolean; sideUnavailable?: string | false; missingTurn?: boolean; schedule?: boolean }) {
   const turnId = active && !missingTurn ? 'turn-1' : null;
   const stop = useStop('thread-1', turnId, live);
-  return <DeliveryControl state={{ active, starting: false, live, cannotSteer: noSteer, agent: 'Scripted agent' }} stop={stop} turnId={turnId}
+  return <DeliveryControl state={{ active, starting: false, live, cannotSteer: noSteer, agent: 'Scripted agent' }} stop={stop}
     mayDrive={mayDrive} empty={empty} tooLong={false} attachmentsWaiting={waitingFiles} onSend={calls.send} onAskOnSide={side ? calls.aside : undefined} sideUnavailable={sideUnavailable}
     onSchedule={schedule ? calls.schedule : undefined} scheduleUnavailable={false} />;
 }
 
-beforeEach(() => { calls.send.mockClear(); calls.aside.mockClear(); calls.schedule.mockClear(); calls.interrupt.mockReset(); calls.apply.mockClear(); calls.interrupt.mockResolvedValue({ id: 'turn-1', state: 'interrupted' }); });
+beforeEach(() => { calls.send.mockClear(); calls.aside.mockClear(); calls.schedule.mockClear(); calls.interrupt.mockReset(); calls.apply.mockClear(); calls.interrupt.mockResolvedValue({ state: 'stopped', requested_at: new Date().toISOString(), turn: { id: 'turn-1', state: 'interrupted' } }); });
 afterEach(async () => { await setLocale('en'); });
 
 describe('the message delivery action', () => {

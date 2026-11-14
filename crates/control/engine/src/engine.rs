@@ -124,6 +124,8 @@ pub struct Inner {
     pub(crate) blobs: OnceLock<Arc<dyn BlobStore>>,
     /// The idle environments that this process is stopping now.
     pub(crate) stopping: Mutex<HashSet<Id>>,
+    /// The threads whose Stops, or the work that follows them, a task of this process is carrying out now.
+    pub(crate) stops: Mutex<HashSet<Id>>,
     /// Current browser profiles, counts and the API's volatile transport.
     pub(crate) browser_memory: Arc<crate::browsers::Memory>,
     /// Display sealing and transient-list hooks supplied by the API.
@@ -216,6 +218,7 @@ impl Engine {
                 growing: crate::streaming::Growing::default(),
                 blobs: OnceLock::new(),
                 stopping: Mutex::new(HashSet::new()),
+                stops: Mutex::new(HashSet::new()),
                 browser_memory: Arc::new(crate::browsers::Memory::default()),
                 display_memory: Arc::new(crate::displays::Memory::default()),
                 background: crate::background::Memory::default(),
@@ -427,6 +430,14 @@ impl Engine {
             ripe
         };
         let batch = self.inner.config.sweep_batch;
+        // A person's Stop comes before everything else the sweep looks at, and is handed to a task of its
+        // thread that the sweep does not wait for.
+        if let Err(error) = self.keep_stops().await {
+            tracing::warn!(%error, "the Stops that are open could not be looked at; the next sweep looks again");
+        }
+        if let Err(error) = self.clear_forgotten_sessions().await {
+            tracing::warn!(%error, "the records of closed sessions could not be cleared; the next sweep looks again");
+        }
         if let Err(error) = crate::tools::source::reap(self, None).await {
             tracing::warn!(%error, "admitted own-tool native commands await their durable outcome");
         }

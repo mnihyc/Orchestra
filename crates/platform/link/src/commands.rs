@@ -6,7 +6,10 @@
 //! [`CommandServer`] is the machine's end. It writes a command down before it
 //! says that it has it, runs commands that share a serial key one at a time in
 //! the order they arrived and the rest side by side, does not start one whose
-//! deadline has passed, writes the result down before it says how the command
+//! deadline had passed when it came, does not count the time one waited between
+//! reaching the machine and starting (the disk writing it down, the line of its
+//! key behind other commands) against its deadline (a deadline is for the
+//! work), writes the result down before it says how the command
 //! ended, and answers a command it has seen before from what it wrote down
 //! instead of running it again.
 //! A transport-only session rebind retains the same serial queue and in-flight ownership,
@@ -234,6 +237,9 @@ struct InHand {
     /// A live transport replacement is acknowledged and executed entirely in memory.
     transport_only: bool,
     accepted: Instant,
+    /// The system's time when the command reached the machine: what passes from then until it starts (the
+    /// disk writing it down, the line of its key) is not counted against its deadline, which is for its work.
+    accepted_at: Time,
     finishing: bool,
     finalizer: Option<tokio::task::JoinHandle<()>>,
 }
@@ -312,7 +318,7 @@ impl CommandServer {
     /// as long as it is not cancelled and its deadline has not passed, and is not failed for good.
     async fn handler_for(
         &self,
-        cmd: &Cmd,
+        deadline: Time,
         cancel: &CancellationToken,
     ) -> Result<Arc<dyn CommandHandler>, CommandError> {
         let mut registered = self.inner.handler.subscribe();
@@ -320,7 +326,7 @@ impl CommandServer {
             if let Some(handler) = registered.borrow_and_update().clone() {
                 return Ok(handler);
             }
-            let left = (cmd.deadline.get() - self.system_now().get())
+            let left = (deadline.get() - self.system_now().get())
                 .to_std()
                 .unwrap_or_default();
             tokio::select! {
@@ -486,6 +492,7 @@ impl CommandServer {
                 written,
                 transport_only,
                 accepted: Instant::now(),
+                accepted_at: self.system_now(),
                 finishing: false,
                 finalizer: None,
             },
@@ -664,8 +671,23 @@ impl CommandServer {
         if let (Ok(kind), Some(accepted)) = (cmd.kind.parse::<CommandKind>(), accepted) {
             command_phase(kind, CommandPhase::KeyWait, accepted.elapsed());
         }
+        // A deadline is for the work: the time between a command reaching the machine and starting (the
+        // disk writing it down, the line of its key behind other commands) is not the command's. Measured
+        // in the system's time, as the deadline is.
+        let waited = lock(&self.inner.state)
+            .in_hand
+            .get(&id)
+            .map_or_else(chrono::Duration::zero, |hand| {
+                (self.system_now().get() - hand.accepted_at.get()).max(chrono::Duration::zero())
+            });
+        let deadline = Time::new(
+            cmd.deadline
+                .get()
+                .checked_add_signed(waited)
+                .unwrap_or_else(|| cmd.deadline.get()),
+        );
         let captured = Instant::now();
-        let execution = self.run(&cmd, cancel).await;
+        let execution = self.run(&cmd, cancel, deadline).await;
         if cmd.kind == CommandKind::FsRecord.as_str() {
             command_phase(
                 CommandKind::FsRecord,
@@ -718,10 +740,13 @@ impl CommandServer {
         }
     }
 
+    /// Starts a command. `deadline` is the command's own, moved later by the time it waited in the line
+    /// of its key.
     async fn run(
         &self,
         cmd: &Cmd,
         cancel: CancellationToken,
+        deadline: Time,
     ) -> Result<(CommandKind, CommandExecution), CommandError> {
         if cancel.is_cancelled() {
             return Err(CommandError::new(
@@ -729,7 +754,7 @@ impl CommandServer {
                 "cancelled before it started",
             ));
         }
-        if cmd.deadline <= self.system_now() {
+        if deadline <= self.system_now() {
             return Err(too_late());
         }
         let command = match cmd.command() {
@@ -754,8 +779,8 @@ impl CommandServer {
                 format!("this machine does not take {kind} commands"),
             ));
         }
-        let handler = self.handler_for(cmd, &cancel).await?;
-        if cmd.deadline <= self.system_now() {
+        let handler = self.handler_for(deadline, &cancel).await?;
+        if deadline <= self.system_now() {
             return Err(too_late());
         }
         let id = cmd.id;
@@ -768,7 +793,7 @@ impl CommandServer {
         let context = CommandContext {
             id,
             key: cmd.key.clone(),
-            deadline: cmd.deadline,
+            deadline,
             cancel,
         };
         // On a task of its own, so that a handler that panics fails its
@@ -803,6 +828,7 @@ impl CommandServer {
                 written: true,
                 transport_only: false,
                 accepted: Instant::now(),
+                accepted_at: self.system_now(),
                 finishing: false,
                 finalizer: None,
             });
