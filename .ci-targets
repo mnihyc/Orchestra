@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-testkit --lib
+test -p orch-testkit --test database_budget
+test -p orch-engine --lib

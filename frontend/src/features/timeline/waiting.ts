@@ -87,7 +87,7 @@ export function waitingWords(thread: Thread | null, t: TFunction): string | null
   if (thread.state === 'starting') {
     switch (thread.starting_step) {
       case 'environment':
-        return t('thread.starting.environment');
+        return t(thread.environment?.status === 'provisioning' ? 'thread.starting.environmentMaking' : 'thread.starting.environment');
       case 'source':
         return t('thread.starting.source');
       case 'files':
