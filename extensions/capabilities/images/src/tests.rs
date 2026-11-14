@@ -638,7 +638,7 @@ fn inline_reference_images_follow_the_declared_data_url_shape_and_never_accept_r
         media_type: "image/png".into(),
     };
     let input = json!({"model":"fixture-model","prompt":"An orchard","n":1});
-    let result = materialize_inline_inputs(&binding, input.clone(), &[source], 4096).unwrap();
+    let result = materialize_inline_inputs(&binding, input.clone(), &[source]).unwrap();
     assert_eq!(result["model"], input["model"]);
     assert_eq!(result["input_references"][0]["type"], "image_url");
     assert_eq!(
@@ -656,13 +656,11 @@ fn inline_reference_images_follow_the_declared_data_url_shape_and_never_accept_r
         media_type: "image/png".into(),
     };
     assert!(
-        materialize_inline_inputs(&binding, input.clone(), &[duplicate(), duplicate()], 4096)
-            .is_err()
+        materialize_inline_inputs(&binding, input.clone(), &[duplicate(), duplicate()]).is_err()
     );
-    assert!(materialize_inline_inputs(&binding, input.clone(), &[duplicate()], 20).is_err());
     let overridden = json!({"model":"fixture-model","prompt":"An orchard","input_references":[{"image_url":{"url":"https://not-a-source.example.invalid/image"}}]});
-    assert!(materialize_inline_inputs(&binding, overridden, &[duplicate()], 4096).is_err());
-    assert!(materialize_inline_inputs(&compatible(), input, &[duplicate()], 4096).is_err());
+    assert!(materialize_inline_inputs(&binding, overridden, &[duplicate()]).is_err());
+    assert!(materialize_inline_inputs(&compatible(), input, &[duplicate()]).is_err());
 }
 
 #[test]

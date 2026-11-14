@@ -10,14 +10,14 @@ import type { Job, RestorePlan, Snapshot, Thread } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ plans: [] as { snapshot: string; options: unknown; overwrite: string[] }[], confirmed: [] as { preflight: string; key: string }[], job: null as Job | null, stale: false, snapshotReason: null as string | null }));
+const calls = vi.hoisted(() => ({ plans: [] as { snapshot: string; options: unknown; overwrite: string[] }[], confirmed: [] as { preflight: string; key: string }[], job: null as Job | null, stale: false, snapshotReason: null as string | null, snapshotExpiresAt: null as string | null }));
 
 const environment = { id: 'env-1', name: 'Main', owner: { id: 'u1', username: 'ada', display_name: 'Ada Lovelace' } } as unknown as Thread['environment'];
 
 function snapshot(id: string): Snapshot {
   return {
     completed_at: '2026-10-14T10:00:00.000Z', created_at: '2026-10-14T10:00:00.000Z', created_by: null, directory: 'web', env_generation: 1, environment: environment!,
-    expires_at: null, file_count: 3, id, kind: 'turn', label: '', missing_count: 0, repository_head: null, selection: { include: [], exclude: [] }, state: calls.snapshotReason === null ? 'complete' : 'unavailable', storage: 'environment',
+    expires_at: calls.snapshotExpiresAt, file_count: 3, id, kind: 'turn', label: '', missing_count: 0, repository_head: null, selection: { include: [], exclude: [] }, state: calls.snapshotReason === null ? 'complete' : calls.snapshotReason === 'expired' ? 'expired' : 'unavailable', storage: 'environment',
     thread_id: 't1', total_bytes: 30, unavailable_reason: calls.snapshotReason,
   };
 }
@@ -69,7 +69,7 @@ function draw(onClose = vi.fn()) {
 }
 
 beforeEach(() => {
-  calls.snapshotReason = null;
+  calls.snapshotReason = null; calls.snapshotExpiresAt = null;
   calls.plans = [];
   calls.confirmed = [];
   calls.stale = false;
@@ -168,5 +168,27 @@ it.each(['en', 'zh-CN'] as const)('requires explicit touched-path overwrite and 
     await user.click(await screen.findByRole('button', { name: i18n.t('source.restore.freshPlan') }));
     await waitFor(() => expect(screen.getByRole('button', { name: i18n.t('source.restore.confirm') })).toBeEnabled());
     expect(calls.plans.at(-1)?.overwrite).toEqual(['src/login.ts', 'src/old.ts']);
+  } finally { await setLocale('en'); }
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`states the exact whole-state recovery expiry in its existing metadata line in ${locale}`, async () => {
+  await setLocale(locale); calls.snapshotExpiresAt = '2099-11-21T10:23:45Z';
+  try {
+    draw(); await screen.findByText('src/login.ts');
+    const time = document.querySelector('time[datetime="2099-11-21T10:23:45Z"]');
+    expect(time).toBeVisible();
+    expect(time?.parentElement).toHaveTextContent(locale === 'en' ? 'Recoverable until' : '可恢复至');
+    expect(time).toHaveTextContent('2099');
+    expect(calls.confirmed).toEqual([]);
+  } finally { await setLocale('en'); }
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps expired whole-state recovery qualified as the selected-file fallback in ${locale}`, async () => {
+  await setLocale(locale); calls.snapshotReason = 'expired'; calls.snapshotExpiresAt = '2026-10-01T10:00:00Z';
+  try {
+    draw(); expect(await screen.findByText(i18n.t('source.restore.toolCoverage'))).toBeVisible();
+    expect(screen.getByText((text) => text.includes(i18n.t('source.restore.why.expired')), { selector: '[data-restore-form]' })).toBeVisible();
+    expect(document.querySelector('time[datetime="2026-10-01T10:00:00Z"]')).toBeNull();
+    expect(calls.confirmed).toEqual([]);
   } finally { await setLocale('en'); }
 });

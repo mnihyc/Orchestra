@@ -973,6 +973,7 @@ pub(crate) fn parameters_ready(
     opening: bool,
 ) -> bool {
     use orch_agent_contract::parameters::{ParameterApply, Resolution};
+    let features = descriptor.feature_values(&settings.features);
     params.as_object().is_some_and(|params| {
         params.iter().all(|(key, value)| {
             if key == "effort" {
@@ -992,7 +993,7 @@ pub(crate) fn parameters_ready(
                 .is_some_and(|parameter| {
                     (parameter.apply == ParameterApply::NextTurn
                         || (opening && parameter.apply == ParameterApply::NewSession))
-                        && match parameter.resolve(context, &settings.features, Some(value)) {
+                        && match parameter.resolve(context, &features, Some(value)) {
                             Resolution::Send(sent) => sent == *value,
                             Resolution::SendNothing => value.is_null(),
                             _ => false,

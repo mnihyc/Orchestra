@@ -88,6 +88,8 @@ use orch_api_contract::binding::BindingAgent;
 
 use orch_api_contract::binding::BindingCanCreate;
 
+use orch_api_contract::binding::BindingDefaultEnvironment;
+
 use orch_api_contract::binding::BindingDefaults;
 
 use orch_api_contract::binding::BindingEnvironment;
@@ -586,6 +588,20 @@ fn model_options(
     settings: &Resolved,
     entries: Option<&[&orch_access_contract::permissions::ProviderUse]>,
 ) -> ApiResult<Vec<ModelOption>> {
+    model_options_for(
+        rows,
+        settings,
+        entries,
+        orch_access_contract::permissions::ProviderUsePurpose::Work,
+    )
+}
+
+fn model_options_for(
+    rows: Vec<orch_db::queries::resources::ProviderModelRow>,
+    settings: &Resolved,
+    entries: Option<&[&orch_access_contract::permissions::ProviderUse]>,
+    purpose: orch_access_contract::permissions::ProviderUsePurpose,
+) -> ApiResult<Vec<ModelOption>> {
     rows.into_iter()
         .map(|row| {
             let reason = if !row.enabled {
@@ -598,7 +614,14 @@ fn model_options(
                 Some(ModelOptionReason::ExcludedByPolicy)
             } else if entries.is_some_and(|entries| {
                 !entries.iter().any(|entry| {
-                    orch_authz::options::allows_model(entry, &row.model_name, &row.groups)
+                    orch_authz::options::entry_allows_for(
+                        entry,
+                        &orch_authz::options::Wanted {
+                            model: Some((&row.model_name, &row.groups)),
+                            ..Default::default()
+                        },
+                        purpose,
+                    )
                 })
             }) {
                 Some(ModelOptionReason::ExcludedByEntry)
@@ -1317,6 +1340,51 @@ fn environment_reason(
     }
 }
 
+/// The environment the nearest setting of `env.default_id` names for the threads started at `topic`, and the node
+/// whose setting it is: the topic itself, else its project, else its org.
+async fn named_default(conn: &mut Conn, topic: Id) -> ApiResult<Option<(Id, Option<Id>)>> {
+    let resolved = orch_settings::resolve(conn, Place::Node(topic), keys::ENV_DEFAULT_ID)
+        .await
+        .map_err(ApiError::internal)?
+        .resolved;
+    let Some(value) = resolved.value else {
+        return Ok(None);
+    };
+    let environment = serde_json::from_value::<Id>(value).map_err(ApiError::internal)?;
+    Ok(Some((environment, resolved.source.node)))
+}
+
+/// Why a thread cannot be started in the environment that is named the default, when it cannot: the reason its row
+/// carries, or that the caller may not see it at all.
+const ENVIRONMENT_NOT_SEEN: &str = "environment_not_seen";
+
+/// The environment that is named the default at `topic`, where its setting is when that is above the topic, and why
+/// the caller cannot use it when they cannot, so that a default that is passed over is said and not dropped in silence.
+async fn default_environment_of(
+    conn: &mut Conn,
+    principal: &Principal,
+    topic: Id,
+    listed: &[BindingEnvironment],
+    names: &crate::routes::access::page::NameBounds,
+) -> ApiResult<Option<BindingDefaultEnvironment>> {
+    let Some((environment, source)) = named_default(conn, topic).await? else {
+        return Ok(None);
+    };
+    let from = match source.filter(|node| *node != topic) {
+        Some(node) => names.refs(conn, principal, &[node]).await?.remove(&node),
+        None => None,
+    };
+    let reason = match listed.iter().find(|row| row.environment.id == environment) {
+        Some(row) => row.reason.clone(),
+        None => Some(ENVIRONMENT_NOT_SEEN.to_owned()),
+    };
+    Ok(Some(BindingDefaultEnvironment {
+        environment,
+        from,
+        reason,
+    }))
+}
+
 async fn environments_from(
     conn: &mut Conn,
     principal: &Principal,
@@ -1336,10 +1404,8 @@ async fn environments_from(
     let grouped = grouping::metadata(app, conn, principal, &subjects, projection).await?;
     let uses = history::environment_uses(conn, &ids, topic).await?;
     let hosts = environment_choice::hosts_of(conn, &ids).await?;
-    let default = environment_queries::default_for(conn, &ids)
+    let default = named_default(conn, topic)
         .await?
-        .into_iter()
-        .find(|(_, of)| *of == topic)
         .map(|(environment, _)| environment);
     let topic_name = thread_rows::node_name(conn, topic)
         .await?
@@ -1844,6 +1910,7 @@ async fn options(ctx: Ctx, (): (), (): ()) -> ApiResult<BindingOptions> {
         providers,
         environments,
         environment_default,
+        default_environment: None,
         source,
         access,
         agent_access: None,
