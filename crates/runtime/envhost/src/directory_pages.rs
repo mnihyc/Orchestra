@@ -23,11 +23,15 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
+#[cfg(all(test, target_os = "linux"))]
+use std::time::Duration;
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+mod allowance;
+use allowance::Allowance;
 mod captures;
+pub(crate) mod searches;
 pub(crate) use captures::Coverage;
 mod operations;
 pub(crate) use operations::{Attachment, Operation};
@@ -36,8 +40,8 @@ pub(crate) use operations::{Attachment, Operation};
 pub(crate) const PAGE_BYTES: usize = 2 * 1024 * 1024;
 // One existing client-frame allowance covers paths, cursors and result/status envelopes.
 const ENTRY_BYTES: usize = PAGE_BYTES - orch_realtime_contract::version::MAX_CLIENT_FRAME_BYTES;
-const IDLE: Duration = Duration::from_secs(5 * 60);
-const SLOTS: usize = crate::environment::DIR_WATCHES_MAX;
+#[cfg(all(test, target_os = "linux"))]
+const SLOTS: usize = 256;
 
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
     value.lock().unwrap_or_else(PoisonError::into_inner)
@@ -103,7 +107,7 @@ struct Cursor {
 
 struct Ledger {
     used: AtomicU64,
-    maximum: u64,
+    maximum: AtomicU64,
 }
 
 /// Only metadata is written here: no content file, recording, journal or native session.
@@ -169,7 +173,9 @@ pub(crate) struct DirectoryPages {
     ledger: Arc<Ledger>,
     snapshots: Mutex<HashMap<Id, Arc<Snapshot>>>,
     captures: Mutex<Vec<Arc<captures::Building>>>,
-    build: Arc<Semaphore>,
+    build: Arc<Allowance>,
+    policies: Mutex<HashMap<Id, orch_link_contract::commands::WorkspaceLimits>>,
+    searches: Mutex<HashMap<Id, Arc<searches::Session>>>,
     operations: Arc<operations::Owners>,
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) testing: Arc<observations_tests::Hooks>,
@@ -189,20 +195,43 @@ fn check(cancel: &CancellationToken, deadline: Instant) -> Result<()> {
 
 impl DirectoryPages {
     pub(crate) fn new(directory: PathBuf, clock: Arc<dyn Clock>) -> Self {
+        let defaults = orch_link_contract::commands::WorkspaceLimits::default();
         Self {
             directory,
             clock,
             ledger: Arc::new(Ledger {
                 used: AtomicU64::new(0),
-                maximum: crate::manifest::MANIFEST_MAX_EXPANDED_BYTES,
+                maximum: AtomicU64::new(defaults.directory_cache_bytes),
             }),
             snapshots: Mutex::new(HashMap::new()),
             captures: Mutex::new(Vec::new()),
-            build: Arc::new(Semaphore::new(1)),
+            build: Allowance::new(defaults.directory_builds),
+            policies: Mutex::new(HashMap::new()),
+            searches: Mutex::new(HashMap::new()),
             operations: operations::Owners::new(),
             #[cfg(all(test, target_os = "linux"))]
             testing: Arc::default(),
         }
+    }
+
+    pub(crate) fn configure(
+        &self,
+        environment: Id,
+        limits: &orch_link_contract::commands::WorkspaceLimits,
+    ) {
+        self.ledger
+            .maximum
+            .store(limits.directory_cache_bytes, Ordering::Release);
+        self.build.configure(limits.directory_builds);
+        self.operations.configure(limits.directory_slots);
+        lock(&self.policies).insert(environment, limits.clone());
+    }
+
+    fn policy(&self, environment: Id) -> orch_link_contract::commands::WorkspaceLimits {
+        lock(&self.policies)
+            .get(&environment)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn expired(&self, snapshot: &Snapshot) -> bool {
@@ -211,7 +240,12 @@ impl DirectoryPages {
             .now()
             .timestamp_millis()
             .saturating_sub(snapshot.last_use.load(Ordering::Acquire));
-        idle >= i64::try_from(IDLE.as_millis()).unwrap_or(i64::MAX)
+        idle >= i64::try_from(
+            self.policy(snapshot.binding.environment)
+                .directory_idle_secs
+                .saturating_mul(1000),
+        )
+        .unwrap_or(i64::MAX)
     }
 
     fn evict_one(&self) -> bool {
@@ -248,7 +282,7 @@ impl DirectoryPages {
                 .used
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                     used.checked_add(bytes)
-                        .filter(|next| *next <= self.ledger.maximum)
+                        .filter(|next| *next <= self.ledger.maximum.load(Ordering::Acquire))
                 })
                 .is_ok()
             {
@@ -264,6 +298,7 @@ impl DirectoryPages {
 
     pub(crate) fn forget(&self, environment: Id) {
         self.forget_selected(environment, None);
+        lock(&self.policies).remove(&environment);
     }
 
     pub(crate) fn forget_attachment(&self, environment: Id, attachment: Id) {
@@ -271,6 +306,12 @@ impl DirectoryPages {
     }
 
     fn forget_selected(&self, environment: Id, attachment: Option<Id>) {
+        for search in lock(&self.searches)
+            .values()
+            .filter(|search| search.belongs(environment, attachment))
+        {
+            search.cancel();
+        }
         // Active page/build Arcs keep their anonymous files and quota until work really ends.
         let captures = lock(&self.captures);
         for capture in captures.iter().filter(|capture| {
@@ -361,9 +402,9 @@ impl DirectoryPages {
         limit: u32,
     ) -> Result<Page> {
         operation.check()?;
-        if !(1..=FS_LIST_MAX_ENTRIES).contains(&limit) {
+        if limit == 0 {
             return Err(HostError::Unsupported(
-                "a directory page needs between one and five thousand entries".to_owned(),
+                "a directory page needs at least one entry".to_owned(),
             ));
         }
         let cursor = cursor
@@ -388,11 +429,8 @@ impl DirectoryPages {
             if snapshot.binding != binding {
                 return Err(stale());
             }
-            if self.expired(&snapshot) {
-                snapshot.observation.invalid.store(true, Ordering::Release);
-                lock(&self.snapshots).remove(&cursor.snapshot);
-                return Err(stale());
-            }
+            // Idle metadata is renewed by validating its actual directory identity/version below.
+            // It remains eligible for pressure eviction, but elapsed time alone loses no selection.
             snapshot
         } else {
             let location = {
@@ -414,7 +452,7 @@ impl DirectoryPages {
                         return Ok(reader);
                     }
                 }
-                if builds.len() >= SLOTS {
+                if builds.len() >= self.operations.maximum() {
                     return Err(HostError::Busy(
                         "the directory metadata cache has no unused capture owner".to_owned(),
                     ));
@@ -424,7 +462,7 @@ impl DirectoryPages {
                         .iter()
                         .filter(|build| !build.observation.published.load(Ordering::Acquire))
                         .count();
-                    if lock(&self.snapshots).len() + pending < SLOTS {
+                    if lock(&self.snapshots).len() + pending < self.operations.maximum() {
                         break;
                     }
                     if !self.evict_one() {
@@ -475,6 +513,9 @@ impl DirectoryPages {
                     }
                 })?;
                 if location != snapshot.version.location {
+                    return Err(stale());
+                }
+                if cache.expired(&snapshot) && files.directory_version(&path)? != snapshot.version {
                     return Err(stale());
                 }
                 cache.page(&snapshot, offset, limit, &token, deadline)
@@ -627,6 +668,11 @@ impl DirectoryPages {
         file.seek(SeekFrom::Start(offset)).map_err(|_| stale())?;
         let mut reader = BufReader::new(file);
         let mut entries = Vec::new();
+        let policy = self.policy(snapshot.binding.environment);
+        // The wire's existing page allowance still applies when a person chooses larger working pages.
+        let page_bytes = usize::try_from(policy.directory_page_bytes)
+            .unwrap_or(usize::MAX)
+            .min(ENTRY_BYTES);
         let mut bytes = 2; // The enclosing JSON array; commas are charged per additional row.
         let mut next = None;
         loop {
@@ -636,7 +682,7 @@ impl DirectoryPages {
                 break;
             };
             let cost = row.bytes.len() + usize::from(!entries.is_empty());
-            if entries.len() >= limit as usize || bytes + cost > ENTRY_BYTES {
+            if entries.len() >= limit as usize || bytes + cost > page_bytes {
                 if entries.is_empty() {
                     return Err(too_large(row.bytes.len()));
                 }
@@ -669,7 +715,13 @@ impl DirectoryPages {
             next_cursor,
             as_of: snapshot.as_of,
             observed_from: snapshot.observed_from,
-            expires_at: Time::new(now + chrono::Duration::minutes(5)),
+            expires_at: Time::new(
+                chrono::Duration::try_seconds(
+                    i64::try_from(policy.directory_idle_secs).unwrap_or(i64::MAX),
+                )
+                .and_then(|idle| now.checked_add_signed(idle))
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+            ),
             observation: Arc::clone(&snapshot.observation),
         })
     }

@@ -552,3 +552,61 @@ async fn a_completed_daemon_start_replay_reopens_the_connectors_mount_handles_an
     assert_eq!(world.commands.issued_of("node.runtime.stop"), 0);
     world.engine().stop();
 }
+
+#[tokio::test]
+async fn a_changed_ignore_list_reaches_the_machine_of_a_running_environment_at_once() {
+    let world = World::new().await;
+    let workspace_engine = journaled_engine(&world);
+    serve(&world);
+    let host = ScriptedHost::on(&world, "workspace-settings", 16_384).await;
+    let (environment, _runtime, unit) =
+        running(&world, &host, template(&world).await, "Main").await;
+    let attaches = Arc::new(Mutex::new(Vec::<Json>::new()));
+    let captured = Arc::clone(&attaches);
+    unit.added
+        .machine
+        .handler
+        .on(CommandKind::EnvAttach, move |command| {
+            let Command::EnvAttach(body) = command else {
+                panic!("wrong attach command")
+            };
+            captured
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(body).unwrap());
+            Ok(CommandResult::EnvAttach(
+                serde_json::from_value(hosting::facts()).unwrap(),
+            ))
+        });
+    // The attach the machine was given last: nothing ignored, the whole tree indexed.
+    sqlx::query("INSERT INTO commands(id,machine_id,kind,body,state,result,deadline_at) VALUES($1,$2,'env.attach',$3,'succeeded',$4,$5)")
+        .bind(new_id()).bind(unit.id).bind(json!({"environment_id":environment,"workspace_root":null,"ignore":[],"index":"full","mounts":null,"variables":{},"secrets":{}})).bind(hosting::facts()).bind(world.clock.now()+chrono::Duration::minutes(2)).execute(world.pool.pool()).await.unwrap();
+    world
+        .set(world.topic, "workspace.ignore", json!(["bulk/"]))
+        .await;
+    workspace_engine
+        .workspace_scope_changed(world.topic)
+        .await
+        .unwrap();
+    {
+        let sent = attaches.lock().unwrap();
+        assert_eq!(sent.len(), 1, "the change is told to the machine, once");
+        assert_eq!(sent[0]["ignore"], json!(["bulk/"]));
+        assert_eq!(sent[0]["index"], "full");
+    }
+    world
+        .set(world.topic, "workspace.index", json!("live"))
+        .await;
+    workspace_engine
+        .workspace_scope_changed(world.topic)
+        .await
+        .unwrap();
+    let sent = attaches.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1]["index"], "live");
+    assert_eq!(sent[1]["ignore"], json!(["bulk/"]));
+    drop(sent);
+    assert_eq!(world.commands.issued_of("node.runtime.create"), 0);
+    assert_eq!(world.commands.issued_of("node.runtime.stop"), 0);
+    world.engine().stop();
+}

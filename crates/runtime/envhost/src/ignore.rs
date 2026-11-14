@@ -1,23 +1,11 @@
 //! Configured patterns and nested .orch_ignore files.
 //!
-//! What the workspace leaves out of what Orch shows is decided by gitignore patterns from two
-//! places: the patterns the environment was attached with (`workspace.ignore`, written as if in a
-//! file at the root) and every `.orch_ignore` file in the workspace, each scoping its own
-//! directory and below. The rules are git's: the last pattern that matches decides, a pattern
-//! with a leading `!` brings back what an earlier one left out, and nothing inside a directory
-//! that is left out can be brought back.
-//!
-//! **Precedence** runs from the configured patterns, which lose to everything, through the file
-//! at the root, down to the file in the entry's own directory, which wins; a deeper file
-//! overrides a shallower one as git's do. A path is ignored when it, or any directory above it,
-//! is. The directory Orch keeps inside a thread's directory (`.orch/`) is never ignored,
-//! whatever a pattern says. Where names do not differ by case, neither do the patterns.
-//!
-//! An ignored path is absent from listings, search, manifests and snapshots, and cannot be read or
-//! written through Orch. The agent itself is unaffected: these rules decide what Orch shows, not
-//! what exists.
+//! Rules apply from configured patterns through each containing directory, with the deepest
+//! matching rule winning. An excluded parent cannot be re-included. Orch's own directory is
+//! always available. Invalid or unreadable rules are an explicit coverage failure, never an
+//! empty set that could expose files the person intended to exclude.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::io::Read;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -26,255 +14,452 @@ use ::ignore::Match;
 use ::ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use crate::paths::{Locate, ORCH_DIR, RelPath, Workspace};
-use crate::platform::{Dir, Identity};
+use crate::platform::{self, Dir, Identity};
 
-/// The name of a file of patterns inside the workspace.
+/// The local exclusion file, always opened without following a link.
 pub const IGNORE_FILE: &str = ".orch_ignore";
-
-/// The most bytes of a file of patterns that are read.
-///
-/// A file of patterns is written by hand and a few kilobytes long; one of a mebibyte is a mistake
-/// or an attack on the time every request spends reading it, and is not read at all.
+/// The default parsing allowance; served environments supply their resolved setting.
 pub const IGNORE_FILE_MAX_BYTES: u64 = 1024 * 1024;
+/// Cached source bytes and record metadata, with least recently used eviction.
+pub const IGNORE_CACHE_BYTES: u64 = 16 * 1024 * 1024;
 
-/// What the patterns say of one name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Decision {
-    Ignore,
-    Keep,
-    Silent,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleProblem {
+    /// Relative file path, or the configured setting key.
+    pub path: String,
+    /// One-based source line or configured item.
+    pub line: Option<usize>,
+    /// A safe diagnostic code, never pattern contents or an absolute path.
+    pub reason: &'static str,
 }
 
-/// The parsed patterns of one directory's file, and which version of the file they were read from.
+impl RuleProblem {
+    pub(crate) fn message(&self) -> String {
+        let line = self
+            .line
+            .map_or_else(String::new, |line| format!(" at line {line}"));
+        let reason = match self.reason {
+            "linked" => "the rules file is a link",
+            "not_file" => "the rules path is not a regular file",
+            "too_large" => "the rules exceed the parsing allowance",
+            "invalid_encoding" => "the rules are not valid UTF-8",
+            "invalid_pattern" => "a pattern is invalid",
+            "changed" => "the rules changed while being read",
+            _ => "the rules could not be read",
+        };
+        format!(
+            "The exclusion rules in {}{line} could not be applied: {reason}.",
+            self.path
+        )
+    }
+}
+
+type Patterns = Result<Option<Arc<Gitignore>>, RuleProblem>;
+
 #[derive(Debug, Clone)]
 struct Loaded {
-    version: Option<Identity>,
-    patterns: Option<Arc<Gitignore>>,
+    version: Identity,
+    patterns: Patterns,
+    age: u64,
+    bytes: u64,
 }
 
-/// The rules of one workspace.
+#[derive(Debug, Default)]
+struct Cache {
+    files: HashMap<RelPath, Loaded>,
+    order: BTreeMap<u64, RelPath>,
+    age: u64,
+    bytes: u64,
+}
+
+impl Cache {
+    fn next_age(&mut self) -> u64 {
+        if let Some(age) = self.age.checked_add(1) {
+            self.age = age;
+        } else {
+            self.files.clear();
+            self.order.clear();
+            self.bytes = 0;
+            self.age = 1;
+        }
+        self.age
+    }
+    fn remove(&mut self, path: &RelPath) {
+        if let Some(loaded) = self.files.remove(path) {
+            self.order.remove(&loaded.age);
+            self.bytes = self.bytes.saturating_sub(loaded.bytes);
+        }
+    }
+    fn get(&mut self, path: &RelPath, version: &Identity) -> Option<Patterns> {
+        let age = self.next_age();
+        let loaded = self.files.get_mut(path)?;
+        if &loaded.version != version {
+            return None;
+        }
+        let result = loaded.patterns.clone();
+        self.order.remove(&loaded.age);
+        loaded.age = age;
+        self.order.insert(age, path.clone());
+        Some(result)
+    }
+    fn keep(
+        &mut self,
+        path: &RelPath,
+        version: Identity,
+        patterns: Patterns,
+        source_bytes: u64,
+        budget: u64,
+    ) {
+        self.remove(path);
+        // Both indices own a path; the fixed record is counted separately from source text.
+        let bytes = source_bytes
+            .saturating_add((2 * path.as_str().len() + std::mem::size_of::<Loaded>()) as u64);
+        if bytes > budget {
+            return;
+        }
+        while self.bytes.saturating_add(bytes) > budget {
+            let Some((_, old)) = self.order.pop_first() else {
+                break;
+            };
+            self.remove(&old);
+        }
+        let age = self.next_age();
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.order.insert(age, path.clone());
+        self.files.insert(
+            path.clone(),
+            Loaded {
+                version,
+                patterns,
+                age,
+                bytes,
+            },
+        );
+    }
+}
+
 #[derive(Debug)]
 pub struct IgnoreRules {
     configured_input: Vec<String>,
     configured: Option<Arc<Gitignore>>,
+    configured_problem: Option<RuleProblem>,
     rejected: Vec<String>,
     case_sensitive: bool,
-    files: Mutex<HashMap<RelPath, Loaded>>,
+    max_file_bytes: u64,
+    cache_bytes: u64,
+    files: Mutex<Cache>,
 }
 
 fn builder(case_sensitive: bool) -> GitignoreBuilder {
-    // The root is `.`, and every path matched against it is written from the directory the
-    // patterns belong to: the matcher then never strips anything from the path it is given.
     let mut builder = GitignoreBuilder::new(".");
-    // Setting this cannot fail; the crate returns a result for an old reason.
     let _ = builder.case_insensitive(!case_sensitive);
     builder
 }
 
 impl IgnoreRules {
-    /// The rules of a workspace whose environment was attached with `patterns`. A pattern that is
-    /// not a pattern is left out and listed by [`IgnoreRules::rejected`].
     #[must_use]
     pub fn new(patterns: &[String], case_sensitive: bool) -> Self {
+        Self::with_limits(
+            patterns,
+            case_sensitive,
+            IGNORE_FILE_MAX_BYTES,
+            IGNORE_CACHE_BYTES,
+        )
+    }
+
+    #[must_use]
+    pub fn with_limits(
+        patterns: &[String],
+        case_sensitive: bool,
+        max_file_bytes: u64,
+        cache_bytes: u64,
+    ) -> Self {
         let mut builder = builder(case_sensitive);
         let mut rejected = Vec::new();
-        for pattern in patterns {
+        let mut configured_problem = None;
+        for (line, pattern) in patterns.iter().enumerate() {
             if builder.add_line(None, pattern).is_err() {
                 rejected.push(pattern.clone());
+                configured_problem.get_or_insert(RuleProblem {
+                    path: "workspace.ignore".to_owned(),
+                    line: Some(line + 1),
+                    reason: "invalid_pattern",
+                });
             }
         }
-        let configured = builder
-            .build()
-            .ok()
-            .filter(|set| !set.is_empty())
-            .map(Arc::new);
+        let configured = match builder.build() {
+            Ok(patterns) => (!patterns.is_empty()).then(|| Arc::new(patterns)),
+            Err(_) => {
+                configured_problem.get_or_insert(RuleProblem {
+                    path: "workspace.ignore".to_owned(),
+                    line: None,
+                    reason: "invalid_pattern",
+                });
+                None
+            }
+        };
         Self {
             configured_input: patterns.to_vec(),
             configured,
+            configured_problem,
             rejected,
             case_sensitive,
-            files: Mutex::new(HashMap::new()),
+            max_file_bytes,
+            cache_bytes,
+            files: Mutex::new(Cache::default()),
         }
     }
 
-    /// The configured patterns that could not be read as patterns.
     #[must_use]
     pub fn rejected(&self) -> &[String] {
         &self.rejected
     }
-
-    /// The frozen configured rules, for a file state's coverage fingerprint.
     #[must_use]
     pub fn configured_patterns(&self) -> &[String] {
         &self.configured_input
     }
+    #[must_use]
+    pub(crate) fn max_file_bytes(&self) -> u64 {
+        self.max_file_bytes
+    }
 
-    /// Forgets what was read from the file of `directory`, after somebody changed it.
     pub fn forget(&self, directory: &RelPath) {
         self.files
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(directory);
     }
-
-    /// Drops cached rule parses when native event loss makes their version evidence incomplete.
     pub(crate) fn forget_all(&self) {
-        self.files
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
+        *self.files.lock().unwrap_or_else(PoisonError::into_inner) = Cache::default();
     }
 
-    /// The patterns of the file in `dir`, read again when the file is another version than the one
-    /// that was parsed.
-    fn load(&self, directory: &RelPath, dir: &Dir) -> Option<Arc<Gitignore>> {
-        let name = OsStr::new(IGNORE_FILE);
-        let version = match dir.lstat(name) {
-            Ok(meta) if meta.is_file() && meta.size <= IGNORE_FILE_MAX_BYTES => {
-                Some(meta.identity())
-            }
-            _ => None,
-        };
-        {
-            let files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(loaded) = files.get(directory)
-                && loaded.version == version
-            {
-                return loaded.patterns.clone();
-            }
+    fn problem(directory: &RelPath, reason: &'static str, line: Option<usize>) -> RuleProblem {
+        RuleProblem {
+            path: if directory.is_root() {
+                IGNORE_FILE.to_owned()
+            } else {
+                format!("{directory}/{IGNORE_FILE}")
+            },
+            reason,
+            line,
         }
-        let patterns = version.and_then(|_| self.read(dir)).map(Arc::new);
+    }
+
+    fn load(&self, directory: &RelPath, dir: &Dir) -> Patterns {
+        let meta = match dir.lstat(OsStr::new(IGNORE_FILE)) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.forget(directory);
+                return Ok(None);
+            }
+            Err(_) => {
+                self.forget(directory);
+                return Err(Self::problem(directory, "unreadable", None));
+            }
+        };
+        let version = meta.identity();
+        if let Some(patterns) = self
+            .files
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(directory, &version)
+        {
+            return patterns;
+        }
+        let patterns = if meta.is_symlink() {
+            Err(Self::problem(directory, "linked", None))
+        } else if !meta.is_file() {
+            Err(Self::problem(directory, "not_file", None))
+        } else if meta.size > self.max_file_bytes {
+            Err(Self::problem(directory, "too_large", None))
+        } else {
+            self.read(directory, dir, &version)
+                .map(|patterns| patterns.map(Arc::new))
+        };
+        let source_bytes = if patterns.is_ok() { meta.size } else { 0 };
         self.files
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(
-                directory.clone(),
-                Loaded {
-                    version,
-                    patterns: patterns.clone(),
-                },
+            .keep(
+                directory,
+                version,
+                patterns.clone(),
+                source_bytes,
+                self.cache_bytes,
             );
         patterns
     }
 
-    fn read(&self, dir: &Dir) -> Option<Gitignore> {
-        // Opened without following a link: a link called .orch_ignore is not a file of patterns.
-        let mut file = dir.open_read(OsStr::new(IGNORE_FILE)).ok()?;
+    fn read(
+        &self,
+        directory: &RelPath,
+        dir: &Dir,
+        version: &Identity,
+    ) -> Result<Option<Gitignore>, RuleProblem> {
+        let mut file = dir
+            .open_read(OsStr::new(IGNORE_FILE))
+            .map_err(|_| Self::problem(directory, "unreadable", None))?;
+        let before =
+            platform::file_meta(&file).map_err(|_| Self::problem(directory, "unreadable", None))?;
         let mut bytes = Vec::new();
         Read::by_ref(&mut file)
-            .take(IGNORE_FILE_MAX_BYTES + 1)
+            .take(self.max_file_bytes.saturating_add(1))
             .read_to_end(&mut bytes)
-            .ok()?;
-        if bytes.len() as u64 > IGNORE_FILE_MAX_BYTES {
-            return None;
+            .map_err(|_| Self::problem(directory, "unreadable", None))?;
+        let after =
+            platform::file_meta(&file).map_err(|_| Self::problem(directory, "unreadable", None))?;
+        if &before.identity() != version || before.identity() != after.identity() {
+            return Err(Self::problem(directory, "changed", None));
         }
-        let text = String::from_utf8_lossy(&bytes);
-        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        if bytes.len() as u64 > self.max_file_bytes {
+            return Err(Self::problem(directory, "too_large", None));
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|error| {
+            Self::problem(
+                directory,
+                "invalid_encoding",
+                Some(
+                    bytes[..error.valid_up_to()]
+                        .iter()
+                        .filter(|byte| **byte == b'\n')
+                        .count()
+                        + 1,
+                ),
+            )
+        })?;
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let mut builder = builder(self.case_sensitive);
-        for line in text.lines() {
-            // A line that is no pattern costs the file that line and nothing more.
-            let _ = builder.add_line(None, line);
+        for (line, pattern) in text.lines().enumerate() {
+            builder
+                .add_line(None, pattern)
+                .map_err(|_| Self::problem(directory, "invalid_pattern", Some(line + 1)))?;
         }
-        builder.build().ok().filter(|set| !set.is_empty())
+        let patterns = builder
+            .build()
+            .map_err(|_| Self::problem(directory, "invalid_pattern", None))?;
+        Ok((!patterns.is_empty()).then_some(patterns))
     }
 
-    /// Whether `path` is left out. It is, when it or a directory above it is; `is_dir` says what
-    /// the path itself is, since a pattern may name directories only. `path` may be spelled with
-    /// links in it, and the answer is for the path as it is spelled: ask for the real path of
-    /// the entry too, to catch a link that leads to a place that is left out.
-    #[must_use]
-    pub fn is_ignored(&self, workspace: &Workspace, path: &RelPath, is_dir: bool) -> bool {
+    /// A coverage problem has its own result; boolean consumers conservatively leave the scope out.
+    pub fn check(
+        &self,
+        workspace: &Workspace,
+        path: &RelPath,
+        is_dir: bool,
+    ) -> Result<bool, RuleProblem> {
         if path.has_component(orch_agent_contract::session::INSTRUCTION_ROOT_MARKER) {
-            return true;
+            return Ok(true);
         }
-        if path.is_root() || path.has_component(ORCH_DIR) {
-            return false;
+        if path.has_component(ORCH_DIR) {
+            return Ok(false);
+        }
+        if let Some(problem) = &self.configured_problem {
+            return Err(problem.clone());
         }
         let names: Vec<&str> = path.components().collect();
         let count = names.len();
-        // The pattern files that apply, from the root down, found as the walk goes.
-        let mut bases: Vec<(usize, Arc<Gitignore>)> = Vec::new();
+        let mut bases = Vec::new();
         let mut directory = RelPath::root();
-        for depth in 0..count {
+        for depth in 0..count.max(1) {
             if depth > 0 {
-                match directory.join(names[depth - 1]) {
-                    Ok(next) => directory = next,
-                    Err(_) => return true,
-                }
+                directory = directory
+                    .join(names[depth - 1])
+                    .map_err(|_| Self::problem(&directory, "unreadable", None))?;
             }
-            if let Some(patterns) = self.patterns_of(workspace, &directory) {
-                bases.push((depth, patterns));
+            match self.patterns_of(workspace, &directory) {
+                Ok(Some(patterns)) => bases.push((depth, patterns)),
+                Ok(None) => {}
+                Err(problem) if !is_dir && path.as_str() == problem.path => return Ok(false),
+                Err(problem) => return Err(problem),
             }
-            let entry_is_dir = depth + 1 < count || is_dir;
-            if self.decide(&names, depth + 1, entry_is_dir, &bases) == Decision::Ignore {
-                return true;
+            if count > 0 && self.decide(&names, depth + 1, depth + 1 < count || is_dir, &bases) {
+                return Ok(true);
             }
         }
-        false
+        Ok(false)
     }
 
-    fn patterns_of(&self, workspace: &Workspace, directory: &RelPath) -> Option<Arc<Gitignore>> {
-        let located = workspace.locate(directory, Locate::THROUGH).ok()?;
-        let dir = workspace.open_dir(&located).ok()?;
+    #[must_use]
+    pub fn is_ignored(&self, workspace: &Workspace, path: &RelPath, is_dir: bool) -> bool {
+        self.check(workspace, path, is_dir).unwrap_or(true)
+    }
+
+    pub(crate) fn root_problem(&self, workspace: &Workspace) -> Option<RuleProblem> {
+        self.check(workspace, &RelPath::root(), true).err()
+    }
+
+    fn patterns_of(&self, workspace: &Workspace, directory: &RelPath) -> Patterns {
+        let located = match workspace.locate(directory, Locate::THROUGH) {
+            Ok(located) => located,
+            Err(crate::error::HostError::NotFound(_)) => return Ok(None),
+            Err(_) => return Err(Self::problem(directory, "unreadable", None)),
+        };
+        let dir = workspace
+            .open_dir(&located)
+            .map_err(|_| Self::problem(directory, "unreadable", None))?;
         self.load(directory, &dir)
     }
 
-    /// What the patterns say of the first `upto` names, given the pattern files above them.
     fn decide(
         &self,
         names: &[&str],
         upto: usize,
         is_dir: bool,
         bases: &[(usize, Arc<Gitignore>)],
-    ) -> Decision {
-        let mut decision = Decision::Silent;
-        let from_root = names[..upto].join("/");
+    ) -> bool {
+        let mut decision = None;
         let consider =
             |patterns: &Gitignore, relative: &str| match patterns.matched(relative, is_dir) {
-                Match::Ignore(_) => Some(Decision::Ignore),
-                Match::Whitelist(_) => Some(Decision::Keep),
+                Match::Ignore(_) => Some(true),
+                Match::Whitelist(_) => Some(false),
                 Match::None => None,
             };
         if let Some(configured) = &self.configured
-            && let Some(found) = consider(configured, &from_root)
+            && let Some(found) = consider(configured, &names[..upto].join("/"))
         {
-            decision = found;
+            decision = Some(found);
         }
         for (base, patterns) in bases {
-            if *base >= upto {
-                continue;
-            }
-            let relative = names[*base..upto].join("/");
-            if let Some(found) = consider(patterns, &relative) {
-                decision = found;
+            if *base < upto
+                && let Some(found) = consider(patterns, &names[*base..upto].join("/"))
+            {
+                decision = Some(found);
             }
         }
-        decision
+        decision == Some(true)
     }
 
-    /// The rules as a walk of a tree sees them, starting at the root.
     #[must_use]
     pub fn scope(self: &Arc<Self>, root: &Dir) -> Scope {
-        let patterns = self.load(&RelPath::root(), root);
+        let (patterns, problem) = match self.load(&RelPath::root(), root) {
+            Ok(patterns) => (patterns, None),
+            Err(problem) => (None, Some(problem)),
+        };
         Scope {
             rules: Arc::clone(self),
             bases: patterns
                 .map(|patterns| vec![(RelPath::root(), patterns)])
                 .unwrap_or_default(),
+            problem: self.configured_problem.clone().or(problem),
         }
     }
 
-    /// The rules inside `directory`, for a walk that starts there; `None` when the directory is
-    /// left out itself, or something above it is, and the walk has nothing to see. `directory`
-    /// is spelled as it really is, with no link in it.
     pub fn scope_at(self: &Arc<Self>, workspace: &Workspace, directory: &RelPath) -> Option<Scope> {
+        if directory.has_component(ORCH_DIR) {
+            return Some(Scope {
+                rules: Arc::clone(self),
+                bases: Vec::new(),
+                problem: None,
+            });
+        }
         let mut scope = self.scope(&workspace.root_dir().ok()?);
         let mut here = RelPath::root();
-        // A path that runs through `.orch/` is Orch's own and is not left out, whatever lies above it.
-        let exempt = directory.has_component(ORCH_DIR);
         for name in directory.components() {
+            if scope.problem.is_some() {
+                return Some(scope);
+            }
             here = here.join(name).ok()?;
-            if !exempt && scope.is_ignored(&here, true) {
+            if scope.is_ignored(&here, true) {
                 return None;
             }
             let located = workspace.locate(&here, Locate::ENTRY).ok()?;
@@ -285,30 +470,37 @@ impl IgnoreRules {
     }
 }
 
-/// The rules in force inside one directory of a walk: the walk enters a directory, learns its
-/// file of patterns once, and then asks about each name in it.
 #[derive(Debug, Clone)]
 pub struct Scope {
     rules: Arc<IgnoreRules>,
     bases: Vec<(RelPath, Arc<Gitignore>)>,
+    problem: Option<RuleProblem>,
 }
 
 impl Scope {
-    /// The rules inside `child`, a directory of this one that is held as `dir`.
     #[must_use]
     pub fn enter(&self, child: &RelPath, dir: &Dir) -> Scope {
-        let mut bases = self.bases.clone();
-        if let Some(patterns) = self.rules.load(child, dir) {
-            bases.push((child.clone(), patterns));
+        if child.has_component(ORCH_DIR) {
+            return Scope {
+                rules: Arc::clone(&self.rules),
+                bases: Vec::new(),
+                problem: None,
+            };
         }
-        Scope {
-            rules: Arc::clone(&self.rules),
-            bases,
+        let mut next = self.clone();
+        if next.problem.is_none() {
+            match self.rules.load(child, dir) {
+                Ok(Some(patterns)) => next.bases.push((child.clone(), patterns)),
+                Ok(None) => {}
+                Err(problem) => next.problem = Some(problem),
+            }
         }
+        next
     }
-
-    /// Whether the entry `path`, which lies directly in the directory this scope is for, is left
-    /// out. The directory itself is known not to be, or the walk would not be here.
+    #[must_use]
+    pub fn problem(&self) -> Option<&RuleProblem> {
+        self.problem.as_ref()
+    }
     #[must_use]
     pub fn is_ignored(&self, path: &RelPath, is_dir: bool) -> bool {
         if path.has_component(orch_agent_contract::session::INSTRUCTION_ROOT_MARKER) {
@@ -317,26 +509,29 @@ impl Scope {
         if path.has_component(ORCH_DIR) {
             return false;
         }
+        if self.problem.is_some() {
+            return true;
+        }
+        let mut decision = None;
         let consider =
             |patterns: &Gitignore, relative: &str| match patterns.matched(relative, is_dir) {
-                Match::Ignore(_) => Some(Decision::Ignore),
-                Match::Whitelist(_) => Some(Decision::Keep),
+                Match::Ignore(_) => Some(true),
+                Match::Whitelist(_) => Some(false),
                 Match::None => None,
             };
-        let mut decision = Decision::Silent;
         if let Some(configured) = &self.rules.configured
             && let Some(found) = consider(configured, path.as_str())
         {
-            decision = found;
+            decision = Some(found);
         }
         for (base, patterns) in &self.bases {
             if let Some(relative) = path.strip_prefix(base)
                 && let Some(found) = consider(patterns, relative.as_str())
             {
-                decision = found;
+                decision = Some(found);
             }
         }
-        decision == Decision::Ignore
+        decision == Some(true)
     }
 }
 
@@ -481,8 +676,8 @@ mod tests {
         std::fs::write(root.path().join("patterns-elsewhere"), "*.out\n").unwrap();
         std::os::unix::fs::symlink("patterns-elsewhere", root.path().join(".orch_ignore")).unwrap();
         assert!(
-            !rules.is_ignored(&ws, &path("x.out"), false),
-            "a link is not a file of patterns"
+            rules.is_ignored(&ws, &path("x.out"), false),
+            "a linked rule file leaves coverage unavailable until corrected"
         );
     }
 
@@ -520,12 +715,84 @@ mod tests {
     }
 
     #[test]
-    fn a_pattern_that_is_no_pattern_is_set_aside_and_the_rest_still_apply() {
+    fn an_unclosed_character_class_keeps_its_git_literal_meaning() {
         let found = rules(&["*.log", "[unclosed", "ok/"], true);
         // An unclosed class is read literally, as git does; the rest are unaffected either way.
         let root = tempfile::tempdir().unwrap();
         let ws = workspace(root.path(), true);
         assert!(found.is_ignored(&ws, &path("a.log"), false));
         assert!(found.is_ignored(&ws, &path("ok"), true));
+    }
+    #[test]
+    fn an_invalid_exclusion_line_is_named_and_its_scope_never_exposes_content() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(IGNORE_FILE), "*.private\n[z-a]\n").unwrap();
+        let ws = workspace(root.path(), true);
+        let rules = Arc::new(rules(&[], true));
+        let problem = rules.check(&ws, &path("visible.txt"), false).unwrap_err();
+        assert_eq!(problem.path, IGNORE_FILE);
+        assert_eq!(problem.line, Some(2));
+        assert_eq!(problem.reason, "invalid_pattern");
+        assert!(rules.is_ignored(&ws, &path("visible.txt"), false));
+        let scope = rules.scope(&ws.root_dir().unwrap());
+        assert_eq!(scope.problem(), Some(&problem));
+        assert!(scope.is_ignored(&path("visible.txt"), false));
+        assert!(
+            !rules.check(&ws, &path(IGNORE_FILE), false).unwrap(),
+            "the broken control file can still be corrected"
+        );
+    }
+
+    #[test]
+    fn invalid_configured_exclusions_are_not_partially_applied_as_if_every_rule_was_valid() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = workspace(root.path(), true);
+        let rules = rules(&["*.private", "[z-a]"], true);
+        let problem = rules.check(&ws, &path("visible.txt"), false).unwrap_err();
+        assert_eq!(problem.path, "workspace.ignore");
+        assert_eq!(problem.line, Some(2));
+        assert!(rules.is_ignored(&ws, &path("visible.txt"), false));
+    }
+
+    #[test]
+    fn an_exclusion_parse_budget_is_reported_and_a_larger_chosen_budget_applies_the_complete_file()
+    {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(IGNORE_FILE), "hidden.txt\n").unwrap();
+        let ws = workspace(root.path(), true);
+        let small = IgnoreRules::with_limits(&[], true, 4, 1024);
+        let problem = small.check(&ws, &path("hidden.txt"), false).unwrap_err();
+        assert_eq!(problem.reason, "too_large");
+        let chosen = IgnoreRules::with_limits(&[], true, 100, 1024);
+        assert!(chosen.check(&ws, &path("hidden.txt"), false).unwrap());
+    }
+
+    #[test]
+    fn invalid_text_and_linked_exclusion_files_are_reported_until_the_actual_rules_are_readable() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = workspace(root.path(), true);
+        let rules = rules(&[], true);
+        std::fs::write(root.path().join(IGNORE_FILE), [255u8]).unwrap();
+        assert_eq!(
+            rules
+                .check(&ws, &path("visible.txt"), false)
+                .unwrap_err()
+                .reason,
+            "invalid_encoding"
+        );
+        std::fs::remove_file(root.path().join(IGNORE_FILE)).unwrap();
+        std::fs::write(root.path().join("actual-rules"), "*.private\n").unwrap();
+        std::os::unix::fs::symlink("actual-rules", root.path().join(IGNORE_FILE)).unwrap();
+        assert_eq!(
+            rules
+                .check(&ws, &path("visible.txt"), false)
+                .unwrap_err()
+                .reason,
+            "linked"
+        );
+        std::fs::remove_file(root.path().join(IGNORE_FILE)).unwrap();
+        std::fs::write(root.path().join(IGNORE_FILE), "*.private\n").unwrap();
+        assert!(!rules.check(&ws, &path("visible.txt"), false).unwrap());
+        assert!(rules.check(&ws, &path("hidden.private"), false).unwrap());
     }
 }

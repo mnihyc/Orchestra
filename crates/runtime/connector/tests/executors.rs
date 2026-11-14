@@ -532,6 +532,8 @@ async fn the_messages_of_an_executor_with_a_protocol_of_its_own_go_both_ways_thr
     })
     .await;
     rig.succeed(&EnvAttach {
+        workspace: Default::default(),
+
         resources: None,
         data_generation: Some(first_generation + 1),
         storage: None,

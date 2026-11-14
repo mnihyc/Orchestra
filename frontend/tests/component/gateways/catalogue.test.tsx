@@ -8,7 +8,7 @@ import { show } from '../support';
 import { catalogue, look, modes, restore } from './fixtures';
 
 afterEach(restore);
-it.each(modes)('shows labels, regions, aliases and revision in $locale/$theme at $width', async (mode) => {
+it.each(modes)('shows labels, regions and aliases, and keeps the revision it binds to out of sight, in $locale/$theme at $width', async (mode) => {
   await look(mode);
   const save = vi.fn().mockResolvedValue(undefined);
   const view = show(<GatewayCatalogueView catalogue={catalogue} writable onSave={save} />);
@@ -17,7 +17,7 @@ it.each(modes)('shows labels, regions, aliases and revision in $locale/$theme at
     expect(screen.getByText(gateway.region, { exact: true })).toBeVisible();
     for (const endpoint of gateway.endpoints) expect(screen.getByText(endpoint.url, { exact: true })).toBeVisible();
   }
-  expect(view.container).toHaveTextContent(catalogue.revision);
+  expect(view.container).not.toHaveTextContent(catalogue.revision);
   expect(screen.getByRole('button', { name: i18n.t('help.hint.label', { term: i18n.t('regionalGateways.title') }) }))
     .toHaveAttribute('data-help-heading', 'gateway-catalogue');
   await userEvent.click(screen.getByRole('button', { name: i18n.t('regionalGateways.edit') }));

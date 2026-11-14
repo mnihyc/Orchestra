@@ -626,7 +626,10 @@ async fn an_auxiliary_cannot_publish_control_or_receive_a_content_token() {
     assert!(auxiliary.ready.endpoints.is_none() && auxiliary.ready.gateways.is_empty());
     auxiliary
         .sender
-        .send(orch_link_contract::commands::CmdAck { id: new_id() })
+        .send(orch_link_contract::commands::CmdAck {
+            id: new_id(),
+            key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+        })
         .unwrap();
     let ended = tokio::time::timeout(PATIENCE, async {
         loop {

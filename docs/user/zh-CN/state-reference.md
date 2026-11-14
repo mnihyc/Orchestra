@@ -571,3 +571,12 @@ summary: 线程、提供方或机器旁显示的每种状态的含义。
 | `state:UploadInventoryState.complete` | 已验证的不可变文件内容已入库。 |
 | `state:UploadInventoryState.partial` | 上传尚未完成；不能据此认定发送方此刻仍在活动。 |
 | `state:UploadInventoryState.expired` | 上传会话的完成期限已过。 |
+
+### 文件准备
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:EnvironmentIndexReason.unreadable` | 部分元数据或排除规则无法读取；安全的实时读取保留修正路径。 |
+| `state:CommandKeyPhase.queued` | 已接受并等待执行位置；尚未占据执行通道。 |
+| `state:CommandKeyPhase.running` | 命令当前正在使用执行通道。 |
+| `state:CommandKeyPhase.released` | 捕获已释放执行通道；上传可以与后续启动同时继续。 |
