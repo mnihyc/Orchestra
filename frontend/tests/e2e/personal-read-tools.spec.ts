@@ -62,7 +62,8 @@ for (const locale of ['en', 'zh-CN'] as const) {
       applied++;await route.continue();
     });
     await page.goto(`/thread/${ACME.mainThread}`);
-    await page.locator('[data-thread-header]').getByRole('button',{name:words.thread.header.shareThread,exact:true}).click();
+    await page.locator('[data-thread-header] [data-thread-more]').click();
+    await page.getByRole('menuitem', { name: words.thread.header.shareThread, exact: true }).click();
     const sharing=page.getByRole('dialog').filter({has:page.getByRole('combobox',{name:words.access.add.label,exact:true})});
     await sharing.getByRole('combobox',{name:words.access.add.label,exact:true}).fill('gra');
     await page.getByRole('option',{name:/Grace Hopper/}).click();

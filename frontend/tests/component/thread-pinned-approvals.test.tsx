@@ -27,7 +27,7 @@ vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof Live>
 const ids: string[] = [];
 afterEach(async () => { cleanup(); for (const id of ids.splice(0)) threadWriter.evict(id); vi.resetAllMocks(); await setLocale('en'); });
 
-for (const locale of ['en', 'zh-CN'] as const) for (const detail of ['summary', 'steps', 'everything'] as const) {
+for (const locale of ['en', 'zh-CN'] as const) for (const detail of ['normal', 'verbose', 'diagnostics'] as const) {
   it(`pins one exact decision and retires it after its confirmed answer in ${locale}/${detail}`, async () => {
     await setLocale(locale); const source = snapshot(null); const id = source.thread.id; ids.push(id);
     const request = harnessApproval('pinned-command', { threadId: id, itemId: 'pinned-item', requester: ADA, title: 'Inspect output',
@@ -35,8 +35,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const detail of ['summary', 
     const item: Item = { ...approvalItem('pinned-item', request.id), kind: 'approval', payload: { approval_id: request.id, approval: request } };
     threadWriter.reset(id, { ...source, items: [item] }, false);
     wire.decide.mockResolvedValue({ ...request, state: 'approved', decided_by: ADA, decision: { option_id: 'allow_once' } });
-    const context: TimelineContext = { threadId: id, threadName: source.thread.name, detail, pinApprovals: true,
-      recent: new Set(), layout: 'one', setLayout: () => undefined, meId: ADA.id, canInteract: true, canManage: true, live: true, lit: null, selection: NOT_PICKING };
+    const context: TimelineContext = { threadId: id, threadName: source.thread.name, detail, pinApprovals: true, layout: 'one', setLayout: () => undefined, meId: ADA.id, canInteract: true, canManage: true, live: true, lit: null, selection: NOT_PICKING };
     const view = show(<div data-screen="thread"><TimelineContextValue.Provider value={context}><ApprovalCard item={item} /></TimelineContextValue.Provider><PinnedApprovals threadId={id} /></div>);
     const pinned = screen.getByRole('region', { name: i18n.t('thread.pinnedApprovals') });
     expect(within(pinned).getByText('Check the generated files')).toBeVisible();

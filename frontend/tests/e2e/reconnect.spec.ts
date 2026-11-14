@@ -95,7 +95,8 @@ for (const width of [1440, 400]) {
 
     test(`dialogs half filled stay what they are when the connection is dropped and restored (${width})`, async ({ page }) => {
       await signIn(page); await page.goto(THREAD);
-      await page.locator('[data-thread-header]').getByRole('button', { name: 'Share thread', exact: true }).click();
+      await page.locator('[data-thread-header] [data-thread-more]').click();
+      await page.getByRole('menuitem', { name: 'Share thread', exact: true }).click();
       const share = page.getByRole('dialog').first();
       await expect(share).toBeVisible();
       const person = share.getByRole('combobox', { name: 'Add people, groups or roles', exact: true });

@@ -56,8 +56,8 @@ function Wizard() {
   if ((kind === 'recover' || kind === 'progress' && options.batch !== undefined) && target.kind === 'environments') return <MoveDialog key={asked} source={{ ids: target.ids }} batch={options.batch ?? null} open={open} onClose={hide} />;
   if (kind === 'recover' && (target.kind === 'host' || target.kind === 'machine' || target.kind === 'environment')) return <MoveDialog key={asked} source={{ target: { type: target.kind, id: target.id } }} open={open} onClose={hide} />;
   // A thread: one fork or switch, or the progress of the job that holds it.
-  if (target.kind === 'thread' && (kind === 'switch' || kind === 'fork' || kind === 'progress')) {
-    return <ThreadChange key={asked} threadId={target.id} kind={kind === 'fork' ? 'fork' : 'switch'} toTurn={options.toTurn ?? null} focus={options.focus ?? null} job={options.job ?? null} say={options.say ?? null} open={open} onClose={hide} />;
+  if (target.kind === 'thread' && (kind === 'switch' || kind === 'fork' || kind === 'move-out' || kind === 'progress')) {
+    return <ThreadChange key={asked} threadId={target.id} kind={kind === 'move-out' ? 'move-out' : kind === 'fork' ? 'fork' : 'switch'} toTurn={options.toTurn ?? null} focus={options.focus ?? null} chosen={{ provider: options.provider ?? null, agent: options.agent ?? null, model: options.model ?? null }} job={options.job ?? null} say={options.say ?? null} open={open} onClose={hide} />;
   }
   // Several threads: from a selection, a topic, a provider or an environment; or the progress of a batch that was started.
   if (kind === 'switch' || (kind === 'progress' && options.batch !== undefined)) {

@@ -185,12 +185,14 @@ export interface ItemFrameProps {
   label: string;
   children: ReactNode;
   className?: string;
-  /** Common controls under a human message; its remaining acts keep the same menu and context menu. */
+  /** Common controls under a message; its remaining acts keep the same menu and context menu. */
   messageActions?: ReactNode;
+  /** The controls stand at the right, under a block that is aligned there. */
+  actionsEnd?: boolean;
 }
 
 /** Wraps an item so that its menu opens under the right mouse button and from a button at its end. */
-export function ItemFrame({ item, extra, label, children, className, messageActions }: ItemFrameProps) {
+export function ItemFrame({ item, extra, label, children, className, messageActions, actionsEnd = false }: ItemFrameProps) {
   const { t } = useTranslation();
   const [restoring, setRestoring] = useState<Turn | null>(null);
   const context = useTimelineContext();
@@ -298,7 +300,7 @@ export function ItemFrame({ item, extra, label, children, className, messageActi
       >
         <div ref={body} data-item-body>{children}</div>
         {item.chat_refs > 0 && <ChatRefs count={item.chat_refs} />}
-        {messageActions !== undefined ? <HoverActions owner="person">{messageActions}
+        {messageActions !== undefined ? <HoverActions owner="person" end={actionsEnd}>{messageActions}
           <Menu label={label} align="end" entries={entries.filter((entry) => !['copy', 'edit-message', 'restore-turn'].includes(entry.id))} trigger={<IconButton size="sm" label={t('timeline.actions.more')} icon={<Ellipsis aria-hidden />} />} />
         </HoverActions> : <div ref={acts} data-item-acts className="absolute top-0 right-0 opacity-0 transition-opacity group-focus-within/item:opacity-100 group-hover/item:opacity-100">
           <Menu label={label} align="end" entries={entries} trigger={<IconButton size="sm" label={t('timeline.actions.more')} icon={<Ellipsis aria-hidden />} />} />

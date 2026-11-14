@@ -17,7 +17,7 @@ import type { Rate } from '@/generated/api-types';
 import type { TranslationKey } from '@/i18n';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 import { SegmentedControl } from '@/ui/SegmentedControl';
-import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
 
 /** The frame of one choice: a rule above it, except for the first. */
 export const SECTION = 'flex flex-col gap-2 border-t border-border pt-3 first:border-t-0 first:pt-0';
@@ -51,6 +51,15 @@ export function ChoiceHead({ title, value, state, chooser, help }: { title: stri
       </p>
     </div>
   );
+}
+
+/** Why a speed, an access program or a context cannot be changed now, in a few words: the thread is only watched, it is for whoever manages it, or something fixes it. */
+export function lockedWords(state: State, watching: string | null, notManager: string | null, t: TFunction): string | undefined {
+  if (watching !== null) return watching;
+  if (notManager !== null) return notManager;
+  if (state.providerFixed === true) return t('providerOptions.fixedByProvider');
+  if (state.lockedBy !== null) return t('composer.model.lockedBy', { place: state.lockedBy.node?.name ?? t(`composer.model.scope.${state.lockedBy.scope}`) });
+  return state.writable ? undefined : t('providerOptions.unavailable');
 }
 
 /** Why a choice cannot be changed by this reader: a place above decides it, or it is for whoever manages the thread. */
@@ -141,7 +150,8 @@ export function AccessChoice({ state, writable, chooser, onChoose, performance, 
   return (
     <section aria-label={t('composer.model.access.title')} data-section="access" className={SECTION}>
       <ChoiceHead title={t('composer.model.access.title')} value={inForce} state={state} chooser={chooser} />
-      <Select
+      <ResourcePicker
+        pickerKey="composer.access"
         open={open}
         onOpenChange={setOpen}
         label={t('composer.model.access.title')}

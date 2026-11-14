@@ -31,6 +31,7 @@ import { useTranslation } from 'react-i18next';
 
 import type { MenuEntry } from '@/ui/Menu';
 import { useTimelineContext } from '@/features/timeline/context';
+import { useAgentSwitch } from '@/features/thread/agentSwitch';
 import { useRecordedItem } from '@/features/timeline/historical';
 import { ItemFrame } from '@/features/timeline/ItemActions';
 import { RawCall } from '@/features/timeline/RawCall';
@@ -140,6 +141,7 @@ function ToolCallRowView({ item }: { item: ToolItem }) {
   const { t } = useTranslation();
   const format = useFormatContext();
   const context = useTimelineContext();
+  const switchTo = useAgentSwitch();
   const read = useThreadReadRef(context.threadId);
   const continuation = useThreadPart(context.threadId, (view) => view.read?.projection?.viewed_continuation_id);
   const recorded = useRecordedItem(context.threadId, item);
@@ -159,8 +161,8 @@ function ToolCallRowView({ item }: { item: ToolItem }) {
     }
     return null;
   });
-  // Every tool starts as one row, including the most recent edit and failed command.
-  const open = ui.steps.get(item.id) ?? (context.liveTools === true && running);
+  // Every tool starts as one row, including the most recent edit and failed command; reading Verbose, a running one is open as it prints.
+  const open = ui.steps.get(item.id) ?? (context.detail !== 'normal' && context.readOnly !== true && running);
   const raw = ui.raw.has(item.id);
   const tookMs = running ? Math.max(0, now - Date.parse(item.payload.started_at)) : item.payload.duration_ms;
   const took = tookMs === null || tookMs < 1000 ? null : formatSpan(tookMs, format);
@@ -189,8 +191,11 @@ function ToolCallRowView({ item }: { item: ToolItem }) {
         <div className="flex min-w-0 items-center gap-1 pr-[calc(var(--control-sm)+var(--spacing-3))]" data-tool-row>
         <button
           type="button"
-          aria-expanded={open}
-          onClick={() => timelineUi.setStep(read, item.id, !open)}
+          aria-expanded={tool.kind === 'subagent' && switchTo !== null ? undefined : open}
+          onClick={() => {
+            if (tool.kind === 'subagent' && switchTo !== null && tool.child_stream !== '') switchTo(item.id);
+            else timelineUi.setStep(read, item.id, !open);
+          }}
           className={cx(
             'flex min-h-8 min-w-0 flex-1 gap-2 rounded-md px-2 py-1 text-left text-sm hover:bg-bg-muted',
             tool.kind === 'subagent' ? 'items-start' : 'items-center',
@@ -221,7 +226,7 @@ function ToolCallRowView({ item }: { item: ToolItem }) {
         </button>
         {open && <IconButton size="sm" icon={<Braces aria-hidden />} label={raw ? t('timeline.step.showDisplay') : t('timeline.step.showRaw')} pressed={raw}
           onClick={() => timelineUi.toggleRaw(read, item.id)} />}
-        {open && tool.kind === 'subagent' && context.inspection === undefined && <IconButton size="sm" icon={<PanelRightOpen aria-hidden />} label={t('timeline.subagent.openPanel')} blocked={tool.child_stream === ''} reason={tool.child_stream === '' ? t('timeline.subagent.unavailable') : undefined}
+        {tool.kind === 'subagent' && context.inspection === undefined && <IconButton size="sm" icon={<PanelRightOpen aria-hidden />} label={t('timeline.subagent.openPanel')} blocked={tool.child_stream === ''} reason={tool.child_stream === '' ? t('timeline.subagent.unavailable') : undefined}
           onClick={() => revealView('subagent', { thread: context.threadId, item: item.id,
             ...(continuation === undefined ? {} : { continuation }) })} />}
         {open && singleFile !== undefined && singleFile.change !== 'delete' && path !== null && environmentId !== undefined && <IconButton size="sm" icon={<FileText aria-hidden />} label={t('files.link.open', { path })}

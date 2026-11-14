@@ -19,7 +19,7 @@ import { show } from './support';
 const openGuide = vi.hoisted(() => vi.fn());
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => openGuide }));
 
-const context: TimelineContext = { threadId: 'history-thread', threadName: 'History', detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: 'history-thread', threadName: 'History', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: false, canManage: false, live: true, lit: null, selection: NOT_PICKING };
 let locale = currentLocale();
 let theme: string | null = null;
@@ -38,7 +38,7 @@ it('keeps removal and reconstruction visible when one person does both within a 
   const items = [marker('removed', { marker: 'agent_history', data: data({ by }) }), marker('recovered', { marker: 'agent_history', data: data({ by, recovered: 'native' }) })]
     .map((item, index) => ({ ...item, seq_created: index + 1, seq_updated: index + 1 }));
   const view = viewFromRows(EMPTY_VIEW, { items }, false);
-  const rows = buildRows(view, { detail: 'steps', hideHistory: false, foldOpened: new Set(), meId: null });
+  const rows = buildRows(view, { detail: 'normal', hideHistory: false, meId: null });
   expect(rows.filter((row) => row.kind === 'markers').map((row) => row.ids)).toEqual([['removed'], ['recovered']]);
 });
 

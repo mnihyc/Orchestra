@@ -51,7 +51,7 @@ const SIDE_READ = defaultThreadRead(SIDE);
 const ADA = userRef(me(1, 'ada', 'Ada'));
 const OTHER = userRef(me(2, 'grace', 'Grace'));
 const reference: NodeRef = { id: SIDE, kind: 'thread', name: 'Login (side)', redacted: false };
-const context: TimelineContext = { threadId: PARENT, threadName: 'Login', detail: 'steps', recent: new Set(['main-turn']), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: PARENT, threadName: 'Login', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: ADA.id, canInteract: true, canManage: false, live: true, lit: null, selection: NOT_PICKING };
 const closed: MarkerSideClosed = { side: reference, by: ADA, turns: 2, why: 'closed', into: null };
 const numbered = (item: Item, seq: number): Item => ({ ...item, thread_id: SIDE, segment_id: 'side-segment', seq_created: seq, seq_updated: seq });
@@ -84,7 +84,7 @@ beforeEach(() => {
   calls.draft.mockReset().mockResolvedValue(null); calls.clear.mockReset().mockResolvedValue(undefined); calls.send.mockReset(); calls.stop.mockReset();
   calls.remove.mockReset(); calls.older.mockReset(); calls.sides.mockReset().mockResolvedValue([]); calls.panel.mockClear(); calls.feed.mockClear(); calls.release.mockClear(); calls.ready = true;
   client.session.setState({ userId: ADA.id }); useComposerStore.setState({ text: {}, parts: {}, sending: {}, refused: {} });
-  timelineUi.forget(PARENT); threadWriter.evict(PARENT); threadWriter.evict(SIDE); seed();
+  timelineUi.forget(PARENT); timelineUi.forget(SIDE); threadWriter.evict(PARENT); threadWriter.evict(SIDE); seed();
   vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const request = input instanceof Request ? input : new Request(input, init);
     const reply = audienceReply(request, aside(), [OTHER]);
@@ -92,12 +92,43 @@ beforeEach(() => {
   });
 });
 afterEach(async () => {
-  cleanup(); threadWriter.evict(PARENT); threadWriter.evict(SIDE); threadWriter.evict(resultThreadRead(SIDE, 'side-tab')); timelineUi.forget(PARENT);
+  cleanup(); threadWriter.evict(PARENT); threadWriter.evict(SIDE); threadWriter.evict(resultThreadRead(SIDE, 'side-tab')); timelineUi.forget(PARENT); timelineUi.forget(SIDE);
   useComposerStore.setState({ text: {}, parts: {}, sending: {}, refused: {} }); client.session.setState({ userId: previousUser }); useAppearance.setState(appearance); await setLocale(originalLocale);
 });
 
 describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('a shared aside lane in %s / %s', (locale, theme) => {
   beforeEach(async () => { await setLocale(locale); useAppearance.setState({ locale, theme, resolvedTheme: theme }); });
+
+  it('groups its own finished work and puts its own actions and changed-files card under its answer', () => {
+    const held = threadViewOf(SIDE);
+    threadWriter.window(SIDE, [...held.items.values()].map((item) => ({ ...item, seq_created: item.seq_created * 2, seq_updated: item.seq_updated * 2 })), false, false);
+    threadWriter.apply(SIDE, { items: [numbered(fileChange('side-edit', { turn: 'side-turn', changes: [change('side.py', LOGIN_DIFF, { added: 4, removed: 1 })] }), 5)] });
+    draw();
+    const lane = document.querySelector<HTMLElement>('[data-side-lane]');
+    expect(lane?.querySelector('[data-work]')).not.toBeNull();
+    expect(lane?.querySelector('[data-turn-figures="side-turn"]')).not.toBeNull();
+    expect(lane?.querySelector('[data-turn-files="side-turn"]')).toHaveTextContent(i18n.t('timeline.footer.changed', { count: 1, added: 4, removed: 1 }));
+  });
+
+  it.each([false, true])('uses the main conversation classification with Diagnostics %s', (diagnostics) => {
+    const reports = [
+      ['session_status', { type: 'active', active_flags: [] }, 'Quiet session program'],
+      ['mcp_startup', { status: 'starting' }, 'Starting service program'],
+      ['mcp_startup', { status: 'ready' }, 'Ready service program'],
+      ['mcp_startup', { status: 'failed', message: 'Credentials expired' }, 'Failed service program'],
+    ] as const;
+    act(() => threadWriter.apply(SIDE, { items: reports.map(([change, value, program], index) => numbered(marker(`side-report-${index}`, { marker: 'harness_changed', data: {
+      program, change, subject: 'Source catalog', previous: { state: 'unsupported' }, value, expected: { state: 'unsupported' },
+      changed: false, diverged: false, next_turn: false, turn_id: 'side-turn', reported_at: '2026-10-01T10:00:00.000Z',
+    } }, { turn: 'side-turn' }), 22 + index)) }));
+    draw(true, { ...context, detail: diagnostics ? 'diagnostics' : 'normal' });
+    const lane = screen.getByRole('region', { name: i18n.t('side.lane.label', { name: reference.name }) });
+    expect(lane).toHaveTextContent('Failed service program');
+    for (const program of ['Quiet session program', 'Starting service program', 'Ready service program']) {
+      if (diagnostics) expect(lane).toHaveTextContent(program);
+      else expect(lane).not.toHaveTextContent(program);
+    }
+  });
 
   it('uses the same bordered frame, messages and command displays as a child stream, then follows the actual answer', async () => {
     draw();
@@ -106,6 +137,9 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     expect(lane).toHaveClass('border-l-2', 'pl-3');
     const log = within(lane).getByRole('log', { name: i18n.t('side.lane.conversation') });
     expect(within(log).getByText('Which redirect test?')).toBeVisible();
+    const work = log.querySelector<HTMLElement>('[data-work="work:side-command"]');
+    if (work === null) throw new Error('The finished side work uses the shared turn group');
+    await userEvent.click(within(work).getByRole('button', { expanded: false }));
     expect(within(log).getByRole('button', { name: /check redirect/ })).toBeVisible();
     expect(within(log).getByText('The same-origin test covers it.')).toBeVisible();
     expect(log).not.toHaveTextContent('The parent keeps working.');
@@ -260,6 +294,9 @@ it('uses the same side draft and full tool displays when moved to its panel', as
   expect(screen.getByRole('textbox')).toHaveValue('Continue in the panel');
   expect(calls.feed).toHaveBeenLastCalledWith(panelRead);
   expect(screen.queryByRole('table', { name: /notes\/login.md/ })).not.toBeInTheDocument();
+  const work = document.querySelector<HTMLElement>('[data-side-panel] [data-work="work:side-edit"]');
+  if (work === null) throw new Error('The side work uses the shared turn group');
+  await userEvent.click(within(work).getByRole('button', { expanded: false }));
   await userEvent.click(screen.getByRole('button', { expanded: false, name: /Edited notes\/login.md/ }));
   expect(screen.getByRole('table', { name: /notes\/login.md/ })).toBeVisible();
   expect(calls.draft).toHaveBeenCalledTimes(1);

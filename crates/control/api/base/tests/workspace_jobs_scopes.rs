@@ -323,6 +323,79 @@ async fn creator_job_read_keeps_its_real_place_ceiling_without_inventing_parent_
 }
 
 #[tokio::test]
+async fn a_thread_move_creator_can_read_its_job_after_the_source_ends_with_the_same_place_ceiling()
+{
+    let site = site().await;
+    let id = seed(
+        &site,
+        "thread_fork",
+        Some(site.thread),
+        Some(site.environment),
+        None,
+        json!({"confirmed_history_source":{"operation":{"origin":{"operation":"ThreadMoveOut"}}}}),
+    )
+    .await;
+    let ordinary = seed(
+        &site,
+        "thread_fork",
+        Some(site.thread),
+        Some(site.environment),
+        None,
+        json!({}),
+    )
+    .await;
+    sqlx::query("UPDATE jobs SET state='succeeded',finished_at=$2 WHERE id=ANY($1)")
+        .bind(vec![id, ordinary])
+        .bind(site.world.now())
+        .execute(&site.world.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE nodes SET deleted_at=$2 WHERE id=$1")
+        .bind(site.thread)
+        .bind(site.world.now())
+        .execute(&site.world.db.pool)
+        .await
+        .unwrap();
+    for (place, allowed) in [(site.org, true), (site.ada.person.personal_org, false)] {
+        let key = keys::scoped(&site, site.ada.id(), vec![read_job(id)]).await;
+        let restriction = vec![vec![keys::rule(
+            "JobGet.ordinary",
+            "org",
+            place,
+            "subtree",
+            &["read"],
+        )]];
+        sqlx::query("UPDATE api_tokens SET operation_scope=jsonb_set(operation_scope,'{constraints}',$2) WHERE id=$1")
+            .bind(key.id).bind(json!(restriction)).execute(&site.world.db.pool).await.unwrap();
+        let body = get(
+            &site,
+            id,
+            &key.secret,
+            if allowed {
+                StatusCode::OK
+            } else {
+                StatusCode::FORBIDDEN
+            },
+        )
+        .await;
+        if allowed {
+            assert_eq!(body["result"]["native_result"], "Earlier native Job result");
+        }
+    }
+    let other = keys::scoped(&site, site.dev.id(), vec![read_job(id)]).await;
+    let reply = site
+        .app()
+        .call(JobGet, &[&id])
+        .token(&other.secret)
+        .send_bytes()
+        .await;
+    assert!(!reply.status.is_success());
+    assert!(!String::from_utf8_lossy(&reply.raw).contains("Earlier native Job result"));
+    let key = keys::scoped(&site, site.ada.id(), vec![read_job(ordinary)]).await;
+    get(&site, ordinary, &key.secret, StatusCode::FORBIDDEN).await;
+}
+
+#[tokio::test]
 async fn job_measurement_and_notice_sources_come_from_their_native_subjects_not_nearby_columns() {
     let site = site().await;
     let measurement = seed(
