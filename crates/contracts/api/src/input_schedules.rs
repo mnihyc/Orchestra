@@ -11,7 +11,7 @@ use orch_access_contract::permissions::ObjectKind as K;
 use crate::common::{Page, PageQuery};
 use crate::nodes::{CreateThread, NodeRef};
 use crate::routes::Access::{Permission, Rule, User};
-use crate::threads::ContentPart;
+use crate::threads::{ContentPart, Delivery};
 use crate::users::UserRef;
 use orch_types::Json;
 use orch_types::{Id, Seq, Time};
@@ -185,6 +185,10 @@ pub struct InputSchedule {
     pub author: UserRef,
     /// Authored name.
     pub name: String,
+    /// Whether occurrences request a planning turn.
+    pub plan: bool,
+    /// The delivery choice reviewed by the author.
+    pub delivery: Delivery,
     /// Current redacted destination.
     pub destination: InputScheduleDestination,
     /// Author-only draft.
@@ -258,6 +262,10 @@ pub struct InputScheduleCreateBody {
     pub target: InputScheduleTarget,
     /// Frozen authored parts.
     pub content: Vec<ContentPart>,
+    /// Whether occurrences request a planning turn.
+    pub plan: bool,
+    /// Authored queue, steer or interrupt delivery, rechecked when due.
+    pub delivery: Delivery,
     /// Optional native selection.
     pub native_action: Option<NativeInvocation>,
     /// Explicit future timing.
@@ -276,6 +284,12 @@ pub struct InputScheduleUpdateBody {
     pub target: Option<InputScheduleTarget>,
     /// New frozen parts.
     pub content: Option<Vec<ContentPart>>,
+    /// A new planning choice; omission keeps the reviewed choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<bool>,
+    /// A new delivery choice; omission keeps the reviewed choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<Delivery>,
     /// Omitted preserves, null removes.
     #[serde(
         default,
