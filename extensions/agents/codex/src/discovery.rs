@@ -570,14 +570,20 @@ pub async fn servers_to_switch_off(
 ) -> Result<BTreeMap<String, Json>, AdapterError> {
     session_configuration(rpc, place)
         .await
-        .map(|(servers, _)| servers)
+        .map(|(servers, _, _)| servers)
+}
+
+/// Native instruction discovery choices, from the same effective cwd configuration as the session.
+pub(crate) struct InstructionConfig {
+    pub filenames: Vec<String>,
+    pub max_bytes: u64,
 }
 
 /// Read the same effective configuration once for server isolation and managed-launch observations.
 pub(crate) async fn session_configuration(
     rpc: &Rpc,
     place: Option<(&str, &str)>,
-) -> Result<(BTreeMap<String, Json>, Vec<String>), AdapterError> {
+) -> Result<(BTreeMap<String, Json>, Vec<String>, InstructionConfig), AdapterError> {
     let mut looks: Vec<Json> = Vec::new();
     for directory in place.iter().flat_map(|(directory, cwd)| [*cwd, *directory]) {
         let look = json!({ "includeLayers": false, "cwd": directory });
@@ -590,11 +596,29 @@ pub(crate) async fn session_configuration(
     }
     let mut off = BTreeMap::new();
     let mut mismatches = Vec::new();
+    let mut instruction_fallbacks = Vec::new();
+    let mut instruction_budget = None;
     for look in looks {
         let read = rpc
             .call("config/read", look)
             .await
             .map_err(|error| AdapterError::HarnessError(remote_text(&error)))?;
+        // The first lookup is the effective cwd; the directory-only lookup also isolates its servers.
+        let _ = instruction_budget.get_or_insert_with(|| {
+            read["config"]["project_doc_max_bytes"]
+                .as_u64()
+                .unwrap_or(crate::sessions::PROJECT_DOC_BUDGET)
+        });
+        for name in read["config"]["project_doc_fallback_filenames"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Json::as_str)
+        {
+            if !instruction_fallbacks.iter().any(|known| known == name) {
+                instruction_fallbacks.push(name.to_owned());
+            }
+        }
         for key in crate::process::managed_pin_mismatches(&read["config"]) {
             if !mismatches.contains(&key) {
                 mismatches.push(key);
@@ -609,7 +633,14 @@ pub(crate) async fn session_configuration(
             off.entry(name).or_insert(entry);
         }
     }
-    Ok((off, mismatches))
+    Ok((
+        off,
+        mismatches,
+        InstructionConfig {
+            filenames: instruction_fallbacks,
+            max_bytes: instruction_budget.unwrap_or(crate::sessions::PROJECT_DOC_BUDGET),
+        },
+    ))
 }
 
 fn looks_secret(name: &str) -> bool {

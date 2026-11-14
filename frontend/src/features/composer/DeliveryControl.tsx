@@ -13,7 +13,6 @@ import { Tooltip } from '@/ui/Tooltip';
 export interface DeliveryControlProps {
   state: DeliveryState;
   stop: ReturnType<typeof useStop>;
-  turnId: string | null;
   mayDrive: boolean;
   empty: boolean;
   tooLong: boolean;
@@ -26,7 +25,7 @@ export interface DeliveryControlProps {
   sideUnavailable?: string | false;
 }
 
-export function DeliveryControl({ state, stop, turnId, mayDrive, empty, tooLong, attachmentsWaiting, onSend, onSchedule, scheduleUnavailable, onAskOnSide, sideUnavailable = false }: DeliveryControlProps) {
+export function DeliveryControl({ state, stop, mayDrive, empty, tooLong, attachmentsWaiting, onSend, onSchedule, scheduleUnavailable, onAskOnSide, sideUnavailable = false }: DeliveryControlProps) {
   const compact = useCompactControls();
   const { t } = useTranslation();
   const unavailable = inputUnavailable(state, { mayDrive, empty, tooLong, attachmentsWaiting }, t);
@@ -37,9 +36,10 @@ export function DeliveryControl({ state, stop, turnId, mayDrive, empty, tooLong,
       return { ...entry, disabled: typeof reason === 'string' && reason !== '' ? reason : unavailable };
     });
   if (onSchedule !== undefined) entries.push({ type: 'separator', id: 'before-schedule' }, { id: 'send-later', label: t('sendLater.title'), icon: <CalendarClock aria-hidden />, disabled: scheduleUnavailable ?? unavailable, onSelect: onSchedule });
-  if (state.active && mayDrive) {
-    const disabled = !state.live || turnId === null;
-    const reason = !state.live ? t('composer.reason.offline') : turnId === null ? t('composer.row.waitingForTurn') : undefined;
+  // A thread that is starting and has no turn yet (it records the directory or writes the files first) is stopped too: the Stop is of the start.
+  if ((state.active || state.starting) && mayDrive) {
+    const disabled = !state.live || !stop.may;
+    const reason = !state.live ? t('composer.reason.offline') : !stop.may ? t('composer.row.waitingForTurn') : undefined;
     return <Tooltip content={reason}><span className="inline-flex" tabIndex={disabled ? 0 : undefined}>
       <StopControl stop={stop} entries={entries} inlineFeedback={false} disabled={disabled} menuDisabled={!state.live} />
     </span></Tooltip>;

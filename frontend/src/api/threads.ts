@@ -20,7 +20,7 @@ import { applyThread, isCompleteThread } from '@/api/cache';
 import { queryClient } from '@/api/query';
 import { settingsKey } from '@/api/settings';
 import { assertThreadRead, captureThreadExecution, captureThreadRead, isCurrentThreadRead, readInThread,
-  receiveThreadRead, stampThreadRows, threadAct, threadQueryRead, threadReadQueryKey, threadReadSelector, type ThreadReadCapture } from '@/api/threadRead';
+  receiveThreadRead, stampThreadRows, threadAct, threadStopAct, threadQueryRead, threadReadQueryKey, threadReadSelector, type ThreadReadCapture } from '@/api/threadRead';
 import { isDefaultThreadRead, sameThreadRead, threadReadTarget, type ThreadReadTarget, planThreadOpening, scopedThreadKey, stampThreadReceipt, threadReadChanged } from '@/realtime/threadScope';
 export { captureThreadRead, isCurrentThreadRead, selectThreadContinuation, threadReadQueryKey, threadReadSelector } from '@/api/threadRead';
 import type {
@@ -48,8 +48,8 @@ import type {
   ThreadOpening,
   ThreadParameters,
   ThreadQueue,
+  ThreadStop,
   ThreadSync,
-  Turn,
 } from '@/generated/api-types';
 import { THREAD_INPUT_PAGE_SIZE, threadViewOf, threadWriter } from '@/realtime/stores/thread';
 
@@ -378,11 +378,12 @@ export async function cancelInput(target: ThreadReadTarget, inputId: string): Pr
   return stampThreadReceipt(reply, captured);
 }
 
-/** Stops a turn. */
-export function interruptTurn(target: ThreadReadTarget, turnId: string): Promise<Turn> {
+/** Stops a turn, or, with none to name, the start of the thread's next turn (the files being recorded or written before it
+ * exists). The answer comes at once and says that the thread is stopping until the program has stopped. */
+export function interruptTurn(target: ThreadReadTarget, turnId: string | null): Promise<ThreadStop> {
   const ref = threadReadTarget(target);
   const id = ref.threadId;
-  return threadAct(ref, () => ok(api.POST('/threads/{id}/interrupt', { params: { path: { id } }, body: { turn_id: turnId } })));
+  return threadStopAct(ref, () => ok(api.POST('/threads/{id}/interrupt', { params: { path: { id } }, body: turnId === null ? {} : { turn_id: turnId } })), (reply) => reply.turn === null || reply.turn === undefined ? [] : [reply.turn]);
 }
 
 /** Tries again, for its author, the files that hold an input: the same input, held again if they still cannot go. */

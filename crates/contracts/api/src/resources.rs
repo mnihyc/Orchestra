@@ -2596,9 +2596,10 @@ pub struct ProviderModelUpdateBody {
     pub enabled: Option<bool>,
 }
 
-/// Accepts models that discovery suggested. Each is added with what its suggestion says of it,
-/// except that the service tiers and access programs it lists and a context larger than the usual
-/// one become `parameters.offered`, and none of them is enabled.
+/// Accepts models that discovery suggested. Each is added with what its suggestion says of it, and what
+/// the organization chose to switch on (`models.add_switches_on`) is enabled: by default every effort, the
+/// window, every context size, speed and access program it lists. Whatever is left off stays under
+/// `parameters.offered`, and what a thread starts with is never taken from a suggestion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderModelSuggestionAcceptBody {

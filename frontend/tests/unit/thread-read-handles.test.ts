@@ -6,7 +6,7 @@ import { FeedRegistry, type FeedFollower } from '@/realtime/sync';
 import { queryClient } from '@/api/query';
 import { settingsKey } from '@/api/settings';
 import { captureThreadRead, isCurrentThreadRead, selectThreadContinuation, threadReadQueryKey, stampThreadRows } from '@/api/threadRead';
-import { fetchItem, fetchItems, fetchOutput, fetchSubagentItems, fetchThreadSync, markRead, sendInput, threadKeys } from '@/api/threads';
+import { fetchItem, fetchItems, fetchOutput, fetchSubagentItems, fetchThreadSync, markRead, sendInput, interruptTurn, threadKeys } from '@/api/threads';
 import { exportViewedThreadFile, viewedItemQuery, viewedRawFramesQuery } from '@/api/threadHistory';
 import type { Draft, ThreadLimits, ThreadParameters } from '@/generated/api-types';
 import { holdThreadRead, flushDeltas, setGapHandler, setThreadReadChangeHandler, setThreadReadHolder, setThreadReadRetainer,
@@ -273,4 +273,20 @@ it('authority rebase also reopens an actually held HTTP-only B once without load
   expect(threadViewOf(left).read?.selection).toBe(B); expect(threadViewOf(route).thread).toBeNull();
   expect(server.calls.filter((request) => new URL(request.url).pathname.endsWith('/opening'))
     .map((request) => new URL(request.url).searchParams.get('continuation_id'))).toEqual([null,B,B]);
+});
+
+it('sends Stop through a stale-revision reload while an explicit historical view still cannot stop', async () => {
+  setup(); const server = serve((request) => new URL(request.url).pathname.endsWith('/interrupt')
+    ? Promise.resolve(Response.json({ state: 'stopping', requested_at: AT, turn: null })) : undefined);
+  await open(route, null); await open(left, B);
+  threadWriter.invalidate(route, false);
+  expect(threadReadState(threadViewOf(route)).readiness).toBe('loading');
+  await expect(interruptTurn(route, 'exact-running-turn')).resolves.toMatchObject({ state: 'stopping' });
+  const stop = server.calls.find((request) => new URL(request.url).pathname.endsWith('/interrupt'));
+  expect(stop).toBeDefined();
+  expect(await stop!.clone().json()).toEqual({ turn_id: 'exact-running-turn' });
+  threadWriter.invalidate(left, false);
+  const before = server.calls.length;
+  await expect(interruptTurn(left, 'exact-running-turn')).rejects.toMatchObject({ name: 'AbortError' });
+  expect(server.calls).toHaveLength(before);
 });

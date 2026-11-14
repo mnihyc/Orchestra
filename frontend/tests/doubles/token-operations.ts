@@ -50984,7 +50984,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "operation_id": "ThreadInterrupt",
     "method": "POST",
     "path": "/threads/{id}/interrupt",
-    "title": "Stops a running turn, and holds what waits in the queue until somebody resumes it.",
+    "title": "Stops a running turn, or the start of the next one, and holds what waits in the queue until somebody resumes it. The answer is at once: the Stop is recorded, and says that the thread is stopping until the program has stopped.",
     "delegation": "business",
     "variants": [
       {

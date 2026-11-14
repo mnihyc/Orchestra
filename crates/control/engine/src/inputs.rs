@@ -1761,8 +1761,9 @@ impl Engine {
             }
         }
         let mut prepared = self
-            .prepare_pastes(unit.conn, thread, &request.content)
-            .await?;
+            .prepare_pastes(unit.conn, thread, &crate::paste::incoming(&request.content))
+            .await?
+            .content;
         self.prepare_attachment_names(unit.conn, thread_id, &mut prepared)
             .await?;
         Ok(PreparedInputWork {
@@ -1845,6 +1846,9 @@ impl Engine {
         if thread.archived_at.is_some() {
             return Err(InputError::Archived);
         }
+        // A Stop that is open was asked before this message reached the row. It is carried out first, so that the
+        // message is held with what the Stop holds and steers into nothing.
+        self.apply_open_stops_in(unit, thread_id).await?;
         // A repeat returns what stands, before anything is asked again.
         if let Some(found) = threads::input_by_client(
             &mut *unit.conn,
@@ -2113,6 +2117,17 @@ impl Engine {
             let thread = threads::lock(&mut *unit.conn, thread_id)
                 .await?
                 .ok_or_else(|| EngineError::unreadable("there is no such thread"))?;
+            let thread = if self
+                .apply_open_stops_in(&mut unit, thread_id)
+                .await?
+                .carried_out
+            {
+                threads::thread(&mut *unit.conn, thread_id)
+                    .await?
+                    .ok_or_else(|| EngineError::unreadable("there is no such thread"))?
+            } else {
+                thread
+            };
             let seq = unit.stamp(thread_id).await?;
             let content = serde_json::to_value(content)?;
             let row = threads::insert_input(
@@ -2631,7 +2646,10 @@ impl Engine {
             let mut released_files = false;
             if let Some(content) = content {
                 self.check_content(&mut unit, caller, &content).await?;
-                let content = self.prepare_pastes(unit.conn, &thread, &content).await?;
+                let content = self
+                    .prepare_pastes(unit.conn, &thread, &crate::paste::incoming(&content))
+                    .await?
+                    .content;
                 let seq = unit.stamp(thread_id).await?;
                 let stored = serde_json::to_value(&content).map_err(EngineError::from)?;
                 threads::update_input_content(&mut *unit.conn, input_id, &stored, seq).await?;
@@ -3707,6 +3725,8 @@ impl Engine {
         posting: Option<(&Caller, Id, &threads::tools::AnnouncementRow)>,
     ) -> Result<(), EngineError> {
         let now = unit.now();
+        // A Stop that is open is carried out first, so that the announcement is held with what it holds.
+        self.apply_open_stops_in(unit, thread_id).await?;
         // What a message to one thread carries goes with it as file parts, which the courier writes before the
         // turn begins or the steer is sent.
         let mut parts = vec![ContentPart::Text {
@@ -3866,6 +3886,18 @@ impl Engine {
             if thread.archived_at.is_some() {
                 return Err(InputError::Archived);
             }
+            // A Stop that is open is carried out first: the queue is resumed as it stands after it.
+            let thread = if self
+                .apply_open_stops_in(&mut unit, thread_id)
+                .await?
+                .carried_out
+            {
+                threads::thread(&mut *unit.conn, thread_id)
+                    .await?
+                    .ok_or(InputError::NotFound)?
+            } else {
+                thread
+            };
             self.check_sender(&mut unit, caller, &thread, false).await?;
             if thread.queue_revision != revision {
                 return Err(InputError::StaleQueue {

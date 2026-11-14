@@ -43,7 +43,9 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     expect(sentence).toContain('Codex');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
-    expect(document.querySelector('time')).toHaveAttribute('dateTime');
+    // A line of history has no time beside it; the moment is its hover text.
+    expect(document.querySelector('time')).toBeNull();
+    expect(screen.getByText(sentence).closest('[title]')).not.toBeNull();
     expect(fetch).not.toHaveBeenCalled();
   });
 });

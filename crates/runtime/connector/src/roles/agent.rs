@@ -1177,6 +1177,8 @@ impl RoleHandler for AgentRole {
                         .await?,
                 )
             }
+            // Export and resync keep reading native history if Stop arrives; they never restart a turn.
+            // Steer and approval keep their exact native target and report its ordinary accepted/ended result.
             Command::SessionResync(body) => {
                 let process = self.process_of_thread(body.thread_id)?;
                 let items = process
@@ -1227,9 +1229,7 @@ impl RoleHandler for AgentRole {
             }
             Command::TurnInterrupt(body) => {
                 let process = self.process_of_thread(body.thread_id)?;
-                process
-                    .call(|adapter| adapter.interrupt(body.thread_id, body.turn_id))
-                    .await?;
+                process.interrupt(body.thread_id, body.turn_id).await?;
                 CommandResult::TurnInterrupt(Empty {})
             }
             Command::ApprovalResolve(body) => {

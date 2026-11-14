@@ -1342,3 +1342,139 @@ async fn server(model_url: String, result_form: bool) -> Server {
         task,
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unchanged_turns_keep_the_native_session_and_a_changed_instruction_file_is_loaded_once() {
+    let mut rig = common::Rig::start("keep-unchanged-session")
+        .await
+        .expect("the pinned image is required");
+    let root = rig.workspace.path().to_path_buf();
+    std::fs::create_dir(root.join(".orch-root")).unwrap();
+    std::fs::write(root.join("AGENTS.md"), "RULE-ORIGINAL\n").unwrap();
+    let boot = rig.boot().await;
+    assert_eq!(
+        boot.descriptor.capabilities.session_reload,
+        orch_agent_contract::descriptor::SessionReload::OnChange
+    );
+    let thread = new_id();
+    let mut spec = rig.spec(thread, SessionMode::New, None);
+    spec.settings.workspace_root = root.display().to_string();
+    spec.settings.instruction_root_marker = true;
+    spec.settings.cwd = root.display().to_string();
+    spec.settings.directory = root.display().to_string();
+    spec.settings.raw_events = true;
+    let opened = rig.adapter.open_session(spec).await.unwrap();
+    rig.run_turn(thread, "#!mock\nsay First turn\n").await;
+    let second = rig.run_turn(thread, "#!mock\nsay Second turn\n").await;
+    assert!(
+        !second
+            .iter()
+            .any(|event| matches!(event, SessionEvent::SessionOpened(_))),
+        "an unchanged turn does not resume a session: {second:?}"
+    );
+    assert!(!second.iter().any(|event| matches!(event, SessionEvent::RawFrame(raw) if raw.direction == "out" && matches!(raw.payload["method"].as_str(), Some("thread/resume" | "thread/unsubscribe")))));
+    std::fs::write(root.join("AGENTS.md"), "RULE-REFRESHED\n").unwrap();
+    let changed = rig.run_turn(thread, "#!mock\nsay Third turn\n").await;
+    assert_eq!(changed.iter().filter(|event| matches!(event, SessionEvent::SessionOpened(event) if event.resumed && event.native_session_ref == opened.native_session_ref)).count(), 1);
+    assert!(changed.iter().any(|event| matches!(event, SessionEvent::ItemCompleted(item) if item.payload["marker"] == "session_reopened" && item.payload["data"]["reason"] == "instructions")));
+    let request = rig.mock.requests().last().unwrap().body.clone();
+    assert!(
+        request.to_string().contains("RULE-REFRESHED"),
+        "the actual model request sees current native instructions"
+    );
+    let fourth = rig.run_turn(thread, "#!mock\nsay Fourth turn\n").await;
+    assert!(
+        !fourth
+            .iter()
+            .any(|event| matches!(event, SessionEvent::SessionOpened(_)))
+    );
+    let mut references: std::collections::BTreeSet<String> = changed
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::ItemCompleted(item) if item.payload["marker"] == "session_reopened" => {
+                Some(item.native_ref.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    for text in ["RULE-ORIGINAL\n", "RULE-REFRESHED\n"] {
+        std::fs::write(root.join("AGENTS.md"), text).unwrap();
+        let refreshed = rig
+            .run_turn(thread, "#!mock\nsay Use the current instruction revision\n")
+            .await;
+        let reference = refreshed
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::ItemCompleted(item)
+                    if item.payload["marker"] == "session_reopened" =>
+                {
+                    Some(item.native_ref.clone())
+                }
+                _ => None,
+            })
+            .expect("each later instruction reload has its own line");
+        assert!(
+            references.insert(reference),
+            "returning to an earlier revision still names this reopening"
+        );
+    }
+    rig.adapter.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_native_configured_instruction_budget_keeps_ignored_tail_edits_out_of_session_opening()
+{
+    use orch_agent_contract::session::{ConfigTrust, WorkspaceConfiguration, configuration_files};
+    let mut rig = common::Rig::start("native-instruction-budget")
+        .await
+        .expect("the pinned image is required");
+    let root = rig.workspace.path().to_path_buf();
+    std::fs::create_dir_all(root.join(".orch-root")).unwrap();
+    std::fs::create_dir_all(root.join(".codex")).unwrap();
+    std::fs::write(
+        root.join(".codex/config.toml"),
+        "project_doc_max_bytes = 4\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("AGENTS.md"), "HEAD-TAIL-INITIAL").unwrap();
+    rig.boot().await;
+    let thread = new_id();
+    let mut spec = rig.spec(thread, SessionMode::New, None);
+    spec.settings.workspace_root = root.display().to_string();
+    spec.settings.directory = root.display().to_string();
+    spec.settings.cwd = root.display().to_string();
+    spec.settings.instruction_root_marker = true;
+    spec.settings.raw_events = true;
+    spec.settings.workspace_configuration = Some(WorkspaceConfiguration {
+        answer: ConfigTrust::Trust,
+        files: configuration_files(&root, &[".codex".to_owned()]),
+    });
+    let opened = rig.adapter.open_session(spec).await.unwrap();
+    let source = opened
+        .instruction_sources
+        .iter()
+        .find(|source| !source.home && source.label == "AGENTS.md")
+        .expect("native project instructions are reported");
+    assert_eq!(
+        source.loaded_bytes,
+        Some(4),
+        "the panel uses the configured native allowance"
+    );
+    rig.run_turn(thread, "#!mock\nsay First bounded turn\n")
+        .await;
+    std::fs::write(root.join("AGENTS.md"), "HEAD-DIFFERENT-TAIL").unwrap();
+    let events = rig
+        .run_turn(thread, "#!mock\nsay The ignored tail stays ignored\n")
+        .await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::SessionOpened(_)))
+    );
+    let request = rig.mock.requests().last().unwrap().body.to_string();
+    assert!(
+        !request.contains("TAIL-INITIAL") && !request.contains("DIFFERENT-TAIL"),
+        "the native model receives only the allowed prefix"
+    );
+    rig.adapter.stop().await.unwrap();
+}
