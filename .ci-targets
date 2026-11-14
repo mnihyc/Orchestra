@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/unit/row-kinds.test.ts tests/unit/recovery-failures.test.ts tests/unit/waiting-environment-making.test.ts tests/component/thread-first-minutes.test.tsx tests/component/thread-view-modes.test.tsx tests/component/instructions-deferred.test.tsx tests/component/subagent-lane.test.tsx tests/component/side-lane.test.tsx tests/component/timeline-accessibility.test.tsx tests/component/timeline-light.test.tsx tests/component/view-find.test.tsx tests/component/side-version-navigation.test.tsx

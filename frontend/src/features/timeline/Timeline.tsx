@@ -17,7 +17,7 @@ import { useStore } from 'zustand';
 import { client } from '@/api/client';
 import type { ThreadSync } from '@/generated/api-types';
 import { fetchItems, markRead } from '@/api/threads';
-import { captureThreadRead, isCurrentThreadRead } from '@/api/threadRead';
+import { captureThreadRead, isCurrentThreadRead, type ThreadReadCapture } from '@/api/threadRead';
 import { type ItemSelection, NOT_PICKING, type PromptFocus, type SelectPromptVersion, type TimelineContext, TimelineContextValue, useTimelineContext } from '@/features/timeline/context';
 import { usePromptFocus } from '@/features/timeline/usePromptFocus';
 import { NewLine } from '@/features/timeline/Catchup';
@@ -27,6 +27,7 @@ import { BeforeOrchHeading } from '@/features/timeline/items/BeforeOrch';
 import { ApprovalCard } from '@/features/timeline/items/Approval';
 import { ErrorRow } from '@/features/timeline/items/Error';
 import { MarkerLine } from '@/features/timeline/items/Marker';
+import { StartLine } from '@/features/timeline/items/StartLine';
 import { Plan } from '@/features/timeline/items/Plan';
 import { Reasoning } from '@/features/timeline/items/Reasoning';
 import { ToolCallRow } from '@/features/timeline/items/ToolCall';
@@ -73,10 +74,10 @@ function StoredHistory({ snapshot, read }: { snapshot: ThreadSync; read: ThreadR
     threadWriter.reset(read, snapshot, snapshot.has_older);
     return () => threadWriter.evict(read);
   }, [read, snapshot]);
-  const rows = buildRows(view, { detail: preferences.detail, hideHistory: preferences.hideHistory, foldOpened: ui.folds, meId: null }).filter((row) => row.kind !== 'divider' && row.kind !== 'status');
+  const rows = buildRows(view, { detail: preferences.detail, hideHistory: preferences.hideHistory, foldOpened: ui.folds, meId: null, diagnostics: preferences.diagnostics }).filter((row) => row.kind !== 'divider' && row.kind !== 'status');
   const context: TimelineContext = { threadId: key, threadName: snapshot.thread.name,
     inspection: { threadId: snapshot.thread.id, ...(snapshot.projection === undefined || snapshot.projection === null ? {} : { continuationId: snapshot.projection.viewed_continuation_id }) },
-    detail: preferences.detail, recent: recentTurns(view.turns), layout: preferences.layout, setLayout: preferences.setLayout, meId: null, canInteract: false, canManage: false, live: false, lit: null, selection: NOT_PICKING };
+    detail: preferences.detail, diagnostics: preferences.diagnostics, hideHistory: preferences.hideHistory, recent: recentTurns(view.turns), layout: preferences.layout, setLayout: preferences.setLayout, meId: null, canInteract: false, canManage: false, live: false, lit: null, selection: NOT_PICKING };
   return <TimelineContextValue.Provider value={context}><ol role="list" className="mx-auto flex w-full max-w-(--reading-width) list-none flex-col gap-6 px-2 py-4" data-stored-timeline>{rows.map((row) => <li key={row.key}><RowView row={row} /></li>)}</ol></TimelineContextValue.Provider>;
 }
 
@@ -111,6 +112,14 @@ export interface TimelineProps {
   highlightLink?: boolean;
   pinApprovals?: boolean;
   ref?: Ref<TimelineHandle>;
+}
+
+interface RevealedItems {
+  captured: ThreadReadCapture;
+  ids: ReadonlySet<string>;
+  named: ReadonlySet<string>;
+  target: string;
+  highlight: boolean;
 }
 
 function Skeletons() {
@@ -161,12 +170,16 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
   const olderFailed = older.scope === requestScope && older.failed;
   const visible = useRef<ReadonlySet<string>>(new Set());
   const sideRevealed = useRef<{ threadId: string; request: number } | null>(null);
+  const bringRequest = useRef(0);
+  const [revealed, setRevealed] = useState<RevealedItems | null>(null);
+  const brought = useRef<RevealedItems | null>(null);
+  const revealedIds = revealed !== null && isCurrentThreadRead(revealed.captured) ? revealed.ids : undefined;
 
   const rows = useMemo<Row[]>(
-    () => buildRows(view, { detail: preferences.detail, hideHistory: preferences.hideHistory, foldOpened: ui.folds, meId }),
+    () => buildRows(view, { detail: preferences.detail, hideHistory: preferences.hideHistory, foldOpened: ui.folds, meId, diagnostics: preferences.diagnostics, ...(revealedIds === undefined ? {} : { revealed: revealedIds }) }),
     // The rows depend on these parts of the view and on nothing else.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [view.order, view.items, view.turns, view.thread, view.read, view.openedReadSeq, view.openedSeq, preferences.detail, preferences.hideHistory, ui.folds, meId],
+    [view.order, view.items, view.turns, view.thread, view.read, view.openedReadSeq, view.openedSeq, preferences.detail, preferences.hideHistory, preferences.diagnostics, ui.folds, meId, revealedIds],
   );
   const recent = useMemo(() => recentTurns(view.turns), [view.turns]);
   if (positionRead === 'waiting' && restored?.item !== null && restored?.item !== undefined && view.items.has(restored.item)) setPositionRead('done');
@@ -187,6 +200,9 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
       threadId,
       threadName: thread?.name ?? '',
       detail: preferences.detail,
+      diagnostics: preferences.diagnostics,
+      hideHistory: preferences.hideHistory,
+      ...(revealedIds === undefined ? {} : { revealed: revealedIds }),
       liveTools: !readOnly && preferences.liveTools,
       pinApprovals: pinApprovals && !readOnly,
       recent,
@@ -201,7 +217,7 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
       lit,
       selection: readOnly ? NOT_PICKING : selection,
     }),
-    [threadId, thread, preferences.detail, preferences.liveTools, preferences.layout, preferences.setLayout, recent, meId, socket.phase, lit, selection, readOnly, onVersionSelect, pinApprovals],
+    [threadId, thread, preferences.detail, preferences.diagnostics, preferences.hideHistory, preferences.liveTools, preferences.layout, preferences.setLayout, recent, meId, socket.phase, lit, selection, readOnly, onVersionSelect, pinApprovals, revealedIds],
   );
 
   // New rows below the reader's place: counted since they were last at the end.
@@ -225,20 +241,15 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
   const bring = useCallback(
     (itemId: string, also: readonly string[] = [], highlight = true) => {
       const captured = captureThreadRead(read);
+      const request = ++bringRequest.current;
       const show = () => {
-        // Rows are drawn after this render; the list finds the row by its key, which for an item is its id,
-        // and for an item inside the folded work of a turn is the line that stands for that turn.
-        requestAnimationFrame(() => {
-          if (!isCurrentThreadRead(captured)) return;
-          const held = threadViewOf(read).items.get(itemId);
-          const folded = held?.turn_id === null || held === undefined ? null : `fold:${held.turn_id}`;
-          if (list.current?.scrollToKey(itemId, 'center') === true || (folded !== null && list.current?.scrollToKey(folded, 'center') === true)) {
-            if (highlight) {
-              const lighted: ReadonlySet<string> = new Set([itemId, ...also]);
-              setLit(lighted);
-              later(() => setLit((current) => (current === lighted ? null : current)), LIT_MS);
-            }
-          }
+        if (!isCurrentThreadRead(captured) || request !== bringRequest.current) return;
+        setFailedLink(null);
+        setRevealed((current) => {
+          const ids = new Set(current !== null && isCurrentThreadRead(current.captured) ? current.ids : []);
+          const named = new Set([itemId, ...also]);
+          for (const id of named) ids.add(id);
+          return { captured, ids, named, target: itemId, highlight };
         });
       };
       if (threadViewOf(read).items.has(itemId)) {
@@ -247,18 +258,41 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
       }
       fetchItems(read, { around: itemId })
         .then((reply) => {
-          if (!isCurrentThreadRead(captured)) return;
+          if (!isCurrentThreadRead(captured) || request !== bringRequest.current) return;
           threadWriter.window(read, reply.items, reply.has_older, reply.has_newer);
           show();
         })
-        .catch(() => { if (isCurrentThreadRead(captured)) setFailedLink(itemId); });
+        .catch(() => { if (isCurrentThreadRead(captured) && request === bringRequest.current) setFailedLink(itemId); });
     },
-    [read, later],
+    [read],
   );
+  // Reveal first, then scroll after the list has received the rows containing the requested item.
+  useEffect(() => {
+    if (revealed === null || brought.current === revealed || !isCurrentThreadRead(revealed.captured)) return;
+    const destination = rows.find((row) => row.key === revealed.target
+      || ((row.kind === 'markers' || row.kind === 'start' || row.kind === 'fold') && row.ids.includes(revealed.target)));
+    const frame = requestAnimationFrame(() => {
+      if (!isCurrentThreadRead(revealed.captured)) return;
+      brought.current = revealed;
+      if (destination === undefined || list.current?.scrollToKey(destination.key, 'center') !== true) {
+        setFailedLink(revealed.target);
+        return;
+      }
+      if (revealed.highlight) {
+        const lighted = revealed.named;
+        setLit(lighted);
+        later(() => setLit((current) => (current === lighted ? null : current)), LIT_MS);
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [revealed, rows, later]);
   const jump = useCallback(() => {
     // The end of a historical window is not the conversation's newest end. Once
     // the reader leaves a permalink, its old target must not hide the fresh tail.
     setLinkIntent({ key: linkKey, dismissed: true });
+    bringRequest.current += 1;
+    setRevealed(null);
+    setFailedLink(null);
     setLit(null);
     if (view.loaded === 'window' && view.hasNewer) reloadThread(read);
     list.current?.scrollToEnd();
@@ -348,6 +382,7 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
   return (
     <TimelineContextValue.Provider value={context}>
       <div ref={root} className={viewport === undefined ? "relative flex h-full min-h-0 flex-col" : "relative flex min-h-16 flex-col"}>
+        {failedLink !== null && <InlineAlert tone="info">{t('timeline.itemUnavailable')}</InlineAlert>}
         {(loadingOlder || olderFailed) && (
           <div className="absolute top-2 left-1/2 z-(--layer-sticky) -translate-x-1/2">
             {loadingOlder ? (
@@ -375,7 +410,7 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
           onAtEnd={setAtEnd}
           onPosition={(position) => {
             const row = rows.find((row) => row.key === position.key);
-            const item = row?.kind === 'item' || row?.kind === 'side' ? row.id : row?.kind === 'fold' || row?.kind === 'markers' ? row.ids[0] ?? null : null;
+            const item = row?.kind === 'item' || row?.kind === 'side' ? row.id : row?.kind === 'fold' || row?.kind === 'markers' || row?.kind === 'start' ? row.ids[0] ?? null : null;
             keepTimelinePosition(read, view.read?.selection ?? null, { ...position, item });
           }}
           onRange={(first, last) => {
@@ -402,7 +437,7 @@ export function Timeline({ viewport, threadId, shown = true, item: linked, items
 
 /** One item of the conversation, read from the store by its id so that a change to one item draws that row alone. */
 const ItemRow = memo(function ItemRow({ id, head }: { id: string; head: boolean }) {
-  const { threadId, inspection } = useTimelineContext();
+  const { threadId, inspection, lit } = useTimelineContext();
   const { t } = useTranslation();
   const item = useThreadPart(threadId, (view) => view.items.get(id));
   if (item === undefined) return null;
@@ -422,7 +457,7 @@ const ItemRow = memo(function ItemRow({ id, head }: { id: string; head: boolean 
     case 'announcement':
       return <AnnouncementCard item={item} />;
     case 'marker':
-      return <MarkerLine item={item} />;
+      return <div data-item={item.id} className={lit?.has(item.id) === true ? 'rounded-sm ring-2 ring-accent' : undefined}><MarkerLine item={item} /></div>;
     case 'error':
       return <ErrorRow item={item} />;
   }
@@ -458,5 +493,7 @@ function RowView({ row }: { row: Row }) {
       return <StatusLine />;
     case 'before':
       return <BeforeOrchHeading />;
+    case 'start':
+      return <StartLine ids={row.ids} />;
   }
 }
