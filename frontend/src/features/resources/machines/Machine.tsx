@@ -1,3 +1,4 @@
+import { holds } from '@/lib/permissions';
 /** Identity, facts, roles, registered resources and certificate.
  *
  * A machine's page is its console in Orch. It says what the machine is and reports (its system, its
@@ -130,7 +131,7 @@ function Overview({ machine }: { machine: MachineRow }) {
         {slow && <p className="text-sm text-text-muted">{t('machines.overview.slowWhy', { ms: SLOW_LINK_MS })}</p>}
       </Section>
 
-      <MachineGatewayStatus machineId={machine.id} online={machine.online} />
+      <MachineGatewayStatus key={machine.id} machineId={machine.id} online={machine.online} manage={holds(machine.access,'machine.manage')||holds(machine.access,'host.manage')} />
 
       <ResourceDetails><JsonTree value={machine.facts} label={t('machines.overview.about')} /></ResourceDetails>
 

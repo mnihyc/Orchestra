@@ -125,6 +125,10 @@ impl Fixture {
     }
 
     async fn failed_report(&self, runtime: Id) -> TestResult {
+        self.report(runtime, "failed").await
+    }
+
+    async fn report(&self, runtime: Id, state: &str) -> TestResult {
         let mut tx = self.world.pool.begin().await?;
         let mut unit = Unit::new(&mut tx, self.world.clock.now());
         self.engine
@@ -133,7 +137,7 @@ impl Fixture {
                 self.host,
                 &NodeRuntime {
                     runtime_id: runtime,
-                    state: "failed".into(),
+                    state: state.into(),
                     detail: Some("synthetic provider unit failure".into()),
                 },
             )
@@ -142,6 +146,76 @@ impl Fixture {
         tx.commit().await?;
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn a_host_that_confirms_a_provider_stop_finishes_it_without_waiting_for_the_command_reply()
+-> TestResult {
+    for state in ["absent", "stopped", "failed"] {
+        let s = Fixture::new(true).await?;
+        let reason = provider_rows::STOPPED_PERSON;
+        sqlx::query("UPDATE runtimes SET state='stopping',state_detail=$2 WHERE id=$1")
+            .bind(s.old)
+            .bind(reason)
+            .execute(s.world.pool.pool())
+            .await?;
+        sqlx::query("UPDATE providers SET status='disabled' WHERE id=$1")
+            .bind(s.world.provider)
+            .execute(s.world.pool.pool())
+            .await?;
+        s.report(s.old, state).await?;
+        s.report(s.old, state).await?;
+        let mut conn = s.world.pool.acquire().await?;
+        let stopped = runtime_rows::runtime(&mut conn, s.old)
+            .await?
+            .ok_or("runtime absent")?;
+        assert_eq!(stopped.state, "stopped", "host report: {state}");
+        assert_eq!(stopped.state_detail.as_deref(), Some(reason));
+        let missing: bool = sqlx::query_scalar("SELECT loss_missing FROM runtimes WHERE id=$1")
+            .bind(s.old)
+            .fetch_one(&mut *conn)
+            .await?;
+        assert_eq!(missing, state == "absent");
+        let provider = provider_rows::state(&mut conn, s.world.provider)
+            .await?
+            .ok_or("provider absent")?;
+        assert_eq!(provider.status, "disabled");
+        assert_eq!(provider.machine_id, None);
+        let candidate = runtime_rows::runtime(&mut conn, s.candidate)
+            .await?
+            .ok_or("candidate absent")?;
+        assert_eq!(candidate.state, "creating");
+        s.engine.stop();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stopped_successor_report_keeps_the_current_provider_and_its_connector() -> TestResult {
+    let s = Fixture::new(false).await?;
+    sqlx::query("UPDATE runtimes SET state='stopping' WHERE id=$1")
+        .bind(s.candidate)
+        .execute(s.world.pool.pool())
+        .await?;
+    s.report(s.candidate, "absent").await?;
+    let mut conn = s.world.pool.acquire().await?;
+    let candidate = runtime_rows::runtime(&mut conn, s.candidate)
+        .await?
+        .ok_or("candidate absent")?;
+    assert_eq!(candidate.state, "stopped");
+    let current = provider_rows::live_runtime(&mut conn, s.world.provider)
+        .await?
+        .ok_or("current absent")?;
+    assert_eq!((current.id, current.state.as_str()), (s.old, "running"));
+    assert_eq!(
+        provider_rows::state(&mut conn, s.world.provider)
+            .await?
+            .ok_or("provider absent")?
+            .machine_id,
+        Some(s.world.machine_id)
+    );
+    s.engine.stop();
+    Ok(())
 }
 
 #[tokio::test]

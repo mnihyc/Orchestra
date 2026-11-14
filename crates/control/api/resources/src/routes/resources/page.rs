@@ -126,6 +126,8 @@ pub async fn update(
         return page_operations::reply(&ctx, &principal, receipt).await;
     }
     crate::routes::access::link_origin::check(&mut tx, &principal, body.link_origin).await?;
+    let server_host =
+        crate::server_host_use::Before::take(&mut tx, &principal, object, body).await?;
     let accepted_revision = match pages::change_resource_under_fenced(
         &mut tx,
         &principal,
@@ -155,6 +157,9 @@ pub async fn update(
         }
         Err(pages::ChangeFailure::BeforeEffect(error)) => return Err(error),
     };
+    if let Some(before) = server_host {
+        before.require(&ctx, &mut tx, &principal).await?;
+    }
     if !people.is_empty() {
         crate::routes::notifications::person::tell(
             &ctx,

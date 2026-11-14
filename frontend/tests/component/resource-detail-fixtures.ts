@@ -25,7 +25,7 @@ export const detailMachine: Machine = { ...unplacedGrouping(), revision: 1, ...d
   providers: [], agents: [], environments: [], environment_sandboxes: [], access: detailAccess,
   facts: { diagnostic_canary: 'diagnostic-canary', hostname: 'build-system' } };
 
-export const detailHost: Host = { ...unjudgedProvenance(), id: 'host', name: 'Build host', address: 'workshop.builder', home: detailHome, org_id: 'team', owner: ADA,
+export const detailHost: Host = { bundled_with_server: false, ...unjudgedProvenance(), id: 'host', name: 'Build host', address: 'workshop.builder', home: detailHome, org_id: 'team', owner: ADA,
   machine: detailMachineRef, capacity: { cpu_millis: 8000, memory_mb: 16384, disk_gb: 200 }, declared: { cpu_millis: 1000, memory_mb: 2048, disk_gb: 20 },
   labels: ['linux'], running: { environment: 1, provider: 1 }, mine: 1, schedulable: true, revision: 1, access: detailAccess,
   drivers: [{ name: 'sample', title: 'Example driver', creates: ['environment', 'provider'], runtime_classes: [] }], storages: [],

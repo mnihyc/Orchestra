@@ -92,6 +92,7 @@ pub struct Dispatcher {
         Arc<crate::role_changes::Requests>,
         Arc<crate::roles::Services>,
     )>,
+    gateway_control: Option<Arc<crate::gateway_control::Requests>>,
 }
 
 impl std::fmt::Debug for Dispatcher {
@@ -200,6 +201,7 @@ impl Dispatcher {
             )),
             programs: None,
             role_changes: None,
+            gateway_control: None,
         }
     }
 
@@ -249,6 +251,10 @@ impl Dispatcher {
         services: Arc<crate::roles::Services>,
     ) {
         self.role_changes = Some((requests, services));
+    }
+
+    pub fn gateway_control(&mut self, requests: Arc<crate::gateway_control::Requests>) {
+        self.gateway_control = Some(requests);
     }
 
     /// Hands the commands a role takes to it. A kind that another role takes already is refused, unless the
@@ -353,6 +359,9 @@ impl CommandHandler for Dispatcher {
         }
     }
     fn answered(&self, id: orch_types::Id) {
+        if let Some(requests) = &self.gateway_control {
+            requests.answered(id);
+        }
         if let Some((requests, _)) = &self.role_changes {
             requests.answered(id);
         }
@@ -380,6 +389,27 @@ impl CommandHandler for Dispatcher {
                 return Ok(CommandResult::MachineProbe((self.facts)()));
             }
             Command::MachineRolesSet(body) => return self.machine_roles_set(&context, body),
+            Command::MachineGatewaySet(body) => {
+                if context.cancel.is_cancelled() {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "The gateway change was cancelled.",
+                    ));
+                }
+                let requests = self.gateway_control.as_ref().ok_or_else(|| {
+                    CommandError::new(
+                        ErrorCode::Unsupported,
+                        "This composition has no persisted gateway control.",
+                    )
+                })?;
+                let saved = requests.request(context.id, &body.choice)?;
+                return Ok(CommandResult::MachineGatewaySet(
+                    orch_link_contract::commands::MachineGatewaySetResult {
+                        choice: saved.choice,
+                        changed: saved.changed,
+                    },
+                ));
+            }
             Command::MachinePrograms(request) => {
                 use orch_api_contract::machine_programs::MachineProgramsCommand;
                 let harness = match &request {

@@ -8,7 +8,7 @@
 //!
 //! The node therefore **changes nothing here**: it looks and tells. What it tells is only what is new since
 //! it last told (a full account at start, then differences), and a runtime a command is being carried out
-//! for is left alone, because the command tells the system what became of it when it ends.
+//! for is left alone, except that a terminal observation can finish an in-flight stop.
 //!
 //! A unit the node has no record of, which carries the system's label, is told with the note that this node
 //! does not know it; the unit stays, and so does everything it stands on. The system's label has no one value
@@ -206,10 +206,12 @@ impl Reconciler {
     pub async fn pass(&self) -> usize {
         let mark = self.reports.mark();
         let observed = self.observe().await;
-        let busy = self.busy.ids();
         let mut told = 0;
         for runtime in observed {
-            if busy.contains(&runtime.runtime_id) {
+            if self.busy.blocks_observation(
+                runtime.runtime_id,
+                runtime.state.state != UnitStateKind::Running,
+            ) {
                 continue;
             }
             let (state, mut detail) = runtime.told();

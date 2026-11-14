@@ -2189,3 +2189,168 @@ async fn the_owner_row_of_a_new_provider_names_its_maker_and_a_choice_of_who_els
     assert!(names(&world, &c.stranger, None).await.is_empty());
     let _ = name_on_page; // naming people by hand is done in the other tests
 }
+
+#[tokio::test]
+async fn a_provider_pause_or_removal_notifies_each_affected_person_once_only_when_chosen() {
+    for (remove, notify) in [
+        (false, None),
+        (false, Some(false)),
+        (false, Some(true)),
+        (true, None),
+        (true, Some(false)),
+        (true, Some(true)),
+    ] {
+        let world = world().await;
+        let c = company(&world).await;
+        let provider = make(&world, &c.boss, &api_body("Shared key", c.acme)).await;
+        name_on_page(
+            &world,
+            "provider",
+            provider.base.id,
+            "provider.manage",
+            ("user", Some(c.admin.id()), None),
+        )
+        .await;
+        let first = bind_thread(&world, &c, provider.base.id).await;
+        let second = bind_thread(&world, &c, provider.base.id).await;
+        sqlx::query("UPDATE nodes SET owner_id=$2 WHERE id=ANY($1)")
+            .bind(vec![first, second])
+            .bind(c.viewer.id())
+            .execute(&world.db.pool)
+            .await
+            .unwrap();
+        let query = match notify {
+            Some(true) => "notify=true",
+            Some(false) => "notify=false",
+            None => "",
+        };
+        if remove {
+            let reply = world
+                .app
+                .call(ProviderDelete, &[&provider.base.id])
+                .token(&c.boss.token)
+                .raw_query(query)
+                .send()
+                .await;
+            assert_eq!(reply.status, 204, "{:?}", reply.body);
+        } else {
+            world
+                .app
+                .call(ProviderDisable, &[&provider.base.id])
+                .token(&c.boss.token)
+                .raw_query(query)
+                .send()
+                .await
+                .ok();
+        }
+        let notices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+        )
+        .bind(c.viewer.id())
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            notices,
+            i64::from(notify.unwrap_or(false)),
+            "the same person owns two affected threads"
+        );
+        if notify == Some(true) {
+            let data: Json = sqlx::query_scalar(
+                "SELECT data FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+            )
+            .bind(c.viewer.id())
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                data["actor"],
+                json!(c.boss.id()),
+                "the affected person can see who acted"
+            );
+        }
+        if remove && notify == Some(true) {
+            let data: Json = sqlx::query_scalar(
+                "SELECT data FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+            )
+            .bind(c.admin.id())
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                data["path"], "/resources/providers",
+                "a removed provider's managers are not linked to its missing page"
+            );
+        }
+        let duplicates: i64 = sqlx::query_scalar("SELECT count(*) FROM (SELECT user_id FROM notifications WHERE kind='environment.attention' GROUP BY user_id HAVING count(*)>1) repeated")
+            .fetch_one(&world.db.pool).await.unwrap();
+        assert_eq!(duplicates, 0);
+        let actor: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+        )
+        .bind(c.boss.id())
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            actor, 0,
+            "the confirming person is not part of Notify others"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_provider_confirmation_reads_distinct_people_and_its_inherited_notice_default_without_sending()
+ {
+    let world = world().await;
+    let c = company(&world).await;
+    let provider = make(&world, &c.boss, &api_body("Shared key", c.acme)).await;
+    let first = bind_thread(&world, &c, provider.base.id).await;
+    let second = bind_thread(&world, &c, provider.base.id).await;
+    sqlx::query("UPDATE nodes SET owner_id=$2 WHERE id=ANY($1)")
+        .bind(vec![first, second])
+        .bind(c.viewer.id())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    for (choice, expected) in [("when_blocking", true), ("never", false)] {
+        world
+            .set_at(
+                Target::Node(c.acme),
+                orch_settings_contract::registry::keys::NOTIFY_OPERATIONS,
+                json!(choice),
+            )
+            .await;
+        let read = world
+            .app
+            .call(orch_api_contract::resource_facts::ResourceImpactRead, &[])
+            .token(&c.boss.token)
+            .raw_body(&json!({"object":{"kind":"provider","id":provider.base.id},"model_id":null}))
+            .send()
+            .await;
+        assert_eq!(read.status, 200, "{:?}", read.body);
+        let data: Json = serde_json::from_slice(&read.raw).unwrap();
+        assert_eq!(data["notification"]["default_on"], expected);
+        let people = data["notification"]["audience"]["people"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            people
+                .iter()
+                .filter(|person| person["id"] == json!(c.viewer.id()))
+                .count(),
+            1
+        );
+        assert!(
+            !people
+                .iter()
+                .any(|person| person["id"] == json!(c.boss.id()))
+        );
+    }
+    let notices: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM notifications WHERE kind='environment.attention'")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(notices, 0);
+}

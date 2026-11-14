@@ -2,9 +2,10 @@
  * The server binds its acknowledgement to the exact write and count; this module grants no access.
  */
 import { ApiError } from '@/api/client';
-import type { OwnerReadDisclosure } from '@/generated/api-types';
+import type { OwnerReadDisclosure, ServerHostUseDisclosure } from '@/generated/api-types';
 
-type Review = (disclosure: OwnerReadDisclosure) => Promise<boolean>;
+export type SharingDisclosure = OwnerReadDisclosure | ServerHostUseDisclosure;
+type Review = (disclosure: SharingDisclosure) => Promise<boolean>;
 let review: Review | null = null;
 let cancel: (() => void) | null = null;
 
@@ -16,8 +17,13 @@ export function installOwnerReadReview(next: Review, stop: () => void): () => vo
 
 export function cancelOwnerReadConfirmations(): void { cancel?.(); }
 
-export function ownerReadDisclosure(error: unknown): OwnerReadDisclosure | null {
+export function ownerReadDisclosure(error: unknown): SharingDisclosure | null {
   if (!(error instanceof ApiError) || !error.is('conflict.confirmation_required')) return null;
+  const host = error.problem.server_host_use;
+  if (typeof host === 'object' && host !== null) {
+    const row = host as Partial<ServerHostUseDisclosure>;
+    if (typeof row.host_id === 'string' && row.host_id !== '' && typeof row.confirmation === 'string' && row.confirmation.startsWith('server-host:')) return row as ServerHostUseDisclosure;
+  }
   const value = error.problem.owner_reads;
   if (typeof value !== 'object' || value === null) return null;
   const row = value as Partial<OwnerReadDisclosure>;
@@ -27,7 +33,7 @@ export function ownerReadDisclosure(error: unknown): OwnerReadDisclosure | null 
 }
 
 export function ownerReadHeaders(confirmation?: string): Record<string, string> {
-  return confirmation === undefined ? {} : { 'orch-owner-reads-confirmed': confirmation };
+  return confirmation === undefined ? {} : { [confirmation.startsWith('server-host:') ? 'orch-server-host-use-confirmed' : 'orch-owner-reads-confirmed']: confirmation };
 }
 
 /** UI-owned progress of one request; neither its proof nor its refusal grants access. */

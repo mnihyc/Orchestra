@@ -169,6 +169,7 @@ const LINK_MEMBER: &str = rows::LINK_MEMBER;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
+    gateway::register(registry);
     reenrollment::mount(registry);
     enrollment::mount(registry);
     registry
@@ -539,7 +540,7 @@ async fn prepare_inventory_for(
     readable_only: bool,
 ) -> ApiResult<PreparedInventory> {
     let ids: Vec<Id> = found.iter().map(|row| row.id).collect();
-    let mut hosts = rows::hosting::machine_hosts(conn, &ids).await?;
+    let mut hosts = rows::hosting::hosts_naming(conn, &ids).await?;
     let mut resource_ids = ids.clone();
     resource_ids.extend(hosts.iter().map(|(_, host, _)| *host));
     let mut effective =
@@ -724,6 +725,7 @@ pub(crate) async fn show_inventory_prepared(
                     online: is_online(&ctx.app, row.id, row.online),
                     platform_os: parse(&row.platform_os)?,
                     placement: parse(&row.placement)?,
+                    host_id: row.host_id,
                 },
                 owner: row.owner_id.and_then(|owner| owners.get(&owner).cloned()),
                 platform_arch: row.platform_arch.clone(),
@@ -1501,6 +1503,8 @@ pub mod individual;
 #[path = "machines/mutations.rs"]
 pub mod mutations;
 
+#[path = "machines/gateway.rs"]
+mod gateway;
 #[path = "machines/policies.rs"]
 pub mod policies;
 

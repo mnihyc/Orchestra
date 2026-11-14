@@ -7,24 +7,64 @@ import type * as GatewayApi from '@/api/gateways';
 import { applyChanges, findAct } from '@/api/acts';
 import { Gateways } from '@/features/admin/Gateways';
 import { MachineGatewayStatus } from '@/features/gateways/MachineGatewayStatus';
+import { applyRow } from '@/api/cache';
 import { ThreadGatewayDetails, ThreadGatewayStatus } from '@/features/gateways/ThreadGatewayStatus';
-import type { ConnectorGatewayStatus, GatewayCatalogue, GatewayCatalogueUpdateBody, GatewayCatalogueUpdated, ThreadTunnelGatewayStatus } from '@/generated/api-types';
+import type { ConnectorGatewayStatus, GatewayCatalogue, GatewayCatalogueUpdateBody, GatewayCatalogueUpdated, ThreadTunnelGatewayStatus, MachineGatewaySetBody, MachineGatewaySetReceipt } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { show } from '../support';
 import { catalogue, connector, look, restore, tunnel } from './fixtures';
 
 const calls = vi.hoisted(() => ({ catalogue: vi.fn<() => Promise<GatewayCatalogue>>(),
   machine: vi.fn<(id: string) => Promise<ConnectorGatewayStatus>>(), thread: vi.fn<(id: string) => Promise<ThreadTunnelGatewayStatus>>(),
-  save: vi.fn<(body: GatewayCatalogueUpdateBody) => Promise<GatewayCatalogueUpdated>>() }));
+  save: vi.fn<(body: GatewayCatalogueUpdateBody) => Promise<GatewayCatalogueUpdated>>(),
+  choice: vi.fn<(id:string,body:MachineGatewaySetBody)=>Promise<MachineGatewaySetReceipt>>() }));
 vi.mock('@/api/gateways', async (load) => ({ ...await load<typeof GatewayApi>(),
   gatewayCatalogueQuery: { queryKey: ['gateway-catalogue'], queryFn: () => calls.catalogue() },
   machineGatewayQuery: (id: string, online?: boolean) => ({ queryKey: ['machine-gateway', id, online], queryFn: () => calls.machine(id) }),
   threadGatewayQuery: (id: string, revision?: number | null) => ({ queryKey: ['thread-tunnel-gateway', id, revision], queryFn: () => calls.thread(id) }),
   updateGatewayCatalogue: calls.save,
+  updateMachineGateway: calls.choice,
 }));
 beforeEach(() => { vi.clearAllMocks(); calls.catalogue.mockResolvedValue(catalogue); calls.machine.mockResolvedValue(connector);
   calls.thread.mockResolvedValue(tunnel); calls.save.mockResolvedValue({ revision: 'accepted' }); });
 afterEach(restore);
+
+it.each(['en','zh-CN'] as const)('saves Automatic on the same enrolled machine and keeps its reported connection while waiting (%s)',async(locale)=>{
+  await look({locale,theme:'dark',width:400});
+  calls.machine.mockResolvedValue({...connector,selection:'selected',selected_gateway_id:'eu',primary_gateway_id:'eu'});
+  let finish:((value:MachineGatewaySetReceipt)=>void)|undefined;
+  calls.choice.mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
+  const user=userEvent.setup();
+  show(<MachineGatewayStatus machineId={connector.machine_id} online manage/>);
+  await user.click(await screen.findByRole('button',{name:i18n.t('regionalGateways.change')}));
+  await user.click(screen.getByRole('combobox',{name:i18n.t('regionalGateways.gateway')}));
+  await user.click(await screen.findByRole('option',{name:i18n.t('regionalGateways.automatic')}));
+  await user.click(screen.getByRole('button',{name:i18n.t('common.save')}));
+  await waitFor(()=>expect(calls.choice).toHaveBeenCalledExactlyOnceWith(connector.machine_id,{selection:'automatic',gateway_id:null}));
+  expect(screen.getByRole('button',{name:i18n.t('regionalGateways.saving')})).toBeDisabled();
+  expect(screen.getByText(i18n.t('regionalGateways.selected'),{exact:true})).toBeVisible();
+  act(()=>finish?.({projection:'receipt',machine_id:connector.machine_id,selection:'automatic',gateway_id:null,changed:true}));
+  await waitFor(()=>expect(screen.queryByRole('combobox')).not.toBeInTheDocument());
+  expect(screen.getByText(i18n.t('regionalGateways.selected'),{exact:true})).toBeVisible();
+  expect(calls.save).not.toHaveBeenCalled();
+});
+
+it('refreshes only the actual active gateway projection after a machine report and stays quiet for load',async()=>{
+  const cache=new QueryClient(); const id=connector.machine_id; const key=['machine-gateway',id,true] as const;
+  const gateway={choice:{selection:'selected',gateway_id:'eu'}};
+  cache.setQueryData(['machine',id],{id,online:true,facts:{gateway}});
+  cache.setQueryData(key,{...connector,selection:'selected',selected_gateway_id:'eu'});
+  const read=vi.fn(()=>Promise.resolve(connector));
+  const observer=new QueryObserver(cache,{queryKey:key,queryFn:read,staleTime:Infinity});
+  const stop=observer.subscribe(()=>undefined);
+  try {
+    applyRow(cache,{kind:'machine',id,value:{id,online:true,facts:{gateway,rates:{up_bps:5}}}});
+    expect(read).not.toHaveBeenCalled();
+    applyRow(cache,{kind:'machine',id,value:{id,online:true,facts:{gateway:{choice:{selection:'automatic'}}}}});
+    await waitFor(()=>expect(read).toHaveBeenCalledOnce());
+    expect(cache.getQueryData(key)).toEqual(connector);
+  } finally {stop();cache.clear();}
+});
 
 it('binds the Admin edit to the native ordered replacement and opaque revision', async () => {
   show(<Gateways />);
@@ -35,11 +75,12 @@ it('binds the Admin edit to the native ordered replacement and opaque revision',
 
 it('rereads the advertised catalogue for review without writing a replacement', async () => {
   show(<Gateways />);
-  await screen.findByText(i18n.t('regionalGateways.revision', { revision: catalogue.revision }));
+  await screen.findByRole('button', { name: i18n.t('regionalGateways.edit') });
+  expect(screen.queryByText(catalogue.revision, { exact: false })).not.toBeInTheDocument();
   calls.catalogue.mockResolvedValue({ ...catalogue, revision: 'changed-elsewhere' });
   await userEvent.click(screen.getByRole('button', { name: i18n.t('regionalGateways.refresh') }));
-  await screen.findByText(i18n.t('regionalGateways.revision', { revision: 'changed-elsewhere' }));
-  expect(calls.catalogue).toHaveBeenCalledTimes(2);
+  await waitFor(() => expect(calls.catalogue).toHaveBeenCalledTimes(2));
+  expect(screen.queryByText('changed-elsewhere', { exact: false })).not.toBeInTheDocument();
   expect(calls.save).not.toHaveBeenCalled();
 });
 

@@ -12,6 +12,10 @@ import { Plug, Pencil, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { deleteMcp, mcpQuery, reimportMcp } from '@/api/resource-tools';
+import { resourceImpactQuery } from '@/api/resource-impact';
+import type { McpServer } from '@/generated/api-types';
+import { UpdateNotify } from '@/features/change/UpdateNotify';
+import { LibraryCounts } from '@/features/resources/Library';
 import { copyLinkAct, entriesOf, managedAct, shareAct } from '@/features/resources/acts';
 import { ResourceDetails, ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/features/resources/DetailSections';
 import { Facts } from '@/features/resources/Facts';
@@ -49,7 +53,6 @@ export function McpScreen({ id, tab, onTab }: { id: string; tab?: McpTab; onTab?
   const [removing, setRemoving] = useState(false);
   const [localTab, setLocalTab] = useState<McpTab>('overview');
   const reimport = useMutation({ mutationFn: () => reimportMcp(id) });
-  const remove = useMutation({ mutationFn: () => deleteMcp(id), onSuccess: () => { void navigate({ to: '/resources/mcp' }); } });
   if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={6} /> : <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
   const server = query.data;
   const entry = connection(readObject(JSON.stringify(server.spec)) ?? {});
@@ -98,6 +101,26 @@ export function McpScreen({ id, tab, onTab }: { id: string; tab?: McpTab; onTab?
       { value: 'access', label: t('agents.tabs.access'), panel: <ResourceAccess access={server.access} target={target} /> },
     ]} />
     {editing && <EditMcp server={server} onClose={() => setEditing(false)} />}
-    <ConfirmDialog admin={admin} open={removing} onOpenChange={setRemoving} title={t(server.imported === null ? 'resourceDetails.removeTitle' : 'mcpWords.forgetTitle', { name: server.name })} confirmLabel={t(server.imported === null ? 'resourceDetails.remove' : 'mcpWords.forget')} danger pending={remove.isPending} error={remove.error} onConfirm={() => remove.mutate()}>{t(server.imported === null ? 'resourceDetails.mcp.removeHelp' : 'resourceDetails.mcp.forgetHelp')}</ConfirmDialog>
+    {removing && <DeleteMcpDialog server={server} onClose={() => setRemoving(false)} onRemoved={() => { void navigate({ to: '/resources/mcp' }); }} />}
   </Page>;
+}
+
+export function DeleteMcpDialog({ server, onClose, onRemoved }: { server: McpServer; onClose: () => void; onRemoved: () => void }) {
+  const { t } = useTranslation();
+  const impact = useQuery(resourceImpactQuery({ object: { kind: 'mcp_server', id: server.id }, model_id: null }));
+  const [notify, setNotify] = useState<boolean>();
+  const selected = notify ?? impact.data?.notification?.default_on ?? false;
+  const remove = useMutation({ mutationFn: () => deleteMcp(server.id, selected), onSuccess: onRemoved });
+  return <ConfirmDialog open onOpenChange={(next) => { if (!next) onClose(); }}
+    admin={adminSpec(server, server.environment === null ? 'mcp.manage' : 'environment.manage')}
+    title={t(server.imported === null ? 'resourceDetails.removeTitle' : 'mcpWords.forgetTitle', { name: impact.data?.name ?? server.name })}
+    confirmLabel={t(server.imported === null ? 'resourceDetails.remove' : 'mcpWords.forget')} danger
+    pending={remove.isPending} error={remove.error} disabled={impact.isPending || impact.isError || !impact.data.facts.dependents_complete}
+    onConfirm={() => remove.mutate()}
+    footerStart={<UpdateNotify audience={impact.data?.notification?.audience} checked={selected} onChange={setNotify} disabled={remove.isPending} />}>
+    <div className="flex flex-col gap-2">
+      <span>{t(server.imported === null ? 'resourceDetails.mcp.removeHelp' : 'resourceDetails.mcp.forgetHelp')}</span>
+      {impact.isPending ? <SkeletonRows read={impact} rows={2} /> : impact.isError ? <ErrorState compact error={impact.error} onRetry={() => void impact.refetch()} /> : <LibraryCounts facts={impact.data.facts} />}
+    </div>
+  </ConfirmDialog>;
 }

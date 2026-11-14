@@ -796,6 +796,18 @@ async fn the_token_of_the_bundled_node_is_registered_in_the_name_of_the_first_ad
         fixture.service.adopt_token_file(&file).await.unwrap(),
         Adopted::AlreadyKnown
     );
+    let recorded: (bool, Option<String>) = sqlx::query_as(
+        "SELECT bundled_with_server,access FROM enrollment_tokens WHERE created_by=$1",
+    )
+    .bind(fixture.user)
+    .fetch_one(fixture.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        recorded,
+        (true, Some("only_me".into())),
+        "the protected bootstrap source records its origin and never grants public Host Use"
+    );
 
     // It enrolls a host, once, even a day later.
     fixture.clock.advance(chrono::Duration::hours(20));
@@ -813,6 +825,16 @@ async fn the_token_of_the_bundled_node_is_registered_in_the_name_of_the_first_ad
         .await
         .unwrap();
     assert_eq!(hosts, 1);
+    let bundled: bool =
+        sqlx::query_scalar("SELECT bundled_with_server FROM hosts WHERE machine_id=$1")
+            .bind(reply.machine_id)
+            .fetch_one(fixture.db.pool())
+            .await
+            .unwrap();
+    assert!(
+        bundled,
+        "the authoritative origin survives token redemption"
+    );
     assert_eq!(
         fixture.service.adopt_token_file(&file).await.unwrap(),
         Adopted::AlreadyKnown,
@@ -824,4 +846,38 @@ async fn the_token_of_the_bundled_node_is_registered_in_the_name_of_the_first_ad
     let foreign = orch_pki::enrollment::issue_token(&other, Duration::ZERO, &fixture.clock);
     std::fs::write(&file, foreign.token.to_string()).unwrap();
     assert!(fixture.service.adopt_token_file(&file).await.is_err());
+}
+
+#[tokio::test]
+async fn an_ordinary_host_cannot_claim_the_server_origin_with_its_name_or_token_hint() {
+    let fixture = fixture().await;
+    let mut conn = fixture.db.acquire().await.unwrap();
+    resources::testing::make_system_admin(&mut conn, fixture.user)
+        .await
+        .unwrap();
+    drop(conn);
+    let issued = fixture
+        .service
+        .issue_token(&TokenRequest {
+            created_by: fixture.user,
+            purpose: TokenFor::Host { home: None },
+            name_hint: Some("bundled node".into()),
+        })
+        .await
+        .unwrap();
+    let mut node = request(&issued.token, &Fixture::csr());
+    node.roles = vec![Role::Node];
+    node.name = "bundled node".into();
+    let reply = fixture
+        .service
+        .enroll(&node, &Origin::default())
+        .await
+        .unwrap();
+    let bundled: bool =
+        sqlx::query_scalar("SELECT bundled_with_server FROM hosts WHERE machine_id=$1")
+            .bind(reply.machine_id)
+            .fetch_one(fixture.db.pool())
+            .await
+            .unwrap();
+    assert!(!bundled);
 }

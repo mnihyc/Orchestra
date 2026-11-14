@@ -205,6 +205,7 @@ function Overview({ host }: { host: Host }) {
         <Facts compact
           label={t('hosts.overview.about')}
           rows={[
+            ...(host.bundled_with_server ? [{ name: t('hosts.serverHost.installation'), value: <span className="inline-flex items-center gap-1">{t('hosts.serverHost.label')}<HelpHint term={t('hosts.serverHost.label')} what={t('hosts.serverHost.help')} /></span> }] : []),
             {
               name: t('hosts.overview.machine'),
               value: (
@@ -234,7 +235,7 @@ function Overview({ host }: { host: Host }) {
           ]}
         />
       </Section>
-      <MachineGatewayStatus machineId={host.machine.id} online={host.machine.online} />
+      <MachineGatewayStatus key={host.machine.id} machineId={host.machine.id} online={host.machine.online} manage={holds(host.access,'host.manage')} />
       <ResourceDetails><Facts compact rows={[{ name: t('hosts.overview.address'), value: host.address }]} /><Capacity host={host} /><Drivers host={host} /></ResourceDetails>
     </div>
   );
@@ -346,7 +347,7 @@ function HostSettings({ host, manage }: { host: Host; manage: boolean }) {
       {revert.error !== null && <ErrorAlert error={revert.error} />}
       {stale && (
         <InlineAlert tone="warning" title={t('hosts.settings.changed')}>
-          {t('hosts.settings.changedLead', { revision: host.revision })}
+          {t('hosts.settings.changedLead')}
           <SettingChanges rows={[{ name: t('hosts.settings.name'), current: host.name, draft: name }, { name: t('hosts.settings.labels'), current: host.labels, draft: wanted }]}
             disabled={busy || host.revision <= base.revision} onKeep={() => { setBase(host); save.reset(); }} />
         </InlineAlert>

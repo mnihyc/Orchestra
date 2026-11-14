@@ -971,11 +971,14 @@ impl CertificateService {
         let hash = raw_hash(&token_digest(token.secret()));
         let expires_at = utc(self.inner.clock.time())
             + chrono::Duration::seconds(i64::try_from(BOOTSTRAP_TOKEN_SECS).unwrap_or(i64::MAX));
-        let mut conn = self.inner.db.acquire().await?;
-        if resources::extend_unused_token(&mut conn, &hash, expires_at).await? {
+        let mut tx = self.inner.db.begin().await?;
+        if resources::extend_unused_token(&mut tx, &hash, expires_at).await? {
+            sqlx::query("UPDATE enrollment_tokens SET bundled_with_server=true,access='only_me' WHERE token_hash=$1 AND purpose='host' AND again_machine_id IS NULL AND used_at IS NULL")
+                .bind(&hash).execute(&mut *tx).await.map_err(DbError::from)?;
+            tx.commit().await.map_err(DbError::from)?;
             return Ok(Adopted::AlreadyKnown);
         }
-        let Some(created_by) = resources::first_system_admin(&mut conn).await? else {
+        let Some(created_by) = resources::first_system_admin(&mut tx).await? else {
             return Ok(Adopted::WaitingForAdministrator);
         };
         let row = TokenRow {
@@ -989,7 +992,10 @@ impl CertificateService {
             machine_id: None,
             again_machine_id: None,
         };
-        let stored = resources::insert_enrollment_token(&mut conn, &row).await?;
+        let stored = resources::insert_enrollment_token(&mut tx, &row).await?;
+        sqlx::query("UPDATE enrollment_tokens SET bundled_with_server=true,access='only_me' WHERE token_hash=$1 AND purpose='host' AND again_machine_id IS NULL AND used_at IS NULL")
+            .bind(&row.token_hash).execute(&mut *tx).await.map_err(DbError::from)?;
+        tx.commit().await.map_err(DbError::from)?;
         Ok(if stored {
             Adopted::Registered
         } else {
@@ -1224,6 +1230,8 @@ impl CertificateService {
                 now,
             )
             .await?;
+            sqlx::query("UPDATE hosts SET bundled_with_server=true WHERE id=$1 AND EXISTS(SELECT 1 FROM enrollment_tokens WHERE token_hash=$2 AND bundled_with_server)")
+                .bind(host_id).bind(&hash).execute(&mut *tx).await.map_err(DbError::from)?;
             // Its page keeps the token maker as first owner and applies only the choice bound to that token.
             ownership::start_resource(
                 &mut tx,

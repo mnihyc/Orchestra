@@ -161,6 +161,42 @@ async fn a_runtime_a_command_is_being_carried_out_for_is_left_to_the_command() {
 }
 
 #[tokio::test]
+async fn a_unit_that_ends_while_its_stop_is_held_is_reported_without_waiting_for_the_command() {
+    let mut rig = Rig::new();
+    rig.have_connector();
+    rig.start().await;
+    let spec = rig.spec(RuntimeKind::Environment, "Stopping workspace");
+    rig.made(&spec).await;
+    rig.start_runtime(spec.runtime_id).await;
+    rig.driver.hold(Operation::Stop);
+    let stopped = rig.controller.issue(
+        &orch_link_contract::commands::SerialKey::Runtime(spec.runtime_id),
+        rig.deadline(),
+        &orch_link_contract::commands::NodeRuntimeStop {
+            runtime_id: spec.runtime_id,
+            reason: None,
+        },
+    );
+    rig.wait_call(Operation::Stop, &spec.name).await;
+    rig.driver.crash(&spec.name, 137, "Ended while stopping");
+    assert_eq!(rig.role().reconciler().pass().await, 1);
+    rig.wait_state(spec.runtime_id, "failed").await;
+    assert_eq!(
+        rig.role().reconciler().pass().await,
+        0,
+        "the same terminal observation is not repeated"
+    );
+    rig.driver.release(Operation::Stop);
+    assert!(matches!(
+        tokio::time::timeout(common::PATIENCE, rig.controller.wait_command(stopped))
+            .await
+            .unwrap(),
+        orch_link::commands::Progress::Succeeded(_)
+    ));
+    rig.stop().await;
+}
+
+#[tokio::test]
 async fn a_driver_that_cannot_list_does_not_make_its_units_absent() {
     let mut rig = Rig::new();
     rig.have_connector();

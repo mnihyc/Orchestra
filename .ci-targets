@@ -1,0 +1,15 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-settings-contract --lib
+test -p orch-api-core --test providers --test provider_crud_scopes --test resource_facts --test resource_resume --test kmounts_mcp --test mcp_delete_scopes --test certificates --test hosts --test host_list_scopes --test machines --test machine_role_scopes --test container_units
+test -p orch-engine --test lifecycle --test provider_runtime
+test -p orch-node-core --test reconciliation --test runtimes
+test -p orch-connector-core --test gateway_choice --test gateway_selector
+test -p orch-connector-core --lib -- dispatch::tests::
+test -p orch-gateway-core --test mcp_forget
+web typecheck
+web lint
+web test -- tests/component/gateways/bindings.test.tsx tests/component/gateways/machine.test.tsx tests/component/gateways/installation.test.tsx tests/component/resource-detail-pages.test.tsx tests/component/environment-data.test.tsx tests/component/provider-home.test.tsx tests/unit/acts.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts

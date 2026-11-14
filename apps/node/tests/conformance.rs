@@ -15,6 +15,15 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn a_scripted_build_cannot_certify_another_version_and_its_unit_is_removed() {
+    check(Some("orch-dev-harness")).await;
+}
+
+#[tokio::test]
+async fn a_fresh_host_prepares_its_check_image_and_runs_isolated_cases_without_a_preload_setting() {
+    check(None).await;
+}
+
+async fn check(image: Option<&str>) {
     let docker = bollard::Docker::connect_with_local_defaults().unwrap();
     docker
         .inspect_image("orch-dev-harness")
@@ -53,7 +62,7 @@ readline.on('line', line => {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| env!("CARGO_BIN_EXE_orch-node").into()),
         ),
-        conformance_image: Some("orch-dev-harness".to_owned()),
+        conformance_image: image.map(str::to_owned),
         ..Default::default()
     };
     let request = NodeToolConformance {
@@ -61,7 +70,7 @@ readline.on('line', line => {
         version: "0.171.0".to_owned(),
         programs: vec!["codex".to_owned()],
         case_timeout_secs: 5,
-        timeout_secs: 60,
+        timeout_secs: if image.is_some() { 60 } else { 1_800 },
     };
     let began = std::time::Instant::now();
     let result = orch_node::conformance_unit::run(
@@ -90,7 +99,7 @@ readline.on('line', line => {
                 .is_some_and(|error| error.contains("0.170.0") && error.contains("0.171.0"))),
         "{result:?}"
     );
-    assert!(began.elapsed() < Duration::from_secs(60));
+    assert!(began.elapsed() < Duration::from_secs(u64::from(request.timeout_secs)));
     let units = docker
         .list_containers(Some(
             bollard::query_parameters::ListContainersOptionsBuilder::default()

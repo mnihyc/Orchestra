@@ -1,7 +1,7 @@
 import { resourceCardRead } from './resource-card-readers';
 /** Hints keep their ordinary and warning states; card reads stay independent of the number of names on screen. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, expect, it, vi } from 'vitest';
 
@@ -9,6 +9,7 @@ import { queryClient } from '@/api/query';
 import { ResourceHint, ResourceName, resourceChoice } from '@/features/resource-facts/ResourceFacts';
 import { Choice } from '@/ui/Choice';
 import ResourceCard from '@/features/resource-facts/ResourceCard';
+import { MachineTools } from '@/features/resources/machines/Tools';
 import type { ResourceSubject } from '@/features/resource-facts/facts';
 import { detailEnvironment, detailHost } from './resource-detail-fixtures';
 import { planProvider } from '../unit/provider-plan-fixtures';
@@ -110,4 +111,31 @@ it('keeps private vendor facts and cap observations out of a resource card', () 
   expect(screen.queryByRole('list', { name: 'Limits' })).not.toBeInTheDocument();
   expect(screen.queryByText('Active turns')).not.toBeInTheDocument();
   expect(requests.provider).not.toHaveBeenCalled();
+});
+
+for (const entry of [
+  { subject: { kind: 'provider', provider } as ResourceSubject, name: provider.name, action: 'Open provider', href: `/resources/providers/${provider.id}` },
+  { subject: { kind: 'model', model, providerId: provider.id } as ResourceSubject, name: model.display_name, action: 'Open models', href: `/resources/providers/${provider.id}?tab=models` },
+  { subject: { kind: 'host', host: detailHost } as ResourceSubject, name: detailHost.name, action: 'Open host', href: `/resources/hosts/${detailHost.id}` },
+  { subject: { kind: 'environment', environment: detailEnvironment } as ResourceSubject, name: detailEnvironment.name, action: 'Open environment', href: `/resources/environments/${detailEnvironment.id}` },
+]) {
+  it(`opens the ${entry.subject.kind} card destination inside the application from its name and quick action`, async () => {
+    show(<ResourceCard subject={entry.subject} />);
+    for (const name of [entry.name, entry.action]) {
+      const link = await screen.findByRole('link', { name });
+      expect(link).toHaveAttribute('href', entry.href);
+      const event = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+      fireEvent(link, event);
+      expect(event.defaultPrevented, `${name} uses the application router`).toBe(true);
+    }
+  });
+}
+
+it('opens the environment list inside the application when a machine has no registered environment', () => {
+  show(<MachineTools machine={{ id: 'machine', name: 'Build machine', environments: [] }} />);
+  const link = screen.getByRole('link', { name: 'Environments' });
+  expect(link).toHaveAttribute('href', '/resources/environments');
+  const event = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+  fireEvent(link, event);
+  expect(event.defaultPrevented).toBe(true);
 });

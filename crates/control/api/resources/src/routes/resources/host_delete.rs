@@ -1214,6 +1214,7 @@ async fn apply_creation(
     let mut environment_children = Vec::new();
     let mut provider_children = Vec::new();
     let notification = notifications::NotificationOperation {
+        actor: principal.user(),
         id: parent,
         kind: "host_delete".into(),
         name: host_row.name.clone(),

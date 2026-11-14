@@ -403,6 +403,7 @@ audit_actions! {
         MachinePolicyChanged = "machine.policy_changed", trail, "A key of a machine's local policy was changed, on the machine or from Orch.";
         MachineProgramsChanged = "machine.programs_changed", trail, "A machine manager registered, tested, removed or reloaded an external program.";
         MachineRolesChanged = "machine.roles_changed", trail, "A machine manager changed the connector roles handed to Orch.";
+        MachineGatewayChanged = "machine.gateway_changed", trail, "A machine manager changed its primary gateway choice.";
         MachineUpdateRequested = "machine.update_requested", trail, "A verified physical connector or node update was requested.";
         MachineReportRefused = "machine.report_refused", trail, "Reports from a machine about something it does not hold were refused.";
     }
@@ -652,6 +653,7 @@ impl AuditAction {
             | Self::MachinePolicyChanged
             | Self::MachineProgramsChanged
             | Self::MachineRolesChanged
+            | Self::MachineGatewayChanged
             | Self::MachineRenewed
             | Self::MachineRevoked
             | Self::MachineReportRefused
@@ -1033,6 +1035,7 @@ mod tests {
             A::MachinePolicyChanged,
             A::MachineProgramsChanged,
             A::MachineRolesChanged,
+            A::MachineGatewayChanged,
             A::MachineReportRefused,
         ] {
             assert!(!action.is_history_line(), "{action}");

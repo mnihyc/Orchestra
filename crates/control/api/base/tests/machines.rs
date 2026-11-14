@@ -76,6 +76,52 @@ async fn online(world: &World, machine: Id) {
 }
 
 #[tokio::test]
+async fn a_connected_machine_manager_changes_its_gateway_without_another_enrollment_token() {
+    use orch_api_contract::gateways::MachineGatewaySet;
+    let world = World::new().await;
+    let owner = person(&world, "gateway-owner").await;
+    let stranger = person(&world, "gateway-stranger").await;
+    let machine = machine_with_policy(&world, &owner, &[]).await;
+    online(&world, machine).await;
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM enrollment_tokens")
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    let denied = world
+        .app
+        .call(MachineGatewaySet, &[&machine])
+        .token(&stranger.token)
+        .raw_body(&json!({"selection":"automatic"}))
+        .send()
+        .await;
+    assert!(!denied.status.is_success());
+    let native = answer(
+        &world,
+        machine,
+        json!({"choice":{"selection":"automatic"},"changed":true}),
+    );
+    let receipt = world
+        .app
+        .call(MachineGatewaySet, &[&machine])
+        .token(&owner.token)
+        .raw_body(&json!({"selection":"automatic"}))
+        .send()
+        .await;
+    assert_eq!(receipt.status, 200, "{:?}", receipt.body);
+    native.await.unwrap();
+    let value: Json = serde_json::from_slice(&receipt.raw).unwrap();
+    assert_eq!(value["projection"], "receipt");
+    assert_eq!(value["machine_id"], json!(machine));
+    assert_eq!(value["selection"], "automatic");
+    assert!(value.get("facts").is_none());
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM enrollment_tokens")
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+}
+
+#[tokio::test]
 async fn a_person_lists_the_machines_they_own_and_nobody_elses() {
     let world = World::new().await;
     let ada = person(&world, "ada").await;

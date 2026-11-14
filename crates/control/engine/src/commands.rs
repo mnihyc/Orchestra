@@ -20,8 +20,8 @@ pub(crate) mod workspace;
 pub use authority::{CommandAuthority, TerminalCloseAuthority};
 pub use host_probe::HostPortsProbe;
 pub use machine_controls::{
-    HostPolicyAuthority, MachinePolicyAuthority, MachineProbeAuthority, MachineProgramsAuthority,
-    MachineRolesAuthority, role_change_refusal,
+    HostPolicyAuthority, MachineGatewayAuthority, MachinePolicyAuthority, MachineProbeAuthority,
+    MachineProgramsAuthority, MachineRolesAuthority, role_change_refusal,
 };
 pub use machine_controls::{
     PolicyFailure, PolicyPreparation, driver_configuration_faults, policy_key_about,

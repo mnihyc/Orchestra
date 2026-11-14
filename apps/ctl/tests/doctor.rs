@@ -365,6 +365,11 @@ async fn the_node_is_waited_for_until_there_is_a_first_administrator_and_then_it
             .await
             .unwrap();
     host_of(&test, machine, "bundled").await;
+    sqlx::query("UPDATE hosts SET bundled_with_server=true WHERE machine_id=$1")
+        .bind(machine)
+        .execute(&test.pool)
+        .await
+        .unwrap();
     let offline = run_doctor(arguments.clone(), environment.clone()).await;
     assert_eq!(offline.status, 1);
     assert!(offline.line("node").contains("no host has a session"));
@@ -373,6 +378,8 @@ async fn the_node_is_waited_for_until_there_is_a_first_administrator_and_then_it
     let online = run_doctor(arguments, environment).await;
     assert_eq!(online.status, 0, "{:#?}", online.lines);
     assert!(online.says("node", "ok"), "{}", online.line("node"));
+    assert!(online.line("node").contains("installed with the server"));
+    assert!(online.line("node").contains("share its kernel"));
 }
 
 async fn host_of(test: &TestDb, machine: orch_types::Id, name: &str) {

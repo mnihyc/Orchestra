@@ -24878,6 +24878,37 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "MachineGatewaySet",
+    "method": "PUT",
+    "path": "/machines/{machine_id}/gateway",
+    "title": "Saves the primary gateway choice on its actual machine; the native reply is durable before reconnect.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "MachineGatewaySet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "machine"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "machine_id",
+                "kind": "machine"
+              }
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "MachineGet",
     "method": "GET",
     "path": "/machines/{id}",
@@ -42662,11 +42693,23 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "resources": [
               "provider",
               "agent",
-              "environment"
+              "environment",
+              "mcp_server"
             ],
             "target": {
               "kind": "resolved",
               "value": "requested_resources"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "environment"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "library_owned_environments"
             },
             "usage": "required"
           },

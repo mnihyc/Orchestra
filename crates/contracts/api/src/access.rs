@@ -747,9 +747,20 @@ pub struct OwnerReadDisclosure {
     pub confirmation: String,
 }
 
+/// Informed Host Use on the host originally installed with the server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ServerHostUseDisclosure {
+    /// The exact host of this permission change; no name or private definition is included.
+    pub host_id: Id,
+    /// Acknowledgement of this exact intent and current native grant set; not an access grant.
+    pub confirmation: String,
+}
+
 /// The effect a change would have, worked out before it is made.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PagePreview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_host_use: Option<ServerHostUseDisclosure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_reads: Option<OwnerReadDisclosure>,
     /// How many pages it reaches; one for a live page.

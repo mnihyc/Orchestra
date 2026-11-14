@@ -351,7 +351,7 @@ async fn prepare_inventory_one(
         );
         let by = refusals::user_refs(conn, &[location.created_by]).await?;
         let sizes: Json = sqlx::query_scalar(
-            "SELECT COALESCE(facts->'mount_sizes','[]'::jsonb) FROM machines WHERE id=$1",
+            "SELECT COALESCE((SELECT mount_sizes FROM hosts WHERE machine_id=$1),'[]'::jsonb)",
         )
         .bind(location.machine_id)
         .fetch_one(&mut *conn)
@@ -526,7 +526,12 @@ async fn seen(
     else {
         return Ok(None);
     };
-    let object = match machine.host_id {
+    // A host's node and a unit that a host runs are named by that host; a person's own machine has a page.
+    let named_by = match machine.host_id {
+        Some(host) => Some(host),
+        None => orch_db::queries::resources::hosting::host_running(conn, machine_id).await?,
+    };
+    let object = match named_by {
         Some(host) => ObjectRef {
             kind: ResourceKind::Host.into(),
             id: host,

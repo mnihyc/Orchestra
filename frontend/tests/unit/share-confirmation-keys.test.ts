@@ -3,14 +3,16 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Client from '@/api/client';
 import { installOwnerReadReview } from '@/api/ownerReadConfirmation';
 import { beginShareAttempt, shareWithAgents } from '@/api/share';
+import { changePage } from '@/api/access';
+import type { SharingDisclosure } from '@/api/ownerReadConfirmation';
 import type { OwnerReadDisclosure, ShareWithAgents } from '@/generated/api-types';
 import { NetworkError } from '@/lib/requests';
 import { bodyOf, type HttpTransport } from '../doubles/http-wire';
 
-const calls=vi.hoisted(()=>({post:vi.fn<HttpTransport>()}));
+const calls=vi.hoisted(()=>({post:vi.fn<HttpTransport>(),patch:vi.fn<HttpTransport>()}));
 vi.mock('@/api/client',async(original)=>{
   const actual=await original<typeof Client>();
-  return {...actual,api:{...actual.api,POST:calls.post}};
+  return {...actual,api:{...actual.api,POST:calls.post,PATCH:calls.patch}};
 });
 const firstKey='00000000-0000-4000-8000-000000000081';
 const body:ShareWithAgents={client_id:firstKey,what:{node_id:'source'},to:[{thread_id:'recipient'}],mode:'live',parts:{timeline:'read'}};
@@ -22,9 +24,24 @@ let uninstall:(()=>void)|undefined;
 beforeEach(()=>vi.clearAllMocks());
 afterEach(()=>{uninstall?.();uninstall=undefined;});
 
+it('waits for explicit server host consent and retries only the original Host Use change with its proof',async()=>{
+  const server = {host_id:'00000000-0000-4000-8000-000000000021',confirmation:'server-host:exact-intent'};
+  const review=vi.fn<(value:SharingDisclosure)=>Promise<boolean>>().mockResolvedValue(true);
+  uninstall=installOwnerReadReview(review,()=>undefined);
+  calls.patch.mockResolvedValueOnce({error:{type:'orch:error:conflict.confirmation_required',code:'conflict.confirmation_required',title:'Confirm Host Use',status:409,detail:'Confirm Host Use.',request_id:'host',server_host_use:server},response:new Response(null,{status:409})})
+    .mockResolvedValue({data:{},response:new Response(null,{status:200})});
+  const change={rows:[{permission:'host.use',add:[{holder:{kind:'user' as const,id:'00000000-0000-4000-8000-000000000022'}}]}]};
+  await changePage({kind:'host',id:server.host_id},change);
+  expect(review).toHaveBeenCalledExactlyOnceWith(server);
+  expect(calls.patch).toHaveBeenCalledTimes(2);
+  expect(new Headers(calls.patch.mock.calls[0]?.[1].headers).has('orch-server-host-use-confirmed')).toBe(false);
+  expect(new Headers(calls.patch.mock.calls[1]?.[1].headers).get('orch-server-host-use-confirmed')).toBe(server.confirmation);
+  for(const call of calls.patch.mock.calls)expect(bodyOf(call)).toEqual(change);
+});
+
 it('mints only after confirmation and retains the new key and body through a lost answer',async()=>{
   const gate:{answer?:(confirmed:boolean)=>void}={};
-  const review=vi.fn((_:OwnerReadDisclosure)=>new Promise<boolean>(answer=>{gate.answer=answer;}));
+  const review=vi.fn((_:SharingDisclosure)=>new Promise<boolean>(answer=>{gate.answer=answer;}));
   uninstall=installOwnerReadReview(review,()=>gate.answer?.(false));
   const lost=new NetworkError('failed');
   calls.post.mockResolvedValueOnce(refused(2)).mockRejectedValueOnce(lost).mockResolvedValue(accepted());
@@ -49,7 +66,7 @@ it('mints only after confirmation and retains the new key and body through a los
 
 it('cancel keeps the retained refusal and a later confirmation starts a fresh HTTP request',async()=>{
   const gate:{answer?:(confirmed:boolean)=>void}={};
-  const review=vi.fn<(value:OwnerReadDisclosure)=>Promise<boolean>>()
+  const review=vi.fn<(value:SharingDisclosure)=>Promise<boolean>>()
     .mockResolvedValueOnce(false).mockImplementationOnce(()=>new Promise<boolean>(answer=>{gate.answer=answer;}));
   uninstall=installOwnerReadReview(review,()=>gate.answer?.(false));
   calls.post.mockResolvedValueOnce(refused(2)).mockResolvedValue(accepted());
@@ -66,12 +83,12 @@ it('cancel keeps the retained refusal and a later confirmation starts a fresh HT
 });
 
 it('a changed count requires another explicit confirmation and another HTTP key',async()=>{
-  const review=vi.fn<(value:OwnerReadDisclosure)=>Promise<boolean>>().mockResolvedValue(true);
+  const review=vi.fn<(value:SharingDisclosure)=>Promise<boolean>>().mockResolvedValue(true);
   uninstall=installOwnerReadReview(review,()=>undefined);
   calls.post.mockResolvedValueOnce(refused(1)).mockResolvedValueOnce(refused(2)).mockResolvedValue(accepted());
   const attempt=beginShareAttempt(firstKey);
   await shareWithAgents(body,attempt);
-  expect(review.mock.calls.map(([value])=>value.count)).toEqual([1,2]);
+  expect(review.mock.calls.map(([value])=>'count' in value ? value.count : undefined)).toEqual([1,2]);
   expect(new Set([header(0,'Idempotency-Key'),header(1,'Idempotency-Key'),header(2,'Idempotency-Key')]).size).toBe(3);
   expect(header(1,'orch-owner-reads-confirmed')).toBe('review-1');
   expect(header(2,'orch-owner-reads-confirmed')).toBe('review-2');
