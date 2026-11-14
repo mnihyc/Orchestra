@@ -21,7 +21,6 @@
 //! companion plugin reports them, and a model request carries no counts of its own.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -34,7 +33,7 @@ use orch_agent_contract::events::{
 use orch_agent_contract::events::{DeltaField, TokenUsage};
 use orch_agent_contract::requests::UsageRequest;
 use orch_agent_contract::session::{ThreadId, TurnId};
-use orch_types::{Clock, Hash, Id, Json, Time};
+use orch_types::{Clock, Id, Json, Time};
 use serde_json::json;
 
 use crate::extensions::{Frame, StreamNotice, committed_attempt};
@@ -44,36 +43,13 @@ use crate::tools::{
 };
 use crate::wire::content_text;
 
-/// Where the whole of a long output is kept, as a file named by its hash, for the connector to upload.
-#[derive(Debug, Clone)]
-pub struct OutputStore {
-    directory: PathBuf,
-}
-
-impl OutputStore {
-    /// A store that keeps its files in `directory`.
-    #[must_use]
-    pub fn new(directory: PathBuf) -> Self {
-        Self { directory }
-    }
-
-    /// Keeps `bytes` and names them by their hash. A file that is there already is left as it is.
-    pub fn put(&self, bytes: &[u8]) -> std::io::Result<BlobRef> {
-        let hash = Hash::of(bytes);
-        let path = self.directory.join(hash.to_string());
-        if !path.exists() {
-            crate::process::write_private(&path, bytes)?;
-        }
-        Ok(BlobRef {
-            hash,
-            size: i64::try_from(bytes.len()).unwrap_or(i64::MAX),
-        })
-    }
-}
+pub use orch_agent_contract::output::OutputStore;
 
 /// What the mapper is told once, when the session opens.
 #[derive(Debug, Clone)]
 pub struct MapperConfig {
+    /// The accepted native output retention allowance.
+    pub output_capture_bytes: u64,
     /// The thread.
     pub thread_id: ThreadId,
     /// The segment of the thread.
@@ -706,8 +682,16 @@ impl Mapper {
         ended: Option<Time>,
     ) -> ToolCallPayload {
         let place = self.place();
+        let mut tool = tool_payload(view, &place);
+        if let ToolPayload::Command { output, .. } = &mut tool {
+            output.inline_limit = Some(
+                self.config
+                    .output_capture_bytes
+                    .min(orch_agent_contract::events::OUTPUT_INLINE_MAX_BYTES as u64),
+            );
+        }
         ToolCallPayload {
-            tool: tool_payload(view, &place),
+            tool,
             title: call_title(view, &place),
             started_at: started,
             duration_ms: ended.map(|ended| {
@@ -827,6 +811,10 @@ impl Mapper {
         let ended = self.clock.time();
         let mut payload = self.tool_payload_of(&tracked.view, tracked.started, Some(ended));
         let mut blob = self.keep_long_output(&mut payload.tool, &tracked.view);
+        payload.raw.input = self.capture_text(&tracked.view.raw_input.to_string()).0;
+        if payload.raw.output.is_some() {
+            payload.raw.output = Some(self.capture_text(&output_of(&tracked.view)).0);
+        }
         let status = forced.unwrap_or(if tracked.view.status == Status::Failed {
             ItemStatus::Failed
         } else {
@@ -940,28 +928,40 @@ impl Mapper {
     }
 
     /// Keeps the whole of an output that is longer than what stays inline, as a file, and says where.
+    fn capture_text(
+        &self,
+        text: &str,
+    ) -> (orch_agent_contract::events::OutputRef, Option<BlobRef>) {
+        let total = i64::try_from(text.len()).unwrap_or(i64::MAX);
+        match self
+            .outputs
+            .retain(text, total, self.config.output_capture_bytes)
+        {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(%error,"native output capture is unavailable");
+                (
+                    orch_agent_contract::output::inline(
+                        orch_agent_contract::output::tail(text, self.config.output_capture_bytes),
+                        total,
+                    ),
+                    None,
+                )
+            }
+        }
+    }
+
     fn keep_long_output(&self, tool: &mut ToolPayload, view: &ToolView) -> Option<BlobRef> {
         let output = match tool {
-            ToolPayload::Command { output, .. } => Some(output),
+            ToolPayload::Command { output, .. } => output,
             ToolPayload::FileRead { content, .. } | ToolPayload::WebFetch { content, .. } => {
-                Some(content)
+                content
             }
-            _ => None,
-        }?;
-        if !output.truncated {
-            return None;
-        }
-        let whole = output_of(view);
-        match self.outputs.put(whole.as_bytes()) {
-            Ok(blob) => {
-                output.blob = Some(blob.hash);
-                Some(blob)
-            }
-            Err(error) => {
-                tracing::warn!(%error, "the whole of a long output could not be kept");
-                None
-            }
-        }
+            _ => return None,
+        };
+        let (retained, blob) = self.capture_text(&output_of(view));
+        *output = retained;
+        blob
     }
 
     // -- plans, usage, phases ------------------------------------------------------------------------------
@@ -1156,6 +1156,7 @@ fn add(a: TokenUsage, b: TokenUsage) -> TokenUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orch_types::Hash;
     use orch_types::ManualClock;
 
     #[test]
@@ -1189,7 +1190,7 @@ mod tests {
         assert_eq!(blob.hash, Hash::of(&bytes));
         assert_eq!(blob.size, 4);
         assert_eq!(
-            std::fs::read(mapper.outputs.directory.join(blob.hash.to_string())).unwrap(),
+            std::fs::read(mapper.outputs.directory().join(blob.hash.to_string())).unwrap(),
             bytes
         );
         assert_eq!(item.payload["tool"]["kind"], "image");
@@ -1225,8 +1226,9 @@ mod tests {
                 SessionEvent::ItemCompleted(item) => {
                     assert_eq!(item.payload["tool"]["kind"], "image");
                     let blob = item.output_blob.as_ref().unwrap();
-                    let bytes = std::fs::read(mapper.outputs.directory.join(blob.hash.to_string()))
-                        .unwrap();
+                    let bytes =
+                        std::fs::read(mapper.outputs.directory().join(blob.hash.to_string()))
+                            .unwrap();
                     assert_eq!(Hash::of(&bytes), blob.hash);
                     images.push((item.payload["tool"]["media_type"].clone(), bytes));
                 }
@@ -1298,6 +1300,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orch-acp-mapper-{}", orch_types::new_id()));
         Mapper::new(
             MapperConfig {
+                output_capture_bytes: orch_agent_contract::output::DEFAULT_CAPTURE_BYTES,
                 thread_id: orch_types::new_id(),
                 segment_id: orch_types::new_id(),
                 program,

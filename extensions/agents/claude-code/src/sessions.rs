@@ -1184,6 +1184,7 @@ mod tests {
     fn spec() -> SessionSpec {
         SessionSpec {
             settings: SessionSettings {
+                output_capture_bytes: 67_108_864,
                 native_model: None,
                 agent_id: new_id(),
                 thread_id: new_id(),
@@ -1210,6 +1211,7 @@ mod tests {
                 subagent_limits: Default::default(),
                 prompt_cache_ttl: None,
                 background_wake: true,
+                web_action_wait_secs: 120,
                 image_generation: None,
                 memory: Some(SessionMemory {
                     directory: "/workspace/web/.orch/memory".into(),

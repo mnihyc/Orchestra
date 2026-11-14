@@ -181,6 +181,8 @@ async fn session_on(line: Line) {
         match controller.progress(command) {
             Some(
                 orch_link::commands::Progress::Accepted
+                | orch_link::commands::Progress::Running
+                | orch_link::commands::Progress::Released
                 | orch_link::commands::Progress::Succeeded(_)
                 | orch_link::commands::Progress::Failed(_),
             ) => {
