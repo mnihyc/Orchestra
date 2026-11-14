@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-api-contract --lib
+test -p orch-db --lib -- queries::identity::tests::
+test -p orch-db --test key_activity
+test -p orch-api-core --lib
+test -p orch-api-core --test account_key_proofs --test kadmin_tokens --test service_key_issuance --test transaction_guards --test action_guard_resolver_deadlines
+test -p orch-engine --test trace_retention
+test -p orch-gateway-core --test gateway_catalogue --test ports_walk

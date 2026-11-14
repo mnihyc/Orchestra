@@ -73,7 +73,7 @@ async fn wrapped_import_ack_checks_the_actual_native_frame_and_sealed_budget_wit
     let mut conn = world.conn().await;
     sqlx::query("UPDATE environments SET facts=jsonb_set(facts,'{mcp_found}',$2::jsonb) WHERE id=$1").bind(environment).bind(json!([{"source":"codex","scope":"user","name":"search","directory":null,"transport":"stdio","digest":"one","tools":2}])).execute(&mut *conn).await?;
     let key = new_id();
-    let bearer = authentication::new_token(authentication::API_TOKEN_PREFIX);
+    let bearer = authentication::new_api_token(key);
     let hash = authentication::token_hash(&bearer);
     let scope: KeyScope = serde_json::from_value(
         json!({"rules":[{"target":{"kind":"environment","id":environment,"reach":"self"},"resources":["environment","mcp_server"],"allow":[{"operation":MCP_IMPORT.operation,"actions":["manage"]}]}]}),

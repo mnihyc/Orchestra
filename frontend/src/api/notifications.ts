@@ -78,6 +78,7 @@ export const notifiersKey = ['notifiers'] as const;
 export const notifiersQuery = queryOptions({
   queryKey: notifiersKey,
   queryFn: ({ signal }): Promise<Notifier[]> => ok(api.GET('/notifiers', { signal })),
+  staleTime: Number.POSITIVE_INFINITY,
 });
 
 export const notificationChannelsKey = ['notification-channels'] as const;

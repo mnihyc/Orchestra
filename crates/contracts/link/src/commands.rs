@@ -1089,7 +1089,7 @@ commands! {
     /// Makes a directory.
     FsMkdir = "fs.mkdir": ENVIRONMENT, Environment, 60, None, FsMkdir => foreign::FileStat;
     /// Renames or moves a file or a directory.
-    FsRename = "fs.rename": ENVIRONMENT, Environment, 60, None, FsRename => foreign::FileStat;
+    FsRename = "fs.rename": ENVIRONMENT, Environment, 60, None, FsRename => foreign::FileRenameResult;
     /// Removes a file or a directory.
     FsRemove = "fs.remove": ENVIRONMENT, Environment, 60, None, FsRemove => Empty;
     /// Copies a file, or a directory with what is in it.
@@ -1470,6 +1470,9 @@ pub struct AgentPtyOpenResult {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentRuntime {
+    /// Keep this environment-hosted connection's own home in its persistent home volume.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub environment_home: bool,
     /// Declared runtime resources, enforced where its actual process controls support them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<orch_driver_contract::runtime::Resources>,
@@ -1867,6 +1870,8 @@ pub struct SessionOpen {
     /// Whether owned background completions may wake this session.
     #[serde(default = "orch_agent_contract::session::background_wake_default")]
     pub background_wake: bool,
+    /// Seconds before a native web action without an end is closed with its reason.
+    pub web_action_wait_secs: u64,
     /// A native image-generation override; absent keeps the selected program's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_generation: Option<bool>,
@@ -5114,7 +5119,7 @@ mod tests {
             "sandbox_mode": "workspace",
             "available_models": [], "side_reading": null, "workspace_configuration": null,
             "subagent_limits": {"at_once": 8, "depth": 1},
-            "background_wake": true,
+            "web_action_wait_secs": 120, "background_wake": true,
             "instructions": "You are working inside Orch.",
             "memory": { "directory": "/workspace/web/.orch/memory", "kept_by": "agent" },
             "arrangement": "separated",

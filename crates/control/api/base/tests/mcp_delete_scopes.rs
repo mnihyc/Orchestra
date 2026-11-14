@@ -13,7 +13,7 @@ use orch_access_contract::{decisions::ObjectRef, key_scope::KeyScope, permission
 use orch_api_contract::resources::McpServerDelete;
 use orch_api_core::{
     dispatch::StoredCommand,
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
     thread_access::AuthzAccess,
 };
@@ -39,7 +39,7 @@ async fn key(world: &World, user: Id, rules: Vec<Json>, seconds: i64) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {

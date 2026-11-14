@@ -53,8 +53,8 @@ impl HandoverFixture {
             "target":{"kind":"provider","id":login.provider,"reach":"self"},
             "allow":[{"operation":RETURN,"actions":["manage"]}]
         }]}))?;
-        let token = new_token(API_TOKEN_PREFIX);
         let token_id = new_id();
+        let token = new_api_token(token_id);
         identity::create_api_token_scoped(
             &mut conn,
             &identity::NewApiToken {

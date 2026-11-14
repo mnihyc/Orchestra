@@ -34,6 +34,8 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { useState, type ReactNode } from 'react';
 import { ResourceDetails } from '@/features/resources/DetailSections';
 import { RuntimeChange } from '@/features/resources/TechnicalValue';
+import { runtimeDetail } from '@/features/resources/runtimeDetail';
+import { canForce, stepWords } from '@/features/resources/runtimeForce';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 import { UserChip } from '@/ui/UserChip';
 
@@ -111,7 +113,14 @@ function RuntimeDetails({ provider, configuration, children }: { provider: Provi
   const { machine, runtime } = provider;
   const [stopping, setStopping] = useState(false);
   const cache=useQueryClient();
-  const control = useMutation({ mutationFn: (action:'start'|'stop') => action === 'start' ? startRuntime(provider.id) : stopRuntime(provider.id, true), onSuccess: (updated) => { setStopping(false);cache.setQueryData(providerQuery(provider.id).queryKey,updated); } });
+  // The plain stop was refused for a reason that doing it by force changes: it is offered by force, until the dialog is closed.
+  const [forcing, setForcing] = useState(false);
+  const control = useMutation({
+    mutationFn: (action:'start'|'stop'|'force') => action === 'start' ? startRuntime(provider.id) : stopRuntime(provider.id, true, action === 'force'),
+    onSuccess: (updated) => { setStopping(false);setForcing(false);cache.setQueryData(providerQuery(provider.id).queryKey,updated); },
+    onError: (error, action) => { if (action === 'stop' && canForce(error)) setForcing(true); },
+  });
+  const stopLabel = forcing ? t('providerRuntime.stopForce') : t('providerRuntime.stop');
 
   if (provider.runtime_support?.lifecycle === 'attach' && machine !== null) {
     return (
@@ -144,6 +153,7 @@ function RuntimeDetails({ provider, configuration, children }: { provider: Provi
         icon={<PlugZap aria-hidden />}
         title={t('providers.runtime.none')}
       />
+      {provider.status === 'needs_setup' && provider.status_detail !== null && <InlineAlert tone="warning">{provider.status_detail}</InlineAlert>}
       {configuration && <RuntimeConfiguration key={provider.id} provider={provider} />}
       {(provider.runtime_support?.lifecycle==='unit' || machine===null && provider.runtime_support?.lifecycle!=='attach') && <Button admin={adminSpec(provider, 'provider.manage')} pending={control.isPending} onClick={() => control.mutate('start')}>{t('providerRuntime.start')}</Button>}
       {control.error && <ErrorAlert error={control.error} />}
@@ -160,6 +170,8 @@ function RuntimeDetails({ provider, configuration, children }: { provider: Provi
           label={t('providers.runtime.title')}
           rows={[
             { name: t('providers.runtime.state'), value: providerRuntimeState(runtime.state,t) },
+            ...(runtime.job === null ? [] : [{ name: t('providers.runtime.now'), value: t('providers.runtime.step', { step: stepWords(runtime.job.kind === 'environment_remove', runtime.job.phase, t), percent: runtime.job.percent }) }]),
+            ...(runtime.detail === null ? [] : [{ name: t('providers.runtime.reason'), value: runtimeDetail(runtime.detail, t) }]),
             { name: t('providers.runtime.host'), value: runtime.host === null ? t('providers.runtime.noHost') : <ResourceChip subject={{ kind: 'host', host: runtime.host }} /> },
             { name: t('providers.runtime.template'), value: <span className="flex flex-wrap items-center gap-1"><ResourceChip subject={{ kind: 'template', template: runtime.template }} hint={false} />{runtime.template.owner !== null && <UserChip user={runtime.template.owner} />}</span> },
             ...(runtime.idle_stop_at === null ? [] : [{ name: t('providers.runtime.idleStop'), value: formatDateTime(runtime.idle_stop_at, context, now) }]),
@@ -174,12 +186,12 @@ function RuntimeDetails({ provider, configuration, children }: { provider: Provi
             ))}
           </ul>
         )}
-        <div className="flex flex-wrap gap-2"><Button admin={adminSpec(provider, 'provider.manage')} pending={control.isPending} disabled={runtime.state !== 'stopped' && runtime.state !== 'failed'} onClick={() => control.mutate('start')}>{t('providerRuntime.start')}</Button><Button disabled={runtime.state !== 'running'} onClick={() => setStopping(true)}>{t('providerRuntime.stop')}</Button></div>
+        <div className="flex flex-wrap gap-2"><Button admin={adminSpec(provider, 'provider.manage')} pending={control.isPending} disabled={runtime.state !== 'stopped' && runtime.state !== 'failed'} onClick={() => control.mutate('start')}>{t('providerRuntime.start')}</Button><Button disabled={runtime.state === 'stopped' || runtime.state === 'failed'} onClick={() => setStopping(true)}>{t('providerRuntime.stop')}</Button></div>
         {control.error && <ErrorAlert error={control.error} />}
       </Section>
       {children}
       {configuration && <RuntimeConfiguration key={provider.id} provider={provider} />}
-      <ConfirmDialog admin={adminSpec(provider, 'provider.manage')} open={stopping} onOpenChange={setStopping} title={t('providerRuntime.stop')} confirmLabel={t('providerRuntime.stop')} pending={control.isPending} error={control.error} onConfirm={() => control.mutate('stop')}>{t('providerRuntime.stopHelp', { count:provider.running_threads })}</ConfirmDialog>
+      <ConfirmDialog admin={adminSpec(provider, 'provider.manage')} open={stopping} onOpenChange={(open) => { setStopping(open); if (!open) setForcing(false); }} title={t('providerRuntime.stop')} confirmLabel={stopLabel} pending={control.isPending} error={control.error} onConfirm={() => control.mutate(forcing ? 'force' : 'stop')}>{forcing ? t('providerRuntime.forceHelp') : t('providerRuntime.stopHelp', { count:provider.running_threads })}</ConfirmDialog>
     </div>
   );
 }

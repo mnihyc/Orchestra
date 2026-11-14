@@ -43,7 +43,7 @@ fn endpoint(protocol: &str, base_url: &str, options: Json) -> Upstream {
 
 fn api_body(name: &str, home: Id) -> CreateProvider {
     CreateProvider::Api {
-        runtime_machine_id: None,
+        runtime_location: None,
         name: name.to_owned(),
         home_id: home,
         access: None,
@@ -151,12 +151,16 @@ async fn a_key_and_a_native_sign_in_have_independent_keepers_and_directory_runti
     let runtime = directory_keeper(&world, &c.boss, c.acme, "Harness runtime").await;
     let mut api = api_body("Separated locations", c.acme);
     if let CreateProvider::Api {
-        runtime_machine_id,
+        runtime_location,
         key_machine_id,
         ..
     } = &mut api
     {
-        *runtime_machine_id = Some(runtime);
+        *runtime_location = Some(
+            orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                machine_id: runtime,
+            },
+        );
         *key_machine_id = Some(keeper);
     }
     let made = make(&world, &c.boss, &api).await;
@@ -246,7 +250,11 @@ async fn a_key_and_a_native_sign_in_have_independent_keepers_and_directory_runti
         agent_id: agent,
         access: None,
         arrangements: None,
-        runtime_machine_id: Some(runtime),
+        runtime_location: Some(
+            orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                machine_id: runtime,
+            },
+        ),
         key_machine_id: Some(keeper),
         config: None,
         sign_in: None,
@@ -538,12 +546,16 @@ async fn a_providers_arrangement_choices_and_writes_use_its_credential_keepers_p
     let keeper = directory_keeper(&world, &c.boss, c.acme, "Credential keeper").await;
     let mut body = api_body("Policy-aware provider", c.acme);
     if let CreateProvider::Api {
-        runtime_machine_id,
+        runtime_location,
         key_machine_id,
         ..
     } = &mut body
     {
-        *runtime_machine_id = Some(keeper);
+        *runtime_location = Some(
+            orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                machine_id: keeper,
+            },
+        );
         *key_machine_id = Some(keeper);
     }
     let provider = make(&world, &c.boss, &body).await;
@@ -640,7 +652,7 @@ async fn make(world: &World, by: &Who, body: &CreateProvider) -> Provider {
 #[tokio::test]
 async fn legacy_manage_only_reads_provider_metadata_without_gaining_view_or_secret_values() {
     use orch_access_contract::permissions::Permission;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token};
     const FACT: &str = "provider-view-only-private-fact";
     let world = world().await;
@@ -680,11 +692,12 @@ async fn legacy_manage_only_reads_provider_metadata_without_gaining_view_or_secr
         !grant.carries(Permission::ProviderView),
         "the fixture delegates no View permission"
     );
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = orch_types::new_id();
+    let token = new_api_token(issued_key_id);
     create_api_token(
         &mut *world.conn().await,
         &NewApiToken {
-            id: orch_types::new_id(),
+            id: issued_key_id,
             user_id: c.boss.id(),
             name: "Legacy metadata management",
             token_hash: &token_hash(&token),
@@ -1190,7 +1203,7 @@ async fn a_provider_is_ready_when_it_has_a_key_and_an_enabled_model_and_not_befo
     assert_eq!(status(&world).await, ProviderStatus::Ready);
     // A provider that takes no key is ready as soon as it has a model.
     let keyless = CreateProvider::Api {
-        runtime_machine_id: None,
+        runtime_location: None,
         name: "Local".to_owned(),
         home_id: c.acme,
         access: None,
@@ -1446,7 +1459,7 @@ async fn what_is_wrong_with_a_new_provider_is_told_member_by_member() {
     assert_eq!(count, 0, "nothing was made");
     // A subscription of a profile that is not there is refused, naming the member.
     let subscription = CreateProvider::Subscription {
-        runtime_machine_id: None,
+        runtime_location: None,
         key_machine_id: None,
         name: "Team Pro".to_owned(),
         home_id: c.acme,
