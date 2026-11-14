@@ -14,7 +14,7 @@ use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::goals::{
     GoalAction, ThreadGoalCreate, ThreadGoalCreateBody, ThreadGoalUpdate, ThreadGoalUpdateBody,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::token_hash;
 use orch_authz::Caller;
 use orch_db::queries::{goals, identity};
 use orch_types::{Id, Json, new_id};
@@ -33,9 +33,10 @@ fn rule(operation: &str, thread: Id, actions: &[&str]) -> Json {
 async fn key(s: &Scene, actor: &Who, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
+    let issued_key_id = new_id();
     let value = Key {
-        id: new_id(),
-        secret: new_token(API_TOKEN_PREFIX),
+        id: issued_key_id,
+        secret: new_api_token(issued_key_id),
     };
     identity::create_api_token_scoped(
         &mut *s.rig.world.conn().await,

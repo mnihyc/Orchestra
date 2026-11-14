@@ -18,6 +18,7 @@ import { ProviderDangerZone } from '@/features/resources/providers/DangerZone';
 import { ProviderKey } from '@/features/resources/providers/Key';
 import { ProviderModels } from '@/features/resources/providers/Models';
 import { ProviderRuntime } from '@/features/resources/providers/Runtime';
+import { ProviderConnectionEnvironment } from './ConnectionEnvironment';
 import { ProviderSettings } from '@/features/resources/providers/Settings';
 import { providerState } from '@/features/resources/providers/state';
 import { ProviderThreads } from '@/features/resources/providers/Threads';
@@ -133,6 +134,7 @@ export function ProviderScreen({ providerId, tab, onTab,usageSearch,onUsageSearc
         actions={<HeadingActs admin={adminSpec(provider, 'provider.manage')} name={provider.name} primary={shown === 'settings' ? null : page.primary} edit={page.edit} menu={page.menu} />}
       />
       <ProviderSetupNotice provider={provider} manage={manage} currentTab={shown} onTab={(next) => onTab(providerTab(next) ?? 'overview')} />
+      <ProviderConnectionEnvironment provider={provider}/>
       <CopySetupResult kind="provider" id={provider.id} />
       {query.isError && <ErrorAlert error={query.error} action={<Button size="sm" pending={query.isRefetching} onClick={()=>void query.refetch()}>{t('common.tryAgain')}</Button>}/>}
       <Tabs label={t('providers.tabs.label')} value={shown} onValueChange={onTab} tabs={tabs} panelClassName="pt-3" />

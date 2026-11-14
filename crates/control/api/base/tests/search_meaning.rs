@@ -2125,14 +2125,15 @@ async fn a_million_document_corpus_reports_words_fused_and_agent_latency() {
 }
 
 async fn stream_key(s: &Scene, document: Id) -> String {
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     let scope: orch_access_contract::key_scope::KeyScope = serde_json::from_value(json!({"rules":[{"target":{"kind":"document","id":document,"reach":"self"},"allow":[{"operation":"SearchStreamList","actions":["read"]}]}]})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     orch_db::queries::identity::create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &orch_db::queries::identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: s.ada.id(),
             name: "Native semantic reader",
             token_hash: &token_hash(&secret),

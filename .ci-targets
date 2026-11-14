@@ -1,0 +1,5 @@
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test provider_harness --test provider_setup --test provider_managed
+test -p orch-engine --test credentials
+test -p orch-connector-core --test credentials --test provider_role

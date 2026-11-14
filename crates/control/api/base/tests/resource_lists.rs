@@ -487,7 +487,7 @@ async fn the_drivers_are_the_ones_the_hosts_report_counted_by_host_and_described
 
 fn api_body(name: &str, home: Id) -> CreateProvider {
     CreateProvider::Api {
-        runtime_machine_id: None,
+        runtime_location: None,
         name: name.to_owned(),
         home_id: home,
         access: Some(NewResourceAccess::OnlyMe),

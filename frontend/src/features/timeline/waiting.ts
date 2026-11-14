@@ -9,6 +9,7 @@ import type { TFunction } from 'i18next';
 import type { Thread } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { sandboxWords } from '@/features/resources/SandboxReadiness';
+import { sourceFailure } from '@/features/source/words';
 
 const APPROVAL_KEYS=['threadConfinement.approvalNotAllowed','threadConfinement.approvalUnsupported'] as const;
 const CONFINEMENT_KEYS=[...APPROVAL_KEYS,'threadConfinement.sandboxUnsupported','agentHistory.removingDetail','agentHistory.sideNeedsImport'] as const;
@@ -25,8 +26,19 @@ export function isAgentHistoryRemoving(thread: Thread): boolean {
   return thread.state === 'blocked' && thread.blocked?.detail === i18n.getFixedT('en')('agentHistory.removingDetail');
 }
 
+/** The sentence a thread is blocked with when its source could not be prepared; the reason is the code the source keeps. */
+const SOURCE_FAILED = /^Source preparation failed(?: \(([a-z0-9._-]+)\))?\. Choose Prepare again to retry\.$/u;
+
+/** The reason a source could not be prepared, in words with the act that fits, from the sentence a blocked thread carries; null for any other detail. */
+function sourceFailedWords(raw: string, t: TFunction): string | null {
+  const failed = SOURCE_FAILED.exec(raw);
+  return failed === null ? null : sourceFailure(t, failed[1] ?? 'workspace.source_failed');
+}
+
 /** Only known engine explanations are translated; unknown/native error details remain verbatim. */
 export function blockedDetail(raw:string,t:TFunction):string {
+  const sourceFailed = sourceFailedWords(raw, t);
+  if (sourceFailed !== null) return sourceFailed;
   const programVersion = MACHINE_PROGRAM_VERSION.exec(raw);
   if (programVersion?.[1] !== undefined && programVersion[2] !== undefined && programVersion[3] !== undefined) {
     return t('environmentTools.versionMismatch', { machine: programVersion[1],
@@ -73,6 +85,68 @@ function lockWords(kind: string, t: TFunction): string {
   }
 }
 
+/** What a kind of command that a start waits for is doing, in words; null for a kind that has none. */
+function startWork(command: string, t: TFunction): string | null {
+  switch (command) {
+    case 'fs.stat': return t('thread.starting.work.fsStat');
+    case 'fs.mkdir': return t('thread.starting.work.fsMkdir');
+    case 'git.prepare': return t('thread.starting.work.gitPrepare');
+    case 'git.worktree': return t('thread.starting.work.gitWorktree');
+    case 'fs.record': return t('thread.starting.work.fsRecord');
+    case 'fs.materialize': return t('thread.starting.work.fsMaterialize');
+    case 'session.open': return t('thread.starting.work.sessionOpen');
+    default: return null;
+  }
+}
+
+/** The other work that holds a start up, as a noun, so that it reads after "waiting behind". */
+function otherWork(command: string, t: TFunction): string {
+  switch (command) {
+    case 'fs.record': return t('thread.starting.other.fsRecord');
+    case 'git.prepare': return t('thread.starting.other.gitPrepare');
+    case 'git.worktree': return t('thread.starting.other.gitWorktree');
+    case 'fs.materialize': return t('thread.starting.other.fsMaterialize');
+    case 'fs.snapshot': return t('thread.starting.other.fsSnapshot');
+    case 'fs.mkdir': return t('thread.starting.other.fsMkdir');
+    case 'fs.write': return t('thread.starting.other.fsWrite');
+    case 'env.attach': return t('thread.starting.other.envAttach');
+    default: return t('thread.starting.other.work');
+  }
+}
+
+/** The step a thread that starts is waiting for, in words. */
+function startingStepWords(thread: Thread, t: TFunction, provider: string, agent: string): string {
+  switch (thread.starting_step) {
+    case 'environment':
+      return t(thread.environment?.status === 'provisioning' ? 'thread.starting.environmentMaking' : 'thread.starting.environment');
+    case 'source':
+      return t('thread.starting.source');
+    case 'recording':
+      return t('thread.starting.recording');
+    case 'files':
+      return t('thread.starting.files');
+    case 'provider':
+      return t('thread.starting.provider', { provider });
+    case 'harness':
+      return t('thread.starting.harness', { agent });
+    case 'credential':
+      return t('thread.starting.credential', { provider });
+    case 'session':
+      return t('thread.starting.session');
+    case 'turn':
+      return t('thread.starting.turn', { agent });
+    default:
+      return t('thread.starting.none');
+  }
+}
+
+/** When the step a starting thread waits for began (an instant, as the server wrote it), or null when it waits for nothing in
+ * particular: the status line draws the time that has gone by since, beside the words of {@link waitingWords}. */
+export function waitingSince(thread: Thread | null): string | null {
+  if (thread?.state !== 'starting') return null;
+  return thread.starting_since ?? null;
+}
+
 /** A resource pause keeps its note apart from the fixed operational status. */
 function pauseNote(raw: string, prefix: string): string | null {
   return raw.startsWith(`${prefix} · `) ? raw.slice(prefix.length + 3) : null;
@@ -85,26 +159,12 @@ export function waitingWords(thread: Thread | null, t: TFunction): string | null
   const provider = thread.binding?.provider.name ?? '';
   const agent = thread.binding?.agent.name ?? '';
   if (thread.state === 'starting') {
-    switch (thread.starting_step) {
-      case 'environment':
-        return t('thread.starting.environment');
-      case 'source':
-        return t('thread.starting.source');
-      case 'files':
-        return t('thread.starting.files');
-      case 'provider':
-        return t('thread.starting.provider', { provider });
-      case 'harness':
-        return t('thread.starting.harness', { agent });
-      case 'credential':
-        return t('thread.starting.credential', { provider });
-      case 'session':
-        return t('thread.starting.session');
-      case 'turn':
-        return t('thread.starting.turn', { agent });
-      default:
-        return t('thread.starting.none');
-    }
+    const step = startingStepWords(thread, t, provider, agent);
+    const work = thread.starting_work ?? null;
+    if (work === null) return step;
+    // The command the step waits for, once it has lasted: more exact than the step, and, when other work holds it up, that too.
+    const what = startWork(work.command, t) ?? step;
+    return work.behind === null ? what : t('thread.starting.behind', { what, other: otherWork(work.behind, t) });
   }
   if (thread.state === 'blocked' && thread.blocked !== null) {
     if (isAgentHistoryRemoving(thread)) return t('agentHistory.removing');
@@ -159,8 +219,12 @@ export function waitingWords(thread: Thread | null, t: TFunction): string | null
         return t('thread.blocked.workspace_trust', common);
       case 'switching':
         return t('thread.blocked.switching');
-      case 'error':
+      case 'error': {
+        // A source that could not be prepared says why and what to do, not that the thread stopped on an error.
+        const sourceFailed = sourceFailedWords(raw, t);
+        if (sourceFailed !== null) return t('source.prepare.stopped', { reason: sourceFailed });
         return t('thread.blocked.error', common);
+      }
     }
   }
   return null;
