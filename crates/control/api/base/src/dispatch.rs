@@ -645,15 +645,34 @@ impl Dispatcher {
                 && inserted
                 && let Some(authority) = &command.authority
             {
-                let current = authority
-                    .current_callers(
-                        &mut tx,
-                        &row,
-                        inner.clock.as_ref(),
-                        &crate::thread_access::AuthzAccess::new(inner.clock.clone()),
-                    )
-                    .await
-                    .map_err(|error| DispatchError::BeforeEffect(Box::new(error)))?;
+                // A command whose issue-time check was made on this very transaction, under the same row
+                // fence, is not read all over again after its insertion: what the insertion can have changed
+                // is the stored row (its body as the database keeps it, its call, its provider), which is
+                // what the rows around the command say, and the source it was made from cannot have moved
+                // under the fence. For a summary the second reading of the whole source is the longest wait
+                // a person's thread can be held for.
+                let current = match (authority.checked_at_issue(), issue_callers.as_ref()) {
+                    (true, Some(issued)) => {
+                        if authority
+                            .refused_without_fence(&mut tx, &row)
+                            .await
+                            .map_err(|error| DispatchError::BeforeEffect(Box::new(error)))?
+                        {
+                            None
+                        } else {
+                            Some(issued.clone())
+                        }
+                    }
+                    _ => authority
+                        .current_callers(
+                            &mut tx,
+                            &row,
+                            inner.clock.as_ref(),
+                            &crate::thread_access::AuthzAccess::new(inner.clock.clone()),
+                        )
+                        .await
+                        .map_err(|error| DispatchError::BeforeEffect(Box::new(error)))?,
+                };
                 let allowed = current
                     .is_some_and(|callers| issuing_deadlines_allow(&callers, inner.clock.as_ref()));
                 if !allowed {
@@ -1173,6 +1192,21 @@ impl Link {
             if let Some(value) = &private.authority {
                 let authority: orch_engine::commands::CommandAuthority =
                     serde_json::from_value(value.clone()).map_err(|_| internal())?;
+                // Whatever the rows around the command already decide is decided before the
+                // source's rows are taken: a command that is refused for that reason never holds
+                // a person's thread, or any place above it, while the refusal is made. A command
+                // that passes (or that this cannot decide) takes them and is checked as before.
+                if authority
+                    .refused_without_fence(&mut tx, &row)
+                    .await
+                    .unwrap_or(false)
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        format!("the accepted {operation} command is no longer authorized"),
+                    )
+                    .into());
+                }
                 authority
                     .lock_native_source(&mut tx)
                     .await

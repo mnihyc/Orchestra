@@ -12,11 +12,16 @@ use std::collections::BTreeMap;
 
 /// The ordinary short answer budget for titles and descriptions.
 pub const OUTPUT_TOKENS: i64 = 120;
+/// The room a model that reasons is left for its reasoning, beyond the answer's own allowance.
+pub const REASONING_TOKENS: i64 = 2_000;
 /// Ordinary input planning budget; an explicitly larger budget may use the model's available window.
 pub const CONTEXT_TOKENS: u32 = 32_000;
 
 const fn output_tokens() -> i64 {
     OUTPUT_TOKENS
+}
+const fn reasoning_tokens() -> i64 {
+    REASONING_TOKENS
 }
 const fn context_tokens() -> u32 {
     CONTEXT_TOKENS
@@ -33,9 +38,13 @@ pub struct Config {
     /// Model request options in the selected endpoint's format; the host applies current model defaults.
     #[serde(default = "empty_params")]
     pub params: Json,
-    /// The maximum response token count.
+    /// The most tokens the visible answer may have.
     #[serde(default = "output_tokens")]
     pub max_output_tokens: i64,
+    /// The room a model that reasons is left for its reasoning, added to the answer's allowance for it; a model
+    /// that does not reason gets none. Zero leaves no room.
+    #[serde(default = "reasoning_tokens")]
+    pub reasoning_tokens: i64,
     /// Input token budget, including the instruction and frame; bounded by the model window less output.
     #[serde(default = "context_tokens")]
     pub context_tokens: u32,
@@ -71,6 +80,42 @@ impl Config {
         }
     }
 
+    /// The completion of a model with what its parameters say of reasoning: a model that reasons is left room
+    /// for it beyond `answer_tokens`, and is asked for the lowest effort it offers unless `params` choose one.
+    #[must_use]
+    pub fn completion_with(
+        &self,
+        reasoning: &crate::completion::Reasoning,
+        system: String,
+        input: String,
+        answer_tokens: i64,
+    ) -> ProviderComplete {
+        let mut request = self.completion(
+            system,
+            input,
+            answer_tokens.saturating_add(self.reasoning_room(reasoning.reasons)),
+        );
+        if reasoning.reasons
+            && let Some(effort) = &reasoning.lowest_effort
+            && let Some(params) = request.params.as_mut()
+            && !orch_provider_contract::calls::names_effort(params)
+        {
+            params["effort"] = serde_json::json!(effort);
+        }
+        request
+    }
+
+    /// The output a request may spend: the answer's allowance and, for a model that reasons, its room.
+    #[must_use]
+    pub fn output_reserve(&self, reasons: bool) -> i64 {
+        self.max_output_tokens
+            .saturating_add(self.reasoning_room(reasons))
+    }
+
+    fn reasoning_room(&self, reasons: bool) -> i64 {
+        if reasons { self.reasoning_tokens } else { 0 }
+    }
+
     /// Reads the schema's configuration and refuses an empty name or nonpositive budget.
     pub fn read(value: &Json) -> Result<Self, SummarizeError> {
         let config: Self = serde_json::from_value(value.clone()).map_err(|_| {
@@ -78,6 +123,7 @@ impl Config {
         })?;
         if config.model_name.trim().is_empty()
             || config.max_output_tokens <= 0
+            || config.reasoning_tokens < 0
             || config.context_tokens == 0
         {
             return Err(SummarizeError::Config(
@@ -101,6 +147,7 @@ pub fn descriptor() -> SummarizerDescriptor {
     for name in ["max_output_tokens", "context_tokens"] {
         schema["properties"][name]["minimum"] = serde_json::json!(1);
     }
+    schema["properties"]["reasoning_tokens"]["minimum"] = serde_json::json!(0);
     schema["properties"]["model_name"]["pattern"] = serde_json::json!("\\S");
     schema["properties"]["params"] = serde_json::json!({
         "type": "object",
@@ -126,6 +173,31 @@ pub fn descriptor() -> SummarizerDescriptor {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_model_that_reasons_is_left_room_and_asked_for_its_lowest_effort_unless_params_choose()
+    -> Result<(), SummarizeError> {
+        use crate::completion::Reasoning;
+        let id = orch_types::new_id();
+        let config = Config::read(&json!({"provider_id":id,"model_name":"small"}))?;
+        let reasons = Reasoning {
+            reasons: true,
+            lowest_effort: Some("low".to_owned()),
+        };
+        let asked = config.completion_with(&reasons, "s".into(), "i".into(), 120);
+        assert_eq!(asked.max_output_tokens, 120 + REASONING_TOKENS);
+        assert_eq!(asked.params, Some(json!({"effort":"low"})));
+        let plain = config.completion_with(&Reasoning::default(), "s".into(), "i".into(), 120);
+        assert_eq!(plain.max_output_tokens, 120);
+        assert_eq!(plain.params, Some(json!({})));
+        let chosen = Config::read(&json!({
+            "provider_id":id,"model_name":"small","params":{"effort":"high"},"reasoning_tokens":500
+        }))?;
+        let asked = chosen.completion_with(&reasons, "s".into(), "i".into(), 120);
+        assert_eq!(asked.max_output_tokens, 620);
+        assert_eq!(asked.params, Some(json!({"effort":"high"})));
+        Ok(())
+    }
 
     #[test]
     fn input_has_one_positive_token_default_and_output_is_unchanged() -> Result<(), SummarizeError>

@@ -56,9 +56,23 @@ use tower::ServiceExt;
 /// says so, and that record is filled by whichever thread reaches the callsite first, which in a process of many tests
 /// that set their own subscribers need not be a thread that has this test's. A request has been found at the row the
 /// case holds, with its two first boundaries behind it, and the log of events held none of them.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Boundaries {
     entered: std::sync::Mutex<Vec<(&'static str, &'static str, std::time::Instant)>>,
+    held: std::sync::Mutex<Option<Hold>>,
+}
+
+/// What a case runs where the followed request waits for it: told the operation and the phase.
+type Hold = Arc<
+    dyn Fn(&'static str, &'static str) -> futures::future::BoxFuture<'static, ()> + Send + Sync,
+>;
+
+impl std::fmt::Debug for Boundaries {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Boundaries")
+            .field("entered", &self.entered)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Boundaries {
@@ -66,6 +80,22 @@ impl Boundaries {
     #[must_use]
     pub fn new() -> Arc<Self> {
         Arc::default()
+    }
+
+    /// Runs `hold` where the followed request reaches a place that waits for a case (a read that is about to
+    /// check what it read again): the request goes on when it is done. A case that moves what a read showed
+    /// between its read and its check does it there, so that it happens at that moment and not near it.
+    pub fn hold(
+        &self,
+        hold: impl Fn(&'static str, &'static str) -> futures::future::BoxFuture<'static, ()>
+        + Send
+        + Sync
+        + 'static,
+    ) {
+        *self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(hold));
     }
 
     /// Whether the followed request has entered `phase` of `operation`'s native boundary.
@@ -107,6 +137,22 @@ tokio::task_local! {
 /// `work` itself awaits, not for tasks that it spawns.
 pub async fn follow<F: std::future::Future>(log: Arc<Boundaries>, work: F) -> F::Output {
     FOLLOWED.scope(log, work).await
+}
+
+/// Lets a case that holds this place run before the followed request goes on; no case holds it in service.
+pub async fn hold_boundary(operation: &'static str, phase: &'static str) {
+    let held = FOLLOWED
+        .try_with(|log| {
+            log.held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        })
+        .ok()
+        .flatten();
+    if let Some(held) = held {
+        held(operation, phase).await;
+    }
 }
 
 /// Writes a native boundary entered by the request that is being followed, if one is.

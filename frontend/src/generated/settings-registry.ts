@@ -8980,6 +8980,29 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
+    "key": "api.read_repeats",
+    "title": "Repeated reads",
+    "description": "How many times a read is made again, in place of being refused, when what it showed has moved while it was being answered; 0 makes no repeat.",
+    "group": "system",
+    "schema": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 3,
+    "example": 5,
+    "text_key": "day100.builtin.api.read_repeats",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
     "key": "release.check_days",
     "title": "Look for a release",
     "description": "Days between read-only checks of the operator's configured release source; 0 is off. A check sends no installation statistics and installs nothing.",

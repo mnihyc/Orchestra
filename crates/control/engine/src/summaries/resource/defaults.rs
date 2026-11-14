@@ -65,7 +65,7 @@ pub async fn manual_default(
             };
             let Ok(tokens) = orch_summarizer_model::context::fit_window(
                 config.context_tokens,
-                config.max_output_tokens,
+                config.output_reserve(parameters.reasons()),
                 parameters
                     .context_open()
                     .or(parameters.context_window.filter(|window| *window > 0)),

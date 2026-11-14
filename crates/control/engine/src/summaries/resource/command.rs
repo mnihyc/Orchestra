@@ -270,6 +270,18 @@ impl std::fmt::Debug for Authority {
         f.write_str("SummaryCommand([private])")
     }
 }
+/// The call row that owns a command: its provider, payer, issuer and the entry that let it use the model.
+type StoredCall = (Id, Option<Id>, Option<Id>, Option<Id>);
+/// What the part of the check that holds no source row found.
+enum Front {
+    /// Work started by a setting: its own source decides the rest.
+    Automatic,
+    /// A person's act: the stored call and the model request it is to send.
+    Work {
+        call: Option<StoredCall>,
+        request: Box<ProviderComplete>,
+    },
+}
 impl Authority {
     pub(crate) fn belongs_to(&self, node: Id, call: Id, work: Option<&Work>) -> bool {
         self.call == call
@@ -298,7 +310,9 @@ impl Authority {
             automatic: None,
             call: command.id,
             machine: command.machine,
-            body: Hash::of(&serde_json::to_vec(&command.body)?),
+            // PostgreSQL keeps an object's members in its own order, so the body is identified
+            // without regard to member order, as every other stored command body is.
+            body: crate::jobs::command_identity::hash(&command.body)?,
             endpoint,
         })
     }
@@ -320,7 +334,7 @@ impl Authority {
             automatic: Some(source),
             call: command.id,
             machine: command.machine,
-            body: Hash::of(&serde_json::to_vec(&command.body)?),
+            body: crate::jobs::command_identity::hash(&command.body)?,
             endpoint,
         })
     }
@@ -331,12 +345,14 @@ impl Authority {
             _ => Err(refused()),
         }
     }
-    async fn current(
+    /// What the stored command, its provider, its key machine, the call that owns it and the
+    /// model's present parameters say, which needs no native source row held: a command that
+    /// fails here is refused whatever its source. `None` is that refusal.
+    async fn front(
         &self,
         conn: &mut Conn,
         command: &NewCommand<'_>,
-        clock: &dyn Clock,
-    ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
+    ) -> Result<Option<Front>, EngineError> {
         let (id, machine, kind, serial, body) = (
             command.id,
             command.machine_id,
@@ -347,7 +363,7 @@ impl Authority {
         if id != self.call
             || machine != self.machine
             || kind != "provider.complete"
-            || Hash::of(&serde_json::to_vec(body)?) != self.body
+            || crate::jobs::command_identity::hash(body)? != self.body
         {
             return Ok(None);
         }
@@ -370,12 +386,11 @@ impl Authority {
         {
             return Ok(None);
         }
-        if let Some(source) = &self.automatic {
-            return source.current(conn, command, clock).await;
+        if self.automatic.is_some() {
+            return Ok(Some(Front::Automatic));
         }
         let work = self.work.as_ref().ok_or_else(refused)?;
-        type StoredCall = (Id, Option<Id>, Option<Id>, Option<Id>);
-        let call:Option<StoredCall>=sqlx::query_as("SELECT provider_id,person_id,issued_by,entry_id FROM summary_calls WHERE id=$1 AND purpose='summary' AND cancel_reason IS NULL").bind(id).fetch_optional(&mut *conn).await.map_err(DbError::from)?;
+        let call:Option<StoredCall>=sqlx::query_as("SELECT provider_id,person_id,issued_by,entry_id FROM summary_calls WHERE id=$1 AND purpose='summary' AND cancel_reason IS NULL").bind(command.id).fetch_optional(&mut *conn).await.map_err(DbError::from)?;
         if call.as_ref().map(|row| (row.0, row.1, row.2))
             != Some((work.model.provider_id, Some(work.payer), work.issuer))
         {
@@ -405,6 +420,28 @@ impl Authority {
         {
             return Ok(None);
         }
+        Ok(Some(Front::Work {
+            call,
+            request: Box::new(request),
+        }))
+    }
+    async fn current(
+        &self,
+        conn: &mut Conn,
+        command: &NewCommand<'_>,
+        clock: &dyn Clock,
+    ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
+        let (call, request) = match self.front(conn, command).await? {
+            None => return Ok(None),
+            Some(Front::Automatic) => {
+                let Some(source) = &self.automatic else {
+                    return Ok(None);
+                };
+                return source.current(conn, command, clock).await;
+            }
+            Some(Front::Work { call, request }) => (call, *request),
+        };
+        let work = self.work.as_ref().ok_or_else(refused)?;
         let frame = match work.frame(conn, clock).await {
             Ok(frame) => frame,
             Err(EngineError::BeforeEffect(_)) => return Ok(None),
@@ -473,6 +510,25 @@ impl Authority {
         let caller = parts.principal.caller().clone();
         let end = caller.grant().and_then(orch_authz::TokenGrant::expires_at);
         Ok(Some(vec![(Some(caller), end)]))
+    }
+    /// Whether the rows around the command already refuse it, decided before any native source
+    /// row (the thread, its places, the provider) is taken: a command refused here never holds
+    /// a person's thread while the refusal is made. `false` leaves the whole decision to the
+    /// check under the source's fence; so does an error.
+    pub(crate) async fn refused_without_fence(
+        &self,
+        conn: &mut Conn,
+        command: &CommandRow,
+    ) -> Result<bool, EngineError> {
+        let native = NewCommand {
+            id: command.id,
+            machine_id: command.machine_id,
+            kind: &command.kind,
+            body: &command.body,
+            serial_key: command.serial_key(),
+            deadline_at: command.deadline_at,
+        };
+        Ok(self.front(conn, &native).await?.is_none())
     }
     pub(crate) async fn current_issue_callers(
         &self,

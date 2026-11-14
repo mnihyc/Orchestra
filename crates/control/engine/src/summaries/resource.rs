@@ -20,7 +20,9 @@ use std::collections::BTreeMap;
 
 pub mod command;
 mod events;
+mod failure;
 pub use events::node_event;
+pub use failure::Reason;
 mod route;
 mod run;
 pub use route::{preview_route, resolve_route};
@@ -202,54 +204,89 @@ pub async fn model_entry(
     place: Id,
     config: &Config,
 ) -> Result<Option<Id>, EngineError> {
-    let provider = resources::provider(conn, config.provider_id)
+    judge_model(conn, principal, place, config)
         .await?
-        .filter(|row| {
-            row.deleted_at.is_none()
-                && crate::providers::request_status_available(&row.status)
-                && !row.protocols.is_empty()
-        })
-        .ok_or_else(refused)?;
-    if completion_protocol(&provider.protocols)?.is_none() {
-        return Err(refused());
+        .map_err(|_| refused())
+}
+
+/// The decision of the native model door: the entry that lets this principal use the model, or the
+/// first thing that keeps it shut, so that whoever asked can be told what to change.
+pub async fn judge_model(
+    conn: &mut Conn,
+    principal: &Principal,
+    place: Id,
+    config: &Config,
+) -> Result<Result<Option<Id>, Reason>, EngineError> {
+    let Some(provider) = resources::provider(conn, config.provider_id).await? else {
+        return Ok(Err(Reason::ProviderGone));
+    };
+    if provider.deleted_at.is_some() {
+        return Ok(Err(Reason::ProviderGone));
     }
-    let model = resources::model(conn, config.provider_id, &config.model_name)
+    if !crate::providers::request_status_available(&provider.status) {
+        return Ok(Err(Reason::ProviderNotReady));
+    }
+    if provider.protocols.is_empty() || completion_protocol(&provider.protocols)?.is_none() {
+        return Ok(Err(Reason::NoInterface));
+    }
+    let Some(model) = resources::model(conn, config.provider_id, &config.model_name)
         .await?
         .filter(|row| row.enabled)
-        .ok_or_else(refused)?;
+    else {
+        return Ok(Err(Reason::ModelOff));
+    };
     let effective = crate::resolved::load(conn, place).await?;
     if effective.models_allowed.as_ref().is_some_and(|patterns| {
         !crate::models::allowed_by(patterns, &config.model_name, &model.groups)
-    }) || crate::provider_policy::forbidden(conn, place, provider.id)
+    }) {
+        return Ok(Err(Reason::ModelNotAllowed));
+    }
+    if crate::provider_policy::forbidden(conn, place, provider.id)
         .await?
         .is_some()
     {
-        return Err(refused());
+        return Ok(Err(Reason::ProviderForbidden));
     }
     let policies = crate::access::resource_policies(conn, provider.id).await?;
     let usable =
         orch_authz::usable::usable(conn, principal, provider.id, Some(place), &policies).await?;
-    let orch_authz::usable::Usable::Yes(usable) = usable else {
-        return Err(refused());
+    let usable = match usable {
+        orch_authz::usable::Usable::Yes(usable) => usable,
+        orch_authz::usable::Usable::Unavailable(_) => return Ok(Err(Reason::ProviderNotReady)),
+        orch_authz::usable::Usable::KeptToItsOwner | orch_authz::usable::Usable::No => {
+            return Ok(Err(Reason::NotAllowed));
+        }
     };
-    let effort =
-        orch_provider_contract::calls::requested_effort(&config.params).map_err(|_| refused())?;
+    let Ok(effort) = orch_provider_contract::calls::requested_effort(&config.params) else {
+        return Ok(Err(Reason::EffortNotOffered));
+    };
     // One entry has to allow the model and the effort together.
-    if !usable.allows(&orch_authz::options::Wanted {
+    let wanted = orch_authz::options::Wanted {
         model: Some((&config.model_name, &model.groups)),
         effort,
         ..orch_authz::options::Wanted::default()
-    }) {
-        return Err(refused());
+    };
+    if !usable.allows(&wanted) {
+        let without_effort = orch_authz::options::Wanted {
+            effort: None,
+            ..wanted
+        };
+        return Ok(Err(if usable.allows(&without_effort) {
+            Reason::EffortNotOffered
+        } else {
+            Reason::ModelNotAllowed
+        }));
     }
-    let machine = provider.key_machine_id.ok_or_else(refused)?;
+    let Some(machine) = provider.key_machine_id else {
+        return Ok(Err(Reason::NoKeeper));
+    };
     if !orch_db::queries::resources::machine(conn, machine)
         .await?
         .is_some_and(|machine| machine.online)
     {
-        return Err(refused());
+        return Ok(Err(Reason::KeeperOffline));
     }
-    Ok(usable.entry)
+    Ok(Ok(usable.entry))
 }
 
 /// Immutable accepted native work. No lease, credential secret or successful admission is

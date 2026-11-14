@@ -106,6 +106,14 @@ async fn state(world: &World, id: Id) -> String {
         .unwrap()
         .state
 }
+async fn problem_of(world: &World, id: Id) -> serde_json::Value {
+    rows::request(&mut world.pool.acquire().await.unwrap(), id)
+        .await
+        .unwrap()
+        .unwrap()
+        .problem
+        .unwrap_or_default()
+}
 fn answer(text: &str) -> Result<CommandResult, CommandError> {
     Ok(CommandResult::ProviderComplete(ProviderCompleteResult {
         text: text.into(),
@@ -236,6 +244,15 @@ async fn manual_document_refresh_uses_the_issuer_not_the_setting_writer_and_stop
         calls.load(Ordering::SeqCst),
         1,
         "the second act never reaches model IO"
+    );
+    let problem = problem_of(&world, second).await;
+    assert_eq!(
+        (problem["reason"].as_str(), problem["message"].as_str()),
+        (
+            Some("cap_no_room"),
+            Some(resource::Reason::CapNoRoom.sentence())
+        ),
+        "the person is told that a usage limit is what stopped it"
     );
     assert_eq!(
         rows::get(
@@ -803,4 +820,265 @@ async fn automatic_chat_titles_leave_explicit_group_names_and_the_model_budget_u
             .as_deref(),
         Some("Written group title")
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refresh_whose_providers_key_machine_went_offline_fails_and_says_that_machine_is_missing()
+{
+    let world = World::on_a_key("synthetic-offline-keeper-key").await;
+    world.engine().stop();
+    chosen(&world).await;
+    let document = world
+        .document_beside(world.topic, "Offline keeper", &["The current source."])
+        .await;
+    let request = accept(&world, SummaryTarget::Document { id: document }).await;
+    sqlx::query("UPDATE machines SET online = false WHERE id = $1")
+        .bind(world.machine_id)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    world.engine().summarize_resources().await.unwrap();
+    eventually("the refresh fails, instead of ending unseen", || async {
+        state(&world, request).await == "failed"
+    })
+    .await;
+    let problem = problem_of(&world, request).await;
+    assert_eq!(
+        (problem["reason"].as_str(), problem["message"].as_str()),
+        (
+            Some("keeper_offline"),
+            Some(resource::Reason::KeeperOffline.sentence())
+        )
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refresh_whose_model_was_switched_off_fails_and_says_that_the_model_is_off() {
+    let world = World::on_a_key("synthetic-model-off-key").await;
+    world.engine().stop();
+    chosen(&world).await;
+    let document = world
+        .document_beside(world.topic, "Model off", &["The current source."])
+        .await;
+    let request = accept(&world, SummaryTarget::Document { id: document }).await;
+    sqlx::query("UPDATE provider_models SET enabled = false WHERE provider_id = $1")
+        .bind(world.provider)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    world.engine().summarize_resources().await.unwrap();
+    eventually("the refresh fails, instead of ending unseen", || async {
+        state(&world, request).await == "failed"
+    })
+    .await;
+    let problem = problem_of(&world, request).await;
+    assert_eq!(
+        (problem["reason"].as_str(), problem["message"].as_str()),
+        (
+            Some("model_off"),
+            Some(resource::Reason::ModelOff.sentence())
+        )
+    );
+}
+
+/// What the scripted machine was asked, in order, and the model's answer to every request.
+fn recording(
+    world: &World,
+    text: &'static str,
+) -> Arc<Mutex<Vec<orch_link_contract::commands::ProviderComplete>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let observed = seen.clone();
+    world
+        .machine
+        .handler
+        .on(CommandKind::ProviderComplete, move |command| {
+            let Command::ProviderComplete(request) = command else {
+                return Err(CommandError::new(ErrorCode::Internal, "not a completion"));
+            };
+            observed.lock().unwrap().push(request.clone());
+            answer(text)
+        });
+    seen
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_summary_asked_of_a_reasoning_model_leaves_room_for_its_reasoning_and_asks_its_lowest_effort()
+ {
+    let world = World::on_a_key("synthetic-reasoning-room-key").await;
+    world.engine().stop();
+    chosen(&world).await;
+    sqlx::query("UPDATE provider_models SET parameters=parameters || jsonb_build_object('efforts',$1::jsonb) WHERE provider_id=$2 AND model_name=$3")
+        .bind(json!(["medium", "low", "high"]))
+        .bind(world.provider)
+        .bind(MODEL)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    let document = world
+        .document_beside(world.topic, "Reasoning room", &["The current source."])
+        .await;
+    let seen = recording(&world, "A short summary.");
+    let request = accept(&world, SummaryTarget::Document { id: document }).await;
+    world.engine().summarize_resources().await.unwrap();
+    eventually("the summary is written", || async {
+        state(&world, request).await == "done"
+    })
+    .await;
+    let asked = seen.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(
+        asked[0].max_output_tokens,
+        120 + 2_000,
+        "the visible answer's allowance and the room the model reasons in"
+    );
+    let params = asked[0].params.as_ref().unwrap().to_string();
+    assert!(
+        params.contains("\"low\"") && !params.contains("\"high\""),
+        "the lowest effort the model offers, whatever order its list is in: {params}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_summary_asked_of_a_model_that_does_not_reason_asks_for_the_visible_allowance_only() {
+    let world = World::on_a_key("synthetic-plain-allowance-key").await;
+    world.engine().stop();
+    chosen(&world).await;
+    let document = world
+        .document_beside(world.topic, "Plain allowance", &["The current source."])
+        .await;
+    let seen = recording(&world, "A short summary.");
+    let request = accept(&world, SummaryTarget::Document { id: document }).await;
+    world.engine().summarize_resources().await.unwrap();
+    eventually("the summary is written", || async {
+        state(&world, request).await == "done"
+    })
+    .await;
+    let asked = seen.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].max_output_tokens, 120);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refresh_whose_answer_ran_out_of_output_fails_and_says_to_raise_the_allowance() {
+    let world = World::on_a_key("synthetic-cut-answer-key").await;
+    world.engine().stop();
+    chosen(&world).await;
+    let document = world
+        .document_beside(world.topic, "Cut answer", &["The current source."])
+        .await;
+    world
+        .machine
+        .handler
+        .on(CommandKind::ProviderComplete, |_| {
+            Err(CommandError::new(
+                ErrorCode::Internal,
+                "the model stopped before its answer was whole: max_output_tokens",
+            )
+            .with_details(json!({"failure":{
+                "code":"harness_error","reason":"max_output_tokens","output_limit":true,"retryable":false
+            }})))
+        });
+    let request = accept(&world, SummaryTarget::Document { id: document }).await;
+    world.engine().summarize_resources().await.unwrap();
+    eventually("the refresh fails, instead of ending unseen", || async {
+        state(&world, request).await == "failed"
+    })
+    .await;
+    let problem = problem_of(&world, request).await;
+    assert_eq!(
+        (problem["reason"].as_str(), problem["message"].as_str()),
+        (
+            Some("output_cut"),
+            Some(resource::Reason::OutputCut.sentence())
+        )
+    );
+}
+
+/// The refresh of an empty source ends with its reason and has asked no model: no command, no model input and no use.
+async fn assert_nothing_new_and_nothing_asked(world: &World, request: Id, calls: &AtomicUsize) {
+    eventually("the refresh ends without a model", || async {
+        state(world, request).await == "failed"
+    })
+    .await;
+    let problem = problem_of(world, request).await;
+    assert_eq!(
+        (problem["reason"].as_str(), problem["message"].as_str()),
+        (
+            Some("nothing_new"),
+            Some(resource::Reason::NothingNew.sentence())
+        )
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "the model was not asked");
+    let asked: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM commands WHERE kind='provider.complete'),(SELECT count(*) FROM usage_events WHERE purpose='summary'),(SELECT count(*) FROM resource_summary_model_inputs)")
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        asked,
+        (0, 0, 0),
+        "no command, no use booked, no model input"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_catch_up_with_nothing_unread_asks_no_model_books_no_use_and_says_there_is_nothing_new() {
+    use orch_db::queries::chats;
+    let world = World::on_a_key("synthetic-nothing-unread-key").await;
+    world.engine().stop();
+    chosen(&world).await;
+    let chat = group(&world, Some("Everything here was read")).await;
+    let last = message(&world, chat, "A message its sender has read.").await;
+    chats::mark_read(
+        &mut world.pool.acquire().await.unwrap(),
+        world.ada,
+        chat,
+        last,
+    )
+    .await
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    world
+        .machine
+        .handler
+        .on(CommandKind::ProviderComplete, move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            answer("No activity material was provided to summarize")
+        });
+    let request = accept(&world, SummaryTarget::Chat { id: chat }).await;
+    world.engine().summarize_resources().await.unwrap();
+    assert_nothing_new_and_nothing_asked(&world, request, &calls).await;
+    assert!(
+        rows::get(
+            &mut world.pool.acquire().await.unwrap(),
+            SummaryTarget::Chat { id: chat },
+            Some(world.ada)
+        )
+        .await
+        .unwrap()
+        .is_none_or(|cache| cache.text.is_none()),
+        "no paragraph is written about nothing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refresh_of_a_document_with_nothing_written_asks_no_model_and_books_no_use() {
+    let world = World::on_a_key("synthetic-empty-document-key").await;
+    world.engine().stop();
+    chosen(&world).await;
+    let document = world
+        .document_beside(world.topic, "Nothing written yet", &[])
+        .await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    world
+        .machine
+        .handler
+        .on(CommandKind::ProviderComplete, move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            answer("No activity material was provided to summarize")
+        });
+    let request = accept(&world, SummaryTarget::Document { id: document }).await;
+    world.engine().summarize_resources().await.unwrap();
+    assert_nothing_new_and_nothing_asked(&world, request, &calls).await;
 }

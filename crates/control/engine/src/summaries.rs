@@ -851,6 +851,10 @@ fn safe_reason(error: &SummarizeError) -> String {
         SummarizeError::Unsupported(_) => {
             "The chosen summarizer does not write this field.".to_owned()
         }
+        SummarizeError::Failed { message, .. } if message == orch_summarizer_contract::summarizer::OUTPUT_CUT => {
+            "The summarizer's model used its output allowance before finishing. Raise the summarizer's output allowance or choose another model."
+                .to_owned()
+        }
         SummarizeError::Failed { .. } => {
             "The summarizer returned no usable answer; it will try again after the backoff."
                 .to_owned()
