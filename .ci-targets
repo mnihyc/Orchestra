@@ -1,0 +1,4 @@
+test -p orch-api-core --test thread_opening_scopes
+web typecheck
+web lint
+web test -- tests/unit/cache-updates.test.ts tests/component/file-references.test.tsx tests/component/model-picker-rows.test.tsx tests/component/resource-names.test.tsx tests/component/resource-inventory.test.tsx tests/component/resource-sharing-summary.test.tsx tests/component/provider-source-models.test.tsx tests/component/recorded-tools.test.tsx tests/component/raw-tool-outputs.test.tsx tests/unit/recovery-failures.test.ts tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

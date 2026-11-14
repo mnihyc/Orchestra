@@ -88,6 +88,9 @@ const CANDIDATES_PER_TRY: usize = 16;
 /// Why a run of the outbox stopped.
 #[derive(Debug, thiserror::Error)]
 pub enum OutboxError {
+    /// The configured recheck interval exceeds the clock's representation.
+    #[error("the quiet-hours recheck interval cannot be represented by the clock")]
+    QuietHoldInterval,
     /// The database refused.
     #[error(transparent)]
     Db(#[from] DbError),
@@ -525,15 +528,39 @@ impl Outbox {
                 fail_all(conn, &unit, "the channel is switched off", Also::Nothing).await?,
             ));
         }
-        if let Some(until) = quiet_hours::outward_held_until(
+        match quiet_hours::outward_held_until(
             &person.timezone,
             person.quiet_window(),
             person.pause_until,
             now,
         ) {
-            db_outbox::hold_unreserved(conn, &ids, until).await?;
-            routes::set_held(conn, route.id, true).await?;
-            return Ok(Step::Settled(Run::one(Done::Held)));
+            Ok(Some(until)) => {
+                db_outbox::hold_unreserved(conn, &ids, until, None).await?;
+                routes::clear_quiet_problem(conn, route.id).await?;
+                routes::set_held(conn, route.id, true).await?;
+                return Ok(Step::Settled(Run::one(Done::Held)));
+            }
+            Ok(None) => {
+                routes::clear_quiet_problem(conn, route.id).await?;
+            }
+            Err(problem) => {
+                // Recheck on an existing configured retry pause; a hold spends no delivery try.
+                let pause = inner
+                    .retry
+                    .iter()
+                    .copied()
+                    .find(|pause| !pause.is_zero())
+                    .unwrap_or(crate::schedule::Job::Routes.default_interval());
+                let until = chrono::Duration::from_std(pause)
+                    .ok()
+                    .and_then(|pause| now.checked_add_signed(pause))
+                    .ok_or(OutboxError::QuietHoldInterval)?;
+                let message = problem.to_string();
+                db_outbox::hold_unreserved(conn, &ids, until, Some(&message)).await?;
+                let _ = routes::record_failure(conn, route.id, None, &serde_json::json!({"code":"invalid_timezone","message":message,"timezone":problem.name}), now).await?;
+                routes::set_held(conn, route.id, true).await?;
+                return Ok(Step::Settled(Run::one(Done::Held)));
+            }
         }
         let Some(notifier) = inner.notifiers.get(&channel.kind).cloned() else {
             return Ok(Step::Settled(

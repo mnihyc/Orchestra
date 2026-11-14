@@ -10,7 +10,7 @@ import { PeopleCount } from '@/ui/PeopleList';
 import { me, userRef } from '../doubles/fixtures';
 import { show } from './support';
 
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const group: ActivityGroup = { count: 6, threads: 4, hidden: 3, since: '2026-10-01T00:00:00Z', visible: [
   { object: { kind: 'thread', id: '00000000-0000-4000-8000-000000000101' }, name: 'Repair redirects', relation: 'binding', until: null },
 ] };
