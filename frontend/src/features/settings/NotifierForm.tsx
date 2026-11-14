@@ -109,6 +109,14 @@ export function NotifierDialog({ title, lead, notifiers, existing, submitLabel, 
           submit();
         }}
       >
+        <Input
+          label={t('settings.channels.name')}
+          hint={t('settings.channels.nameHint')}
+          value={name}
+          error={sent ? (fromServer.name ?? nameWrong) : fromServer.name}
+          onChange={(event) => setName(event.target.value)}
+          autoComplete="off"
+        />
         {existing === undefined && notifiers.length > 1 && (
           <ChoiceLocator
             label={t('settings.channels.kind')}
@@ -121,16 +129,8 @@ export function NotifierDialog({ title, lead, notifiers, existing, submitLabel, 
           />
         )}
         {notifier !== undefined && existing === undefined && notifiers.length === 1 && <p className="text-sm text-text-muted">{notifier.summary}</p>}
-        <Input
-          label={t('settings.channels.name')}
-          hint={t('settings.channels.nameHint')}
-          value={name}
-          error={sent ? (fromServer.name ?? nameWrong) : fromServer.name}
-          onChange={(event) => setName(event.target.value)}
-          autoComplete="off"
-        />
         {notifier !== undefined && (
-          <FieldForm fields={fields} values={values} errors={errors} onChange={(field: string, value: FormValue) => setValues((before) => ({ ...before, [field]: value }))} />
+          <FieldForm fields={fields} values={values} errors={errors} secretsSet={existing?.secretsSet} onChange={(field: string, value: FormValue) => setValues((before) => ({ ...before, [field]: value }))} />
         )}
         {extra}
         {sent && hold !== null && <InlineAlert tone="danger">{hold}</InlineAlert>}

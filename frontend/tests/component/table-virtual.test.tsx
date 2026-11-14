@@ -4,6 +4,13 @@ import { expect, it, vi } from 'vitest';
 import { Table } from '@/ui/Table';
 import { show } from './support';
 
+it('gives an ordinary growing table its own bounded scroll without discarding row state', () => {
+  const rows = Array.from({ length: 11 }, (_, index) => ({ id: String(index), name: `Item ${index}` }));
+  show(<Table label="Editable report" rows={rows} rowKey={(row) => row.id} columns={[{ id: 'name', header: 'Name', cell: (row) => <input aria-label={row.name} defaultValue={row.name} /> }]} />);
+  expect(screen.getByRole('region', { name: 'Editable report' })).toHaveClass('max-h-96', 'overflow-y-auto');
+  expect(screen.getAllByRole('textbox')).toHaveLength(11);
+});
+
 it('keeps the first and later rows reachable without mounting the whole list', () => {
   vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
     return this.tagName === 'TR' ? 72 : 384;

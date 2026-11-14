@@ -204,7 +204,11 @@ for (const clear of [false, true]) it(`keeps the real IDP role/secret draft and 
   await user.click(screen.getByRole('menuitem', { name: i18n.t('admin.idp.edit') }));
   const dialog = screen.getByRole('dialog', { name: i18n.t('admin.idp.editTitle', { name: provider.name }) });
   await waitFor(() => expect(field()).toHaveValue(current.name));
-  await user.type(within(dialog).getByLabelText(i18n.t('admin.idp.secret')), 'replacement-secret-draft');
+  // The saved secret shows as dots that are set; a new one is typed after Replace and stays through the other choices of the form.
+  expect(within(dialog).getByText(i18n.t('settingsEditors.secret.set'))).toBeVisible();
+  await user.click(within(dialog).getByRole('button', { name: i18n.t('settingsEditors.secret.replace') }));
+  await user.click(within(dialog).getByLabelText(i18n.t('admin.idp.secret')));
+  await user.paste('replacement-secret-draft');
   if (clear) await user.click(screen.getByRole('button', { name: i18n.t('resources.bulk.clear') }));
   else {
     await user.click(field()); await user.type(field(), 'research');
@@ -222,4 +226,15 @@ for (const clear of [false, true]) it(`keeps the real IDP role/secret draft and 
   expect(field()).toBeDisabled();
   await act(async () => { saved.resolve({ ...provider, revision: 8, default_org_id: clear ? null : late.id, default_role: clear ? null : 'developer' }); await Promise.resolve(); });
   await waitFor(() => expect(dialog).not.toBeInTheDocument());
+});
+
+
+it('names a new identity provider before its key and shows the actual fallback name', async () => {
+  const user = userEvent.setup(); draw(<IdentityProviders />);
+  await user.click(await screen.findByRole('button', { name: i18n.t('admin.idp.addTitle') }));
+  const dialog = within(screen.getByRole('dialog'));
+  const name = dialog.getByRole('textbox', { name: i18n.t('admin.idp.nameField') + ' ' + i18n.t('ui.field.optional') });
+  expect(dialog.getAllByRole('textbox')[0]).toBe(name);
+  await user.type(dialog.getByRole('textbox', { name: i18n.t('admin.idp.key') }), 'workforce');
+  expect(name).toHaveAttribute('placeholder', 'workforce');
 });

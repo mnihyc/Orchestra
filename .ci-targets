@@ -1,0 +1,7 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-api-core --test provider_models --test model_entries --test typed_resource_operations
+test -p orch-api-core --test credential_collections --test group_list_scopes --test group_operation_scopes --test directory --test directory_native_scopes
+test -p orch-api-core --test account_key_proofs --test folders --test holder_model --test kadmin_tokens --test me --test members --test moves_tags --test service_accounts --test session_others --test token_sign_in_acts --test typed_path_operations

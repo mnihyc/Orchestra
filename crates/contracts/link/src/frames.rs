@@ -4,7 +4,9 @@
 //! whose member `t` says what it is: everything that is said about the
 //! session itself, about streams, about commands and about channels. A
 //! binary frame is tunnel data: a few bytes that say which channel and
-//! where in its stream, then the data.
+//! where in its stream, then the data. A text frame larger than a frame
+//! may be travels as a series of binary parts, which the receiver puts
+//! together again into the same text.
 //!
 //! A text frame of a type nobody knows is passed over, so that a newer
 //! peer can say more than an older one understands. A binary frame of a
@@ -288,6 +290,18 @@ pub enum FrameError {
     /// A binary frame carries no data.
     #[error("the binary frame carries no data")]
     Empty,
+    /// A part of a large message cannot be what it says it is, or does not
+    /// follow what came before it.
+    #[error("a part of a large message {0}")]
+    Part(&'static str),
+    /// A large message was begun and its parts stopped coming.
+    #[error("a message of {total} bytes was begun and only {received} of them came")]
+    Unfinished {
+        /// How many bytes arrived.
+        received: u64,
+        /// How many bytes it was to have.
+        total: u64,
+    },
 }
 
 impl FrameError {
@@ -424,6 +438,115 @@ impl DataFrame {
     }
 }
 
+/// A binary frame of a session: one piece of a text frame that is larger than
+/// a frame may be.
+///
+/// The text is written as it would be as a whole frame and cut in the order of
+/// its bytes; the receiver puts the pieces together and reads the text as it
+/// reads any other. The pieces of one message follow each other in order, and
+/// frames of other kinds may come between them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartFrame {
+    /// The message this piece belongs to, by the number its sender gave it on
+    /// this session.
+    pub message: u32,
+    /// How many bytes of the message come before this piece.
+    pub offset: u32,
+    /// How many bytes the whole message has: the same in every piece of it.
+    pub total: u32,
+    /// The piece: at least one byte of the message's text.
+    pub payload: Bytes,
+}
+
+impl PartFrame {
+    /// The first byte of a part of a large message.
+    pub const KIND: u8 = 4;
+    /// The bytes before the piece: the kind, then the message, the offset and
+    /// the total as four bytes each, highest byte first.
+    pub const HEADER_BYTES: usize = 13;
+
+    /// The most of a message one part carries when a frame may have
+    /// `max_frame_bytes`.
+    #[must_use]
+    pub const fn max_payload(max_frame_bytes: usize) -> usize {
+        max_frame_bytes.saturating_sub(Self::HEADER_BYTES)
+    }
+
+    /// The bytes before the piece.
+    #[must_use]
+    pub fn header(&self) -> [u8; Self::HEADER_BYTES] {
+        let mut header = [0u8; Self::HEADER_BYTES];
+        header[0] = Self::KIND;
+        header[1..5].copy_from_slice(&self.message.to_be_bytes());
+        header[5..9].copy_from_slice(&self.offset.to_be_bytes());
+        header[9..].copy_from_slice(&self.total.to_be_bytes());
+        header
+    }
+
+    /// The offset of the byte after this piece's last.
+    #[must_use]
+    pub fn end(&self) -> u64 {
+        u64::from(self.offset).saturating_add(self.payload.len() as u64)
+    }
+
+    /// Writes the frame, which may have `max_frame_bytes` at most.
+    pub fn encode(&self, max_frame_bytes: usize) -> Result<Bytes, FrameError> {
+        let bytes = Self::HEADER_BYTES + self.payload.len();
+        if self.payload.is_empty() {
+            return Err(FrameError::Empty);
+        }
+        if bytes > max_frame_bytes {
+            return Err(FrameError::TooLarge {
+                bytes,
+                max: max_frame_bytes,
+            });
+        }
+        if self.end() > u64::from(self.total) {
+            return Err(FrameError::Part("reaches past the end of its message"));
+        }
+        let mut frame = BytesMut::with_capacity(bytes);
+        frame.put_slice(&self.header());
+        frame.put_slice(&self.payload);
+        Ok(frame.freeze())
+    }
+
+    /// Reads a binary frame, which may have `max_frame_bytes` at most. The
+    /// piece is not copied.
+    pub fn decode(mut frame: Bytes, max_frame_bytes: usize) -> Result<Self, FrameError> {
+        match frame.first() {
+            None => return Err(FrameError::Truncated),
+            Some(&Self::KIND) => {}
+            Some(&other) => return Err(FrameError::UnknownKind(other)),
+        }
+        if frame.len() > max_frame_bytes {
+            return Err(FrameError::TooLarge {
+                bytes: frame.len(),
+                max: max_frame_bytes,
+            });
+        }
+        if frame.len() < Self::HEADER_BYTES {
+            return Err(FrameError::Truncated);
+        }
+        if frame.len() == Self::HEADER_BYTES {
+            return Err(FrameError::Empty);
+        }
+        frame.advance(1);
+        let message = frame.get_u32();
+        let offset = frame.get_u32();
+        let total = frame.get_u32();
+        let part = Self {
+            message,
+            offset,
+            total,
+            payload: frame,
+        };
+        if part.end() > u64::from(total) {
+            return Err(FrameError::Part("reaches past the end of its message"));
+        }
+        Ok(part)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -498,7 +621,7 @@ mod tests {
                     "platform": { "os": "linux", "arch": "x86_64" }, "roles": ["agent", "environment"],
                     "sent_at": "2026-10-08T17:04:05.120Z" }),
             json!({ "t": "ready", "session_id": B, "session_token": "t0k3n", "heartbeat_secs": 20,
-                    "limits": { "max_frame_bytes": 262144, "tunnel_window_bytes": 1048576, "max_channels": 256 },
+                    "limits": { "max_frame_bytes": 262144, "max_message_bytes": 16777216, "tunnel_window_bytes": 1048576, "max_channels": 256 },
                     "cursors": { "machine": 12 }, "versions": { "min": "0.1.0", "recommended": "0.1.3" } }),
             json!({ "t": "reject", "code": "busy", "detail": "the API is unreachable", "retry_after_secs": 5 }),
             json!({ "t": "bye", "code": "replaced" }),
@@ -710,6 +833,87 @@ mod tests {
             DataFrame::decode(Bytes::from(vec![1u8; MAX + 1]), MAX),
             Err(FrameError::TooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn a_part_of_a_large_message_is_written_with_its_place_in_front() {
+        let part = PartFrame {
+            message: 7,
+            offset: 0x0102_0304,
+            total: 0x0A0B_0C0D,
+            payload: Bytes::from_static(b"data"),
+        };
+        let bytes = part.encode(MAX).unwrap();
+        assert_eq!(
+            &bytes[..],
+            &[
+                4, 0, 0, 0, 7, 1, 2, 3, 4, 0x0A, 0x0B, 0x0C, 0x0D, b'd', b'a', b't', b'a'
+            ]
+        );
+        assert_eq!(PartFrame::decode(bytes, MAX).unwrap(), part);
+        assert_eq!(part.end(), 0x0102_0304 + 4);
+    }
+
+    #[test]
+    fn a_part_carries_at_least_a_byte_and_stays_in_its_message_and_in_a_frame() {
+        let most = PartFrame::max_payload(MAX);
+        assert_eq!(most, 262_131);
+        let full = PartFrame {
+            message: 1,
+            offset: 0,
+            total: u32::try_from(most * 2).unwrap(),
+            payload: Bytes::from(vec![0u8; most]),
+        };
+        assert_eq!(full.encode(MAX).unwrap().len(), MAX);
+        let over = PartFrame {
+            payload: Bytes::from(vec![0u8; most + 1]),
+            ..full.clone()
+        };
+        assert!(matches!(over.encode(MAX), Err(FrameError::TooLarge { .. })));
+        let none = PartFrame {
+            payload: Bytes::new(),
+            ..full.clone()
+        };
+        assert!(matches!(none.encode(MAX), Err(FrameError::Empty)));
+        let past = PartFrame {
+            message: 1,
+            offset: 10,
+            total: 12,
+            payload: Bytes::from_static(b"abc"),
+        };
+        assert!(matches!(past.encode(MAX), Err(FrameError::Part(_))));
+
+        assert!(matches!(
+            PartFrame::decode(Bytes::from(vec![4u8; 13]), MAX),
+            Err(FrameError::Empty)
+        ));
+        assert!(matches!(
+            PartFrame::decode(Bytes::from(vec![4u8; 12]), MAX),
+            Err(FrameError::Truncated)
+        ));
+        assert!(matches!(
+            PartFrame::decode(Bytes::from(vec![4u8; MAX + 1]), MAX),
+            Err(FrameError::TooLarge { .. })
+        ));
+        assert!(matches!(
+            PartFrame::decode(
+                Bytes::from_static(&[1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 9, 5]),
+                MAX
+            ),
+            Err(FrameError::UnknownKind(1))
+        ));
+        assert!(matches!(
+            PartFrame::decode(
+                Bytes::from_static(&[4, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 1, 2, 3]),
+                MAX
+            ),
+            Err(FrameError::Part(_))
+        ));
+        assert_eq!(
+            FrameError::Part("is not text").bye(),
+            ByeCode::ProtocolError,
+            "a part that cannot be what it says ends the session"
+        );
     }
 
     #[test]

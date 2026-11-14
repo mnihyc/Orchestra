@@ -8,19 +8,24 @@ import type * as Users from '@/api/users';
 import { beforeEach, expect, it, vi } from 'vitest';
 
 import { answerChanges } from '@/api/actAnswers';
+import { applyChanges } from '@/api/acts';
 import { Security } from '@/features/settings/personal/Security';
 import type { SessionInfo } from '@/generated/api-types';
 import { setLocale } from '@/i18n';
 import { me, meta } from '../doubles/fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
 
-const calls = vi.hoisted(() => ({ list: vi.fn<() => Promise<SessionInfo[]>>(), revoke: vi.fn<typeof Users.revokeOtherSessions>() }));
+skipOverflowFallback();
+
+const calls = vi.hoisted(() => ({ list: vi.fn<() => Promise<SessionInfo[]>>(), searches: vi.fn<(q: string) => void>(), revoke: vi.fn<typeof Users.revokeOtherSessions>() }));
 vi.mock('@/api/auth', async (original) => ({ ...(await original<typeof Auth>()),
   meQuery: { queryKey: ['me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada')) },
   metaQuery: { queryKey: ['meta'], queryFn: () => Promise.resolve(meta()) },
 }));
 vi.mock('@/api/users', async (original) => ({ ...(await original<typeof Users>()),
   sessionsQuery: { queryKey: ['sessions'], queryFn: calls.list }, revokeOtherSessions: calls.revoke,
+  sessionsPageQuery: (q: string) => ({ queryKey: ['sessions', 'pages', q], initialPageParam: null,
+    queryFn: async () => { calls.searches(q); const rows = await calls.list(); return { items: rows.filter((row) => (row.user_agent + ' ' + (row.ip ?? '')).includes(q)).slice(0, 50), next_cursor: null }; }, getNextPageParam: () => null }),
 }));
 vi.mock('@/features/settings/PersonalFrame', () => ({ PersonalFrame: ({ children }: { children: ReactNode }) => <main>{children}</main> }));
 
@@ -32,7 +37,7 @@ beforeEach(async () => { vi.clearAllMocks(); await setLocale('en'); calls.list.m
 it.each(['en', 'zh-CN'] as const)('confirms once, retains this browser and consumes the exact answer in %s', async (locale) => {
   await setLocale(locale);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  calls.revoke.mockImplementation(() => { client.setQueryData(['sessions'], [current]); return Promise.resolve([current]); });
+  calls.revoke.mockImplementation(async () => { await applyChanges(answerChanges({ method: 'DELETE', path: '/me/sessions', answer: [current] }, () => '', [{ key: ['sessions'] }]), client); return [current]; });
   show(<QueryClientProvider client={client}><Security /></QueryClientProvider>);
   const user = userEvent.setup();
   const button = await screen.findByRole('button', { name: locale === 'en' ? 'Sign out other sessions' : '退出其他会话' });
@@ -51,6 +56,17 @@ it.each(['en', 'zh-CN'] as const)('confirms once, retains this browser and consu
   expect(calls.list).toHaveBeenCalledOnce();
   expect(answerChanges({ method: 'DELETE', path: '/me/sessions', answer: [current] }, () => '', [{ key: ['sessions'] }]))
     .toEqual([{ value: { key: ['sessions'], data: [current] } }]);
+});
+
+it('searches a browser past a thousand on the server and owns the resulting scroll', async () => {
+  calls.list.mockResolvedValue(Array.from({ length: 1_001 }, (_, index) => ({ ...other, id: String(index), user_agent: 'Browser ' + String(index).padStart(4, '0') })));
+  show(<Security />);
+  const search = await screen.findByRole('searchbox', { name: 'Find in Sessions' });
+  const user = userEvent.setup(); await user.type(search, 'Browser 1000');
+  await waitFor(() => expect(calls.searches).toHaveBeenCalledWith('Browser 1000'));
+  expect(await screen.findByText('Browser 1000')).toBeVisible();
+  expect(screen.queryByText('Browser 0000')).toBeNull();
+  expect(screen.getByRole('region', { name: 'Sessions' })).toHaveClass('max-h-96');
 });
 
 it('offers no bulk act when this is the only browser', async () => {

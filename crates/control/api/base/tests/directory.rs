@@ -110,7 +110,8 @@ async fn a_group_is_made_listed_described_anew_and_deleted_by_whoever_manages_th
         .query(&OrgGroupListQuery::default())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(listed.len(), 1);
     let renamed = world
         .app
@@ -143,18 +144,26 @@ async fn a_group_is_made_listed_described_anew_and_deleted_by_whoever_manages_th
         .app
         .call(OrgGroupList, &[&s.acme])
         .token(&s.boss.token)
-        .query(&OrgGroupListQuery { under: None })
+        .query(&OrgGroupListQuery {
+            under: None,
+            ..OrgGroupListQuery::default()
+        })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     let under = world
         .app
         .call(OrgGroupList, &[&s.acme])
         .token(&s.boss.token)
-        .query(&OrgGroupListQuery { under: Some(true) })
+        .query(&OrgGroupListQuery {
+            under: Some(true),
+            ..OrgGroupListQuery::default()
+        })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!((direct.len(), under.len()), (1, 2));
     let gone = world
         .app
@@ -208,7 +217,8 @@ async fn a_member_of_the_root_org_is_put_into_a_group_and_taken_out_and_access_f
         .token(&s.dan.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(people.len(), 2);
     let listed = world
         .app
@@ -217,7 +227,8 @@ async fn a_member_of_the_root_org_is_put_into_a_group_and_taken_out_and_access_f
         .query(&OrgGroupListQuery::default())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(listed[0].member_count, 2);
     // The group is named on the page of Web, and its members read it.
     let private = world
@@ -463,7 +474,8 @@ async fn a_suspended_member_is_shut_out_of_the_org_until_it_is_lifted() {
         .token(&s.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(listed.len(), 1);
     let members = world
         .app

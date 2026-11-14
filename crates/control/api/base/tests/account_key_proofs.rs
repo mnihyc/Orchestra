@@ -426,7 +426,8 @@ async fn a_key_revokes_actual_owned_sessions_and_never_invents_a_session_to_keep
         .token(old_one.token())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(old.len(), 2);
     let expiry = old
         .iter()
@@ -444,7 +445,8 @@ async fn a_key_revokes_actual_owned_sessions_and_never_invents_a_session_to_keep
         .token(first.token())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         sessions.len(),
         3,
@@ -586,7 +588,8 @@ async fn a_key_revokes_actual_owned_sessions_and_never_invents_a_session_to_keep
         .token(bobs.token())
         .send()
         .await
-        .ok()[0]
+        .ok()
+        .items[0]
         .id;
     let claimed = key(
         &world,

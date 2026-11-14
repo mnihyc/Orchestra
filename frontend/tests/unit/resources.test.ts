@@ -15,6 +15,32 @@ import { settingValue } from '@/features/resources/SettingsTable';
 import { amountsOf, confinementOf, execOffers, hasAmounts, imageSource, readSpec, schemaFields, specSchema, specText, starterSpec } from '@/features/resources/templates/spec';
 import type { EnrollmentToken, ProviderSetupProtocol } from '@/generated/api-types';
 import { initialValues, missingFields, textValues } from '@/ui/FieldForm';
+import { readAllPages } from '@/api/collection';
+import { client } from '@/api/client';
+
+describe('complete metadata reads', () => {
+  it('keeps every page without crossing a change of reader', async () => {
+    const before = client.session.getState();
+    try {
+      const cursors: (string | null)[] = [];
+      expect(await readAllPages((cursor) => {
+        cursors.push(cursor);
+        return Promise.resolve(cursor === null ? { items: [1], next_cursor: 'second' } : { items: [2], next_cursor: null });
+      }, new AbortController().signal)).toEqual([1, 2]);
+      expect(cursors).toEqual([null, 'second']);
+      await expect(readAllPages(() => {
+        client.session.setState({ readerVersion: (before.readerVersion ?? 0) + 1 });
+        return Promise.resolve({ items: [3], next_cursor: 'next' });
+      }, new AbortController().signal)).rejects.toHaveProperty('name', 'AbortError');
+    } finally { client.session.setState(before); }
+  });
+
+  it('ends a cancelled read and rejects a repeated continuation', async () => {
+    const cancelled = new AbortController(); cancelled.abort();
+    await expect(readAllPages(() => Promise.resolve({ items: [1], next_cursor: null }), cancelled.signal)).rejects.toHaveProperty('name', 'AbortError');
+    await expect(readAllPages(() => Promise.resolve({ items: [1], next_cursor: 'same' }), new AbortController().signal)).rejects.toThrow('repeated a cursor');
+  });
+});
 
 /** What a harness's adapter says of itself, cut down to what the screens read. */
 const declared = {

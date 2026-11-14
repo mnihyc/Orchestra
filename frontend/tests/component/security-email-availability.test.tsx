@@ -22,6 +22,7 @@ vi.mock('@/api/auth', async (load) => ({ ...await load<typeof Auth>(),
   metaQuery: { queryKey: ['meta'], queryFn: () => Promise.resolve(meta()) },
 }));
 vi.mock('@/api/users', async (load) => ({ ...await load<typeof Users>(),
+  sessionsPageQuery: (q: string) => ({ queryKey: ['sessions', 'pages', q], initialPageParam: null, queryFn: () => Promise.resolve({ items: [], next_cursor: null }), getNextPageParam: () => null }),
   sessionsQuery: { queryKey: ['sessions'], queryFn: (): Promise<SessionInfo[]> => Promise.resolve([]) },
   sendEmailCode: calls.send, enableEmailCode: calls.enable, disableEmailCode: calls.disable,
 }));

@@ -635,7 +635,8 @@ async fn tags_are_defined_at_any_place_and_listed_with_those_above() {
         .token(&dan.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         listed
             .iter()
@@ -650,7 +651,8 @@ async fn tags_are_defined_at_any_place_and_listed_with_those_above() {
         .token(&dan.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(of_org.len(), 1);
     // A name is unique in its node without regard to case.
     let again = define(&a.boss, a.acme, "URGENT", 1).await.problem();

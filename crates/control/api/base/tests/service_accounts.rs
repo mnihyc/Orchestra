@@ -84,12 +84,18 @@ async fn make(
 }
 
 async fn list(world: &World, who: &Who, org: Id) -> Reply<Vec<ServiceAccount>> {
-    world
+    let reply = world
         .app
         .call(OrgServiceAccountList, &[&org])
         .token(&who.token)
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        body: reply.body.map(|page| page.items),
+        raw: reply.raw,
+    }
 }
 
 fn named(name: &str) -> ApiTokenCreateBody {
@@ -123,12 +129,18 @@ async fn token(
 }
 
 async fn tokens(world: &World, who: &Who, service: Id) -> Reply<Vec<ApiTokenInfo>> {
-    world
+    let reply = world
         .app
         .call(ServiceAccountTokenList, &[&service])
         .token(&who.token)
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        body: reply.body.map(|page| page.items),
+        raw: reply.raw,
+    }
 }
 
 /// Gives the service identity `service` a role in `place`, as `by`.
@@ -150,7 +162,8 @@ async fn give(world: &World, by: &Who, place: Id, service: Id, role: Role) {
         .send()
         .await
         .full_role()
-        .ok();
+        .ok()
+        .items;
 }
 
 async fn read_as(world: &World, secret: &str, node: Id) -> Reply<Node> {

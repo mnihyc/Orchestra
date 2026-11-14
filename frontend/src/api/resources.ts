@@ -15,6 +15,7 @@ import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { api, done, ok, repeatable } from '@/api/client';
 import { cachedRow } from '@/api/cache';
+import { readAllPages } from '@/api/collection';
 import { queryClient, type ReadOptions } from '@/api/query';
 import { type ResourceRows, resourceRows } from '@/api/listed';
 import type {
@@ -44,6 +45,8 @@ import type {
   ProviderFactsOverridesSetBody,
   ProviderListScope,
   ProviderModel,
+  ProviderModelPage,
+  ModelSuggestionPage,
   ProviderSetup,
   ProviderSourcesSetBody,
   ProviderThreadListReply,
@@ -223,7 +226,7 @@ export const providerModelsQuery = (id: string) =>
   queryOptions({
     queryKey: providerModelsKey(id),
     queryFn: ({ signal }): Promise<ProviderModel[]> =>
-      ok(api.GET('/providers/{id}/models', { params: { path: { id } }, signal })),
+      readAllPages((cursor) => ok(api.GET('/providers/{id}/models', { params: { path: { id }, query: { limit: RESOURCE_PAGE_SIZE, ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
 
 /** The models the provider's endpoint or harness names that are not listed yet. It fails where the provider cannot be asked. */
@@ -231,7 +234,7 @@ export const providerSuggestionsQuery = (id: string) =>
   queryOptions({
     queryKey: providerSuggestionsKey(id),
     queryFn: ({ signal }): Promise<ModelSuggestion[]> =>
-      ok(api.GET('/providers/{id}/models/suggestions', { params: { path: { id } }, signal })),
+      readAllPages((cursor) => ok(api.GET('/providers/{id}/models/suggestions', { params: { path: { id }, query: { limit: RESOURCE_PAGE_SIZE, ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
     // A discovery is a question put to the vendor: it is asked when the reader asks, not on every visit.
     staleTime: 5 * 60_000,
     retry: false,
@@ -306,6 +309,25 @@ export function restartHarness(providerId: string, agentId: string): Promise<Pro
   );
 }
 
+/** Model rows page independently of the provider's complete setup metadata. */
+export const providerModelsPageQuery = (id: string, q: string) => infiniteQueryOptions({
+  queryKey: ['provider-model-pages', id, q] as const,
+  initialPageParam: null as string | null,
+  queryFn: ({ pageParam, signal }): Promise<ProviderModelPage> => ok(api.GET('/providers/{id}/models', {
+    params: { path: { id }, query: { limit: RESOURCE_PAGE_SIZE, ...(q === '' ? {} : { q }), ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal,
+  })),
+  getNextPageParam: (page) => page.next_cursor,
+});
+
+export const providerSuggestionsPageQuery = (id: string, q: string, observedAt: string | null) => infiniteQueryOptions({
+  queryKey: ['provider-suggestion-pages', id, q, observedAt] as const,
+  initialPageParam: null as string | null,
+  queryFn: ({ pageParam, signal }): Promise<ModelSuggestionPage> => ok(api.GET('/providers/{id}/models/suggestions', {
+    params: { path: { id }, query: { unlisted: true, limit: RESOURCE_PAGE_SIZE, ...(q === '' ? {} : { q }), ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal,
+  })),
+  getNextPageParam: (page) => page.next_cursor,
+});
+
 export interface NewModel {
   model_name: string;
   display_name?: string;
@@ -371,10 +393,11 @@ export const agentQuery = (id: string) =>
     queryFn: ({ signal }): Promise<Agent> => ok(api.GET('/agents/{id}', { params: { path: { id } }, signal })),
   });
 
-/** The harnesses the system has an adapter for, with the builds there are. */
+/** The harnesses the system has an adapter for, with the builds there are. It changes with a release or an administrator's own act, which says so: it is read once. */
 export const harnessKindsQuery = queryOptions({
   queryKey: harnessKindsKey,
   queryFn: ({ signal }): Promise<HarnessKindInfo[]> => ok(api.GET('/harness-kinds', { signal })),
+  staleTime: Number.POSITIVE_INFINITY,
 });
 
 /** Makes a profile for a harness in an org. */
@@ -468,6 +491,7 @@ export const templateQuery = (id: string) =>
 export const driversQuery = queryOptions({
   queryKey: driversKey,
   queryFn: ({ signal }): Promise<DriverInfo[]> => ok(api.GET('/drivers', { signal })),
+  staleTime: Number.POSITIVE_INFINITY,
 });
 
 /** What an environment may be granted beyond the ordinary, each with its risk. */

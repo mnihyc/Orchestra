@@ -53,6 +53,8 @@ for (const locale of ['en','zh-CN'] as const) for (const theme of ['light','dark
   it(`registers through a system invitation without joining or promising a personal org in ${locale}/${theme}`, async () => {
     await setLocale(locale); useAppearance.setState({ locale, theme, resolvedTheme: theme });
     show(<Register invitation="test-offer" />);
+    const name = await screen.findByLabelText(i18n.t('auth.fields.displayName'));
+    expect(screen.getAllByRole('textbox')[0]).toBe(name);
     await fill();
     await userEvent.click(screen.getByRole('button', { name: i18n.t('auth.register.submit') }));
     await waitFor(() => expect(calls.register).toHaveBeenCalledTimes(1));

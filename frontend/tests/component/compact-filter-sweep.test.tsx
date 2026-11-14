@@ -90,7 +90,7 @@ vi.mock('@/api/everything',()=>({everythingQuery:(_reader:string,_parent:string,
 vi.mock('@/api/resources', async (original) => ({ ...await original<typeof ResourcesApi>(), machinesQuery: rowsQuery(['compact-machines']), hostsQuery: rowsQuery(['compact-hosts']), harnessKindsQuery: { queryKey: ['compact-harnesses'], queryFn: () => Promise.resolve([{ kind: 'codex' }, { kind: 'claude_code' }]) } }));
 vi.mock('@/api/admin', async (original) => ({ ...await original<typeof AdminApi>(), usersQuery: (filter: unknown) => pageQuery(['compact-users', filter]), runtimesQuery: (filter: unknown) => rowsQuery(['compact-runtimes', filter]) }));
 vi.mock('@/api/auth', async (original) => ({ ...await original<typeof AuthApi>(), meQuery: { queryKey: ['compact-me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada')) }, metaQuery: { queryKey: ['compact-meta'], queryFn: () => Promise.resolve(meta()) } }));
-vi.mock('@/api/users', async (original) => ({ ...await original<typeof UsersApi>(), sessionsQuery: rowsQuery(['compact-sessions']) }));
+vi.mock('@/api/users', async (original) => ({ ...await original<typeof UsersApi>(), sessionsQuery: rowsQuery(['compact-sessions']), sessionsPageQuery: (q: string) => pageQuery(['compact-sessions', q]) }));
 vi.mock('@/api/personal', async (original) => ({ ...await original<typeof PersonalApi>(), meStateQuery: { queryKey: ['compact-state'], queryFn: () => Promise.resolve({}) } }));
 vi.mock('@/api/day100', async (original) => ({ ...await original<typeof Day100Api>(), saveProjectView: vi.fn(() => Promise.resolve()) }));
 vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof NodesApi>(),

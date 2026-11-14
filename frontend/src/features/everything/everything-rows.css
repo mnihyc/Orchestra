@@ -22,7 +22,8 @@
 .everything-flat-row [data-desktop-place] { display: none; }
 .everything-flat-row [data-mobile-place] { display: block; }
 @media (min-width: 40rem) {
-  /* Subgrids align every row while Name takes its content width before Where gets the remainder. */
+  .everything-table:not(.everything-recent-table) { table-layout: fixed; min-width: var(--inventory-min-width); }
+  /* Subgrids align every row while Name and Where share the remaining room within stable tracks. */
   .everything-recent-table { display: grid; grid-template-columns: var(--recent-columns); min-width: var(--recent-min-width); }
   .everything-recent-table > thead, .everything-recent-table > tbody,
   .everything-recent-table tr { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; }

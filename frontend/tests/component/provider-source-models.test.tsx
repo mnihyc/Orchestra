@@ -5,17 +5,25 @@ import { act,cleanup,screen,waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach,expect,it,vi } from 'vitest';
 import type * as Resources from '@/api/resources';
-import { acceptSuggestions,providerKey } from '@/api/resources';
+import { acceptSuggestions,createModel,providerKey } from '@/api/resources';
 import { answerChanges } from '@/api/actAnswers';
 import { applyChanges } from '@/api/acts';
+import { AddModelDialog } from '@/features/resources/providers/ModelEditor';
 import { ProviderModels } from '@/features/resources/providers/Models';
 import { ProviderSetupNotice } from '@/features/resources/providers/SetupNotice';
-import type { Provider,ProviderModel,ProviderModelSuggestionAcceptReply } from '@/generated/api-types';
+import type { Provider,ProviderModel,ProviderModelSuggestionAcceptReply,ProviderModelPage } from '@/generated/api-types';
 import { i18n,setLocale } from '@/i18n';
+import { formatNumber } from '@/lib/format';
 import { planProvider,SOURCE_DESCRIPTOR } from '../unit/provider-plan-fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
 
-vi.mock('@/api/resources',async(load)=>({...await load<typeof Resources>(),acceptSuggestions:vi.fn()}));
+skipOverflowFallback();
+
+const pages = vi.hoisted(() => ({ models: vi.fn<(q: string, cursor: string | null) => Promise<ProviderModelPage>>() }));
+vi.mock('@/api/resources',async(load)=>({...await load<typeof Resources>(),acceptSuggestions:vi.fn(),createModel:vi.fn(),
+  providerModelsPageQuery: (id: string, q: string) => ({ queryKey: ['provider-model-pages', id, q], initialPageParam: null as string | null,
+    queryFn: ({ pageParam }: { pageParam: string | null }) => pages.models(q, pageParam), getNextPageParam: (page: ProviderModelPage) => page.next_cursor, staleTime: Infinity }),
+}));
 const read=vi.fn<()=>Promise<Provider>>();
 function Page({initial}:{initial:Provider}) {
   const query=useQuery({queryKey:providerKey(initial.id),queryFn:read,initialData:initial,staleTime:Infinity});
@@ -66,4 +74,69 @@ it('keeps an actual models-source failure visible on its recovery panel',()=>{
   show(<Page initial={provider}/>);
   expect(screen.getByRole('alert')).toBeVisible();
   expect(screen.queryByText(i18n.t('providers.phrase.needsModel'))).not.toBeInTheDocument();
+});
+
+it('says that adding switches on what a model offers, and offers the suggestions as what they offer', async () => {
+  const provider=sourceProvider();
+  provider.facts.models=[{model_name:'gpu-small',display_name:'GPU Small',listed:true,parameters:{context_window:32768,offered:{service_tiers:[{id:'fast',label:'Fast'}]}}}];
+  show(<Page initial={provider}/>);
+  expect(await screen.findByText(i18n.t('models.list.suggestionsOffer'))).toBeVisible();
+  expect(screen.getByText(i18n.t('models.list.offers',{list:'Fast'}))).toBeVisible();
+  expect(screen.queryByText(/Offered, not switched on/)).not.toBeInTheDocument();
+});
+
+it('shows what an added model has switched on in its row, with nothing left offered', () => {
+  const provider=sourceProvider();
+  const model:ProviderModel={...MODEL_ESTIMATE,id:'gpu-small',model_name:'gpu-small',display_name:'GPU Small',groups:[],enabled:true,source:'suggested',
+    parameters:{context_window:272000,context_max:1000000,default_context:272000,service_tiers:[{id:'fast',label:'Fast'}],access_programs:['early'],efforts:['low','high'],
+      offered:{context_max:1000000,service_tiers:[{id:'fast',label:'Fast'}],access_programs:['early']}}};
+  show(<Page initial={{...provider,models:[model]}}/>);
+  const row=screen.getAllByRole('row').find((one)=>one.textContent.includes('GPU Small'));
+  if(row===undefined)throw new Error('The added model has a row');
+  expect(row).toHaveTextContent('Fast');expect(row).toHaveTextContent('early');
+  expect(row).not.toHaveTextContent('Offered, not switched on');
+});
+
+for(const locale of ['en','zh-CN'] as const)it(`marks what may be left empty, shows the reported window as its placeholder and requires the window where nothing reports one (${locale})`,async()=>{
+  await setLocale(locale);
+  const user=userEvent.setup();const provider=sourceProvider();const onClose=vi.fn();
+  vi.mocked(createModel).mockResolvedValue({...MODEL_ESTIMATE,id:'gpu-small',model_name:'gpu-small',display_name:'GPU Small',groups:[],enabled:true,source:'manual',parameters:{}});
+  show(<AddModelDialog provider={provider} onClose={onClose}/>);
+  const optional=i18n.t('ui.field.optional'),window=i18n.t('models.editor.context.window'),routing=screen.getByLabelText(i18n.t('providers.models.routingName'));
+  expect(screen.getAllByRole('textbox')[0]).toBe(screen.getByLabelText(i18n.t('providers.models.displayName') + ' ' + optional));
+  // A name that nobody lists leaves the window to be written: it is not marked as one that may be left out.
+  await user.type(routing,'unlisted');
+  expect(screen.getByLabelText(window)).toBeInTheDocument();
+  expect(screen.queryByLabelText(`${window} ${optional}`)).not.toBeInTheDocument();
+  expect(screen.getByLabelText(`${i18n.t('providers.models.effortsLabel')} ${optional}`)).toHaveAttribute('placeholder',i18n.t('models.editor.none'));
+  await user.click(screen.getByRole('button',{name:i18n.t('providers.models.addSubmit')}));
+  expect(screen.getByText(i18n.t('models.fault.windowRequired'))).toBeVisible();
+  expect(createModel).not.toHaveBeenCalled();
+  // A name the catalogue lists reports its window, which fills what is left empty.
+  await user.clear(routing);await user.type(routing,'gpu-small');
+  const field=screen.getByLabelText(`${window} ${optional}`);
+  expect(field).toHaveAttribute('placeholder',i18n.t('models.editor.fromCatalogue',{value:formatNumber(32768,locale)}));
+  await user.click(screen.getByRole('button',{name:i18n.t('providers.models.addSubmit')}));
+  await waitFor(()=>expect(createModel).toHaveBeenCalledExactlyOnceWith(provider.id,{model_name:'gpu-small'}));
+  await waitFor(()=>expect(onClose).toHaveBeenCalled());
+});
+
+it('searches every model on the server and retains an unfinished name while paging through results', async () => {
+  const initial = sourceProvider();
+  initial.models = Array.from({ length: 1_001 }, (_, index) => ({ ...MODEL_ESTIMATE, id: 'listed-' + String(index), model_name: 'model-' + String(index),
+    display_name: 'Model ' + String(index).padStart(4, '0'), groups: [], enabled: true, source: 'manual' as const, parameters: {} }));
+  pages.models.mockImplementation((q, cursor) => Promise.resolve({ items: q === '' ? cursor === null ? initial.models.slice(0, 37) : initial.models.slice(37, 74)
+    : initial.models.filter((model) => model.display_name === q), next_cursor: q === '' && cursor === null ? 'next-models' : null }));
+  const user = userEvent.setup(); show(<Page initial={initial} />);
+  const first = await screen.findByRole('button', { name: i18n.t('providers.models.editName', { name: 'Model 0000' }) });
+  expect(screen.queryByRole('button', { name: i18n.t('providers.models.editName', { name: 'Model 1000' }) })).toBeNull();
+  await user.click(first);
+  const name = screen.getByRole('textbox', { name: i18n.t('providers.models.displayName') });
+  await user.clear(name); await user.paste('Unfinished model name');
+  const search = screen.getByRole('searchbox', { name: i18n.t('providers.models.find') });
+  await user.click(search); await user.paste('Model 1000');
+  await screen.findByRole('button', { name: i18n.t('providers.models.editName', { name: 'Model 1000' }) });
+  expect(pages.models).toHaveBeenCalledWith('Model 1000', null);
+  await user.clear(search);
+  expect(await screen.findByRole('textbox', { name: i18n.t('providers.models.displayName') })).toHaveValue('Unfinished model name');
 });

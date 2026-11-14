@@ -10,6 +10,7 @@ import { queryOptions } from '@tanstack/react-query';
 import { meQuery } from '@/api/auth';
 import { accepted, api, client, done, ok, repeatable } from '@/api/client';
 import { queryClient } from '@/api/query';
+import { collectionQuery, readAllPages } from '@/api/collection';
 import type {
   ApiTokenCreateBody,
   ApiTokenActivityPage,
@@ -171,7 +172,7 @@ export const sessionsKey = ['sessions'] as const;
 /** The sessions open for the person, this one marked. */
 export const sessionsQuery = queryOptions({
   queryKey: sessionsKey,
-  queryFn: ({ signal }): Promise<SessionInfo[]> => ok(api.GET('/me/sessions', { signal })),
+  queryFn: ({ signal }): Promise<SessionInfo[]> => readAllPages((cursor) => ok(api.GET('/me/sessions', { params: { query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
 });
 
 /** Ends one of the person's sessions; its browser is signed out at its next request. */
@@ -204,7 +205,7 @@ export const tokenOperationsQuery = queryOptions({
 /** The API tokens the person has made, with what each may do. Their secrets were shown once and are not kept. */
 export const tokensQuery = queryOptions({
   queryKey: tokensKey,
-  queryFn: ({ signal }): Promise<ApiTokenInfo[]> => ok(api.GET('/me/tokens', { signal })),
+  queryFn: ({ signal }): Promise<ApiTokenInfo[]> => readAllPages((cursor) => ok(api.GET('/me/tokens', { params: { query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
 });
 
 /** Makes an API token. The answer holds its secret, which is never given again. */
@@ -232,3 +233,6 @@ export function searchUsers(q: string, orgId?: string, signal?: AbortSignal): Pr
     }),
   );
 }
+
+export const sessionsPageQuery = (q: string) => collectionQuery(sessionsKey, q, (query, signal) => ok(api.GET('/me/sessions', { params: { query }, signal })));
+export const tokensPageQuery = (q: string) => collectionQuery(tokensKey, q, (query, signal) => ok(api.GET('/me/tokens', { params: { query }, signal })));

@@ -117,6 +117,7 @@ async fn make_group(world: &World, boss: &places::Who, org: Id, name: &str) -> I
         .send()
         .await
         .ok()
+        .items
         .into_full()
         .expect("this ordinary control requires the full native creation response")
         .id
@@ -347,8 +348,8 @@ async fn holder_list_requires_each_actual_group_payload_but_preserves_public_peo
     }
     let nested = rule("GroupHolderList", "group", d.inner, &["read"]);
     let narrow = d.key(vec![primary.clone(), nested.clone()]).await;
-    let actual = success(&holders(&d.world, &narrow.secret, d.outer).await);
-    let ordinary = success(&holders(&d.world, &d.boss.token, d.outer).await);
+    let actual = success(&holders(&d.world, &narrow.secret, d.outer).await)["items"].clone();
+    let ordinary = success(&holders(&d.world, &d.boss.token, d.outer).await)["items"].clone();
     assert_eq!(
         actual.as_array().unwrap().len(),
         ordinary.as_array().unwrap().len()
@@ -399,7 +400,7 @@ async fn holder_list_requires_each_actual_group_payload_but_preserves_public_peo
         .key(vec![primary, nested, names("GroupHolderList", d.org)])
         .await;
     assert_eq!(
-        success(&holders(&d.world, &full.secret, d.outer).await),
+        success(&holders(&d.world, &full.secret, d.outer).await)["items"].clone(),
         ordinary
     );
 }
@@ -939,7 +940,8 @@ async fn simultaneous_holder_puts_from_one_revision_admit_only_one_and_expose_th
         .query(&OrgGroupListQuery::default())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         shown
             .iter()

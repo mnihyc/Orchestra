@@ -13,6 +13,7 @@
  * makes nothing twice. A change to something with a revision carries the revision the person saw, and
  * a stale one comes back as `conflict.stale_revision`, which the screen shows and never retries alone.
  */
+import { collectionQuery, readAllPages } from '@/api/collection';
 import { CancelledError, infiniteQueryOptions, queryOptions, type QueryClient, type QueryKey } from '@tanstack/react-query';
 
 import { scheduledReads, suppliedRead } from '@/api/readScheduler';
@@ -274,7 +275,7 @@ export function setNodeTags(id: string, tagIds: string[], revision: number): Pro
 export const tagsQuery = (id: string) =>
   queryOptions({
     queryKey: tagsKey(id),
-    queryFn: ({ signal }): Promise<Tag[]> => ok(api.GET('/nodes/{id}/tags', { params: { path: { id } }, signal })),
+    queryFn: ({ signal }): Promise<Tag[]> => readAllPages((cursor) => ok(api.GET('/nodes/{id}/tags', { params: { path: { id }, query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
 
 /** What was deleted directly under a node and is not purged yet. */
@@ -485,3 +486,5 @@ export function setSubscription(id: string, level: SubscriptionLevel | null): Pr
     ? ok(api.DELETE('/nodes/{id}/subscription', { params: { path: { id } } }))
     : ok(api.PUT('/nodes/{id}/subscription', { params: { path: { id } }, body: { level } }));
 }
+
+export const tagsPageQuery = (id: string, q: string) => collectionQuery(tagsKey(id), q, (query, signal) => ok(api.GET('/nodes/{id}/tags', { params: { path: { id }, query }, signal })));

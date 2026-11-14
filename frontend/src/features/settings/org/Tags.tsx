@@ -5,13 +5,17 @@
  * tag taken away is removed from every topic that carried it, and the dialog says how many places
  * that is not known to be before it asks: the server removes it from all of them.
  */
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { ScrollRegion } from '@/ui/ScrollRegion';
+import { Pagination } from '@/ui/Pagination';
+import { useInfiniteQuery, useMutation } from '@tanstack/react-query';
 import { Pencil, Plus, Tags as TagsIcon, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { createTag, deleteTag, updateTag } from '@/api/directory';
-import { tagsQuery } from '@/api/nodes';
+import { tagsPageQuery } from '@/api/nodes';
 import { takes } from '@/features/settings/refusals';
 import type { SettingsNode } from '@/features/settings/org/General';
 import type { Tag } from '@/generated/api-types';
@@ -134,7 +138,9 @@ function TagDialog({ node, tag, onClose }: { node: SettingsNode; tag: Tag | null
 
 export function Tags({ node }: { node: SettingsNode }) {
   const { t } = useTranslation();
-  const list = useQuery(tagsQuery(node.id));
+  const search = useCollectionSearch("tags:" + node.id);
+  const list = useInfiniteQuery(tagsPageQuery(node.id, search.q));
+  const rows = list.data?.pages.flatMap((page) => page.items) ?? [];
   const [editing, setEditing] = useState<Tag | 'new' | null>(null);
   const [removing, setRemoving] = useState<Tag | null>(null);
   const may = holds(node.access, `${node.kind}.manage`);
@@ -146,8 +152,8 @@ export function Tags({ node }: { node: SettingsNode }) {
       setRemoving(null);
     },
   });
-  const own = (list.data ?? []).filter((tag) => tag.node.id === node.id);
-  const above = (list.data ?? []).filter((tag) => tag.node.id !== node.id);
+  const own = rows.filter((tag) => tag.node.id === node.id);
+  const above = rows.filter((tag) => tag.node.id !== node.id);
   return (
     <Section
       id="tags"
@@ -161,16 +167,17 @@ export function Tags({ node }: { node: SettingsNode }) {
         </PermissionGate>
       }
     >
+      <CollectionSearch name={t("settings.org.sectionNames.tags")} {...search} />
       {list.isPending ? (
         <SkeletonRows read={list} rows={3} />
-      ) : list.isError ? (
+      ) : list.isError && rows.length === 0 ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
-      ) : list.data.length === 0 ? (
+      ) : rows.length === 0 ? (
         <EmptyState compact icon={<TagsIcon aria-hidden />} title={t('tags.none', { place: node.name })} description={may ? t('tags.noneAbout') : undefined} />
       ) : (
         <div className="flex flex-col gap-4">
           {own.length > 0 && (
-            <ul className={`${boxClasses} divide-y divide-border`} aria-label={t('tags.ownList', { place: node.name })}>
+            <ScrollRegion kind="table" label={t("tags.ownList", { place: node.name })} className="max-h-96 overflow-y-auto"><ul className={`${boxClasses} divide-y divide-border`} aria-label={t('tags.ownList', { place: node.name })}>
               {own.map((tag) => (
                 <li key={tag.id} className="flex items-center gap-3 px-4 py-2">
                   <TagChip name={tag.name} color={tag.color} />
@@ -183,23 +190,24 @@ export function Tags({ node }: { node: SettingsNode }) {
                   )}
                 </li>
               ))}
-            </ul>
+            </ul></ScrollRegion>
           )}
           {above.length > 0 && (
             <div className="flex flex-col gap-2">
               <h3 className="text-sm font-medium text-text-muted">{t('tags.fromAbove')}</h3>
-              <ul className={`${boxClasses} divide-y divide-border`} aria-label={t('tags.aboveList')}>
+              <ScrollRegion kind="table" label={t("tags.aboveList")} className="max-h-96 overflow-y-auto"><ul className={`${boxClasses} divide-y divide-border`} aria-label={t('tags.aboveList')}>
                 {above.map((tag) => (
                   <li key={tag.id} className="flex flex-wrap items-center gap-3 px-4 py-2">
                     <TagChip name={tag.name} color={tag.color} />
                     <span className="text-sm text-text-muted">{t('tags.setIn', { place: tag.node.name ?? '' })}</span>
                   </li>
                 ))}
-              </ul>
+              </ul></ScrollRegion>
             </div>
           )}
         </div>
       )}
+      <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
       {editing !== null && <TagDialog node={node} tag={editing === 'new' ? null : editing} onClose={() => setEditing(null)} />}
       <ConfirmDialog
         open={removing !== null}

@@ -34,6 +34,7 @@ vi.mock('@/api/auth', async (original) => ({ ...(await original<typeof Auth>()),
 }));
 vi.mock('@/api/users', async (original) => ({ ...(await original<typeof Users>()),
   recoveryCodesQuery: { queryKey: ['recovery-codes'], queryFn: calls.status },
+  sessionsPageQuery: (q: string) => ({ queryKey: ['sessions', 'pages', q], initialPageParam: null, queryFn: () => Promise.resolve({ items: [], next_cursor: null }), getNextPageParam: () => null }),
   sessionsQuery: { queryKey: ['sessions'], queryFn: () => Promise.resolve([]) },
   regenerateRecoveryCodes: calls.replace, verifySecondStep: calls.verify,
   setUpAuthenticator: calls.setup, enableAuthenticator: calls.enable,

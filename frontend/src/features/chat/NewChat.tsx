@@ -178,11 +178,12 @@ function NewChatDialog({ open, onOpenChange, orgId, me, onOpened, defaultHome = 
     footer={<><Button variant="ghost" disabled={pending} onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
       <Button action="newMessage" variant="primary" pending={pending} blocked={chosen.length === 0 || group && nameTooLong} onClick={() => void submit()}>{title}</Button></>}>
     <div className="flex min-w-0 flex-col gap-3">
+      {group && <Input label={t('chat.new.name')} optional value={name} onChange={(event) => { setName(event.target.value); setError(null); }} disabled={pending}
+        error={nameTooLong ? t('chat.new.nameTooLong', { number: formatNumber(GROUP_NAME_MAX_CHARS, locale) }) : undefined} />}
       <Switch label={t('chat.new.asGroup')} checked={group} disabled={pending || chosen.length > 1}
         tooltip={chosen.length > 1 ? t('chat.new.multipleGroup') : undefined} onCheckedChange={(value) => { setGroup(value); setError(null); }} />
       <PeoplePicker orgId={orgId} chosen={chosen} onToggle={toggle} exclude={new Set()} guests={false} me={me} disabled={pending} />
-      {group && <><Input label={t('chat.new.name')} optional value={name} onChange={(event) => { setName(event.target.value); setError(null); }} disabled={pending}
-        error={nameTooLong ? t('chat.new.nameTooLong', { number: formatNumber(GROUP_NAME_MAX_CHARS, locale) }) : undefined} />
+      {group && <>
         <PlacePicker label={t('chat.group.home')} value={home} onChange={setHome} rootOrgId={orgId} includeThreads disabled={pending} />
         {home === null && <span className="text-sm text-text-muted">{t('chat.new.rootHome')}</span>}
         <Select<'private' | 'public'> label={t('chat.group.visibility')} value={visibility} disabled={pending} onValueChange={setVisibility}

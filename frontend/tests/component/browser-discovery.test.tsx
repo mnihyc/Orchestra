@@ -7,6 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import type * as ClientApi from '@/api/client';
 import type * as EnvironmentApi from '@/api/environments';
+import { OpenDialog } from '@/features/browser/OpenDialog';
 import { browserKeys } from '@/api/browsers';
 import { EnvironmentScreen, type EnvironmentTab } from '@/features/resources/environments/Environment';
 import { i18n, setLocale } from '@/i18n';
@@ -163,3 +164,11 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(wire.read).toHaveBeenCalledTimes(1);
   });
 }
+
+
+it('names a new browser profile before choosing how it starts', () => {
+  show(<OpenDialog environmentId={environment.id} environmentName={environment.name} list={{ ...browserSnapshot(), profiles: [] }} watchers={null} threadId={null} onOpened={vi.fn()} onClose={vi.fn()} />);
+  const name = screen.getByRole('textbox', { name: i18n.t('browser.open.name') });
+  const profiles = screen.getByRole('radiogroup', { name: i18n.t('browser.open.profile') });
+  expect(name.compareDocumentPosition(profiles) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+});

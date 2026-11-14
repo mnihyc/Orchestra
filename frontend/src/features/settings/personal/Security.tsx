@@ -6,7 +6,11 @@
  * Sessions are the browsers that are signed in; the person ends any but the one they are using. A
  * password changed ends every other session, and the page says so before it is changed.
  */
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { ScrollRegion } from '@/ui/ScrollRegion';
+import { Pagination } from '@/ui/Pagination';
+import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query';
 import { Link2, Mail, Monitor, Smartphone } from 'lucide-react';
 import { type ReactNode, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -23,7 +27,7 @@ import {
   revokeSession,
   revokeOtherSessions,
   sendEmailCode,
-  sessionsQuery,
+  sessionsPageQuery,
   type SetupProof,
   setUpAuthenticator,
   unlinkIdentity,
@@ -532,7 +536,9 @@ function Identities({ me }: { me: Me }) {
 function Sessions() {
   const { t } = useTranslation();
   const format = useFormatContext();
-  const list = useQuery(sessionsQuery);
+  const search = useCollectionSearch("sessions");
+  const list = useInfiniteQuery(sessionsPageQuery(search.q));
+  const rows = list.data?.pages.flatMap((page) => page.items) ?? [];
   const [ending, setEnding] = useState<SessionInfo | null>(null);
   const [endingOthers, setEndingOthers] = useState(false);
   const others = useMutation({
@@ -551,14 +557,15 @@ function Sessions() {
   });
   return (
     <Section id="security-sessions" title={t('security.sessions.title')} lead={t('security.sessions.lead')}
-      action={list.data?.some((session) => !session.current) === true ? <Button size="sm" disabled={end.isPending || others.isPending} onClick={() => setEndingOthers(true)}>{t('security.sessions.endOthers')}</Button> : undefined}>
+      action={(search.q !== '' || rows.some((session) => !session.current) || list.hasNextPage) ? <Button size="sm" disabled={end.isPending || others.isPending} onClick={() => setEndingOthers(true)}>{t('security.sessions.endOthers')}</Button> : undefined}>
+      <CollectionSearch name={t("security.sessions.title")} {...search} />
       {list.isPending ? (
         <SkeletonRows read={list} rows={2} />
       ) : list.isError ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : (
-        <ul className={`${boxClasses} divide-y divide-border`}>
-          {[...list.data].sort((one, other) => Number(other.current) - Number(one.current) || other.last_used_at.localeCompare(one.last_used_at)).map((session) => (
+        <ScrollRegion kind="table" label={t("security.sessions.title")} className="max-h-96 overflow-y-auto"><ul className={`${boxClasses} divide-y divide-border`}>
+          {[...rows].sort((one, other) => Number(other.current) - Number(one.current) || other.last_used_at.localeCompare(one.last_used_at)).map((session) => (
             <li key={session.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
               <Monitor className="size-4 text-text-subtle" aria-hidden />
               <div className="min-w-0 flex-1">
@@ -581,8 +588,9 @@ function Sessions() {
               )}
             </li>
           ))}
-        </ul>
+        </ul></ScrollRegion>
       )}
+      <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
       <ConfirmDialog
         open={endingOthers}
         onOpenChange={(open) => !open && setEndingOthers(false)}

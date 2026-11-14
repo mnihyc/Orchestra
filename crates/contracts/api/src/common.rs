@@ -319,8 +319,29 @@ pub struct PageQuery {
     pub cursor: Option<String>,
 }
 
+/// A named collection, searched and read without a fixed total-result cutoff.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CollectionQuery {
+    /// Words of the visible name; no minimum length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries in this page; 50 when absent, any positive u32 when supplied.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// The opaque continuation returned by this same collection and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
 /// Flattened URL query members arrive as strings; JSON callers retain the same numeric vocabulary.
-fn query_u32<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+pub(crate) fn query_u32<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Number {

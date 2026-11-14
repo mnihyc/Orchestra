@@ -29,6 +29,81 @@ use places::Who;
 use serde_json::json;
 use support::World;
 
+#[tokio::test]
+async fn account_credentials_are_searched_before_pages_and_every_continuation_is_available() {
+    use orch_api_contract::common::CollectionQuery;
+    let world = World::new().await;
+    let owner = places::person(&world, "page-owner").await;
+    for index in 0..13 {
+        legacy(
+            &world,
+            owner.id(),
+            &format!("Page key {index:02}"),
+            None,
+            false,
+        )
+        .await;
+        session(
+            &world,
+            owner.id(),
+            &format!("Page browser {index:02}"),
+            false,
+        )
+        .await;
+    }
+    let last = world
+        .app
+        .call(MeTokenList, &[])
+        .token(&owner.token)
+        .query(&CollectionQuery {
+            q: Some("Page key 12".to_owned()),
+            limit: Some(3),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(last.items.len(), 1);
+    assert_eq!(last.items[0].name, "Page key 12");
+    let browser = world
+        .app
+        .call(MeSessionList, &[])
+        .token(&owner.token)
+        .query(&CollectionQuery {
+            q: Some("Page browser 12".to_owned()),
+            limit: Some(3),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(browser.items.len(), 1);
+    let mut cursor = None;
+    let mut names = std::collections::HashSet::new();
+    loop {
+        let page = world
+            .app
+            .call(MeTokenList, &[])
+            .token(&owner.token)
+            .query(&CollectionQuery {
+                q: Some("Page key".to_owned()),
+                limit: Some(3),
+                cursor,
+            })
+            .send()
+            .await
+            .ok();
+        for row in page.items {
+            assert!(names.insert(row.name));
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(names.len(), 13);
+}
+
 struct Key {
     id: Id,
     secret: String,
@@ -195,6 +270,7 @@ async fn personal_key_collection_composes_root_rows_and_protected_names_without_
             .send()
             .await
             .ok()
+            .items
             .is_empty()
     );
     let exact_only = scoped(
@@ -227,7 +303,8 @@ async fn personal_key_collection_composes_root_rows_and_protected_names_without_
         .token(&composed.secret)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         rows.iter().map(|row| row.id).collect::<Vec<_>>(),
         vec![a.id]
@@ -267,7 +344,8 @@ async fn personal_key_collection_composes_root_rows_and_protected_names_without_
         .token(&named.secret)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         rows[0].node.as_ref().unwrap().name.as_deref(),
         Some("Private project label")
@@ -297,6 +375,7 @@ async fn personal_key_collection_composes_root_rows_and_protected_names_without_
             .send()
             .await
             .ok()
+            .items
             .is_empty(),
         "a legacy key restriction is not placement ancestry of that credential"
     );
@@ -320,7 +399,8 @@ async fn personal_key_collection_composes_root_rows_and_protected_names_without_
         .token(&all.secret)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     let expected = {
         let mut conn = world.conn().await;
         identity::api_tokens_of(&mut conn, owner.id())
@@ -350,7 +430,8 @@ async fn personal_key_collection_composes_root_rows_and_protected_names_without_
         .token(&owner.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         browser
             .iter()
@@ -370,7 +451,8 @@ async fn personal_key_collection_composes_root_rows_and_protected_names_without_
         .token(&old.secret)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         legacy_rows
             .iter()
@@ -420,6 +502,7 @@ async fn session_collection_uses_actual_owners_and_live_rows_without_inventing_a
             .send()
             .await
             .ok()
+            .items
             .is_empty()
     );
     let exact_only = scoped(
@@ -460,7 +543,8 @@ async fn session_collection_uses_actual_owners_and_live_rows_without_inventing_a
         .token(&one.secret)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![a]);
     assert_eq!(rows[0].user_agent, "Browser A");
     assert_eq!(rows[0].ip.as_deref(), Some("192.0.2.12"));
@@ -489,6 +573,7 @@ async fn session_collection_uses_actual_owners_and_live_rows_without_inventing_a
             .send()
             .await
             .ok()
+            .items
             .is_empty()
     );
     let all = scoped(
@@ -510,7 +595,8 @@ async fn session_collection_uses_actual_owners_and_live_rows_without_inventing_a
         .token(&all.secret)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     let expected = {
         let mut conn = world.conn().await;
         identity::live_sessions(&mut conn, owner.id(), world.now())
@@ -534,7 +620,8 @@ async fn session_collection_uses_actual_owners_and_live_rows_without_inventing_a
         .token(&owner.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(browser.iter().filter(|row| row.current).count(), 1);
     let old = legacy(&world, owner.id(), "Legacy session reader", None, false).await;
     let legacy_rows = world
@@ -543,7 +630,8 @@ async fn session_collection_uses_actual_owners_and_live_rows_without_inventing_a
         .token(&old.secret)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         legacy_rows.iter().map(|row| row.id).collect::<Vec<_>>(),
         expected
@@ -821,6 +909,7 @@ async fn service_collections_and_revokes_keep_member_checks_and_real_credential_
             .send()
             .await
             .ok()
+            .items
             .is_empty()
     );
     let one = scoped(
@@ -853,7 +942,8 @@ async fn service_collections_and_revokes_keep_member_checks_and_real_credential_
         .token(&one.secret)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         rows.iter().map(|row| row.id).collect::<Vec<_>>(),
         vec![a.id]
@@ -897,7 +987,8 @@ async fn service_collections_and_revokes_keep_member_checks_and_real_credential_
         .token(&all.secret)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().any(|row| row.id == a.id) && rows.iter().any(|row| row.id == expired.id));
     let old = legacy(&world, owner.id(), "Legacy service manager", None, false).await;
@@ -907,7 +998,8 @@ async fn service_collections_and_revokes_keep_member_checks_and_real_credential_
         .token(&old.secret)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(legacy_rows.len(), 2);
     assert_eq!(
         legacy_rows

@@ -8,7 +8,7 @@ import { show } from '../support';
 import { catalogue, look, modes, restore } from './fixtures';
 
 afterEach(restore);
-it.each(modes)('shows labels, regions, aliases and revision in $locale/$theme at $width', async (mode) => {
+it.each(modes)('shows labels, regions and aliases, and keeps the revision it binds to out of sight, in $locale/$theme at $width', async (mode) => {
   await look(mode);
   const save = vi.fn().mockResolvedValue(undefined);
   const view = show(<GatewayCatalogueView catalogue={catalogue} writable onSave={save} />);
@@ -17,7 +17,7 @@ it.each(modes)('shows labels, regions, aliases and revision in $locale/$theme at
     expect(screen.getByText(gateway.region, { exact: true })).toBeVisible();
     for (const endpoint of gateway.endpoints) expect(screen.getByText(endpoint.url, { exact: true })).toBeVisible();
   }
-  expect(view.container).toHaveTextContent(catalogue.revision);
+  expect(view.container).not.toHaveTextContent(catalogue.revision);
   expect(screen.getByRole('button', { name: i18n.t('help.hint.label', { term: i18n.t('regionalGateways.title') }) }))
     .toHaveAttribute('data-help-heading', 'gateway-catalogue');
   await userEvent.click(screen.getByRole('button', { name: i18n.t('regionalGateways.edit') }));
@@ -29,6 +29,7 @@ it.each(modes)('shows labels, regions, aliases and revision in $locale/$theme at
   const endpoints = within(first).getByRole('list', { name: i18n.t('regionalGateways.endpointsFor', { label: 'Europe gateway' }) });
   expect(within(endpoints).getAllByRole('listitem')).toHaveLength(catalogue.gateways[0]!.endpoints.length);
   expect(within(first).getByRole('textbox', { name: i18n.t('regionalGateways.label') })).toHaveValue('Europe gateway');
+  expect(within(first).getAllByRole('textbox')[0]).toBe(within(first).getByRole('textbox', { name: i18n.t('regionalGateways.label') }));
   expect(within(first).getByRole('textbox', { name: i18n.t('regionalGateways.endpointNumber', { number: 1 }) })).toHaveValue(catalogue.gateways[0]!.endpoints[0]!.url);
   await userEvent.click(within(dialog).getByRole('button', { name: i18n.t('common.cancel') }));
   expect(save).not.toHaveBeenCalled();

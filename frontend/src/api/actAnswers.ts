@@ -9,6 +9,7 @@ import { META_SETTINGS } from '@/api/adminState';
 import { isPeopleProjection } from '@/api/peopleChanges';
 import { documentSummaryOptionsKey, resourceSummaryKey } from '@/api/summaries';
 import { outsideKey, routesKey } from '@/api/away';
+import { searchedPageChanges } from '@/api/collectionChanges';
 
 const KINDS: Readonly<Record<string, string>> = {
   nodes: 'node', orgs: 'node', projects: 'node', topics: 'node', threads: 'thread',
@@ -53,7 +54,8 @@ export function answerChanges(act: Act, p: PathParam, dependencies: readonly Cha
   // went to) keeps it with whatever the answer made of the row, as the related views and the exact views are kept.
   const membership = native.filter((change) => 'people' in change && change.always === true);
   const kept = answered.some((change) => 'people' in change) ? [] : membership;
-  return [...answered, ...kept, ...related, ...outside, ...missing];
+  const pages = searchedPageChanges(act, p);
+  return [...pages.early, ...answered, ...kept, ...related, ...outside, ...missing, ...pages.late];
 }
 
 function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Change[]): Change[] {
@@ -315,15 +317,19 @@ function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Chan
       ...pendingParameters,
       ...(parts[0] === 'admin' && META_SETTINGS.has(answer.key) ? [meta()] : [])];
   }
+  const modelPages = (id: string): Change => ({ missing: [{ key:['provider-model-pages',id] },{ key:['provider-suggestion-pages',id] }], allObserved:true, cancelPending:true });
+  if (parts[0] === 'providers' && parts[2] !== 'models' && record(answer) && Array.isArray(answer.models)) changes.push(modelPages(p('id')));
   if (parts[0] === 'providers' && parts[2] === 'models') {
     if(parts[3]==='suggestions' && parts[4]==='accept' && record(answer) && record(answer.provider)) {
       put('provider',answer.provider);
       if(Array.isArray(answer.provider.models))value(['provider-models',p('id')],answer.provider.models);
+      changes.push(modelPages(p('id')));
       return changes;
     }
     const modelChanges=(id:string,data:unknown):Change[]=>[
       {collection:{key:['provider-models',p('id')],identity:'id',id,data}},
       {collection:{key:['provider',p('id')],field:'models',identity:'id',id,data}},
+      modelPages(p('id')),
     ];
     if (Array.isArray(answer)) return answer.flatMap((model: unknown) => record(model) && typeof model.id === 'string'
       ? modelChanges(model.id,model) : []);

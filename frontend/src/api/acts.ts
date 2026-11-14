@@ -18,6 +18,7 @@
  * request that changes nothing a screen reads (a preview, a ticket, a part of an upload) has an entry that
  * says so.
  */
+import { collectionRows, seedNamedPages } from '@/api/collection';
 import type { Query, QueryClient, QueryKey } from '@tanstack/react-query';
 
 import { type Act, client } from '@/api/client';
@@ -252,7 +253,7 @@ const files = (id: string): Change[] => [...ones(id, 'workspace-stat', 'workspac
 
 /** One provider, with what its pages and every chooser of a provider read. */
 const provider = (id: string): Change[] => [
-  ...ones(id, 'provider', 'provider-settings', 'provider-models', 'provider-suggestions', 'provider-threads', 'provider-caps', 'provider-login', 'settings'),
+  ...ones(id, 'provider', 'provider-settings', 'provider-models', 'provider-suggestions', 'provider-model-pages', 'provider-suggestion-pages', 'provider-threads', 'provider-caps', 'provider-login', 'settings'),
   ...kinds('providers', 'provider-setup', 'start-options', 'usage', 'thread-parameters', AGENT_REACH),
 ];
 
@@ -1286,10 +1287,8 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
       // A native live view repairs itself from its feed; a legacy hint must not evict or read it.
       const candidates=cache.getQueryCache().getAll().filter((query)=>queryFeed(query.queryKey)===null
         && change.missing.some((candidate)=>covers(candidate,query.queryKey))
-        && (change.containingRow===undefined || Array.isArray(query.state.data)
-          && (query.state.data as unknown[]).some((row)=>record(row) && row.id===change.containingRow))
-        && (change.containingAccount===undefined || Array.isArray(query.state.data)
-          && (query.state.data as unknown[]).some((row)=>record(row) && record(row.user) && row.user.id===change.containingAccount))
+        && (change.containingRow===undefined || collectionRows(query.state.data).some((row)=>record(row) && row.id===change.containingRow))
+        && (change.containingAccount===undefined || collectionRows(query.state.data).some((row)=>record(row) && record(row.user) && row.user.id===change.containingAccount))
         && (change.except === undefined || !names(query.queryKey, change.except, 0))
         && (change.dependentOn === undefined || record(query.state.data) && Array.isArray(query.state.data.depends)
           && !(query.queryKey[1] === change.dependentOn.object && query.queryKey[2] === change.dependentOn.id)
@@ -1329,7 +1328,13 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
         }
       }
     }
-    else if ('value' in change) cache.setQueryData(change.value.key, change.value.data);
+    else if ('value' in change) {
+      if (change.value.key.length === 1 && change.value.key[0] === 'sessions' && Array.isArray(change.value.data)) {
+        await seedNamedPages(cache, ['sessions'], change.value.data as unknown[], (row) => record(row) ? [row.user_agent, row.ip].filter((value) => typeof value === 'string').join(' ') : '');
+        if (client.session.getState().readerVersion !== readerVersion) return;
+      }
+      cache.setQueryData(change.value.key, change.value.data);
+    }
     else if ('collection' in change) {
       if (change.cancelPending === true) {
         const query = cache.getQueryCache().find({ queryKey: change.collection.key, exact: true });

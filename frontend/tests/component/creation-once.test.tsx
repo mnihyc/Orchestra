@@ -4,7 +4,7 @@ import type * as OrgState from '@/shell/org';
 import type * as OrgOverviewModule from '@/api/orgOverview';
 import type * as FirstStepsModule from '@/api/firstSteps';
 import type * as UsageBoardModule from '@/features/usage/Board';
-import { screen, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Box } from 'lucide-react';
 import type { ReactNode } from 'react';
@@ -17,6 +17,8 @@ import { placeOfNode } from '@/features/navigation/places';
 import { OrgHome } from '@/features/org/Home';
 import { Project as ProjectPage } from '@/features/project/Project';
 import { ResourceListFrame } from '@/features/resources/ResourceList';
+import { treeNode } from '../doubles/tree-node';
+import { TopicThreads } from '@/features/topic/Threads';
 import { TopicOverview } from '@/features/topic/Overview';
 import type { Org, Project, Topic, TreeNode } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
@@ -24,6 +26,8 @@ import { useAppearance } from '@/lib/appearance';
 import { acmeTree, me, org, userRef } from '../doubles/fixtures';
 import { show } from './support';
 import { overviewFixture } from './overview-fixture';
+import type { EverythingFilter } from '@/api/everything';
+import { inventoryRow } from '../doubles/everything-row';
 
 const calls = vi.hoisted(() => ({ dialog: vi.fn(), document: vi.fn() }));
 const owner = userRef(me(1, 'ada', 'Ada'));
@@ -44,6 +48,8 @@ const topic: Topic = { ...project, kind: 'topic', id: 'topic', name: 'Release to
   default_environment_id: null, environments: [], last_activity_at: null, seq: 0,
   access: { ...root.access, permissions: ['topic.view', 'topic.interact', 'topic.start_threads', 'topic.manage', 'doc.create'] } };
 let nodes = new Map<string, TreeNode>();
+const threadReads: string[] = [];
+let serverOnlyThread: ReturnType<typeof inventoryRow> | null = null;
 function emptyPages(key: readonly unknown[]) {
   return { queryKey: key, initialPageParam: null, queryFn: () => Promise.resolve({ items: [], next_cursor: null }), getNextPageParam: () => undefined };
 }
@@ -74,6 +80,14 @@ vi.mock('@/api/documents', async (original) => ({ ...await original<object>(), d
 vi.mock('@/api/chats', async (original) => ({ ...await original<object>(), orgChatsQuery: (id: string) => emptyPages(['one-create-chats', id]) }));
 vi.mock('@/realtime/live', async (original) => ({ ...await original<object>(), useOrgTreeFeed: vi.fn() }));
 vi.mock('@/realtime/stores/tree', async (original) => ({ ...await original<object>(), useOrgTree: () => ({ nodes, loaded: true, error: null }) }));
+vi.mock('@/api/everything', () => ({ everythingQuery: (reader: string, parent: string | null, filter: EverythingFilter) => {
+  const rows = [...nodes.values()].filter((row) => row.kind === 'thread' && row.parent_id === parent).map((row) => inventoryRow({ id: row.id, kind: 'thread', parent_id: parent, name: row.name, ...(row.thread === null ? {} : { thread_display: row.thread.display }) }));
+  if (serverOnlyThread !== null) rows.push(serverOnlyThread);
+  const items = rows.filter((row) => row.name?.includes(filter.q) === true);
+  const page = { items: items.slice(0, 50), next_cursor: items.length > 50 ? 'later' : null };
+  return { queryKey: ['topic-threads-server', reader, parent, filter], initialPageParam: null, initialData: () => ({ pages: [page], pageParams: [null] }),
+    queryFn: () => { threadReads.push(filter.q); return Promise.resolve(page); }, getNextPageParam: (last: typeof page) => last.next_cursor };
+} }));
 vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
 vi.mock('@/shell/org', async (load) => ({ ...await load<typeof OrgState>(), selectOrg: vi.fn() }));
 vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: calls.dialog }));
@@ -113,9 +127,9 @@ const modes = [['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
 const appearance = useAppearance.getState();
 const previousTheme = document.documentElement.dataset.theme;
 const wasDark = document.documentElement.classList.contains('dark');
-beforeEach(() => { vi.clearAllMocks(); root = makeOrg(); projectData = project; children = []; nodes = new Map(); });
+beforeEach(() => { vi.clearAllMocks(); root = makeOrg(); projectData = project; children = []; nodes = new Map(); threadReads.length = 0; serverOnlyThread = null; });
 afterEach(async () => {
-  useAppearance.setState(appearance);
+  vi.restoreAllMocks(); useAppearance.setState(appearance);
   document.documentElement.classList.toggle('dark', wasDark);
   if (previousTheme === undefined) delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = previousTheme;
@@ -162,7 +176,7 @@ for (const [locale, theme] of modes) {
     nodes = new Map([[thread.id, { ...thread, parent_id: topic.id }]]);
     view.rerender(<TopicOverview topic={topic} place={placeOfNode(topic)} />);
     expect(screen.getAllByRole('textbox', { name: i18n.t('start.quick.label.topic') })).toHaveLength(1);
-    expect(screen.getByRole('link', { name: thread.name })).toBeVisible();
+    expect(await screen.findByRole('link', { name: thread.name })).toBeVisible();
     expect(screen.queryByRole('button', { name: i18n.t('places.topic.newThread') })).not.toBeInTheDocument();
   });
 
@@ -306,3 +320,29 @@ for (const [locale, theme] of modes) {
     expect(calls.dialog).toHaveBeenCalledExactlyOnceWith({ type: 'new-org' });
   });
 }
+
+
+for (const surface of ['overview', 'threads'] as const) it(`finds a late topic thread through server search without drawing every row on ${surface}`, async () => {
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) { return this.tagName === 'TR' ? 72 : 384; });
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(600);
+  nodes = new Map(Array.from({ length: 1_200 }, (_, index) => {
+    const row = treeNode({ id: `long-thread-${index}`, kind: 'thread', parent_id: topic.id, name: `Thread ${index}`, tree_seq: index });
+    return [row.id, row];
+  }));
+  show(surface === 'overview' ? <TopicOverview topic={topic} place={placeOfNode(topic)} />
+    : <TopicThreads orgId={topic.org_id} topicId={topic.id} topic={placeOfNode(topic)} allowed owner={topic.owner} />);
+  const table = screen.getByRole('table', { name: i18n.t('places.topic.threads') });
+  expect(within(table).getAllByRole('row').length).toBe(51);
+  expect(screen.getByRole('button', { name: i18n.t('ui.pagination.more') })).toBeVisible();
+  fireEvent.change(screen.getByRole('searchbox', { name: i18n.t('places.topic.findThreads') }), { target: { value: 'Thread 1199' } });
+  await waitFor(() => expect(threadReads).toContain('Thread 1199'));
+  const matched = screen.getByRole('table', { name: i18n.t('places.topic.threads') });
+  expect(within(matched).queryByRole('link', { name: 'Thread 0' })).not.toBeInTheDocument();
+  expect(matched).toHaveTextContent('Thread 1199');
+});
+
+it('shows a readable server thread before its live tree row has arrived', async () => {
+  serverOnlyThread = inventoryRow({ id: 'late-live-row', kind: 'thread', parent_id: topic.id, name: 'Available on the server' });
+  show(<TopicThreads orgId={topic.org_id} topicId={topic.id} topic={placeOfNode(topic)} allowed owner={topic.owner} />);
+  expect(await screen.findByRole('link', { name: 'Available on the server' })).toBeVisible();
+});

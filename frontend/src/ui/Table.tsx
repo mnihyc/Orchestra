@@ -160,7 +160,7 @@ export function Table<Row>({ label, columns, rows, sections, rowKey, rowClassNam
   // One page of 50 remains a native table; additional pages need a separate scroll window.
   const windowed = virtual && items.length > 50;
   return (
-    <ScrollRegion ref={ref} kind="table" label={label} className={cx('rounded-lg border border-border bg-surface', virtual && 'max-h-96 overflow-y-auto', className)}>
+    <ScrollRegion ref={ref} kind="table" label={label} className={cx('max-h-96 overflow-y-auto rounded-lg border border-border bg-surface', className)}>
       <table aria-label={label} aria-rowcount={windowed ? items.length + 1 : undefined} className="w-full table-auto border-collapse text-left text-base">
         <thead className="sticky top-0 z-(--layer-sticky)">
           <tr aria-rowindex={windowed ? 1 : undefined} className="border-b border-border bg-bg-subtle text-sm font-medium text-text-muted">

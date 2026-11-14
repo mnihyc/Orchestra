@@ -6,9 +6,11 @@
 //!
 //! The entry of a model also says what it can be run with at the provider: its efforts, the speeds and the
 //! access programs its managers enabled, the largest context a thread may be given, and what a thread on it
-//! starts with of each. Whatever costs more or reaches further is enabled by a manager and by no one else,
-//! so accepting a suggestion puts what it lists under `offered` and enables none of it. The groups a manager
-//! puts a model in are the names by which a cap, an allowlist or an entry's models name several at once.
+//! starts with of each. What a model is added with is the organization's to say (`models.add_switches_on`):
+//! accepting a suggestion, or adding a model by a name the provider's catalogue lists, switches on everything
+//! the catalogue says the model offers, only its efforts and context sizes, or nothing but what the model
+//! states of itself; whatever is left off stays under `offered` for a manager to switch on. The groups a
+//! manager puts a model in are the names by which a cap, an allowlist or an entry's models name several at once.
 
 use crate::middleware::requests::ApiError;
 
@@ -343,17 +345,47 @@ fn parameters_json(parameters: &ModelParameters) -> ApiResult<Json> {
     serde_json::to_value(parameters).map_err(ApiError::internal)
 }
 
-/// Lists the models of a provider.
-async fn list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ProviderModel>> {
+#[derive(sqlx::FromRow)]
+struct ListedModel {
+    #[sqlx(flatten)]
+    row: queries::ModelRow,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Lists saved models with server name search and a stable creation-order continuation.
+async fn list(
+    ctx: Ctx,
+    query: orch_api_contract::common::CollectionQuery,
+    (): (),
+) -> ApiResult<api::ProviderModelPage> {
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     let principal = ctx.operation_principal(&mut conn).await?;
     provider_for(&mut conn, &principal, id, Permission::ProviderView).await?;
-    queries::models_of(&mut conn, &[id])
-        .await?
-        .iter()
-        .map(model_view)
-        .collect()
+    let source = format!("provider-models/{id}");
+    let after: Option<(chrono::DateTime<chrono::Utc>, orch_types::Id)> =
+        orch_api_base::collection::after(&query, &source)?;
+    let terms = orch_api_base::collection::terms(&query);
+    let rows: Vec<ListedModel> = sqlx::query_as(
+        "SELECT m.*, provider_option_layers(m.provider_id,m.groups) AS option_layers FROM provider_models m
+         WHERE m.provider_id=$1
+           AND NOT EXISTS (SELECT 1 FROM unnest($2::text[]) word WHERE position(word in lower(m.model_name||' '||m.display_name))=0)
+           AND ($3::timestamptz IS NULL OR (m.created_at,m.id)>($3,$4::uuid))
+         ORDER BY m.created_at,m.id LIMIT $5")
+        .bind(id).bind(terms).bind(after.as_ref().map(|(at,_)| *at)).bind(after.map(|(_,id)| id))
+        .bind(i64::from(orch_api_base::collection::limit(&query)?) + 1)
+        .fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
+    let page = orch_api_base::collection::finish(&query, &source, rows, |entry| {
+        (entry.created_at, entry.row.id)
+    })?;
+    Ok(orch_api_contract::common::Page {
+        items: page
+            .items
+            .iter()
+            .map(|entry| model_view(&entry.row))
+            .collect::<ApiResult<Vec<_>>>()?,
+        next_cursor: page.next_cursor,
+    })
 }
 
 /// Adds a model to a provider, enabled.
@@ -363,7 +395,7 @@ async fn create(
     body: api::ProviderModelCreateBody,
 ) -> ApiResult<api::ProviderModelWriteResponse> {
     let id = ctx.id("id")?;
-    let definition = definition(&body)?;
+    let mut definition = definition(&body)?;
     // The provider's Manage is asked again in the transaction that writes, once the body has come.
     let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
     let row = queries::providers(&mut tx, &[id])
@@ -384,6 +416,15 @@ async fn create(
     ) {
         return Err(exists(&ctx, existing));
     }
+    // A name the provider's catalogue lists is added with what the catalogue says of it, under what was written.
+    let switches = add_switches(&mut tx, row.home_id).await?;
+    let asked = body.parameters.clone().unwrap_or_default();
+    definition.parameters = parameters_json(&catalogued(
+        &row.facts,
+        &definition.routing,
+        &asked,
+        switches,
+    ))?;
     let model = insert_native(&ctx, &mut tx, &row, &definition).await?;
     orch_db::idempotency::creation::observe(&mut tx, Some(principal.user()), MODEL_CREATION, model)
         .await?;
@@ -700,6 +741,7 @@ async fn update(
             {
                 members.insert("offered".to_owned(), offered.clone());
             }
+            fill_window(&mut written);
             Some(written)
         }
         None => None,
@@ -912,7 +954,21 @@ async fn discover(ctx: &Ctx, row: &ProviderRow) -> ApiResult<Vec<ModelSuggestion
 }
 
 /// Lists the models that discovery suggests; nothing is added by it.
-async fn suggestions(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ModelSuggestion>> {
+fn unlisted_suggestions(
+    found: Vec<ModelSuggestion>,
+    saved: &std::collections::HashSet<String>,
+) -> Vec<ModelSuggestion> {
+    found
+        .into_iter()
+        .filter(|row| !saved.contains(&row.model_name))
+        .collect()
+}
+
+async fn suggestions(
+    ctx: Ctx,
+    query: api::ProviderModelSuggestionListQuery,
+    (): (),
+) -> ApiResult<api::ModelSuggestionPage> {
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     let row = queries::providers(&mut conn, &[id])
@@ -920,18 +976,83 @@ async fn suggestions(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ModelSuggestion>
         .pop()
         .ok_or_else(ApiError::not_found)?;
     drop(conn);
-    let found = discover(&ctx, &row).await?;
+    let cached = row
+        .facts
+        .get("models")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value::<Vec<ModelSuggestion>>)
+        .transpose()
+        .map_err(ApiError::internal)?;
+    let mut found = match cached.filter(|_| query.refresh != Some(true)) {
+        Some(found) => found,
+        None => discover(&ctx, &row).await?,
+    };
     let (mut tx, guard) = Box::pin(crate::middleware::transaction_guard::begin(&ctx)).await?;
     provider_for(&mut tx, guard.principal(), id, Permission::ProviderManage).await?;
+    let unlisted = query.unlisted.unwrap_or(false);
+    if unlisted {
+        let saved: Vec<String> =
+            sqlx::query_scalar("SELECT model_name FROM provider_models WHERE provider_id=$1")
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(DbError::from)?;
+        found = unlisted_suggestions(found, &saved.into_iter().collect());
+    }
     tx.commit().await.map_err(DbError::from)?;
-    Ok(found)
+    orch_api_base::collection::snapshot(
+        &query.collection(),
+        &format!("provider-model-suggestions/{id}/{unlisted}"),
+        found,
+        |row| row.model_name.clone(),
+        |row| format!("{} {}", row.model_name, row.display_name),
+        false,
+    )
 }
 
-/// What a suggestion becomes when it is accepted: the speeds and access programs it lists, and a context
-/// larger than the model's own window, are on offer, and none of them is enabled; a manager enables one by
-/// writing it in. What a thread starts with is a manager's choice and never discovery's, so no start comes
-/// from a suggestion.
-fn accepted_parameters(suggested: &ModelParameters) -> ApiResult<Json> {
+/// What the organization has chosen to switch on when a model is added from the catalogue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddSwitches {
+    /// Efforts, the window, every context size, every speed and every access program.
+    All,
+    /// Efforts, the window and every context size.
+    Basic,
+    /// What the model states of itself, its window and its efforts; the rest stays on offer.
+    Nothing,
+}
+
+impl AddSwitches {
+    /// The choice as the setting words it; an unset or unknown word is the shipped one.
+    fn read(word: Option<&str>) -> Self {
+        match word {
+            Some("basic") => Self::Basic,
+            Some("nothing") => Self::Nothing,
+            _ => Self::All,
+        }
+    }
+}
+
+/// What the organization that holds a provider has chosen to switch on for the models added to it.
+async fn add_switches(conn: &mut orch_db::Conn, home: Id) -> ApiResult<AddSwitches> {
+    let word = orch_settings::get::<String>(
+        conn,
+        orch_settings::Place::Node(home),
+        orch_settings_contract::registry::keys::MODELS_ADD_SWITCHES_ON,
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(AddSwitches::read(word.as_deref()))
+}
+
+/// What a suggestion becomes when it is accepted. The window is the model's own: the one its source gives,
+/// or else the largest context the source says the model takes, since an entry without one cannot measure its
+/// context. What the speeds, the access programs and a context larger than the window do depends on what the
+/// organization chose to switch on: each is either enabled on the entry or left on offer, and a manager
+/// enables the rest by writing it in. What a thread starts with is a manager's choice and never discovery's,
+/// so no start comes from a suggestion, except that a larger context that is switched on leaves a thread
+/// starting with the model's own window, which costs no more than before; the larger sizes are a choice.
+fn accepted_parameters(suggested: &ModelParameters, switches: AddSwitches) -> ApiResult<Json> {
     let mut parameters = suggested.clone();
     let mut offered = parameters.offered.take().unwrap_or_default();
     if let Some(modes) = parameters.web_search.take() {
@@ -962,11 +1083,27 @@ fn accepted_parameters(suggested: &ModelParameters) -> ApiResult<Json> {
     parameters.default_access_program = None;
     parameters.default_context = None;
     parameters.request_options = None;
+    // A model with no window of its own has the one its source reports.
+    if parameters.context_window.is_none() {
+        parameters.context_window = offered.context_max.filter(|largest| *largest > 0);
+    }
     // A context that is no more than the model's own window offers nothing.
     if let (Some(largest), Some(window)) = (offered.context_max, parameters.context_window)
         && largest <= window
     {
         offered.context_max = None;
+    }
+    if switches != AddSwitches::Nothing
+        && let Some(largest) = offered.context_max
+    {
+        parameters.context_max = Some(largest);
+        parameters.default_context = parameters.context_window;
+    }
+    if switches == AddSwitches::All {
+        parameters.service_tiers.clone_from(&offered.service_tiers);
+        parameters
+            .access_programs
+            .clone_from(&offered.access_programs);
     }
     if offered != api::ModelOffered::default() {
         parameters.offered = Some(offered);
@@ -974,8 +1111,92 @@ fn accepted_parameters(suggested: &ModelParameters) -> ApiResult<Json> {
     parameters_json(&parameters)
 }
 
-/// Adds the suggested models that were chosen, enabled, none of their speeds or access programs
-/// enabled.
+/// A model saved without a window of its own has the one its source reports, so long as that does not pass
+/// the largest context a manager opened.
+fn fill_window(parameters: &mut Json) {
+    let reported = parameters
+        .pointer("/offered/context_max")
+        .and_then(Json::as_i64)
+        .filter(|largest| *largest > 0);
+    let opened = parameters.get("context_max").and_then(Json::as_i64);
+    if let (Some(members), Some(window)) = (parameters.as_object_mut(), reported)
+        && members.get("context_window").is_none_or(Json::is_null)
+        && opened.is_none_or(|largest| largest >= window)
+    {
+        members.insert("context_window".to_owned(), json!(window));
+    }
+}
+
+/// What a model that the provider's catalogue (the list its source last gave) names is added with: what it
+/// would have been given on being accepted, under whatever the manager wrote. A catalogue that does not fit
+/// what was written is left out, so that a request that was valid before is never refused for it.
+fn catalogued(
+    facts: &Json,
+    name: &str,
+    asked: &ModelParameters,
+    switches: AddSwitches,
+) -> ModelParameters {
+    let listed = facts
+        .get("models")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|each| serde_json::from_value::<ModelSuggestion>(each.clone()).ok())
+        .find(|each| each.model_name == name);
+    let Some(listed) = listed else {
+        let mut own = parameters_json(asked).unwrap_or_default();
+        fill_window(&mut own);
+        return serde_json::from_value(own).unwrap_or_else(|_| asked.clone());
+    };
+    let Ok(mut merged) = accepted_parameters(&listed.parameters, switches) else {
+        return asked.clone();
+    };
+    let Ok(given) = parameters_json(asked) else {
+        return asked.clone();
+    };
+    if let (Some(base), Some(over)) = (merged.as_object_mut(), given.as_object()) {
+        for (member, value) in over {
+            base.insert(member.clone(), value.clone());
+        }
+    }
+    let Ok(mut merged) = serde_json::from_value::<ModelParameters>(merged) else {
+        return asked.clone();
+    };
+    // What the catalogue starts a thread with is dropped where what was written leaves it nothing to start from.
+    if asked.efforts.is_some()
+        && asked.default_effort.is_none()
+        && merged.default_effort.as_ref().is_some_and(|effort| {
+            !merged
+                .efforts
+                .as_deref()
+                .unwrap_or_default()
+                .contains(effort)
+        })
+    {
+        merged.default_effort = None;
+    }
+    if merged
+        .context_max
+        .zip(merged.context_window)
+        .is_some_and(|(largest, window)| largest < window)
+    {
+        merged.context_max = None;
+    }
+    // A start that nobody wrote is the model's own window, so long as a larger context is open above it.
+    if asked.default_context.is_none() {
+        merged.default_context = merged
+            .context_max
+            .and(merged.context_window)
+            .filter(|window| Some(*window) <= merged.context_max);
+    }
+    if check_parameters(&merged).is_ok() {
+        merged
+    } else {
+        asked.clone()
+    }
+}
+
+/// Adds the suggested models that were chosen, enabled, with what the organization switches on for them.
 async fn accept(
     ctx: Ctx,
     (): (),
@@ -991,6 +1212,7 @@ async fn accept(
     let found = discover(&ctx, &row).await?;
     // A completed discovery cannot lend its old authority to validation or writes.
     let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
+    let switches = add_switches(&mut tx, row.home_id).await?;
     let mut chosen: Vec<&ModelSuggestion> = Vec::new();
     for (index, name) in body.model_names.iter().enumerate() {
         let Some(suggestion) = found.iter().find(|each| &each.model_name == name) else {
@@ -1027,7 +1249,7 @@ async fn accept(
             return Err(exists(&ctx, existing));
         }
         let model = orch_types::new_id();
-        let parameters = accepted_parameters(&suggestion.parameters)?;
+        let parameters = accepted_parameters(&suggestion.parameters, switches)?;
         queries::insert_model(
             &mut tx,
             &NewModel {
@@ -1117,6 +1339,19 @@ pub mod tests {
     use orch_api_contract::resources::ModelOffered;
 
     use orch_api_contract::resources::ServiceTier;
+
+    #[test]
+    fn unlisted_suggestion_pages_exclude_saved_models_before_search_and_paging() {
+        let found = vec![
+            ModelSuggestion::named("saved", Some("Saved")),
+            ModelSuggestion::named("new", Some("New")),
+        ];
+        let names = std::collections::HashSet::from(["saved".to_owned()]);
+        let remaining = unlisted_suggestions(found, &names);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].model_name, "new");
+        assert!(remaining[0].listed, "the vendor's listed fact is unchanged");
+    }
     #[cfg(any(test, feature = "test-support"))]
     fn a_routing_name_is_taken_as_it_is_given_and_a_display_name_is_trimmed() {
         assert!(clean_routing_name("model_name", "openai/gpt-6-sol").is_ok());
@@ -1217,7 +1452,7 @@ pub mod tests {
             ..Default::default()
         };
         assert!(check_parameters(&parameters).is_ok());
-        let accepted = accepted_parameters(&parameters).unwrap();
+        let accepted = accepted_parameters(&parameters, AddSwitches::All).unwrap();
         assert!(accepted.get("reasoning_modes").is_none());
         assert!(accepted.get("default_reasoning_mode").is_none());
         assert_eq!(
@@ -1247,7 +1482,7 @@ pub mod tests {
             ..Default::default()
         };
         assert!(check_parameters(&parameters).is_ok());
-        let accepted = accepted_parameters(&parameters).unwrap();
+        let accepted = accepted_parameters(&parameters, AddSwitches::All).unwrap();
         assert!(accepted.get("capacity_tiers").is_none());
         assert!(accepted.get("default_capacity_tier").is_none());
         assert_eq!(accepted["offered"]["capacity_tiers"][0]["id"], "auto");
@@ -1272,7 +1507,7 @@ pub mod tests {
             cache_lifetimes: Some(vec!["1h".into()]),
             ..Default::default()
         };
-        let accepted = accepted_parameters(&parameters).unwrap();
+        let accepted = accepted_parameters(&parameters, AddSwitches::All).unwrap();
         assert!(accepted.get("cache_lifetimes").is_none());
         assert_eq!(accepted["offered"]["cache_lifetimes"], json!(["1h"]));
     }
@@ -1327,7 +1562,7 @@ pub mod tests {
             efforts: Some(vec!["low".into(), "high".into()]),
             ..ModelParameters::default()
         };
-        let kept = accepted_parameters(&suggested).unwrap();
+        let kept = accepted_parameters(&suggested, AddSwitches::Nothing).unwrap();
         assert!(kept.get("context_max").is_none(), "none of it is enabled");
         assert_eq!(kept["offered"]["context_max"], 1_000_000);
         assert_eq!(kept["context_window"], 272_000);
@@ -1339,6 +1574,22 @@ pub mod tests {
             assert!(kept.get(member).is_none(), "{member} is a manager's choice");
         }
         assert_eq!(kept["default_effort"], "high", "an effort is not a cost");
+        // Where the organization switches the larger context on, a thread still starts with the model's own window.
+        for switches in [AddSwitches::Basic, AddSwitches::All] {
+            let opened = accepted_parameters(&suggested, switches).unwrap();
+            assert_eq!(opened["context_max"], 1_000_000, "{switches:?}");
+            assert_eq!(opened["default_context"], 272_000, "{switches:?}");
+            assert_eq!(
+                opened["offered"]["context_max"], 1_000_000,
+                "the offer stays beside it"
+            );
+            for member in ["default_service_tier", "default_access_program"] {
+                assert!(
+                    opened.get(member).is_none(),
+                    "{member} is a manager's choice"
+                );
+            }
+        }
         let same = ModelParameters {
             context_window: Some(272_000),
             offered: Some(api::ModelOffered {
@@ -1349,7 +1600,10 @@ pub mod tests {
             ..ModelParameters::default()
         };
         assert!(
-            accepted_parameters(&same).unwrap().get("offered").is_none(),
+            accepted_parameters(&same, AddSwitches::All)
+                .unwrap()
+                .get("offered")
+                .is_none(),
             "a context no larger than the window offers nothing"
         );
     }
@@ -1367,7 +1621,7 @@ pub mod tests {
             "offered":{"report":{"capabilities":{"pdf_input":{"supported":true},"future_capability":{"supported":true}},
             "output_max":64000,"lifecycle":"deprecated","retires_at":"2027-01-01T00:00:00Z","future_member":{"kept":true}}}
         })).unwrap();
-        let kept = accepted_parameters(&suggested).unwrap();
+        let kept = accepted_parameters(&suggested, AddSwitches::All).unwrap();
         assert_eq!(
             kept["offered"],
             serde_json::to_value(&suggested.offered).unwrap()
@@ -1384,7 +1638,7 @@ pub mod tests {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn what_a_suggestion_lists_is_on_offer_and_none_of_it_is_enabled() {
+    fn what_a_suggestion_lists_is_on_offer_and_the_organizations_choice_switches_it_on() {
         let suggested = ModelParameters {
             service_tiers: Some(vec![ServiceTier {
                 id: "fast".into(),
@@ -1394,19 +1648,29 @@ pub mod tests {
             context_window: Some(200_000),
             ..ModelParameters::default()
         };
-        let kept = accepted_parameters(&suggested).unwrap();
+        let kept = accepted_parameters(&suggested, AddSwitches::Nothing).unwrap();
         assert!(kept.get("service_tiers").is_none() && kept.get("access_programs").is_none());
         assert_eq!(kept["offered"]["service_tiers"][0]["id"], "fast");
         assert_eq!(kept["offered"]["access_programs"][0], "early");
         assert_eq!(kept["context_window"], 200_000);
-        let plain = accepted_parameters(&ModelParameters::default()).unwrap();
+        // Without an organization narrowing it, accepting switches on every speed and program the source lists.
+        let on = accepted_parameters(&suggested, AddSwitches::All).unwrap();
+        assert_eq!(on["service_tiers"][0]["id"], "fast");
+        assert_eq!(on["access_programs"][0], "early");
+        assert!(
+            on.get("default_service_tier").is_none() && on.get("default_access_program").is_none()
+        );
+        let basic = accepted_parameters(&suggested, AddSwitches::Basic).unwrap();
+        assert!(basic.get("service_tiers").is_none() && basic.get("access_programs").is_none());
+        let plain = accepted_parameters(&ModelParameters::default(), AddSwitches::All).unwrap();
         assert!(plain.get("offered").is_none());
         let _ = ModelOffered::default();
     }
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
-    pub fn __api_run_what_a_suggestion_lists_is_on_offer_and_none_of_it_is_enabled() {
-        self::what_a_suggestion_lists_is_on_offer_and_none_of_it_is_enabled()
+    pub fn __api_run_what_a_suggestion_lists_is_on_offer_and_the_organizations_choice_switches_it_on()
+     {
+        self::what_a_suggestion_lists_is_on_offer_and_the_organizations_choice_switches_it_on()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1414,7 +1678,7 @@ pub mod tests {
         let suggested: ModelParameters =
             serde_json::from_value(json!({"web_search":["live"],"default_web_search":"live"}))
                 .unwrap();
-        let accepted = accepted_parameters(&suggested).unwrap();
+        let accepted = accepted_parameters(&suggested, AddSwitches::All).unwrap();
         assert_eq!(accepted["offered"]["web_search"], json!(["live"]));
         assert!(accepted.get("web_search").is_none());
         assert!(accepted.get("default_web_search").is_none());
@@ -1426,5 +1690,150 @@ pub mod tests {
     #[doc(hidden)]
     pub fn __api_run_search_offers_never_enable_the_tool_or_its_default() {
         self::search_offers_never_enable_the_tool_or_its_default()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn a_model_without_a_window_of_its_own_has_the_largest_context_its_source_reports() {
+        let reported: ModelParameters = serde_json::from_value(json!({
+            "efforts": ["low", "high"],
+            "offered": { "context_max": 400_000 }
+        }))
+        .unwrap();
+        for switches in [AddSwitches::All, AddSwitches::Basic, AddSwitches::Nothing] {
+            let kept = accepted_parameters(&reported, switches).unwrap();
+            assert_eq!(kept["context_window"], 400_000, "{switches:?}");
+            assert!(
+                kept.get("context_max").is_none(),
+                "nothing larger is on offer"
+            );
+            assert!(kept.get("offered").is_none(), "{switches:?}");
+            assert_eq!(kept["efforts"], json!(["low", "high"]), "{switches:?}");
+        }
+        let mut saved = json!({ "efforts": ["low"], "offered": { "context_max": 400_000 } });
+        fill_window(&mut saved);
+        assert_eq!(saved["context_window"], 400_000);
+        let mut own = json!({ "context_window": 128_000, "offered": { "context_max": 400_000 } });
+        fill_window(&mut own);
+        assert_eq!(
+            own["context_window"], 128_000,
+            "a window that is written is never replaced"
+        );
+        let mut narrower = json!({ "context_max": 200_000, "offered": { "context_max": 400_000 } });
+        fill_window(&mut narrower);
+        assert!(
+            narrower.get("context_window").is_none(),
+            "a window never passes the largest context a manager opened"
+        );
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn __api_run_a_model_without_a_window_of_its_own_has_the_largest_context_its_source_reports()
+     {
+        self::a_model_without_a_window_of_its_own_has_the_largest_context_its_source_reports()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn a_name_the_catalogue_lists_is_added_with_what_the_catalogue_says_under_what_was_written() {
+        let facts = json!({ "models": [{
+            "model_name": "gpt-6-sol", "display_name": "GPT-6 Sol", "listed": true,
+            "parameters": {
+                "efforts": ["low", "high"], "default_effort": "low", "context_window": 272_000,
+                "offered": { "context_max": 1_000_000, "service_tiers": [{ "id": "fast", "label": "Fast" }],
+                             "access_programs": ["early"] }
+            }
+        }] });
+        let plain = catalogued(
+            &facts,
+            "gpt-6-sol",
+            &ModelParameters::default(),
+            AddSwitches::All,
+        );
+        assert_eq!(
+            plain.efforts,
+            Some(vec!["low".to_owned(), "high".to_owned()])
+        );
+        assert_eq!(plain.default_effort.as_deref(), Some("low"));
+        assert_eq!(plain.context_window, Some(272_000));
+        assert_eq!(plain.context_max, Some(1_000_000));
+        assert_eq!(plain.default_context, Some(272_000));
+        assert_eq!(plain.service_tiers, Some(vec![tier("fast")]));
+        assert_eq!(plain.access_programs, Some(vec!["early".to_owned()]));
+        assert!(check_parameters(&plain).is_ok());
+
+        let basic = catalogued(
+            &facts,
+            "gpt-6-sol",
+            &ModelParameters::default(),
+            AddSwitches::Basic,
+        );
+        assert_eq!(basic.context_max, Some(1_000_000));
+        assert!(basic.service_tiers.is_none() && basic.access_programs.is_none());
+
+        let nothing = catalogued(
+            &facts,
+            "gpt-6-sol",
+            &ModelParameters::default(),
+            AddSwitches::Nothing,
+        );
+        assert!(nothing.context_max.is_none() && nothing.default_context.is_none());
+        assert_eq!(nothing.context_window, Some(272_000));
+        assert_eq!(nothing.efforts, plain.efforts);
+
+        let written = ModelParameters {
+            efforts: Some(vec!["minimal".into()]),
+            context_window: Some(500_000),
+            ..ModelParameters::default()
+        };
+        let over = catalogued(&facts, "gpt-6-sol", &written, AddSwitches::All);
+        assert_eq!(
+            over.efforts,
+            Some(vec!["minimal".to_owned()]),
+            "what was written wins"
+        );
+        assert!(
+            over.default_effort.is_none(),
+            "a start that is not among the written efforts is dropped"
+        );
+        assert_eq!(over.context_window, Some(500_000));
+        assert_eq!(over.context_max, Some(1_000_000));
+        assert_eq!(
+            over.default_context,
+            Some(500_000),
+            "a thread starts with the window that was written"
+        );
+        assert!(check_parameters(&over).is_ok());
+
+        let unknown = catalogued(
+            &facts,
+            "another-model",
+            &ModelParameters::default(),
+            AddSwitches::All,
+        );
+        assert_eq!(
+            unknown,
+            ModelParameters::default(),
+            "a name the catalogue does not list gets nothing"
+        );
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn __api_run_a_name_the_catalogue_lists_is_added_with_what_the_catalogue_says_under_what_was_written()
+     {
+        self::a_name_the_catalogue_lists_is_added_with_what_the_catalogue_says_under_what_was_written()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn the_organizations_choice_of_what_adding_switches_on_is_read_with_all_as_the_shipped_one() {
+        assert_eq!(AddSwitches::read(None), AddSwitches::All);
+        assert_eq!(AddSwitches::read(Some("all")), AddSwitches::All);
+        assert_eq!(AddSwitches::read(Some("basic")), AddSwitches::Basic);
+        assert_eq!(AddSwitches::read(Some("nothing")), AddSwitches::Nothing);
+        assert_eq!(AddSwitches::read(Some("something else")), AddSwitches::All);
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn __api_run_the_organizations_choice_of_what_adding_switches_on_is_read_with_all_as_the_shipped_one()
+     {
+        self::the_organizations_choice_of_what_adding_switches_on_is_read_with_all_as_the_shipped_one()
     }
 }

@@ -98,6 +98,7 @@ async fn sign_out_everywhere_else_keeps_exactly_this_session_other_people_and_pe
             .send()
             .await
             .ok()
+            .items
             .len(),
         1
     );

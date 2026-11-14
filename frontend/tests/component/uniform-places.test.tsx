@@ -18,7 +18,7 @@ vi.mock('@/api/announcements', async (load) => ({ ...await load<typeof Announcem
   queryFn: () => Promise.resolve({ items: [], next_cursor: null }), getNextPageParam: () => undefined }) }));
 const settingsState = vi.hoisted(() => ({ wake: true }));
 vi.mock('@/api/settings', () => ({ settingsQuery: (id: string) => ({ queryKey: ['settings', id], queryFn: () => Promise.resolve([{ key: 'tags.max_per_place', value: 1 }, { key: 'broadcast.wake_idle', value: settingsState.wake }]) }) }));
-vi.mock('@/api/nodes', () => ({ tagsQuery: (id: string) => ({ queryKey: ['tags', id], queryFn: () => Promise.resolve(labels) }),
+vi.mock('@/api/nodes', () => ({ tagsPageQuery: (id: string, q: string) => ({ queryKey: ['tags', id, 'pages', q], initialPageParam: null, queryFn: () => Promise.resolve({ items: labels.filter((row) => row.name.includes(q)), next_cursor: null }), getNextPageParam: () => null }), tagsQuery: (id: string) => ({ queryKey: ['tags', id], queryFn: () => Promise.resolve(labels) }),
   nodeQuery: (id: string) => ({ queryKey: ['node', id], queryFn: () => Promise.resolve(root) }), setNodeTags: vi.fn() }));
 vi.mock('@/api/day100', () => ({ createPickerTag: vi.fn() }));
 
