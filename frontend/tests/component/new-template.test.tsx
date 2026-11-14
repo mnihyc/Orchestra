@@ -14,7 +14,7 @@ import { detailTemplate } from './resource-detail-fixtures';
 
 const calls=vi.hoisted(()=>({create:vi.fn<typeof Resources.createTemplate>(),check:vi.fn(),navigate:vi.fn(),close:vi.fn()}));
 vi.mock('@tanstack/react-router',async(original)=>({...await original<object>(),useNavigate:()=>calls.navigate}));
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
 vi.mock('@/api/nodes',async(original)=>({...await original<object>(),orgsQuery:{queryKey:['short-template-orgs'],queryFn:()=>Promise.resolve([{id:'acme',name:'Acme',org_kind:'team'},{id:'beta',name:'Beta',org_kind:'team'}])},fetchTree:()=>Promise.resolve({nodes:[]}),nodeQuery:()=>({queryKey:['short-template-node'],queryFn:()=>Promise.resolve({id:'beta',kind:'org',org_id:'beta',path:[]})})}));
 vi.mock('@/api/resources',async(original)=>({...await original<object>(),createTemplate:calls.create,checkTemplate:calls.check,

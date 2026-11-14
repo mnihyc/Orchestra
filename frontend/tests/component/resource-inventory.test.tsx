@@ -39,7 +39,7 @@ const row = (value: Host): EverythingRow => inventoryRow({ id: value.id, kind: '
   owner: value.owner, participating: value.access.participating, admin_access: value.access.admin_access,
   resource: { kind: 'host', value } });
 
-vi.mock('@/api/auth', () => ({ meQuery: { queryKey: ['resource-reader'], initialData: () => reader, queryFn: () => Promise.resolve(reader) } }));
+vi.mock('@/api/auth', async (loadOriginal) => ({ ...await loadOriginal<object>(), meQuery: { queryKey: ['resource-reader'], initialData: () => reader, queryFn: () => Promise.resolve(reader) } }));
 vi.mock('@/api/everything', () => ({ everythingQuery: (person: string, parent: string | null, filter: EverythingFilter) => ({
   queryKey: ['everything', person, parent, filter], initialPageParam: null as string | null,
   queryFn: ({ pageParam }: { pageParam: string | null }) => {
@@ -54,7 +54,7 @@ vi.mock('@/api/everything', () => ({ everythingQuery: (person: string, parent: s
 }) }));
 vi.mock('@/features/resources/trail', () => ({ rememberList: vi.fn(), useResourceHeading: vi.fn() }));
 vi.mock('@/features/resources/ResourceNav', () => ({ ResourceNav: () => null }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (place: { name: string | null }) => place.name }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabel: () => (place: { name: string | null }) => place.name }));
 
 function List() {
   const [text, setText] = useState('');

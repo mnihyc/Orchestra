@@ -41,7 +41,7 @@ vi.mock('@/api/access', async (load) => ({ ...await load<typeof Access>(),
 vi.mock('@/api/approvals', async (load) => ({ ...await load<typeof Approvals>(),
   approvalQuery: (id: string) => ({ queryKey: ['recovery-approval', id], queryFn: () => calls.approval(id), retry: false }),
 }));
-vi.mock('@/realtime/stores/tree', () => ({ useNodePath: () => ({ path: [] }) }));
+vi.mock('@/realtime/stores/tree', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodePath: () => ({ path: [] }) }));
 vi.mock('@/ui/UserChip', () => ({ UserChip: ({ user }: { user: UserRef }) => <span data-person-chip={user.id}>{user.display_name}</span> }));
 const originalSession = client.session.getState();
 

@@ -26,8 +26,8 @@ vi.mock('@/api/client', async (load) => {
     throw new Error(`Unexpected GET ${path}`);
   } } };
 });
-vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map() }));
-vi.mock('@/features/resources/ResourceCreation', () => ({ ResourceCreateButton: () => null }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKnownPlaces: () => new Map() }));
+vi.mock('@/features/resources/ResourceCreation', async (loadOriginal) => ({ ...await loadOriginal<object>(), ResourceCreateButton: () => null }));
 
 const HOME = id(93, 11), PROVIDER = id(93, 12);
 const provider = planProvider({ id: PROVIDER, name: 'Picture plan', owner: userRef(me(1, 'ada', 'Ada')), org_id: HOME,

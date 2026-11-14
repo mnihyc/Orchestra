@@ -13,7 +13,7 @@ import { show } from './support';
 
 const calls = vi.hoisted(() => ({ describe: vi.fn<(...args: Parameters<typeof Documents.describeDocument>) => Promise<unknown>>() }));
 vi.mock('@/api/documents', async (original) => ({ ...await original<typeof Documents>(), describeDocument: calls.describe }));
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   Link: ({ children, className }: { children?: ReactNode; className?: string }) => <a href="/doc" className={className}>{children}</a>,
 }));
 

@@ -24,8 +24,8 @@ vi.mock('@/api/resources', async (load) => ({ ...await load<typeof Resources>(),
 vi.mock('@/api/machinePrograms', () => ({ changeMachinePrograms: calls.program, machineProgramsKey: (id: string) => ['profile-programs', id],
   machineProgramsQuery: (id: string) => ({ queryKey: ['profile-programs', id], queryFn: () => Promise.resolve({ entries: [], can_manage: true, config_file: null,
     capabilities: [{ kind: 'agent', supported: true, delegated: true, enabled: true, remote: true, policy_key: 'agent.programs', reason: null }] }) }) }));
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.help }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNavigate: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => calls.help }));
 vi.mock('@/features/resources/HomePicker', () => ({ HomePicker: ({ value, onChange }: Pick<HomePickerProps, 'value' | 'onChange'>) =>
   <select aria-label="Fixture home" value={value} onChange={(event) => onChange(event.target.value)}><option value="home">Workshop</option><option value="other-home">Other home</option></select> }));
 const registry: HarnessKindInfo[] = ['codex', 'claude-code'].map((kind) => ({ kind, title: harnessName(kind).name, harness: harnessName(kind), builds: [], program: null,

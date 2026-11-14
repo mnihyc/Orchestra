@@ -29,7 +29,7 @@ vi.mock('@/api/approvals', async (load) => ({ ...await load<typeof Approvals>(),
 }));
 vi.mock('@/api/auth', async (load) => ({ ...await load<typeof Auth>(), meQuery: { queryKey: ['outcome-me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada')) } }));
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useUserFeed: () => undefined, useSocketStatus: () => ({ phase: 'ready' }) }));
-vi.mock('@/realtime/stores/tree', () => ({ useNodePath: () => ({ path: [] }) }));
+vi.mock('@/realtime/stores/tree', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodePath: () => ({ path: [] }) }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), Link: ({ children }: { children: ReactNode }) => <a href="#thread">{children}</a> }));
 vi.mock('@/ui/UserChip', () => ({ UserChip: ({ user }: { user: { display_name: string } }) => <span>{user.display_name}</span> }));
 

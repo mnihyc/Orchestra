@@ -11,7 +11,7 @@ import type { HiddenItem } from '@/generated/api-types';
 import { show } from './support';
 
 const openAccess = vi.hoisted(() => vi.fn());
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess }));
 vi.mock('@/features/resources/trail', () => ({ rememberList: vi.fn(), useResourceHeading: vi.fn() }));
 vi.mock('@/features/resources/ResourceNav', () => ({ ResourceNav: () => null }));
 

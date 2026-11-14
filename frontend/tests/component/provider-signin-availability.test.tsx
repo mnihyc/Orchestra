@@ -17,7 +17,7 @@ import { harnessName } from '../doubles/harness-names';
 
 skipOverflowFallback();
 
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
 vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(),useNavigate:()=>vi.fn(),Link:({children}:{children:ReactNode})=><a href="#profile">{children}</a>}));
 vi.mock('@/features/resources/HomePicker',()=>({

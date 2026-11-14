@@ -12,7 +12,7 @@ import { show } from './support';
 
 const shown = vi.hoisted(() => ({ embeddings: false, row: null as UsageEvent | null }));
 vi.mock('@/api/usage',()=>({eventsQuery:()=>({queryKey:['records-test'],initialPageParam:null,queryFn:()=>Promise.resolve({items:[shown.embeddings ? { ...requestRow(), thread:null, purpose:'embeddings' } : shown.row ?? requestRow()],next_cursor:null}),getNextPageParam:()=>null})}));
-vi.mock('@tanstack/react-router',()=>({Link:({params,search,children}:{params:{threadId:string};search:{turn?:number};children:ReactNode})=><a href={`/thread/${params.threadId}?turn=${search.turn ?? ''}`}>{children}</a>}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),Link:({params,search,children}:{params:{threadId:string};search:{turn?:number};children:ReactNode})=><a href={`/thread/${params.threadId}?turn=${search.turn ?? ''}`}>{children}</a>}));
 const appearance = useAppearance.getState();
 afterEach(async()=>{shown.row=null;useAppearance.setState(appearance);await setLocale('en');});
 
@@ -49,6 +49,7 @@ for(const locale of ['en','zh-CN'] as const)it(`shows a third program’s suppli
 
 for(const locale of ['en','zh-CN'] as const)it(`shows retained request facts in the row and More about this record (${locale})`,async()=>{
   await setLocale(locale);useAppearance.setState({locale});shown.embeddings=false;
+  const user=userEvent.setup();
   const timing=(await import('../doubles/performance')).timingFixture;
   const base=requestRow();shown.row=requestRow({thread_owner:base.user,tool_calls:2,tool_ms:400,timing:timing({
     reported_tokens:{input_tokens:100,cached_input_tokens:20,cache_write_tokens:10,output_tokens:64,reasoning_tokens:0,total_tokens:164},
@@ -57,11 +58,19 @@ for(const locale of ['en','zh-CN'] as const)it(`shows retained request facts in 
   show(<Records scope={{kind:'me'}} search={{}} span={{from:'2026-10-15',to:'2026-10-15',days:1,range:'custom'}} depth="reports"/>);
   const table=await screen.findByRole('table',{name:i18n.t('usage.records.title')});
   for(const key of ['uncached','cached','cacheWrite','status','attempt'] as const)expect(within(table).getByText(i18n.t(`usageRequest.${key}`))).toBeVisible();
-  await userEvent.click(within(table).getByRole('button',{name:i18n.t('usage.records.aboutRecord')}));
+  await user.click(within(table).getByRole('button',{name:i18n.t('usage.records.aboutRecord')}));
   const details=screen.getByRole('dialog',{name:i18n.t('usage.records.aboutRecord')});
   for(const key of ['uncached','cached','cacheWrite','status','attempt','tools','toolTime','providerId','adapterId','owner'] as const)expect(within(details).getByText(i18n.t(`usageRequest.${key}`))).toBeVisible();
-  expect(details).toHaveTextContent('provider-local');expect(details).toHaveTextContent('request-1');expect(details).toHaveTextContent('Dana');
+  expect(details).toHaveTextContent('Dana');
   expect(details).toHaveTextContent('429');expect(details).toHaveTextContent('70');
+  // The provider's and the adapter's request references are not words of the record: each is one Copy ID act in its own row, which puts the reference on the clipboard.
+  expect(details).not.toHaveTextContent('provider-local');expect(details).not.toHaveTextContent('request-1');
+  for(const [key,reference] of [['providerId','provider-local'],['adapterId','request-1']] as const){
+    const row=within(details).getByText(i18n.t(`usageRequest.${key}`)).closest<HTMLElement>('[data-item]');
+    if(row===null)throw new Error('The fact is drawn in a row of its own');
+    await user.click(within(row).getByRole('button',{name:i18n.t('common.copyId')}));
+    expect(await navigator.clipboard.readText()).toBe(reference);
+  }
 });
 
 

@@ -27,6 +27,8 @@ and the History view.
 
 - `Thread.tsx`: The thread as a screen of the workbench: the conversation with its composer, and its other views in the arrangement chosen.
 - `Header.tsx`: Title and compact state, one Star, icon-only Fork/Fork to/Ask/Switch/Find in one row, and grouped remaining acts; exported state/time/reason readers for the status bar.
+- `WhereChip.tsx`: Where a thread works, "<environment> · <directory>", in one chip under its message; it opens the change of the environment and the directory.
+- `openWhere.ts`: The one function that opens where a thread works, called by the chip, by `/directory` and by the act that a reason about the environment offers.
 - `cached.ts`: Recognizable conversation frames and reported capabilities at a cached-view boundary; no permission inference.
 - `Description.tsx`: Manual or automatic progress text with override controls.
 - `BindingSummary.tsx`: Provider, model and effort, the thread's environment with its owner, and the arrangement's type, what the agent works with there and isolation facts.

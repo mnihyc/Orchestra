@@ -12,16 +12,16 @@ import type { Problem, Topic, UserRef } from '@/generated/api-types';
 import { toast } from '@/ui/Toast';
 import { TooltipProvider } from '@/ui/Tooltip';
 
-vi.mock('@/features/navigation/NodeMenu', async () => {
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => {
   const { create } = await import('zustand');
-  return {
+  return { ...await loadOriginal<object>(),
     NodeMenuButton: () => null,
     useIsPending: () => false,
     usePendingPlaces: create<{ ids: ReadonlySet<string> }>(() => ({ ids: new Set() })),
   };
 });
-vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: vi.fn() }));
-vi.mock('@/features/navigation/places', () => ({
+vi.mock('@/features/navigation/NodeDialogs', async (loadOriginal) => ({ ...await loadOriginal<object>(), openNodeDialog: vi.fn() }));
+vi.mock('@/features/navigation/places', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   PlaceLink: ({ children }: { children: ReactNode }) => <a href="#topic">{children}</a>,
   placeOfNode: (node: Topic) => node,
 }));
@@ -29,7 +29,7 @@ vi.mock('@/features/org/ProjectCards', () => ({ AttentionChips: () => null }));
 vi.mock('@/features/project/TopicList', () => ({ TopicTags: () => null, topicAttention: () => ({}), lastActivityOf: () => null }));
 vi.mock('@/features/navigation/refresh', () => ({ invalidatePlaces: () => Promise.resolve() }));
 vi.mock('@/ui/RelativeTime', () => ({ RelativeTime: () => null }));
-vi.mock('@/ui/Toast', () => ({ toast: vi.fn() }));
+vi.mock('@/ui/Toast', async (loadOriginal) => ({ ...await loadOriginal<object>(), toast: vi.fn() }));
 
 /** jsdom has no layout: two cards sit in the bottom fifth of a scrolling page with a footer below. */
 const PAGE = new DOMRect(0, 0, 800, 600);

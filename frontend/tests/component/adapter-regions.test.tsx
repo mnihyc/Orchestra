@@ -13,7 +13,7 @@ import { show } from './support';
 import { agentDescriptor } from '../doubles/agent-descriptor';
 
 const server = vi.hoisted(() => ({ detail: vi.fn<() => Promise<ProgramDetail>>(), builds: vi.fn<() => Promise<HarnessBuild[]>>(), legacy: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/programAdmin', async (original) => ({ ...await original<object>(),
   adminProgramQuery: (kind: string) => ({ queryKey: ['admin', 'programs', kind, 'detail'], queryFn: server.detail }),
   adminProgramBuildsQuery: (kind: string, cursor: string | undefined) => ({ queryKey: ['admin', 'programs', kind, 'builds', cursor ?? null],

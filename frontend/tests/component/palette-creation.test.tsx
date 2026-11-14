@@ -16,7 +16,7 @@ const calls = vi.hoisted(() => ({ node: vi.fn<(id: string) => Promise<Node>>(), 
 vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof NodesApi>(),
   nodeQuery: (id: string) => ({ queryKey: ['creation-node', id], queryFn: () => calls.node(id), staleTime: 30_000 }),
 }));
-vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: calls.dialog }));
+vi.mock('@/features/navigation/NodeDialogs', async (loadOriginal) => ({ ...await loadOriginal<object>(), openNodeDialog: calls.dialog }));
 vi.mock('@/api/search', async (original) => {
   const actual = await original<typeof SearchApi>();
   return { ...actual, namesQuery: (search: NameSearch) => ({ ...actual.namesQuery(search), queryFn: () => calls.names(search) }) };

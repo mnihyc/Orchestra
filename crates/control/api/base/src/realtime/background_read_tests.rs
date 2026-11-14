@@ -695,6 +695,7 @@ async fn socket_expiry(seed: bool, expire_origin: bool) -> Proof {
         "prepare scene; seed={seed} expire_origin={expire_origin}"
     ));
     let (rig, thread, calls) = world().await?;
+    let held_at = rig.clock.now();
     let (user, token) = if expire_origin {
         (
             rig.ada,
@@ -720,6 +721,14 @@ async fn socket_expiry(seed: bool, expire_origin: bool) -> Proof {
         .inner
         .ephemeral
         .test_background_seed(feed.clone(), data.clone());
+    // A coordinator pass can happen before this reader registers its interest.
+    // Drive that exact interleaving without spending time on a real tick.
+    rig.server
+        .app
+        .realtime
+        .inner
+        .ephemeral
+        .retain_active_lists(&HashSet::new());
     let mut pause = if seed {
         Some(Pause::arm(thread, Cut::SocketProjected))
     } else {
@@ -778,6 +787,11 @@ async fn socket_expiry(seed: bool, expire_origin: bool) -> Proof {
     trace.mark(format!(
         "native projection paused; epoch={epoch} native_calls={observed}"
     ));
+    assert_eq!(
+        rig.clock.now(),
+        held_at,
+        "native and socket preparation do not spend the credential's held lifetime"
+    );
     rig.let_time_pass(chrono::Duration::seconds(3));
     trace.mark("advanced the held clock by three seconds and released projection");
     pause.release();

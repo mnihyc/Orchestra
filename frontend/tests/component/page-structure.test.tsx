@@ -22,11 +22,11 @@ vi.mock('@tanstack/react-router', async (original) => ({
   ...await original<typeof Router>(),
   Link: ({ to, children, className }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string }) => <a href={to} className={className}>{children}</a>,
 }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: vi.fn() }));
 vi.mock('@/features/help/GuideLink', () => ({ GuideLink: () => null }));
 vi.mock('@/features/access/AdminReachNotice', () => ({ AdminReachNotice: () => null }));
 vi.mock('@/features/settings/PersonalFrame', () => ({ PersonalFrame: ({ children }: { children: ReactNode }) => <>{children}</> }));
-vi.mock('@/api/auth', () => ({ meQuery: { queryKey: ['structure-me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada Lovelace', { is_system_admin: true })) } }));
+vi.mock('@/api/auth', async (loadOriginal) => ({ ...await loadOriginal<object>(), meQuery: { queryKey: ['structure-me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada Lovelace', { is_system_admin: true })) } }));
 vi.mock('@/api/adminMode', async (original) => {
   const actual = await original<typeof AdminModeApi>();
   const mode = { available: true, as_admin: false };
@@ -37,7 +37,7 @@ vi.mock('@/api/profile', () => ({
   profileQuery: (username: string) => ({ queryKey: ['structure-profile', username], queryFn: () => Promise.resolve(PROFILE) }),
   updateProfile: vi.fn(), replaceProfilePins: vi.fn(),
 }));
-vi.mock('@/api/personal', () => ({ favoritesQuery: { queryKey: ['structure-favorites'], queryFn: () => Promise.resolve([]) } }));
+vi.mock('@/api/personal', async (loadOriginal) => ({ ...await loadOriginal<object>(), favoritesQuery: { queryKey: ['structure-favorites'], queryFn: () => Promise.resolve([]) } }));
 vi.mock('@/api/search', () => ({ namesQuery: () => ({ queryKey: ['structure-names'], queryFn: () => Promise.resolve([]) }) }));
 
 const PROFILE: UserProfile = {

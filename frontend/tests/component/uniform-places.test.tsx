@@ -12,13 +12,13 @@ import { i18n } from '@/i18n';
 import { org, me, userRef } from '../doubles/fixtures';
 import { show } from './support';
 
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 vi.mock('@/api/announcements', async (load) => ({ ...await load<typeof AnnouncementsApi>(), announce: vi.fn(), announcementsQuery: (id: string) => ({ queryKey: ['announcements', id], initialPageParam: null,
   queryFn: () => Promise.resolve({ items: [], next_cursor: null }), getNextPageParam: () => undefined }) }));
 const settingsState = vi.hoisted(() => ({ wake: true }));
 vi.mock('@/api/settings', () => ({ settingsQuery: (id: string) => ({ queryKey: ['settings', id], queryFn: () => Promise.resolve([{ key: 'tags.max_per_place', value: 1 }, { key: 'broadcast.wake_idle', value: settingsState.wake }]) }) }));
-vi.mock('@/api/nodes', () => ({ tagsQuery: (id: string) => ({ queryKey: ['tags', id], queryFn: () => Promise.resolve(labels) }),
+vi.mock('@/api/nodes', async (loadOriginal) => ({ ...await loadOriginal<object>(), tagsQuery: (id: string) => ({ queryKey: ['tags', id], queryFn: () => Promise.resolve(labels) }),
   nodeQuery: (id: string) => ({ queryKey: ['node', id], queryFn: () => Promise.resolve(root) }), setNodeTags: vi.fn() }));
 vi.mock('@/api/day100', () => ({ createPickerTag: vi.fn() }));
 

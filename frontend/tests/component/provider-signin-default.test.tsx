@@ -22,7 +22,7 @@ const methods = ():LoginMethod[] => {
   ];
 };
 const idle={state:'idle' as const,method:null,shows:[],asks:null,expires_at:null,error:null};
-vi.mock('@/api/resources',()=>({providerSetupQuery:()=>({queryKey:['signin-preference-setup'],queryFn:()=>Promise.resolve({subscriptions:[{agent:{id:'profile'},methods:methods()}]})})}));
+vi.mock('@/api/resources',async (loadOriginal) => ({ ...await loadOriginal<object>(),providerSetupQuery:()=>({queryKey:['signin-preference-setup'],queryFn:()=>Promise.resolve({subscriptions:[{agent:{id:'profile'},methods:methods()}]})})}));
 vi.mock('@/api/provider-plan',()=>({
   loginStateQuery:()=>({queryKey:['signin-preference-progress'],queryFn:()=>Promise.resolve(idle)}),
   startProviderLogin:vi.fn(()=>Promise.resolve(idle)),answerProviderLogin:vi.fn(),cancelProviderLogin:vi.fn(),retryProvider:vi.fn(),

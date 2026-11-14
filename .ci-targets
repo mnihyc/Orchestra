@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-api-core --lib -- realtime::background_read_tests::
+test -p orch-api-core --lib -- realtime::ephemeral::tests::
+test -p orch-api-core --lib -- realtime::epoch_handoff_tests::a_credential_deadline_crossed_during_paused_inbox_projection_prevents_publication
