@@ -373,6 +373,7 @@ pub async fn names(conn: &mut Conn, ask: &Names<'_>) -> Result<Vec<NameRow>, DbE
             -- and root tests the batch applies below, before any place is read.
             SELECT d.id, d.title, d.node_id, d.org_id, d.owner_id, d.updated_at FROM documents d
              WHERE d.deleted_at IS NULL AND __DOCUMENT_NAME__ AND 'document' = ANY($6) AND ($7::uuid IS NULL OR d.org_id = $7)
+               AND ($12::uuid[] IS NULL OR d.id = ANY($12))
                AND ($3 OR $12::uuid[] IS NOT NULL OR d.org_id IS NULL OR d.org_id = ANY($11::uuid[]) OR d.owner_id = $1)
         ), document_places AS MATERIALIZED (
             -- Each live place of those documents is read once, not once for every document in it.

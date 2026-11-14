@@ -192,10 +192,11 @@ test('a successful custom setup is remembered after a reload without writing pla
   await starterBox(page).fill('Check the idle stop');
   await starter(page).getByRole('button', { name: 'Thread setup', exact: true }).click();
   const form = startDialog(page, 'Idle-stop rework');
-  await form.getByRole('combobox', { name: 'Provider', exact: true }).click();
-  await page.getByRole('option', { name: /Team Anthropic/ }).click();
-  await form.getByRole('combobox', { name: 'Agent', exact: true }).click();
-  await page.getByRole('option', { name: 'Scripted agent', exact: true }).click();
+  // The provider is the model's: choosing a model of Team Anthropic chooses it.
+  await form.getByRole('button', { name: /^Model:/ }).click();
+  await page.getByRole('dialog', { name: 'Model', exact: true }).getByRole('menuitemradio', { name: /Claude Sonnet 5/ }).click();
+  await form.getByRole('button', { name: /^Agent:/ }).click();
+  await page.getByRole('menuitemradio', { name: 'Scripted agent', exact: true }).click();
   await form.getByRole('button', { name: 'Create thread', exact: true }).click();
   await openedThread(page);
   await page.goto(`/topic/${ACME.idleStop}`);
@@ -256,10 +257,10 @@ test('where no harness has reported what it can do, the starter says so, offers 
   await panel.getByRole('button', { name: 'Thread setup' }).click();
   const dialog = startDialog(page, 'Idle-stop rework');
   await expect(dialog.getByRole('button', { name: 'Create thread' })).toBeDisabled();
-  await dialog.getByRole('combobox', { name: 'Agent', exact: true }).click();
-  const unreported = page.getByRole('option', { name: 'Codex', exact: true });
-  await expect(unreported).toHaveAttribute('aria-disabled', 'true');
-  await expect(unreported).toHaveAccessibleDescription('its agent program has not reported yet');
+  await dialog.getByRole('button', { name: /^Agent:/ }).click();
+  const unreported = page.getByRole('menuitemradio', { name: /^Codex/ });
+  await expect(unreported).toBeDisabled();
+  await expect(unreported.locator('xpath=ancestor::li')).toContainText('not reported yet');
   await page.keyboard.press('Escape');
   await expect(arrangements(page)).toHaveCount(0);
   await dialog.getByRole('button', { name: 'Cancel' }).click();
@@ -281,10 +282,10 @@ test('a profile that has not reported is waited for, and one that has is offered
   const panel = starter(page).getByRole('group', { name: 'What is missing' });
   await expect(panel).toContainText('Codex has not reported its capabilities');
   // What can run is offered, and what cannot is not among it.
-  await panel.getByRole('combobox', { name: 'Agent' }).click();
-  await expect(page.getByRole('option', { name: 'Scripted agent', exact: true })).toBeVisible();
-  await expect(page.getByRole('option', { name: 'Codex', exact: true })).toHaveCount(0);
-  await page.getByRole('option', { name: 'Scripted agent', exact: true }).click();
+  await panel.getByRole('button', { name: /^Agent:/ }).click();
+  await expect(page.getByRole('menuitemradio', { name: 'Scripted agent', exact: true })).toBeVisible();
+  await expect(page.getByRole('menuitemradio', { name: /^Codex/ })).toHaveCount(0);
+  await page.getByRole('menuitemradio', { name: 'Scripted agent', exact: true }).click();
   for (const [field, name] of Object.entries({ agent: 'Scripted agent', provider: 'OpenAI key', model: 'GPT-5.4' })) await expect(starter(page).locator(`[data-start-value="${field}"]`).getByText(name, { exact: true })).toBeVisible();
 });
 
@@ -343,10 +344,10 @@ test('a way that cannot be had is off with the server’s reason, and a refusal 
   await page.mouse.move(0, 0);
 
   // A model that the provider lists and the person may not use is there too, off, with why.
-  await startDialog(page).getByRole('combobox', { name: 'Model' }).click();
-  const closedModel = page.getByRole('option', { name: 'GPT-4.1', exact: true });
+  await startDialog(page).getByRole('button', { name: /^Model:/ }).click();
+  const closedModel = page.getByRole('menuitemradio', { name: 'GPT-4.1', exact: true });
   await expect(closedModel).toBeDisabled();
-  await expect(closedModel).toContainText('it is switched off');
+  await expect(closedModel.locator('xpath=ancestor::li')).toContainText('switched off');
   await page.keyboard.press('Escape');
 
   // The environment loses what the harness works through after the answer was read: the server refuses the way that was ticked.

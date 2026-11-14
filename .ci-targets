@@ -1,0 +1,11 @@
+fmt
+test -p orch-api-core --lib -- backplane::
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test browsers --test kvnc_core --test kvnc_filter
+test -p orch-plugin --test adapter
+test -p orch-conformance --test suites
+test -p orch-agent-contract --lib
+test -p orch-link-contract --lib
+web typecheck
+web lint
+web test -- tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts tests/component/harness-unrecognized-marker.test.tsx tests/component/thread-turn-files.test.tsx
