@@ -66,7 +66,7 @@ async fn world() -> World {
 }
 fn api(home: Id, name: &str) -> CreateProvider {
     CreateProvider::Api {
-        runtime_machine_id: None,
+        runtime_location: None,
         key_machine_id: None,
         name: name.into(),
         home_id: home,
@@ -184,7 +184,9 @@ async fn agent(world: &World, by: &places::Who, home: Id, machine: Option<Id>) -
 }
 fn subscription(home: Id, agent: Id, runtime: Option<Id>) -> CreateProvider {
     CreateProvider::Subscription {
-        runtime_machine_id: runtime,
+        runtime_location: runtime.map(|machine_id| {
+            orch_api_contract::resources::ProviderConnectionLocation::Machine { machine_id }
+        }),
         key_machine_id: None,
         name: "Scoped native creator".into(),
         home_id: home,
@@ -359,12 +361,16 @@ async fn selected_directory_machines_keep_the_same_use_and_local_policy_checks()
     .await;
     let mut body = api(c.acme, "Scoped directory API");
     if let CreateProvider::Api {
-        runtime_machine_id,
+        runtime_location,
         key_machine_id,
         ..
     } = &mut body
     {
-        *runtime_machine_id = Some(machine);
+        *runtime_location = Some(
+            orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                machine_id: machine,
+            },
+        );
         *key_machine_id = Some(machine);
     }
     let id = receipt(
@@ -896,13 +902,17 @@ async fn hosted_machine_creation_uses_the_canonical_host_subject_and_keeps_the_p
     // the actor is not the physical machine's owner.
     let mut ordinary = api(c.acme, "Ordinary hosted provider");
     if let CreateProvider::Api {
-        runtime_machine_id,
+        runtime_location,
         key_machine_id,
         api_key,
         ..
     } = &mut ordinary
     {
-        *runtime_machine_id = Some(machine);
+        *runtime_location = Some(
+            orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                machine_id: machine,
+            },
+        );
         *key_machine_id = Some(machine);
         *api_key = None;
     }

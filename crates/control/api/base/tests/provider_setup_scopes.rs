@@ -543,7 +543,6 @@ async fn root_only_setup_keeps_public_schema_home_values_and_catalogue_without_p
     assert!(!agent_present(&page, private));
     for field in [
         "subscriptions",
-        "subscriptions_unreported",
         "subscriptions_withheld",
         "subscriptions_unshared",
         "machines",
@@ -680,7 +679,6 @@ async fn actual_agent_read_keeps_complete_use_schema_and_intrinsic_machine_witho
     );
     assert_eq!(shown_profile["methods"][0]["id"], "token");
     assert!(!agent_present(&page, private) && !agent_present(&page, disabled));
-    assert!(contains(&page["subscriptions_unreported"], "id", unknown));
     assert!(
         page["subscriptions_unavailable"]
             .as_array()

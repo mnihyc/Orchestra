@@ -378,6 +378,9 @@ pub struct ThreadModelParameter {
     pub writable: bool,
     /// The models there are to choose from.
     pub options: Vec<ModelOption>,
+    /// The opening supplies only the selected model; opening the picker reads the full choices.
+    #[serde(default, skip_serializing_if = "crate::common::is_false")]
+    pub options_partial: bool,
 }
 
 /// The effort of a thread.
@@ -391,6 +394,53 @@ pub struct ThreadEffortParameter {
     pub writable: bool,
     /// False when this harness takes no effort.
     pub supported: bool,
+}
+
+/// The three choices of a thread that a model's entry opens, and that a thread's agent may not offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WithheldChoice {
+    /// A speed beside the ordinary one.
+    Speed,
+    /// An access program.
+    Access,
+    /// A context larger than the model's own window.
+    Context,
+}
+
+/// Why a choice that a manager of the provider switched on for the model is not one this thread can make.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "why", rename_all = "snake_case")]
+pub enum WithheldReason {
+    /// The thread's agent takes no such choice.
+    Agent,
+    /// The choice needs another way of reaching the model: the credential has to stay with the provider.
+    Access,
+    /// The choice needs the other kind of environment: one Orch manages, or a person's own machine.
+    Placement,
+    /// The choice needs the other kind of provider: a subscription or a key.
+    ProviderKind,
+    /// A feature of agents that is off where the thread runs, as `agent.features` says.
+    Feature {
+        /// The feature, as `agent.features` names it.
+        feature: String,
+    },
+    /// The provider's own rule for the model leaves the choice out.
+    Provider,
+    /// Another condition the agent declares for the choice does not hold.
+    Condition,
+}
+
+/// A choice that a model's managers opened and that this thread cannot make, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct WithheldParameter {
+    /// Which choice it is.
+    pub choice: WithheldChoice,
+    /// The key of the agent's parameter that stands for it; none where the agent declares no such parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Why the thread cannot make it.
+    pub reason: WithheldReason,
 }
 
 /// Limits over the harness's own sub-agents. The places of a thread resolve them independently of its model.
@@ -421,21 +471,99 @@ pub struct ThreadSubagentLimits {
     pub supported: Vec<String>,
 }
 
+/// A thread's provider as its first screen draws it: what it is called and how it stands, where its plan is, what the
+/// reader may choose by and what the reader holds on it. It says how many models the provider lists and holds none
+/// of them, nor how it is set up, which are the provider's own page's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadProvider {
+    /// The caller's applicable provider caps and observed seven-day model performance; absent without View.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice_usage: Option<crate::resources::ProviderChoiceUsage>,
+    /// What names it wherever it is pointed at.
+    #[serde(flatten)]
+    pub base: crate::resources::ProviderRef,
+    /// What its harness or endpoint reports: the plan and its windows, and what is left to spend; not what has been
+    /// spent, the resets or the extra usage, which are the provider page's.
+    pub facts: crate::resources::ProviderFacts,
+    /// Where each member of `facts` stands.
+    pub facts_state: crate::resources::ProviderFactsState,
+    /// How many models it lists.
+    pub models_count: i64,
+    /// How many turns run on it now.
+    pub running_threads: i64,
+    /// What the caller holds on it.
+    pub access: crate::access::ResourceAccess,
+}
+
+impl ThreadProvider {
+    /// The thread's row of a provider, from its whole view.
+    #[must_use]
+    pub fn of(mut provider: crate::resources::Provider) -> Self {
+        provider.facts.spend.clear();
+        provider.facts.available_resets = None;
+        provider.facts.extra_usage = None;
+        Self {
+            choice_usage: provider.choice_usage,
+            base: provider.base,
+            facts: provider.facts,
+            facts_state: provider.facts_state,
+            models_count: provider.models_count,
+            running_threads: provider.running_threads,
+            access: provider.access,
+        }
+    }
+}
+
+/// The profile facts used by a turn's option labels, without its configuration or reports.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadAgent {
+    pub agent: crate::resources::AgentRef,
+    pub parameters: Vec<Json>,
+}
+
+/// The workspace facts a conversation's path links draw, without the environment's snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadEnvironment {
+    pub id: Id,
+    pub registered_root: String,
+    pub workspace_root: String,
+    pub generation: i32,
+}
+
+/// Effective choices drawn by the composer before any settings panel is opened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadComposer {
+    pub default_delivery: String,
+    pub paste_inline_context_share: i64,
+    pub plan_first: bool,
+    pub owner_reads: bool,
+}
+
 /// What can be set on a thread's agent, and what it is now.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ThreadParameters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composer: Option<ThreadComposer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<ThreadAgent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<ThreadEnvironment>,
     /// The same declaration-derived routes used by capability planning; private backend intent is omitted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<orch_provider_contract::capabilities::Resolution>,
-    /// The provider's ordinary resource view for a caller with provider View, shared by model options and status items.
+    /// The thread's provider as the first screen draws it, for a caller with provider View: shared by model options and
+    /// status items. Its own page is read from `GET /providers/{id}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<crate::resources::Provider>,
+    pub provider: Option<ThreadProvider>,
     /// The model.
     pub model: ThreadModelParameter,
     /// The effort.
     pub effort: ThreadEffortParameter,
     /// The other parameters that are eligible and enabled.
     pub parameters: Vec<ParameterView>,
+    /// The speeds, access programs and context sizes that the model's managers opened and that this thread cannot use, each with why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withheld: Vec<WithheldParameter>,
     /// The resolved native permission mode, independent of boundary requests.
     pub approval_mode: String,
     /// Modes offered by this harness, the place's policy and the current confinement; absent on older servers.

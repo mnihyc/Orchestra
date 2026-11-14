@@ -75,7 +75,9 @@ async fn agent(world: &World, user: Id, home: Id, machine: Option<Id>) -> Id {
 
 fn body(home: Id, agent: Id, runtime: Option<Id>, name: &str) -> CreateProvider {
     CreateProvider::Subscription {
-        runtime_machine_id: runtime,
+        runtime_location: runtime.map(|machine_id| {
+            orch_api_contract::resources::ProviderConnectionLocation::Machine { machine_id }
+        }),
         key_machine_id: None,
         name: name.into(),
         home_id: home,
@@ -252,7 +254,7 @@ async fn a_legacy_provider_manage_key_keeps_its_ordinary_managed_creation_premis
     .await
     .unwrap();
     let request = CreateProvider::Api {
-        runtime_machine_id: None,
+        runtime_location: None,
         key_machine_id: None,
         name: "Legacy narrow managed creation".into(),
         home_id: c.acme,
