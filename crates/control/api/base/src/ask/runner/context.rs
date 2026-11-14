@@ -9,7 +9,7 @@ use orch_types::Hash;
 use serde::Deserialize;
 
 use serde::Serialize;
-/// A retained read witness and the exact bounded material used by the summary.
+/// A retained read witness and the complete checked projection used to validate a summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
     id: Id,
@@ -33,29 +33,50 @@ pub struct History {
     previous: bool,
     sources: Vec<Source>,
     per_message: Vec<Vec<Source>>,
+    /// Whether retained tool calls used opaque state that requires the readable transcript fallback.
+    opaque_tools: bool,
 }
 
+/// What bounds this turn's requests: the model's window, lowered by `ask.context_tokens` and by `learned`, a
+/// window below the one a provider's refusal of a request as too long has shown (zero while none has).
 pub(super) async fn budget(
     conn: &mut Conn,
     root: Id,
     parameters: &orch_provider_contract::models::ModelParameters,
     model: &str,
+    learned: i64,
+    reduced_output: i64,
 ) -> Result<Budget, EngineError> {
     let context = setting::<i64>(conn, Place::Node(root), "ask.context_tokens").await?;
     let output = setting::<i64>(conn, Place::Node(root), "ask.max_output_tokens")
         .await?
         .unwrap_or(4096);
-    let tools = setting::<i64>(conn, Place::Node(root), "ask.turn_tool_bytes")
-        .await?
-        .unwrap_or(262144);
+    let output = if reduced_output > 0 {
+        output.min(reduced_output)
+    } else {
+        output
+    };
+    let context = [context, (learned > 0).then_some(learned)]
+        .into_iter()
+        .flatten()
+        .min();
     // The request's own root is used, including for a kept built-in thread.
-    Budget::new(
-        parameters,
-        model,
-        context,
-        output,
-        usize::try_from(tools).map_err(failed)?,
-    )
+    Ok(Budget::new(parameters, model, context, output))
+}
+
+/// Where the whole source of a tool result is: the first canonical link among its citations.
+pub(super) fn first_link(value: &Json) -> Option<String> {
+    value
+        .get("citations")?
+        .as_array()?
+        .iter()
+        .find_map(|source| {
+            source
+                .get("url")
+                .and_then(Json::as_str)
+                .filter(|url| url.starts_with('/') && !url.starts_with("//"))
+        })
+        .map(str::to_owned)
 }
 
 pub(super) async fn refresh(
@@ -100,12 +121,6 @@ async fn current(host: &Host, sources: &[Source]) -> Result<bool, EngineError> {
             }
         }
     }
-    let limit = usize::try_from(
-        setting::<i64>(&mut conn, Place::Node(host.origin.root), "ask.tool_bytes")
-            .await?
-            .unwrap_or(65536),
-    )
-    .map_err(failed)?;
     drop(conn);
     for source in sources {
         let row = witnesses
@@ -116,13 +131,10 @@ async fn current(host: &Host, sources: &[Source]) -> Result<bool, EngineError> {
             Some(row) => refresh(host, row).await?,
             None => None,
         };
-        let (mut text, error) = match value {
-            Some(value) => (serde_json::to_string(&value)?, false),
+        let (text, error) = match &value {
+            Some(value) => (serde_json::to_string(value)?, false),
             None => ("no longer available to you".to_owned(), true),
         };
-        if !error {
-            orch_engine::ask::bound_tool_result(&mut text, limit);
-        }
         if hash(&text, error)? != source.hash {
             return Ok(false);
         }
@@ -144,9 +156,20 @@ fn reusable(host: &Host, item: &threads::ItemRow) -> bool {
                 .and_then(Json::as_str)
                 .and_then(|id| id.parse::<Id>().ok())
                 == Some(host.origin.principal.caller().user())
-            && origin.get("opaque_reusable").and_then(Json::as_bool) == Some(true)
+            // The current round trip rechecks its page and every source before sending. Hidden state
+            // derived from those sources cannot be reused by a later question.
+            && (item.turn_id == Some(host.turn)
+                || origin.get("opaque_reusable").and_then(Json::as_bool) == Some(true))
             && origin.get("params") == Some(host.model.params.as_ref().unwrap_or(&Json::Null))
     })
+}
+
+fn has_opaque_tools(message: &GenerationMessage) -> bool {
+    !message.continuation.is_empty()
+        && message
+            .content
+            .iter()
+            .any(|part| matches!(part, GenerationPart::ToolCall { .. }))
 }
 
 /// Two hundred is a page size, never a history window. Pin one selected lineage.
@@ -224,6 +247,7 @@ pub(super) async fn load(host: &Host) -> Result<History, EngineError> {
         previous: summary.is_some(),
         sources: vec![],
         per_message: vec![],
+        opaque_tools: false,
     };
     let through = summary.as_ref().map(|(summary, _, _)| summary.through);
     if let Some((summary, text, sources)) = summary {
@@ -271,6 +295,7 @@ pub(super) async fn load(host: &Host) -> Result<History, EngineError> {
                 turn = item.turn_id;
             }
             let mut message: GenerationMessage = serde_json::from_value(value.clone())?;
+            history.opaque_tools |= has_opaque_tools(&message);
             if !reusable(host, &item) {
                 if message.role == GenerationRole::Assistant
                     && (!message.continuation.is_empty()
@@ -305,7 +330,135 @@ pub(super) fn summary_message(text: String) -> GenerationMessage {
 }
 
 impl History {
-    /// Record already refreshed material before portability removes native tool pairs.
+    /// Fit the current turn before optional page context. Older exchanges are folded by `plan`, never cut.
+    pub fn fit_reading(
+        &self,
+        input: &mut GenerationInput,
+        budget: Budget,
+        model: &str,
+    ) -> Result<(), EngineError> {
+        let mut current = GenerationInput {
+            system: input.system.clone(),
+            messages: input.messages[self.older..].to_vec(),
+            tools: input.tools.clone(),
+            max_output_tokens: input.max_output_tokens,
+        };
+        let mut results = Vec::new();
+        for (message, value) in current.messages.iter().enumerate() {
+            for (part, value) in value.content.iter().enumerate() {
+                let content = match value {
+                    GenerationPart::ToolResult { content, .. } => Some(content),
+                    GenerationPart::Text { text }
+                        if self
+                            .per_message
+                            .get(self.older + message)
+                            .is_some_and(|sources| !sources.is_empty()) =>
+                    {
+                        Some(text)
+                    }
+                    _ => None,
+                };
+                if let Some(content) = content {
+                    results.push((
+                        message,
+                        part,
+                        orch_engine::ask::context::result_tokens(model, content),
+                    ));
+                }
+            }
+        }
+        // The largest result yields space first, preserving small completed reads whenever they fit.
+        results.sort_by_key(|(_, _, tokens)| std::cmp::Reverse(*tokens));
+        for (message, part, tokens) in results {
+            let Some(left) = budget.room_after(&current)? else {
+                break;
+            };
+            if left >= 0 {
+                break;
+            }
+            if let GenerationPart::ToolResult { content, .. }
+            | GenerationPart::Text { text: content } =
+                &mut current.messages[message].content[part]
+            {
+                let source = content
+                    .strip_prefix("Untrusted source result: ")
+                    .or_else(|| content.strip_prefix("Untrusted unavailable source result: "))
+                    .unwrap_or(content);
+                let link = serde_json::from_str(source)
+                    .ok()
+                    .and_then(|value| first_link(&value));
+                let mut fitted = content.clone();
+                orch_engine::ask::fit_tool_result(
+                    model,
+                    &mut fitted,
+                    tokens.saturating_add(left),
+                    link.as_deref(),
+                );
+                // A shortening line can be longer than a tiny result; keep that complete result instead.
+                if orch_engine::ask::context::result_tokens(model, &fitted) < tokens {
+                    *content = fitted;
+                }
+            }
+        }
+        for (target, message) in input.messages[self.older..]
+            .iter_mut()
+            .zip(current.messages)
+        {
+            *target = message;
+        }
+        Ok(())
+    }
+
+    /// The page receives only the room left after the completed reads; it cannot crowd a result out.
+    pub fn fit_page(
+        &self,
+        input: &mut GenerationInput,
+        budget: Budget,
+        model: &str,
+        mut text: String,
+        link: Option<&str>,
+    ) -> Result<(), EngineError> {
+        let Some(position) = input.messages.iter().rposition(|message| {
+            message.role == GenerationRole::User
+                && message.content.iter().any(|part| {
+                    matches!(
+                        part,
+                        GenerationPart::Text { .. }
+                            | GenerationPart::ImageRef { .. }
+                            | GenerationPart::Image { .. }
+                    )
+                })
+        }) else {
+            return Ok(());
+        };
+        let mut current = GenerationInput {
+            system: input.system.clone(),
+            messages: input.messages[self.older..].to_vec(),
+            tools: input.tools.clone(),
+            max_output_tokens: input.max_output_tokens,
+        };
+        let Some(at) = position.checked_sub(self.older) else {
+            return Ok(());
+        };
+        current.messages[at].content.insert(
+            0,
+            GenerationPart::Text {
+                text: String::new(),
+            },
+        );
+        if let Some(left) = budget.room_after(&current)? {
+            orch_engine::ask::fit_tool_result(model, &mut text, left, link);
+        }
+        current.messages[at].content[0] = GenerationPart::Text { text: text.clone() };
+        if budget.fits(&current)? {
+            input.messages[position]
+                .content
+                .insert(0, GenerationPart::Text { text });
+        }
+        Ok(())
+    }
+
+    /// Record already refreshed material before any native tool pairs need a transcript fallback.
     pub fn capture_sources(&mut self, input: &GenerationInput) -> Result<(), EngineError> {
         self.per_message = input
             .messages
@@ -354,7 +507,16 @@ impl History {
             });
         }
         self.older = keep.iter().take(self.older).filter(|keep| **keep).count();
-        orch_engine::ask::portable_messages(input);
+        if self.opaque_tools {
+            orch_engine::ask::portable_messages(input);
+        } else {
+            // Refreshing a page, changing a source or removing unrelated hidden state does not turn
+            // ordinary calls and results into prose. Keep their roles, witnesses and complete text.
+            for message in &mut input.messages {
+                message.continuation.clear();
+            }
+            input.messages.retain(|message| !message.content.is_empty());
+        }
     }
 
     pub fn plan(
@@ -370,7 +532,16 @@ impl History {
         let mut current = input.clone();
         current.messages = input.messages[self.older..].to_vec();
         if !budget.fits(&current)? {
-            return Err(refuse());
+            // What the person asked and what it read is too long by itself, and no summary of earlier messages
+            // helps: a narrower question or fewer sources does. Where Ask's own instructions and tools leave
+            // no room either, that is no question's fault and the earlier refusal stands.
+            let mut bare = current;
+            bare.messages.clear();
+            return Err(if budget.fits(&bare)? {
+                EngineError::AskTurnTooLong(model.to_owned())
+            } else {
+                refuse()
+            });
         }
 
         let mut request = input.clone();
@@ -378,6 +549,7 @@ impl History {
         request.tools.clear();
         request.messages.clear();
         let mut estimated = budget.estimate(&request)?;
+        let room = budget.room();
         let mut cut = 0;
         for (index, message) in input.messages.iter().take(self.older).enumerate() {
             let mut portable = GenerationInput {
@@ -388,7 +560,7 @@ impl History {
             };
             orch_engine::ask::portable_messages(&mut portable);
             estimated = estimated.saturating_add(budget.material(&portable.messages)?);
-            if estimated > budget.window - budget.output {
+            if room.is_some_and(|room| estimated > room) {
                 break;
             }
             let next = index + 1;
@@ -402,7 +574,7 @@ impl History {
         }
         request.messages = input.messages[..cut].to_vec();
         orch_engine::ask::portable_messages(&mut request);
-        if !budget.fits_summary(&request)? {
+        if !budget.fits(&request)? {
             return Err(refuse());
         }
         let mut sources = self.sources.clone();
@@ -416,5 +588,191 @@ impl History {
                 material_tokens: budget.material(&input.messages[..cut])?,
             },
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MODEL: &str = "gpt-6-sol";
+
+    fn question(text: &str) -> GenerationMessage {
+        GenerationMessage {
+            role: GenerationRole::User,
+            content: vec![GenerationPart::Text { text: text.into() }],
+            continuation: vec![],
+        }
+    }
+
+    fn read(content: String, opaque: bool) -> Vec<GenerationMessage> {
+        vec![
+            question("Read the source on this page."),
+            GenerationMessage {
+                role: GenerationRole::Assistant,
+                content: vec![GenerationPart::ToolCall {
+                    id: "source".into(),
+                    name: "open".into(),
+                    arguments: json!({"reference":"topic:example"}),
+                }],
+                continuation: if opaque {
+                    vec![json!({"opaque":"synthetic-tool-state"})]
+                } else {
+                    vec![]
+                },
+            },
+            GenerationMessage {
+                role: GenerationRole::User,
+                content: vec![GenerationPart::ToolResult {
+                    call_id: "source".into(),
+                    content,
+                    is_error: false,
+                    witness: Some(new_id()),
+                }],
+                continuation: vec![],
+            },
+        ]
+    }
+
+    fn history(messages: Vec<GenerationMessage>, older: usize) -> History {
+        History {
+            view: new_id(),
+            positions: vec![1; messages.len()],
+            opaque_tools: messages.iter().any(has_opaque_tools),
+            messages,
+            older,
+            previous: false,
+            sources: vec![],
+            per_message: vec![],
+        }
+    }
+
+    fn input(messages: Vec<GenerationMessage>) -> GenerationInput {
+        GenerationInput {
+            system: "Answer from checked sources.".into(),
+            messages,
+            tools: vec![],
+            max_output_tokens: 4096,
+        }
+    }
+
+    #[test]
+    fn a_page_keeps_ordinary_tool_exchanges_when_unrelated_hidden_state_is_removed() {
+        // More than the former byte allowance; only the model's token window bounds this source.
+        let messages = read("完整来源😀 ".repeat(4000), false);
+        let mut history = history(messages.clone(), 0);
+        let mut request = input(messages.clone());
+        request.messages[0].continuation = vec![json!({"opaque":"old-page-state"})];
+        history.capture_sources(&request).unwrap();
+        history.portable(&mut request);
+        assert_eq!(
+            request.messages, messages,
+            "the whole checked exchange survives"
+        );
+        assert_eq!(history.positions.len(), messages.len());
+        assert_eq!(
+            history.per_message[2].len(),
+            1,
+            "the result keeps its witness"
+        );
+    }
+
+    #[test]
+    fn a_tool_exchange_with_hidden_protocol_state_keeps_the_readable_fallback() {
+        let messages = read("Checked source".into(), true);
+        let mut history = history(messages.clone(), 0);
+        let mut request = input(messages);
+        history.portable(&mut request);
+        assert!(
+            request
+                .messages
+                .iter()
+                .all(|message| message.continuation.is_empty())
+        );
+        assert!(
+            request
+                .messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .all(|part| matches!(part, GenerationPart::Text { .. }))
+        );
+        assert!(request.messages.iter().flat_map(|message| &message.content).any(|part|
+            matches!(part, GenerationPart::Text { text } if text.contains("Checked source"))
+        ));
+    }
+
+    #[test]
+    fn refreshed_reading_fits_current_tokens_with_or_without_native_tool_thinking() {
+        for opaque in [false, true] {
+            let source =
+                json!({"data":"完整来源😀 ".repeat(4000),"citations":[{"url":"/doc/example"}]})
+                    .to_string();
+            let messages = read(source, opaque);
+            let mut history = history(messages.clone(), 0);
+            let mut request = input(messages);
+            request.max_output_tokens = 1;
+            history.capture_sources(&request).unwrap();
+            history.portable(&mut request);
+            let mut bare = request.clone();
+            match &mut bare.messages[2].content[0] {
+                GenerationPart::ToolResult { content, .. }
+                | GenerationPart::Text { text: content } => content.clear(),
+                _ => panic!("the result has a readable representation"),
+            }
+            // This allowance holds the shortening line and source link, while the full source is much larger.
+            let window = orch_engine::ask::context::estimate(MODEL, &bare).unwrap() + 256 + 1;
+            let budget = Budget::new(
+                &serde_json::from_value(json!({})).unwrap(),
+                MODEL,
+                Some(window),
+                1,
+            );
+            history.fit_reading(&mut request, budget, MODEL).unwrap();
+            assert!(
+                budget.fits(&request).unwrap(),
+                "opaque={opaque}: refreshed material fits tokens"
+            );
+            let given = serde_json::to_string(&request.messages[2]).unwrap();
+            assert!(
+                given.contains("Result shortened to fit the context")
+                    && given.contains("/doc/example")
+            );
+        }
+    }
+
+    #[test]
+    fn older_tool_exchanges_are_folded_whole_when_the_model_window_fills() {
+        let source = "A checked source, including its last sentence. ".repeat(2000);
+        let mut messages = read(source.clone(), false);
+        let older = messages.len();
+        messages.push(question(&"Continue from that source. ".repeat(1000)));
+        let mut history = history(messages.clone(), older);
+        history.positions[older] = 2;
+        let mut request = input(messages);
+        history.capture_sources(&request).unwrap();
+        history.portable(&mut request);
+        let parameters = serde_json::from_value(json!({})).unwrap();
+        // One token less than this full request forces folding; its current question still fits.
+        let window = orch_engine::ask::context::estimate(MODEL, &request).unwrap() + 4096 - 1;
+        let budget = Budget::new(&parameters, MODEL, Some(window), 4096);
+        let (summary, pending) = history.plan(&request, budget, MODEL).unwrap().unwrap();
+        assert!(budget.fits(&summary).unwrap());
+        assert_eq!(pending.through, 1, "the cut is the older turn's frontier");
+        assert_eq!(pending.sources.len(), 1, "folding retains the read witness");
+        assert_eq!(
+            summary.messages.len(),
+            older,
+            "the whole earlier turn is folded"
+        );
+        assert!(
+            summary
+                .messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .any(
+                    |part| matches!(part, GenerationPart::Text { text } if text.contains(&source))
+                ),
+            "the summary is given the full source without a byte cut"
+        );
     }
 }

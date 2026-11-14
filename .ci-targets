@@ -1,0 +1,8 @@
+fmt
+clippy
+test -p orch-api-base --lib
+test -p orch-engine --lib
+test -p orch-api-core --test ask --test ask_tools_native_origin --test reference_preview
+web typecheck
+web lint
+web test -- tests/component/ask-stream-lifetime.test.tsx tests/unit/ask-refusal-words.test.ts tests/unit/ask-root.test.ts
