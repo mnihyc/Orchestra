@@ -16,7 +16,7 @@ import { useAgentActs } from '@/features/resources/agents/acts';
 import { versionPin } from '@/features/resources/agents/descriptor';
 import { useHarnessTitle } from '@/features/resources/harnesses';
 import { ResourceList, useSearchText } from '@/features/resources/ResourceList';
-import { oneOf } from '@/features/resources/search';
+import { AGENT_STATES, type AgentsSearch, oneOf } from '@/features/resources/search';
 import type { Agent } from '@/generated/api-types';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
@@ -26,18 +26,8 @@ import { ChoiceLocator } from '@/ui/ChoiceLocator';
 import type { Column } from '@/ui/Table';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 
-export type AgentState = 'enabled' | 'disabled';
-
-export const AGENT_STATES: readonly AgentState[] = ['enabled', 'disabled'];
-
 /** A registered adapter may itself be named `any`; this is only the local clear choice. */
 const ANY_HARNESS = '\u0000any';
-
-export interface AgentsSearch {
-  q?: string;
-  state?: AgentState;
-  harness?: string;
-}
 
 export function AgentLink({ agent, label = agent.name }: { agent: Pick<Agent, 'id' | 'name'> & Partial<Agent>; label?: string }) {
   return (

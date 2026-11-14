@@ -11,13 +11,13 @@ mod places;
 mod resources;
 mod support;
 
-use orch_api_contract::common::ErrorCode;
+use orch_api_contract::common::{CollectionQuery, ErrorCode};
 use orch_api_contract::resources::{
     CreateProvider, ModelParameters, ModelSource, Provider, ProviderCreate, ProviderGet,
     ProviderModel, ProviderModelCreate, ProviderModelCreateBody, ProviderModelDelete,
     ProviderModelList, ProviderModelSuggestionAccept, ProviderModelSuggestionAcceptBody,
-    ProviderModelSuggestionList, ProviderModelUpdate, ProviderModelUpdateBody, ProviderStatus,
-    ServiceTier, Upstream,
+    ProviderModelSuggestionList, ProviderModelSuggestionListQuery, ProviderModelUpdate,
+    ProviderModelUpdateBody, ProviderStatus, ServiceTier, Upstream,
 };
 use orch_api_core::routes::resources::sealing::install_master_key;
 use orch_db::secrets::MasterKey;
@@ -136,7 +136,8 @@ async fn models_are_added_listed_changed_and_removed_by_whoever_manages_the_prov
         .token(&c.viewer.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         listed
             .iter()
@@ -217,7 +218,8 @@ async fn models_are_added_listed_changed_and_removed_by_whoever_manages_the_prov
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(left.len(), 1);
     let gone = world
         .app
@@ -415,8 +417,25 @@ async fn a_program_source_lists_models_before_any_is_enabled_and_acceptance_retu
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     native.await.unwrap();
+    // No second native response is supplied: filtered continuations read the accepted catalogue.
+    let cached = world
+        .app
+        .call(ProviderModelSuggestionList, &[&id])
+        .token(&c.boss.token)
+        .query(&ProviderModelSuggestionListQuery {
+            q: Some("GPU Large".into()),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(cached.items.len(), 1);
+    assert_eq!(cached.items[0].model_name, "gpu-large");
+
     assert_eq!(
         suggestions
             .iter()
@@ -506,7 +525,8 @@ async fn discovery_asks_the_machine_that_holds_the_key_and_adds_nothing_by_itsel
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     machine_says.await.unwrap();
     assert_eq!(
         listed
@@ -522,7 +542,8 @@ async fn discovery_asks_the_machine_that_holds_the_key_and_adds_nothing_by_itsel
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(
         none.is_empty(),
         "suggestions never change the allowlist by themselves"
@@ -587,7 +608,8 @@ async fn a_provider_on_a_key_the_server_holds_is_started_on_its_machine_before_t
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     machine_says.await.unwrap();
     assert_eq!(
         listed
@@ -646,7 +668,8 @@ async fn accepting_two_reported_names_that_collide_refuses_the_batch_without_los
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(
         saved.is_empty(),
         "a collision rolls back the whole batch instead of blanking a reported name"
@@ -654,7 +677,7 @@ async fn accepting_two_reported_names_that_collide_refuses_the_batch_without_los
 }
 
 #[tokio::test]
-async fn accepted_suggestions_are_added_with_what_they_offer_and_none_of_it_enabled() {
+async fn accepted_suggestions_are_added_with_what_they_offer_switched_on() {
     let world = world().await;
     let c = company(&world).await;
     let machine = machine_forwarding_to(&world, c.boss.id(), &["https://api.example.com/v1"]).await;
@@ -713,9 +736,22 @@ async fn accepted_suggestions_are_added_with_what_they_offer_and_none_of_it_enab
         Some(&["low".to_owned(), "high".to_owned()][..])
     );
     assert_eq!(sol.parameters.context_window, Some(400_000));
+    assert_eq!(
+        sol.parameters.service_tiers,
+        Some(vec![ServiceTier {
+            id: "fast".into(),
+            label: "Fast".into()
+        }]),
+        "the organization's shipped choice switches on what a suggestion offers"
+    );
+    assert_eq!(
+        sol.parameters.access_programs,
+        Some(vec!["early".to_owned()])
+    );
     assert!(
-        sol.parameters.service_tiers.is_none() && sol.parameters.access_programs.is_none(),
-        "none enabled"
+        sol.parameters.default_service_tier.is_none()
+            && sol.parameters.default_access_program.is_none(),
+        "a thread still starts with the ordinary speed and no program"
     );
     let offered = sol.parameters.offered.clone().unwrap();
     assert_eq!(
@@ -737,7 +773,8 @@ async fn accepted_suggestions_are_added_with_what_they_offer_and_none_of_it_enab
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     for expected in &added {
         let persisted = saved.iter().find(|model| model.id == expected.id).unwrap();
         assert_eq!(
@@ -780,4 +817,61 @@ async fn accepted_suggestions_are_added_with_what_they_offer_and_none_of_it_enab
     machine_says.await.unwrap();
     assert!(again.added.is_empty());
     assert_eq!(again.provider.models.len(), 2);
+}
+
+#[tokio::test]
+async fn model_names_are_searched_and_paged_on_the_server_beyond_a_thousand_entries() {
+    let world = world().await;
+    let c = company(&world).await;
+    let id = provider(&world, &c.boss, c.acme, None).await.base.id;
+    sqlx::query(
+        "INSERT INTO provider_models(id,provider_id,model_name,display_name,source,created_by)
+        SELECT gen_random_uuid(),$1,'model-'||n::text,'Model '||lpad(n::text,4,'0'),'manual',$2
+        FROM generate_series(0,1000) AS n",
+    )
+    .bind(id)
+    .bind(c.boss.id())
+    .execute(&world.db.pool)
+    .await
+    .unwrap();
+    let found = world
+        .app
+        .call(ProviderModelList, &[&id])
+        .token(&c.boss.token)
+        .query(&CollectionQuery {
+            q: Some("Model 1000".into()),
+            limit: Some(37),
+            cursor: None,
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(found.items.len(), 1);
+    assert_eq!(found.items[0].model_name, "model-1000");
+    assert!(found.next_cursor.is_none());
+    let mut cursor = None;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let page = world
+            .app
+            .call(ProviderModelList, &[&id])
+            .token(&c.boss.token)
+            .query(&CollectionQuery {
+                q: None,
+                limit: Some(137),
+                cursor,
+            })
+            .send()
+            .await
+            .ok();
+        assert!(page.items.len() <= 137);
+        for item in page.items {
+            assert!(seen.insert(item.id));
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen.len(), 1001);
 }

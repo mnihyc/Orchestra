@@ -441,15 +441,14 @@ pub(super) async fn child_list_in(
     } else {
         None
     };
+    let words = orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or(""));
     let batch = i64::try_from(limit + READ_AHEAD).unwrap_or(i64::MAX);
     let mut items: Vec<Node> = Vec::new();
     loop {
-        let rows = match child_kind {
-            Some(kind) => {
-                hierarchy::presentation::children_of_kind(conn, parent, kind, after, batch).await?
-            }
-            None => hierarchy::children_after(conn, parent, after, batch).await?,
-        };
+        let rows = hierarchy::presentation::children_matching(
+            conn, parent, child_kind, after, batch, &words,
+        )
+        .await?;
         let exhausted = i64::try_from(rows.len()).is_ok_and(|count| count < batch);
         let Some(last) = rows.last().map(|row| row.id) else {
             break;
@@ -476,19 +475,15 @@ pub(super) async fn child_list_in(
     // The private children the caller administers stand once, on the first page, after what they may
     // read, sorted by name: an existence list that counts nothing and tells no work.
     let hidden = if query.cursor.is_none() && !query.participating.unwrap_or(false) {
-        let candidates = match child_kind {
-            Some(kind) => {
-                hierarchy::presentation::children_of_kind(
-                    conn,
-                    parent,
-                    kind,
-                    None,
-                    PRIVATE_CHILDREN_MOST,
-                )
-                .await?
-            }
-            None => hierarchy::children_after(conn, parent, None, PRIVATE_CHILDREN_MOST).await?,
-        };
+        let candidates = hierarchy::presentation::children_matching(
+            conn,
+            parent,
+            child_kind,
+            None,
+            PRIVATE_CHILDREN_MOST,
+            &words,
+        )
+        .await?;
         let ids: Vec<Id> = candidates
             .iter()
             .filter(|row| archived_ok(filter, row.archived_at.is_some()))

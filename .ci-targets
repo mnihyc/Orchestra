@@ -1,0 +1,2 @@
+test -p orch-api-core --test users --test invitation_operation_scopes --test notifications_channels --test notifications_destinations --test notifications_inbox --test personal_notification_scope --test provider_harness --test threads_adopt
+test -p orch-api-core --test document_list_scopes --test node_list_operation_scopes

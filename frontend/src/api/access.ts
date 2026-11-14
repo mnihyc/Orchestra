@@ -10,6 +10,7 @@
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { ApiError, accepted, api, client, done, ok, repeatable } from '@/api/client';
+import { readAllPages } from '@/api/collection';
 import { ownerReadHeaders, withOwnerReadConfirmation } from '@/api/ownerReadConfirmation';
 import type {
   AccessRequestCreateBody,
@@ -303,7 +304,7 @@ export const groupsQuery = (orgId: string) =>
   queryOptions({
     queryKey: ['groups', orgId] as const,
     queryFn: ({ signal }): Promise<Group[]> =>
-      ok(api.GET('/nodes/{id}/groups', { params: { path: { id: orgId } }, signal })),
+      readAllPages((cursor) => ok(api.GET('/nodes/{id}/groups', { params: { path: { id: orgId }, query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
 
 // ---------------------------------------------------------------- roles held in a place

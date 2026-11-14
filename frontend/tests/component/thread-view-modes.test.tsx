@@ -41,7 +41,7 @@ it.each(['en', 'zh-CN'] as const)('keeps detail per thread across another device
   expect(a.getByRole('combobox')).toHaveTextContent(i18n.t('thread.viewModes.full'));
   await userEvent.click(a.getByRole('combobox')); await userEvent.click(screen.getByRole('option', { name: i18n.t('thread.viewModes.focused') }));
   await waitFor(() => expect(wire.save).toHaveBeenCalledWith('timeline', expect.objectContaining({ extra: 'kept', diff_layout: 'two', threads: {
-    a: { work_detail: 'summary', live_tools: false }, b: { work_detail: 'steps', live_tools: true, extra: 'also kept' },
+    a: { work_detail: 'summary', live_tools: false, diagnostics: false }, b: { work_detail: 'steps', live_tools: true, extra: 'also kept' },
   } })));
   expect(b.getByRole('combobox')).toHaveTextContent(i18n.t('thread.viewModes.live'));
   await userEvent.click(a.getByRole('combobox')); await userEvent.click(screen.getByRole('option', { name: i18n.t('thread.viewModes.live') }));
@@ -49,6 +49,20 @@ it.each(['en', 'zh-CN'] as const)('keeps detail per thread across another device
   view.unmount(); draw();
   await waitFor(() => expect(within(screen.getByRole('region', { name: 'Thread a' })).getByRole('combobox')).toHaveTextContent(i18n.t('thread.viewModes.live')));
   expect(changedTimeline(wire.state.timeline, { value: { diff_layout: 'one' } })).toMatchObject({ extra: 'kept', threads: { a: { live_tools: true }, b: { extra: 'also kept' } } });
+});
+
+it.each(['en', 'zh-CN'] as const)('offers Diagnostics as the fourth way to read, kept for that thread alone in %s', async (locale) => {
+  await setLocale(locale); draw();
+  const a = within(screen.getByRole('region', { name: 'Thread a' }));
+  await waitFor(() => expect(a.getByRole('combobox')).toHaveTextContent(i18n.t('thread.viewModes.full')));
+  await userEvent.click(a.getByRole('combobox'));
+  expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual(
+    ['focused', 'full', 'live', 'diagnostics'].map((mode): unknown => expect.stringContaining(i18n.t(`thread.viewModes.${mode}`))));
+  await userEvent.click(screen.getByRole('option', { name: i18n.t('thread.viewModes.diagnostics') }));
+  await waitFor(() => expect(wire.save).toHaveBeenCalledWith('timeline', expect.objectContaining({ threads: expect.objectContaining({
+    a: { work_detail: 'steps', live_tools: false, diagnostics: true } }) as unknown })));
+  await waitFor(() => expect(a.getByRole('combobox')).toHaveTextContent(i18n.t('thread.viewModes.diagnostics')));
+  expect(within(screen.getByRole('region', { name: 'Thread b' })).getByRole('combobox')).toHaveTextContent(i18n.t('thread.viewModes.live'));
 });
 
 it.each(['en', 'zh-CN'] as const)('opens current tool output in Live and keeps a deliberate collapse in %s', async (locale) => {

@@ -30,7 +30,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
   it(`names an environment in its topic without repeating its routing address in ${locale}/${theme}`, async () => {
     await setLocale(locale); useAppearance.setState({ locale, theme }); document.documentElement.dataset.theme = theme;
     const workspace = { ...environment('workspace').environment, name: 'Alice workspace', address: 'acme.ada.acme-workspace' };
-    const view = show(<TopicEnvironments topic={{ environments: [workspace], default_environment_id: workspace.id }} />);
+    const view = show(<TopicEnvironments topic={{ id: 'topic', environments: [workspace], default_environment_id: workspace.id }} />);
     expect(screen.getByRole('link', { name: workspace.name })).toHaveAttribute('href', '/resources/environments/workspace');
     expect(screen.getByText(i18n.t('places.environments.default'))).toBeVisible();
     expect(view.container).not.toHaveTextContent(workspace.address);
@@ -46,7 +46,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const trigger = screen.getByRole('combobox', { name: i18n.t('start.where.title') });
     expect(trigger).toHaveValue(blocked.environment.name);
     await userEvent.click(trigger);
-    const list = await screen.findByRole('listbox');
+    const list = await screen.findByRole('dialog', { name: i18n.t('start.where.title') });
     const off = within(list).getByRole('option', { name: blocked.environment.name });
     expect(off).toHaveAttribute('aria-disabled', 'true');
     expect(off).toHaveAccessibleDescription();
