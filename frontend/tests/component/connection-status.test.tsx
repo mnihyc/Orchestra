@@ -53,11 +53,24 @@ for (const locale of ['en', 'zh-CN'] as const) {
     act(() => { vi.advanceTimersByTime(RECONNECT_ELAPSED_AFTER_MS - 1_000); });
     expect(screen.getByText(i18n.t('workbench.status.reconnecting'))).toBeInTheDocument();
     act(() => { vi.advanceTimersByTime(1_000); });
-    expect(screen.getByText(i18n.t('workbench.status.reconnectingSince', { time: formatSpan(RECONNECT_ELAPSED_AFTER_MS, { locale }, 'short') }))).toBeInTheDocument();
+    expect(screen.getByText(i18n.t('workbench.status.noLive', { time: formatSpan(RECONNECT_ELAPSED_AFTER_MS, { locale }, 'short') }))).toBeInTheDocument();
     act(() => { peers.at(-1)!.open(); peers.at(-1)!.ready(); });
     expect(screen.getByText(i18n.t('workbench.status.connected'))).toBeInTheDocument();
     act(() => { state.socket!.stop(); state.socket!.start(); });
     expect(screen.getByText(i18n.t('workbench.status.connecting'))).toBeInTheDocument();
+  });
+}
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`says that live updates never came up once the connection has been refused for ten seconds in ${locale}`, async () => {
+    useAppearance.setState({ locale }); await setLocale(locale);
+    state.socket!.start();
+    show(<ConnectionPart />);
+    act(() => peers[0]!.close(1006));
+    act(() => { vi.advanceTimersByTime(RECONNECT_ELAPSED_AFTER_MS - 1_000); });
+    expect(screen.getByText(i18n.t('workbench.status.connecting'))).toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(1_000); });
+    expect(screen.getByText(i18n.t('workbench.status.noLive', { time: formatSpan(RECONNECT_ELAPSED_AFTER_MS, { locale }, 'short') }))).toBeInTheDocument();
+    expect(screen.queryByText(i18n.t('workbench.status.connecting'))).not.toBeInTheDocument();
   });
 }
 it('leaves an idle socket unlabelled', () => {
