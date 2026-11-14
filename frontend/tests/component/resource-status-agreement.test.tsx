@@ -30,7 +30,7 @@ vi.mock('@/api/adoption', async (load) => { const actual = await load<typeof Ado
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useNavigate: () => vi.fn(),
   Link: ({ to, params, children, ...attributes }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; params?: Record<string, string> }) => <a {...attributes} href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resources/providers/acts', () => ({ useProviderActs: () => ({ page: () => ({ primary: null, edit: null, menu: [] }), dialogs: null }) }));
 vi.mock('@/features/resources/providers/Threads', () => ({ ProviderThreads: () => null }));
 vi.mock('@/shell/Page', async (load) => ({ ...await load<object>(), Page: ({ children }: { children: ReactNode }) => <main>{children}</main>,
