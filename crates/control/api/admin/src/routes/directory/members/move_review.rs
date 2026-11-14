@@ -102,6 +102,7 @@ impl native::Selected for Preview {
     type Query = ((), MemberMoveBody);
     type Value = Selected;
     type Reply = MemberMovePreviewResponse;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::MEMBER_MOVE_PREVIEW;
 
     fn select<'a>(

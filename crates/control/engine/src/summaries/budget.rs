@@ -36,12 +36,45 @@ pub(super) async fn context_tokens(
     .map_err(EngineError::unreadable)?;
     orch_summarizer_model::context::fit_window(
         config.context_tokens,
-        config.max_output_tokens,
+        config.output_reserve(parameters.reasons()),
         parameters
             .context_open()
             .or(parameters.context_window.filter(|window| *window > 0)),
     )
     .map_err(|error| EngineError::unreadable(super::safe_reason(&error)))
+}
+
+/// Whether the summary model reasons before it answers, as its own parameters say: the same reading that tells a
+/// request how much room to leave it. A model, provider or interface that cannot be found does not reason here.
+pub(super) async fn reasons(
+    conn: &mut orch_db::Conn,
+    config: &orch_summarizer_model::descriptor::Config,
+) -> Result<bool, EngineError> {
+    let Some(model) = orch_db::queries::resources::thread_engine::model(
+        conn,
+        config.provider_id,
+        &config.model_name,
+    )
+    .await?
+    else {
+        return Ok(false);
+    };
+    let Some(provider) =
+        orch_db::queries::resources::thread_engine::provider(conn, config.provider_id).await?
+    else {
+        return Ok(false);
+    };
+    let Some(protocol) = super::resource::completion_protocol(&provider.protocols)? else {
+        return Ok(false);
+    };
+    let parameters = orch_provider_contract::models::composed_model_parameters(
+        &model.parameters,
+        &model.groups,
+        &model.option_layers,
+        Some(&protocol),
+    )
+    .map_err(EngineError::unreadable)?;
+    Ok(parameters.reasons())
 }
 
 /// The window taken for a model whose entry does not say: what every model that does this work has.

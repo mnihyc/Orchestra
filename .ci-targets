@@ -1,0 +1,16 @@
+# n41-summaries, round four: a reader who may read is not refused because the summary moved while being answered (every read under the publication recheck, a repeat count as a setting); the Summary box's cases; an empty source refused at acceptance; the hand-off estimate counts reasoning room; the writer reads a summary's source once under its fence.
+fmt
+clippy
+test -p orch-settings-contract --lib
+test -p orch-api-contract --lib
+test -p orch-summarizer-model --lib
+test -p orch-protocol-openai-responses --test cut_answers
+test -p orch-protocol-anthropic-messages --test cut_answers
+test -p orch-connector-core --test provider_role
+test -p orch-engine --lib
+test -p orch-engine --test resource_summaries --test document_summaries
+test -p orch-api-core --lib -- command_admission_tests
+test -p orch-api-core --test resource_summaries --test summaries --test admin_token_inventory --test admin_messages --test first_steps --test imports --test imports_history --test forks --test uploads --test ask --test binding_options --test threads_adopt --test agent_duplicates --test mcp_duplicates --test mount_duplicates --test provider_duplicates --test skill_duplicates --test template_duplicates --test environment_duplicates --test people_storage --test document_summary_options --test node_chat_opening_scopes --test everything_resources --test container_units --test thread_continuation_cancel --test thread_continuation_exports --test thread_continuation_late --test thread_continuation_queues --test thread_continuation_reads --test thread_continuation_search --test thread_continuation_summaries --test thread_continuation_tokens
+web typecheck
+web lint
+web test -- tests/component/resource-summary.test.tsx tests/component/summary-box.test.tsx tests/component/summary-follow.test.tsx tests/component/thread-summary-inspector.test.tsx
