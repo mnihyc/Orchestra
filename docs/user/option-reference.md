@@ -13,6 +13,10 @@ An option is offered only where its interface or program declares it. Provider l
 
 | Reference | Meaning |
 | --- | --- |
+| `option:ProviderStartStopBody.force` | Stop a provider even while its own work is stuck. Other work and running turns can still require a separate decision. The record stops at once; the host is told again until it confirms. |
+| `option:HostRuntimeStopBody.force` | Apply the same forced-stop behavior to a provider runtime from its host page. Environment runtimes do not support this option and return an explicit refusal. |
+| `option:HostRuntimeDeleteQuery.force` | End the provider’s own work that prevents deletion, then remove its runtime with the chosen volume treatment. Work that has committed and a replaced runtime keep their explicit safeguards. |
+| `option:ProviderRuntime.detail` | The reason for the runtime’s current state. A forced stop says that host confirmation is pending, then becomes the ordinary person-requested stop once the host confirms. Host-supplied diagnostics remain the host’s own words. |
 | `option:ask.models.*.model` | The enabled API model’s routing name. Together with provider_id it identifies one allowed Ask model; child lists can narrow the choices while retaining the parent’s order. |
 | `option:ask.models.*.provider_id` | The API provider’s identity for this allowed Ask model. The person and current payer must still be allowed to use that provider and model in the conversation’s organization. |
 | `option:AccessOptions.models` | The models. |

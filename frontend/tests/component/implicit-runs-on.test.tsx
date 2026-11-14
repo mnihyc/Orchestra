@@ -69,6 +69,28 @@ for (const locale of ['en', 'zh-CN'] as const) describe(`run choices in ${locale
     }
     await userEvent.keyboard('{Escape}');
   });
+  it('keeps the profile a person chose when another provider can use it, including returning to the original provider', async () => {
+    server.providers[0]!.protocols = ['openai'];
+    server.providers.push(planProvider({ id: 'second-provider', name: 'Second provider', protocols: ['openai'] }),
+      planProvider({ id: 'source-provider', name: 'Original provider', protocols: ['openai'] }));
+    show(<Form compact initial={{ ...initialChoices('replace'), providerId: 'target-provider', agentId: 'other' }} />);
+    const provider = screen.getByRole('combobox', { name: t('change.runs.provider') });
+    const profile = screen.getByRole('combobox', { name: t('change.runs.agent') });
+    expect(profile).toHaveValue('Other profile');
+    await userEvent.click(provider);
+    await userEvent.click(screen.getByRole('option', { name: 'Second provider' }));
+    expect(profile).toHaveValue('Other profile');
+    expect(await screen.findByText(t('change.runs.automatic.profile.retained'), { exact: false })).toBeVisible();
+    const second = server.change.mock.calls.find(([patch]) => patch.providerId === 'second-provider')?.[0];
+    expect(second?.agentId).toBe('other');
+    expect(second?.automaticRuns?.profile?.previous).toBeNull();
+    await userEvent.click(provider);
+    await userEvent.click(screen.getByRole('option', { name: t('change.runs.providerNow', { name: 'Original provider' }) }));
+    expect(profile).toHaveValue('Other profile');
+    const original = server.change.mock.calls.find(([patch]) => patch.providerId === null)?.[0];
+    expect(original?.agentId).toBe('other');
+    expect(original?.automaticRuns?.profile?.by).toBe('retained');
+  });
   it('keeps disabled models readable and clears automatic origins after an explicit choice', async () => {
     const target = server.providers[0]!;
     show(<Form initial={{ ...initialChoices('new'), providerId: target.id, agentId: 'keeper', automaticRuns: automaticProfileFor(target, server.agents, thread) }} />);
@@ -138,19 +160,23 @@ for (const locale of ['en', 'zh-CN'] as const) describe(`run choices in ${locale
     expect(screen.queryByText('Earlier profile')).not.toBeInTheDocument();
     expect(screen.queryByText(t('change.runs.automatic.previousProfile.disabled'), { exact: false })).not.toBeInTheDocument();
   });
-  it('keeps refused pairs in a compact switch and marks a retained model correctly', async () => {
+  it('keeps refused profiles in their own switch control and marks a retained model correctly', async () => {
     server.providers[0]!.protocols = ['openai']; server.models[0]!.enabled = true;
     const target = server.providers[0]!;
     const initial = { ...initialChoices('replace'), providerId: target.id, agentId: 'keeper', automaticRuns: automaticProfileFor(target, server.agents, thread) };
     show(<Form result="replace" compact initial={initial} />);
     expect(await screen.findByText(t('change.runs.automatic.model.retained'), { exact: false })).toBeVisible();
     expect(screen.queryByText(t('change.runs.automatic.previousModel'), { exact: false })).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole('combobox', { name: t('switchChoice.picker') }));
-    const refused = screen.getByRole('option', { name: t('switchChoice.option', { agent: 'Earlier profile', provider: 'Readable provider' }) });
+    await userEvent.click(screen.getByRole('combobox', { name: t('change.runs.agent') }));
+    const refused = screen.getByRole('option', { name: 'Earlier profile' });
     expect(refused).toHaveAttribute('aria-disabled', 'true'); expect(refused).toHaveAccessibleDescription(expect.stringContaining(t('change.runs.unavailable.profileDisabled')));
-    await userEvent.click(screen.getByRole('option', { name: t('switchChoice.option', { agent: 'Other profile', provider: 'Readable provider' }) }));
-    await waitFor(() => expect(screen.getByRole('combobox', { name: t('switchChoice.picker') })).toHaveValue(t('switchChoice.option', { agent: 'Other profile', provider: 'Readable provider' })));
+    await userEvent.click(screen.getByRole('option', { name: 'Other profile' }));
+    await waitFor(() => expect(screen.getByRole('combobox', { name: t('change.runs.agent') })).toHaveValue('Other profile'));
     expect(screen.queryByText(t('change.runs.automatic.profile.first'), { exact: false })).not.toBeInTheDocument();
-    expect(server.change).toHaveBeenCalledWith({ providerId: 'target-provider', agentId: 'other', model: null, effort: undefined, arrangement: null, automaticRuns: {} });
+    const selected = server.change.mock.calls.find(([patch]) => patch.agentId === 'other')?.[0];
+    expect(selected?.agentId).toBe('other');
+    expect(selected?.automaticRuns?.profile).toBeUndefined();
+    expect(selected?.automaticRuns?.model?.by).toBe('retained');
+    expect(selected?.automaticRuns?.effort).toBeDefined();
   });
 });

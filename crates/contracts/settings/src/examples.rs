@@ -259,6 +259,7 @@ pub const SWITCH_KEEP_PREVIOUS: &str = "false";
 pub const BINDING_PREFER: &str = r#"["separated","key_separated"]"#;
 pub const BINDING_ALLOWED: &str = r#"["separated","key_separated"]"#;
 pub const CREDENTIAL_REFRESH_MARGIN_SECS: &str = "300";
+pub const CREDENTIAL_REFRESH_MIN_INTERVAL_SECS: &str = "30";
 pub const AUTO_TITLE: &str = r#""harness""#;
 pub const AUTO_TAGS: &str = r#""off""#;
 pub const AUTO_SUMMARIZER: &str = r#"{"kind":"model"}"#;

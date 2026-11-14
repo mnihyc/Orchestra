@@ -61154,6 +61154,18 @@
               ],
               "description": "Whether to remove its volumes there too."
             }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Whether to remove a provider's unit although work of the provider's own is under way on it, which is ended\nfirst (an update is undone); the unit is taken away from the host when the host can be told, and kept for that\nas long as it takes. Only a provider's unit is removed by force; an environment's unit refuses it."
+            }
           }
         ]
       }
@@ -131469,6 +131481,13 @@
               }
             ],
             "description": "A job on it now: its provision or its recreation."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it stands where it does: a word the screen says in the reader's language (`provider_person_stop`,\n`provider_forced_stop`, `provider_update_ended`, `provider_unit_unfinished`, ...) or, for a failure the host\nreported, the host's own words. `null` when there is nothing to say."
           }
         },
         "required": [
@@ -131483,7 +131502,8 @@
           "last_active_at",
           "idle_stop_at",
           "renew_at",
-          "job"
+          "job",
+          "detail"
         ],
         "description": "The runtime a managed provider has: the unit in which its harness holds the credential and the\nconversations."
       },
@@ -175136,16 +175156,6 @@
             },
             "description": "The harnesses a provider can be signed in to."
           },
-          "subscriptions_unreported": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "$ref": "#/components/schemas/AgentRef"
-            },
-            "description": "Usable profiles whose sign-in capabilities have not been reported yet; never guessed by kind."
-          },
           "subscriptions_unavailable": {
             "type": [
               "array",
@@ -177384,6 +177394,13 @@
               "null"
             ],
             "description": "Whether to go on although a turn runs on it; a stop is refused otherwise."
+          },
+          "force": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "For a stop: whether to settle it although the host does not confirm it. The work of the provider's own that is\nin the way is ended (an update is undone, and left to be removed when its host does not answer in time), the\nunit is stopped in the system's records, and the host is told to stop it, again and again, until it answers."
           }
         },
         "description": "Starts or stops a managed provider's runtime by hand."
@@ -182213,6 +182230,13 @@
           "interrupt": {
             "type": "boolean",
             "description": "Whether to interrupt what runs in it."
+          },
+          "force": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to settle the stop although the host does not confirm it, ending the work of the provider's own that\nis in the way; the host is told to stop the unit, again and again, until it answers. Only a provider's unit\nis stopped by force; an environment's unit refuses it."
           }
         },
         "required": [
@@ -182234,6 +182258,13 @@
               "null"
             ],
             "description": "Whether to remove its volumes there too."
+          },
+          "force": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to remove a provider's unit although work of the provider's own is under way on it, which is ended\nfirst (an update is undone); the unit is taken away from the host when the host can be told, and kept for that\nas long as it takes. Only a provider's unit is removed by force; an environment's unit refuses it."
           }
         },
         "required": [

@@ -14,6 +14,10 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 
 | 参考标识 | 含义 |
 | --- | --- |
+| `option:ProviderStartStopBody.force` | 即使提供方自身的工作卡住，也可停止提供方。其他工作或运行中的轮次仍可能需要另行处理。记录立即变为已停止；系统持续通知主机，直到主机确认。 |
+| `option:HostRuntimeStopBody.force` | 从主机页面对提供方运行实例执行同样的强制停止。环境运行实例不支持此选项，并会明确拒绝。 |
+| `option:HostRuntimeDeleteQuery.force` | 结束阻碍删除的提供方自身工作，再按所选的数据卷处理方式移除运行实例。已经提交的工作和被替换的运行实例仍保留各自的保护规则。 |
+| `option:ProviderRuntime.detail` | 当前运行状态的原因。强制停止时先说明仍在等待主机确认，确认后改为通常的手动停止原因。主机提供的诊断信息保持原文。 |
 | `option:ask.models.*.model` | 已启用 API 模型的路由名称，与 provider_id 一起标识一个允许的问一问模型。子级列表可以缩小可选范围，并保留父级顺序。 |
 | `option:ask.models.*.provider_id` | 此项允许的问一问模型所使用的 API 提供方标识。提问者和当前付费人仍须有权在对话所属组织中使用该提供方及模型。 |
 | `option:AccessOptions.models` | 此使用权限涵盖的模型。 |

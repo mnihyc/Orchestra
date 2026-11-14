@@ -849,6 +849,11 @@ pub async fn scheduled_look(
     if !current.is_empty() {
         crate::harness_checks::check_requested(app, &current).await;
     }
+    // A build checked before that lacks a case the present manifest has is taken up for it without anyone's press;
+    // an interval of zero keeps this, like the reads, off.
+    if hours > 0 {
+        crate::harness_checks::check_completing(app).await;
+    }
     Ok(read_now)
 }
 

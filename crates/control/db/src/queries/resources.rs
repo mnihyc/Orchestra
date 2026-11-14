@@ -6073,8 +6073,15 @@ pub mod provider_runtime {
     pub const STOPPED_IDLE: &str = "provider_idle_stop";
     /// A person asked the runtime to stay stopped.
     pub const STOPPED_PERSON: &str = "provider_person_stop";
+    /// A person stopped the runtime by force: it reads as stopped, and its host has not yet said that it stopped it.
+    pub const STOPPED_FORCED: &str = "provider_forced_stop";
+    /// The unit an update made beside the provider's was left when the update was ended where it stood; its host is
+    /// to stop and remove it.
+    pub const UPDATE_ENDED: &str = "provider_update_ended";
+    /// A unit that read as being made, that no work made any more, and that its host reported.
+    pub const UNFINISHED: &str = "provider_unit_unfinished";
     /// Shared by scheduled candidate, admission and start guards.
-    pub const INTENTIONAL_STOP_DETAILS: [&str; 2] = [STOPPED_IDLE, STOPPED_PERSON];
+    pub const INTENTIONAL_STOP_DETAILS: [&str; 3] = [STOPPED_IDLE, STOPPED_PERSON, STOPPED_FORCED];
 
     /// Whether this unit is being or has been stopped deliberately.
     #[must_use]
@@ -6480,6 +6487,27 @@ pub mod provider_runtime {
         .await?)
     }
 
+    /// The units of providers stopped by force whose online hosts have not confirmed their stops,
+    /// excluding units this process already follows so one busy batch cannot hide later ones.
+    pub async fn forced_stops(
+        conn: &mut Conn,
+        followed: &[Id],
+        limit: i64,
+    ) -> Result<Vec<RuntimeFull>, DbError> {
+        Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {RUNTIME_COLUMNS} FROM runtimes
+              WHERE kind = 'provider' AND state = 'stopped' AND state_detail = $1
+                AND NOT (id = ANY($2))
+                AND host_id IN (SELECT h.id FROM hosts h JOIN machines m ON m.id = h.machine_id WHERE m.online)
+              ORDER BY updated_at, id LIMIT $3"
+        )))
+        .bind(STOPPED_FORCED)
+        .bind(followed)
+        .bind(limit)
+        .fetch_all(conn)
+        .await?)
+    }
+
     /// The retired runtimes of providers whose time to be removed has come.
     pub async fn retired_due(
         conn: &mut Conn,
@@ -6814,32 +6842,27 @@ pub mod provider_runtime {
         pub provider_id: Id,
         /// When the token lapses.
         pub expires_at: DateTime<Utc>,
-        /// When the credential was issued, where its own claims or stated life supplied it.
-        pub issued_at: Option<DateTime<Utc>>,
-        /// Where it stands.
-        pub status: String,
-        /// The root org of its home.
-        pub org_id: Id,
-        /// Its name.
-        pub name: String,
     }
 
     /// The providers not deleted whose facts say when a token lapses.
-    pub async fn token_ends(conn: &mut Conn, limit: i64) -> Result<Vec<TokenEnd>, DbError> {
+    pub async fn token_ends(
+        conn: &mut Conn,
+        after: Option<Id>,
+        limit: i64,
+    ) -> Result<Vec<TokenEnd>, DbError> {
         Ok(sqlx::query_as(
             "SELECT id AS provider_id,
                     (facts #>> '{credential,expires_at}')
-                        ::timestamptz AS expires_at,
-                    (facts #>> '{credential,issued_at}')
-                        ::timestamptz AS issued_at,
-                    status, org_id, name
+                        ::timestamptz AS expires_at
                FROM providers
               WHERE deleted_at IS NULL AND facts #>> '{credential,yields}' IN ('token','key')
                 AND (facts #>> '{credential,expires_at}')
                     IS NOT NULL
+                AND ($2::uuid IS NULL OR id > $2)
               ORDER BY id LIMIT $1",
         )
         .bind(limit)
+        .bind(after)
         .fetch_all(conn)
         .await?)
     }

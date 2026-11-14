@@ -69,7 +69,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const confirm = screen.getByRole('button', { name: i18n.t('hosts.runtimes.removeConfirm', { name: detailEnvironment.name }) }); expect(confirm).toHaveAttribute('aria-disabled', 'true');
     await user.click(confirm); expect(removeHostRuntime).not.toHaveBeenCalled();
     await user.click(screen.getByRole('textbox', { name: i18n.t('hosts.runtimes.type', { name: detailEnvironment.name }) })); await user.paste(detailEnvironment.name);
-    await user.click(confirm); await waitFor(() => expect(removeHostRuntime).toHaveBeenCalledExactlyOnceWith(detailHost.id, runtime.id, unit, false));
+    await user.click(confirm); await waitFor(() => expect(removeHostRuntime).toHaveBeenCalledExactlyOnceWith(detailHost.id, runtime.id, unit, false, false));
   });
   for (const volumes of [false, true]) it(`keeps provider-unit deletion offered and confirms its exact unit with the volume choice (${locale}/${theme}/${volumes})`, async () => {
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme }); document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -87,7 +87,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const checkbox = screen.getByRole('checkbox', { name: i18n.t('hosts.runtimes.volumes') }); expect(checkbox).not.toBeChecked();
     if (volumes) await user.click(checkbox);
     await user.click(confirm);
-    await waitFor(() => expect(removeHostRuntime).toHaveBeenCalledExactlyOnceWith(detailHost.id, providerRuntime.id, providerRuntime.unit_name, volumes));
+    await waitFor(() => expect(removeHostRuntime).toHaveBeenCalledExactlyOnceWith(detailHost.id, providerRuntime.id, providerRuntime.unit_name, volumes, false));
     expect(await screen.findByText(i18n.t('hosts.runtimes.removed', { name: detailUnitProvider.name }))).toBeVisible();
   });
 }

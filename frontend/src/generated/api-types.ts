@@ -27171,6 +27171,12 @@ export interface components {
         HostRuntimeDeleteQuery: {
             /** @description The unit's name, to be sure. */
             confirm: string;
+            /**
+             * @description Whether to remove a provider's unit although work of the provider's own is under way on it, which is ended
+             *     first (an update is undone); the unit is taken away from the host when the host can be told, and kept for that
+             *     as long as it takes. Only a provider's unit is removed by force; an environment's unit refuses it.
+             */
+            force?: boolean | null;
             /** @description Whether to remove its volumes there too. */
             volumes?: boolean | null;
         };
@@ -27181,6 +27187,12 @@ export interface components {
         };
         /** @description Stops a runtime of a host. */
         HostRuntimeStopBody: {
+            /**
+             * @description Whether to settle the stop although the host does not confirm it, ending the work of the provider's own that
+             *     is in the way; the host is told to stop the unit, again and again, until it answers. Only a provider's unit
+             *     is stopped by force; an environment's unit refuses it.
+             */
+            force?: boolean | null;
             /** @description Whether to interrupt what runs in it. */
             interrupt: boolean;
         };
@@ -40806,6 +40818,12 @@ export interface components {
          *     conversations.
          */
         ProviderRuntime: {
+            /**
+             * @description Why it stands where it does: a word the screen says in the reader's language (`provider_person_stop`,
+             *     `provider_forced_stop`, `provider_update_ended`, `provider_unit_unfinished`, ...) or, for a failure the host
+             *     reported, the host's own words. `null` when there is nothing to say.
+             */
+            detail: string | null;
             /** @description The driver that made it. */
             driver: string;
             /**
@@ -41005,8 +41023,6 @@ export interface components {
             subscriptions: components["schemas"]["ProviderSetupSubscription"][];
             /** @description Named programs which cannot be chosen for sign-in yet, with an actual reason and no guessed capabilities. */
             subscriptions_unavailable?: components["schemas"]["ProviderSetupUnavailableSubscription"][] | null;
-            /** @description Usable profiles whose sign-in capabilities have not been reported yet; never guessed by kind. */
-            subscriptions_unreported?: components["schemas"]["AgentRef"][] | null;
             /**
              * @description Kinds whose subscription only its owner may use there (`providers.subscription_sharing`),
              *     and the scope that says so: who may use it is then fixed at the owner.
@@ -41174,6 +41190,12 @@ export interface components {
         };
         /** @description Starts or stops a managed provider's runtime by hand. */
         ProviderStartStopBody: {
+            /**
+             * @description For a stop: whether to settle it although the host does not confirm it. The work of the provider's own that is
+             *     in the way is ended (an update is undone, and left to be removed when its host does not answer in time), the
+             *     unit is stopped in the system's records, and the host is told to stop it, again and again, until it answers.
+             */
+            force?: boolean | null;
             /** @description Whether to go on although a turn runs on it; a stop is refused otherwise. */
             interrupt?: boolean | null;
         };
@@ -66667,6 +66689,7 @@ export interface operations {
         parameters: {
             query: {
                 confirm: string;
+                force?: boolean | null;
                 volumes?: boolean | null;
             };
             header?: never;

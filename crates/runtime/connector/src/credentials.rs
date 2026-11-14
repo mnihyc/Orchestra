@@ -22,17 +22,17 @@
 //!
 //! **When a copy may be issued** ([`check_issue`]): only under an open lease of the mode that fits the form's
 //! custody (a copy that stays the provider's under `shared`, a login that moves under `handover`), only in the
-//! form the lease names, only to the machine and the key the lease names, and not within thirty seconds of the
-//! last copy of that lease, so that a harness that asks over and over does not drain the key's custodian.
+//! form the lease names, and only to the machine and key the lease names. Renewal timing belongs to
+//! the issuer's policy; it does not weaken the lease's custody or recipient checks.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use orch_agent_contract::credentials::{CredentialForm, Custody, IssuedCredential, may_issue};
+use orch_agent_contract::credentials::{CredentialForm, Custody, IssuedCredential};
 use orch_link_contract::commands::{
     CommandError, ErrorCode, LeaseMode, MachineKey, Sealed, SealedCredential,
 };
-use orch_types::{Id, Time};
+use orch_types::Id;
 
 use crate::leases::Lease;
 use crate::roles::Keys;
@@ -240,12 +240,11 @@ fn refuse(code: ErrorCode, detail: impl Into<String>) -> CommandError {
 }
 
 /// Whether a copy of the credential may be issued now under `lease`, in `form`, to `recipient`. `form` is
-/// the declaration of the form by whoever issues it, and `now` the moment.
+/// the declaration of the form by whoever issues it.
 pub fn check_issue(
     lease: &Lease,
     form: &CredentialForm,
     recipient: &MachineKey,
-    now: Time,
 ) -> Result<(), CommandError> {
     if !lease.is_open() {
         return Err(refuse(
@@ -284,13 +283,6 @@ pub fn check_issue(
             "the lease allows a credential to go to another machine than the one asked for",
         ));
     }
-    if !may_issue(false, lease.last_issue(), now) {
-        return Err(refuse(
-            ErrorCode::Conflict,
-            "a copy was issued under this lease less than thirty seconds ago",
-        )
-        .retryable());
-    }
     Ok(())
 }
 
@@ -317,7 +309,58 @@ pub fn seal_issued(
 mod tests {
     use super::*;
     use orch_pki::certificates::LeafKey;
-    use orch_types::new_id;
+    use orch_types::{Time, new_id};
+
+    #[test]
+    fn a_recent_copy_can_be_renewed_only_under_its_open_lease_and_exact_recipient() {
+        let now: Time = "2026-10-11T10:00:00.000Z".parse().unwrap();
+        let recipient = MachineKey {
+            machine_id: new_id(),
+            public_key: "the-recipient-key".to_owned(),
+        };
+        let request: orch_link_contract::commands::LeaseOpen =
+            serde_json::from_value(serde_json::json!({
+                "lease_id": new_id(), "provider_id": new_id(), "thread_id": new_id(),
+                "mode": "shared", "form": "access_token", "recipient": recipient,
+                "allowed_models": []
+            }))
+            .unwrap();
+        let leases = crate::leases::Leases::new();
+        let lease = leases.open(&request, now).unwrap();
+        let form = CredentialForm {
+            form: "access_token".to_owned(),
+            custody: Custody::Shared,
+            lifetime_secs: Some(3_600),
+        };
+        lease.issued_at_checked(now).unwrap();
+        assert!(check_issue(&lease, &form, &recipient).is_ok());
+        let wrong_machine = MachineKey {
+            machine_id: new_id(),
+            ..recipient.clone()
+        };
+        assert!(check_issue(&lease, &form, &wrong_machine).is_err());
+        let wrong_key = MachineKey {
+            public_key: "another-key".to_owned(),
+            ..recipient.clone()
+        };
+        assert!(check_issue(&lease, &form, &wrong_key).is_err());
+        let wrong_form = CredentialForm {
+            form: "another-form".to_owned(),
+            ..form.clone()
+        };
+        assert!(check_issue(&lease, &wrong_form, &recipient).is_err());
+        let transferred = CredentialForm {
+            custody: Custody::Transferred,
+            lifetime_secs: None,
+            ..form.clone()
+        };
+        assert!(check_issue(&lease, &transferred, &recipient).is_err());
+        leases.close_checked(lease.id(), now).unwrap();
+        assert_eq!(
+            check_issue(&lease, &form, &recipient).unwrap_err().code,
+            ErrorCode::LeaseClosed.as_str()
+        );
+    }
 
     fn store() -> (SecretStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();

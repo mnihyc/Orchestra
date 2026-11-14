@@ -214,7 +214,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `option:providers.presets.*.model` | 选定的模型。 |
 | `option:providers.presets.*.dimensions` | 此索引的向量维数。 |
 | `setting:providers.allow_http_upstreams` | **允许不加密的上游** — 是否允许不经过 TLS 访问 API 端点，例如私有网络中的模型服务器。 下级可以关闭此权限，不能推翻上级的禁止。 |
-| `setting:providers.expiry_notice_days` | **凭据到期提醒** — 提供者所用令牌到期前多少天提醒其管理者；零表示仅在到期后提醒。 |
+| `setting:providers.expiry_notice_days` | **凭据到期提醒** — 提供方所用令牌到期前多少天提醒其管理者；0 表示仅在到期后提醒。提供方可覆盖所属位置的值；删除覆盖后重新沿用所属位置的值。 |
 | `setting:providers.subscription_harnesses` | **允许的订阅类型** — 此处允许将哪些代理程序的订阅添加为提供方。 |
 | `setting:providers.subscription_sharing` | **可分享的订阅类型** — 允许哪些代理程序的订阅供所有者以外的人使用。 |
 | `setting:resources.created_by_members` | **成员可创建的资源** — 普通成员可在组织中为自己创建哪些类型的资源。 |
@@ -249,6 +249,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:binding.prefer` | **运行方式的顺序** — 优先按此顺序尝试代理运行方式，其他支持的方式随后尝试。 |
 | `setting:binding.allowed` | **允许的运行方式** — 控制代理可在哪里运行，以及能否与环境共享登录信息。 |
 | `setting:credential.refresh_margin_secs` | **共享凭据续期提前量** — 共享的凭据副本剩余有效期少于这些秒时续期。 |
+| `setting:credential.refresh_min_interval_secs` | **凭据续期间隔** — 系统默认值为 30 秒，仅控制即将到期的共享副本自动续期之间的间隔；0 表示不设间隔。执行程序请求新副本时，当前发放结束后即处理，不受此间隔限制。原始登录仍由提供方保管。 |
 | `setting:auto.title` | **自动标题** — 自动标题的来源：不生成、使用首条输入、使用代理提供的标题，或生成摘要。 |
 | `setting:auto.tags` | **自动标签** — 摘要器是否为位置设置标签。 |
 | `setting:summary.handoff_input_share` | **摘要输入比例** — 交接、分叉或目标核对发送给摘要模型的对话最多占其上下文窗口的比例：先发最新的轮次，更早的只发一行索引。 下级只能降低此上限，不能取消上级设定的限制。 |

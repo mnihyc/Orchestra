@@ -82,6 +82,7 @@
     "noModels": "No API models available here",
     "modelUnavailable": "This model is unavailable here",
     "sources": "Sources",
+    "noAnswer": "No answer was written. Try again.",
     "sourceUnavailable": "Source no longer available",
     "copy": "Copy answer",
     "retry": "Retry answer",
@@ -91,7 +92,6 @@
     "noHistory": "No conversations yet",
     "retention": "Kept for {{days}} days after the last message",
     "expires": "Expires",
-    "adminNotice": "This organization’s admins can inspect and export this conversation",
     "inspection": "Read-only admin inspection",
     "readOnlyTools": "Reads as you · cites sources · makes no changes",
     "paidBy": "Paid by",
@@ -99,7 +99,9 @@
     "privateThread": "Creates a Private permanent thread in this organization",
     "destination": "Destination topic",
     "defaultDestination": "Use the page’s topic or an authorized default",
-    "contextNoRoom": "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves.",
+    "contextNoRoom": "ask.context_tokens leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Increase ask.context_tokens or reduce ask.max_output_tokens.",
+    "windowNoRoom": "The context window of {{model}} leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Use a model with a larger window or reduce ask.max_output_tokens.",
+    "windowUnknown": "The context window of {{model}} is not recorded and is assumed to be small, and the answer’s reserve (ask.max_output_tokens) leaves no room for the conversation. Record the model’s context window or reduce ask.max_output_tokens.",
     "contextTooLong": "This conversation is too long for {{model}}; start a new one or keep it as a thread."
   },
   "viewWindow": {
@@ -263,8 +265,6 @@
     "environmentManager": "Ask {{who}} or an environment manager"
   },
   "switchChoice": {
-    "picker": "Agent and provider",
-    "option": "{{agent}} on {{provider}}",
     "modelUnavailable": "Waiting for a usable model",
     "hold": "New messages wait while the switch runs.",
     "approvalMode": "Approval: {{mode}}"
@@ -4135,6 +4135,10 @@
       "refresh_margin_secs": {
         "title": "Credential refresh margin",
         "description": "A shared copy of a credential that expires is renewed when fewer than this many seconds remain."
+      },
+      "refresh_min_interval_secs": {
+        "title": "Credential renewal interval",
+        "description": "Minimum seconds between automatic renewals of a shared credential. Harness requests are served as soon as the current issue finishes; 0 imposes no interval."
       }
     },
     "auto": {
@@ -5010,6 +5014,7 @@
       "label": "Context {{used}} of {{window}} ({{percent}}); shortens at {{compact}}",
       "labelBare": "Context {{used}} of {{window}} ({{percent}})",
       "open": "Show what fills the context ({{label}})",
+      "labelUsed": "Context {{used}} used; no window reported",
       "modelLabel": "{{model}}: {{context}}"
     },
     "panel": {
@@ -7521,7 +7526,9 @@
     "progress": "Updating provider runtime",
     "start": "Start runtime",
     "stop": "Stop runtime",
-    "stopHelp": "Stops the runtime and interrupts its {{count}} running turns. The sign-in and conversations are kept."
+    "stopHelp": "Stops the runtime and interrupts its {{count}} running turns. The sign-in and conversations are kept.",
+    "stopForce": "Stop by force",
+    "forceHelp": "The runtime is recorded as stopped without waiting for its host, work that makes or replaces it is ended, and the host is told to stop it, again and again, until it answers."
   },
   "providerLogin": {
     "method": "Sign-in method",
@@ -7561,6 +7568,9 @@
     "runtimeStopped": "Stopped",
     "runtimeStoppedIdle": "Stopped after being idle",
     "runtimeStoppedByPerson": "Stopped by a person",
+    "runtimeStoppedByForce": "Stopped by force; its host has not said yet that it stopped it",
+    "runtimeUpdateEnded": "Left by an update that was ended; it is taken away when its host answers",
+    "runtimeUnfinished": "It was being made and nothing makes it any more; start the runtime again to make a new one",
     "runtimeFailed": "Start failed",
     "runtimeRetired": "Replaced",
     "runtimeRemoved": "Removed",
@@ -7644,7 +7654,7 @@
   "providerCreation": {
     "subscriptionUnavailable": {
       "profile_needed": "No agent profile you can use. Add one below, or ask for access to an existing profile.",
-      "not_reported": "Sign-in support has not been read. Register this program from a machine, or run this profile once.",
+      "not_reported": "Subscription support is unknown. Add an agent profile from a machine to check it.",
       "unsupported": "This program reports no subscription sign-in support. Use an API address instead."
     },
     "subscriptionMachineUnavailable": "This profile’s machine cannot keep this sign-in here. Add a profile on another machine.",
@@ -7661,7 +7671,6 @@
       "handed_over": "Move the sign-in",
       "together": "Use the workspace’s sign-in"
     },
-    "subscriptionUnreported": "This agent’s harness has not reported its subscription sign-in support yet.",
     "subscriptionWithheld": "Subscription sign-in is not allowed at this provider’s home.",
     "noAllowedArrangement": "This machine allows none of the ways this agent can run. Choose another machine or agent.",
     "registerSource": "Add a source program…",
@@ -8348,7 +8357,8 @@
       "show": "Show password",
       "hide": "Hide password",
       "showField": "Show {{field}}",
-      "hideField": "Hide {{field}}"
+      "hideField": "Hide {{field}}",
+      "storedMask": "••••••••"
     },
     "error": {
       "partFailed": "This part could not be displayed. Try again; your other work is still open.",
@@ -8366,6 +8376,7 @@
       "nativeWebActionFailed": "The web action failed.",
       "nativeWebActionUnproven": "The web action could not be verified.",
       "cancelled": "The operation was cancelled.",
+      "overruled": "A person ended this work by stopping or deleting the runtime by force.",
       "afterStart": "The environment's startup command failed. Review that command before starting again.",
       "mcpStopped": "The MCP server stopped. Check its failure reason and restart that server.",
       "agentProgramUnavailable": "The agent program is not available on this machine. Open its Programs to register it, then try again.",
@@ -8530,6 +8541,22 @@
     "rate_limited": "Too many requests in a short time. Try again at {{time}}."
   },
   "errors": {
+    "reasonWork": {
+      "make": "being made",
+      "start": "being started",
+      "renew": "being started to renew its sign-in",
+      "update": "being replaced by an update",
+      "remove": "being taken away"
+    },
+    "reason": {
+      "own_work": "The runtime is {{work}} ({{step}}). Stopping or deleting it by force ends that work first.",
+      "other_work": "Something else the provider takes part in is under way, such as a move or an update of an environment. Wait for it to end, then try again.",
+      "past_commit": "That work is at its last step ({{step}}) and can no longer be ended. Try again in a moment.",
+      "host_silent": "The host has not said that the runtime stopped. Stopping it by force settles it without the host, and the host is told again until it answers.",
+      "nothing_makes_it": "The runtime shows as being made, but nothing is making it. Stop it by force to settle it.",
+      "replaced": "This runtime was replaced by an update and waits to be taken away. Delete it instead.",
+      "force_environment": "Stopping or deleting by force is for a provider's runtime. An environment's runtime is stopped or deleted without it."
+    },
     "reader": {
       "tag_kept_as_text": "Kept as text: <{{tag}}>",
       "link_unresolved": "Link not found, kept as words: {{target}}",
@@ -9874,7 +9901,11 @@
         "right": "Hide the right bar",
         "bottom": "Hide the bottom"
       },
-      "pin": "Keep open as a bar"
+      "pin": "Keep open as a bar",
+      "peek": {
+        "title": "Bars",
+        "label": "Show hidden bars on hover: {{state}}"
+      }
     },
     "sash": {
       "left": "Width of the left bar",
@@ -9941,9 +9972,10 @@
       "shellsHint": "Your shells in this environment. Open Terminal.",
       "connecting": "Connecting…",
       "connectingHint": "Connecting to live updates.",
-      "reconnectingSince": "Reconnecting… · {{time}}",
       "reconnecting": "Reconnecting…",
       "reconnectingHint": "What is on screen stays and can be read. Approving and steering wait for the connection; typing does not.",
+      "noLive": "No live updates · {{time}}",
+      "noLiveHint": "Live updates cannot connect, so this page reads again every few seconds. If this stays, ask whoever runs this system to check that the HTTPS front passes WebSocket upgrades for /api/v1/ws; orchctl doctor --url shows it as edge-ws.",
       "slow": "Slow connection · {{ms}} ms",
       "slowHint": "Sending, saving and shells take longer. Nothing you type waits."
     },
@@ -15991,7 +16023,32 @@
       "renew": "Started to renew at",
       "updates": "What it is behind in",
       "update": "{{name}}: {{from}} → {{to}}",
-      "lastProgramError": "Last program error"
+      "lastProgramError": "Last program error",
+      "now": "Now",
+      "step": "{{step}} ({{percent}}%)",
+      "reason": "Reason",
+      "phase": {
+        "schedule": "Choosing a host",
+        "image": "Getting the image",
+        "volumes": "Preparing the volumes",
+        "tools": "Preparing the tools",
+        "create": "Making the runtime",
+        "start": "Starting the runtime",
+        "enroll": "Waiting for its connector",
+        "after_up": "Running the commands after start",
+        "verify": "Checking the runtime",
+        "commit": "Finishing",
+        "refresh": "Reading the sign-in",
+        "notify": "Telling the people it affects",
+        "lock": "Waiting for turns to end",
+        "replace": "Replacing the runtime"
+      },
+      "removalPhase": {
+        "stop": "Stopping the runtime",
+        "unit": "Taking the runtime away",
+        "volumes": "Deleting the volumes",
+        "forget": "Forgetting the runtime"
+      }
     },
     "models": {
       "title": "Models",
@@ -17553,7 +17610,9 @@
       "type": "Type {{name}} to confirm",
       "removeConfirm": "Delete {{name}}",
       "removed": "{{name}} will be deleted",
-      "inUse": "It is refused while something still depends on it."
+      "inUse": "It is refused while something still depends on it.",
+      "stopForce": "Stop {{name}} by force",
+      "force": "Delete even though work is under way on it"
     },
     "remove": {
       "menu": "Delete…",
@@ -22815,7 +22874,7 @@
       "automatic": {
         "profile": {
           "keeper": "Automatic · provider’s keeper",
-          "retained": "Automatic · current profile kept",
+          "retained": "Automatic · selected profile kept",
           "first": "Automatic · first reported profile"
         },
         "previousProfile": {
@@ -23395,6 +23454,9 @@
       "askBoxAbout": "Sends this to a side thread and leaves the turn alone.",
       "moveOut": "Move to another org",
       "moveOutReason": "Moves with its main thread · Keep it to move it alone"
+    },
+    "slash": {
+      "about": "Ask a question on the side, without disturbing the turn"
     },
     "ask": {
       "title": "Side thread",
@@ -24417,6 +24479,9 @@
     "runtimeCount_other": "{{number}} runtimes",
     "offInBuild": "Off in this version: {{feature}}",
     "caseUnavailable": "Unavailable",
+    "checkedPending_one": "Checked · {{number}} check pending",
+    "checkedPending_other": "Checked · {{number}} checks pending",
+    "casesPending": "Not verified yet: {{names}}",
     "notChecked": "This version has not been checked",
     "checkFailed": "Compatibility check failed · review its results",
     "policySummary": "{{name}}: {{choice}}",
@@ -26192,6 +26257,8 @@
     "resultsRootPending": "The results’ organization cannot be opened",
     "model": "Model summarizer",
     "details": "Summary details",
+    "hide": "Hide summary",
+    "show": "Show summary",
     "inputFacts": "Source items: {{included}} included · {{shortened}} shortened · {{omitted}} omitted",
     "baseRates": "Configured model base rates",
     "noRates": "No base rates reported",
