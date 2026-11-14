@@ -1,0 +1,7 @@
+fmt
+clippy
+test -p orch-authz --lib
+test -p orch-authz --test key_scope_boundaries
+test -p orch-engine --test resource_summaries --test document_summaries
+test -p orch-api-core --lib -- command_admission_tests
+test -p orch-api-core --test summaries --test resource_summaries

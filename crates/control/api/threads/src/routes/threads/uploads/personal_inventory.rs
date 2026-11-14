@@ -117,6 +117,7 @@ impl native::Selected for Uploads {
     type Query = PageQuery;
     type Value = Arc<Selected>;
     type Reply = Page<UploadInventoryItem>;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::OWN_LIST;
 
     fn select<'a>(

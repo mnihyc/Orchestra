@@ -271,6 +271,7 @@ impl native::Selected for Preview {
     type Query = ((), ThreadAdoptBody);
     type Value = Value;
     type Reply = AdoptPlan;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &declarations::PREVIEW;
     fn origin<'a>(_: &Self::Query, value: &'a Value) -> Option<&'a CapturedOperation> {
         value.fetched.preparation().map(|value| value.origin())

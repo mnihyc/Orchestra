@@ -410,11 +410,16 @@ pub trait StoredRead: Stored {
     ) -> BoxFuture<'a, ApiResult<bool>> {
         Box::pin(async { Ok(true) })
     }
+
+    /// Whether `check_opened` compares only what the read showed, some of which can move while the read is
+    /// being answered, with the reader's access unchanged: the read is then made again, as `Moves::Repeat` says
+    /// for a selected read, and a read that still moves is refused at the end.
+    const REPEATS: bool = false;
 }
 
 /// A stored reader uses the same factual preparation and current response boundary as a selection.
 pub async fn stored_read<F: StoredRead>(ctx: Ctx, (): (), (): ()) -> ApiResult<F::Reply> {
-    let (reply, publication) = observed(
+    let (mut reply, publication) = observed(
         &ctx,
         "stored_read.snapshot",
         read(ctx.clone(), |ctx, conn, principal| {
@@ -455,18 +460,55 @@ pub async fn stored_read<F: StoredRead>(ctx: Ctx, (): (), (): ()) -> ApiResult<F
         .await,
     )?;
     if let Some((earlier, accepted)) = publication {
+        let mut earlier = earlier;
+        if F::REPEATS {
+            // The read can have moved since it was made, with the reader's access unchanged: it is made
+            // again, so that the answer is the newer one. What can no longer be read is refused by the
+            // same check, whatever the answer.
+            let mut repeated = 0_u32;
+            loop {
+                let settling = ctx.for_auxiliary_check();
+                let Some(Some((next, answer, allowed))) = super::publication::read_again(
+                    &settling,
+                    &accepted,
+                    &earlier,
+                    |ctx, conn, reader, earlier| {
+                        Box::pin(async move {
+                            let fresh = stored_recheck::<F>(ctx, conn, reader, earlier).await?;
+                            observed(ctx, "stored.publication", complete_publication(ctx))?;
+                            if fresh.same {
+                                return Ok(None);
+                            }
+                            let allowed = repeats_allowed(conn).await?;
+                            let answer =
+                                F::render(ctx, conn, &fresh.principal, &fresh.value).await?;
+                            Ok::<_, ApiError>(Some((
+                                Arc::new(Prepared {
+                                    response: fresh.plan,
+                                    value: fresh.value,
+                                }),
+                                answer,
+                                allowed,
+                            )))
+                        })
+                    },
+                )
+                .await?
+                else {
+                    break;
+                };
+                if repeated >= allowed {
+                    break;
+                }
+                earlier = next;
+                reply = answer;
+                repeated += 1;
+            }
+        }
         super::publication::retain(&ctx, &accepted, earlier, |ctx, conn, reader, earlier| {
             Box::pin(async move {
-                let declaration = F::ROWS
-                    .iter()
-                    .find(|row| row.operation == ctx.route.name)
-                    .ok_or_else(declaration_error)?;
-                let (value, facts) = F::load(ctx, conn, declaration).await?;
-                let fresh = bind(ctx, declaration, &facts)?;
-                let principal =
-                    publication_principal(ctx, conn, reader, &fresh, &earlier.response).await?;
-                F::require(ctx, conn, &principal, &value).await?;
-                if !F::check_opened(ctx, conn, &principal, &earlier.value, &value).await? {
+                let fresh = stored_recheck::<F>(ctx, conn, reader, earlier).await?;
+                if !fresh.same {
                     return Err(opened_source_refused());
                 }
                 complete_publication(ctx)
@@ -594,6 +636,145 @@ pub trait Selected: Send + Sync + 'static {
     ) -> BoxFuture<'a, ApiResult<bool>> {
         Box::pin(async { Ok(true) })
     }
+
+    /// What a read does when `check_opened` finds that the fresh read differs from the opened one.
+    /// The gates that concern the reader's access (every source of the opened body is still covered,
+    /// still admitted, the ordinary requirement still holds) are passed before that is asked.
+    const MOVES: Moves = Moves::Refuse;
+
+    /// For `Moves::Publish`: whether everything the opened body was made from may still be read by the
+    /// reader, whatever else about it has moved. Only asked when `check_opened` answered no.
+    fn access_held<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        principal: &'a Principal,
+        query: &'a Self::Query,
+        opened: &'a Self::Value,
+        fresh: &'a Self::Value,
+    ) -> BoxFuture<'a, ApiResult<bool>> {
+        Self::check_opened(ctx, conn, principal, query, opened, fresh)
+    }
+}
+
+/// What a selected read does when it finds, at its cut, that what it read differs from what is there now
+/// although the reader's access to every source of what it read has not changed. A fresh read that no
+/// longer covers a source of the opened one is refused whatever this says.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Moves {
+    /// Its comparison holds something that only access can change, or nothing is known about it: refused.
+    Refuse,
+    /// The comparison holds only what the read showed, and some of it can move while the read is being
+    /// answered (a state, a count, a list). The read is made again, as many times as the system setting
+    /// `api.read_repeats` allows, and the newer answer is given. A read that has moved after its last repeat
+    /// is refused at the end like any read that differs.
+    Repeat,
+    /// As `Repeat`, and a read that has moved after its last repeat gives its newest answer, since
+    /// `access_held` says that everything the answer was made from may still be read.
+    Publish,
+}
+
+/// How many times a read that has moved is made again, when the system has no setting for it.
+const READ_REPEATS: u32 = 3;
+
+/// What the cut of a selected read finds when it reads again, once every gate that concerns the reader's
+/// access has passed.
+struct Fresh<V> {
+    plan: OperationPlan,
+    value: V,
+    principal: Principal,
+    same: bool,
+}
+
+/// The one new reading of a selected read at its cut, for the final check and for the repeats alike.
+async fn recheck<F: Selected>(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    reader: &Principal,
+    query: &F::Query,
+    earlier: &Prepared<F::Value>,
+) -> ApiResult<Fresh<F::Value>> {
+    entering(ctx, "selected.refresh");
+    let (value, facts) = observed(
+        ctx,
+        "selected.refresh",
+        F::refresh(ctx, conn, reader.caller(), query, &earlier.value).await,
+    )?;
+    let fresh = bind(ctx, F::declaration(query, &value), &facts)?;
+    let fresh = match F::origin(query, &value) {
+        Some(origin) => {
+            fresh
+                .with_origin(ctx, conn, reader.caller(), origin)
+                .await?
+        }
+        None => fresh,
+    };
+    let principal = publication_principal(ctx, conn, reader, &fresh, &earlier.response).await?;
+    F::require(ctx, conn, &principal).await?;
+    let same = F::check_opened(ctx, conn, &principal, query, &earlier.value, &value).await?;
+    Ok(Fresh {
+        plan: fresh,
+        value,
+        principal,
+        same,
+    })
+}
+
+/// The one new reading of a stored read at its cut, for the final check and for the repeats alike.
+async fn stored_recheck<F: StoredRead>(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    reader: &Principal,
+    earlier: &Prepared<F::Value>,
+) -> ApiResult<Fresh<F::Value>> {
+    let declaration = F::ROWS
+        .iter()
+        .find(|row| row.operation == ctx.route.name)
+        .ok_or_else(declaration_error)?;
+    let (value, facts) = F::load(ctx, conn, declaration).await?;
+    let fresh = bind(ctx, declaration, &facts)?;
+    let principal = publication_principal(ctx, conn, reader, &fresh, &earlier.response).await?;
+    F::require(ctx, conn, &principal, &value).await?;
+    let same = F::check_opened(ctx, conn, &principal, &earlier.value, &value).await?;
+    Ok(Fresh {
+        plan: fresh,
+        value,
+        principal,
+        same,
+    })
+}
+
+/// Whether a read that differs from the opened one may be given as it is.
+async fn may_give<F: Selected>(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    query: &F::Query,
+    earlier: &Prepared<F::Value>,
+    fresh: &Fresh<F::Value>,
+) -> ApiResult<bool> {
+    if F::MOVES != Moves::Publish {
+        return Ok(false);
+    }
+    F::access_held(
+        ctx,
+        conn,
+        &fresh.principal,
+        query,
+        &earlier.value,
+        &fresh.value,
+    )
+    .await
+}
+
+/// How many times a read that has moved is made again.
+async fn repeats_allowed(conn: &mut Conn) -> ApiResult<u32> {
+    Ok(orch_settings::get::<u32>(
+        conn,
+        orch_settings::Place::System,
+        orch_settings_contract::registry::keys::API_READ_REPEATS,
+    )
+    .await
+    .map_err(ApiError::internal)?
+    .unwrap_or(READ_REPEATS))
 }
 
 enum SelectedReadValue<V> {
@@ -714,34 +895,69 @@ pub async fn selected_read<F: Selected>(ctx: Ctx, query: F::Query, (): ()) -> Ap
     if !accepted.key_deadline_allows(ctx.app.clock.as_ref()) {
         return Err(opened_source_refused());
     }
+    crate::testing::hold_boundary(ctx.route.name, "selected.settle").await;
+    let mut reply = reply;
     if let SelectedReadValue::Admitted(earlier) = opened {
+        let mut earlier = earlier;
+        if F::MOVES != Moves::Refuse {
+            // Between its read and now the read can have moved, with the reader's access unchanged:
+            // it is made again, so that the answer is the newer one. What can no longer be read is
+            // refused by the same check, whatever the answer.
+            let mut repeated = 0_u32;
+            loop {
+                let held = (retained_query.clone(), Arc::clone(&earlier));
+                let settling = ctx.for_auxiliary_check();
+                let Some(Some((next, answer, allowed))) = super::publication::read_again(
+                    &settling,
+                    &accepted,
+                    &held,
+                    |ctx, conn, reader, (query, earlier)| {
+                        Box::pin(async move {
+                            let fresh = recheck::<F>(ctx, conn, reader, query, earlier).await?;
+                            if fresh.same {
+                                observed(ctx, "selected.publication", complete_publication(ctx))?;
+                                return Ok(None);
+                            }
+                            if F::MOVES == Moves::Publish
+                                && !may_give::<F>(ctx, conn, query, earlier, &fresh).await?
+                            {
+                                return Err(opened_source_refused());
+                            }
+                            observed(ctx, "selected.publication", complete_publication(ctx))?;
+                            let allowed = repeats_allowed(conn).await?;
+                            let answer =
+                                F::render(ctx, conn, &fresh.principal, &fresh.value).await?;
+                            Ok::<_, ApiError>(Some((
+                                Arc::new(Prepared {
+                                    response: fresh.plan,
+                                    value: fresh.value,
+                                }),
+                                answer,
+                                allowed,
+                            )))
+                        })
+                    },
+                )
+                .await?
+                else {
+                    break;
+                };
+                if repeated >= allowed {
+                    break;
+                }
+                earlier = next;
+                reply = answer;
+                repeated += 1;
+            }
+        }
         super::publication::retain(
             &ctx,
             &accepted,
             (retained_query, earlier),
             |ctx, conn, reader, (query, earlier)| {
                 Box::pin(async move {
-                    entering(ctx, "selected.refresh");
-                    let (value, facts) = observed(
-                        ctx,
-                        "selected.refresh",
-                        F::refresh(ctx, conn, reader.caller(), query, &earlier.value).await,
-                    )?;
-                    let fresh = bind(ctx, F::declaration(query, &value), &facts)?;
-                    let fresh = match F::origin(query, &value) {
-                        Some(origin) => {
-                            fresh
-                                .with_origin(ctx, conn, reader.caller(), origin)
-                                .await?
-                        }
-                        None => fresh,
-                    };
-                    let principal =
-                        publication_principal(ctx, conn, reader, &fresh, &earlier.response).await?;
-                    F::require(ctx, conn, &principal).await?;
-                    if !F::check_opened(ctx, conn, &principal, query, &earlier.value, &value)
-                        .await?
-                    {
+                    let fresh = recheck::<F>(ctx, conn, reader, query, earlier).await?;
+                    if !fresh.same && !may_give::<F>(ctx, conn, query, earlier, &fresh).await? {
                         return Err(opened_source_refused());
                     }
                     observed(ctx, "selected.publication", complete_publication(ctx))

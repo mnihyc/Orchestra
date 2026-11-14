@@ -46,7 +46,7 @@ import { resourceSubjectOf } from '@/features/resource-facts/facts';
 import type { EnvironmentRef, Item, UserRef } from '@/generated/api-types';
 import type { MarkerPayload } from '../markerTypes';
 import { useFormatContext } from '@/lib/appearance';
-import { formatSpan } from '@/lib/time';
+import { formatExact, formatSpan } from '@/lib/time';
 import { formatBytes, formatNumber } from '@/lib/format';
 import { TimeOfDay } from '@/ui/TimeOfDay';
 import { Button } from '@/ui/Button';
@@ -418,9 +418,8 @@ function RateLimitMarker({item,threadId}:{item:MarkerItem;threadId:string}) {
   const context=useFormatContext();
   // The historical segment's already bounded provider name; a later switch cannot rename this notice.
   const providerName=useThreadPart(threadId,view=>view.segments.find(segment=>segment.id===item.segment_id)?.provider?.name);
-  return <div className="flex items-center justify-center gap-2 py-1 text-center text-sm text-text-subtle">
+  return <div title={formatExact(item.created_at,context)} className="flex items-center justify-center gap-2 py-1 text-center text-sm text-text-subtle">
     <Settings2 aria-hidden/><span className="wrap-anywhere">{markerSentence(item.payload,t,{...context,providerName})}</span>
-    <TimeOfDay at={item.created_at} className="text-xs"/>
   </div>;
 }
 
@@ -486,8 +485,9 @@ export function MarkerLine({ item, count = 1 }: { item: MarkerItem; count?: numb
       <TimeOfDay at={item.created_at} className="text-xs" />
     </div>;
   }
+  // A line of history has no time of its own beside it: the moment is under the pointer.
   return (
-      <div className="flex items-center justify-center gap-2 py-1 text-center text-sm text-text-subtle">
+      <div title={formatExact(item.created_at, context)} className="flex items-center justify-center gap-2 py-1 text-center text-sm text-text-subtle">
         <Icon aria-hidden />
         <span className="wrap-anywhere">
           {item.payload.marker === 'call_recovery' && typeof item.payload.data.provider_id === 'string' && typeof item.payload.data.model === 'string' && ['skip', 'return', 'failover'].includes(item.payload.data.action)
@@ -497,7 +497,6 @@ export function MarkerLine({ item, count = 1 }: { item: MarkerItem; count?: numb
             : markerSentence(item.payload, t, context)}
           {count > 1 && <span className="ml-1">· {t('timeline.marker.more', { count: count - 1 })}</span>}
         </span>
-        <TimeOfDay at={item.created_at} className="text-xs" />
       </div>
   );
 }

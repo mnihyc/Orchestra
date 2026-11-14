@@ -8,7 +8,8 @@ use http::{Method, Response, StatusCode};
 use orch_agent_contract::discovery::ModelSuggestion;
 use orch_model_contract::credentials::WireError;
 use orch_model_contract::protocol::{
-    OPENAI_CHAT, OPENAI_CHAT_REQUESTS, WireProtocol, is_allowed, model_in_body, next_models_page,
+    CompletionStop, OPENAI_CHAT, OPENAI_CHAT_REQUESTS, WireProtocol, is_allowed, model_in_body,
+    next_models_page,
 };
 use orch_model_contract::usage::UsageObserver;
 
@@ -149,6 +150,23 @@ impl WireProtocol for OpenAiChat {
             .filter(|text| !text.is_empty())
             .map(str::to_owned)
             .ok_or_else(bad)
+    }
+
+    fn completion_stopped(&self, body: &[u8]) -> Option<CompletionStop> {
+        let reply: serde_json::Value = serde_json::from_slice(body).ok()?;
+        let reason = reply
+            .get("choices")?
+            .as_array()?
+            .first()?
+            .get("finish_reason")?
+            .as_str()?;
+        if reason == "stop" {
+            return None;
+        }
+        Some(CompletionStop {
+            reason: reason.to_owned(),
+            output_limit: reason == "length",
+        })
     }
 }
 

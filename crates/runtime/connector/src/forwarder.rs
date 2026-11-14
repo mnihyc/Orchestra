@@ -1811,9 +1811,21 @@ impl Forwarder {
                 &call,
                 |protocol, options| completion_request(protocol, options, &request),
                 |protocol, body| {
-                    protocol
-                        .completion_text(body)
-                        .map_err(|_| "the upstream did not return a completed text answer")
+                    protocol.completion_text(body).map_err(|_| {
+                        // An answer the upstream cut short says why, in its own word.
+                        match protocol.completion_stopped(body) {
+                            Some(stop) => Unread {
+                                message: format!(
+                                    "the model stopped before its answer was whole: {}",
+                                    stop.reason
+                                ),
+                                stopped: Some(stop),
+                            },
+                            None => {
+                                Unread::from("the upstream did not return a completed text answer")
+                            }
+                        }
+                    })
                 },
                 None,
             )
@@ -1892,9 +1904,9 @@ impl Forwarder {
                     Ok((method, path, body))
                 },
                 |protocol, body| {
-                    protocol
-                        .embedding_vectors(body, inputs)
-                        .map_err(|_| "the upstream did not return one vector for each text")
+                    protocol.embedding_vectors(body, inputs).map_err(|_| {
+                        Unread::from("the upstream did not return one vector for each text")
+                    })
                 },
                 None,
             )
@@ -1921,7 +1933,7 @@ impl Forwarder {
             (Method, &'static str, Bytes),
             orch_link_contract::commands::CommandError,
         >,
-        read: impl FnOnce(&dyn WireProtocol, &Bytes) -> Result<T, &'static str>,
+        read: impl FnOnce(&dyn WireProtocol, &Bytes) -> Result<T, Unread>,
         stream_command: Option<Id>,
     ) -> Result<
         (T, ObservedUsage, orch_api_contract::usage::RequestTiming),
@@ -2245,13 +2257,38 @@ impl Forwarder {
             }
             return Err(error);
         }
-        let answer = read(entry.protocol.as_ref(), &body).map_err(|message| {
-            failed(
-                CommandError::new(ErrorCode::Internal, message),
-                "harness_error",
-                None,
-            )
-        })?;
+        let answer = match read(entry.protocol.as_ref(), &body) {
+            Ok(answer) => answer,
+            Err(unread) => {
+                let mut error = CommandError::new(ErrorCode::Internal, unread.message);
+                let stopped = unread.stopped;
+                if let Some(stop) = &stopped {
+                    error = error.with_details(serde_json::json!({"failure": {
+                        "code": "harness_error", "reason": stop.reason,
+                        "output_limit": stop.output_limit, "retryable": false,
+                    }}));
+                }
+                let mut error = failed(error, "harness_error", None);
+                // An answer that was cut short was still paid for: what it used is counted.
+                if stopped.is_some() {
+                    let mut observer = orch_model_contract::declared_usage::configured(
+                        entry.protocol.usage_observer(),
+                        &native,
+                    );
+                    observer.observe(&body);
+                    if let Some(usage) = observer.usage()
+                        && let Some(details) = error.details.as_mut()
+                    {
+                        details["model_request"]["tokens"] = serde_json::json!(
+                            orch_api_contract::usage::RequestTokens::from(usage.tokens)
+                        );
+                        details["model_request"]["reported_service_tier"] =
+                            serde_json::json!(usage.service_tier);
+                    }
+                }
+                return Err(error);
+            }
+        };
         let mut observer = orch_model_contract::declared_usage::configured(
             entry.protocol.usage_observer(),
             &native,
@@ -2366,6 +2403,22 @@ impl Forwarder {
             },
         );
         Ok((answer, usage, timing))
+    }
+}
+
+/// Why the answer of a successful reply could not be read: the sentence the command fails with, and, for an
+/// answer that the upstream cut short, why it stopped.
+struct Unread {
+    message: String,
+    stopped: Option<orch_model_contract::protocol::CompletionStop>,
+}
+
+impl From<&'static str> for Unread {
+    fn from(message: &'static str) -> Self {
+        Self {
+            message: message.to_owned(),
+            stopped: None,
+        }
     }
 }
 

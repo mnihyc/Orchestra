@@ -645,15 +645,30 @@ impl Dispatcher {
                 && inserted
                 && let Some(authority) = &command.authority
             {
-                let current = authority
-                    .current_callers(
-                        &mut tx,
-                        &row,
-                        inner.clock.as_ref(),
-                        &crate::thread_access::AuthzAccess::new(inner.clock.clone()),
-                    )
-                    .await
-                    .map_err(|error| DispatchError::BeforeEffect(Box::new(error)))?;
+                // The source proved at issue remains fenced on this transaction. Recheck the stored
+                // command's body/call/provider without reading the words again under those locks.
+                let current = match (authority.checked_at_issue(), issue_callers.as_ref()) {
+                    (true, Some(issued)) => {
+                        if authority
+                            .refused_without_fence(&mut tx, &row)
+                            .await
+                            .map_err(|error| DispatchError::BeforeEffect(Box::new(error)))?
+                        {
+                            None
+                        } else {
+                            Some(issued.clone())
+                        }
+                    }
+                    _ => authority
+                        .current_callers(
+                            &mut tx,
+                            &row,
+                            inner.clock.as_ref(),
+                            &crate::thread_access::AuthzAccess::new(inner.clock.clone()),
+                        )
+                        .await
+                        .map_err(|error| DispatchError::BeforeEffect(Box::new(error)))?,
+                };
                 let allowed = current
                     .is_some_and(|callers| issuing_deadlines_allow(&callers, inner.clock.as_ref()));
                 if !allowed {
@@ -1170,9 +1185,36 @@ impl Link {
             orch_db::queries::transaction_guard::lock_action(&mut tx)
                 .await
                 .map_err(|_| internal())?;
+            let mut checked_before_row = None;
             if let Some(value) = &private.authority {
                 let authority: orch_engine::commands::CommandAuthority =
                     serde_json::from_value(value.clone()).map_err(|_| internal())?;
+                // Whatever the rows around the command already decide is decided before the
+                // source's rows are taken: a command that is refused for that reason never holds
+                // a person's thread, or any place above it, while the refusal is made. A command
+                // that passes (or that this cannot decide) takes them and is checked as before.
+                if authority
+                    .refused_without_fence(&mut tx, &row)
+                    .await
+                    .unwrap_or(false)
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        format!("the accepted {operation} command is no longer authorized"),
+                    )
+                    .into());
+                }
+                if authority.reads_before_fence() {
+                    let checked = authority
+                        .current_callers(
+                            &mut tx,
+                            &row,
+                            self.inner.clock.as_ref(),
+                            &crate::thread_access::AuthzAccess::new(self.inner.clock.clone()),
+                        )
+                        .await;
+                    checked_before_row = Some((authority.clone(), checked));
+                }
                 authority
                     .lock_native_source(&mut tx)
                     .await
@@ -1209,6 +1251,16 @@ impl Link {
                 return Ok(None);
             }
             if current.state != "accepted"
+                && checked_before_row.is_some()
+                && private.authority.is_none()
+            {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the native command's source disappeared during admission",
+                )
+                .into());
+            }
+            if current.state != "accepted"
                 && let Some(stored) = private.authority
             {
                 let authority: orch_engine::commands::CommandAuthority =
@@ -1218,15 +1270,31 @@ impl Link {
                             format!("{operation} command authority is invalid"),
                         )
                     })?;
-                let Some(checked) = authority
-                    .current_callers(
-                        &mut tx,
-                        &current,
-                        self.inner.clock.as_ref(),
-                        &crate::thread_access::AuthzAccess::new(self.inner.clock.clone()),
-                    )
-                    .await
-                    .map_err(|_| internal())?
+                let checked = if let Some((opened, checked)) = checked_before_row {
+                    if !authority.same_origin(&opened) {
+                        return Err(CommandError::new(
+                            ErrorCode::Conflict,
+                            "the native command's source changed during admission",
+                        )
+                        .into());
+                    }
+                    checked
+                } else {
+                    authority
+                        .current_callers(
+                            &mut tx,
+                            &current,
+                            self.inner.clock.as_ref(),
+                            &crate::thread_access::AuthzAccess::new(self.inner.clock.clone()),
+                        )
+                        .await
+                };
+                let Some(checked) = checked.map_err(|error| match error {
+                    orch_engine::EngineError::Db(DbError::Retry) => {
+                        WireAdmissionError::Database(DbError::Retry)
+                    }
+                    _ => WireAdmissionError::Command(internal()),
+                })?
                 else {
                     return Err(CommandError::new(
                         ErrorCode::Conflict,
