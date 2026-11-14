@@ -7,6 +7,8 @@ use orch_types::{Id, Json, new_id};
 /// The latest update's progress; the running version still comes from the authenticated hello.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct UpdateRow {
+    /// A person chose Update explicitly; none denotes an automatic request.
+    pub requested_by: Option<Id>,
     /// Physical machine, including a host's node machine.
     pub machine_id: Id,
     /// Server recommendation at the time of the request.
@@ -41,7 +43,7 @@ pub async fn lock_shared(conn: &mut Conn, machine: Id) -> Result<(), DbError> {
 
 /// Latest progress for a batch of visible machine/host rows.
 pub async fn among(conn: &mut Conn, machines: &[Id]) -> Result<Vec<UpdateRow>, DbError> {
-    Ok(sqlx::query_as("SELECT machine_id,recommended_version,state,detail,command_id FROM component_updates WHERE machine_id=ANY($1)")
+    Ok(sqlx::query_as("SELECT machine_id,recommended_version,state,detail,command_id,requested_by FROM component_updates WHERE machine_id=ANY($1)")
         .bind(machines).fetch_all(conn).await?)
 }
 
@@ -131,7 +133,8 @@ pub async fn request_with_origin(
           request_id=excluded.request_id,origin=excluded.origin,origin_required=excluded.origin_required,
           recommended_version=excluded.recommended_version,state='queued',detail=NULL,command_id=NULL,
           requested_by=excluded.requested_by,requested_at=excluded.requested_at,updated_at=excluded.updated_at
-        WHERE component_updates.state NOT IN ('queued','updating')")
+        WHERE component_updates.state NOT IN ('queued','updating')
+           OR (excluded.requested_by IS NOT NULL AND component_updates.requested_by IS NULL)")
         .bind(machine).bind(recommended).bind(person).bind(now).bind(request).bind(origin).bind(origin.is_some()).execute(conn).await?.rows_affected()>0;
     Ok(changed)
 }
@@ -217,7 +220,7 @@ pub async fn waiting(conn: &mut Conn, machine: Id) -> Result<Vec<Id>, DbError> {
 
 /// Work is bounded by actual outstanding physical requests, not by the number of threads.
 pub async fn pending(conn: &mut Conn) -> Result<Vec<UpdateRow>, DbError> {
-    Ok(sqlx::query_as("SELECT machine_id,recommended_version,state,detail,command_id FROM component_updates WHERE state IN ('queued','updating') ORDER BY machine_id")
+    Ok(sqlx::query_as("SELECT machine_id,recommended_version,state,detail,command_id,requested_by FROM component_updates WHERE state IN ('queued','updating') ORDER BY machine_id")
         .fetch_all(conn).await?)
 }
 

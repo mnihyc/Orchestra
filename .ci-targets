@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/unit/running.test.ts tests/unit/thread-deltas.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts tests/component/recorded-tools.test.tsx tests/component/raw-tool-outputs.test.tsx tests/component/component-update.test.tsx tests/component/web-actions.test.tsx tests/component/native-web-attempts.test.tsx tests/component/thread-opening.test.tsx tests/unit/timeline-copy.test.ts

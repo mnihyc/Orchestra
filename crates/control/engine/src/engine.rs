@@ -139,8 +139,6 @@ pub struct Inner {
     /// What this process remembers of the credentials that left their providers (the part that keeps
     /// providers): the copies issued under each lease, and the returns under way.
     pub(crate) credentials: Mutex<crate::credentials::Issuing>,
-    /// The pieces of growing text that are not written to their items yet ([`crate::streaming`]).
-    pub(crate) growing: crate::streaming::Growing,
 }
 
 /// The thread engine.
@@ -213,7 +211,6 @@ impl Engine {
                 room_made: Mutex::new(None),
                 releasing: AtomicBool::new(false),
                 cap_waits: Mutex::new(HashMap::new()),
-                growing: crate::streaming::Growing::default(),
                 blobs: OnceLock::new(),
                 stopping: Mutex::new(HashSet::new()),
                 browser_memory: Arc::new(crate::browsers::Memory::default()),

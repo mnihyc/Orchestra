@@ -715,7 +715,14 @@ impl Process {
     }
 
     /// A session opened in the adapter: it is kept, in the process and on disk.
-    pub fn session_opened(&self, binding: &SessionBinding, native_session_ref: &str) {
+    pub fn session_opened(
+        &self,
+        binding: &SessionBinding,
+        native_session_ref: &str,
+        directory: &str,
+        cwd: &str,
+        output_capture_bytes: u64,
+    ) {
         self.state().sessions.insert(
             binding.thread_id,
             OpenSession {
@@ -736,7 +743,11 @@ impl Process {
                 thread_id: binding.thread_id,
                 segment_id: binding.segment_id,
                 native_session_ref: native_session_ref.to_owned(),
+                directory: directory.to_owned(),
+                cwd: cwd.to_owned(),
+                output_capture_bytes,
                 running_turn: None,
+                native_turn_ref: None,
             },
         );
     }
@@ -967,13 +978,18 @@ impl Process {
                 }
                 self.ctx
                     .ledger
-                    .turn_running(*thread_id, Some(started.turn_id));
+                    .turn_native(*thread_id, started.turn_id, &started.native_turn_ref);
             }
             SessionEvent::TurnCompleted(completed) => {
-                if let Some(session) = self.state().sessions.get_mut(thread_id) {
+                if let Some(session) = self.state().sessions.get_mut(thread_id)
+                    && session.segment_id == *segment_id
+                    && session.running_turn == Some(completed.turn_id)
+                {
                     session.running_turn = None;
+                    self.ctx.ledger.turn_running(*thread_id, None);
                 }
-                self.ctx.ledger.turn_running(*thread_id, None);
+                // Replayed recovery has no open slot. Its retained source stays until the next
+                // open/close replaces it, so a crash before publication can safely replay it again.
                 let commands = lock(&self.scratch).remove(&completed.turn_id);
                 if let Some(commands) = commands {
                     let content = Arc::clone(&self.ctx.services.content);
@@ -1017,6 +1033,7 @@ impl Process {
                 segment_id: session.segment_id,
             };
             let event = SessionEvent::SessionLost(orch_agent_contract::events::SessionLost {
+                uncertain: false,
                 reason: format!("the harness process died: {reason}"),
             });
             if let Ok(body) = serde_json::to_value(&event)
@@ -1840,30 +1857,42 @@ impl Process {
         ))
     }
 
-    /// Lists the sessions the adapter holds, by their native references.
-    pub async fn native_refs(&self) -> Option<Vec<String>> {
-        let capable = self
-            .state()
-            .descriptor
-            .as_ref()
-            .is_some_and(|descriptor| descriptor.capabilities.discover_sessions);
-        if !capable {
-            return None;
-        }
-        self.call(|adapter| Box::pin(async move { adapter.discover_sessions().await }))
-            .await
-            .ok()
-            .map(|sessions| {
-                sessions
-                    .into_iter()
-                    .map(|session| session.native_session_ref)
-                    .collect()
+    /// Inspects only the exact admitted native turn; no model input, resume or interruption is submitted.
+    pub async fn recover_recorded_turn(
+        &self,
+        session: &HostedSession,
+    ) -> Result<bool, CommandError> {
+        let Some(turn) = session.running_turn else {
+            let native = session.native_session_ref.clone();
+            self.call(move |adapter| {
+                Box::pin(async move { adapter.read_session(&native, false).await })
             })
+            .await?;
+            return Ok(true);
+        };
+        let source = orch_agent_contract::history::NativePrefixSource {
+            thread_id: session.thread_id,
+            segment_id: session.segment_id,
+            native_session_ref: session.native_session_ref.clone(),
+        };
+        let native = session.native_turn_ref.clone();
+        let directory = session.directory.clone();
+        let cwd = session.cwd.clone();
+        let capture = session.output_capture_bytes;
+        self.call(move |adapter| {
+            Box::pin(async move {
+                adapter
+                    .recover_turn(source, turn, native, directory, cwd, capture)
+                    .await
+            })
+        })
+        .await
     }
 
     /// Reports a session of this process as lost, to the stream of its session.
     pub async fn report_lost(&self, thread: ThreadId, segment: Id, reason: &str) {
         let event = SessionEvent::SessionLost(orch_agent_contract::events::SessionLost {
+            uncertain: false,
             reason: reason.to_owned(),
         });
         if let Ok(body) = serde_json::to_value(&event)

@@ -267,6 +267,8 @@ impl Engine {
         input: &InputRow,
         environment: &environments::EnvironmentRow,
     ) -> Result<(), EngineError> {
+        // How long the turn waits for its recording, from the setting read with the other two below.
+        let wait_secs;
         let (snapshot, request) = {
             let mut tx = self.inner.db.begin().await?;
             let Some(current) = threads::lock(&mut tx, thread.node_id).await? else {
@@ -290,10 +292,12 @@ impl Engine {
                 .ok_or_else(|| EngineError::unreadable("recording days are not registered"))?;
             let bytes = registry::get(keys::WORKSPACE_RECORD_MAX_BYTES)
                 .ok_or_else(|| EngineError::unreadable("recording bytes are not registered"))?;
+            let wait = registry::get(keys::WORKSPACE_RECORD_WAIT_SECS)
+                .ok_or_else(|| EngineError::unreadable("the recording wait is not registered"))?;
             let settings = Snapshot::load(
                 &mut tx,
                 Place::Environment(environment.id),
-                Wanted::Keys(&[days, bytes]),
+                Wanted::Keys(&[days, bytes, wait]),
             )
             .await?;
             let record_days = settings
@@ -306,6 +310,12 @@ impl Engine {
                 .value
                 .and_then(|value| value.as_i64())
                 .ok_or_else(|| EngineError::unreadable("recording bytes are invalid"))?;
+            wait_secs = settings
+                .resolve(wait)
+                .value
+                .and_then(|value| value.as_i64())
+                .filter(|secs| *secs > 0)
+                .ok_or_else(|| EngineError::unreadable("the recording wait is invalid"))?;
             rows::begin_recorded(
                 &mut tx,
                 &storage::NewSnapshot {
@@ -337,40 +347,88 @@ impl Engine {
         };
         let command_id = crate::ids::derived("fs.record.before-turn", &[snapshot.as_bytes()]);
         let mut result = if let Some(machine) = environment.machine_id {
+            // The command's own time is how long the machine may wait for the files to be ready;
+            // the engine itself gives up on the answer after twice that (the files, then their
+            // upload), not counting any time the command stands in the machine's line behind other
+            // work, which is told to the thread.
             let command = Outgoing::new(
                 command_id,
                 machine,
                 SerialKey::Environment(environment.id),
                 &request,
-            )?;
-            let outcome = if self.inner.commands.status(command_id).await?.is_some() {
-                self.inner.commands.wait(command_id).await
+            )?
+            .by(orch_types::Time::new(
+                self.inner.clock.now() + chrono::Duration::seconds(wait_secs),
+            ));
+            if request.record_days == 0 {
+                // Recording is off: the machine is told so (it stops keeping the directory's files up to
+                // date for a recording), and the turn does not wait for its answer, which is known.
+                if self.inner.commands.status(command_id).await?.is_none() {
+                    match self.inner.commands.issue(command).await {
+                        Err(CommandsError::Stopping) => return Err(CommandsError::Stopping.into()),
+                        Err(error) => {
+                            tracing::warn!(%error, command=%command_id, environment=%environment.id,
+                                "the machine could not be told that recording is off");
+                        }
+                        Ok(()) => {}
+                    }
+                }
+                unavailable("off")
             } else {
-                crate::commands::run(self.inner.commands.as_ref(), command).await
-            };
-            match outcome {
-                Ok(Outcome::Succeeded(value)) => {
-                    serde_json::from_value(value).unwrap_or_else(|error| {
-                        tracing::warn!(%error, command=%command_id, environment=%environment.id,
+                let patience = std::time::Duration::from_secs(
+                    u64::try_from(wait_secs).unwrap_or(1).saturating_mul(2),
+                );
+                let asking = async {
+                    if self.inner.commands.status(command_id).await?.is_none() {
+                        self.inner.commands.issue(command).await?;
+                    }
+                    self.inner.commands.wait(command_id).await
+                };
+                let outcome = match self
+                    .waiting_noted(
+                        thread.node_id,
+                        command_id,
+                        orch_link_contract::commands::CommandKind::FsRecord,
+                        Some(patience),
+                        asking,
+                    )
+                    .await
+                {
+                    crate::start_wait::Waited::Done(outcome) => outcome,
+                    crate::start_wait::Waited::Tired => {
+                        tracing::warn!(command=%command_id, environment=%environment.id, wait_secs,
+                        "the files were not recorded in time, so the turn goes on without a whole-state recording");
+                        let _ = self.inner.commands.cancel(command_id).await;
+                        Ok(Outcome::Succeeded(
+                            serde_json::to_value(unavailable("timeout"))
+                                .map_err(|error| CommandsError::Body(error.to_string()))?,
+                        ))
+                    }
+                };
+                match outcome {
+                    Ok(Outcome::Succeeded(value)) => {
+                        serde_json::from_value(value).unwrap_or_else(|error| {
+                            tracing::warn!(%error, command=%command_id, environment=%environment.id,
                         "the file recording reply could not be read");
-                        unavailable("store_unavailable")
-                    })
-                }
-                Err(CommandsError::Stopping) => return Err(CommandsError::Stopping.into()),
-                Ok(Outcome::Failed(error)) => {
-                    tracing::warn!(code=%error.code, reason=%error.detail, command=%command_id, environment=%environment.id,
+                            unavailable("store_unavailable")
+                        })
+                    }
+                    Err(CommandsError::Stopping) => return Err(CommandsError::Stopping.into()),
+                    Ok(Outcome::Failed(error)) => {
+                        tracing::warn!(code=%error.code, reason=%error.detail, command=%command_id, environment=%environment.id,
                         "the machine could not record the files before a turn");
-                    unavailable("store_unavailable")
-                }
-                Ok(outcome @ (Outcome::Expired | Outcome::Cancelled)) => {
-                    tracing::warn!(?outcome, command=%command_id, environment=%environment.id,
+                        unavailable("store_unavailable")
+                    }
+                    Ok(outcome @ (Outcome::Expired | Outcome::Cancelled)) => {
+                        tracing::warn!(?outcome, command=%command_id, environment=%environment.id,
                         "the recording command ended before a complete answer");
-                    unavailable("store_unavailable")
-                }
-                Err(error) => {
-                    tracing::warn!(%error, command=%command_id, environment=%environment.id,
+                        unavailable("store_unavailable")
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, command=%command_id, environment=%environment.id,
                         "the recording command could not complete");
-                    unavailable("store_unavailable")
+                        unavailable("store_unavailable")
+                    }
                 }
             }
         } else {
@@ -727,6 +785,9 @@ impl Engine {
         // Unknown coverage also invalidates old observations conservatively. Only a complete,
         // equal before/end comparison can prove that no included change occurred.
         rows::work_pending(&mut *unit.conn, turn.id, true).await?;
+        // How many files the turn changed is the difference of its two recordings, whoever changed them
+        // (the patch tool, a shell, a build); unknown while either recording is missing.
+        let mut changed_count = None;
         if let Some((_, end)) = end
             && let Some(before) = before
             && let Some(environment) = environment
@@ -734,6 +795,7 @@ impl Engine {
             && before.header().generation == end.header().generation
         {
             let changes = changed_paths(&before, &end);
+            changed_count = i32::try_from(changes.paths.len()).ok();
             rows::work_pending(&mut *unit.conn, turn.id, !changes.paths.is_empty()).await?;
             if !changes.paths.is_empty() {
                 rows::stale_work(&mut *unit.conn, thread.node_id, now, seq).await?;
@@ -769,6 +831,7 @@ impl Engine {
                 .await?;
             }
         }
+        rows::set_end_changes(&mut *unit.conn, turn.id, changed_count).await?;
         let finished = unit.finish().await?;
         self.commit(tx, finished).await?;
         Ok(())
