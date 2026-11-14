@@ -21,7 +21,7 @@ it('keeps a device choice with its reader and restores defaults when the arrange
   useWorkbench.getState().setChipSize('prose', 'large');
   useWorkbench.getState().setChipSize('compact', 'large');
   useWorkbench.getState().flush();
-  expect(loadWorkspace('reader-one', 'thread').kept?.chipSizes).toEqual({ prose: 'large', compact: 'large' });
+  expect(loadWorkspace('reader-one').kept?.chipSizes).toEqual({ prose: 'large', compact: 'large' });
   useWorkbench.getState().leave();
   useWorkbench.getState().enter('reader-two', 'thread');
   expect(useWorkbench.getState().chipSizes).toEqual({});
@@ -31,7 +31,7 @@ it('keeps a device choice with its reader and restores defaults when the arrange
   expect(chipSize('compact', useWorkbench.getState().chipSizes.compact)).toBe('medium');
   useWorkbench.getState().reset();
   useWorkbench.getState().flush();
-  expect(loadWorkspace('reader-one', 'thread').kept?.chipSizes).toEqual({});
+  expect(loadWorkspace('reader-one').kept?.chipSizes).toEqual({});
   expect(chipSize('compact')).toBe('small');
   expect(chipSize('prose')).toBe('medium');
   expect(chipSize('document')).toBe('large');

@@ -7,7 +7,6 @@
  * own menu, made commands: one list of acts, written once, with what the caller may not do switched off and
  * why.
  */
-import { screenBuilt } from '@/shell/availability';
 import { usePlaceLabel } from '@/features/navigation/placeLabels';
 import { useMutation } from '@tanstack/react-query';
 import { useRouter } from '@tanstack/react-router';
@@ -208,7 +207,7 @@ export function useGlobalCommands(): void {
         ...(shortcut === undefined ? {} : { shortcut }),
         path: address,
         run: (how) => (how === 'tab' ? window.open(address, '_blank', 'noopener') : router.history.push(address)),
-        available: () => exists(pattern) && screenBuilt(address),
+        available: () => exists(pattern),
       });
 
     for (const where of SCREENS.filter((entry) => entry.section !== 'settings')) {

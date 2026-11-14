@@ -15,6 +15,15 @@ An option is offered only where its interface or program declares it. Provider l
 | --- | --- |
 | `option:ask.models.*.model` | The enabled API model’s routing name. Together with provider_id it identifies one allowed Ask model; child lists can narrow the choices while retaining the parent’s order. |
 | `option:ask.models.*.provider_id` | The API provider’s identity for this allowed Ask model. The person and current payer must still be allowed to use that provider and model in the conversation’s organization. |
+| `option:Meta.interface_defaults` | Installation defaults for retaining recently closed views, loading indications and read freshness. Each person may override them in their own interface preferences. |
+| `option:InterfaceDefaults.kept_closed_tabs` | Additional recently closed views to retain. Open views are always retained. |
+| `option:InterfaceDefaults.progress_delay_ms` | Milliseconds before a read shows its spinner. |
+| `option:InterfaceDefaults.read_freshness_ms` | Freshness windows for directory, lookup, report and status reads, in milliseconds. |
+| `option:PersonalState.interface` | The signed-in person’s reading choices. Omitted fields use the installation defaults; changing a preference preserves the other fields. Showing a tab changes none of them. |
+| `option:PersonalState.interface.kept_closed_tabs` | This person’s additional recently closed views to retain. Zero retains none of them. |
+| `option:PersonalState.interface.progress_delay_ms` | This person’s loading-indication delay in milliseconds. Zero shows it immediately. |
+| `option:PersonalState.interface.read_freshness_ms` | This person’s directory, lookup, report and status freshness overrides, in milliseconds. |
+| `state:PersonalStateKey.interface` | The native personal-state key that keeps interface reading choices separately from named layouts, sidebar choices and keyboard bindings. |
 | `option:AccessOptions.models` | The models. |
 | `option:AccessOptions.services` | Enabled provider services this Use grant allows, by name, family or group. Omitted permits every enabled service; this list is independent of generation models. |
 | `option:AccessOptions.efforts` | The efforts. |
@@ -25,6 +34,7 @@ An option is offered only where its interface or program declares it. Provider l
 | `option:BindingOptions.providers` | The providers, each with its models and agents. |
 | `option:BindingOptions.environments` | Every existing environment the caller manages. This topic's come first (its default, then those its threads use or that were made for it), and the rest follow. |
 | `option:BindingOptions.environment_default` | What a new thread does about its environment unless told. |
+| `option:BindingOptions.default_environment` | The environment the nearest setting names as the default, wherever it is set, and why the reader cannot use it when they cannot; absent when no setting names one and when an existing thread is bound again. |
 | `option:BindingOptions.source` | Safe resolved repository settings and the place supplying the repository address. |
 | `option:BindingOptions.access` | The permission page that a thread created here would begin with. |
 | `option:BindingOptions.agent_access` | Agent privilege choices for this creation context. Rebinding an existing holder does not create another contribution and leaves this field absent. |

@@ -49,7 +49,7 @@ function Preview({ preview }: { preview: PagePreview }) {
 export function PrivateDialog({ doc, open, onOpenChange }: DialogProps) {
   const { t } = useTranslation();
   const whole = doc.page === 'restricted' ? 'reset' : 'private';
-  const preview = useQuery({ queryKey: ['document-preview', doc.id, whole], queryFn: () => previewPrivate(doc.id, whole), enabled: open, staleTime: 0 });
+  const preview = useQuery({ queryKey: ['document-preview', doc.id, whole], queryFn: () => previewPrivate(doc.id, whole), enabled: open });
   const change = useMutation({
     mutationFn: () => setPrivate(doc.id, whole),
     onSuccess: () => {
@@ -125,7 +125,7 @@ export function MoveDialog({ doc, open, onOpenChange }: DialogProps) {
         .slice(0, 30),
     [tree.nodes, query, doc.node.id],
   );
-  const preview = useQuery({ queryKey: ['document-move', doc.id, target], queryFn: () => previewMove(doc.id, target ?? ''), enabled: open && target !== null, staleTime: 0 });
+  const preview = useQuery({ queryKey: ['document-move', doc.id, target], queryFn: () => previewMove(doc.id, target ?? ''), enabled: open && target !== null });
   const move = useMutation({
     mutationFn: () => moveDocument(doc.id, target ?? ''),
     onSuccess: (moved) => {

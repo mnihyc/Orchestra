@@ -8,7 +8,7 @@
 import { create } from 'zustand';
 
 import type { Density, Locale, Me, Theme, TimezoneMode } from '@/generated/api-types';
-import { isLocale, nearestLocale, setLocale } from '@/i18n';
+import { i18n, isLocale, nearestLocale, setLocale } from '@/i18n';
 import { browserTimeZone } from '@/lib/time';
 
 /** Where the device keeps them. */
@@ -96,7 +96,7 @@ export const useAppearance = create<AppearanceStore>((set, get) => {
       set({ ...next, resolvedTheme });
       apply(next, resolvedTheme);
       remember(next);
-      if (next.locale !== before.locale) void setLocale(next.locale);
+      if (next.locale !== before.locale && i18n.isInitialized && next.locale !== i18n.language) void setLocale(next.locale);
     },
   };
 });

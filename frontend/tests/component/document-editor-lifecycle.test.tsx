@@ -8,6 +8,9 @@ import { DocumentMarksProvider, retireDocumentMarks } from '@/features/documents
 import { clearViewOpenings, showViewOpening, ViewOpening } from '@/features/workbench/viewOpening';
 import type { Document, DocumentBlock } from '@/generated/api-types';
 import { documentWriter } from '@/realtime/stores/document';
+import { documentStateNow } from '@/realtime/stores/document';
+import { feeds, retainDocument } from '@/realtime/live';
+import { EVICT_AFTER_MS, UNSUBSCRIBE_AFTER_MS } from '@/realtime/sync';
 import { World } from '../doubles/world';
 import { show } from './support';
 
@@ -79,6 +82,22 @@ it.each([false, true])('restores the real editor after two hidden lifetimes (fix
   expect(calls.send).not.toHaveBeenCalled();
   drawn.unmount();
   expect(ready.mock.calls.at(-1)?.[0]).toBeNull();
+});
+
+it('keeps an open document model beyond the idle feed window without keeping its transport', async () => {
+  vi.useFakeTimers();
+  const stopped = vi.fn();
+  const releaseModel = retainDocument(doc.id);
+  const releaseReader = feeds.use(`doc:${doc.id}`, () => ({ lastSeq: () => doc.seq, reload: () => undefined, refresh: () => undefined, stop: stopped }), () => documentWriter.evict(doc.id));
+  try {
+    releaseReader();
+    await vi.advanceTimersByTimeAsync(UNSUBSCRIBE_AFTER_MS + EVICT_AFTER_MS + 1);
+    expect(stopped).toHaveBeenCalledOnce();
+    expect(documentStateNow(doc.id).blocks.get(block.id)).toEqual(block);
+    releaseModel();
+    await vi.advanceTimersByTimeAsync(EVICT_AFTER_MS + 1);
+    expect(documentStateNow(doc.id).loaded).toBe(false);
+  } finally { releaseReader(); releaseModel(); feeds.clear(); vi.useRealTimers(); }
 });
 
 it('reopens from the latest confirmed blocks, including rows received while the pane was hidden', async () => {

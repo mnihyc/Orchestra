@@ -16,7 +16,7 @@ import { LibraryCounts } from './Library';
 import { ResourceGroupControl, ResourceGroupHeader } from './GroupHeader';
 import { groupResourceRows, RESOURCE_GROUP_MODES, resourceGroupMeta, type ResourceGroupMeta, type ResourceGroupMode } from './groups';
 import { useFormatContext } from '@/lib/appearance';
-import { MachineLink } from './machines/MachineLink';
+import { MachineOrigin } from './machines/MachineOrigin';
 import { Hint } from '@/features/help/Hint';
 import { useResourceCleanup } from '@/features/storage/acts';
 import { holds } from '@/lib/permissions';
@@ -28,8 +28,9 @@ import { createContext, type ReactNode, useContext, useEffect, useRef, useState 
 import { useTranslation } from 'react-i18next';
 
 import { meQuery } from '@/api/auth';
-import { everythingQuery, type EverythingFilter, type ResourceFilter } from '@/api/everything';
+import { type EverythingFilter, type ResourceFilter } from '@/api/everything';
 import type { EverythingResource, EverythingScope, EverythingSort, ProviderListScope, ResourceFacts } from '@/generated/api-types';
+import { inventoryQuery } from '@/features/resources/inventoryRead';
 import { INVENTORY_KINDS } from '@/features/resources/inventory';
 
 import { AllBox, BulkBar, type ListActs, type RowActs, RowBox, RowMenuCell, RowPrimaryCell, useSelection, adminRow, secondaryEntries } from '@/features/resources/acts';
@@ -157,10 +158,8 @@ export function ResourceList<Row extends ResourceRow>({ readRow, filter: resourc
   },[keptView,view,orgLoad.isSuccess,chooseView,keptSort,sort,setSort,keptDirection,direction,setDirection]);
   const wider = offered.slice(offered.indexOf(view)+1).find((value):value is Exclude<ProviderListScope,'mine'>=>value!=='mine');
   const text = useDebounced(props.text.trim());
-  const filter: EverythingFilter = { scope, kinds: [INVENTORY_KINDS[props.kind]], q: text,
-    owner: null, createdFrom: '', createdTo: '', sort, direction, participating,
-    resource: { ...resource, view, ...(view === 'all' && viewed !== null ? {home:viewed.id} : {}), details: true } };
-  const options = everythingQuery(me.data?.id ?? '', 'resources', filter, props.kind === 'mcp' ? 'mcp-servers' : props.kind);
+  const options = inventoryQuery(me.data?.id ?? '', props.kind, { scope, q: text, sort, direction, participating },
+    { ...resource, view, ...(view === 'all' && viewed !== null ? {home:viewed.id} : {}) });
   const load = useInfiniteQuery({ ...options, enabled: me.data !== undefined && (keptView!=='all'||orgLoad.isSuccess) });
   const rows = (load.data?.pages.flatMap((page) => page.items) ?? []).flatMap((item) => {
     if (item.resource === undefined || item.resource === null) return [];
@@ -254,7 +253,7 @@ export function ResourceListFrame<Row extends ResourceRow>({
       <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1"><div data-resource-name className="min-w-0 flex-1 basis-[min(100%,12rem)]">{column.cell(row, shown)}</div><AsAdminMark of={adminAccessOf(row)?.place} responsive /></div>
       {showOwner && <ResourceOwner {...row} />}
       {origin !== null && origin !== undefined && <span data-resource-origin className="flex min-w-0 items-center gap-1 text-sm text-text-muted">
-        <span>{t('resourceGroups.from')}</span><MachineLink machine={origin} />
+        <MachineOrigin machine={origin} />
       </span>}
       {entry !== undefined && <LibraryCounts facts={entry.facts} threads={entry.threads} />}
     </div>; } });

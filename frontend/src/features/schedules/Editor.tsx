@@ -1,4 +1,5 @@
 /** An authored schedule freezes one complete draft and saves without starting a thread or turn. */
+import { READ_NOW } from '@/api/freshness';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
@@ -82,7 +83,7 @@ export function ScheduleEditor({ topic, thread, draft, schedule, onClose, onAcce
     onAccepted?.(); onClose();
   }, onError: (error) => {
     if (schedule !== undefined && error instanceof ApiError && error.is('conflict.stale_revision') && sameLibraryReader(reader)) {
-      void cache.query({ ...inputScheduleQuery(schedule.id), staleTime: 0 }).then((row) => { if (mounted.current && sameLibraryReader(reader)) setCurrent(row); }).catch(() => undefined);
+      void cache.query({ ...inputScheduleQuery(schedule.id), ...READ_NOW }).then((row) => { if (mounted.current && sameLibraryReader(reader)) setCurrent(row); }).catch(() => undefined);
     }
   } });
   const parent: PlaceRef = { id: topic, kind: 'topic', name: thread?.path.find((step) => step.id === topic)?.name ?? schedule?.topic?.name ?? '', parentId: null, archived: false, status: null, folder: false };

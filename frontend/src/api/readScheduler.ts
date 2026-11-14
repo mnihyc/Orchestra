@@ -41,3 +41,8 @@ export const scheduledReads = new ReadScheduler();
 export const suppliedRead = (key: readonly unknown[]) => scheduledReads.owns(key)
   ? { refetchOnMount: false as const, retryOnMount: false, staleTime: Infinity }
   : {};
+
+/** A tab's initial consumer takes over its already-started read without immediately starting it twice. */
+export const startingRead = (key: readonly unknown[]) => scheduledReads.owner(key)?.[0] === 'page-read' && scheduledReads.owns(key)
+  ? { refetchOnMount: false as const, retryOnMount: false, staleTime: Infinity }
+  : {};
