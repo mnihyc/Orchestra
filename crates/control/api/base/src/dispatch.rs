@@ -1689,6 +1689,7 @@ pub mod tests {
             kind: "machine.probe".into(),
             body,
             serial_key: None,
+            key_phase: 0,
             state: "queued".into(),
             result: None,
             error: None,

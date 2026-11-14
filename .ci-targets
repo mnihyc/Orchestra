@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-api-core --lib -- archives::
+test -p orch-api-core --test workspace_source --test workspace_looking --test workspace_source_scopes --test workspace_pages --test workspace_connector --test document_containers --test admin_places

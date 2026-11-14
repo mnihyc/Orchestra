@@ -138,6 +138,8 @@ async fn restore_fixture() -> (Site, orch_types::Id, std::sync::Arc<RestoreReade
         &mut conn,
         snapshot,
         &FsRecordResult {
+            indexing: None,
+
             state: RecordState::Complete,
             tree_ref: Some("retained-native-root".into()),
             repository_head: None,
