@@ -984,3 +984,9 @@ it('applies the native recovery reply to every reader without another recovery r
     expect(read).not.toHaveBeenCalled();
   } finally {stopOne();stopTwo();cache.clear();}
 });
+
+it('resolves a native parameter form without changing any displayed data', () => {
+  const form = findAct('POST', '/settings/parameters/form');
+  expect(form?.act).toBe('POST /settings/parameters/form');
+  expect(form?.changes).toEqual([]);
+});
