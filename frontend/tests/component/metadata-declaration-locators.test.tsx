@@ -60,10 +60,10 @@ it('searches thirteen caller-eligible notifiers without resetting secrets until 
     fields: [field('endpoint', 'Delivery endpoint', 'text', `https://delivery.example.test/${index + 1}`), field('token', 'Delivery token', 'secret')] }));
   const user = userEvent.setup(); show(<NotifierDialog title="Add delivery" notifiers={notifiers} submitLabel="Create delivery" pending={false} error={null} onSubmit={calls.submit} onClose={vi.fn()} />);
   const picker = screen.getByRole('combobox', { name: i18n.t('settings.channels.kind') });
-  await user.type(screen.getByRole('textbox', { name: i18n.t('settings.channels.name') }), 'My channel');
+  await user.click(screen.getByRole('textbox', { name: i18n.t('settings.channels.name') })); await user.paste('My channel');
   // Leaving the dialog's autofocused locator reveals its committed value.
   expect(picker).toHaveValue('Delivery method 1');
-  await user.type(screen.getByLabelText('Delivery token'), 'first-kind-secret');
+  await user.click(screen.getByLabelText('Delivery token')); await user.paste('first-kind-secret');
   await user.click(picker); expect(screen.getAllByRole('option')).toHaveLength(13);
   await user.type(picker, 'channel-13'); expect(screen.getByText('Deliver through route 13.', { exact: true })).toBeVisible();
   expect(screen.getByLabelText('Delivery token')).toHaveValue('first-kind-secret'); expect(calls.submit).not.toHaveBeenCalled();
@@ -73,7 +73,31 @@ it('searches thirteen caller-eligible notifiers without resetting secrets until 
   expect(screen.getByRole('textbox', { name: 'Delivery endpoint' })).toHaveValue('https://delivery.example.test/13');
   expect(screen.getByRole('textbox', { name: i18n.t('settings.channels.name') })).toHaveValue('My channel');
   expect(calls.submit).not.toHaveBeenCalled();
-  await user.type(screen.getByLabelText('Delivery token'), 'selected-kind-secret');
+  await user.click(screen.getByLabelText('Delivery token')); await user.paste('selected-kind-secret');
   await user.click(screen.getByRole('button', { name: 'Create delivery' }));
   expect(calls.submit).toHaveBeenCalledExactlyOnceWith({ kind: 'channel-13', name: 'My channel', config: { endpoint: 'https://delivery.example.test/13' }, secrets: { token: 'selected-kind-secret' } });
 });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const editing of [false, true]) {
+  it(`names the optional SMTP greeting and keeps its field when setting up or editing email in ${locale}, editing ${String(editing)}`, async () => {
+    await setLocale(locale);
+    const notifier: Notifier = { name: 'email', title: 'Email', summary: 'SMTP mail', links: false, single: true,
+      owners: ['system', 'org'], targets: ['person'],
+      templates: { single: { subject: null, body: '{{title}}' }, digest: { subject: null, body: '{{count}}' } },
+      fields: [{ ...field('hello_name', 'Name for the greeting', 'text'), required: false, help: 'The SMTP client name.' }] };
+    const user = userEvent.setup();
+    show(<NotifierDialog title="Email" notifiers={[notifier]} submitLabel="Save email" pending={false} error={null}
+      {...(editing ? { existing: { kind: 'email', name: 'Mail', config: { hello_name: 'kept.example.test' }, secretsSet: [] } } : {})}
+      onSubmit={calls.submit} onClose={vi.fn()} />);
+    const name = locale === 'en' ? 'EHLO name' : 'EHLO 名称';
+    const hint = locale === 'en' ? "The host name given to the mail server when connecting. Empty: this machine's name."
+      : '连接邮件服务器时发送的主机名。留空时使用本机名称。';
+    const greeting = screen.getByRole('textbox', { name: new RegExp(`^${name}`) });
+    expect(greeting).toHaveAccessibleDescription(hint);
+    expect(greeting).toHaveValue(editing ? 'kept.example.test' : '');
+    if (!editing) { await user.click(screen.getByRole('textbox', { name: i18n.t('settings.channels.name') })); await user.paste('Mail'); }
+    await user.clear(greeting); await user.paste('chosen.example.test');
+    await user.click(screen.getByRole('button', { name: 'Save email' }));
+    expect(calls.submit).toHaveBeenCalledExactlyOnceWith({ kind: 'email', name: 'Mail', config: { hello_name: 'chosen.example.test' }, secrets: {} });
+  });
+}

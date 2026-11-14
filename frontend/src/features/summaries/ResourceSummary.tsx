@@ -82,6 +82,7 @@ function CurrentSummary({ target, reference, range, enabled = true, onConfigure,
     summary={{ revision: JSON.stringify(reply), state: reply.state, text: reply.text, producer: producer(reply, t('summaryBox.model')), updated_at: reply.updated_at, wait: reply.wait,
       ...(reply.problem === null ? {} : { error: new ApiError(reply.problem, null) }) }}
     onRefresh={refresh} refreshBlockedReason={reply.inspecting ? t('summaryBox.inspection') : manualReason}
+    nothingNew={target.kind === 'chat' && range !== undefined && range.after >= range.through}
     askBlockedReason={reply.inspecting ? t('summaryBox.inspection') : undefined} {...(onConfigure === undefined ? {} : { onConfigure })} details={details}
     onAsk={({ summary }) => { if (reader !== summaryReaderKey() || reply.inspecting) return; openAskWithDraft({ root: reply.root_org_id,
       text: [t('summaryBox.ask'), reference, ...(summary === null ? [] : summary.split('\n').map((line) => `> ${line}`))].join('\n\n') }); }} />;

@@ -486,7 +486,7 @@ impl native::Selected for Lists {
 }
 
 pub(super) async fn read(ctx: Ctx, query: OrgChatListQuery, (): ()) -> ApiResult<Page<Chat>> {
-    let output = native::selected_read::<Lists>(ctx.clone(), query, ()).await?;
+    let output = native::selected_value::<Lists>(ctx.clone(), query, ()).await?;
     ctx.retain_source(output.witness)?;
     Ok(output.page)
 }

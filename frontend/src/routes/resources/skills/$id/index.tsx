@@ -2,7 +2,8 @@
 import { usePageParams, usePageSearch, usePageNavigate } from '@/features/workbench/pageContext';
 import { createFileRoute } from '@tanstack/react-router';
 
-import { SkillScreen, SKILL_TABS, type SkillTab } from '@/features/resources/skills/Skill';
+import { SkillScreen } from '@/features/resources/skills/Skill';
+import { SKILL_TABS, type SkillTab } from '@/features/resources/tabs';
 
 export const Route = createFileRoute('/resources/skills/$id/')({
   staticData: { screen: 'page' },

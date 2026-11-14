@@ -93,6 +93,17 @@ impl CapturedOperation {
         self.caller.restore_current(conn, clock).await
     }
 
+    /// Preliminary unadmitted source selection without row locks. This cannot stand in for
+    /// the writer's locked restoration, factual binding or current permission checks.
+    pub async fn preview_current(
+        &self,
+        conn: &mut Conn,
+        clock: &dyn Clock,
+    ) -> Result<Option<Caller>, Error> {
+        self.validate()?;
+        self.caller.preview_current(conn, clock).await
+    }
+
     fn validate(&self) -> Result<(), Error> {
         if self.operation.is_empty() {
             return Err(Error::Stored("captured operation has no selection".into()));

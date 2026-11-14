@@ -51,7 +51,9 @@ use orch_agent_contract::credentials::{CredentialForm, IssuedCredential};
 use orch_agent_contract::discovery::ModelSuggestion;
 use orch_model_contract::credentials::{Credential, WireError};
 use orch_model_contract::endpoint::{AuthMode, AuthorizeError, EndpointOptions, standard_options};
-use orch_model_contract::protocol::{OPENAI_RESPONSES, SecretHeaders, WireProtocol};
+use orch_model_contract::protocol::{
+    CompletionStop, OPENAI_RESPONSES, SecretHeaders, WireProtocol,
+};
 use orch_model_contract::usage::UsageObserver;
 use orch_types::Field;
 use url::Url;
@@ -210,6 +212,21 @@ impl WireProtocol for OpenAiResponses {
         } else {
             Ok(text)
         }
+    }
+
+    fn completion_stopped(&self, body: &[u8]) -> Option<CompletionStop> {
+        let reply: serde_json::Value = serde_json::from_slice(body).ok()?;
+        if reply.get("status")?.as_str()? != "incomplete" {
+            return None;
+        }
+        let reason = reply
+            .pointer("/incomplete_details/reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("incomplete");
+        Some(CompletionStop {
+            reason: reason.to_owned(),
+            output_limit: reason == "max_output_tokens",
+        })
     }
 
     fn credential_forms(&self) -> Vec<CredentialForm> {
