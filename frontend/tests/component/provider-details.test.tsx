@@ -238,7 +238,7 @@ it('uses windows, then balance, then spend in a compact card while preserving pr
 it.each(STATES)('models remain %s independently of the manually enabled list', (state) => {
   const provider=planProvider();
   provider.facts_state.models=state;
-  provider.facts.models=state === 'told' ? [{model_name:'example',display_name:'Example',parameters:{},listed:true}] : state === 'empty' ? [] : null;
+  provider.facts.models_count=state === 'told' ? 1 : state === 'empty' ? 0 : null;
   show(<ModelsSourceState provider={provider} />);
   const key=state === 'unsupported' ? 'providerDetails.models.unsupported' : state === 'not_read_yet' ? 'providerDetails.models.notRead' : state === 'empty' ? 'providerDetails.models.empty' : 'providerDetails.models.told';
   expect(screen.getByText(i18n.t(key))).toBeVisible();

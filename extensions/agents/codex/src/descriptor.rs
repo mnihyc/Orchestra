@@ -189,8 +189,8 @@ pub fn capabilities() -> Capabilities {
         telemetry_off: true,
         memory: MemoryKind::Home,
         agent_terminal: AgentTerminal::None,
-        // This pin caches the files of a directory while a session is open; a native resume reloads them.
-        session_reload: SessionReload::Turn,
+        // The adapter keeps local sessions and resumes only when their instruction-file chain changes.
+        session_reload: SessionReload::OnChange,
         // The harness looks up the tree for its instruction files; Orch's marker stops it at the workspace root.
         instruction_root_marker: true,
         // The adapter hands it the root that holds a thread's skills.
@@ -279,7 +279,15 @@ pub fn descriptor(version: &str) -> AgentDescriptor {
         text: text(),
         extensions: serde_json::from_value(serde_json::json!({
             "x_capability_program": serde_json::from_str::<orch_types::Json>(include_str!("capability-program.json")).unwrap_or(orch_types::Json::Null),
-            "x_profile_parameters": crate::parameters::profile_parameters()
+            "x_profile_parameters": crate::parameters::profile_parameters(),
+            "x_turn_end_delays": {"version":1,"delays":[{
+                "pointer":"/native_result_wait_ms", "also_ms":0,
+                "default_ms":crate::runtime::DEFAULT_NATIVE_RESULT_WAIT_MS,
+                "default_setting":"agents.native_result_wait_ms",
+                "pending_buffer":{"pointer":"/native_result_buffer_bytes",
+                    "default_bytes":crate::runtime::DEFAULT_NATIVE_RESULT_BUFFER_BYTES,
+                    "default_setting":"agents.native_result_buffer_bytes"}
+            }]}
         })).unwrap_or_default(),
     }
 }
