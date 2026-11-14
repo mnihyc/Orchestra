@@ -1,9 +1,11 @@
 /** Ask only for the missing required choice.
  *
  * Where the defaults of a place do not settle what a thread there runs on, the inline starter does not open a dialog:
- * it says which choice is missing and asks for that one alone, a provider, a profile or a model, where the person is
- * typing. Where the person may write the defaults of a place (it takes managing it), the choice can be kept for the
- * topic, the project or the org, the widest of them ticked, and is written before anything is made; where they may
+ * it says which choice is missing and asks for that one alone, with the controls of the box of a thread: the model (the
+ * models of every provider the person may use, in groups under the providers' names, so that a model is the choice of its
+ * provider) with its effort, or the agent, where the person is typing. Where the person may write the defaults of a
+ * place (it takes managing it), the choice can be kept for the topic, the project or the org, the widest of them
+ * ticked, and is written before anything is made; where they may
  * not, the same place says so and offers to ask for the right. A profile whose harness has not reported what it can
  * do is said to be waiting for that, with nothing offered that cannot run, and what is offered returns by itself when
  * the report comes. What no choice here can mend (no environment may be used or made, no arrangement can be had) says so,
@@ -13,7 +15,6 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { Info, LoaderCircle, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { choiceOption, offeredChoice } from '@/i18n/choices';
 
 import { nodeQuery } from '@/api/nodes';
 import { providersQuery } from '@/api/resources';
@@ -21,7 +22,6 @@ import { setStartDefault } from '@/api/start';
 import { AccessRequest } from '@/features/access/AccessRequest';
 import { providerNamesCollide, providerPickerLabels } from '@/features/resources/providers/labels';
 import { useKnownPlaces } from '@/features/navigation/placeLabels';
-import { programNameIn } from '@/features/resources/programNames';
 import { ResourceCreationActions } from '@/features/resources/ResourceCreation';
 import type { PlaceRef } from '@/features/navigation/places';
 import type { Project, Topic } from '@/generated/api-types';
@@ -29,14 +29,14 @@ import { holds } from '@/lib/permissions';
 import { Button } from '@/ui/Button';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { Select } from '@/ui/Select';
-import { ResourcePicker } from '@/ui/ResourcePicker';
 import { cx } from '@/ui/cx';
 
-import { type Missing, modelName, type Picks, type Resolved, settingsToKeep } from './choices';
+import { type Missing, type Picks, type Resolved, settingsToKeep } from './choices';
 import type { StartOptions } from '@/api/start';
 import { RequestDefault } from './RequestDefault';
 import { agentWhy, arrangementWhy, providerWhy } from './words';
 import { ProgramReport } from './ProgramReport';
+import { StartAgentChoice, StartModelChoice } from './ModelChoice';
 
 /** A place whose defaults decide what the threads made in the place run on, and whether the person may write them there. */
 export interface Scope {
@@ -91,8 +91,10 @@ export interface MissingDefaultProps {
 }
 
 export function MissingDefault({ place, node, options, resolved, picks, onPick, scopes, keepAt, onKeepAt, onChange }: MissingDefaultProps) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const [asking, setAsking] = useState(false);
+  // The line that says where a choice of model changed the agent.
+  const [agentNotice, setAgentNotice] = useState<string | null>(null);
   const choice = firstChoice(resolved.missing);
   const providerRefs = resolved.providers.map((row) => row.entry.provider);
   const needProviderContext = choice !== null && (choice.kind === 'provider' || picks.provider !== null) && providerNamesCollide(providerRefs);
@@ -190,46 +192,18 @@ export function MissingDefault({ place, node, options, resolved, picks, onPick, 
       </details>}
 
       {choice !== null && (
-        <div className="flex flex-wrap items-start gap-3">
-          {(choice.kind === 'provider' || picks.provider !== null) && (
-            <ResourcePicker pickerKey="start-missing-provider"
-              label={missingProviderContext ? t(providers.isError ? 'startFlow.providerLocationsFailure' : 'startFlow.providerLocationsLoading') : t('start.provider.title')}
-              value={chosenProvider?.id ?? ''}
-              placeholder={t('start.missing.pickProvider')}
-              disabled={options.defaults.locked || missingProviderContext}
-              onValueChange={(next) => onPick({ provider: next, agent: null, model: null, effort: null, arrangement: null })}
-              options={resolved.providers.filter((row) => row.choosable).map((row) => ({ value: row.id, name: providerNames.get(row.id) ?? row.entry.provider.name, resource:{kind:'provider',id:row.id,data:row.entry} }))}
-              fieldClassName="min-w-(--field-narrow) flex-1"
-            />
-          )}
-          {chosenProvider !== null && resolved.agents.some((row) => row.startable) && (choice.kind === 'agent' || picks.agent !== null) && (
-            <ResourcePicker pickerKey="start-missing-profile"
-              label={t('start.agent.title')}
-              value={resolved.agent?.id ?? ''}
-              placeholder={t('start.missing.pickAgent')}
-              onValueChange={(next) => onPick({ agent: next, arrangement: null })}
-              options={resolved.agents.filter((row) => row.startable).map((row) => {
-                const program = programNameIn(row.entry.agent, i18n.resolvedLanguage ?? i18n.language) ?? t('resources.harnessNameUnknown');
-                return { value: row.id, name: row.entry.agent.name, resource:{kind:'agent',id:row.id,data:row.entry}, description: program === row.entry.agent.name || program === t('resources.harnessNameUnknown') ? undefined : program };
-              })}
-              fieldClassName="min-w-(--field-narrow) flex-1"
-            />
-          )}
-          {chosenProvider !== null && (choice.kind === 'model' || picks.model !== null) && (
-            <>
-              <Select
-                label={t('start.model.model')}
-                value={resolved.model?.model_name ?? ''}
-                placeholder={t('start.missing.pickModel')}
-                onValueChange={(next) => onPick({ model: next, effort: null })}
-                options={resolved.models.map((model) => ({ value: model.model_name, label: modelName(model) }))}
-                fieldClassName="min-w-(--field-narrow) flex-1"
-              />
-              {resolved.model !== null && resolved.efforts.length > 0 && (
-                <Select label={t('start.model.effort')} value={resolved.effort ?? ''} onValueChange={(next) => onPick({ effort: next })} options={resolved.efforts.map((value) => ({ value, ...(offeredChoice(t, 'effort', value) ?? choiceOption(t, 'dynamic.value', { name: value, context: t('start.model.effort') })) }))} fieldClassName="min-w-(--field-narrow)" />
-              )}
-            </>
-          )}
+        <div className="flex min-w-0 flex-col gap-1">
+          <div className="flex flex-wrap items-center gap-2">
+            {(choice.kind === 'provider' || choice.kind === 'model' || picks.provider !== null || picks.model !== null) && (
+              <StartModelChoice options={options} resolved={resolved} names={providerNames} disabled={options.defaults.locked || missingProviderContext}
+                onPick={(patch, notice) => { setAgentNotice(notice); onPick(patch); }} />
+            )}
+            {chosenProvider !== null && resolved.agents.some((row) => row.startable) && (choice.kind === 'agent' || picks.agent !== null) && (
+              <StartAgentChoice options={options} resolved={resolved} names={providerNames} onPick={(agent) => { setAgentNotice(null); onPick({ agent, arrangement: null }); }} />
+            )}
+          </div>
+          {missingProviderContext && !providers.isError && <p className="text-sm text-text-muted">{t('startFlow.providerLocationsLoading')}</p>}
+          {agentNotice !== null && <p role="status" className="text-sm text-text-muted" data-agent-notice>{agentNotice}</p>}
         </div>
       )}
 

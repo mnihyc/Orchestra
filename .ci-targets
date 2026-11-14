@@ -1,0 +1,16 @@
+# b42a: the assembly branch with plain words, the container-unit reads, settings and composer-and-models merged, generated files regenerated: every case of the four lanes together, the whole web suite and the web build.
+fmt
+clippy
+contracts
+test -p orch-agent-contract --lib
+test -p orch-settings-contract --lib
+test -p orch-db --test machine_names
+test -p orch-engine --lib
+test -p orch-engine --test preflight --test summary_targets --test model_parameters --test call_recovery
+test -p orch-settings --test matrix_inheritance
+test -p orch-api-base --lib
+test -p orch-api-core --test container_units --test everything_resources --test realtime_diagnostics --test kfix_binding --test settings --test threads_settings --test model_entries --test provider_models
+web typecheck
+web lint
+web test
+web build

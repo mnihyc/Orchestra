@@ -47,8 +47,11 @@ that proof.
 
 The native conformance cases are shared. What differs between programs is said by the adapter in three hooks of
 `AgentAdapter`: `native_check`, `mcp_tool_name` and `verify_quiet_start`. The scripts of the cases that have the model call
-one of the program's tools say the tool by its role (`command`, `ask_user`, `read_file`, `spawn_agent`); the manifest's
-`checks.tool_names` maps each role the program's cases need to the program's own tool and the names of its arguments.
+one of the program's tools say the tool by its role (`command`, `background_command`, `ask_user`, `read_file`,
+`spawn_agent`); the manifest's `checks.tool_names` maps each role the program's cases need to the program's own tool, the
+names of its arguments and, in `with`, the arguments it needs besides the script's (what makes a command outlive its turn).
+A case's `feature` names what a failure switches off for the build: a capability that is a switch, an approval kind, an
+approval mode, or `native_input_prefix`.
 
 `cargo xtask names` fails when shared code names a program or a vendor of one.
 

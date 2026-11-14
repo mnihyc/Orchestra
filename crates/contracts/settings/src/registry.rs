@@ -1916,6 +1916,18 @@ const WRITTEN_SUMMARY_OPTIONS: Schema = Schema::Object {
     members: &[],
     open: false,
 };
+/// The features of agent programs that are on while no scope says otherwise. A feature whose only purpose is to show what a manager
+/// of a provider has already switched on for a model is on: the access program of Codex, which a thread offers only on a model whose
+/// managers enabled it. A scope that does not want a program offered under it sets its feature off; the others stay as they are.
+const AGENT_FEATURES_SHIPPED: DefaultOf = DefaultOf::Value(r#"{"codex.cyber_access":true}"#);
+/// What each generated target does while no scope sets it, written out in full. The settings page draws these as the values a
+/// target starts from, and the engine falls back to the same numbers (it reads them from this default), so the page and the work
+/// can never disagree: nothing is automatic; a thread keeps the shared trigger pacing (two minutes after a turn or a milestone), a topic
+/// follows its children at a quarter of an hour, a document waits for edits to settle for five minutes, chats and their titles collect
+/// messages for five minutes; each reads up to 32,000 tokens and writes up to 600 characters, 80 for the title of a chat.
+const SUMMARY_TARGETS_SHIPPED: DefaultOf = DefaultOf::Value(
+    r#"{"thread":{"automatic":false,"on":["turn_completed","milestone"],"min_interval_secs":120,"context_tokens":32000,"output_chars":600},"topic":{"automatic":false,"on":["child_changed"],"min_interval_secs":900,"context_tokens":32000,"output_chars":600},"document":{"automatic":false,"on":["content_changed"],"min_interval_secs":300,"context_tokens":32000,"output_chars":600},"chat":{"automatic":false,"on":["message_posted"],"min_interval_secs":300,"context_tokens":32000,"output_chars":600},"chat_title":{"automatic":false,"on":["message_posted"],"min_interval_secs":300,"context_tokens":32000,"output_chars":80}}"#,
+);
 const SUMMARY_TARGETS: Schema = Schema::Object {
     members: &[
         optional("thread", SUMMARY_TARGET_OPTIONS),
@@ -2178,7 +2190,7 @@ registry! {
         "Effort", "The reasoning effort asked of the model, one of those the model lists.";
     AGENT_PARAMS = "agent.params", Agent, Parameter, ORG_TO_THREAD, Map, EMPTY_MAP, map(&ANY),
         "Agent parameters", "Values for the parameters that the agent's adapter declares, by parameter.";
-    AGENT_FEATURES = "agent.features", Agent, Policy, SYSTEM_TO_TOPIC, Map, EMPTY_MAP, map(&BOOL),
+    AGENT_FEATURES = "agent.features", Agent, Policy, SYSTEM_TO_TOPIC, Map, AGENT_FEATURES_SHIPPED, map(&BOOL),
         "Agent features", "Which optional features of agents are switched on, by feature.";
     AGENT_INSTRUCTIONS = "agent.instructions", Agent, Parameter, ORG_TO_THREAD, Append, value("\"\""), INSTRUCTIONS,
         "Instructions", "Standing instructions given to the agent with every session; each scope adds its own under those above it.";
@@ -2255,6 +2267,8 @@ registry! {
         "Allowed services", "Patterns naming enabled provider services that may be used here; every scope that sets a list must admit the service.";
     PROVIDERS_ALLOWED = "providers.allowed", Models, Policy, SYSTEM_TO_TOPIC, Intersect, UNSET, list(&TEXT),
         "Allowed providers", "Patterns over providers' Orch addresses; every scope that sets a list must admit the provider used for work here.";
+    MODELS_ADD_SWITCHES_ON = "models.add_switches_on", Models, Parameter, SYSTEM_ORG, Replace, value("\"all\""), choice(&["all", "basic", "nothing"]),
+        "Switched on when added", "What a model starts with when it is added from its provider's catalogue: everything it offers (all), only its efforts and context sizes (basic), or only its window and efforts (nothing). A manager can switch on the rest afterwards.";
     COLLAB_ATTRIBUTION = "collab.attribution", Collaboration, Parameter, ORG_TO_THREAD, Replace, value("\"auto\""), choice(&["auto", "always", "never"]),
         "Attribution", "Whether Orch's composed input, stop, denial and forwarded text names people: auto once a second person's words are delivered, always, or never (a person/an approver, with source, time and notes kept). Authored chats and documents retain their writers.";
     COLLAB_DEFAULT_DELIVERY = "collab.default_delivery", Collaboration, Parameter, ORG_TO_THREAD, Replace, value("\"queue\""), choice(&["queue", "steer"]),
@@ -2541,7 +2555,7 @@ registry! {
         "Summarizer", "Which summarizer is used, and its configuration.";
     AUTO_TRIGGERS = "auto.triggers", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("{\"on\":[\"turn_completed\",\"milestone\"],\"min_interval_secs\":120}"), TRIGGERS,
         "Triggers", "When automatic titles, tags and summaries are written again: after a turn, at a milestone or at intervals, and how often at most.";
-    SUMMARY_TARGETS = "summary.targets", Automation, Parameter, SYSTEM_TO_THREAD, Map, EMPTY_MAP, SUMMARY_TARGETS,
+    SUMMARY_TARGETS = "summary.targets", Automation, Parameter, SYSTEM_TO_THREAD, Map, SUMMARY_TARGETS_SHIPPED, SUMMARY_TARGETS,
         "Summary targets", "Refresh events and input/output defaults by target, off until enabled under the chosen summarizer and shared usage caps. Help and search results use written or existing summaries.";
     SUMMARY_FOLLOW_INTERVAL_SECS = "summary.follow_interval_secs", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("5"), int_between(1, 4_294_967_295, Unit::Seconds),
         "Summary follow interval", "Free reads while a summary is eligible or running; a scheduled future update is followed at its actual due time instead.";
@@ -2747,6 +2761,24 @@ registry! {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_model_that_is_added_starts_with_everything_it_offers_unless_an_organization_narrows_it() {
+        use super::*;
+        use serde_json::json;
+        let setting = get(keys::MODELS_ADD_SWITCHES_ON).unwrap();
+        assert_eq!(setting.default_value(), Some(json!("all")));
+        assert!(matches!(setting.merge, Merge::Replace));
+        assert!(setting.set_at(Scope::System) && setting.set_at(Scope::Org));
+        assert!(!setting.set_at(Scope::Topic));
+        for word in ["all", "basic", "nothing"] {
+            assert!(
+                validate(keys::MODELS_ADD_SWITCHES_ON, &json!(word)).is_ok(),
+                "{word}"
+            );
+        }
+        assert!(validate(keys::MODELS_ADD_SWITCHES_ON, &json!("some")).is_err());
+    }
+
     #[test]
     fn messaging_defaults_keep_wake_explicit_and_hourly_budgets_separate() {
         use super::*;
