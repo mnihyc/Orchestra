@@ -9,6 +9,7 @@
  */
 import { create } from 'zustand';
 import type { Environment } from '@/generated/api-types';
+import type { Choices } from './choices';
 
 /** What is done to the thing named. */
 export type ChangeKind =
@@ -16,6 +17,8 @@ export type ChangeKind =
   | 'switch'
   /** A second thread made out of a thread, or out of a side thread kept. */
   | 'fork'
+  /** A complete native copy to another organization, then deletion of the original. */
+  | 'move-out'
   /** A unit brought up to what it would be made from now. */
   | 'update'
   /** A new unit with nothing new in it. */
@@ -29,6 +32,9 @@ export type ChangeKind =
   /** The view of a job that is under way or over, asked for by its number. */
   | 'progress';
 
+/** The selected home and template suffice to ask the server for an authoritative move plan. */
+export type EnvironmentMoveSource = Pick<Environment, 'id' | 'home' | 'template'>;
+
 /** What a screen names: the thing the change is about. */
 export type ChangeTarget =
   | { kind: 'thread'; id: string; name?: string }
@@ -40,7 +46,7 @@ export type ChangeTarget =
   | { kind: 'model'; providerId: string; id: string; name?: string }
   | { kind: 'environment'; id: string; name?: string }
   /** Several environments of one place, listed. */
-  | { kind: 'environments'; ids: string[]; node?: string; selection?: { reader: number; rows: readonly Environment[] } }
+  | { kind: 'environments'; ids: string[]; node?: string; selection?: { reader: number; rows: readonly EnvironmentMoveSource[] } }
   | { kind: 'machine'; id: string; name?: string }
   | { kind: 'host'; id: string; name?: string }
   /** A place with environments in it: an org, a project or a topic. */
@@ -53,11 +59,17 @@ export interface ChangeOptions {
   toTurn?: number;
   /** For a switch, what the person came for: another provider, or another environment or directory. */
   focus?: 'provider' | 'environment';
+  /** For a switch asked for from a list that named what it is to run on: the provider, the agent and the model, each chosen before the wizard is seen. */
+  provider?: string;
+  agent?: string;
+  model?: string;
   /** For the progress of a job, or of a batch, that was started already. */
   job?: string;
   batch?: string;
   /** For a fork made from a message of a person: what it said, to be put in the new thread's box. */
   say?: string;
+  /** Choices already made in the shared location field, reviewed by the ordinary plan. */
+  placement?: Partial<Pick<Choices, 'where' | 'directory'>>;
 }
 
 /** What the host holds: the change asked for, until it is closed. */

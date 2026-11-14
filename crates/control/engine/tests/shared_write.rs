@@ -677,6 +677,38 @@ async fn read_doc(docs: &Docs, path: &str) -> Value {
 }
 
 #[tokio::test]
+async fn an_agent_reads_a_pasted_document_link_with_the_same_current_shares_as_a_tree_path() {
+    let docs = with_documents(false).await;
+    let document = docs
+        .world
+        .document_beside(docs.topic, "Shared plan", &["A readable document body"])
+        .await;
+    let read = read_doc(
+        &docs,
+        &format!("/doc/{document}?block={}", orch_types::new_id()),
+    )
+    .await;
+    assert!(
+        read["text"]
+            .as_str()
+            .unwrap()
+            .contains("A readable document body")
+    );
+    let private = docs
+        .world
+        .document_beside(docs.world.topic, "Private plan", &["Private fixture body"])
+        .await;
+    let result = call(
+        &docs.world,
+        docs.agent,
+        OrchTool::ReadShared,
+        json!({"path":format!("/doc/{private}")}),
+    )
+    .await;
+    assert_eq!(refused(&result).0, "not_found");
+}
+
+#[tokio::test]
 async fn a_document_is_made_under_the_name_of_the_agent_and_belongs_to_the_first_owner_of_its_thread()
  {
     let d = with_documents(true).await;

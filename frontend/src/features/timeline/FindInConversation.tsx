@@ -21,22 +21,25 @@ export function openFind(threadId: string, owner?: string): void {
 
 export interface FindInConversationProps {
   threadId: string;
+  stream?: string | undefined;
+  enabled?: boolean | undefined;
   timeline: RefObject<TimelineHandle | null>;
   root: RefObject<HTMLDivElement | null>;
 }
-export function FindInConversation({ threadId, timeline, root }: FindInConversationProps) {
+export function FindInConversation({ threadId, timeline, root, stream = 'main', enabled = true }: FindInConversationProps) {
   const { t } = useTranslation();
   const instance = useViewInstance();
   const owner = instance?.id ?? threadId;
   const read = useThreadReadRef(threadId);
   const hit = useCallback((found: SearchHit) => {
-    if (found.kind !== 'item' || found.thread.id !== threadId) return;
+    if (found.kind !== 'item' || found.thread.id !== threadId || found.item.stream !== stream) return;
     const projection = threadViewOf(read).read?.projection;
     if (projection !== undefined && projection !== null && (found.projection === undefined || found.projection === null || !sameThreadProjection(projection, found.projection))) return;
+    // The timeline fetches and opens the target through the same path for held and off-window matches.
     timeline.current?.scrollToItem(found.item.id);
-  }, [read, threadId, timeline]);
-  const find = useViewFind({ root, filters: { scope: threadId, kinds: ITEM_KINDS }, historyThread: read,
-    label: t('search.find.label'), onHit: hit, content: '[role="log"]' });
+  }, [read, threadId, timeline, stream]);
+  const find = useViewFind({ root, filters: { scope: threadId, stream, kinds: ITEM_KINDS }, historyThread: read,
+    enabled, label: t('search.find.label'), onHit: hit, content: '[role="log"]' });
   useEffect(() => {
     const entry = { thread: threadId, show: find.show };
     owners.set(owner, entry);

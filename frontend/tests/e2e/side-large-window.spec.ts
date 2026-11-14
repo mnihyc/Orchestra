@@ -52,7 +52,7 @@ test('a full 200-item side window remains usable inline and in its own panel', a
     acceptedSide = reply.thread.id;
     await route.fulfill({ response });
   });
-  await page.route('**/api/v1/threads/*/opening?*', async (route) => {
+  await page.route('**/api/v1/threads/*/opening*', async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname.split('/')[4] !== acceptedSide) { await route.continue(); return; }
     // The legacy side double exposes its own authorized sync, but lacks the
@@ -62,8 +62,7 @@ test('a full 200-item side window remains usable inline and in its own panel', a
     const response = await route.fetch({ url: url.toString() });
     expect(response.ok()).toBe(true);
     const sync = await response.json() as ThreadSync;
-    const data: ThreadOpening = { sync, draft: null, parameters: null, limits: null, settings: [],
-      outline: { entries: [], next_before: null, seq: sync.seq } };
+    const data: ThreadOpening = { sync, draft: null, parameters: null, limits: null };
     const id = data.sync.thread.id;
     openings.push(id);
     data.sync.items = Array.from({ length: 200 }, (_, index) => ({
@@ -82,7 +81,8 @@ test('a full 200-item side window remains usable inline and in its own panel', a
   await openHistory(page);
   const draft = page.getByRole('textbox', { name: 'Message to the agent', exact: true });
   await draft.fill('Keep the parent draft during the large side read');
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Side thread…', exact: true }).click();
+  await page.locator('[data-thread-header] [data-thread-more]').click();
+  await page.getByRole('menuitem', { name: 'Side thread…', exact: true }).click();
   const ask = page.getByRole('dialog', { name: 'Side thread', exact: true });
   await ask.getByRole('textbox', { name: 'What to ask' }).fill('Review the retained side history');
   const inlineStart = await page.evaluate(() => performance.now());

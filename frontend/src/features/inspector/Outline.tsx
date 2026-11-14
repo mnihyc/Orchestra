@@ -13,7 +13,7 @@ import { useInfiniteQuery } from '@tanstack/react-query';
 import { useParams } from '@tanstack/react-router';
 import { DocumentOutline } from '@/features/people/DocumentOutline';
 import { Link } from '@tanstack/react-router';
-import { AlignLeft, Flag, ListOrdered, MessageSquare, ShieldQuestionMark, TriangleAlert } from 'lucide-react';
+import { AlignLeft, Bot, Flag, ListOrdered, MessageSquare, ShieldQuestionMark, TriangleAlert } from 'lucide-react';
 import { type ComponentType } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -23,6 +23,7 @@ import type { ViewProps } from '@/features/workbench/views';
 import type { WorkspaceAccess } from '@/features/files/door';
 import { useThreadView } from '@/realtime/stores/thread';
 import { outlineRows } from '@/features/inspector/outlineRows';
+import { Avatar } from '@/ui/Avatar';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
 import { RelativeTime } from '@/ui/RelativeTime';
@@ -75,6 +76,11 @@ export function OutlinePanel({ access }: { access: Pick<WorkspaceAccess, 'thread
         <ol aria-label={t('inspector.outline.list')} className="min-h-0 flex-1 overflow-auto">
           {shown.map((entry) => {
             const Icon = groupOf(entry)?.icon ?? AlignLeft;
+            // A person's message carries the person's avatar and an agent's answer the agent's mark, so that the two are told apart at a glance.
+            const held = view.items.get(entry.item_id);
+            const author = entry.kind === 'user_message' && held?.kind === 'user_message' ? held.author : null;
+            const mark = entry.kind === 'agent_message' ? <Avatar kind="agent" size="row" text="" color={0} mark={<Bot aria-hidden />} />
+              : author === null ? null : <Avatar kind={author.kind === 'service' ? 'service' : 'human'} size="row" text={author.avatar.text} color={author.avatar.color} />;
             const condition = 'goal_condition' in entry && typeof entry.goal_condition === 'string' ? entry.goal_condition : undefined;
             const title = condition === undefined
               ? entry.kind === 'turn' && typeof entry.turn_ordinal === 'number' ? t('inspector.outline.turn', { ordinal: entry.turn_ordinal }) : entry.title
@@ -87,7 +93,7 @@ export function OutlinePanel({ access }: { access: Pick<WorkspaceAccess, 'thread
                   search={{ item: entry.item_id }}
                   className="focus-inset flex min-h-(--row-height) items-center gap-2 px-3 py-1 text-base text-text hover:bg-bg-muted"
                 >
-                  <Icon className="shrink-0 text-text-muted" aria-hidden />
+                  {mark === null ? <Icon className="shrink-0 text-text-muted" aria-hidden /> : <span className="shrink-0" aria-hidden>{mark}</span>}
                   <span className="sr-only">{outlineKindWord(t, entry.kind)}: </span>
                   <span className="min-w-0 flex-1 truncate" title={title}>
                     {title}

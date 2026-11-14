@@ -1,9 +1,10 @@
 /** Human, system, forwarded and delivered announcement inputs.
  *
- * What a person said to the agent: their picture, name and time, and what they said in a bubble.
- * Text is Markdown; an image or a file they attached is a chip with its name; what they forwarded
- * stands in the bubble as a block for each source. A line the system or an announcement put in is a
- * quiet row across the column with its icon, and has no bubble.
+ * What a person said to the agent, as a tinted rounded block at the right, at most four fifths of the column wide; the
+ * sender's picture and name stand above it only where more than one person wrote in the thread, and the time is in
+ * the toolbar that shows on hover. Text is Markdown; an image or a file they attached is a chip with its name; what they
+ * forwarded stands in the block as a block for each source. A line the system or an announcement put in is a
+ * quiet row across the column with its icon, and has no block.
  */
 import { useMutation } from '@tanstack/react-query';
 import { Megaphone, Pencil, Settings2, Share, Target } from 'lucide-react';
@@ -46,6 +47,9 @@ import { useViewShown } from '@/features/workbench/viewOpening';
 
 type UserItem = Extract<Item, { kind: 'user_message' }>;
 
+/** The block a person's words stand in: tinted, rounded, at the right and at most four fifths of the column; a message on its way to the agent is drawn in it too. */
+export const PERSON_BLOCK = 'flex max-w-[80%] min-w-0 flex-col gap-2 rounded-xl bg-bg-muted px-3 py-2';
+
 /** One part of what was said. */
 export function Part({ part, owner, updatedAt, thread: sourceThread }: { part: ContentPart; owner?: Author | undefined; updatedAt?: string | undefined; thread?: string }) {
   const { t } = useTranslation();
@@ -86,7 +90,7 @@ export function Part({ part, owner, updatedAt, thread: sourceThread }: { part: C
   }
 }
 
-export function UserMessage({ item }: { item: UserItem }) {
+export function UserMessage({ item, named = false }: { item: UserItem; named?: boolean }) {
   const { t } = useTranslation();
   const { source, parts } = item.payload;
 
@@ -109,10 +113,10 @@ export function UserMessage({ item }: { item: UserItem }) {
     );
   }
 
-  return <HumanMessage item={item} />;
+  return <HumanMessage item={item} named={named} />;
 }
 
-function HumanMessage({ item }: { item: UserItem }) {
+function HumanMessage({ item, named }: { item: UserItem; named: boolean }) {
   const { t } = useTranslation();
   const format=useFormatContext();
   const context = useTimelineContext();
@@ -150,23 +154,16 @@ function HumanMessage({ item }: { item: UserItem }) {
   const author = item.author;
   if (author === null) return null;
   return (
-    <PersonThingProvider thing={{ kind: 'thread', id: threadId, ...(item.turn_id === null ? {} : { anchor: { turn: item.turn_id } }) }}><ItemFrame item={item} label={t('timeline.user.menu')} extra={mine ? [{ id: 'edit-message', label: t('messageVersions.edit'),
+    <PersonThingProvider thing={{ kind: 'thread', id: threadId, ...(item.turn_id === null ? {} : { anchor: { turn: item.turn_id } }) }}><ItemFrame item={item} label={t('timeline.user.menu')} actionsEnd restoreChanges={fileChanges.files.length > 0} extra={mine ? [{ id: 'edit-message', label: t('messageVersions.edit'),
       icon: <Pencil aria-hidden />, disabled: unavailable ?? false, onSelect: begin }] : []} messageActions={editing ? undefined : <>
         {mine && <IconButton size="sm" label={t('messageVersions.edit')} icon={<Pencil aria-hidden />} blocked={unavailable !== null} reason={unavailable ?? undefined} onClick={begin} />}
         <CopyButton value={itemText(item)} label={t('timeline.actions.copy')} />
         {ownTurn !== undefined && <RestoreFromTurn threadId={threadId} turn={ownTurn} compact fallback hasChanges={fileChanges.files.length > 0} readOnly={context.readOnly === true} label={t('thread.turnActions.restoreBefore')} />}
+        <TimeOfDay at={item.created_at} className="px-1 text-xs text-text-subtle" />
       </>}>
-      <div className="flex items-start gap-3">
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
-            <UserChip user={author} size={28} />
-            <TimeOfDay at={item.created_at} className="text-xs text-text-subtle" />
-            <ScheduleWakeMarker thread={threadId} input={item.payload.input_id} turn={item.turn_id} clientId={inputClient} enabled={shown && context.inspection === undefined && context.readOnly !== true} />
-            {delivery !== 'queue' && <span className="text-xs text-text-subtle">· {delivery === 'steer' ? t(item.status === 'in_progress' ? 'composer.queue.steering' : 'composer.queue.steered') : t(`timeline.user.delivery.${delivery}`)}</span>}
-            {item.payload.automatic !== null && item.payload.automatic !== undefined && <span className="inline-flex min-w-0 max-w-full items-baseline gap-1"><Tooltip content={t('calls.automaticDetail', { rule: item.payload.automatic.rule_id, attempt: formatNumber(item.payload.automatic.attempt, format.locale) })}><span tabIndex={0} className="focus-inset min-w-0 rounded-sm wrap-anywhere text-sm text-text-muted" data-automatic-input>{t('calls.automatic')}</span></Tooltip><CallHelp section="automatic" /></span>}
-          </p>
-          <div className="ml-10 flex min-w-0 flex-col gap-1">
-          {editing ? <PromptEditForm parts={parts} activeTurnId={currentTurn} pending={edit.isPending}
+      <div className="mt-(--message-gap) flex min-w-0 flex-col items-end gap-1" data-user-message>
+        {named && <p className="flex flex-wrap items-center justify-end gap-x-2 text-sm"><UserChip user={author} size={28} /></p>}
+        {editing ? <div className="w-full"><PromptEditForm parts={parts} activeTurnId={currentTurn} pending={edit.isPending}
             retryOnly={retryOnly} unavailable={retryOnly ? null : unavailable} error={preparationError ?? edit.error}
             onCancel={() => setEditing(false)} onSubmit={(content, activeTurn) => {
               if (retryOnly) { edit.mutate(edit.variables); return; }
@@ -181,16 +178,19 @@ function HumanMessage({ item }: { item: UserItem }) {
                 ...(activeTurn === undefined ? {} : { active_turn: activeTurn }) };
               edit.mutate(body);
             }}>
-          </PromptEditForm> : <div className="flex max-w-full flex-col gap-2 self-start rounded-lg bg-bg-muted px-3 py-2">
+          </PromptEditForm></div> : <div className={PERSON_BLOCK}>
             {parts.map((part, index) => (
               <Part key={index} part={part} owner={author} updatedAt={item.created_at} />
             ))}
           </div>}
-          {!editing && context.inspection === undefined && (mine || (summary?.total ?? 0) > 1) && <div className="flex flex-wrap items-center gap-1">
-            {summary !== undefined && <PromptNavigation threadId={threadId} prompt={summary} onSelect={context.onVersionSelect} />}
-          </div>}
-          </div>
-        </div>
+        <p className="flex flex-wrap items-baseline justify-end gap-x-2 gap-y-1 text-xs text-text-subtle empty:hidden">
+          <ScheduleWakeMarker thread={threadId} input={item.payload.input_id} turn={item.turn_id} clientId={inputClient} enabled={shown && context.inspection === undefined && context.readOnly !== true} />
+          {delivery !== 'queue' && <span>{delivery === 'steer' ? t(item.status === 'in_progress' ? 'composer.queue.steering' : 'composer.queue.steered') : t(`timeline.user.delivery.${delivery}`)}</span>}
+          {item.payload.automatic !== null && item.payload.automatic !== undefined && <span className="inline-flex min-w-0 max-w-full items-baseline gap-1"><Tooltip content={t('calls.automaticDetail', { rule: item.payload.automatic.rule_id, attempt: formatNumber(item.payload.automatic.attempt, format.locale) })}><span tabIndex={0} className="focus-inset min-w-0 rounded-sm wrap-anywhere text-sm text-text-muted" data-automatic-input>{t('calls.automatic')}</span></Tooltip><CallHelp section="automatic" /></span>}
+        </p>
+        {!editing && context.inspection === undefined && (mine || (summary?.total ?? 0) > 1) && <div className="flex flex-wrap items-center gap-1">
+          {summary !== undefined && <PromptNavigation threadId={threadId} prompt={summary} onSelect={context.onVersionSelect} />}
+        </div>}
       </div>
     </ItemFrame></PersonThingProvider>
   );

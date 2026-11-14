@@ -79,6 +79,123 @@ fn key(hit: &SearchHit) -> (String, Id, Option<Id>) {
 }
 
 #[tokio::test]
+async fn finding_words_in_a_child_conversation_never_returns_its_parents_matches() {
+    use orch_engine::{
+        ingest::{ItemSpec, add_item},
+        unit::Unit,
+    };
+    let desk = Desk::new().await;
+    let (thread, segment) = thread(&desk, &desk.ada, desk.topic, "Two conversations").await;
+    let mut ids = Vec::new();
+    {
+        let mut tx = desk.world.app.app.db.begin().await.unwrap();
+        let mut unit = Unit::new(&mut tx, desk.world.now());
+        for stream in ["main", "child:reader", "child:reader"] {
+            let payload = serde_json::json!({"text":"A sharedneedle in this conversation","text_len":40,"phase":"final"});
+            let item = add_item(
+                &mut unit,
+                &ItemSpec {
+                    thread,
+                    segment,
+                    turn: None,
+                    stream,
+                    parent: None,
+                    kind: "agent_message",
+                    status: "completed",
+                    author: None,
+                    payload: &payload,
+                    native_ref: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            ids.push(item.id);
+        }
+        unit.finish().await.unwrap();
+        tx.commit().await.unwrap();
+    }
+    let mut selected = query("sharedneedle");
+    selected.scope = Some(thread);
+    selected.stream = Some("child:reader".into());
+    selected.limit = Some(1);
+    let first = find(&desk, &desk.ada, &selected).await;
+    assert_eq!(first.items.len(), 1);
+    assert!(
+        matches!(&first.items[0].found, SearchFound::Item { item, .. } if item.stream == "child:reader")
+    );
+    selected.cursor = Some(
+        first
+            .next_cursor
+            .expect("the other child match stays pageable"),
+    );
+    let second = find(&desk, &desk.ada, &selected).await;
+    assert_eq!(second.items.len(), 1);
+    assert!(second.next_cursor.is_none());
+    assert_ne!(key(&second.items[0]), key(&first.items[0]));
+    assert!(
+        matches!(&second.items[0].found, SearchFound::Item { item, .. } if item.stream == "child:reader")
+    );
+    selected.cursor = None;
+    selected.stream = Some("main".into());
+    let main = find(&desk, &desk.ada, &selected).await;
+    assert_eq!(main.items.len(), 1);
+    assert!(matches!(&main.items[0].found, SearchFound::Item { item, .. } if item.id == ids[0]));
+}
+
+#[tokio::test]
+async fn an_empty_search_reports_its_index_scope_and_effective_conversation_allowance() {
+    use orch_api_contract::search::{SearchStreamEvent, SearchStreamList};
+    let desk = Desk::new().await;
+    let mut conn = desk.world.app.app.db.acquire().await.unwrap();
+    orch_db::queries::settings::put(
+        &mut conn,
+        None,
+        "search.text_chars",
+        &orch_db::queries::settings::Stored {
+            value: &serde_json::json!(24_000),
+            locked: false,
+            by: Some(desk.ada.id()),
+            at: desk.world.now(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    let response = desk
+        .world
+        .app
+        .call(SearchStreamList, &[])
+        .token(&desk.ada.token)
+        .query(&SearchListQuery {
+            scope: Some(desk.topic),
+            immediate: Some(true),
+            ..query("absent")
+        })
+        .send_bytes()
+        .await;
+    assert_eq!(response.status, 200);
+    let events: Vec<SearchStreamEvent> = response
+        .raw
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SearchStreamEvent::Coverage {
+            conversation_chars: 24_000
+        }
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SearchStreamEvent::Hit { .. }))
+    );
+}
+
+#[tokio::test]
 async fn injected_context_never_matches_and_old_echoes_are_repaired_without_losing_the_actual_answer()
  {
     use orch_engine::{
