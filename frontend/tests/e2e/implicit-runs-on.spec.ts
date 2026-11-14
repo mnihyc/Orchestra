@@ -57,27 +57,21 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await scenario(); await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme: theme });
     const t = await language(page, request, locale, theme); const { previews, admitted } = await availability(page);
     await page.goto(`/thread/${ACME.mainThread}`); const form = await openChange(page, t, 'switch');
-    const picker = form.getByRole('combobox', { name: t('switchChoice.picker'), exact: true });
-    await picker.click(); await picker.fill('Scripted agent');
-    const disabled = page.getByRole('option', { name: t('switchChoice.option', { agent: 'Scripted agent', provider: 'OpenAI key' }), exact: true });
-    await expect(disabled).toHaveAttribute('aria-disabled', 'true'); await expect(disabled).toContainText(t('change.runs.unavailable.profileDisabled'));
-    await picker.fill('Claude Code');
-    const unreported = page.getByRole('option', { name: t('switchChoice.option', { agent: 'Claude Code', provider: 'OpenAI key' }), exact: true });
-    await expect(unreported).toHaveAttribute('aria-disabled', 'true'); await expect(unreported).toContainText(t('start.agent.unreported'));
-    await picker.fill('Codex');
-    const nonKeeper = page.getByRole('option', { name: t('switchChoice.option', { agent: 'Codex', provider: 'Codex subscription' }), exact: true });
-    await expect(nonKeeper).toHaveAttribute('aria-disabled', 'true'); await expect(nonKeeper).toContainText(t('change.runs.unavailable.keeper'));
-    await info.attach('switch-refused-pairs', { body: await page.screenshot({ animations: 'disabled' }), contentType: 'image/png' });
-    await picker.fill('Codex on ada-laptop');
-    await page.getByRole('option', { name: t('switchChoice.option', { agent: 'Codex on ada-laptop', provider: 'OpenAI key' }), exact: true }).click();
-    await expect(form.locator('[data-automatic-runs="model"]')).toContainText(t('change.runs.automatic.model.retained'));
-    await expect(form.locator('[data-automatic-runs="effort"]')).toContainText(t('change.runs.automatic.effort.retained'));
+    // The agents that cannot be chosen stay in the agent list, off, with why.
+    await form.getByRole('button', { name: new RegExp(`^${t('composer.row.agentName')}`) }).click();
+    const disabled = page.getByRole('menuitemradio', { name: /^Scripted agent/ });
+    await expect(disabled).toBeDisabled(); await expect(disabled.locator('xpath=ancestor::li')).toContainText(t('composer.pick.agent.why.disabled'));
+    const unreported = page.getByRole('menuitemradio', { name: /^Claude Code/ });
+    await expect(unreported).toBeDisabled(); await expect(unreported.locator('xpath=ancestor::li')).toContainText(t('composer.pick.agent.why.unreported'));
+    await info.attach('switch-refused-agents', { body: await page.screenshot({ animations: 'disabled' }), contentType: 'image/png' });
+    await page.getByRole('menuitemradio', { name: 'Codex on ada-laptop', exact: true }).click();
+    // A simple switch says only which agent went with the provider; the model and the effort are kept and go into the plan.
     await expect(form.locator('[data-automatic-runs="profile"]')).toHaveCount(0);
     await expect.poll(() => admitted.some((preview) => preview.result === 'replace' && preview.to?.agent_id === keeper && preview.to.model === 'gpt-5.4' && preview.to.effort === 'high')).toBe(true);
-    await form.getByRole('combobox', { name: t('change.runs.model'), exact: true }).click();
-    const refusedModel = page.getByRole('option', { name: 'GPT-4.1', exact: true });
-    await expect(refusedModel).toHaveAttribute('aria-disabled', 'true'); await expect(refusedModel).toContainText(t('change.runs.unavailable.modelDisabled'));
-    await page.getByRole('option', { name: 'GPT-5.4 Chat', exact: true }).click();
+    await form.getByRole('button', { name: new RegExp(`^${t('composer.model.chip')}`) }).click();
+    const refusedModel = page.getByRole('menuitemradio', { name: 'GPT-4.1', exact: true });
+    await expect(refusedModel).toBeDisabled(); await expect(refusedModel.locator('xpath=ancestor::li')).toContainText(t('composer.model.reason.disabled', { provider: 'OpenAI key' }));
+    await page.getByRole('menuitemradio', { name: 'GPT-5.4 Chat', exact: true }).click();
     await expect(form.locator('[data-automatic-runs="model"]')).toHaveCount(0);
     await expect.poll(() => admitted.some((preview) => preview.result === 'replace' && preview.to?.model === 'gpt-5.4-chat')).toBe(true);
     expect(previews.every((preview) => !Object.hasOwn(preview, 'automaticRuns') && !Object.hasOwn(preview.to ?? {}, 'automaticRuns'))).toBe(true);
@@ -94,12 +88,11 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await page.goto(`/thread/${ACME.mainThread}`); const form = await openChange(page, t, 'fork');
     const destination = form.getByRole('combobox', { name: t('duplicate.destination'), exact: true });
     await destination.fill('Fix login'); await page.getByRole('option', { name: /Fix login/ }).click();
-    const provider = form.getByRole('combobox', { name: t('change.runs.provider'), exact: true });
-    await provider.click(); await provider.fill('Codex subscription'); await page.getByRole('option', { name: 'Codex subscription', exact: true }).click();
+    // The provider is the model's: choosing a model of the Codex subscription chooses it, with its keeper agent.
+    await form.getByRole('button', { name: new RegExp(`^${t('composer.model.chip')}`) }).click();
+    await page.getByRole('menuitemradio', { name: 'GPT-5.5 Codex', exact: true }).click();
     await expect(form.locator('[data-automatic-runs="profile"]')).toContainText(t('change.runs.automatic.profile.keeper'));
     await expect(form.locator('[data-automatic-runs="profile"]')).toContainText(t('change.runs.automatic.previousProfile.keeper'));
-    await expect(form.locator('[data-automatic-runs="model"]')).toContainText(t('change.runs.automatic.model.first'));
-    await expect(form.locator('[data-automatic-runs="model"]')).toContainText(t('change.runs.automatic.previousModel'));
     await expect(form.locator('[data-automatic-runs="effort"]')).toContainText(t('change.runs.automatic.effort.default'));
     await expect(form.locator('[data-automatic-runs="effort"]')).toContainText(t('change.runs.automatic.previousEffort'));
     const frame = await form.boundingBox(); if (frame === null) throw new Error('The native change form is visible');
@@ -108,12 +101,10 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
       expect(bounds.x).toBeGreaterThanOrEqual(frame.x); expect(bounds.x + bounds.width).toBeLessThanOrEqual(frame.x + frame.width + 1);
     }
     await info.attach('fork-automatic-origins', { body: await page.screenshot({ animations: 'disabled' }), contentType: 'image/png' });
-    const profile = form.getByRole('combobox', { name: t('change.runs.agent'), exact: true }); await profile.click(); await profile.fill('Codex');
-    const previous = page.getByRole('option', { name: 'Codex', exact: true });
-    await expect(previous).toHaveAttribute('aria-disabled', 'true'); await expect(previous).toContainText(t('change.runs.unavailable.keeper'));
-    await page.keyboard.press('Escape');
+    // A provider that runs its keeper agent only has nothing to choose among.
+    await expect(form.getByRole('button', { name: new RegExp(`^${t('composer.row.agentName')}`) })).toBeDisabled();
     await expect.poll(() => admitted.some((preview) => preview.result === 'new' && preview.topic_id === ACME.fixLogin && preview.to?.provider_id === subscription && preview.to.agent_id === keeper && preview.to.model === 'gpt-5.5-codex' && preview.to.effort === 'medium')).toBe(true);
-    await expect(form.getByRole('combobox', { name: t('change.runs.model'), exact: true })).toContainText('GPT-5.5 Codex');
+    await expect(form.getByRole('button', { name: new RegExp(`^${t('composer.model.chip')}`) })).toContainText('GPT-5.5 Codex');
     expect(previews.every((preview) => !Object.hasOwn(preview, 'automaticRuns') && !Object.hasOwn(preview.to ?? {}, 'automaticRuns'))).toBe(true);
     await info.attach('native-fork-previews', { body: JSON.stringify({ requested: previews, admitted }), contentType: 'application/json' });
     await form.getByRole('button', { name: t('common.cancel'), exact: true }).click();

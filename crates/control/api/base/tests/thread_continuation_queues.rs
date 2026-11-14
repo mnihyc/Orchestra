@@ -58,7 +58,9 @@ async fn setup() -> Proof<(rig::Scene, Id, Retained, ThreadInput, ThreadInput)> 
         .app
         .call(ThreadInterrupt, &[&thread])
         .token(&scene.ada.token)
-        .body(&ThreadInterruptBody { turn_id: last })
+        .body(&ThreadInterruptBody {
+            turn_id: Some(last),
+        })
         .send()
         .await
         .ok();
@@ -166,7 +168,7 @@ async fn inactive_delivery_and_stop_refuse_but_author_text_edits_and_cancellatio
         .call(ThreadInterrupt, &[&thread])
         .token(&scene.ada.token)
         .body(&ThreadInterruptBody {
-            turn_id: original_turn,
+            turn_id: Some(original_turn),
         })
         .send()
         .await

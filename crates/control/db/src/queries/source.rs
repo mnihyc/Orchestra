@@ -549,6 +549,43 @@ pub async fn set_before_state(conn: &mut Conn, turn: Id, snapshot: Id) -> Result
         == 1)
 }
 
+/// Keeps how many included files a turn changed, from its before-state and its observed end; none when either
+/// is unknown.
+pub async fn set_end_changes(
+    conn: &mut Conn,
+    turn: Id,
+    changed: Option<i32>,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE turns SET files_changed = $2 WHERE id = $1")
+        .bind(turn)
+        .bind(changed)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// Keeps the namespace of a turn's observed end, as large as the directory, while the observation is still due:
+/// written before the thread's row is taken, with no reference to the blob that is pinned afterwards.
+pub async fn set_end_namespace(conn: &mut Conn, turn: Id, namespace: &Json) -> Result<(), DbError> {
+    sqlx::query("UPDATE turns SET files_end_manifest = $2 WHERE id = $1 AND files_end_due")
+        .bind(turn)
+        .bind(namespace)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// Keeps the blob of a turn's observed end beside the namespace written by [`set_end_namespace`], once its
+/// observation is taken.
+pub async fn set_end_blob(conn: &mut Conn, turn: Id, blob: &Hash) -> Result<(), DbError> {
+    sqlx::query("UPDATE turns SET end_manifest_blob = $2 WHERE id = $1")
+        .bind(turn)
+        .bind(blob.as_bytes().to_vec())
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// Keeps complete end hashes or explicit unknown coverage before this thread's next turn.
 pub async fn set_end_manifest(
     conn: &mut Conn,

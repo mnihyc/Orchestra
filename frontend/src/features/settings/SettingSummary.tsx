@@ -5,6 +5,8 @@ import type { TFunction } from 'i18next';
 import { settingChoice } from '@/i18n/choices';
 import type { SettingDef } from '@/generated/api-types';
 import { numericSettingDisplay, numericSettingText, settingFieldName } from '@/features/settings/settingText';
+import { isRecord, noSummarizer, SUMMARY_TARGETS } from '@/features/settings/draftChecks';
+import { DocumentsSummary, isThingSetting, MountsSummary, THING_SETTINGS, ThingName } from '@/features/settings/ThingChoice';
 import { formatNumber } from '@/lib/format';
 import { OrgTermsPreview } from '@/features/settings/OrgTerms';
 import { ValueSummary } from '@/ui/ValueSummary';
@@ -17,6 +19,7 @@ import { PathValue } from '@/features/resources/TechnicalValue';
 import { PROGRAM_VERSIONS_KEY, versionChoice } from './versionPolicy';
 import { choiceCopy } from '@/i18n/choices';
 import { CallsSummary } from './CallsRules';
+import { AGENT_FEATURES_SETTING, AgentFeaturesSummary } from '@/features/settings/AgentFeaturesChoice';
 import { useHarnessNames } from '@/features/resources/harnesses';
 import { CurrentDetailPage } from '@/features/resources/CurrentDetailPage';
 import { ErrorState } from '@/ui/ErrorState';
@@ -27,7 +30,18 @@ import { CapabilityBackendSummary } from './CapabilityBackendChoice';
 import { isCapabilityBackendSetting } from './capabilityBackendValue';
 
 export function emptySettingValue(value: unknown): boolean {
-  return value === null || value === undefined || value === '' || (typeof value === 'object' && Object.keys(value).length === 0);
+  // A summarizer chosen as "none here" says nothing, as an empty object does.
+  return value === null || value === undefined || value === '' || (typeof value === 'object' && (Object.keys(value).length === 0 || noSummarizer(value)));
+}
+
+/** The summary targets in a few words: which of them refresh by themselves. */
+function TargetsSummary({ value }: { value: Record<string, unknown> }) {
+  const { t, i18n } = useTranslation();
+  const automatic = (entry: unknown) => isRecord(entry) && entry.automatic === true;
+  const on = SUMMARY_TARGETS.filter((target) => automatic(value[target]));
+  if (on.length === 0) return <span>{t('settingsEditors.targets.summaryOff')}</span>;
+  const names = new Intl.ListFormat(i18n.resolvedLanguage ?? 'en', { style: 'long', type: 'conjunction' }).format(on.map((target) => t(`summaryOptions.fields.${target}`)));
+  return <span>{t('settingsEditors.targets.summaryOn', { names })}</span>;
 }
 
 /** A missing semantic choice and an unlimited disk share use their product meanings. */
@@ -80,11 +94,15 @@ export function SettingSummary({ value, def, inControl = false, example = false,
   if (def.key === 'thread.goal.max_credits' && (value === '0' || value === 0)) return <span>{t('goals.editor.noLimit')}</span>;
   if (def.key === 'org.terms' && typeof value === 'string') return <OrgTermsPreview text={value} />;
   if (def.key === SEMANTIC_TUNING_SETTING || def.key === WORD_TUNING_SETTING) return <SemanticTuningSummary value={value} label={def.title} inControl={inControl} />;
-  if (def.key === 'auto.summarizer' && !example && typeof value === 'object' && value !== null && 'kind' in value && value.kind === 'model' && 'provider_id' in value) {
-    return <ProviderDefaultName value={value.provider_id}>{(name) => <ValueSummary
-      value={{ ...value, provider_id: name }} label={def.title} inControl={inControl}
-      fieldName={(name) => settingFieldName(name, def.key, t)} number={number} />}</ProviderDefaultName>;
+  if (def.key === 'auto.summarizer' && !example && isRecord(value) && value.kind === 'model' && 'provider_id' in value) {
+    const model = typeof value.model_name === 'string' ? value.model_name : '';
+    return <ProviderDefaultName value={value.provider_id}>{(name) => <span className="min-w-0 wrap-anywhere">{t('settingsEditors.summarizer.summary', { provider: name, model })}</span>}</ProviderDefaultName>;
   }
+  if (def.key === 'summary.targets' && !example && isRecord(value)) return <TargetsSummary value={value} />;
+  if (def.key === AGENT_FEATURES_SETTING && !example && isRecord(value)) return <AgentFeaturesSummary value={value} />;
+  if (def.key !== undefined && isThingSetting(def.key)) return example ? <span>{t(`settingsEditors.thing.examples.${THING_SETTINGS[def.key]}`)}</span> : <ThingName settingKey={def.key} value={value} />;
+  if (def.key === 'env.mounts') return example ? <span>{t('settingsEditors.thing.examples.mount')}</span> : <MountsSummary value={value} />;
+  if (def.key === 'docs.templates') return example ? <span>{t('settingsEditors.thing.examples.document')}</span> : <DocumentsSummary value={value} />;
   if (def.key !== undefined && isResourceSetting(def.key)) return <ResourceSettingName settingKey={def.key} value={value} example={example} />;
   if (def.key === 'runtime.home' && typeof value === 'object' && value !== null && 'kind' in value) {
     if (value.kind === 'existing_directory' && 'path' in value && typeof value.path === 'string') return <PathValue path={value.path} />;

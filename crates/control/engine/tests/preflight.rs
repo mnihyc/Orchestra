@@ -1795,3 +1795,35 @@ async fn a_declaration_that_cannot_be_read_or_is_of_another_version_declares_not
         assert_eq!(common::words_after_where(&start.text), "Go", "{declaration}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_thread_whose_environment_is_still_being_made_is_not_refused_for_the_executors_it_has_not_reported()
+ {
+    let world = World::observed().await;
+    let thread = world.thread("Environment being made").await;
+    world
+        .exec("UPDATE threads SET arrangement = 'separated'")
+        .await;
+    // The unit is not up: it reports no executors yet, and what its template promises is what is judged.
+    world
+        .exec(
+            r#"UPDATE environments SET status = 'provisioning',
+                   facts = '{"environment_descriptor":{"lifecycle":"unit"}}'::jsonb,
+                   config = '{"exec.offers":["plain"]}'::jsonb"#,
+        )
+        .await;
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Hello"))
+        .await
+        .unwrap();
+    eventually("the thread is looked at", || async {
+        world.state(thread).await.0 != "idle"
+    })
+    .await;
+    let (state, reason, step) = world.state(thread).await;
+    assert!(
+        !(state == "blocked" && reason.as_deref() == Some("binding_invalid")),
+        "it stands {state} (reason {reason:?}, step {step:?})"
+    );
+}

@@ -6,6 +6,28 @@ import { checkReferenceCoverage, documentedReferences, requiredHelpReferences, s
 import { readArticle, type Guide } from '@/help/guide';
 
 const content = readHelpContent();
+it('explains stopping and session reopening facts in both shipped languages', () => {
+  const references = [
+    'state:StopState.stopping', 'state:StopState.stopped', 'state:BlockedReason.source_failed',
+    'state:MarkerKind.session_reopened',
+    ...['unknown', 'instructions', 'limits', 'configuration', 'mcp', 'tools', 'skills', 'program_reloads', 'side_history']
+      .map((reason) => `state:SessionReopenReason.${reason}`),
+    'option:ThreadInterruptBody.turn_id', 'option:ThreadStop.state', 'option:ThreadStop.requested_at',
+    'option:ThreadStop.turn', 'option:Thread.stopping_since', 'option:Turn.interrupted_at',
+    'option:MarkerSessionReopened.reason',
+  ];
+  for (const language of ['en', 'zh-CN'] as const) {
+    const entries = content.guide.articles.filter((article) => content.userArticles.includes(article.id))
+      .flatMap((article) => documentedReferences(language === 'en' ? article.body : article.translations?.[language]?.body ?? ''));
+    for (const reference of references) {
+      const entry = entries.find((entry) => entry.id === reference);
+      expect(entry, `${language}:${reference}`).toBeDefined();
+      expect(entry?.explanation.trim().length).toBeGreaterThan(0);
+      if (language === 'zh-CN') expect(entry?.explanation).toMatch(/\p{Script=Han}/u);
+    }
+  }
+});
+
 it('covers every currently declared setting, nested option, state and API error in the shipped guide', () => {
   expect(content.references).toContain('setting:threads.offline_deadline');
   expect(content.references).toContain('option:env.after_up.*.command');

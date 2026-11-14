@@ -27933,7 +27933,7 @@
     "/threads/{id}/interrupt": {
       "post": {
         "operationId": "ThreadInterrupt",
-        "summary": "Stops a running turn, and holds what waits in the queue until somebody resumes it.",
+        "summary": "Stops a running turn, or the start of the next one, and holds what waits in the queue until somebody resumes it. The answer is at once: the Stop is recorded, and says that the thread is stopping until the program has stopped.",
         "x-orch-access": "permission",
         "x-orch-tokens": true,
         "x-orch-legacy-access-tokens": true,
@@ -27941,7 +27941,7 @@
           "operation_id": "ThreadInterrupt",
           "method": "POST",
           "path": "/threads/{id}/interrupt",
-          "title": "Stops a running turn, and holds what waits in the queue until somebody resumes it.",
+          "title": "Stops a running turn, or the start of the next one, and holds what waits in the queue until somebody resumes it. The answer is at once: the Stop is recorded, and says that the thread is stopping until the program has stopped.",
           "delegation": "business",
           "variants": [
             {
@@ -27980,7 +27980,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Turn"
+                  "$ref": "#/components/schemas/ThreadStop"
                 }
               }
             }
@@ -104420,6 +104420,11 @@
           },
           {
             "type": "string",
+            "const": "source_failed",
+            "description": "Its source could not be prepared; the source keeps the structured cause."
+          },
+          {
+            "type": "string",
             "const": "switching",
             "description": "A switch holds it."
           },
@@ -112617,6 +112622,33 @@
             ],
             "description": "What a starting thread is waiting for."
           },
+          "starting_since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the step it is waiting for began."
+          },
+          "starting_work": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StartingWork"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The command that step waits for, and what holds it up; none while it waits for nothing in particular."
+          },
+          "stopping_since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Since when the thread is being stopped: the oldest Stop that was asked for and is not over, whether it names\na turn that has not yet stopped or waits to be carried out. Absent while nobody is stopping it."
+          },
           "blocked": {
             "anyOf": [
               {
@@ -113256,6 +113288,11 @@
           },
           {
             "type": "string",
+            "const": "recording",
+            "description": "The files of the directory, recorded before the turn so that they can be put back."
+          },
+          {
+            "type": "string",
             "const": "files",
             "description": "Its files."
           },
@@ -113266,6 +113303,27 @@
           }
         ],
         "description": "What a starting thread is waiting for."
+      },
+      "StartingWork": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The kind of command the step waits for, such as `fs.mkdir`, `git.prepare` or `fs.record`."
+          },
+          "behind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The kind of command of other work, on the same machine and in the same line, that it waits behind."
+          }
+        },
+        "required": [
+          "command",
+          "behind"
+        ],
+        "description": "The command a starting thread's step waits for, and the other work that holds it up."
       },
       "ThreadBlocked": {
         "type": "object",
@@ -135235,6 +135293,13 @@
             },
             "description": "The other parameters that are eligible and enabled."
           },
+          "withheld": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WithheldParameter"
+            },
+            "description": "The speeds, access programs and context sizes that the model's managers opened and that this thread cannot use, each with why."
+          },
           "approval_mode": {
             "type": "string",
             "description": "The resolved native permission mode, independent of boundary requests."
@@ -135668,6 +135733,152 @@
           }
         ],
         "description": "When a changed parameter takes effect."
+      },
+      "WithheldParameter": {
+        "type": "object",
+        "properties": {
+          "choice": {
+            "$ref": "#/components/schemas/WithheldChoice",
+            "description": "Which choice it is."
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The key of the agent's parameter that stands for it; none where the agent declares no such parameter."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/WithheldReason",
+            "description": "Why the thread cannot make it."
+          }
+        },
+        "required": [
+          "choice",
+          "reason"
+        ],
+        "description": "A choice that a model's managers opened and that this thread cannot make, with the reason."
+      },
+      "WithheldChoice": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "speed",
+            "description": "A speed beside the ordinary one."
+          },
+          {
+            "type": "string",
+            "const": "access",
+            "description": "An access program."
+          },
+          {
+            "type": "string",
+            "const": "context",
+            "description": "A context larger than the model's own window."
+          }
+        ],
+        "description": "The three choices of a thread that a model's entry opens, and that a thread's agent may not offer."
+      },
+      "WithheldReason": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "agent"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The thread's agent takes no such choice."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "access"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs another way of reaching the model: the credential has to stay with the provider."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "placement"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs the other kind of environment: one Orch manages, or a person's own machine."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "provider_kind"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs the other kind of provider: a subscription or a key."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "feature": {
+                "type": "string",
+                "description": "The feature, as `agent.features` names it."
+              },
+              "why": {
+                "type": "string",
+                "const": "feature"
+              }
+            },
+            "required": [
+              "why",
+              "feature"
+            ],
+            "description": "A feature of agents that is off where the thread runs, as `agent.features` says."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "provider"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The provider's own rule for the model leaves the choice out."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "condition"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "Another condition the agent declares for the choice does not hold."
+          }
+        ],
+        "description": "Why a choice that a manager of the provider switched on for the model is not one this thread can make."
       },
       "ApprovalReviewer": {
         "type": "object",
@@ -151818,6 +152029,23 @@
             "properties": {
               "marker": {
                 "type": "string",
+                "const": "session_reopened"
+              },
+              "data": {
+                "$ref": "#/components/schemas/MarkerSessionReopened"
+              }
+            },
+            "required": [
+              "marker",
+              "data"
+            ],
+            "description": "The thread's next turn opened its session again, and why."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "marker": {
+                "type": "string",
                 "const": "limit_bypassed"
               },
               "data": {
@@ -153529,6 +153757,69 @@
         ],
         "description": "The resumed session keeps its original instructions until a new session is made."
       },
+      "MarkerSessionReopened": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "$ref": "#/components/schemas/SessionReopenReason",
+            "description": "Why."
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "description": "The thread's next turn opened its session again."
+      },
+      "SessionReopenReason": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "unknown",
+            "description": "The session was not known to be open: the server or the program started again since it was opened."
+          },
+          {
+            "type": "string",
+            "const": "instructions",
+            "description": "The instructions changed."
+          },
+          {
+            "type": "string",
+            "const": "limits",
+            "description": "The limits on its sub-agents changed."
+          },
+          {
+            "type": "string",
+            "const": "configuration",
+            "description": "The start directory or another setting that only a new session takes changed."
+          },
+          {
+            "type": "string",
+            "const": "mcp",
+            "description": "The MCP servers it is offered changed."
+          },
+          {
+            "type": "string",
+            "const": "tools",
+            "description": "The Orch tools it is offered changed."
+          },
+          {
+            "type": "string",
+            "const": "skills",
+            "description": "The skills it is given changed."
+          },
+          {
+            "type": "string",
+            "const": "program_reloads",
+            "description": "The program reads the directory's files again each time its session is opened, so it is opened at each turn."
+          },
+          {
+            "type": "string",
+            "const": "side_history",
+            "description": "The history of a side thread is read from its parent again."
+          }
+        ],
+        "description": "Why a thread's next turn opened its session again, where the session had been opened before."
+      },
       "MarkerLimitBypassed": {
         "type": "object",
         "properties": {
@@ -154440,6 +154731,14 @@
             "format": "uuid",
             "description": "The complete or explicitly unavailable recorded files before this turn."
           },
+          "files_changed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many included files the turn changed, whoever changed them: the difference of the files recorded\nbefore it and the files observed at its end. `null` while either is missing (the files were not\nrecorded, or the end has not been observed yet)."
+          },
           "model": {
             "type": "string",
             "description": "The model's routing name."
@@ -154514,6 +154813,14 @@
               }
             ],
             "description": "Who stopped it."
+          },
+          "interrupted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the stop was asked for, which is when the clock of a turn that is stopping starts; absent for a turn\nnobody stopped."
           },
           "command_cleanup": {
             "anyOf": [
@@ -157466,15 +157773,60 @@
         "additionalProperties": false,
         "properties": {
           "turn_id": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "uuid",
-            "description": "The turn."
+            "description": "The turn. Left out, the Stop is of the start of the thread's next turn: the thread is recording the\nfiles of its directory or writing the message's files, and there is no turn to name yet."
+          }
+        },
+        "description": "Stops a turn, or the start of the next one."
+      },
+      "ThreadStop": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/StopState",
+            "description": "Whether the program has stopped."
+          },
+          "requested_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the Stop was asked for, which is when its clock starts."
+          },
+          "turn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Turn"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The turn it names, as it stands; absent for the Stop of a start that has no turn yet."
           }
         },
         "required": [
-          "turn_id"
+          "state",
+          "requested_at"
         ],
-        "description": "Stops a turn."
+        "description": "A Stop as it is answered the moment it is taken."
+      },
+      "StopState": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "stopping",
+            "description": "Asked for, and the program has not yet confirmed that it stopped."
+          },
+          {
+            "type": "string",
+            "const": "stopped",
+            "description": "Nothing is left to wait for: the start was given up, or the turn was over."
+          }
+        ],
+        "description": "How far a Stop has come."
       },
       "ThreadQueueResumeBody": {
         "type": "object",
@@ -178560,7 +178912,7 @@
         "required": [
           "model_names"
         ],
-        "description": "Accepts models that discovery suggested. Each is added with what its suggestion says of it,\nexcept that the service tiers and access programs it lists and a context larger than the usual\none become `parameters.offered`, and none of them is enabled."
+        "description": "Accepts models that discovery suggested. Each is added with what its suggestion says of it, and what\nthe organization chose to switch on (`models.add_switches_on`) is enabled: by default every effort, the\nwindow, every context size, speed and access program it lists. Whatever is left off stays under\n`parameters.offered`, and what a thread starts with is never taken from a suggestion."
       },
       "ProviderModelSuggestionAcceptResponse": {
         "anyOf": [

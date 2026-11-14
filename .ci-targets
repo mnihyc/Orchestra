@@ -1,0 +1,8 @@
+fmt
+clippy
+test -p orch-engine --test turns --test approvals --test background_stop --test background_wake
+test -p orch-adapter-codex --lib
+test -p orch-adapter-codex --test prompt_cases --test sessions
+web typecheck
+web lint
+web test -- tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts
