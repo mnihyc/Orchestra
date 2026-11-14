@@ -535,7 +535,7 @@ mod tests {
         let frames = [
             json!({ "t": "cmd", "id": A, "k": "session.close", "key": B, "deadline": "2026-10-08T17:04:35.000Z",
                     "b": { "thread_id": B } }),
-            json!({ "t": "cmd_ack", "id": A }),
+            json!({ "t": "cmd_ack", "id": A, "key_phase": "queued" }),
             json!({ "t": "cmd_res", "id": A, "ok": true, "b": {} }),
             json!({ "t": "cmd_res", "id": A, "ok": false,
                     "err": { "code": "timeout", "detail": "the harness did not answer", "retryable": true } }),

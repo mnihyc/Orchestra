@@ -26844,6 +26844,44 @@
             }
           },
           {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same immutable archive selection."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Match archive child names without regard to case."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Archive rows in this page; omitted uses the current default."
+            }
+          },
+          {
             "name": "archive",
             "in": "query",
             "required": false,
@@ -28283,6 +28321,44 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same immutable archive selection."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Match archive child names without regard to case."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Archive rows in this page; omitted uses the current default."
             }
           },
           {
@@ -33732,7 +33808,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "One through 5,000 rows, with an independent two-MiB serialized page bound."
+              "description": "Positive rows per page; omitted uses the workspace default, with independent wire-byte paging."
             }
           }
         ]
@@ -35286,6 +35362,18 @@
             }
           },
           {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue exactly this selected search."
+            }
+          },
+          {
             "name": "thread",
             "in": "query",
             "required": false,
@@ -35382,7 +35470,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "With content: how many matches at most, [`FILE_SEARCH_LIMIT_DEFAULT`] when left out and at\nmost [`FILE_SEARCH_LIMIT_MAX`]."
+              "description": "Matches in this page; the workspace's default when omitted. Continuation retains the rest."
             }
           }
         ]
@@ -35460,6 +35548,30 @@
             }
           },
           {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Match child names without regard to case."
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same archive selection."
+            }
+          },
+          {
             "name": "thread",
             "in": "query",
             "required": false,
@@ -35504,7 +35616,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries at most, [`ARCHIVE_LIST_LIMIT_DEFAULT`] when left out and at most\n[`ARCHIVE_LIST_LIMIT_MAX`]."
+              "description": "Entries in this page; omitted uses the workspace default. Continuation retains the rest."
             }
           }
         ]
@@ -35769,6 +35881,32 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same native Git output."
+            }
+          },
+          {
+            "name": "max_bytes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Preferred bytes in this page; omitted uses the workspace default."
             }
           },
           {
@@ -89995,6 +90133,30 @@
             }
           },
           {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Continue the same immutable archive selection."
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Match child names without regard to case."
+            }
+          },
+          {
             "name": "inspect_deleted",
             "in": "query",
             "required": false,
@@ -90029,7 +90191,7 @@
               ],
               "format": "uint32",
               "minimum": 0,
-              "description": "How many entries at most, [`crate::workspace::ARCHIVE_LIST_LIMIT_DEFAULT`] when left out and\nat most [`crate::workspace::ARCHIVE_LIST_LIMIT_MAX`]."
+              "description": "Entries in this page; omitted uses the place's archive-row default."
             }
           }
         ]
@@ -112617,6 +112779,25 @@
             ],
             "description": "What a starting thread is waiting for."
           },
+          "starting_since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the step it is waiting for began."
+          },
+          "starting_work": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StartingWork"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The command that step waits for, and what holds it up; none while it waits for nothing in particular."
+          },
           "blocked": {
             "anyOf": [
               {
@@ -113256,6 +113437,11 @@
           },
           {
             "type": "string",
+            "const": "recording",
+            "description": "The files of the directory, recorded before the turn so that they can be put back."
+          },
+          {
+            "type": "string",
             "const": "files",
             "description": "Its files."
           },
@@ -113266,6 +113452,27 @@
           }
         ],
         "description": "What a starting thread is waiting for."
+      },
+      "StartingWork": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The kind of command the step waits for, such as `fs.mkdir`, `git.prepare` or `fs.record`."
+          },
+          "behind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The kind of command of other work, on the same machine and in the same line, that it waits behind."
+          }
+        },
+        "required": [
+          "command",
+          "behind"
+        ],
+        "description": "The command a starting thread's step waits for, and the other work that holds it up."
       },
       "ThreadBlocked": {
         "type": "object",
@@ -127507,6 +127714,11 @@
             "type": "string",
             "const": "scan_time",
             "description": "One scan took too long."
+          },
+          {
+            "type": "string",
+            "const": "unreadable",
+            "description": "Some workspace metadata or exclusion rules could not be read."
           }
         ],
         "description": "Why a workspace is listed live instead of indexed."
@@ -135235,6 +135447,13 @@
             },
             "description": "The other parameters that are eligible and enabled."
           },
+          "withheld": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WithheldParameter"
+            },
+            "description": "The speeds, access programs and context sizes that the model's managers opened and that this thread cannot use, each with why."
+          },
           "approval_mode": {
             "type": "string",
             "description": "The resolved native permission mode, independent of boundary requests."
@@ -135668,6 +135887,152 @@
           }
         ],
         "description": "When a changed parameter takes effect."
+      },
+      "WithheldParameter": {
+        "type": "object",
+        "properties": {
+          "choice": {
+            "$ref": "#/components/schemas/WithheldChoice",
+            "description": "Which choice it is."
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The key of the agent's parameter that stands for it; none where the agent declares no such parameter."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/WithheldReason",
+            "description": "Why the thread cannot make it."
+          }
+        },
+        "required": [
+          "choice",
+          "reason"
+        ],
+        "description": "A choice that a model's managers opened and that this thread cannot make, with the reason."
+      },
+      "WithheldChoice": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "speed",
+            "description": "A speed beside the ordinary one."
+          },
+          {
+            "type": "string",
+            "const": "access",
+            "description": "An access program."
+          },
+          {
+            "type": "string",
+            "const": "context",
+            "description": "A context larger than the model's own window."
+          }
+        ],
+        "description": "The three choices of a thread that a model's entry opens, and that a thread's agent may not offer."
+      },
+      "WithheldReason": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "agent"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The thread's agent takes no such choice."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "access"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs another way of reaching the model: the credential has to stay with the provider."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "placement"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs the other kind of environment: one Orch manages, or a person's own machine."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "provider_kind"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs the other kind of provider: a subscription or a key."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "feature": {
+                "type": "string",
+                "description": "The feature, as `agent.features` names it."
+              },
+              "why": {
+                "type": "string",
+                "const": "feature"
+              }
+            },
+            "required": [
+              "why",
+              "feature"
+            ],
+            "description": "A feature of agents that is off where the thread runs, as `agent.features` says."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "provider"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The provider's own rule for the model leaves the choice out."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "condition"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "Another condition the agent declares for the choice does not hold."
+          }
+        ],
+        "description": "Why a choice that a manager of the provider switched on for the model is not one this thread can make."
       },
       "ApprovalReviewer": {
         "type": "object",
@@ -154440,6 +154805,42 @@
             "format": "uuid",
             "description": "The complete or explicitly unavailable recorded files before this turn."
           },
+          "files_changed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many paths changed during the turn, from complete recordings or the index journal."
+          },
+          "files_changed_paths": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Directory-relative paths from the end observation, independent of tool patches."
+          },
+          "recording_notice": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why whole recording is unavailable, on the thread's first affected turn only."
+          },
+          "recording_indexing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnRecordingProgress"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Indexing progress at the turn's first recording fallback."
+          },
           "model": {
             "type": "string",
             "description": "The model's routing name."
@@ -154645,6 +155046,28 @@
           }
         ],
         "description": "How far a turn has come."
+      },
+      "TurnRecordingProgress": {
+        "type": "object",
+        "properties": {
+          "done": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Files examined by the background pass."
+          },
+          "total": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Files included in that pass."
+          }
+        },
+        "required": [
+          "done",
+          "total"
+        ],
+        "description": "The indexing progress observed when a turn starts with per-file restore."
       },
       "TurnUsageDetail": {
         "type": "object",
@@ -157030,6 +157453,29 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same immutable archive selection."
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Match archive child names without regard to case."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0,
+            "description": "Archive rows in this page; omitted uses the current default."
+          },
           "archive": {
             "type": [
               "boolean",
@@ -162192,7 +162638,7 @@
             ],
             "format": "uint32",
             "minimum": 0,
-            "description": "One through 5,000 rows, with an independent two-MiB serialized page bound."
+            "description": "Positive rows per page; omitted uses the workspace default, with independent wire-byte paging."
           }
         },
         "required": [
@@ -163136,6 +163582,13 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue exactly this selected search."
+          },
           "thread": {
             "type": [
               "string",
@@ -163194,7 +163647,7 @@
             ],
             "format": "uint32",
             "minimum": 0,
-            "description": "With content: how many matches at most, [`FILE_SEARCH_LIMIT_DEFAULT`] when left out and at\nmost [`FILE_SEARCH_LIMIT_MAX`]."
+            "description": "Matches in this page; the workspace's default when omitted. Continuation retains the rest."
           }
         },
         "required": [
@@ -163207,7 +163660,7 @@
           {
             "type": "string",
             "const": "names",
-            "description": "A substring of the path, without regard to case, in the latest manifest."
+            "description": "A substring of the path, from live traversal or the last complete cached manifest."
           },
           {
             "type": "string",
@@ -163220,11 +163673,8 @@
       "EnvironmentFileSearchReply": {
         "anyOf": [
           {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/DirEntry"
-            },
-            "description": "For a search by name: at most [`FILE_SEARCH_NAMES_MAX`] entries."
+            "$ref": "#/components/schemas/FileSearchNames",
+            "description": "Matching names with source coverage and continuation."
           },
           {
             "$ref": "#/components/schemas/FileSearchContent",
@@ -163233,9 +163683,74 @@
         ],
         "description": "What a search in files found."
       },
+      "FileSearchNames": {
+        "type": "object",
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DirEntry"
+            },
+            "description": "Matching paths from this observation."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The next window of the same selected search."
+          },
+          "source": {
+            "$ref": "#/components/schemas/FilesSource",
+            "description": "Live traversal or the last complete cached manifest."
+          },
+          "as_of": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The end of this page's observation."
+          },
+          "observed_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The beginning of live traversal, or the cached manifest's observation time."
+          },
+          "searched": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Entries examined so far; this is not a count of the whole directory."
+          }
+        },
+        "required": [
+          "entries",
+          "next_cursor",
+          "source",
+          "as_of",
+          "observed_from",
+          "searched"
+        ],
+        "description": "A filename-search window with its actual source and continuation."
+      },
       "FileSearchContent": {
         "type": "object",
         "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same live traversal; null means it reached the end."
+          },
+          "observed_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The beginning of live observation."
+          },
           "matches": {
             "type": "array",
             "items": {
@@ -163245,7 +163760,7 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "Whether there were more than were returned."
+            "description": "Whether traversal can continue; another slice may examine entries without finding a match."
           },
           "searched": {
             "type": "integer",
@@ -163310,6 +163825,20 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Match child names without regard to case."
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same archive selection."
+          },
           "thread": {
             "type": [
               "string",
@@ -163336,7 +163865,7 @@
             ],
             "format": "uint32",
             "minimum": 0,
-            "description": "How many entries at most, [`ARCHIVE_LIST_LIMIT_DEFAULT`] when left out and at most\n[`ARCHIVE_LIST_LIMIT_MAX`]."
+            "description": "Entries in this page; omitted uses the workspace default. Continuation retains the rest."
           }
         },
         "required": [
@@ -163347,6 +163876,13 @@
       "ArchiveListing": {
         "type": "object",
         "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same archive traversal, including a slice with no matching child."
+          },
           "format": {
             "$ref": "#/components/schemas/ArchiveFormat",
             "description": "Its format."
@@ -163697,6 +164233,22 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same native Git output."
+          },
+          "max_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Preferred bytes in this page; omitted uses the workspace default."
+          },
           "thread": {
             "type": [
               "string",
@@ -178560,7 +179112,7 @@
         "required": [
           "model_names"
         ],
-        "description": "Accepts models that discovery suggested. Each is added with what its suggestion says of it,\nexcept that the service tiers and access programs it lists and a context larger than the usual\none become `parameters.offered`, and none of them is enabled."
+        "description": "Accepts models that discovery suggested. Each is added with what its suggestion says of it, and what\nthe organization chose to switch on (`models.add_switches_on`) is enabled: by default every effort, the\nwindow, every context size, speed and access program it lists. Whatever is left off stays under\n`parameters.offered`, and what a thread starts with is never taken from a suggestion."
       },
       "ProviderModelSuggestionAcceptResponse": {
         "anyOf": [
@@ -201460,6 +202012,20 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continue the same immutable archive selection."
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Match child names without regard to case."
+          },
           "inspect_deleted": {
             "type": [
               "boolean",
@@ -201481,7 +202047,7 @@
             ],
             "format": "uint32",
             "minimum": 0,
-            "description": "How many entries at most, [`crate::workspace::ARCHIVE_LIST_LIMIT_DEFAULT`] when left out and\nat most [`crate::workspace::ARCHIVE_LIST_LIMIT_MAX`]."
+            "description": "Entries in this page; omitted uses the place's archive-row default."
           }
         },
         "description": "What to list of a file that is an archive."

@@ -959,6 +959,7 @@ mod tests {
             environment_id: new_id(),
             snapshot_id: new_id(),
             directory: String::new(),
+            wait_for_indexing: true,
             kind: orch_link_contract::source::RecordKind::Turn,
             record_days: 1,
             max_bytes: 1024,

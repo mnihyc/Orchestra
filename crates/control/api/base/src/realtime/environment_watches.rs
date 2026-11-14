@@ -677,15 +677,9 @@ impl Sources {
                 else {
                     return Ok(());
                 };
-                let observation = orch_types::new_id();
                 inner
                     .engine()?
-                    .begin_git_read(id, &target.1, observation, eph.at)
-                    .await
-                    .map_err(Fail::other)?;
-                inner
-                    .engine()?
-                    .finish_git_read(id, &target.1, observation, eph.at, &report.status)
+                    .remember_git_report(id, &target.1, eph.at, &report.status)
                     .await
                     .map_err(Fail::other)?;
                 for (feed, selected) in &self.git_targets {
