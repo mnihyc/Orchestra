@@ -649,6 +649,11 @@ impl CommandAuthority {
     /// Take the native owner's factual row fence before its canonical command row.
     /// This grants nothing; the live verifier still restores and checks the original source.
     pub async fn lock_native_source(&self, conn: &mut Conn) -> Result<(), EngineError> {
+        if self.reads_before_fence() {
+            // Its verifier reads the words first, then takes this same native footprint and
+            // proves their versions unchanged. An outer lock would make that read hold the rows.
+            return Ok(());
+        }
         match self {
             Self::ResourceSummary(authority) => authority.lock_source(conn).await,
             Self::SideHistory(authority) => authority.lock_source(conn).await,
@@ -683,6 +688,51 @@ impl CommandAuthority {
             Self::CapabilitySession(authority) => authority.lock_source(conn).await,
             _ => Ok(()),
         }
+    }
+
+    /// Whether the native verifier takes its source fence after reading the words, so the
+    /// caller must run it before taking the canonical command row as well.
+    #[must_use]
+    pub fn reads_before_fence(&self) -> bool {
+        match self {
+            Self::ResourceSummary(authority) => authority.reads_before_fence(),
+            Self::Http(authority) => authority.reads_before_fence(),
+            Self::CapabilityService(authority) => {
+                authority.native().is_some_and(Self::reads_before_fence)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the rows around this stored command already refuse it, decided before the native
+    /// source's rows are taken, so that a command refused for that reason never holds a person's
+    /// thread for the time its refusal takes. `false` leaves the decision to the check under the
+    /// source's fence, as for every authority that has no such part.
+    pub async fn refused_without_fence(
+        &self,
+        conn: &mut Conn,
+        command: &CommandRow,
+    ) -> Result<bool, EngineError> {
+        match self {
+            Self::ResourceSummary(authority) => {
+                authority.refused_without_fence(conn, command).await
+            }
+            Self::Http(authority) => Box::pin(authority.refused_without_fence(conn, command)).await,
+            Self::CapabilityService(authority) => match authority.native() {
+                Some(source) => Box::pin(source.refused_without_fence(conn, command)).await,
+                None => Ok(false),
+            },
+            _ => Ok(false),
+        }
+    }
+
+    /// Whether the check made on the new command before its insertion, in the same transaction and under the same
+    /// row fence, stands for the whole of the check after it: what is left to ask after the insertion is what the rows
+    /// around the stored command say (`refused_without_fence`). Only a summary's authority, whose check reads the
+    /// whole source, says so.
+    #[must_use]
+    pub fn checked_at_issue(&self) -> bool {
+        matches!(self, Self::ResourceSummary(_)) || self.reads_before_fence()
     }
 
     /// Native operation-owned suppliers also prepare their actual queue insertion after waits.

@@ -2717,6 +2717,8 @@ registry! {
         "Shared mail server", "Whether a root org that has no mail server of its own sends its mail through the system's.";
     API_IDEMPOTENCY_WINDOW = "api.idempotency_window", System, Parameter, SYSTEM, Replace, value("24"), int(0, Unit::Hours),
         "Creation replay window", "How many hours a creation key retains its accepted identity; 0 disables replay. This default can be increased.";
+    API_READ_REPEATS = "api.read_repeats", System, Parameter, SYSTEM, Replace, value("3"), int(0, Unit::Count),
+        "Repeated reads", "How many times a read is made again, in place of being refused, when what it showed has moved while it was being answered; 0 makes no repeat.";
     RELEASE_CHECK_DAYS = "release.check_days", System, Policy, SYSTEM, Replace, value("0"), int(0, Unit::Days),
         "Look for a release", "Days between read-only checks of the operator's configured release source; 0 is off. A check sends no installation statistics and installs nothing.";
     CLEANUP_RELEASE_KEEP_COUNT = "cleanup.release_keep_count", Retention, Policy, SYSTEM, Replace, value("3"), int(0, Unit::Count),

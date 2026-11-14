@@ -2,6 +2,7 @@
 use super::*;
 use orch_plugin_contract::refs::NodeRef;
 use orch_provider_contract::{
+    SourceErrorCode,
     calls::Purpose,
     capabilities::{CallSource, CapabilityCall, Executors},
 };
@@ -47,24 +48,27 @@ impl Engine {
 
     async fn run_resource_summary(&self, request: rows::Request) -> Result<(), EngineError> {
         let token = request.lease_token.ok_or_else(refused)?;
-        let preparation = self.prepare_resource_work(&request, token).await;
+        let mut told = None;
+        let preparation = self.prepare_resource_work(&request, token, &mut told).await;
         let work = match preparation {
             Ok(work) => work,
-            Err(_) => {
-                self.finish_resource_failure(&request, token, true).await?;
+            Err(error) => {
+                self.finish_resource_failure(&request, token, None, told, &error)
+                    .await?;
                 return Ok(());
             }
         };
-        let attempt = self.execute_resource_work(&work).await;
+        let attempt = self.execute_resource_work(&work, &mut told).await;
         match attempt {
             Ok((text, actual)) => {
                 let current = work.candidate(&actual);
                 let mut tx = self.db().begin().await?;
                 let frame = match current.frame(&mut tx, self.inner.clock.as_ref()).await {
                     Ok(frame) => frame,
-                    Err(_) => {
+                    Err(error) => {
                         drop(tx);
-                        self.finish_resource_failure(&request, token, true).await?;
+                        self.finish_resource_discarded(&request, token, &error)
+                            .await?;
                         return Ok(());
                     }
                 };
@@ -97,30 +101,70 @@ impl Engine {
                 .await?;
                 tx.commit().await.map_err(DbError::from)?;
             }
-            Err(_) => {
-                self.finish_resource_failure(&request, token, false).await?;
+            Err(error) => {
+                self.finish_resource_failure(&request, token, Some(&work), told, &error)
+                    .await?;
             }
         }
         Ok(())
     }
 
+    /// The request ends without a paragraph, and says why: the first thing the person can change
+    /// that no longer holds. A request that was refused before any model was asked, and for which
+    /// nothing can be named, found its source or settings changed under it: it is discarded, as a
+    /// newer act supersedes it, and no failure is shown. Once the model was asked, a request with no
+    /// nameable cause still fails, so that the person is told that something went wrong.
     async fn finish_resource_failure(
         &self,
         request: &rows::Request,
         token: Id,
-        discard: bool,
+        work: Option<&Work>,
+        told: Option<Reason>,
+        error: &EngineError,
     ) -> Result<(), EngineError> {
+        // What no longer holds is the reason when something does not; what the work itself saw of
+        // the model is the reason when everything else still holds. A source with nothing in it needs
+        // no model, whatever the model's state.
+        let judged = if told == Some(Reason::NothingNew) {
+            None
+        } else {
+            match self.explain_resource_failure(request, work).await {
+                Ok(reason) => reason,
+                Err(cause) => {
+                    tracing::warn!(request = %request.id, error = %cause, "the reason a summary failed could not be looked up");
+                    None
+                }
+            }
+        };
+        let reason = judged
+            .or(told)
+            .or_else(|| work.is_some().then_some(Reason::Unexpected));
+        let problem = reason.map(|reason| {
+            json!({"code":"summary_unavailable","message":reason.sentence(),"reason":reason.code()})
+        });
+        match reason {
+            Some(reason) => tracing::warn!(
+                request = %request.id,
+                reason = reason.code(),
+                error = %error,
+                "a summary could not be written: {}",
+                reason.sentence()
+            ),
+            None => tracing::info!(
+                request = %request.id,
+                error = %error,
+                "a summary request was discarded: its source or settings changed after it was asked"
+            ),
+        }
         let mut tx = self.db().begin().await?;
-        let problem = json!({"code":"summary_unavailable","message":"The summary could not be refreshed. The previous paragraph is kept."});
         rows::finish(
             &mut tx,
             request.id,
             token,
             self.inner.clock.as_ref(),
-            if discard {
-                rows::Outcome::Discarded
-            } else {
-                rows::Outcome::Failed(&problem)
+            match &problem {
+                Some(problem) => rows::Outcome::Failed(problem),
+                None => rows::Outcome::Discarded,
             },
         )
         .await?;
@@ -128,10 +172,188 @@ impl Engine {
         Ok(())
     }
 
+    /// A paragraph that was written about material that changed meanwhile is not kept; the next
+    /// request is the person's, or the settings', to make.
+    async fn finish_resource_discarded(
+        &self,
+        request: &rows::Request,
+        token: Id,
+        error: &EngineError,
+    ) -> Result<(), EngineError> {
+        tracing::info!(
+            request = %request.id,
+            error = %error,
+            "a summary was discarded: its source or settings changed while it was written"
+        );
+        let mut tx = self.db().begin().await?;
+        rows::finish(
+            &mut tx,
+            request.id,
+            token,
+            self.inner.clock.as_ref(),
+            rows::Outcome::Discarded,
+        )
+        .await?;
+        tx.commit().await.map_err(DbError::from)?;
+        Ok(())
+    }
+
+    /// Who asked, as the work would restore them: the raw sign-in or key, the captured operation,
+    /// or the standing of whoever pays for an automatic refresh. A caller that ended is a refusal.
+    async fn asker_of(
+        &self,
+        conn: &mut Conn,
+        request: &rows::Request,
+        work: Option<&Work>,
+    ) -> Result<Caller, EngineError> {
+        if let Some(work) = work {
+            return work.caller(conn, self.inner.clock.as_ref()).await;
+        }
+        let payer = request.paying_user.ok_or_else(refused)?;
+        let http = request
+            .accepted_source
+            .get("http")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .map(serde_json::from_value::<operation_scope::http_origin::HttpOrigin>)
+            .transpose()?;
+        if let Some(http) = &http {
+            return Ok(http
+                .current(conn, self.inner.clock.as_ref())
+                .await
+                .map_err(command::frame_error)?
+                .caller()
+                .clone());
+        }
+        if let Some(origin) = &request.accepted_operation {
+            let origin: CapturedOperation = serde_json::from_value(origin.clone())?;
+            if origin.user() != payer
+                || origin.operation() != summary_sources::RESOURCE_REFRESH.operation
+            {
+                return Err(refused());
+            }
+            return origin
+                .restore_current(conn, self.inner.clock.as_ref())
+                .await?
+                .ok_or_else(refused);
+        }
+        Ok(Caller::session(payer).with_admin_mode(false))
+    }
+
+    /// The first thing that no longer holds, looked at again in a transaction that is never
+    /// committed: who asked, what the summary is about, the model and its provider, and the usage
+    /// limits. `None` when everything still holds.
+    async fn explain_resource_failure(
+        &self,
+        request: &rows::Request,
+        work: Option<&Work>,
+    ) -> Result<Option<Reason>, EngineError> {
+        let mut tx = self.db().begin().await?;
+        orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+        let caller = match self.asker_of(&mut tx, request, work).await {
+            Ok(caller) => caller,
+            Err(EngineError::BeforeEffect(_)) => return Ok(Some(Reason::AskerEnded)),
+            Err(error) => return Err(error),
+        };
+        let principal = match Principal::load(&mut tx, caller, self.inner.clock.time()).await {
+            Ok(principal) => principal,
+            Err(orch_authz::Error::Db(error)) => return Err(error.into()),
+            Err(_) => return Ok(Some(Reason::AskerEnded)),
+        };
+        let Some(target) = request
+            .accepted_source
+            .get("target")
+            .cloned()
+            .and_then(|target| serde_json::from_value::<SummaryTarget>(target).ok())
+        else {
+            return Ok(None);
+        };
+        let identity = match sources::identify(&mut tx, target).await {
+            Ok(identity) => identity,
+            Err(
+                sources::SourceError::Unavailable
+                | sources::SourceError::Authz(orch_authz::Error::NotFound(_)),
+            ) => return Ok(Some(Reason::SourceGone)),
+            Err(error) => return Err(source_error(error)),
+        };
+        let wanted: Vec<SummaryTarget> = match work {
+            Some(work) => work.refs.clone(),
+            None => vec![target],
+        };
+        for source in wanted {
+            match sources::readable(&mut tx, &principal, source).await {
+                Ok(true) => {}
+                Ok(false) => return Ok(Some(Reason::SourceUnreadable)),
+                Err(sources::SourceError::Unavailable) => return Ok(Some(Reason::SourceGone)),
+                Err(error) => return Err(source_error(error)),
+            }
+        }
+        let config = match work {
+            Some(work) => work.config.clone(),
+            None => {
+                let chosen = request
+                    .accepted_source
+                    .get("model")
+                    .filter(|value| !value.is_null())
+                    .cloned()
+                    .map(serde_json::from_value::<SummaryModelChoice>)
+                    .transpose()?;
+                let policy = options::resolve(&mut tx, &identity).await?;
+                let producer = policy
+                    .producer
+                    .as_ref()
+                    .filter(|producer| producer.kind == "model");
+                match (chosen, producer) {
+                    (Some(choice), _) => {
+                        let mut config: Config = serde_json::from_value(
+                            json!({"provider_id":choice.provider_id,"model_name":choice.model}),
+                        )?;
+                        config.params = choice.params.clone().unwrap_or_else(|| json!({}));
+                        config
+                    }
+                    (None, Some(producer)) => match Config::read(&producer.config) {
+                        Ok(config) => config,
+                        Err(_) => return Ok(Some(Reason::NoSummarizer)),
+                    },
+                    (None, None) => return Ok(Some(Reason::NoSummarizer)),
+                }
+            }
+        };
+        if let Err(reason) = judge_model(&mut tx, &principal, identity.place(), &config).await? {
+            return Ok(Some(reason));
+        }
+        let protocol = match resources::provider(&mut tx, config.provider_id).await? {
+            Some(provider) => completion_protocol(&provider.protocols)?,
+            None => None,
+        };
+        let tier = protocol.as_deref().and_then(|protocol| {
+            orch_model_contract::parameters::requested_tier_for_caps(protocol, &config.params)
+        });
+        if !crate::caps::own_room(
+            &mut tx,
+            &crate::caps::OwnCapAsk {
+                place: identity.place(),
+                provider: config.provider_id,
+                model: &config.model_name,
+                tier: tier.as_deref(),
+                purpose: "summary",
+                person: request.requested_by,
+            },
+            self.inner.clock.now(),
+        )
+        .await?
+        {
+            return Ok(Some(Reason::CapNoRoom));
+        }
+        Ok(None)
+    }
+
+    /// `told` receives the reason when the source has nothing in it, so that no model is asked.
     async fn prepare_resource_work(
         &self,
         request: &rows::Request,
         token: Id,
+        told: &mut Option<Reason>,
     ) -> Result<Work, EngineError> {
         if let Some(prepared) = &request.prepared {
             return serde_json::from_value(prepared.clone()).map_err(EngineError::from);
@@ -169,11 +391,11 @@ impl Engine {
             .map(serde_json::from_value::<operation_scope::http_origin::HttpOrigin>)
             .transpose()?;
         let caller = if let Some(http) = &http {
-            http.current(&mut tx, self.inner.clock.as_ref())
-                .await
-                .map_err(command::frame_error)?
-                .caller()
-                .clone()
+            // Material is read before the frame pins the original raw identity for its write.
+            http.origin()
+                .restore_current(&mut tx, self.inner.clock.as_ref())
+                .await?
+                .ok_or_else(refused)?
         } else if let Some(origin) = &request.accepted_operation {
             let origin: CapturedOperation = serde_json::from_value(origin.clone())?;
             if origin.user() != payer
@@ -202,6 +424,12 @@ impl Engine {
             || request.accepted_source.get("policy")
                 != Some(&serde_json::to_value(selected.policy.fingerprint)?)
         {
+            return Err(refused());
+        }
+        // Nothing unread, nothing written, no activity: there is nothing to say, and a model asked to
+        // summarize no material answers with a sentence about that, which would be kept as the summary.
+        if selected.material.activity.is_empty() {
+            *told = Some(Reason::NothingNew);
             return Err(refused());
         }
         let plan = operation_scope::sources::bind_required(
@@ -246,9 +474,12 @@ impl Engine {
         Ok(work)
     }
 
+    /// `told` receives what the work itself saw of the model: that it did not answer, or that its
+    /// answer could not be used. Whatever else no longer holds is looked at again by the caller.
     async fn execute_resource_work(
         &self,
         work: &Work,
+        told: &mut Option<Reason>,
     ) -> Result<(String, ProviderComplete), EngineError> {
         let mut tx = self.db().begin().await?;
         let frame = work.frame(&mut tx, self.inner.clock.as_ref()).await?;
@@ -345,6 +576,14 @@ impl Engine {
         let result = match executors.execute(call).await {
             Ok(result) => result,
             Err(error) => {
+                *told = match error.code {
+                    SourceErrorCode::Unavailable | SourceErrorCode::Timeout => {
+                        Some(Reason::ModelFailed)
+                    }
+                    SourceErrorCode::TooLarge => Some(Reason::OutputCut),
+                    SourceErrorCode::Malformed => Some(Reason::UnusableAnswer),
+                    _ => None,
+                };
                 // An unusable paid answer uses the same call rules as every summary. A
                 // precondition refusal with no answered command reserves no paid retry.
                 let chosen = super::super::Choice {
@@ -363,14 +602,17 @@ impl Engine {
                 return Err(EngineError::unreadable(error));
             }
         };
-        let text = result
+        let Some(text) = result
             .items
             .first()
             .and_then(|item| item.payload.get("text"))
             .and_then(Json::as_str)
             .filter(|text| !text.trim().is_empty())
-            .ok_or_else(refused)?
-            .to_owned();
+            .map(str::to_owned)
+        else {
+            *told = Some(Reason::UnusableAnswer);
+            return Err(refused());
+        };
         let mut conn = self.db().acquire().await?;
         let actual = crate::calls::read_root(&mut conn, place, Purpose::Summary, work.request)
             .await?

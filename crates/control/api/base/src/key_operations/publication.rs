@@ -401,49 +401,65 @@ async fn check_sources(ctx: &Ctx, sources: &[Arc<Source>]) -> ApiResult<()> {
     super::snapshot_read::retry_conflict(|| check_sources_once(ctx, sources)).await
 }
 
+/// The reader that a retained source is checked as, on a snapshot that is already open: the original HTTP
+/// identity as it is now, kept inside what the source accepted.
+async fn reader_of(
+    ctx: &Ctx,
+    tx: &mut Conn,
+    identity: &transaction_guard::CurrentHttpIdentity,
+    accepted: &Caller,
+) -> ApiResult<(Ctx, Principal)> {
+    if accepted.as_admin() && !identity.caller.as_admin() {
+        return Err(ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the response's administrator context has ended",
+        ));
+    }
+    let accepted = if accepted.grant().is_some() {
+        orch_authz::CapturedCaller::capture(accepted)
+            .restore_current(tx, ctx.app.clock.as_ref())
+            .await
+            .map_err(authorization::restoration_error)?
+            .ok_or_else(|| {
+                ApiError::new(ErrorCode::AuthInvalidToken, "the response key has ended")
+            })?
+    } else {
+        accepted.clone()
+    };
+    let caller = identity
+        .caller
+        .intersect_restrictions(&accepted)
+        .map_err(ApiError::internal)?;
+    ctx.publication
+        .retain_deadline(caller.grant().and_then(orch_authz::TokenGrant::expires_at))?;
+    let principal = authorization::load_principal(tx, caller, identity.now).await?;
+    let principal = crate::sign_in::second_step::hold(tx, &identity.user, principal).await?;
+    let current = ctx
+        .for_operation_checkpoint(identity.user.clone(), identity.now.get())
+        .with_snapshot_inspection()?;
+    Ok((current, principal))
+}
+
+/// Whether this request has a transport identity that a later read can be checked against.
+fn checkable(ctx: &Ctx) -> bool {
+    let native_read = ctx
+        .ask_read
+        .as_ref()
+        .is_some_and(|read| read.native_identity().is_some());
+    ctx.surface.is_some() || native_read
+}
+
 async fn check_sources_once(ctx: &Ctx, sources: &[Arc<Source>]) -> ApiResult<()> {
     let key = ctx.user().is_ok_and(|user| !user.is_session());
     if !key && sources.is_empty() {
         return Ok(());
     }
-    let native_read = ctx
-        .ask_read
-        .as_ref()
-        .is_some_and(|read| read.native_identity().is_some());
-    if (ctx.surface.is_some() || native_read) && (key || !sources.is_empty()) {
+    if checkable(ctx) && (key || !sources.is_empty()) {
         let mut tx = ctx.app.db.begin_snapshot().await?;
         let identity =
             transaction_guard::current_http_identity(ctx, &mut tx, HttpIdentityMode::Read).await?;
         for source in sources {
-            if source.accepted.as_admin() && !identity.caller.as_admin() {
-                return Err(ApiError::new(
-                    ErrorCode::AuthzDenied,
-                    "the response's administrator context has ended",
-                ));
-            }
-            let accepted = if source.accepted.grant().is_some() {
-                orch_authz::CapturedCaller::capture(&source.accepted)
-                    .restore_current(&mut tx, ctx.app.clock.as_ref())
-                    .await
-                    .map_err(authorization::restoration_error)?
-                    .ok_or_else(|| {
-                        ApiError::new(ErrorCode::AuthInvalidToken, "the response key has ended")
-                    })?
-            } else {
-                source.accepted.clone()
-            };
-            let caller = identity
-                .caller
-                .intersect_restrictions(&accepted)
-                .map_err(ApiError::internal)?;
-            ctx.publication
-                .retain_deadline(caller.grant().and_then(orch_authz::TokenGrant::expires_at))?;
-            let principal = authorization::load_principal(&mut tx, caller, identity.now).await?;
-            let principal =
-                crate::sign_in::second_step::hold(&mut tx, &identity.user, principal).await?;
-            let current = ctx
-                .for_operation_checkpoint(identity.user.clone(), identity.now.get())
-                .with_snapshot_inspection()?;
+            let (current, principal) = reader_of(ctx, &mut tx, &identity, &source.accepted).await?;
             let reads = current
                 .inspection
                 .as_ref()
@@ -459,6 +475,67 @@ async fn check_sources_once(ctx: &Ctx, sources: &[Arc<Source>]) -> ApiResult<()>
         identity.check_deadline(&ctx.app)?;
     }
     ctx.publication.check_deadline(ctx)
+}
+
+/// Reads a source once more, now, on a new snapshot and as the same reader that the final check of the
+/// answer uses, and gives what `read` makes of it. A read whose cut found that what it showed has moved,
+/// with the reader's access to every source unchanged, is made again here before its answer is built,
+/// so that the answer is the newer one and not a refusal. Nothing is retained: the answer that is kept
+/// is retained by its reader afterwards, and is checked at the end as every answer is. `None` when this
+/// request has no transport identity to be checked against.
+pub async fn read_again<T, R, F>(
+    ctx: &Ctx,
+    accepted: &Caller,
+    source: &T,
+    read: F,
+) -> ApiResult<Option<R>>
+where
+    T: Send + Sync,
+    R: Send,
+    F: for<'a> Fn(&'a Ctx, &'a mut Conn, &'a Principal, &'a T) -> BoxFuture<'a, ApiResult<R>>
+        + Send
+        + Sync,
+{
+    if !super::admission::same_response_origin(ctx, accepted)? {
+        return Err(ApiError::internal(
+            "response source changed credential origin",
+        ));
+    }
+    super::snapshot_read::retry_conflict(|| read_again_once(ctx, accepted, source, &read)).await
+}
+
+async fn read_again_once<T, R, F>(
+    ctx: &Ctx,
+    accepted: &Caller,
+    source: &T,
+    read: &F,
+) -> ApiResult<Option<R>>
+where
+    T: Send + Sync,
+    R: Send,
+    F: for<'a> Fn(&'a Ctx, &'a mut Conn, &'a Principal, &'a T) -> BoxFuture<'a, ApiResult<R>>
+        + Send
+        + Sync,
+{
+    if !checkable(ctx) {
+        return Ok(None);
+    }
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let identity =
+        transaction_guard::current_http_identity(ctx, &mut tx, HttpIdentityMode::Read).await?;
+    let (current, principal) = reader_of(ctx, &mut tx, &identity, accepted).await?;
+    let reads = current
+        .inspection
+        .as_ref()
+        .map(|info| info.reads.clone())
+        .unwrap_or_default();
+    let answer =
+        orch_db::queries::trace::read_scope(&reads, read(&current, &mut tx, &principal, source))
+            .await?;
+    tx.commit().await.map_err(DbError::from)?;
+    identity.check_deadline(&ctx.app)?;
+    ctx.publication.check_deadline(ctx)?;
+    Ok(Some(answer))
 }
 
 /// Called after Registry bookkeeping. Preserve completed effects and typed receipts;
