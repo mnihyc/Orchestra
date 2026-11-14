@@ -54,6 +54,26 @@ under shared caps. Size and interval values are defaults, not spending caps;
 locks above the place still apply. Call recovery follows the configured call
 rules for summaries.
 
+### Configure a summarizer
+
+Open the place's **Settings → Automation → Summarizer** and edit an own value.
+Choose a registered summarizer. For **API model**, choose the provider and model by
+name; the person saving must have provider Use. **Options** contains input and
+answer token defaults, the model's request options, and optional instructions for
+each field. It starts closed. Other registered kinds show their declared fields.
+No kind name, provider identifier or JSON configuration needs to be typed.
+
+Use the row's **Save** or **Discard**. Another setting's switch does not save this
+draft. Enable the desired automatic **Summary targets** separately; saving the
+summarizer does not enable automatic refresh by itself. Titles or tags use the
+summarizer only when their own automation choice says so.
+
+The confirmed value is stored in the server's database, not in the program image
+or browser. Program updates keep it with the database. **Reset to inherited**
+removes this place's override; it does not erase the inherited setting. Runtime
+provider access, model availability and usage caps are checked again when a
+summary runs.
+
 Without an explicit interval, threads use 120 seconds, topics 900 seconds,
 documents 300 seconds, and chats and chat titles 300 seconds. Topic changes
 aggregate many threads; document edits and chat messages usually arrive in

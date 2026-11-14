@@ -158,12 +158,41 @@ pub async fn machine_subjects(
 
 /// Current canonical identity for an already native-selected physical reference, including retained.
 /// This supplies no live read, private inspection or lifecycle authority.
+///
+/// A unit that a host runs (the container of a provider or of an environment) is no resource of
+/// its own: it has no owner, home or page. It is named by the host it runs on, exactly as that
+/// host's own machine is. Read as a machine of its own it was missing, and one such unit made
+/// every read that mentions it answer not-found.
 pub async fn machine_identities(
     conn: &mut Conn,
     machines: &[Id],
 ) -> ApiResult<std::collections::HashMap<Id, KeyResolvedTarget>> {
-    let result = shared::machine_identities(conn, machines).await;
-    target_result(conn, result).await
+    let units: Vec<(Id, Id)> = sqlx::query_as(
+        "SELECT id, host_id FROM machines WHERE id = ANY($1) AND runtime_id IS NOT NULL AND host_id IS NOT NULL",
+    )
+    .bind(machines)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(orch_db::DbError::from)?;
+    let own: Vec<Id> = machines
+        .iter()
+        .copied()
+        .filter(|machine| !units.iter().any(|(unit, _)| unit == machine))
+        .collect();
+    let result = shared::machine_identities(conn, &own).await;
+    let mut found = target_result(conn, result).await?;
+    for (unit, host) in units {
+        let host = resource_identity(
+            conn,
+            ObjectRef {
+                kind: ObjectKind::Host,
+                id: host,
+            },
+        )
+        .await?;
+        found.insert(unit, host);
+    }
+    Ok(found)
 }
 
 /// The very same subject producer used by `require_on_path_in`, followed by its

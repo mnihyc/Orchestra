@@ -6,10 +6,34 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
 import { shapeOf } from '@/features/settings/settingsModel';
 import { ValueControl } from '@/features/settings/ValueControl';
+import { SummarizerChoice } from '@/features/settings/SummarizerChoice';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 afterEach(async () => { cleanup(); await setLocale('en'); });
+
+for (const locale of ['en', 'zh-CN'] as const) it(`chooses a registered summarizer and edits its fields without writing JSON in ${locale}`, async () => {
+  await setLocale(locale);
+  const user = userEvent.setup(), changed = vi.fn();
+  const schema = { type: 'object', properties: { kind: { type: 'string' } }, additionalProperties: true,
+    'x-summarizers': [{ name: 'rules', title: 'Rule summaries', fields: ['summary'], config_schema: {
+      type: 'object', properties: { prefix: { type: 'string', default: 'Summary:' } }, required: ['prefix'], additionalProperties: false,
+    } }] };
+  function Editor() {
+    const [value, setValue] = useState<unknown>({});
+    const props = { schema, shape: shapeOf(schema), value, label: 'Producer', onChange: (next: unknown) => { changed(next); setValue(next); } };
+    return <SummarizerChoice {...props} />;
+  }
+  show(<Editor />);
+  await user.click(screen.getByRole('combobox', { name: 'Producer' }));
+  await user.click(screen.getByRole('option', { name: 'Rule summaries' }));
+  const prefix = screen.getByRole('textbox', { name: 'Prefix' });
+  expect(prefix).toHaveValue('Summary:');
+  await user.clear(prefix); await user.type(prefix, 'Review:');
+  expect(changed).toHaveBeenLastCalledWith({ kind: 'rules', prefix: 'Review:' });
+  expect(screen.queryByRole('textbox', { name: 'Producer' })).not.toBeInTheDocument();
+});
+
 for (const locale of ['en', 'zh-CN'] as const) it(`includes the untouched automatic=false member of a new document target in ${locale}`, async () => {
   await setLocale(locale);
   const user = userEvent.setup(), changed = vi.fn();

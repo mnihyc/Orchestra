@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-api-core --test settings
+web typecheck
+web lint
+web test -- tests/component/settings-required-members.test.tsx tests/component/managed-provider-settings.test.tsx tests/unit/help-summaries.test.ts

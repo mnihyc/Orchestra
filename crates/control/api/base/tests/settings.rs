@@ -83,6 +83,33 @@ fn value(value: Value) -> NodeSettingSetBody {
 }
 
 #[tokio::test]
+async fn the_summarizer_editor_is_given_registered_choices_and_their_configuration_fields() {
+    let world = World::new().await;
+    let ada = person(&world, "ada").await;
+    let defs = world
+        .app
+        .call(SettingRegistryGet, &[])
+        .token(&ada.token)
+        .send()
+        .await
+        .ok();
+    let summarizer = defs
+        .iter()
+        .find(|def| def.key == "auto.summarizer")
+        .unwrap();
+    let kinds = summarizer.schema["x-summarizers"]
+        .as_array()
+        .expect("registered kinds are offered as choices");
+    let model = kinds.iter().find(|kind| kind["name"] == "model").unwrap();
+    assert!(!model["title"].as_str().unwrap().is_empty());
+    let fields = &model["config_schema"]["properties"];
+    assert_eq!(fields["provider_id"]["format"], "uuid");
+    assert_eq!(fields["model_name"]["type"], "string");
+    assert!(fields.get("context_tokens").is_some());
+    assert!(fields.get("max_output_tokens").is_some());
+}
+
+#[tokio::test]
 async fn the_registry_lists_every_key_with_its_class_and_where_it_is_written() {
     let world = World::new().await;
     let ada = person(&world, "ada").await;

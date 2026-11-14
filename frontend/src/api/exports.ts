@@ -12,6 +12,8 @@
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 import { api, done, ok, repeatable } from '@/api/client';
 import { liveValue } from '@/api/liveValue';
+import { isOver } from '@/api/forks';
+import { readAgain } from '@/api/readAgain';
 import { documentPage, type DocumentPage } from '@/api/documents';
 import type { ChatExportFiles, Document, DocumentBlock, DocumentExport, DocumentExportChoice, DocumentRef, ExportDetail, ExportFormat, ExportPlan, ExportRequest, Job, Thread, Export as ExportRow } from '@/generated/api-types';
 
@@ -81,7 +83,9 @@ export function removeExport(id: string): Promise<void> {
 export const jobQuery = (id: string) =>
   queryOptions({
     queryKey: exportKeys.job(id),
-    queryFn: ({ signal }): Promise<Job> => liveValue(exportKeys.job(id), signal),
+    queryFn: ({ signal }): Promise<Job> => liveValue(exportKeys.job(id), signal, () => readJob(id, signal)),
+    // While the live connection is not up nothing else tells a screen that the job moved.
+    refetchInterval: readAgain<Job>((job) => job === undefined || !isOver(job.state), false),
   });
 
 /** Reads a job once, outside a component. */

@@ -61,7 +61,7 @@ export function SettingValue({ def, setting, target, ignored = false, onApply, .
       : def.key === 'org.terms' ? <OrgTermsControl {...control} setting={setting} target={target} hideLabel />
       : def.key === AGENT_ACCESS_SETTING ? <AgentAccessSetting {...control} hideLabel />
       : def.key === 'agent.default_provider_id' ? <ProviderDefaultChoice {...control} hideLabel />
-      : def.key === 'auto.summarizer' ? <SummarizerChoice {...control} hideLabel />
+      : def.key === 'auto.summarizer' ? <SummarizerChoice {...control} schema={def.schema} hideLabel />
       : def.key === 'summary.targets' ? <ValueControl {...control} shape={summaryShape} memberLabel={(name) => settingFieldName(name, def.key, t)} hideLabel />
         : def.key === EMBEDDINGS_SETTING ? <EmbeddingsChoice {...control} hideLabel />
         : def.key === SEMANTIC_TUNING_SETTING || def.key === WORD_TUNING_SETTING ? <SemanticTuning {...control} hideLabel />

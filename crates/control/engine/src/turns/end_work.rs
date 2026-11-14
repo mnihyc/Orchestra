@@ -79,8 +79,9 @@ fn failure_class(error: &EngineError) -> (&'static str, Option<String>) {
     match error {
         EngineError::Capability(_) => ("capability", None),
         EngineError::CapabilityPaused(_) => ("capability_paused", None),
-        EngineError::AskContextNoRoom => ("ask_context_no_room", None),
         EngineError::AskContextTooLong(_) => ("ask_context_too_long", None),
+        EngineError::AskTurnTooLong(_) => ("ask_turn_too_long", None),
+        EngineError::AskRefused { .. } => ("ask_refused", None),
         EngineError::BeforeEffect(_) => ("before_effect", None),
         EngineError::BackgroundRunning(_) => ("background_running", None),
         EngineError::Db(DbError::Unique { .. }) => ("db_unique", Some("23505".into())),
@@ -315,6 +316,15 @@ impl Engine {
 #[cfg(test)]
 mod diagnostics_tests {
     use super::*;
+
+    #[test]
+    fn a_refused_question_has_a_diagnostic_category_without_the_persons_words() {
+        let refusal = EngineError::AskRefused {
+            reason: "no_use".into(),
+            message: "Synthetic private question context".into(),
+        };
+        assert_eq!(failure_class(&refusal), ("ask_refused", None));
+    }
 
     #[test]
     fn failure_metadata_excludes_error_values_and_constraint_text() {
