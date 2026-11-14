@@ -735,6 +735,21 @@ async fn a_question_keeps_invalid_answers_pending_and_exposes_answered_in_every_
             .items
             .is_empty()
     );
+    rig::eventually("the answered question reaches the timeline", || async {
+        s.rig
+            .world
+            .app
+            .call(ThreadSyncGet, &[&thread])
+            .token(&s.cai.token)
+            .query(&ThreadSyncGetQuery::default())
+            .send()
+            .await
+            .ok()
+            .items
+            .iter()
+            .any(|item| item.kind() == ItemKind::Approval && item.status == ItemStatus::Answered)
+    })
+    .await;
     let sync = s
         .rig
         .world

@@ -116,7 +116,6 @@ export function MoveMember({ org, member, onClose }: MoveMemberProps) {
     queryKey: ['member-move-plan', org.id, member.user.id, to, role] as const,
     queryFn: ({ signal }) => previewMemberMove(org.id, member.user.id, to, role, signal),
     enabled: to !== '',
-    staleTime: 0,
     retry: false,
   });
   const plan = preview.data;

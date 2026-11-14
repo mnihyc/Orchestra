@@ -31,7 +31,7 @@ type Json = Record<string, unknown>;
 /** One option an entry may carry, as a field. */
 export type OptionField =
   | { key: string; kind: 'strings' }
-  | { key: string; kind: 'choices'; choices: readonly { value: string; hint: string; leaves: boolean }[] }
+  | { key: string; kind: 'choices'; choices: readonly { value: string; hint: string; leaves: boolean; defaultSelected?: boolean }[] }
   | { key: string; kind: 'integer' }
   | { key: string; kind: 'places' }
   | { key: string; kind: 'limits'; fields: readonly OptionField[] };
@@ -61,7 +61,7 @@ export function optionFields(schema: unknown, root: Json | null = isRecord(schem
       const items = follow(root, member.items);
       if (items !== null && isRecord(items.properties) && 'kind' in items.properties && 'id' in items.properties) fields.push({ key, kind: 'places' });
       else if (items !== null && Array.isArray(items.oneOf)) {
-        const choices = items.oneOf.flatMap((entry) => (isRecord(entry) && typeof entry.const === 'string' ? [{ value: entry.const, hint: typeof entry.description === 'string' ? entry.description : '', leaves: entry['x-credential-leaves'] === true }] : []));
+        const choices = items.oneOf.flatMap((entry) => (isRecord(entry) && typeof entry.const === 'string' ? [{ value: entry.const, hint: typeof entry.description === 'string' ? entry.description : '', leaves: entry['x-credential-leaves'] === true, defaultSelected: entry['x-default-selected'] === true }] : []));
         fields.push({ key, kind: 'choices', choices });
       } else fields.push({ key, kind: 'strings' });
     } else if (Array.isArray(member.anyOf)) {
@@ -74,10 +74,12 @@ export function optionFields(schema: unknown, root: Json | null = isRecord(schem
 
 /**
  * What an entry that leaves a choices member out has: where some choices let the credential leave the place it is kept in, only the
- * others, which are then the default; otherwise nothing, and so no narrowing. `null` for a member without such choices.
+ * others, which are then the default. Other choices can declare their default selection in the schema.
+ * `null` for a member without a declared default.
  */
 export function stayingChoices(field: Extract<OptionField, { kind: 'choices' }>): string[] | null {
-  return field.choices.some((choice) => choice.leaves) ? field.choices.filter((choice) => !choice.leaves).map((choice) => choice.value) : null;
+  if (field.choices.some((choice) => choice.leaves)) return field.choices.filter((choice) => !choice.leaves).map((choice) => choice.value);
+  return field.choices.some((choice) => choice.defaultSelected) ? field.choices.filter((choice) => choice.defaultSelected).map((choice) => choice.value) : null;
 }
 
 /** What is typed, read back as the options: a member left empty is left out. */
@@ -123,10 +125,12 @@ function valuesOf(fields: readonly OptionField[], options: unknown): Json {
 }
 
 export const optionLabel = (t: TFunction, key: string): string => {
-  const known = ['models', 'services', 'efforts', 'arrangements', 'max_environments', 'storages', 'resources_max', 'sources', 'templates', 'capabilities', 'where', 'cpu_millis', 'memory_mb', 'memory_swap_mb', 'blkio_weight', 'pids', 'disk_gb'];
+  const known = ['purposes', 'models', 'services', 'efforts', 'arrangements', 'max_environments', 'storages', 'resources_max', 'sources', 'templates', 'capabilities', 'where', 'cpu_millis', 'memory_mb', 'memory_swap_mb', 'blkio_weight', 'pids', 'disk_gb'];
   return known.includes(key) ? t(`access.options.${key}`, { defaultValue: key }) : key.replaceAll('_', ' ').replaceAll('.', ' ');
 };
 const optionChoice=(t:TFunction,value:string)=>offeredChoice(t,'arrangement',value)??offeredChoice(t,'effort',value);
+
+export const providerUsePurposeName = (t: TFunction, value: string): string | undefined => value === 'ask' ? t('access.options.purposeNames.ask') : value === 'work' ? t('access.options.purposeNames.work') : undefined;
 
 function Fields({ fields, values, onChange }: { fields: readonly OptionField[]; values: Json; onChange: (next: Json) => void }) {
   const { t } = useTranslation();
@@ -156,8 +160,8 @@ function Fields({ fields, values, onChange }: { fields: readonly OptionField[]; 
                 <Checkbox
                   key={choice.value}
                   presentation="compact"
-                  label={optionChoice(t,choice.value)?.name ?? choice.value}
-                  description={optionChoice(t,choice.value)?.description ?? (choice.hint === '' ? undefined : choice.hint)}
+                  label={(field.key === 'purposes' ? providerUsePurposeName(t, choice.value) : optionChoice(t,choice.value)?.name) ?? choice.value}
+                  description={field.key === 'purposes' ? undefined : optionChoice(t,choice.value)?.description ?? (choice.hint === '' ? undefined : choice.hint)}
                   checked={chosen.includes(choice.value)}
                   onCheckedChange={(on) => onChange({ ...values, [field.key]: on ? [...chosen, choice.value] : chosen.filter((entry) => entry !== choice.value) })}
                 />

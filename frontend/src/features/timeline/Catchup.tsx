@@ -45,7 +45,7 @@ export function NewLine({ threadId }: { threadId: string }) {
 export function RequestedCatchupCard({ threadId }: { threadId: string }) {
   const read = useThreadReadRef(threadId);
   const since = useThreadPart(threadId, (view) => view.openedReadSeq);
-  const query = useQuery({ ...catchupQuery(read, since ?? 0), staleTime: 0 });
+  const query = useQuery({ ...catchupQuery(read, since ?? 0) });
   if (query.data !== undefined) return <CatchupContents data={query.data} />;
   return query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : <Skeleton className="h-20 w-full" />;
 }

@@ -25,9 +25,6 @@ const PLACE_KINDS: ReadonlySet<NodeKind> = new Set<NodeKind>(['org', 'project', 
  */
 const TREES_READ_FOR_LABELS = 20;
 
-/** How long a tree read for labels is kept before it is read again: names seldom change, and an act that changes one asks again at once. */
-const LABEL_TREES_FRESH_MS = 5 * 60_000;
-
 const NO_NAME_TREES: ReadonlyMap<string, OrgTree> = new Map();
 
 /** Immutable snapshots are compared once, however many captions subscribe to them. Weak keys retain neither snapshot. */
@@ -112,7 +109,6 @@ export function useKnownPlaces({ trees = true, loadTrees = false }: { trees?: bo
       .map((org) => ({
         queryKey: ['tree-places', org.id] as const,
         queryFn: ({ signal }: { signal: AbortSignal }) => fetchTree(org.id, null, signal),
-        staleTime: LABEL_TREES_FRESH_MS,
       })),
     combine: rowsOfTrees,
   });

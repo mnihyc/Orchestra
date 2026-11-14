@@ -89,6 +89,7 @@ export function workReason(node: TreeNode, t: TFunction): string {
       case 'quota_exceeded': return t('places.org.work.blocked.quota_exceeded');
       case 'attachments': return t('places.org.work.blocked.attachments');
       case 'workspace_trust': return t('places.org.work.blocked.workspace_trust');
+      case 'source_failed': return t('source.prepare.failed');
       case 'switching': return t('places.org.work.blocked.switching');
       default: return t('places.org.work.blocked.error');
     }

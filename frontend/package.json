@@ -14,7 +14,8 @@
     "typecheck": "node build/check-translation-keys.ts && node --max-old-space-size=8192 node_modules/typescript/bin/tsc -b",
     "lint": "node build/lint.ts",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "measure:pages": "node tests/e2e/measure-pages.ts"
   },
   "dependencies": {
     "@codemirror/autocomplete": "6.20.3",

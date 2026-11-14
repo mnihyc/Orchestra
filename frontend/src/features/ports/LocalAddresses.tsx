@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { type ReactNode, useCallback } from 'react';
 import { portsQuery } from '@/api/ports';
 import { LocalAddressRewrite } from '@/lib/markdown';
-import { PORTS_POLL_MS, portAddressFor } from './model';
+import { portAddressFor } from './model';
 
 /** A local address as a shell prints one: a loopback or wildcard host with its port, and the path after it. */
 const LOCAL_ADDRESS = /(?:https?:\/\/)?(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[(?:::1|::)\]):\d{1,5}(?:\/[^\s'"<>)\]]*)?/gi;
@@ -11,7 +11,7 @@ const LOCAL_ADDRESS = /(?:https?:\/\/)?(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\
 /** Where a local address leads for this reader: the port's stable address where it has one, else the environment's Ports view of that port; null where the reader has no Ports door here, or before the ports are read. */
 export function useLocalAddresses(environmentId: string | null, canView: boolean): ((href: string) => string | null) | null {
   const enabled = environmentId !== null && canView;
-  const query = useQuery({ ...portsQuery(environmentId ?? ''), enabled, staleTime: PORTS_POLL_MS });
+  const query = useQuery({ ...portsQuery(environmentId ?? ''), enabled });
   const ports = query.data?.ports;
   const rewrite = useCallback((href: string) => environmentId === null || ports === undefined ? null : portAddressFor(href, ports, environmentId), [environmentId, ports]);
   return enabled && ports !== undefined ? rewrite : null;

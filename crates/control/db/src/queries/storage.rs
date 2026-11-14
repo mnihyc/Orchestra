@@ -45,6 +45,28 @@ fn raw_hashes(hashes: &[Hash]) -> Vec<Vec<u8>> {
     hashes.iter().map(|hash| hash.as_bytes().to_vec()).collect()
 }
 
+/// Counts verified from the immutable UTF-8 bytes, never from attachment metadata.
+pub async fn paste_counts(conn: &mut Conn, hash: &Hash) -> Result<Option<(i64, i64)>, DbError> {
+    Ok(sqlx::query_as("SELECT text_characters,text_ascii_characters FROM blobs WHERE hash=$1 AND text_characters IS NOT NULL AND text_ascii_characters IS NOT NULL")
+        .bind(hash.as_bytes().as_slice()).fetch_optional(conn).await?)
+}
+
+/// Keeps only small text counts with a blob so an oversized paste need not be read again at preflight.
+pub async fn remember_paste_counts(
+    conn: &mut Conn,
+    hash: &Hash,
+    characters: i64,
+    ascii: i64,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE blobs SET text_characters=$2,text_ascii_characters=$3 WHERE hash=$1")
+        .bind(hash.as_bytes().as_slice())
+        .bind(characters)
+        .bind(ascii)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 // ---- blobs ------------------------------------------------------------------------------------
 
 /// What is known of a blob that the store holds.

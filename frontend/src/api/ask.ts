@@ -23,7 +23,6 @@ export const askModelsQuery = (root: string) => {
       current(); const reply = await ok(api.GET('/ask/models', { params: { query: { root_org_id: root } }, signal })); current();
       if (reply.root_org_id !== root) throw new NetworkError('malformed'); return reply;
     },
-    staleTime: 0,
   });
 };
 export const askQuery = (id: string, inspect = false) => {
@@ -38,7 +37,6 @@ export const askQuery = (id: string, inspect = false) => {
       if (reply.conversation.id !== id) throw new NetworkError('malformed');
       return newerAskSnapshot(queryClient.getQueryData<AskGetReply>(key), reply);
     },
-    staleTime: 0,
   });
 };
 

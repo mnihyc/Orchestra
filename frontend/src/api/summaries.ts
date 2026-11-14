@@ -1,5 +1,6 @@
 /** Summary configuration uses the ordinary authenticated client and keeps its original reader. */
 import { queryOptions } from '@tanstack/react-query';
+import { visibleReadCount } from '@/api/reads';
 import { accepted, api, ok } from '@/api/client';
 import { NetworkError } from '@/lib/requests';
 import type { SummaryChatRange, SummaryOptionsReceipt, SummaryOptionsView, SummaryReceipt, SummarySnapshot, SummaryTarget, SummaryTargetOptions } from '@/generated/api-types';
@@ -28,7 +29,6 @@ export const documentSummaryOptionsQuery = (id: string) => {
       if (reply.target.kind !== 'document' || reply.target.id !== id) throw new NetworkError('malformed');
       return reply;
     },
-    staleTime: 0,
     retry: false,
   });
 };
@@ -65,8 +65,8 @@ export const resourceSummaryQuery = (target: ResourceSummaryTarget, range?: Reso
       if (reply.target.kind !== target.kind || reply.target.id !== target.id || reply.root_org_id === '') throw new NetworkError('malformed');
       return reply;
     },
-    staleTime: 0, retry: false,
-    refetchOnMount: (query) => refetchSummaryOpening(query.state.data, query.getObserversCount(), query.state.isInvalidated),
+    retry: false,
+    refetchOnMount: (query) => refetchSummaryOpening(query.state.data, visibleReadCount(query), query.state.isInvalidated),
     // Only the server's pending-work pace follows free reads; it never submits/retries paid work.
     refetchInterval: (query) => {
       if (query.state.status === 'error' || query.state.fetchStatus !== 'idle') return false;

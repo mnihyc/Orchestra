@@ -1,5 +1,6 @@
 /** A native resume limitation is a localized history line, without a false failure or an action. */
 import { screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MarkerLine, markerSentence } from '@/features/timeline/items/Marker';
 import { NOT_PICKING, TimelineContextValue, type TimelineContext } from '@/features/timeline/context';
@@ -42,8 +43,23 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     expect(screen.getByText(sentence)).toBeVisible();
     expect(sentence).toContain('Codex');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button')).not.toBeInTheDocument();
-    expect(document.querySelector('time')).toHaveAttribute('dateTime');
+    const time = screen.getByRole('button', { name: i18n.t('timeline.exactTime') });
+    // The exact moment is available to a keyboard and a touch reader, without expanding the history line.
+    expect(document.querySelector('time')).toBeNull();
+    expect(screen.getByText(sentence).closest('[title]')).not.toBeNull();
+    const user = userEvent.setup();
+    await user.tab();
+    expect(time).toHaveFocus();
+    await user.keyboard('{Enter}');
+    let moment = screen.getByRole('dialog', { name: i18n.t('timeline.exactTime') }).querySelector('time');
+    expect(moment).toBeVisible();
+    expect(moment).toHaveAttribute('datetime', item.created_at);
+    expect(moment?.textContent).toBe(time.getAttribute('title'));
+    await user.keyboard('{Escape}');
+    expect(time).toHaveFocus();
+    await user.pointer({ keys: '[TouchA]', target: time });
+    moment = screen.getByRole('dialog', { name: i18n.t('timeline.exactTime') }).querySelector('time');
+    expect(moment).toBeVisible();
     expect(fetch).not.toHaveBeenCalled();
   });
 });

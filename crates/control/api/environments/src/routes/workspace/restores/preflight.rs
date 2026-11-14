@@ -482,7 +482,14 @@ impl Initial for ReviewPlan {
             .await
             .map_err(DbError::from)?;
             let target = match turn {
-                Some(id) => threads::turn(conn, id).await?,
+                Some(id) => match threads::turn(conn, id).await? {
+                    Some(mut row) => {
+                        // A turn is read without its end namespace, which is as large as the directory.
+                        row.files_end_manifest = threads::turn_end_namespace(conn, id).await?;
+                        Some(row)
+                    }
+                    None => None,
+                },
                 None => None,
             };
             let selected_undo = snapshot.kind == "restore"

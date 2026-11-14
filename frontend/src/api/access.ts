@@ -7,6 +7,7 @@
  * other people before it is made; the people behind one holder of a page, a page at a time; what one
  * person holds on a thing and through what; the roles held in a place; and asking for access.
  */
+import { RELEASE_READ } from '@/api/freshness';
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { ApiError, accepted, api, client, done, ok, repeatable } from '@/api/client';
@@ -112,7 +113,7 @@ export const rolesKey = (nodeId: string) => ['roles', nodeId] as const;
 export const permissionsQuery = queryOptions({
   queryKey: permissionsKey,
   queryFn: ({ signal }): Promise<PermissionCatalogueGetReply> => ok(api.GET('/permissions', { signal })),
-  staleTime: Number.POSITIVE_INFINITY,
+  ...RELEASE_READ,
 });
 
 // ---------------------------------------------------------------- pages
@@ -263,7 +264,6 @@ export const uploadHistoryQuery = (environment: string, line: string, cursor: st
     })),
     retry: false,
     gcTime: 0,
-    staleTime: 0,
   });
 };
 
@@ -277,7 +277,7 @@ export const holderSearchQuery = (q: string, placeId: string | null, orgId: stri
   queryOptions({ queryKey: ['holder-search', q, placeId, orgId, includeWork, listPlaces] as const,
     queryFn: ({ signal }): Promise<HolderSearchReply> => ok(api.GET('/holders/search', { params: { query: {
       q, ...(placeId === null ? {} : { place_id: placeId }), ...(orgId === null ? {} : { org_id: orgId }), include_work: includeWork, list_places: listPlaces,
-    } }, signal })), staleTime: 15_000 });
+    } }, signal })) });
 
 /** A chosen permission holder as the subject of a role, retaining its source place. */
 export function roleSubject(input: HolderInput, placeId: string): SubjectInput | null {
@@ -295,7 +295,6 @@ export const searchPeopleQuery = (q: string, orgId: string | null) =>
     queryFn: ({ signal }): Promise<UserRef[]> =>
       ok(api.GET('/users/search', { params: { query: { q, ...(orgId === null ? {} : { org_id: orgId }) } }, signal })),
     enabled: q.length >= SEARCH_MIN_CHARS,
-    staleTime: 15_000,
   });
 
 /** The groups kept by the org containing the chosen place. */

@@ -1,0 +1,24 @@
+# b42k-a: the assembly with reads, summaries, Stop, mail, Ask and tabs merged: formatting, lints, contracts, libraries, link, gateway, connector, host, the guards, the whole web suite and build
+fmt
+clippy
+contracts
+test -p orch-agent-contract --lib
+test -p orch-api-contract --lib
+test -p orch-settings-contract --lib
+test -p orch-link-contract --lib
+test -p orch-link-contract --test largest_messages
+test -p orch-config --lib
+test -p orch-link --lib
+test -p orch-link --test large_messages --test handshake --test streams --test spool --test refusals_are_told --test raw_spool_restart --test commands
+test -p orch-gateway-core --test large_messages --test sessions
+test -p orch-connector-core --lib
+test -p orch-connector-core --test provider_role
+test -p orch-envhost --lib
+test -p orch-envhost --test environment
+test -p orch-db --test machine_names --test commands_in_line
+test -p orch-db --lib -- queries::documents::tests::
+test -p orch-xtask
+web typecheck
+web lint
+web test
+web build

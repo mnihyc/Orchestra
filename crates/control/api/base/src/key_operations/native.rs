@@ -55,7 +55,9 @@ use orch_types::Id;
 
 use std::collections::BTreeSet;
 
-use std::sync::Arc;
+use bytes::Bytes;
+use serde::Serialize;
+use std::sync::{Arc, Mutex};
 
 pub use orch_engine::operation_scope::sources::Facts;
 pub(super) fn entering(ctx: &Ctx, phase: &'static str) {
@@ -410,10 +412,18 @@ pub trait StoredRead: Stored {
     ) -> BoxFuture<'a, ApiResult<bool>> {
         Box::pin(async { Ok(true) })
     }
+
+    /// Whether ordinary content changes can rebuild this finite JSON body at its transport cut.
+    /// The source association and current access still pass every gate; an exhausted allowance
+    /// reports that the page changed, without inventing an access denial.
+    const REPEATS: bool = false;
 }
 
 /// A stored reader uses the same factual preparation and current response boundary as a selection.
-pub async fn stored_read<F: StoredRead>(ctx: Ctx, (): (), (): ()) -> ApiResult<F::Reply> {
+pub async fn stored_read<F: StoredRead>(ctx: Ctx, (): (), (): ()) -> ApiResult<F::Reply>
+where
+    F::Reply: Serialize,
+{
     let (reply, publication) = observed(
         &ctx,
         "stored_read.snapshot",
@@ -455,24 +465,57 @@ pub async fn stored_read<F: StoredRead>(ctx: Ctx, (): (), (): ()) -> ApiResult<F
         .await,
     )?;
     if let Some((earlier, accepted)) = publication {
-        super::publication::retain(&ctx, &accepted, earlier, |ctx, conn, reader, earlier| {
-            Box::pin(async move {
-                let declaration = F::ROWS
-                    .iter()
-                    .find(|row| row.operation == ctx.route.name)
-                    .ok_or_else(declaration_error)?;
-                let (value, facts) = F::load(ctx, conn, declaration).await?;
-                let fresh = bind(ctx, declaration, &facts)?;
-                let principal =
-                    publication_principal(ctx, conn, reader, &fresh, &earlier.response).await?;
-                F::require(ctx, conn, &principal, &value).await?;
-                if !F::check_opened(ctx, conn, &principal, &earlier.value, &value).await? {
-                    return Err(opened_source_refused());
-                }
-                complete_publication(ctx)
-            })
-        })?;
+        if F::REPEATS {
+            let state = Arc::new(Mutex::new(Rebuilding {
+                opened: earlier,
+                body: None,
+                rebuilt: 0,
+            }));
+            super::publication::retain_rebuilding(
+                &ctx,
+                &accepted,
+                state,
+                |ctx, conn, reader, state| {
+                    Box::pin(async move {
+                        let (earlier, body, rebuilt) = rebuilding(state)?;
+                        let fresh = stored_recheck::<F>(ctx, conn, reader, &earlier).await?;
+                        if fresh.same {
+                            complete_publication(ctx)?;
+                            return Ok(body);
+                        }
+                        if ctx.surface.is_none()
+                            || !earlier
+                                .response
+                                .shared()
+                                .covers_sources(fresh.plan.shared())
+                            || rebuilt >= repeats_allowed(conn).await?
+                        {
+                            return Err(read_changed());
+                        }
+                        complete_publication(ctx)?;
+                        entering(ctx, "stored.repeat_render");
+                        let answer = F::render(ctx, conn, &fresh.principal, &fresh.value).await?;
+                        let body =
+                            Bytes::from(serde_json::to_vec(&answer).map_err(ApiError::internal)?);
+                        complete_publication(ctx)?;
+                        keep_rebuilt(state, fresh, body.clone(), rebuilt)?;
+                        Ok(Some(body))
+                    })
+                },
+            )?;
+        } else {
+            super::publication::retain(&ctx, &accepted, earlier, |ctx, conn, reader, earlier| {
+                Box::pin(async move {
+                    let fresh = stored_recheck::<F>(ctx, conn, reader, earlier).await?;
+                    if !fresh.same {
+                        return Err(opened_source_refused());
+                    }
+                    complete_publication(ctx)
+                })
+            })?;
+        }
     }
+
     Ok(reply)
 }
 
@@ -594,6 +637,185 @@ pub trait Selected: Send + Sync + 'static {
     ) -> BoxFuture<'a, ApiResult<bool>> {
         Box::pin(async { Ok(true) })
     }
+
+    /// What a read does when `check_opened` finds that the fresh read differs from the opened one.
+    /// The gates that concern the reader's access (every source of the opened body is still covered,
+    /// still admitted, the ordinary requirement still holds) are passed before that is asked.
+    const MOVES: Moves = Moves::Refuse;
+
+    /// For `Moves::Publish`: whether everything the opened body was made from may still be read by the
+    /// reader, whatever else about it has moved. Only asked when `check_opened` answered no.
+    fn access_held<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        principal: &'a Principal,
+        query: &'a Self::Query,
+        opened: &'a Self::Value,
+        fresh: &'a Self::Value,
+    ) -> BoxFuture<'a, ApiResult<bool>> {
+        Self::check_opened(ctx, conn, principal, query, opened, fresh)
+    }
+}
+
+/// What a selected read does when it finds, at its cut, that what it read differs from what is there now
+/// although the reader's access to every source of what it read has not changed. A fresh read that no
+/// longer covers a source of the opened one is refused whatever this says.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Moves {
+    /// Its comparison holds something that only access can change, or nothing is known about it: refused.
+    Refuse,
+    /// The comparison holds only what the read showed, and some of it can move while the read is being
+    /// answered (a state, a count, a list). At the transport's existing source check its finite JSON
+    /// body may be rebuilt from the current read, as often as `api.read_repeats` allows. A read that
+    /// cannot be rebuilt reports a changed-page outcome; it does not report lost access.
+    Repeat,
+    /// As `Repeat`, with an as-read fallback when `access_held` proves every source of that body
+    /// is still readable. Every current identity, source and ordinary permission gate still runs.
+    Publish,
+}
+
+/// How many times a read that has moved is made again, when the system has no setting for it.
+const READ_REPEATS: u32 = 3;
+
+/// What the cut of a selected read finds when it reads again, once every gate that concerns the reader's
+/// access has passed.
+struct Fresh<V> {
+    plan: OperationPlan,
+    value: V,
+    principal: Principal,
+    same: bool,
+}
+
+/// The one new reading of a selected read at its cut, for the final check and for the repeats alike.
+async fn recheck<F: Selected>(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    reader: &Principal,
+    query: &F::Query,
+    earlier: &Prepared<F::Value>,
+) -> ApiResult<Fresh<F::Value>> {
+    entering(ctx, "selected.refresh");
+    crate::testing::hold_boundary(ctx.route.name, "selected.refresh").await;
+    let (value, facts) = observed(
+        ctx,
+        "selected.refresh",
+        F::refresh(ctx, conn, reader.caller(), query, &earlier.value).await,
+    )?;
+    let fresh = bind(ctx, F::declaration(query, &value), &facts)?;
+    let fresh = match F::origin(query, &value) {
+        Some(origin) => {
+            fresh
+                .with_origin(ctx, conn, reader.caller(), origin)
+                .await?
+        }
+        None => fresh,
+    };
+    let principal = publication_principal(ctx, conn, reader, &fresh, &earlier.response).await?;
+    F::require(ctx, conn, &principal).await?;
+    let same = F::check_opened(ctx, conn, &principal, query, &earlier.value, &value).await?;
+    Ok(Fresh {
+        plan: fresh,
+        value,
+        principal,
+        same,
+    })
+}
+
+/// The one new reading of a stored read at its cut, for the final check and for the repeats alike.
+async fn stored_recheck<F: StoredRead>(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    reader: &Principal,
+    earlier: &Prepared<F::Value>,
+) -> ApiResult<Fresh<F::Value>> {
+    let declaration = F::ROWS
+        .iter()
+        .find(|row| row.operation == ctx.route.name)
+        .ok_or_else(declaration_error)?;
+    let (value, facts) = F::load(ctx, conn, declaration).await?;
+    let fresh = bind(ctx, declaration, &facts)?;
+    let principal = publication_principal(ctx, conn, reader, &fresh, &earlier.response).await?;
+    F::require(ctx, conn, &principal, &value).await?;
+    let same = F::check_opened(ctx, conn, &principal, &earlier.value, &value).await?;
+    Ok(Fresh {
+        plan: fresh,
+        value,
+        principal,
+        same,
+    })
+}
+
+/// Whether a read that differs from the opened one may be given as it is.
+async fn may_give<F: Selected>(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    query: &F::Query,
+    earlier: &Prepared<F::Value>,
+    fresh: &Fresh<F::Value>,
+) -> ApiResult<bool> {
+    if F::MOVES != Moves::Publish {
+        return Ok(false);
+    }
+    F::access_held(
+        ctx,
+        conn,
+        &fresh.principal,
+        query,
+        &earlier.value,
+        &fresh.value,
+    )
+    .await
+}
+
+/// How many times a read that has moved is made again.
+async fn repeats_allowed(conn: &mut Conn) -> ApiResult<u32> {
+    Ok(orch_settings::get::<u32>(
+        conn,
+        orch_settings::Place::System,
+        orch_settings_contract::registry::keys::API_READ_REPEATS,
+    )
+    .await
+    .map_err(ApiError::internal)?
+    .unwrap_or(READ_REPEATS))
+}
+
+struct Rebuilding<V> {
+    opened: Arc<Prepared<V>>,
+    body: Option<Bytes>,
+    rebuilt: u32,
+}
+
+type RebuildSnapshot<V> = (Arc<Prepared<V>>, Option<Bytes>, u32);
+fn rebuilding<V>(state: &Mutex<Rebuilding<V>>) -> ApiResult<RebuildSnapshot<V>> {
+    let state = state
+        .lock()
+        .map_err(|_| ApiError::internal("the read's body state is poisoned"))?;
+    Ok((state.opened.clone(), state.body.clone(), state.rebuilt))
+}
+fn keep_rebuilt<V>(
+    state: &Mutex<Rebuilding<V>>,
+    fresh: Fresh<V>,
+    body: Bytes,
+    rebuilt: u32,
+) -> ApiResult<()> {
+    *state
+        .lock()
+        .map_err(|_| ApiError::internal("the read's body state is poisoned"))? = Rebuilding {
+        opened: Arc::new(Prepared {
+            response: fresh.plan,
+            value: fresh.value,
+        }),
+        body: Some(body),
+        rebuilt: rebuilt + 1,
+    };
+    Ok(())
+}
+
+fn read_changed() -> ApiError {
+    ApiError::new(
+        orch_api_contract::common::ErrorCode::ConflictStaleRevision,
+        "The content changed while this page was being read. Read the page again.",
+    )
 }
 
 enum SelectedReadValue<V> {
@@ -645,7 +867,40 @@ pub fn selected<'a, F: Selected>(
 }
 
 /// Native output under the fresh snapshot's own operation and current reader.
-pub async fn selected_read<F: Selected>(ctx: Ctx, query: F::Query, (): ()) -> ApiResult<F::Reply> {
+pub async fn selected_read<F: Selected>(ctx: Ctx, query: F::Query, (): ()) -> ApiResult<F::Reply>
+where
+    F::Reply: Serialize,
+{
+    selected_read_with::<F, JsonReply>(ctx, query).await
+}
+
+trait EncodeReply<R>: Send + Sync + 'static {
+    const JSON: bool;
+    fn bytes(reply: R) -> ApiResult<Bytes>;
+}
+struct JsonReply;
+impl<R: Serialize> EncodeReply<R> for JsonReply {
+    const JSON: bool = true;
+    fn bytes(reply: R) -> ApiResult<Bytes> {
+        serde_json::to_vec(&reply)
+            .map(Bytes::from)
+            .map_err(ApiError::internal)
+    }
+}
+struct RawReply;
+impl<R> EncodeReply<R> for RawReply {
+    const JSON: bool = false;
+    fn bytes(_: R) -> ApiResult<Bytes> {
+        Err(ApiError::internal(
+            "a raw source cannot rebuild a JSON reply",
+        ))
+    }
+}
+
+async fn selected_read_with<F: Selected, Output: EncodeReply<F::Reply>>(
+    ctx: Ctx,
+    query: F::Query,
+) -> ApiResult<F::Reply> {
     entering(&ctx, "selected.read");
     let retained_query = query.clone();
     let (reply, producing, accepted, opened) = observed(
@@ -714,42 +969,84 @@ pub async fn selected_read<F: Selected>(ctx: Ctx, query: F::Query, (): ()) -> Ap
     if !accepted.key_deadline_allows(ctx.app.clock.as_ref()) {
         return Err(opened_source_refused());
     }
+    crate::testing::hold_boundary(ctx.route.name, "selected.settle").await;
     if let SelectedReadValue::Admitted(earlier) = opened {
-        super::publication::retain(
-            &ctx,
-            &accepted,
-            (retained_query, earlier),
-            |ctx, conn, reader, (query, earlier)| {
-                Box::pin(async move {
-                    entering(ctx, "selected.refresh");
-                    let (value, facts) = observed(
-                        ctx,
-                        "selected.refresh",
-                        F::refresh(ctx, conn, reader.caller(), query, &earlier.value).await,
-                    )?;
-                    let fresh = bind(ctx, F::declaration(query, &value), &facts)?;
-                    let fresh = match F::origin(query, &value) {
-                        Some(origin) => {
-                            fresh
-                                .with_origin(ctx, conn, reader.caller(), origin)
-                                .await?
+        if F::MOVES != Moves::Refuse && Output::JSON {
+            let state = Arc::new(Mutex::new(Rebuilding {
+                opened: earlier,
+                body: None,
+                rebuilt: 0,
+            }));
+            super::publication::retain_rebuilding(
+                &ctx,
+                &accepted,
+                (retained_query, state),
+                |ctx, conn, reader, (query, state)| {
+                    Box::pin(async move {
+                        let (earlier, body, rebuilt) = rebuilding(state)?;
+                        let fresh = recheck::<F>(ctx, conn, reader, query, &earlier).await?;
+                        if fresh.same {
+                            complete_publication(ctx)?;
+                            return Ok(body);
                         }
-                        None => fresh,
-                    };
-                    let principal =
-                        publication_principal(ctx, conn, reader, &fresh, &earlier.response).await?;
-                    F::require(ctx, conn, &principal).await?;
-                    if !F::check_opened(ctx, conn, &principal, query, &earlier.value, &value)
-                        .await?
-                    {
-                        return Err(opened_source_refused());
-                    }
-                    observed(ctx, "selected.publication", complete_publication(ctx))
-                })
-            },
-        )?;
+                        let may_keep = may_give::<F>(ctx, conn, query, &earlier, &fresh).await?;
+                        if F::MOVES == Moves::Publish && !may_keep {
+                            return Err(opened_source_refused());
+                        }
+                        // Auxiliary reads/audits belong to the original source footprint. A new
+                        // footprint gets a new request; a current body from the same facts is safe.
+                        if ctx.surface.is_none()
+                            || !earlier
+                                .response
+                                .shared()
+                                .covers_sources(fresh.plan.shared())
+                            || rebuilt >= repeats_allowed(conn).await?
+                        {
+                            if may_keep {
+                                complete_publication(ctx)?;
+                                return Ok(body);
+                            }
+                            return Err(read_changed());
+                        }
+                        complete_publication(ctx)?;
+                        entering(ctx, "selected.repeat_render");
+                        let answer = F::render(ctx, conn, &fresh.principal, &fresh.value).await?;
+                        let body = Output::bytes(answer)?;
+                        complete_publication(ctx)?;
+                        keep_rebuilt(state, fresh, body.clone(), rebuilt)?;
+                        Ok(Some(body))
+                    })
+                },
+            )?;
+        } else {
+            super::publication::retain(
+                &ctx,
+                &accepted,
+                (retained_query, earlier),
+                |ctx, conn, reader, (query, earlier)| {
+                    Box::pin(async move {
+                        let fresh = recheck::<F>(ctx, conn, reader, query, earlier).await?;
+                        if !fresh.same && !may_give::<F>(ctx, conn, query, earlier, &fresh).await? {
+                            return Err(if F::MOVES == Moves::Repeat {
+                                read_changed()
+                            } else {
+                                opened_source_refused()
+                            });
+                        }
+                        observed(ctx, "selected.publication", complete_publication(ctx))
+                    })
+                },
+            )?;
+        }
     }
+
     Ok(reply)
+}
+
+/// Native operands for a supplier that owns the final response projection. These values can
+/// carry private witnesses and are not JSON replies; their original source checks still run.
+pub async fn selected_value<F: Selected>(ctx: Ctx, query: F::Query, (): ()) -> ApiResult<F::Reply> {
+    selected_read_with::<F, RawReply>(ctx, query).await
 }
 
 /// Raw formatting of an effect-free prepared native selection. Byte suppliers and live
@@ -759,7 +1056,7 @@ pub async fn selected_raw<F: Selected<Reply = axum::response::Response>>(
     query: F::Query,
     _body: axum::body::Body,
 ) -> ApiResult<axum::response::Response> {
-    selected_read::<F>(ctx, query, ()).await
+    selected_value::<F>(ctx, query, ()).await
 }
 
 /// A body preview's native input is the immutable typed query/body pair. The
@@ -784,6 +1081,7 @@ where
 pub async fn selected_body_read<F, Q, B>(ctx: Ctx, query: Q, body: B) -> ApiResult<F::Reply>
 where
     F: Selected<Query = (Q, B)>,
+    F::Reply: Serialize,
     Q: Clone + Send + Sync + 'static,
     B: Clone + Send + Sync + 'static,
 {

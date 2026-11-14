@@ -14,7 +14,6 @@ pub mod resource;
 pub mod sources;
 
 pub(crate) use budget::InputBudget;
-pub(crate) use budget::UNKNOWN_WINDOW_TOKENS;
 pub(crate) use estimate::handoff_estimate;
 pub use handoff::{
     Carried, IndexedTranscript, handoff, indexed_transcript, notice as handoff_notice,
@@ -252,6 +251,24 @@ impl Engine {
             .map(|producer| producer.describe().config_schema)
     }
 
+    /// The registered producers and their configuration forms, including the built-in model producer.
+    pub fn summarizer_descriptors(
+        &self,
+    ) -> Vec<orch_summarizer_contract::descriptor::SummarizerDescriptor> {
+        let mut descriptors = vec![orch_summarizer_model::descriptor::descriptor()];
+        descriptors.extend(
+            self.inner
+                .summarizers
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .filter(|(name, _)| name.as_str() != "model")
+                .map(|(_, producer)| producer.describe()),
+        );
+        descriptors.sort_by(|one, other| one.name.cmp(&other.name));
+        descriptors
+    }
+
     fn producer(
         &self,
         chosen: &Choice,
@@ -486,7 +503,8 @@ impl Engine {
         let configured = chosen.clone();
         let context_tokens = if chosen.kind == "model" {
             let mut config = orch_summarizer_model::descriptor::Config::read(&chosen.config)?;
-            config.context_tokens = budget::context_tokens(&mut conn, &config)
+            let field = budget::activity_field(&config, &fields);
+            config.context_tokens = budget::context_tokens(&mut conn, &config, field)
                 .await
                 .map_err(internal)?;
             let tokens = config.context_tokens;
@@ -850,6 +868,10 @@ fn safe_reason(error: &SummarizeError) -> String {
         SummarizeError::Config(_) => "The summarizer configuration is not usable.".to_owned(),
         SummarizeError::Unsupported(_) => {
             "The chosen summarizer does not write this field.".to_owned()
+        }
+        SummarizeError::Failed { message, .. } if message == orch_summarizer_contract::summarizer::OUTPUT_CUT => {
+            "The summarizer's model used its output allowance before finishing. Raise the summarizer's output allowance or choose another model."
+                .to_owned()
         }
         SummarizeError::Failed { .. } => {
             "The summarizer returned no usable answer; it will try again after the backoff."

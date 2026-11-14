@@ -36,6 +36,7 @@ impl native::Selected for Setup {
     type Query = FirstStepsGetQuery;
     type Value = Selection;
     type Reply = FirstSteps;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::FIRST_STEPS;
 
     fn select<'a>(

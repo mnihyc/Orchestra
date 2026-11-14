@@ -37,19 +37,11 @@ async fn expires_after_wait(decision: bool) {
         .fetch_one(&mut *held)
         .await
         .unwrap();
-    if decision {
-        sqlx::query("SELECT node_id FROM threads WHERE node_id=$1 FOR UPDATE")
-            .bind(thread)
-            .execute(&mut *held)
-            .await
-            .unwrap();
-    } else {
-        sqlx::query("SELECT id FROM approvals WHERE id=$1 FOR UPDATE")
-            .bind(id)
-            .execute(&mut *held)
-            .await
-            .unwrap();
-    }
+    sqlx::query("SELECT id FROM approvals WHERE id=$1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *held)
+        .await
+        .unwrap();
     let app = s.rig.world.app.clone();
     let mut pending = tokio::spawn(async move {
         if decision {
@@ -82,7 +74,7 @@ async fn expires_after_wait(decision: bool) {
     assert!(!has(&s, &s.cai, thread, Permission::ThreadInteract).await);
 }
 #[tokio::test]
-async fn legacy_harness_decider_deadline_is_rechecked_after_the_real_thread_lock() {
+async fn legacy_harness_decider_deadline_is_rechecked_after_the_real_approval_lock() {
     expires_after_wait(true).await;
 }
 #[tokio::test]
