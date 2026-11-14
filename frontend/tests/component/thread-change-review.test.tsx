@@ -81,7 +81,7 @@ it.each(['en', 'zh-CN'] as const)('omits a Git scope for a reported non-reposito
   await screen.findByText('a.ts');
   await userEvent.click(screen.getByRole('combobox', { name: i18n.t('thread.changeScopes.label') }));
   await waitFor(() => expect(wire.gitRead).toHaveBeenCalledTimes(1));
-  expect(screen.queryByRole('option', { name: i18n.t('thread.changeScopes.git') })).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole('option', { name: i18n.t('thread.changeScopes.git') })).not.toBeInTheDocument());
   await userEvent.keyboard('{Escape}');
   const reason = await screen.findByRole('img', { name: i18n.t('inspector.git.needsRepository') });
   await userEvent.hover(reason); expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('inspector.git.needsRepository'));

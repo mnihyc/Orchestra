@@ -33,6 +33,18 @@ summary: 结合来源、缺失状态和重置选项阅读提供方观测。
 示例填同一组字段，密钥之后在登录和密钥添加。创建不等待运行时回应；页面先显示已存配置，
 实时连接再带来观测。
 
+Gemini 的 [OpenAI 兼容 API](https://ai.google.dev/gemini-api/docs/openai) 使用
+**openai-chat**。文档中的 Priority 和 Flex 分别使用 `priority`、`flex` 标识；在
+同一个模型表单中启用该模型提供的层级并选择默认值。推理力度使用 `reasoning_effort`。
+`extra_body.google.cached_content` 等 Gemini 专有字段同样使用嵌套请求选项规则、默认值
+及每次使用的参数表单。
+
+DeepSeek 的 [Chat Completions API](https://api-docs.deepseek.com/api/create-chat-completion/)
+也使用 **openai-chat**。文档中的推理力度及 `thinking.type` 可以设置模型默认值和每次
+使用的覆盖值。该 API 没有声明推理速度层级选择器；模型规则中的 `service_tier: false`
+会省略此字段，无需虚构 Fast 层级。新增字段使用现有请求选项模式及其 `default` 值；
+所有提供商均依次应用端点默认值、模型默认值和本次使用的明确选择。
+
 设置中的详情来源分别选择信息和模型。默认会说明实际读取者：原生登录使用适配器，
 OpenRouter 或 DeepSeek 密钥地址用相应读取器，否则没有可选信息；模型通常来自地址自己的列表。
 

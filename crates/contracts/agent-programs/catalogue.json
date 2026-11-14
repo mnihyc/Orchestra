@@ -48,6 +48,14 @@
       "en": "Refuses an unproved read-only sandbox",
       "zh-CN": "拒绝未经验证的只读沙箱"
     },
+    "background_commands": {
+      "en": "Lists a command left running and ends it by name",
+      "zh-CN": "列出留在后台运行的命令并按名称结束"
+    },
+    "input_prefix": {
+      "en": "Forks a conversation exactly before an earlier message",
+      "zh-CN": "在较早的消息之前精确分叉对话"
+    },
     "dynamic_tools": {
       "en": "Exposes Orch's tools as dynamic tools",
       "zh-CN": "将 Orch 工具作为动态工具提供"
@@ -125,6 +133,10 @@
     "history_delete": {
       "en": "removing native session history",
       "zh-CN": "移除原生会话历史"
+    },
+    "native_input_prefix": {
+      "en": "editing a sent message and continuing from an earlier version",
+      "zh-CN": "编辑已发送的消息并从较早的版本继续"
     }
   },
   "runner": {
@@ -222,6 +234,14 @@
             "zh-CN": "计划交接"
           },
           "path": "/capabilities/plan_mode"
+        },
+        {
+          "id": "native_input_prefix",
+          "title": {
+            "en": "Edit message and continue from an earlier version",
+            "zh-CN": "编辑消息并从较早版本继续"
+          },
+          "path": "/capabilities/native_input_prefix"
         }
       ]
     },
