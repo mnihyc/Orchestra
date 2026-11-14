@@ -781,8 +781,16 @@ async fn an_approval_notifies_the_eligible_turn_starter_while_other_managers_can
         .decide_approval(&Caller::session(always), approval, &option("allow_once"))
         .await
         .unwrap();
-    let rows = inbox_of(&world, world.ada, "approval.requested").await;
-    assert!(rows[0].2, "the starter need not look at what was decided");
+    common::eventually(
+        "the accepted decision settles the starter's Inbox",
+        || async {
+            inbox_of(&world, world.ada, "approval.requested")
+                .await
+                .first()
+                .is_some_and(|row| row.2)
+        },
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
