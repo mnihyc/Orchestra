@@ -22,7 +22,7 @@ import { show } from './support';
 const calls = vi.hoisted(() => ({ join: vi.fn<typeof Chats.joinGroup>(), refresh: vi.fn<typeof ChatStore.refreshChat>(), open: vi.fn<(href: string) => void>(), share: vi.fn<typeof Access.openAccess>(), toast: vi.fn<typeof Toast.toast>() }));
 vi.mock('@/api/chats', async (original) => ({ ...await original<typeof Chats>(), joinGroup: calls.join }));
 vi.mock('@/realtime/stores/chat', async (original) => ({ ...await original<typeof ChatStore>(), refreshChat: calls.refresh }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: calls.share }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: calls.share }));
 vi.mock('@/ui/Toast', async (original) => ({ ...await original<typeof Toast>(), toast: calls.toast }));
 function Actions({ row }: { row: Chat }) {
   const group = useGroupActions(row, calls.open);

@@ -23,9 +23,9 @@ import { show } from './support';
 
 const scene = vi.hoisted(() => ({ shape: 'wide', path: '/topic/current', push: vi.fn() }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<object>(), useRouter: () => ({ state: { location: { pathname: scene.path } }, history: { push: scene.push } }), useRouterState: () => undefined, useMatches: () => '/topic/$topicId/', useLocation: () => ({ pathname: scene.path, search: {}, searchStr: '', hash: '' }), useNavigate: () => (options: { href: string }) => { scene.push(options.href); return Promise.resolve(); } }));
-vi.mock('@/features/workbench/Narrow', () => ({ useShape: () => scene.shape }));
+vi.mock('@/features/workbench/Narrow', async (loadOriginal) => ({ ...await loadOriginal<object>(), useShape: () => scene.shape }));
 vi.mock('@/help/localized', () => ({ useLocalizedGuide: () => ({ articles: [readArticle('draft-help', '# Draft help\n\nA short answer.\n\n## Next\n\nYour draft is kept.')] }) }));
-vi.mock('@/features/help/Tutorial', () => ({ TutorialList: () => null }));
+vi.mock('@/features/help/Tutorial', async (loadOriginal) => ({ ...await loadOriginal<object>(), TutorialList: () => null }));
 vi.mock('@/features/help/SourceJump', () => ({ SettingSourceJumpHost: () => null }));
 
 function Fields() {

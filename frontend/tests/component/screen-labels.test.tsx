@@ -14,8 +14,8 @@ import { treeWriter, useTreeStore } from '@/realtime/stores/tree';
 import { ACME, acmeTree } from '../doubles/fixtures';
 import { show } from './support';
 
-vi.mock('@/features/navigation/NodeMenu', () => ({ useNodeMenu: () => [{ id: 'rename', label: 'Rename', onSelect: vi.fn() }] }));
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodeMenu: () => [{ id: 'rename', label: 'Rename', onSelect: vi.fn() }] }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   Link: ({ to, activeOptions: _activeOptions, ...props }: ComponentProps<'a'> & { to: string; activeOptions?: unknown }) => <a href={to} {...props} />,
   useNavigate: () => vi.fn(),
   useRouter: () => ({ history: { push: vi.fn() }, routesByPath: { '/project/$projectId/settings': {} } }),

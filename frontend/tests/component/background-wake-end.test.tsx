@@ -10,7 +10,7 @@ import { show } from './support';
 
 vi.mock('@/api/background', () => ({ fetchBackground: vi.fn(), endBackground: vi.fn() }));
 vi.mock('@/api/forks', () => ({ jobQuery: (id: string) => ({ queryKey: ['job', id], queryFn: () => Promise.reject(new Error('No job was requested')) }), isOver: () => false }));
-vi.mock('@/realtime/live', () => ({ socket: { status: { getState: () => ({ phase: 'ready' }), subscribe: () => () => undefined } } }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { status: { getState: () => ({ phase: 'ready' }), subscribe: () => () => undefined } } }));
 
 const command: BackgroundCommand = { id: 'reviewed-native-end', segment_id: 'origin-segment', turn_id: null, item_id: null, command: 'Build web',
   command_truncated: false, cwd: null, cwd_redacted: false, place: 'environment', since: null, cpu_percent: null, memory_bytes: null };

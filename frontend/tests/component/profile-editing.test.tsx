@@ -27,7 +27,7 @@ vi.mock('@/api/profile', async (original) => {
 vi.mock('@/api/auth', async (original) => ({ ...await original<typeof AuthApi>(), meQuery: { queryKey: ['editing-me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada Lovelace')) } }));
 vi.mock('@/api/personal', async (original) => ({ ...await original<typeof PersonalApi>(), favoritesQuery: { queryKey: ['editing-favorites'], queryFn: calls.favorites } }));
 vi.mock('@/api/search', async (original) => ({ ...await original<typeof SearchApi>(), namesQuery: (search: NameSearch) => ({ queryKey: ['editing-names', search.q], queryFn: () => calls.search(search.q), placeholderData: (previous: NameHit[] | undefined) => previous }) }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: vi.fn() }));
 vi.mock('@/shell/Page', () => ({ Page: ({ children }: { children: ReactNode }) => <>{children}</> }));
 vi.mock('@/features/settings/PersonalFrame', () => ({ PersonalFrame: ({ children }: { children: ReactNode }) => <>{children}</> }));
 vi.mock('@/features/access/AdminReachNotice', () => ({ AdminReachNotice: () => null }));

@@ -11,7 +11,7 @@ import { show } from './support';
 const calls = vi.hoisted(() => ({ preview: vi.fn(), people: vi.fn() }));
 vi.mock('@/api/imports', async (original) => ({ ...await original<object>(), previewImport: calls.preview }));
 vi.mock('@/api/chats', async (original) => ({ ...await original<object>(), peopleQuery: (_org: string | null, q: string) => ({ queryKey: ['import-people', q], queryFn: () => calls.people(q) as Promise<unknown>, retry: false }) }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const person = userRef(me(1, 'ada', 'Ada Lovelace'));
 const node = org('place', 'acme', 'Acme', person, { access: { ...memberAccess, administers: true } });

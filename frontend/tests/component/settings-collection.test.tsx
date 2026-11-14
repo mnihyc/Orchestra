@@ -21,7 +21,7 @@ vi.mock('@/api/settings', async (load) => {
   };
 });
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useLocation: () => server.location }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const target = { kind: 'node', id: 'topic' } as const;
 const place = { name: 'login', kind: 'topic', owner: { display_name: 'Ada Lovelace' }, access: { permissions: ['topic.view'] } };
 const scroll = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView');
@@ -144,27 +144,25 @@ it.each(['en', 'zh-CN'] as const)('condenses 146 view-only values under one sent
   expect(server.values).toHaveBeenCalledTimes(1);
 });
 
-it('jumps to a group without opening a new view or loading another setting list', { timeout: 30_000 }, async () => {
+it('lists every group beside or above the page, marks the one pressed and takes it to its heading without another read', { timeout: 30_000 }, async () => {
   const definitions = GROUP_ORDER.map((group, index) => ({ ...definition(index), group }));
   server.definitions.mockResolvedValue(definitions);
   server.values.mockResolvedValue(definitions.map((def) => value(def, false, false)));
   const view = show(<SettingsEditor target={target} scope="topic" place={place} />);
-  const picker = await screen.findByRole('combobox', { name: i18n.t('settings.editor.groupsNav') });
-  await userEvent.click(picker);
-  expect(screen.getAllByRole('option')).toHaveLength(GROUP_ORDER.length);
+  const nav = await screen.findByRole('navigation', { name: i18n.t('settings.editor.groupsNav') });
+  expect(within(nav).queryByRole('combobox')).not.toBeInTheDocument();
+  expect(within(nav).getAllByRole('link')).toHaveLength(GROUP_ORDER.length);
   expect(GROUP_ORDER.length).toBeGreaterThan(10);
-  await userEvent.type(picker, i18n.t('settings.editor.groups.system'));
-  expect(putSetting).not.toHaveBeenCalled();
-  expect(server.definitions).toHaveBeenCalledTimes(1);
-  expect(server.values).toHaveBeenCalledTimes(1);
-  await userEvent.click(screen.getByRole('option', { name: i18n.t('settings.editor.groups.system') }));
-  const contents = view.container.querySelector<HTMLElement>('[data-settings-contents]');
-  if (contents === null) throw new Error('The long page has no contents list');
-  const link = within(contents).getByText(i18n.t('settings.editor.groups.system'));
+  // Every group is on the page under its own heading: none is hidden behind the list.
+  expect(view.container.querySelectorAll('[data-scroll-section]')).toHaveLength(GROUP_ORDER.length);
+  const link = within(nav).getByRole('link', { name: i18n.t('settings.editor.groups.system') });
   const href = link.getAttribute('href');
   if (href === null) throw new Error('The contents link has no destination');
+  await userEvent.click(link);
   await waitFor(() => expect(document.getElementById(href.slice(1))).toHaveFocus());
   expect(link).toHaveAttribute('aria-current', 'location');
+  expect(putSetting).not.toHaveBeenCalled();
+  expect(server.definitions).toHaveBeenCalledTimes(1);
   expect(server.values).toHaveBeenCalledTimes(1);
 });
 

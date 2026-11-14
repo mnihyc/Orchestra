@@ -34,13 +34,13 @@ const viewOnly = environment('view-environment', 'View-only workspace', false);
 const inventory = (row: Environment) => inventoryRow({ id: row.id, kind: 'environment', name: row.name, owner: row.owner, parent_id: 'resources', resource: { kind: 'environment', value: row } });
 
 vi.mock('@/api/client', async (load) => ({ ...await load<typeof ClientApi>(), api: { GET: (path: string, options: ReadOptions) => { const auxiliary = resourceCardRead(path, options); return auxiliary === null ? read(path, options) : Promise.resolve(auxiliary); } } }));
-vi.mock('@/api/auth', () => ({ meQuery: { queryKey: ['environment-list-reader'], initialData: () => reader, queryFn: () => Promise.resolve(reader) } }));
+vi.mock('@/api/auth', async (loadOriginal) => ({ ...await loadOriginal<object>(), meQuery: { queryKey: ['environment-list-reader'], initialData: () => reader, queryFn: () => Promise.resolve(reader) } }));
 vi.mock('@/features/resources/HomePicker', () => ({ useViewedOrgState: () => ({ org: { id: 'workshop', name: 'Workshop', access: { administers: true } }, load: { isSuccess: true, isError: false } }) }));
 vi.mock('@/features/resources/trail', () => ({ rememberList: vi.fn(), useResourceHeading: vi.fn() }));
 vi.mock('@/features/resources/ResourceNav', () => ({ ResourceNav: () => null }));
-vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map() }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKnownPlaces: () => new Map() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resources/environments/acts', () => ({ useEnvironmentActs: () => ({ list: { name: (row: Environment) => row.name, of: () => ({ primary: null, entries: [], keys: {}, busy: false }), bulk: [] } }) }));
 vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), useNavigate: () => vi.fn(), Link: ({ to, params, children, ...attributes }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; params?: { id: string } }) => <a {...attributes} href={to.replace('$id', params?.id ?? '')}>{children}</a> }));
 

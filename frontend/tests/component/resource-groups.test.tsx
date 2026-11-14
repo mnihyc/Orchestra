@@ -2,7 +2,8 @@
 import { cleanup, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Box } from 'lucide-react';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import * as AccessOpening from '@/features/access/AccessDialog';
 import { ResourceListFrame } from '@/features/resources/ResourceList';
 import { groupResourceRows, resourceGroupMeta, type ResourceGroupMeta } from '@/features/resources/groups';
 import type { NodeRef } from '@/generated/api-types';
@@ -13,9 +14,9 @@ import { show } from './support';
 
 vi.mock('@/features/resources/trail', () => ({useResourceHeading:vi.fn(),rememberList:vi.fn()}));
 vi.mock('@/features/resources/ResourceNav', () => ({ResourceNav:() => null}));
-vi.mock('@/features/navigation/places', () => ({PlaceLink:({children,place}:{children:React.ReactNode;place:NodeRef}) => <a href={`#${place.id}`}>{children}</a>}));
+vi.mock('@/features/navigation/places', async (loadOriginal) => ({ ...await loadOriginal<object>(),PlaceLink:({children,place}:{children:React.ReactNode;place:NodeRef}) => <a href={`#${place.id}`}>{children}</a>}));
 const sharing = vi.hoisted(() => vi.fn());
-vi.mock('@/features/access/AccessDialog', () => ({openAccess:sharing}));
+beforeEach(() => { vi.spyOn(AccessOpening, 'openAccess').mockImplementation(sharing); });
 const appearance = useAppearance.getState();
 const session = client.session.getState();
 afterEach(async () => {cleanup();localStorage.clear();client.session.setState(session);useAppearance.setState(appearance);sharing.mockReset();await setLocale('en');});

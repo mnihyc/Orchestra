@@ -16,7 +16,7 @@ const calls = vi.hoisted(() => ({
 }));
 vi.mock('@/api/storage', () => ({ planCleanup: calls.plan, startCleanup: calls.start }));
 vi.mock('@/api/exports', async (original) => ({ ...await original<object>(), readJob: calls.read, cancelJob: calls.cancel }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const request: CleanupRequest = { scope: 'me', resource: null, items: ['image', 'recovery', 'tool'] };
 const now = '2026-10-01T00:00:00Z';

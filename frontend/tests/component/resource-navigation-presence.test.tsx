@@ -15,7 +15,7 @@ import { show, skipOverflowFallback } from './support';
 
 skipOverflowFallback();
 
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   Link: ({ to, activeProps: _activeProps, children, ...props }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; activeProps?: unknown; children?: ReactNode }) => {
     return <a href={to} {...props}>{children}</a>;
   },

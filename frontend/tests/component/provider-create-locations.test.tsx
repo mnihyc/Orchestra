@@ -18,7 +18,7 @@ import { harnessName } from '../doubles/harness-names';
 
 skipOverflowFallback();
 
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
 const navigate=vi.hoisted(()=>vi.fn());
 const readProvider=vi.hoisted(()=>vi.fn<(id:string)=>Promise<Provider>>());

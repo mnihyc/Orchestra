@@ -17,7 +17,7 @@ vi.mock('@/api/settings', async (load) => { const actual = await load<typeof Set
   targetSettingsQuery: (target: SettingsApi.SettingsTarget) => ({ queryKey: actual.targetSettingsKey(target), queryFn: server.values, staleTime: Infinity }) }; });
 vi.mock('@/api/resources', async (load) => ({ ...await load<object>(), templateQuery: (id: string) => ({ queryKey: ['detail-template-commands', id], queryFn: server.template, staleTime: Infinity }) }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useLocation: () => ({ pathname: '/resources/environments/unit', searchStr: server.search }) }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const target = { kind: 'environment', id: 'unit' } as const;
 const place = { name: 'Research workspace', kind: null, owner: detailAgent.owner, access: { permissions: ['environment.manage'] } };
 const def = (index: number): SettingDef => ({ key: `env.detail_feature_${index}`, title: `Feature ${index}`, description: `Keep feature ${index} available.`,

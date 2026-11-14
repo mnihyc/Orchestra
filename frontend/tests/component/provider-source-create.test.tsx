@@ -21,7 +21,7 @@ skipOverflowFallback();
 const guide = vi.hoisted(() => vi.fn());
 const navigate = vi.hoisted(() => vi.fn());
 const close = vi.hoisted(() => vi.fn());
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => guide }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => guide }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), useNavigate: () => navigate, Link: ({ children }: { children: ReactNode }) => <a href="#provider">{children}</a> }));
 vi.mock('@/api/machinePrograms',()=>({machineProgramsKey:(id:string)=>['programs',id],changeMachinePrograms:vi.fn(),

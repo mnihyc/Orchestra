@@ -29,22 +29,22 @@ const calls = vi.hoisted(() => ({
   me: vi.fn<() => Promise<Pick<Me, 'is_system_admin'>>>(),
   chats: vi.fn<(root: string, filter: ChatListFilter) => Promise<{ items: Pick<Chat, 'id' | 'name'>[]; next_cursor: null }>>(),
 }));
-vi.mock('@/api/adminMode', () => ({
+vi.mock('@/api/adminMode', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   adminModeKey: ['admin-mode'],
   adminModeQuery: { queryKey: ['admin-mode'], queryFn: () => calls.read() },
   setAdminMode: (enabled: boolean) => calls.write(enabled),
 }));
-vi.mock('@/api/auth', () => ({ meQuery: { queryKey: ['me'], queryFn: () => calls.me() } }));
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@/api/auth', async (loadOriginal) => ({ ...await loadOriginal<object>(), meQuery: { queryKey: ['me'], queryFn: () => calls.me() } }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   useRouter: () => ({ invalidate: () => Promise.resolve() }),
   useNavigate: () => vi.fn(),
   useLocation: (options?: { select: (location: { pathname: string }) => string }) => options?.select === undefined ? { pathname: '/resources/machines' } : options.select({ pathname: '/resources/machines' }),
   Link: ({ to, className, children }: { to: string; className?: string; children?: ReactNode }) => <a href={to} className={className}>{children}</a>,
 }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: vi.fn() }));
 vi.mock('@/features/admin/Overview', () => ({ Overview: () => <p>System overview</p> }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (of: { name: string | null; redacted?: boolean }) => of.redacted === true ? null : of.name }));
-vi.mock('@/api/chats', () => ({ orgChatsQuery: (root: string, filter: ChatListFilter) => ({
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabel: () => (of: { name: string | null; redacted?: boolean }) => of.redacted === true ? null : of.name }));
+vi.mock('@/api/chats', async (loadOriginal) => ({ ...await loadOriginal<object>(), orgChatsQuery: (root: string, filter: ChatListFilter) => ({
   queryKey: ['chats', root, filter], initialPageParam: null, queryFn: () => calls.chats(root, filter), getNextPageParam: () => undefined,
 }) }));
 vi.mock('@/features/chat/ChatRow', () => ({ ChatRow: ({ chat }: { chat: Pick<Chat, 'id' | 'name'> }) => <li><a href={`/chat/${chat.id}`}>{chat.name}</a></li> }));
@@ -225,8 +225,10 @@ describe('the one human-session admin mode', () => {
     draw(<AdminModeControl />);
     await user.click(await screen.findByRole('switch', { name: ADMIN_MODE_NAME }));
     await waitFor(() => expect(calls.write).toHaveBeenCalledOnce());
-    expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).toHaveAttribute('data-as-admin', 'false');
-    expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).not.toBeChecked();
+    await waitFor(() => {
+      expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).toHaveAttribute('data-as-admin', 'false');
+      expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).not.toBeChecked();
+    });
   });
 });
 

@@ -11,10 +11,11 @@ import { i18n, setLocale } from '@/i18n';
 import { choiceCopy } from '@/i18n/choices';
 import { planProvider } from '../unit/provider-plan-fixtures';
 import { show, skipOverflowFallback } from './support';
+import { SECRET_DOTS } from '@/ui/SecretField';
 
 skipOverflowFallback();
 
-vi.mock('@/features/help/open', () => ({useHelpOpener:() => vi.fn()}));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:() => vi.fn()}));
 
 const save = vi.fn<(_draft:SourceDraft) => void>();
 const base: Omit<SourceFieldsProps,'value' | 'onChange'> = { element:'facts',programs:[],defaultTitle:'Default reader',defaultSummary:'Uses the registered default.',httpAllowed:true,canSendCredential:true,savedAddress:null,authorizationSet:false,secretFieldsSet:[] };
@@ -69,8 +70,8 @@ it('marks plain HTTP and refuses Save while its policy is off', () => {
 
 it('keeps a saved authorization blank and requires a new value for a different address', async () => {
   show(<Form initial={{...emptySourceDraft(),by:'address',url:'https://reports.example/details',auth:'bearer'}} savedAddress={{url:'https://reports.example/details',auth:'bearer',header:''}} authorizationSet />);
-  expect(screen.getByLabelText('Authorization value')).toHaveValue('');
-  expect(screen.getByText('Set; replace')).toBeVisible();
+  expect(screen.getByLabelText('Authorization value')).toHaveValue(SECRET_DOTS);
+  expect(screen.getByText(i18n.t('settingsEditors.secret.set'))).toBeVisible();
   expect(screen.getByRole('button',{name:'Save sources'})).toBeEnabled();
   await userEvent.clear(screen.getByRole('textbox',{name:'Address'}));
   await userEvent.type(screen.getByRole('textbox',{name:'Address'}),'https://other.example/details');
@@ -128,8 +129,8 @@ it('writes the reviewed revision and only the changed source, then clears the su
   const [change,reviewed]=sent.mock.calls[0]!;
   expect(providerSourcesBody(change,reviewed,offers,offers)).toEqual({expected_revision:7,facts:{by:'address',address:{url:'https://reports.example/read',auth:'bearer',send_credential:false},config:{},secrets:{},authorization:'typed-source-token'}});
   expect(change.models).toBeNull();
-  expect(facts.getByLabelText('Authorization value')).toHaveValue('');
-  expect(facts.getByText('Set; replace')).toBeVisible();
+  expect(facts.getByLabelText('Authorization value')).toHaveValue(SECRET_DOTS);
+  expect(facts.getByText(i18n.t('settingsEditors.secret.set'))).toBeVisible();
   expect(screen.queryByText('typed-source-token')).not.toBeInTheDocument();
 });
 
@@ -141,18 +142,28 @@ it('keeps an authorization draft on a refused save and on a newer provider until
   const props={facts:offers,models:offers,httpAllowed:true,onSave:refused};
   const view=show(<SourcesForm provider={initial} {...props} />);
   const facts=within(screen.getByRole('group',{name:'Details from'}));
+  await userEvent.click(facts.getByRole('button',{name:i18n.t('settingsEditors.secret.replace')}));
   await userEvent.type(facts.getByLabelText('Authorization value'),'keep-this-draft');
   await userEvent.click(screen.getByRole('button',{name:'Save sources'}));
   await waitFor(() => expect(refused).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(screen.getByRole('button',{name:'Save sources'})).toBeEnabled());
   expect(facts.getByLabelText('Authorization value')).toHaveValue('keep-this-draft');
-  const newer=structuredClone(initial);newer.revision+=1;
+  // The provider's revision moves whenever its state or figures are read again: that is no edit of its sources,
+  // so the draft stays, nothing is warned of, and the form can still be saved.
+  const refreshed=structuredClone(initial);refreshed.revision+=1;
+  view.rerender(<SourcesForm provider={refreshed} {...props} />);
+  expect(screen.queryByText(/This provider changed while you were editing/)).toBeNull();
+  expect(screen.getByRole('button',{name:'Save sources'})).toBeEnabled();
+  expect(facts.getByLabelText('Authorization value')).toHaveValue('keep-this-draft');
+  // Somebody else saving other sources under the draft is the conflict.
+  const newer=structuredClone(refreshed);newer.revision+=1;
+  newer.sources.models={...newer.sources.models,by:'program' as const,name:'acme'};
   view.rerender(<SourcesForm provider={newer} {...props} />);
   expect(screen.getByText(/This provider changed while you were editing/)).toBeVisible();
   expect(screen.getByRole('button',{name:'Save sources'})).toBeDisabled();
   expect(facts.getByLabelText('Authorization value')).toHaveValue('keep-this-draft');
   await userEvent.click(screen.getByRole('button',{name:'Use current values'}));
-  expect(facts.getByLabelText('Authorization value')).toHaveValue('');
+  expect(facts.getByLabelText('Authorization value')).not.toHaveValue('keep-this-draft');
   expect(refused).toHaveBeenCalledTimes(1);
 });
 

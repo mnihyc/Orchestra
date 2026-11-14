@@ -23,8 +23,8 @@ const reads = vi.hoisted(() => {
   return { node: vi.fn<(id: string) => Promise<Node>>(), opening: vi.fn<(id: string, scope: string, chat: string | null) => Promise<NodeChatOpening>>(), href: '/topic/topic?tab=overview', search, availability: undefined as { ready: boolean; chat?: boolean } | undefined, replace: vi.fn() };
 });
 vi.mock('@/api/chats', async (load) => ({ ...await load<typeof Chats>(), nodeChatOpeningQuery: (id: string, scope: string, chat: string | null) => ({ queryKey: ['chat-panel-opening', id], queryFn: () => reads.opening(id, scope, chat), staleTime: Infinity }) }));
-vi.mock('@/shell/screen', () => ({ useCurrentHeading: () => ({ nodeId: ACME.fixLogin, views: reads.availability }) }));
-vi.mock('@tanstack/react-router', () => ({ useRouterState: () => reads.search, useRouter: () => ({ state: { location: { href: reads.href } }, history: { replace: reads.replace } }) }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useCurrentHeading: () => ({ nodeId: ACME.fixLogin, views: reads.availability }) }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), useRouterState: () => reads.search, useRouter: () => ({ state: { location: { href: reads.href } }, history: { replace: reads.replace } }) }));
 vi.mock('@/features/chat/ChatView', () => ({ ChatView: ({ chatId, scope }: { chatId: string; scope?: ReactNode }) => <>{scope}<output aria-label="Visible chat">{chatId}</output></> }));
 afterEach(() => { reads.node.mockClear(); reads.opening.mockClear(); reads.search = {}; reads.availability = undefined; reads.replace.mockReset(); clearChatFocus(); treeWriter.clear(); client.session.setState({ userId: null }); });
 

@@ -9,7 +9,7 @@ import { Menu } from '@/ui/Menu';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ open: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.open }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => calls.open }));
 afterEach(async () => { calls.open.mockClear(); await setLocale('en'); });
 
 it.each(['en', 'zh-CN'] as const)('links the actual %s card-and-menu heading from the native menu', async (locale) => {

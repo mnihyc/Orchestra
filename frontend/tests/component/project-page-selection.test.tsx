@@ -24,7 +24,7 @@ vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(), topic
   queryFn: () => Promise.resolve({ items: topics, next_cursor: null }),
 }) }));
 vi.mock('@/api/day100', async (original) => ({ ...await original<object>(), changeTopicStatus: vi.fn() }));
-vi.mock('@/features/navigation/NodeMenu', () => ({ useIsPending: () => false, NodeMenuButton: () => null }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), useIsPending: () => false, NodeMenuButton: () => null }));
 vi.mock('@/features/topic/TopicMenu', () => ({ TopicMenu: () => null, TopicMenuEntries: () => null }));
 vi.mock('@/features/navigation/places', async (original) => ({ ...await original<object>(),
   PlaceLink: ({ place, children, className }: { place: { id: string }; children: ReactNode; className?: string }) => <a href={`/topic/${place.id}`} className={className}>{children}</a>,

@@ -1,0 +1,7 @@
+fmt
+clippy
+test -p orch-testkit --lib
+test -p orch-testkit --test database_budget
+test -p orch-db --lib
+test -p orch-engine --lib
+test -p orch-engine --test exports --test history_scale -- --nocapture

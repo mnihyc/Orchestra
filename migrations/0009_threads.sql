@@ -1561,3 +1561,13 @@ BEGIN
 END
 $$;
 CREATE TRIGGER ask_files_release AFTER DELETE ON ask_files FOR EACH ROW EXECUTE FUNCTION orch_release_ask_file();
+
+
+-- Bounded capture metadata pages and their frozen references use these exact keys.
+CREATE INDEX segments_history_metadata_idx ON segments(thread_id,id);
+CREATE INDEX segments_history_metadata_text_idx ON segments(thread_id,(id::text));
+CREATE INDEX inputs_history_metadata_idx ON thread_inputs(thread_id,id);
+CREATE INDEX inputs_history_metadata_text_idx ON thread_inputs(thread_id,(id::text)) WHERE state='delivered';
+CREATE INDEX approvals_history_metadata_text_idx ON approvals((id::text));
+CREATE INDEX history_cut_turn_input_idx ON thread_history_cut_rows(cut_id,(body->>'input_id')) WHERE kind='turn';
+CREATE INDEX history_cut_turn_segment_idx ON thread_history_cut_rows(cut_id,(body->>'segment_id')) WHERE kind='turn';

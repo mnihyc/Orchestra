@@ -4,9 +4,9 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { useChatLinks } from '@/features/chat/links';
 
 const world = vi.hoisted(() => ({ request: { panel: false, chat: '', message: '' }, node: undefined as string | undefined, current: undefined as string | undefined, reveal: vi.fn() }));
-vi.mock('@tanstack/react-router', () => ({ useRouterState: () => world.request }));
-vi.mock('@/shell/screen', () => ({ useCurrentHeading: () => ({ nodeId: world.node }), currentHeading: () => ({ nodeId: world.current }) }));
-vi.mock('@/features/workbench/openView', () => ({ revealView: world.reveal }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), useRouterState: () => world.request }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useCurrentHeading: () => ({ nodeId: world.node }), currentHeading: () => ({ nodeId: world.current }) }));
+vi.mock('@/features/workbench/openView', async (loadOriginal) => ({ ...await loadOriginal<object>(), revealView: world.reveal }));
 function Frame() { useChatLinks(); return null; }
 afterEach(() => { world.request = { panel: false, chat: '', message: '' }; world.node = undefined; world.current = undefined; vi.clearAllMocks(); });
 

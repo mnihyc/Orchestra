@@ -19,7 +19,7 @@ vi.mock('@/api/environments', async (original) => {
   const actual = await original<typeof EnvironmentsApi>();
   return { ...actual, environmentReachQuery: (id: string) => ({ ...actual.environmentReachQuery(id), queryFn: read }) };
 });
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 afterEach(() => { vi.clearAllMocks(); });
 
 const NETWORK: NetworkState = { mode: 'restricted', required_mode: 'restricted', network_mode: 'bridge', networks: [], proxy_url: null, allowed_hosts: ['packages.example'], sources: [], revision: 'r1', always: [{ authority: 'orch.example', port: 443, protocol: 'wss', purpose: 'gateway' }], always_revision: 'a1', always_source: 'orch_configuration', state: 'ready', reason: null, last_denied: null };

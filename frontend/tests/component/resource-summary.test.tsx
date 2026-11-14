@@ -10,7 +10,7 @@ import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 const source = vi.hoisted(() => ({ reply: undefined as Reply | undefined, readFailures: 0, refresh: vi.fn(), ask: vi.fn() }));
-vi.mock('@/features/ask/open', () => ({ openAskWithDraft: source.ask }));
+vi.mock('@/features/ask/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAskWithDraft: source.ask }));
 vi.mock('@/api/summaries', async (original) => ({ ...await original<typeof Summaries>(),
   resourceSummaryQuery: (target: { kind: string; id: string }) => queryOptions({ queryKey: ['native-summary-case', target.kind, target.id], queryFn: () => {
     if (source.readFailures > 0) { source.readFailures -= 1; return Promise.reject(new Error('The free readback failed')); }

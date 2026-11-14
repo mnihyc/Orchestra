@@ -10,7 +10,7 @@ import { snapshot } from '../unit/continuation-fixtures';
 import { executionDisplay } from '../doubles/thread-display';
 import { show } from './support';
 
-vi.mock('@/features/change/target', () => ({ openChange: vi.fn() }));
+vi.mock('@/features/change/target', async (loadOriginal) => ({ ...await loadOriginal<object>(), openChange: vi.fn() }));
 afterEach(async () => { cleanup(); useAppearance.setState({ locale: 'en' }); await setLocale('en'); });
 const turn = '00000000-0000-0000-0000-000000000201';
 const since = '2026-11-08T00:00:00Z';

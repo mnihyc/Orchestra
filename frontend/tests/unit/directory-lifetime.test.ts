@@ -8,8 +8,8 @@ import { socket } from '@/realtime/live';
 import { DIRECTORY_READ_CONCURRENCY, MOST_WATCHED, directoryKey, directoryWriter, sortEntries, stopWatching, useDirectories, watchDirectory } from '@/realtime/stores/environment';
 
 const calls = vi.hoisted(() => ({ list: vi.fn(), subscribe: vi.fn() }));
-vi.mock('@/api/workspace', () => ({ listDirectory: calls.list }));
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: calls.subscribe, status: createStore<SocketStatus>(() => ({ phase: 'ready', lostAt: null, roundTripMs: null, build: null, outdated: false })) } }));
+vi.mock('@/api/workspace', async (loadOriginal) => ({ ...await loadOriginal<object>(), listDirectory: calls.list }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: calls.subscribe, status: createStore<SocketStatus>(() => ({ phase: 'ready', lostAt: null, roundTripMs: null, build: null, outdated: false })) } }));
 const door = { environmentId: 'workspace', threadId: 'thread' };
 const subscriptions: { onFrame: (frame: FeedFrame) => void; unsubscribe: ReturnType<typeof vi.fn> }[] = [];
 const entry = (name: string): DirEntry => ({ name, path: name, type: 'file', size: 1, mtime: '2026-01-01T00:00:00Z', cached: false, mode: 420, link_target: null });

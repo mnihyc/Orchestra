@@ -15,8 +15,8 @@ import { show } from './support';
 
 const made = vi.hoisted(() => ({ connections: [] as { control: boolean; sent: BrowserControlFrame[]; state: StoreApi<BrowserSocketState> }[], list: null as EnvironmentBrowsers | null }));
 
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="#">{children}</a> }));
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: ReactNode }) => <a href="#">{children}</a> }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
 vi.mock('@/api/browsers', async (original) => ({
   ...await original<typeof BrowserApi>(),
   browserKeys: { list: (id: string) => ['test-browsers', id] },
