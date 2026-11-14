@@ -30,7 +30,7 @@ vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(),
   // This focused setting-write fixture does not mount a router; preserve its real anchors.
   Link: ({to,params:_params,children,...props}:ComponentProps<'a'>&{to:string;params?:unknown}) => <a {...props} href={to}>{children}</a>,
 }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const currentId = '0199c1a0-0000-7000-8000-000000000001', nextId = '0199c1a0-0000-7000-8000-000000000002';
 const initialAppearance = useAppearance.getState(), wasDark = document.documentElement.classList.contains('dark'), previousTheme = document.documentElement.dataset.theme;
 beforeEach(() => {

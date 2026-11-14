@@ -99,6 +99,26 @@ afterEach(async () => {
 describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('a shared aside lane in %s / %s', (locale, theme) => {
   beforeEach(async () => { await setLocale(locale); useAppearance.setState({ locale, theme, resolvedTheme: theme }); });
 
+  it.each([false, true])('uses the main conversation classification with Diagnostics %s', (diagnostics) => {
+    const reports = [
+      ['session_status', { type: 'active', active_flags: [] }, 'Quiet session program'],
+      ['mcp_startup', { status: 'starting' }, 'Starting service program'],
+      ['mcp_startup', { status: 'ready' }, 'Ready service program'],
+      ['mcp_startup', { status: 'failed', message: 'Credentials expired' }, 'Failed service program'],
+    ] as const;
+    act(() => threadWriter.apply(SIDE, { items: reports.map(([change, value, program], index) => numbered(marker(`side-report-${index}`, { marker: 'harness_changed', data: {
+      program, change, subject: 'Source catalog', previous: { state: 'unsupported' }, value, expected: { state: 'unsupported' },
+      changed: false, diverged: false, next_turn: false, turn_id: 'side-turn', reported_at: '2026-10-01T10:00:00.000Z',
+    } }, { turn: 'side-turn' }), 22 + index)) }));
+    draw(true, { ...context, diagnostics });
+    const lane = screen.getByRole('region', { name: i18n.t('side.lane.label', { name: reference.name }) });
+    expect(lane).toHaveTextContent('Failed service program');
+    for (const program of ['Quiet session program', 'Starting service program', 'Ready service program']) {
+      if (diagnostics) expect(lane).toHaveTextContent(program);
+      else expect(lane).not.toHaveTextContent(program);
+    }
+  });
+
   it('uses the same bordered frame, messages and command displays as a child stream, then follows the actual answer', async () => {
     draw();
     const lane = screen.getByRole('region', { name: i18n.t('side.lane.label', { name: reference.name }) });
@@ -199,7 +219,7 @@ it('keeps a locked or offline aside draft writable but never sends it or interru
 
 it('queues while its own turn runs, and its Stop names only that side turn', async () => {
   seed({}, true);
-  calls.stop.mockResolvedValue({ ...turn('side-turn', { ordinal: 1, inputId: 'side-input', state: 'interrupted' }), seq_updated: 22 });
+  calls.stop.mockResolvedValue({ state: 'stopped', requested_at: new Date().toISOString(), turn: { ...turn('side-turn', { ordinal: 1, inputId: 'side-input', state: 'interrupted' }), seq_updated: 22 } });
   const input = { ...threadInput('queued-side', 'Then check expiry', { author: ADA, position: '1' }), thread_id: SIDE, seq_updated: 23 };
   calls.send.mockResolvedValue({ input, seq: 23 });
   draw();

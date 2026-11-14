@@ -177,21 +177,30 @@ pub fn mount(registry: &mut Registry) {
 orch_api_base::__api_bind_d9260d2301!();
 
 /// The registry, as the API's definitions.
-pub(crate) async fn registry_get(_ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<api::SettingDef>> {
-    registry_definitions()
+pub(crate) async fn registry_get(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<api::SettingDef>> {
+    registry_definitions(Some(&ctx.app.engine))
 }
 
 /// Static registry projection for readers with their own SystemRead admission.
-pub(crate) fn registry_definitions() -> ApiResult<Vec<api::SettingDef>> {
+pub(crate) fn registry_definitions(
+    engine: Option<&orch_engine::Engine>,
+) -> ApiResult<Vec<api::SettingDef>> {
     registry::all()
         .iter()
         .map(|def| {
+            let mut schema = offered_schema(def);
+            if def.key == keys::AUTO_SUMMARIZER
+                && let Some(engine) = engine
+            {
+                schema["x-summarizers"] = serde_json::to_value(engine.summarizer_descriptors())
+                    .map_err(ApiError::internal)?;
+            }
             Ok(api::SettingDef {
                 key: def.key.to_owned(),
                 title: def.title.to_owned(),
                 description: def.description.to_owned(),
                 group: def.group.as_str().to_owned(),
-                schema: offered_schema(def),
+                schema,
                 class: same(&def.class).ok_or_else(|| ApiError::internal("a class is none"))?,
                 scopes: def
                     .scopes
@@ -1337,7 +1346,7 @@ pub mod tests {
     use super::*;
     #[cfg(any(test, feature = "test-support"))]
     fn every_registry_definition_and_merge_word_has_the_same_api_contract() -> ApiResult<()> {
-        let definitions = registry_definitions()?;
+        let definitions = registry_definitions(None)?;
         assert_eq!(definitions.len(), registry::all().len());
         for (definition, native) in definitions.iter().zip(registry::all()) {
             assert_eq!(definition.key, native.key);

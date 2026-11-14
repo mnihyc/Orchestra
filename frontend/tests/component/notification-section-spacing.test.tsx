@@ -12,9 +12,9 @@ import { Section } from '@/shell/Page';
 import { show } from './support';
 
 const openHelp = vi.hoisted(() => vi.fn());
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => openHelp }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => openHelp }));
 const prefs: NotificationPrefs = { approvals_always: false, chat_direct_level: 'mentions', chat_node_level: 'mentions', quiet_hours: null, pause_until: null, revision: 1 };
-vi.mock('@/api/notifications', () => ({ notificationPrefsKey: ['spacing-notification-prefs'], setNotificationPrefs: vi.fn(),
+vi.mock('@/api/notifications', async (loadOriginal) => ({ ...await loadOriginal<object>(), notificationPrefsKey: ['spacing-notification-prefs'], setNotificationPrefs: vi.fn(),
   notificationPrefsQuery: { queryKey: ['spacing-notification-prefs'], queryFn: () => Promise.resolve(prefs) },
 }));
 vi.mock('@/shell/screen', async (load) => ({ ...await load<typeof Screen>(), useScreenHeading: () => undefined }));

@@ -48,8 +48,8 @@ it('keeps the status arrangement in the same per-person workspace across a reloa
   const layout = shippedLayout('thread');
   const entries = stepStatus(showStatus(moveStatus(defaultStatus(), 'speed', 'bar'), 'tokens', 'live', false), 'provider_window', -1);
   saveWorkspace('status-person', { arrangement: 'default', layout, focusedGroup: null, focusedTab: null, focusedMainGroup: null, focusedMainTab: null, activeContent: null, focusMode: false, closedTabs: [], statusItems: entries });
-  expect(loadWorkspace('status-person', 'thread').kept?.statusItems).toEqual(entries);
-  expect(loadWorkspace('another-person', 'thread').kept).toBeNull();
+  expect(loadWorkspace('status-person').kept?.statusItems).toEqual(entries);
+  expect(loadWorkspace('another-person').kept).toBeNull();
   expect(readStatus([{ id: 'speed', place: 'somewhere', shown: true }])).toEqual(defaultStatus());
 });
 
@@ -58,6 +58,13 @@ it('resets the saved status arrangement with the existing Layout reset', () => {
   useWorkbench.getState().setStatusItems(moveStatus(defaultStatus(), 'speed', 'header'));
   useWorkbench.getState().reset();
   expect(useWorkbench.getState().statusItems).toEqual(defaultStatus());
-  expect(loadWorkspace('status-reset-person', 'thread').kept?.statusItems).toEqual(defaultStatus());
+  expect(loadWorkspace('status-reset-person').kept?.statusItems).toEqual(defaultStatus());
   useWorkbench.getState().leave();
+});
+
+it('says how full the context is as a share of its window, and as the tokens alone where no window was reported', () => {
+  const context = statusContext(), read = (usage: { context_used: number | null; context_window: number | null }) => STATUS_ITEMS.find((item) => item.id === 'context')?.read({ ...context, turn: null, thread: { ...context.thread, usage: { ...context.thread.usage!, ...usage } } });
+  expect(read({ context_used: 152_000, context_window: 400_000 })?.text).toBe('Context 38%');
+  expect(read({ context_used: 152_000, context_window: null })?.text).toBe('Context 152k');
+  expect(read({ context_used: null, context_window: 400_000 })).toBeNull();
 });

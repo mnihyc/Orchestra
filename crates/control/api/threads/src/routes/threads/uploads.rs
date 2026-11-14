@@ -481,7 +481,7 @@ async fn blob_get(ctx: Ctx, query: ThreadBlobGetQuery, _: Body) -> ApiResult<Res
 
 /// A private draft reads only a hash the caller independently holds, never somebody else's unfinished input.
 async fn upload_get(ctx: Ctx, query: UploadBlobGetQuery, _: Body) -> ApiResult<Response> {
-    let selected = crate::key_operations::native::selected_read::<blob_source::Blobs>(
+    let selected = crate::key_operations::native::selected_value::<blob_source::Blobs>(
         ctx.clone(),
         query.clone(),
         (),

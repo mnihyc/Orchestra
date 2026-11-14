@@ -14,6 +14,7 @@ import { type ComponentProps, type KeyboardEvent, type ReactNode, useCallback, u
 
 import { Choice, type ChoiceHelp } from '@/ui/Choice';
 import { cx } from '@/ui/cx';
+import { useReadProgress } from '@/lib/useReadProgress';
 import { ChoiceCard, ChoiceInspection, type CardController, type CardPreview } from '@/ui/DetailCard';
 import { EmptyState } from '@/ui/EmptyState';
 import { Field, type FieldSlots } from '@/ui/Field';
@@ -138,6 +139,7 @@ export function Combobox<Value extends string>({
   fieldClassName,
   className,
 }: ComboboxProps<Value>) {
+  const slow = useReadProgress(loading);
   const { t } = useTranslation();
   const covered = usePromptCovered();
   const listId = useId();
@@ -354,7 +356,7 @@ export function Combobox<Value extends string>({
                 onPointerDown={(event) => setTouchPreview(event.pointerType === 'touch')}
                 onKeyDown={press}
               />
-              {loading && <LoaderCircle className={cx('absolute top-1/2 -translate-y-1/2 animate-spin text-text-subtle',
+              {slow && <LoaderCircle className={cx('absolute top-1/2 -translate-y-1/2 animate-spin text-text-subtle',
                 // Shift the existing spinner slot by the trailing action's standard control width.
                 trailing === undefined ? 'right-3' : 'right-[calc(var(--control-sm)+0.75rem)]')} aria-hidden />}
               {trailing !== undefined && <div className="absolute inset-y-0 right-1 flex items-center">{trailing}</div>}

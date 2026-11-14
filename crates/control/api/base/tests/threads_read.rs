@@ -31,7 +31,7 @@ fn text(words: &str) -> Vec<ContentPart> {
 }
 
 #[tokio::test]
-async fn goal_inputs_have_bounded_human_outline_titles_in_opening_and_older_pages() {
+async fn goal_inputs_have_bounded_human_titles_in_initial_and_older_outline_pages() {
     use orch_api_contract::threads::{
         OUTLINE_TITLE_CHARS, ThreadOpeningGet, ThreadOpeningGetQuery, ThreadOutlineGetQuery,
     };
@@ -87,9 +87,24 @@ async fn goal_inputs_have_bounded_human_outline_titles_in_opening_and_older_page
             .send()
             .await
             .ok();
+        assert!(
+            serde_json::to_value(&opening)
+                .unwrap()
+                .get("outline")
+                .is_none()
+        );
+        let initial_outline = scene
+            .rig
+            .world
+            .app
+            .call(ThreadOutlineGet, &[&thread])
+            .token(&reader.token)
+            .query(&ThreadOutlineGetQuery::default())
+            .send()
+            .await
+            .ok();
         assert_eq!(
-            opening
-                .outline
+            initial_outline
                 .entries
                 .iter()
                 .find(|entry| entry.item_id == item && entry.kind == OutlineKind::UserMessage),
@@ -264,7 +279,8 @@ async fn opening_carries_the_native_screen_projections_and_only_the_readers_own_
     );
     let opening = response.ok();
     assert_eq!(opening.sync.seq, opening.sync.thread.seq);
-    assert_eq!(opening.sync.seq, opening.outline.seq);
+    let wire = serde_json::to_value(&opening).unwrap();
+    assert!(wire.get("outline").is_none() && wire.get("settings").is_none());
     assert!(
         opening
             .sync
@@ -303,16 +319,50 @@ async fn opening_carries_the_native_screen_projections_and_only_the_readers_own_
             .ok()
     );
     assert_eq!(opening.draft, Some(saved));
-    assert_eq!(
-        opening.parameters,
-        Some(
-            app.call(ThreadParameterGet, &[&id])
-                .token(&scene.ada.token)
-                .send()
-                .await
-                .ok()
-        )
-    );
+    let parameters = app
+        .call(ThreadParameterGet, &[&id])
+        .token(&scene.ada.token)
+        .send()
+        .await
+        .ok();
+    let shown = opening
+        .parameters
+        .as_ref()
+        .expect("the reader sees the composer controls");
+    assert_eq!(shown.model.value, parameters.model.value);
+    assert_eq!(shown.model.source, parameters.model.source);
+    assert_eq!(shown.model.writable, parameters.model.writable);
+    assert!(shown.model.options_partial);
+    assert_eq!(shown.effort, parameters.effort);
+    assert_eq!(shown.parameters, parameters.parameters);
+    assert_eq!(shown.provider, parameters.provider);
+    assert_eq!(shown.agent, parameters.agent);
+    assert_eq!(shown.environment, parameters.environment);
+    assert_eq!(shown.composer, parameters.composer);
+    let selected = parameters
+        .model
+        .options
+        .iter()
+        .find(|option| Some(&option.model_name) == parameters.model.value.as_ref());
+    assert_eq!(shown.model.options.len(), usize::from(selected.is_some()));
+    if let Some(selected) = selected {
+        let current = &shown.model.options[0];
+        assert_eq!(current.model_name, selected.model_name);
+        assert_eq!(current.display_name, selected.display_name);
+        assert_eq!(
+            current.parameters.input_images,
+            selected.parameters.input_images
+        );
+        assert_eq!(
+            current.parameters.context_window,
+            selected.parameters.context_window
+        );
+        assert_eq!(
+            current.parameters.service_tiers,
+            selected.parameters.service_tiers
+        );
+        assert_eq!(current.allowed, selected.allowed);
+    }
     assert_eq!(
         opening.limits,
         Some(
@@ -324,23 +374,30 @@ async fn opening_carries_the_native_screen_projections_and_only_the_readers_own_
                 .ok()
         )
     );
+    let settings = app
+        .call(NodeSettingList, &[&id])
+        .token(&scene.ada.token)
+        .send()
+        .await
+        .ok();
+    assert!(!settings.is_empty());
     assert_eq!(
-        opening.settings,
-        app.call(NodeSettingList, &[&id])
-            .token(&scene.ada.token)
-            .send()
-            .await
-            .ok()
+        settings
+            .iter()
+            .find(|setting| setting.key == "agent.model")
+            .and_then(|setting| setting.value.as_ref())
+            .and_then(serde_json::Value::as_str),
+        shown.model.value.as_deref()
     );
-    assert_eq!(
-        opening.outline,
-        app.call(ThreadOutlineGet, &[&id])
-            .token(&scene.ada.token)
-            .query(&ThreadOutlineGetQuery::default())
-            .send()
-            .await
-            .ok()
-    );
+    let outline = app
+        .call(ThreadOutlineGet, &[&id])
+        .token(&scene.ada.token)
+        .query(&ThreadOutlineGetQuery::default())
+        .send()
+        .await
+        .ok();
+    assert!(outline.seq >= opening.sync.seq);
+    assert!(outline.entries.iter().all(|entry| entry.seq <= outline.seq));
     let other = app
         .call(ThreadOpeningGet, &[&id])
         .token(&scene.dan.token)
@@ -1590,4 +1647,83 @@ async fn a_stranger_reads_nothing_and_a_viewer_neither_drives_nor_pins_nor_keeps
             .problem(),
         "thread.interact",
     );
+}
+
+#[tokio::test]
+async fn a_paged_output_read_never_substitutes_a_new_blob_for_the_one_the_reader_selected() {
+    use orch_blob_contract::store::stream_of;
+    let s = Scene::new().await;
+    let id = s.thread().await.base.id;
+    let app = &s.rig.world.app.app;
+    app.engine.attach_blobs(app.blobs.store());
+    let bytes = "replacement output";
+    let hash = orch_types::Hash::of(bytes.as_bytes());
+    app.blobs
+        .store()
+        .put(
+            &hash,
+            Some(bytes.len() as i64),
+            stream_of(vec![bytes::Bytes::from(bytes)]),
+        )
+        .await
+        .unwrap();
+    let item=command_printing(&s,id,json!({"inline":"tail","total_len":bytes.len(),"truncated":true,"blob":hash,"retained":{"offset":0,"len":bytes.len()}})).await;
+    let reply = s
+        .rig
+        .world
+        .app
+        .call(ThreadItemOutputGet, &[&id, &item])
+        .token(&s.cai.token)
+        .query(&ThreadItemOutputGetQuery {
+            expected_blob: Some(orch_types::Hash::of(b"the previously selected output")),
+            ..Default::default()
+        })
+        .send_bytes()
+        .await;
+    assert_eq!(reply.status, 409);
+    assert!(!String::from_utf8_lossy(&reply.raw).contains(bytes));
+}
+
+#[tokio::test]
+async fn tiny_output_pages_keep_unicode_characters_whole_and_continue_at_the_returned_byte_offset()
+{
+    use orch_blob_contract::store::stream_of;
+    let s = Scene::new().await;
+    let id = s.thread().await.base.id;
+    let app = &s.rig.world.app.app;
+    app.engine.attach_blobs(app.blobs.store());
+    let source = "字🙂".repeat(4);
+    let hash = orch_types::Hash::of(source.as_bytes());
+    app.blobs
+        .store()
+        .put(
+            &hash,
+            Some(source.len() as i64),
+            stream_of(vec![bytes::Bytes::from(source.clone())]),
+        )
+        .await
+        .unwrap();
+    let item=command_printing(&s,id,json!({"inline":"tail","total_len":source.len(),"truncated":true,"blob":hash,"retained":{"offset":0,"len":source.len()}})).await;
+    let mut all = Vec::new();
+    while all.len() < source.len() {
+        let page = s
+            .rig
+            .world
+            .app
+            .call(ThreadItemOutputGet, &[&id, &item])
+            .token(&s.cai.token)
+            .query(&ThreadItemOutputGetQuery {
+                expected_blob: Some(hash),
+                offset: Some(all.len() as i64),
+                limit: Some(5),
+                ..Default::default()
+            })
+            .send_bytes()
+            .await;
+        assert_eq!(page.status, 200);
+        assert!(!page.raw.is_empty());
+        assert!(std::str::from_utf8(&page.raw).is_ok());
+        all.extend_from_slice(&page.raw);
+    }
+    assert_eq!(all, source.as_bytes());
 }

@@ -22,12 +22,12 @@ vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router
   <a className={className} href={`${to.replace('$id', params?.id ?? '')}${search === undefined ? '' : `?tab=${search.tab}`}`}>{children}</a> }));
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useThreadFeed: () => undefined, useOrgTreeFeed: () => undefined }));
 vi.mock('@/shell/screen', async (load) => ({ ...await load<typeof Screen>(), useScreenHeading: () => undefined }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
-vi.mock('@/features/inbox/Counters', () => ({ useReadWhenOpened: () => undefined }));
-vi.mock('@/features/change/target', () => ({ openChange: calls.change }));
-vi.mock('@/features/navigation/favorites', () => ({ StarButton: () => <button>Star</button> }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
+vi.mock('@/features/inbox/Counters', async (loadOriginal) => ({ ...await loadOriginal<object>(), useReadWhenOpened: () => undefined }));
+vi.mock('@/features/change/target', async (loadOriginal) => ({ ...await loadOriginal<object>(), openChange: calls.change }));
+vi.mock('@/features/navigation/favorites', async (loadOriginal) => ({ ...await loadOriginal<object>(), StarButton: () => <button>Star</button> }));
 vi.mock('@/features/thread/SubscriptionBell', () => ({ SubscriptionBell: () => <button>Notifications</button> }));
-vi.mock('@/features/navigation/NodeMenu', () => ({ useNodeMenu: () => [] }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodeMenu: () => [] }));
 vi.mock('@/features/thread/forkNow', () => ({ useForkNow: () => ({ pending: false, start: vi.fn() }) }));
 vi.mock('@/features/running/live', () => ({ useRunning: () => ({ roster: null, closed: false, error: null }) }));
 vi.mock('@/features/timeline/preferences', () => ({ useTimelinePreferences: () => ({ detail: 'steps', hideHistory: false, setDetail: vi.fn(), setHideHistory: vi.fn() }) }));
