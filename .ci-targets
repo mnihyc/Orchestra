@@ -1,0 +1,10 @@
+fmt
+clippy
+test -p orch-engine --test environments
+test -p orch-engine --test call_recovery -- session_loss::
+test -p orch-engine --test turns -- offline_deadline::
+test -p orch-engine --lib -- binding::machine_programs::tests::
+test -p orch-api-core --test container_units --test binding_options --test machine_policy_scopes
+web typecheck
+web lint
+web test -- tests/unit/enrollment-progress.test.ts tests/component/machine-enrollment-arrival.test.tsx tests/component/machine-program-version-blocked.test.tsx tests/component/environment-machine-programs.test.tsx tests/component/environment-data.test.tsx

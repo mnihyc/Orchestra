@@ -538,6 +538,19 @@ fn stored(progress: &JobProgress, log: Option<&str>) -> Json {
     value
 }
 
+/// Keeps the public failure reason beside the native output, including after cleanup overwrites a tail.
+fn keep_failure_log(progress: &JobProgress, log: &mut Option<String>, failure: &Failure) {
+    let reason = format!("{} · {}: {}", progress.phase, failure.code, failure.message);
+    let tail = log.get_or_insert_with(String::new);
+    if tail.lines().any(|line| line == reason) {
+        return;
+    }
+    if !tail.is_empty() && !tail.ends_with('\n') {
+        tail.push('\n');
+    }
+    tail.push_str(&reason);
+}
+
 /// A job's progress as the row holds it, and the end of what a phase printed.
 #[must_use]
 pub fn read_progress(row: &JobRow) -> (JobProgress, Option<String>) {
@@ -1043,6 +1056,7 @@ impl Job {
         let Some(mut row) = self.lock_owned(&mut tx).await? else {
             return Ok(None);
         };
+        let first = abort_reason(&row)?.is_none();
         let reason = if let Some(reason) = abort_reason(&row)? {
             reason
         } else {
@@ -1051,7 +1065,22 @@ impl Job {
             row.plan["abort"] = value;
             why.clone()
         };
+        if first && let Stop::Failed(failure) = &reason {
+            let (progress, mut log) = read_progress(&row);
+            if failure.log.is_some() {
+                log.clone_from(&failure.log);
+            }
+            keep_failure_log(&progress, &mut log, failure);
+            row.progress = stored(&progress, log.as_deref());
+            rows::save_progress(&mut tx, self.id, &row.progress, self.now()).await?;
+        }
         tx.commit().await.map_err(orch_db::DbError::from)?;
+        if first && let Stop::Failed(failure) = &reason {
+            let (progress, _) = read_progress(&row);
+            tracing::warn!(job = %self.id, kind = %row.kind, environment = ?row.environment_id,
+                provider = ?row.provider_id, phase = %progress.phase, code = %failure.code,
+                reason = %failure.message, "a job failed");
+        }
         Ok(Some((row, reason)))
     }
 
@@ -2281,6 +2310,9 @@ impl Engine {
         let (progress, mut log) = read_progress(&row);
         if failure.log.is_some() {
             log.clone_from(&failure.log);
+        }
+        if to == state::FAILED {
+            keep_failure_log(&progress, &mut log, &failure);
         }
         let error = json!({
             "code": failure.code,
