@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-api-base --lib
+test -p orch-engine --lib
+test -p orch-api-core --test ask --test ask_tools_native_origin --test search_native_scopes --test reference_preview

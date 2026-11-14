@@ -2153,15 +2153,19 @@ registry! {
     ASK_MAX_STEPS = "ask.max_steps", Automation, Policy, SYSTEM_ORG, Min, value("16"), int(1, Unit::Count),
         "Ask steps per turn", "The model steps allowed for one question before it asks the person to continue.";
     ASK_MAX_OUTPUT_TOKENS = "ask.max_output_tokens", Automation, Policy, SYSTEM_ORG, Min, value("4096"), int(1, Unit::Count),
-        "Ask answer tokens", "The most output tokens per Ask model request, also reserved before fitting conversation context. The lowest system or organization value applies.";
+        "Ask answer tokens", "The most output tokens per Ask model request. The request is fitted to the window less this, and an answer takes half of the window at most. The lowest system or organization value applies.";
     ASK_CONTEXT_TOKENS = "ask.context_tokens", Automation, Policy, SYSTEM_ORG, Min, UNSET, int(1, Unit::Count),
-        "Ask context tokens", "Unset uses the chosen model's context window. When set, the smaller value applies to Ask only; output and tool-result reserves must still fit. The lowest system or organization value applies.";
+        "Ask context tokens", "Unset uses the chosen model's context window; a model that states none is not given a small one. When set, the smaller value applies to Ask only. A window no larger than twice the answer tokens leaves the answer half of it. The lowest system or organization value applies.";
     ASK_MAX_TOOLS = "ask.max_tools", Automation, Policy, SYSTEM_ORG, Min, value("32"), int(1, Unit::Count),
         "Ask tools per turn", "The read operations allowed for one question before it asks the person to narrow the question.";
-    ASK_TOOL_BYTES = "ask.tool_bytes", Automation, Policy, SYSTEM_ORG, Min, value("65536"), int(1, Unit::Bytes),
-        "Ask source size", "The most bytes from one read result supplied to the model, with a canonical link to the full source.";
-    ASK_TURN_TOOL_BYTES = "ask.turn_tool_bytes", Automation, Policy, SYSTEM_ORG, Min, value("262144"), int(1, Unit::Bytes),
-        "Ask sources per turn", "The total read-result bytes supplied while answering one question.";
+    ASK_DOCS_HITS = "ask.docs_hits", Automation, Policy, SYSTEM_ORG, Min, value("5"), int(1, Unit::Count),
+        "Ask guide pages per search", "The most guide pages one Ask search of the help gives the model, English and Chinese alternating where both match.";
+    ASK_DOCS_EXCERPT_TOKENS = "ask.docs_excerpt_tokens", Automation, Policy, SYSTEM_ORG, Min, value("1000"), int(1, Unit::Count),
+        "Ask guide excerpt size", "The most tokens of one guide page that Ask's help search gives the model; the page's link comes with it.";
+    ASK_MAX_OPERATIONS = "ask.max_operations", Automation, Policy, SYSTEM_ORG, Min, value("20"), int(1, Unit::Count),
+        "Ask operations per search", "The most read operations one Ask search of the read catalogue returns.";
+    ASK_MAX_LINKS = "ask.max_links", Automation, Policy, SYSTEM_ORG, Min, value("50"), int(1, Unit::Count),
+        "Ask links per source", "The most canonical source links Ask keeps from one read.";
     CALLS_RULES = "calls.rules", Automation, Policy, SYSTEM_TO_TOPIC, Replace, value(orch_provider_contract::calls::DEFAULT_RULES), Schema::List { items: &Schema::Any, unique: false },
         "Call recovery", "Ordered rules for retrying, continuing, failing over or waiting after a model call fails.";
     CALLS_REPEAT_LIMIT = "calls.repeat_limit", Automation, Policy, SYSTEM_TO_TOPIC, Min, value("3"), int(0, Unit::Count),
