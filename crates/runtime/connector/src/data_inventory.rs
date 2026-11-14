@@ -16,7 +16,8 @@ fn kind(name: &std::ffi::OsStr) -> MachineDataKind {
         Some("mcp") => MachineDataKind::McpCopies,
         Some("storage-bindings") => MachineDataKind::StorageBindings,
         Some("logs") => MachineDataKind::Logs,
-        Some("secrets" | "identity") => MachineDataKind::SealedStore,
+        // What is put aside for an earlier unit is its identity and what its key sealed.
+        Some("secrets" | "identity" | "previous") => MachineDataKind::SealedStore,
         Some("spool" | "journal" | "cache" | "state") => MachineDataKind::State,
         _ => MachineDataKind::Other,
     }
@@ -188,6 +189,28 @@ mod tests {
         assert_eq!(snapshots[1].parts[1].bytes, None);
         assert!(report.complete);
         assert!(report.parts.iter().all(|part| part.bytes == Some(4)));
+    }
+
+    #[test]
+    fn the_machine_put_aside_for_an_earlier_unit_is_counted_with_the_sealed_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aside = tmp.path().join("previous").join("unit-a").join("identity");
+        std::fs::create_dir_all(&aside).unwrap();
+        std::fs::write(aside.join("key"), b"private-key-value").unwrap();
+        let at = "2026-11-08T06:00:00Z".parse().unwrap();
+        let report = measure(tmp.path(), at, &tokio_util::sync::CancellationToken::new());
+        let part = report
+            .parts
+            .iter()
+            .find(|part| part.name == "previous")
+            .unwrap();
+        assert_eq!(part.kind, MachineDataKind::SealedStore);
+        assert_eq!(part.bytes, Some(17));
+        assert!(
+            !serde_json::to_string(&report)
+                .unwrap()
+                .contains("private-key-value")
+        );
     }
 
     #[test]

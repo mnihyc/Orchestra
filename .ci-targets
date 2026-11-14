@@ -1,0 +1,12 @@
+# n41-runtime, second round: the thirteen findings of the review: a forced act undoes an update first and leaves no second unit on the volume; the host is told of a forced stop until it answers; everything that can refuse is checked before a job is ended; the machine put aside is never the only copy lost; no unmarked-volume branch; reasons as words in both languages; a unit shown as being made is settled by its host; the log's fields pinned.
+fmt
+clippy
+test -p orch-connector-core --lib
+test -p orch-api-resources --lib
+test -p orch-api-contract --lib
+test -p orch-engine --lib
+test -p orch-engine --test provider_runtime --test provider_updates --test environments --test provider_sign_in --test updates --test provider_homes --test loss
+test -p orch-api-core --test provider_managed --test hosts --test hosted_environments --test cluster_retained --test runtime_updates
+web typecheck
+web lint
+web test -- tests/component/provider-runtime-force.test.tsx tests/component/host-runtime-force.test.tsx tests/component/resource-technical-values.test.tsx tests/unit/api-error-words.test.ts

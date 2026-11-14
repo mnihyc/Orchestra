@@ -27181,6 +27181,11 @@ export interface components {
         };
         /** @description Stops a runtime of a host. */
         HostRuntimeStopBody: {
+            /**
+             * @description Whether to settle the stop although the host does not confirm it, ending the job that works on the unit;
+             *     the host is told to stop the unit as soon as it can be told.
+             */
+            force?: boolean | null;
             /** @description Whether to interrupt what runs in it. */
             interrupt: boolean;
         };
@@ -40806,6 +40811,11 @@ export interface components {
          *     conversations.
          */
         ProviderRuntime: {
+            /**
+             * @description What the system knows of why it stands where it does, in a sentence: why a unit failed, or what its host did
+             *     not confirm. `null` when there is nothing to say.
+             */
+            detail: string | null;
             /** @description The driver that made it. */
             driver: string;
             /**
@@ -41174,6 +41184,12 @@ export interface components {
         };
         /** @description Starts or stops a managed provider's runtime by hand. */
         ProviderStartStopBody: {
+            /**
+             * @description For a stop: whether to settle it although the host does not confirm it. The unit is stopped in the
+             *     system's records, the job that works on it is ended, and the host is told to stop the unit as soon as it
+             *     can be told.
+             */
+            force?: boolean | null;
             /** @description Whether to go on although a turn runs on it; a stop is refused otherwise. */
             interrupt?: boolean | null;
         };
@@ -66667,6 +66683,7 @@ export interface operations {
         parameters: {
             query: {
                 confirm: string;
+                force?: boolean | null;
                 volumes?: boolean | null;
             };
             header?: never;
