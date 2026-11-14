@@ -5,7 +5,7 @@ import { useStore } from 'zustand';
 import type { TFunction } from 'i18next';
 import { pageQuery, permissionsQuery, type AccessTarget } from '@/api/access';
 import { client } from '@/api/client';
-import { settingsQuery } from '@/api/settings';
+import { parametersQuery } from '@/api/threads';
 import { openAccess } from '@/features/access/AccessDialog';
 import { holderName, peopleOf } from '@/features/access/holders';
 import { indexCatalogue } from '@/features/access/model';
@@ -49,9 +49,9 @@ export function AudienceBanner({ thread }: { thread: Pick<Thread, 'id' | 'name' 
   const owner = page.data?.owner?.id ?? thread.owner.id;
   const holders = page.data !== undefined && definitions.data !== undefined && page.data.object.id === thread.id
     ? threadAudience(page.data, indexCatalogue(definitions.data), owner, now) : [];
-  const settings = useQuery({ ...settingsQuery(thread.id), enabled: known && holders.length > 0 && !page.isError && !definitions.isError, retry: false, refetchOnMount: false });
+  const settings = useQuery({ ...parametersQuery(thread.id), enabled: known && holders.length > 0 && !page.isError && !definitions.isError, retry: false, refetchOnMount: false });
   const [dismissed, dismiss] = useViewChoice<string | null>('thread', 'audience-dismissed', null, thread.id);
-  const readsOn = !settings.isError && settings.data?.find((row) => row.key === 'orch_tools.owner_reads')?.value === true;
+  const readsOn = !settings.isError && settings.data?.composer?.owner_reads === true;
   const share = <Button variant="ghost" size="sm" className="shrink-0" onClick={() => openAccess(target, { share: true })}>{t('thread.audience.sharing')}</Button>;
   if (page.isError || definitions.isError) {
     return <Banner tone="warning" action={<Button variant="ghost" size="sm" onClick={() => { void page.refetch(); void definitions.refetch(); }}>{t('common.tryAgain')}</Button>}

@@ -52,6 +52,12 @@ The access choice and usage reports use the same readable program names as the
 provider's model editor. **None** means no access program; **Standard** is a
 program when the provider offers and enables it.
 
+An agent program may keep a parameter behind a feature, as Codex does for its
+access program. **Agent features** lists each such feature by the program and the
+parameter it opens. The access program of Codex ships on, so a program that a
+manager enabled for a model is offered in a thread; a place that does not want it
+offered switches the feature off there, and the others keep it.
+
 Model, reasoning effort and parameters apply from the next turn. Steering a
 running turn adds a message and does not change that turn's parameters. Stop,
 change and continue when the new setting must take effect sooner. The provider
@@ -139,7 +145,10 @@ The Inbox keeps a notification for 90 days, read or not, unless a system admin
 chose another number of days ("Inbox kept"); a delivery that failed stays a
 month for you to retry, and one that went stays a week.
 
-An organization or system manager can configure channels and their templates.
+An organization or system manager can configure channels and their templates in
+**Settings → Email and channels** or **Management → Email and channels**. Browser
+push is available by default when the installation has its push key; you still
+choose whether to enable it for each browser.
 A project's destination receives only the work its rules permit; private
 descendants and human chat do not automatically flow outward. Weekly quiet
 schedules and offline content caching are not offered in this release.
