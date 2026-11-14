@@ -46,7 +46,6 @@ export function UndoChange({ change, access, onClose }: { change: EnvironmentCha
       return { state: 'ready', ...inverse, hash: brought.hash };
     },
     enabled: access.mayView && access.mayManage,
-    staleTime: 0,
     retry: false,
   });
   const undo = useMutation({

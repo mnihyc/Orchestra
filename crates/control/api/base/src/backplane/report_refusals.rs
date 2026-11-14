@@ -8,6 +8,8 @@ use chrono::Utc;
 
 use orch_db::queries::machine_refusals;
 
+use orch_db::queries::machine_reports;
+
 use orch_db::Db;
 
 use orch_db::DbError;
@@ -79,6 +81,21 @@ impl Refusals {
 }
 
 impl Link {
+    /// Whether `stream` is an environment's, and `machine` is the unit that enrolled for it before its row names
+    /// that unit. What the unit reports then waits, unanswered so that it is sent again: it is no other machine's
+    /// report, and is neither refused nor counted.
+    pub(super) async fn awaits_its_environment(&self, machine: Id, stream: &Stream) -> bool {
+        let Stream::Env { environment_id } = *stream else {
+            return false;
+        };
+        let waits: Result<bool, DbError> = async {
+            let mut conn = self.inner.db.acquire().await?;
+            machine_reports::awaits_attachment(&mut conn, machine, environment_id).await
+        }
+        .await;
+        waits.unwrap_or(false)
+    }
+
     pub async fn record_report_refusal(&self, machine: Id, stream: &Stream, count: usize) {
         let count = i64::try_from(count).unwrap_or(i64::MAX);
         if let Err(error) = self

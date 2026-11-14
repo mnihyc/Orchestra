@@ -13,7 +13,8 @@
  * makes nothing twice. A change to something with a revision carries the revision the person saw, and
  * a stale one comes back as `conflict.stale_revision`, which the screen shows and never retries alone.
  */
-import { CancelledError, infiniteQueryOptions, queryOptions, type QueryClient, type QueryKey } from '@tanstack/react-query';
+import { supersededRead } from '@/api/reads';
+import { infiniteQueryOptions, queryOptions, type QueryClient, type QueryKey } from '@tanstack/react-query';
 
 import { scheduledReads, suppliedRead } from '@/api/readScheduler';
 import { outsideOpeningsQuery } from '@/api/ports';
@@ -92,7 +93,7 @@ async function fetchNode(id: string, cache: QueryClient, signal: AbortSignal, op
     const data = await ok(api.GET('/nodes/{id}/overview', { params: { path: { id }, query: {
       from: opening.from, to: opening.to, breakdowns: opening.breakdowns.join(','), limit: opening.limit ?? null,
     } }, signal }));
-    if (!current() || reader !== client.session.getState().readerVersion) throw new CancelledError({ silent: true });
+    if (!current() || reader !== client.session.getState().readerVersion) throw supersededRead();
     if (data.node.id !== id) throw new Error('The node overview returned a different node');
     const keys: QueryKey[] = [];
     const usage = usageQuery(opening).queryKey, outside = outsideOpeningsQuery(id).queryKey;

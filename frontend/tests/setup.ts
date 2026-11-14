@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
 import { afterEach, beforeAll, beforeEach, vi } from 'vitest';
 
-import { i18n, startI18n } from '@/i18n';
+import { i18n, loadSearchCatalogues, startI18n } from '@/i18n';
 
 const geometryRestores: (() => void)[] = [];
 const pointerCaptures=new Map<number,Element>();
@@ -98,6 +98,7 @@ beforeEach(() => {
 
 beforeAll(async () => {
   if (!i18n.isInitialized) await startI18n('en');
+  await loadSearchCatalogues();
   const { installDevCatalogue } = await import('@/i18n/dev');
   installDevCatalogue();
 });

@@ -85,6 +85,7 @@ API; choose one exporter for them, rather than summing the same observation twic
 | `orch_turns_waiting` | Gauge, `reason=cap|lock`: inputs held by a cap or switching lock, excluding a person's queue Hold |
 | `orch_link_sessions` | Gauge, `placement,trust`: current machine sessions |
 | `orch_link_events_total` | Counter, `stream_kind`: committed link events |
+| `orch_link_stream_resets_total` | Counter, `reason=spool_lost|spool_overflow|too_large`: times a machine said that events of a stream are gone; `too_large` is an event larger than a message of the session may be |
 | `orch_link_event_lag_seconds` | Distribution, `stream_kind`: age on admission of delivered link events |
 | `orch_link_round_trip_seconds` | Distribution, `placement`: measured machine-link round trip |
 | `orch_commands_open` | Gauge, `kind`: machine commands not yet over |

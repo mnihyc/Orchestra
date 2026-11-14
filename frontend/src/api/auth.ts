@@ -24,12 +24,6 @@ import type {
   SetupCreateBody,
 } from '@/generated/api-types';
 
-/**
- * How long what the system says of itself counts as fresh. It changes when an administrator changes
- * it, which is seldom, and a page that is open for a day should still learn of a new banner.
- */
-const META_FRESH_FOR_MS = 5 * 60_000;
-
 /** The fewest characters a password has. The server holds the rule; this is so the form can say it first. */
 export const PASSWORD_MIN_CHARS = 10;
 
@@ -50,7 +44,6 @@ export async function fetchMeta(signal?: AbortSignal): Promise<Meta> {
 export const metaQuery = queryOptions({
   queryKey: metaKey,
   queryFn: ({ signal }): Promise<Meta> => fetchMeta(signal),
-  staleTime: META_FRESH_FOR_MS,
 });
 
 /** A newly signed-in caller needs a fresh permission fact after any previous reader's flight. */
@@ -91,7 +84,6 @@ export async function refreshMetaForSignIn(): Promise<void> {
 export const meQuery = queryOptions({
   queryKey: meKey,
   queryFn: ({ signal }): Promise<Me> => ok(api.GET('/me', { signal })),
-  staleTime: META_FRESH_FOR_MS,
 });
 
 /** The same native session projections, including caller-specific Meta, in one read. */
@@ -166,7 +158,6 @@ export const recoveryQuery = (token: string) => queryOptions({
     return true;
   },
   retry: false,
-  staleTime: 0,
   gcTime: 0,
 });
 

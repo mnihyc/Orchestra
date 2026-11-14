@@ -235,13 +235,20 @@ pub struct Checks {
 /// The roles of the tools that the shared conformance scripts call: what a script has the program do, in words that
 /// name no program. A script says `command` and its arguments as `command`; the program's manifest says which tool is
 /// its `command` and what it calls that argument.
-pub const TOOL_ROLES: [&str; 4] = ["command", "ask_user", "read_file", "spawn_agent"];
+pub const TOOL_ROLES: [&str; 5] = [
+    "command",
+    "background_command",
+    "ask_user",
+    "read_file",
+    "spawn_agent",
+];
 
 /// The role of the tool that a shared conformance case calls, for the cases that call one.
 #[must_use]
 pub fn tool_role_of(case: &str) -> Option<&'static str> {
     match case {
         "command_approval" => Some("command"),
+        "background_commands" => Some("background_command"),
         "user_input" => Some("ask_user"),
         "nested_subagent" => Some("spawn_agent"),
         "parallel_calls" | "image_result" => Some("read_file"),
@@ -259,14 +266,20 @@ pub struct ToolName {
     /// `message`; `ask_user` has `questions`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub arguments: BTreeMap<String, String>,
+    /// Arguments the program needs besides the script's, with their values: what makes the tool of the role
+    /// `background_command` leave the command running when the turn ends (`yield_time_ms` for Codex). The script's
+    /// own value of the same argument wins.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub with: BTreeMap<String, Json>,
 }
 
 impl ToolName {
     /// The call a script makes: the tool's name, and the arguments the script gave with the names the program gives
-    /// them (only the members of an object are renamed; the values are the script's).
+    /// them (only the members of an object are renamed; the values are the script's), after the fixed ones the
+    /// program needs.
     #[must_use]
     pub fn call(&self, arguments: &Json) -> (String, Json) {
-        let renamed = match arguments {
+        let mut renamed = match arguments {
             Json::Object(members) => Json::Object(
                 members
                     .iter()
@@ -280,6 +293,11 @@ impl ToolName {
             ),
             other => other.clone(),
         };
+        if let Json::Object(members) = &mut renamed {
+            for (key, value) in &self.with {
+                members.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
         (self.name.clone(), renamed)
     }
 }
@@ -707,6 +725,7 @@ mod tests {
             ToolName {
                 name: String::new(),
                 arguments: BTreeMap::new(),
+                with: BTreeMap::new(),
             },
         );
         let Err(faults) = manifest.check() else {
@@ -734,6 +753,28 @@ mod tests {
             json!({ "questions": [] })
         );
         assert_eq!(tool_role_of("user_input"), Some("ask_user"));
+        assert_eq!(
+            tool_role_of("background_commands"),
+            Some("background_command")
+        );
         assert_eq!(tool_role_of("startup"), None);
+        let staying: ToolName = serde_json::from_value(json!({
+            "name": "exec_command",
+            "arguments": { "command": "cmd" },
+            "with": { "yield_time_ms": 1000 }
+        }))
+        .unwrap();
+        assert_eq!(
+            staying.call(&json!({ "command": "sleep 600" })).1,
+            json!({ "cmd": "sleep 600", "yield_time_ms": 1000 }),
+            "the program's fixed arguments come with the script's"
+        );
+        assert_eq!(
+            staying
+                .call(&json!({ "command": "sleep 600", "yield_time_ms": 50 }))
+                .1["yield_time_ms"],
+            50,
+            "a value the script gives is its own"
+        );
     }
 }
