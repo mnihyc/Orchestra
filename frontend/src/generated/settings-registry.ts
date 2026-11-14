@@ -6100,6 +6100,30 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
+    "key": "credential.refresh_min_interval_secs",
+    "title": "Credential renewal interval",
+    "description": "Minimum seconds between automatic renewals of a shared credential. Harness requests are served as soon as the current issue finishes; 0 imposes no interval.",
+    "group": "confinement",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 30,
+    "example": 30,
+    "text_key": "day100.builtin.credential.refresh_min_interval_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
     "key": "auto.title",
     "title": "Titles",
     "description": "Who writes automatic titles: nobody, the first input, the harness, or the summarizer.",

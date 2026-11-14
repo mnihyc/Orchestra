@@ -2531,6 +2531,8 @@ registry! {
         "Allowed arrangements", "The arrangement types that may be used here.";
     CREDENTIAL_REFRESH_MARGIN_SECS = "credential.refresh_margin_secs", Confinement, Policy, SYSTEM, Replace, value("300"), int(30, Unit::Seconds),
         "Credential refresh margin", "A shared copy of a credential that expires is renewed when fewer than this many seconds remain.";
+    CREDENTIAL_REFRESH_MIN_INTERVAL_SECS = "credential.refresh_min_interval_secs", Confinement, Parameter, SYSTEM, Replace, value("30"), int(0, Unit::Seconds),
+        "Credential renewal interval", "Minimum seconds between automatic renewals of a shared credential. Harness requests are served as soon as the current issue finishes; 0 imposes no interval.";
     AUTO_TITLE = "auto.title", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("\"harness\""), choice(&["off", "first_input", "harness", "summarizer"]),
         "Titles", "Who writes automatic titles: nobody, the first input, the harness, or the summarizer.";
     AUTO_TAGS = "auto.tags", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("\"off\""), OFF_OR_SUMMARIZER,
