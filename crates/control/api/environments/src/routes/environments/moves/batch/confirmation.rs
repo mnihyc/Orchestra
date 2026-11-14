@@ -629,6 +629,7 @@ impl effects::ApplyOwned for Confirm {
                 check.check()?;
             }
             let operation = orch_engine::notifications::NotificationOperation {
+                actor: principal.user(),
                 id: batch,
                 kind: "move".into(),
                 name: String::new(),

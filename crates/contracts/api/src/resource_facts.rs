@@ -29,6 +29,36 @@ pub struct ResourcePauseQuery {
     pub run_waiting: Option<bool>,
 }
 
+/// An explicit optional notice while switching a provider off.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderPauseQuery {
+    /// A short note shown beside the resource stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Tell affected people once; omitted is silent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
+}
+
+/// Deletion keeps notices an explicit choice.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceDeleteQuery {
+    /// Tell affected people once; omitted is silent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
+}
+
+/// The current affected people and the configured initial notification choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResourceOperationNotification {
+    /// Visible people and the count whose association remains private.
+    pub audience: crate::forks::UpdateAudience,
+    /// The inherited Operation notices default; the confirmer may change it.
+    pub default_on: bool,
+}
+
 /// Enable keeps waiting messages held unless the person explicitly asks to run them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -77,6 +107,9 @@ pub struct ResourceImpact {
     pub activity: ActivityFacts,
     /// A previously accepted stop still has native work to finish.
     pub stopping: bool,
+    /// A provider-wide pause or deletion can explicitly notify this current audience.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification: Option<ResourceOperationNotification>,
     /// Current reader-specific status for visible bound threads with content access.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub thread_displays: std::collections::BTreeMap<Id, crate::threads::ThreadDisplay>,

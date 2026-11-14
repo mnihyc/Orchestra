@@ -10,6 +10,7 @@ import type { FactTarget, ProviderModel, ResourceImpact } from '@/generated/api-
 import { i18n, setLocale } from '@/i18n';
 import { planProvider } from '../unit/provider-plan-fixtures';
 import { show } from './support';
+import { ADA } from '../doubles/chat-rows';
 
 const calls = vi.hoisted(() => ({ read: vi.fn<(target: FactTarget) => Promise<ResourceImpact>>(), disable: vi.fn(), remove: vi.fn(), updateModel:vi.fn(),removeModel:vi.fn(), switch: vi.fn() }));
 vi.mock('@/api/resource-impact', () => ({ resourceImpactQuery: (target: FactTarget) => ({ queryKey: ['pause-dialog', target], queryFn: () => calls.read(target), retry: false }) }));
@@ -31,7 +32,7 @@ function impact(): ResourceImpact {
 beforeEach(() => { calls.read.mockResolvedValue(impact()); calls.disable.mockResolvedValue(provider); calls.remove.mockResolvedValue(undefined); calls.updateModel.mockResolvedValue(model);calls.removeModel.mockResolvedValue(undefined); });
 afterEach(async () => { cleanup(); vi.resetAllMocks(); await setLocale('en'); });
 
-it('waits for the current effects before admitting an emergency stop and sends only its one-line note', async () => {
+it('waits for the current effects before admitting an emergency stop and sends its note with an explicit silent choice', async () => {
   const user = userEvent.setup();
   let ready: ((value: ResourceImpact) => void) | undefined;
   calls.read.mockImplementation(() => new Promise<ResourceImpact>((resolve) => { ready = resolve; }));
@@ -48,7 +49,7 @@ it('waits for the current effects before admitting an emergency stop and sends o
   expect(screen.queryByRole('button', { name: i18n.t('resourceImpact.switchFirst') })).not.toBeInTheDocument();
   await user.type(screen.getByRole('textbox', { name: new RegExp(i18n.t('resourceImpact.note')) }), '  Key rotation  ');
   await user.click(confirm);
-  await waitFor(() => expect(calls.disable).toHaveBeenCalledExactlyOnceWith(provider.id, 'Key rotation'));
+  await waitFor(() => expect(calls.disable).toHaveBeenCalledExactlyOnceWith(provider.id, 'Key rotation', false));
 });
 
 it('a failed impact read cannot silently turn unknown effects into zero or permit confirmation', async () => {
@@ -104,3 +105,23 @@ it('a model deletion requires its exact current name before ending its membershi
   await user.click(submit);
   await waitFor(()=>expect(calls.removeModel).toHaveBeenCalledExactlyOnceWith(provider.id,model.id));
 });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const kind of ['disable', 'delete'] as const) for (const notify of [false, true]) {
+  it(`confirms the ${notify ? 'selected' : 'cleared'} ${kind} notification choice explicitly (${locale})`, async () => {
+    await setLocale(locale);
+    const current = { ...impact(), notification: { audience: { people: [ADA], hidden: 2 }, default_on: true } };
+    calls.read.mockResolvedValue(current);
+    const user = userEvent.setup();
+    show(kind === 'disable' ? <DisableProviderDialog provider={provider} open onClose={vi.fn()} /> : <DeleteProviderDialog provider={provider} open onClose={vi.fn()} />);
+    const name = i18n.t('programVersions.notify', { count: 3, number: '3' });
+    const choice = await screen.findByRole('checkbox', { name });
+    expect(choice).toBeChecked();
+    if (!notify) await user.click(choice);
+    if (notify) expect(choice).toBeChecked(); else expect(choice).not.toBeChecked();
+    if (kind === 'delete') await user.type(screen.getByRole('textbox', { name: i18n.t('resourceImpact.typeName', { name: provider.name }) }), provider.name);
+    await user.click(screen.getByRole('button', { name: i18n.t(kind === 'delete' ? 'providers.danger.deleteConfirm' : 'providers.danger.disableConfirm', { name: provider.name }) }));
+    await waitFor(() => expect(kind === 'disable' ? calls.disable : calls.remove).toHaveBeenCalled());
+    if (kind === 'disable') expect(calls.disable).toHaveBeenCalledWith(provider.id, undefined, notify);
+    else expect(calls.remove).toHaveBeenCalledWith(provider.id, notify);
+  });
+}

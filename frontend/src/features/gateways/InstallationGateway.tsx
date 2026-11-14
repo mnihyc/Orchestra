@@ -6,12 +6,12 @@ import { ErrorState } from '@/ui/ErrorState';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { GatewayChoice } from './GatewayChoice';
 
-export function InstallationGateway({ value, onChange, disabled = false }: { value: string; onChange: (value: string) => void; disabled?: boolean }) {
+export function InstallationGateway({ value, onChange, disabled = false, keepCurrent = false }: { value: string; onChange: (value: string) => void; disabled?: boolean; keepCurrent?: boolean }) {
   const { t } = useTranslation();
   const catalogue = useQuery(gatewayCatalogueQuery);
   return <div className="flex min-w-0 flex-col gap-2">
     {catalogue.isPending && <SkeletonRows read={catalogue} rows={1} />}
     {catalogue.isError && <ErrorState compact title={t('regionalGateways.loadFailed')} error={catalogue.error} onRetry={() => void catalogue.refetch()} />}
-    <GatewayChoice gateways={catalogue.data?.gateways ?? []} value={value} onChange={onChange} disabled={disabled || catalogue.isPending} />
+    <GatewayChoice gateways={catalogue.data?.gateways ?? []} value={value} onChange={onChange} keepCurrent={keepCurrent} disabled={disabled || catalogue.isPending} />
   </div>;
 }

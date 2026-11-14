@@ -14,7 +14,14 @@ import { offeredChoice } from '@/i18n/choices';
 import { providerPickerLabels } from '@/features/resources/providers/labels';
 import { isolationToolWords } from '@/features/resources/executorNames';
 
-import { type AgentRow, type ProviderRow, type Resolved, modelName } from './choices';
+import { blockedDetail, isMachineProgramVersionMismatch } from '@/features/timeline/waiting';
+
+import { type AgentRow, ENVIRONMENT_SHUT, type ProviderRow, type Resolved, modelName } from './choices';
+
+/** The engine's sentence for a machine whose program of the agent's kind its owner has not confirmed. */
+const PROGRAM_UNCONFIRMED = /^(.+) on (.+) is not confirmed\. The machine's owner can confirm it on the machine's page\.$/u;
+/** The engine's sentence that lists the executors an environment offers and the harness can use: names that mean nothing to a person. */
+const EXECUTORS_LISTED = /^The environment offers .+ and the harness can work through .+\.$/su;
 
 /** Known reasons use the reader's language; an unfamiliar code never becomes the visible explanation. */
 export function reasonWords(code: string): string {
@@ -22,10 +29,36 @@ export function reasonWords(code: string): string {
   return i18n.exists(key) ? i18n.t(key,{defaultValue:i18n.t('start.reason.unreported')}) : i18n.t('start.reason.unreported');
 }
 
-/** Why an arrangement cannot be had: the server's own sentence, else the code put into words. */
+/** Why an arrangement cannot be had: the server's own sentence in the reader's language where it is one of the known ones, else the code put into words. */
 export function arrangementWhy(entry: Arrangement, t: TFunction): string {
-  if (entry.detail !== null && entry.detail !== '' && !hasErrorCode(entry.detail)) return entry.detail;
+  const detail = entry.detail;
+  if (detail !== null && detail !== '' && !hasErrorCode(detail)) {
+    if (isMachineProgramVersionMismatch(detail)) return blockedDetail(detail, t);
+    const unconfirmed = PROGRAM_UNCONFIRMED.exec(detail);
+    if (unconfirmed?.[1] !== undefined && unconfirmed[2] !== undefined) return t('machinePrograms.notConfirmed', { name: unconfirmed[1], machine: unconfirmed[2] });
+    if (entry.reason === 'executor_missing' && EXECUTORS_LISTED.test(detail)) return reasonWords('executor_missing');
+    return detail;
+  }
   return entry.reason === null ? t('start.arrangement.notAvailable') : reasonWords(entry.reason);
+}
+
+/** What a sentence about a machine's program is: the version that is apart from the agent's, or a program nobody has confirmed. */
+export function programKind(detail: string | null): 'version' | 'unconfirmed' | null {
+  if (detail === null) return null;
+  return isMachineProgramVersionMismatch(detail) ? 'version' : PROGRAM_UNCONFIRMED.test(detail) ? 'unconfirmed' : null;
+}
+
+/**
+ * The closed arrangement that says what a person can act on: what the environment shuts comes before what the provider or a
+ * policy shuts, and among those the way through the environment's tools before a way that needs the provider's own machine.
+ */
+export function closedArrangement(row: AgentRow): Arrangement | undefined {
+  const closed = row.entry.arrangements.filter((entry) => !entry.available || !entry.permitted);
+  for (const code of ENVIRONMENT_SHUT) {
+    const found = closed.find((entry) => entry.reason === code);
+    if (found !== undefined) return found;
+  }
+  return closed[0];
 }
 
 /** A closed profile names the same native reason as its unavailable arrangement. */
@@ -33,8 +66,8 @@ export function agentWhy(row: AgentRow, t: TFunction): string {
   if (row.entry.reason === 'harness_error' || row.entry.reason === 'harness_unreported' && row.entry.program_report?.status === 'error') return t('start.agent.programFailed');
   if (row.unreported) return t('start.agent.unreported');
   if (row.entry.reason === 'no_host') return t('startPreflight.noHost');
-  const closed = row.entry.arrangements.find((entry) => !entry.available || !entry.permitted);
-  if (closed !== undefined && (row.entry.reason === null || row.entry.reason === closed.reason)) return arrangementWhy(closed, t);
+  const closed = closedArrangement(row);
+  if (closed !== undefined && (row.entry.reason === null || row.entry.reason === closed.reason || ENVIRONMENT_SHUT.includes(row.entry.reason))) return arrangementWhy(closed, t);
   return row.entry.reason === null || row.entry.reason === 'binding_incompatible' ? t('startPreflight.changed') : reasonWords(row.entry.reason);
 }
 

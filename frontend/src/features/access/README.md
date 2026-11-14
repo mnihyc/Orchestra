@@ -70,7 +70,7 @@ the form for several things are built on what the server serves.
 
 The doors: a thread's three choices name its chat, its documents and its session; its environment's files, terminal,
 browsers and displays are rows of the environment's own page. Under What goes with it the form for a thread says whose
-files its files are and how many people look into them, and offers Let them into the environment, on as the form
+files its files are and how many people look into them, and offers Viewers can open the environment, on as the form
 opens: readers can look at files, terminal and screens, never use or change them, even when they manage the thread.
 The environment's page has Can view and Can manage, five rows by area with what each Manage
 means, and the list of who reaches it.

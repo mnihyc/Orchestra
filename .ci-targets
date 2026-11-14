@@ -1,0 +1,8 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --test providers --test provider_crud_scopes --test resource_facts --test resource_resume
+test -p orch-engine --test loss --test notifications
+web typecheck
+web lint
+web test -- tests/component/resource-pause-dialog.test.tsx tests/component/resource-impact.test.tsx tests/unit/resources-expected.test.ts tests/unit/resource-verbs.test.ts tests/unit/inbox-text.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts

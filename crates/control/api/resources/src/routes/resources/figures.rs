@@ -104,6 +104,7 @@ pub(super) struct CurrentImpact {
     activity: activity::PreparedProjection,
     stopping: bool,
     displays: BTreeMap<Id, orch_api_contract::threads::ThreadDisplay>,
+    notification: Option<super::notices::PreparedNotice>,
 }
 
 fn grouped(
@@ -487,6 +488,7 @@ impl native::Selected for Impact {
                         .map(|object| object.id)
                 })
                 .collect();
+            let notification = super::notices::prepare(conn, &principal, target, &threads).await?;
             let displays = node_view::refs(
                 conn,
                 &principal,
@@ -509,6 +511,7 @@ impl native::Selected for Impact {
                     activity,
                     stopping,
                     displays,
+                    notification,
                 },
                 bound,
             ))
@@ -542,6 +545,10 @@ impl native::Selected for Impact {
                 activity: value.activity.project(),
                 stopping: value.stopping,
                 thread_displays: value.displays.clone(),
+                notification: match &value.notification {
+                    Some(notification) => Some(notification.project(conn).await?),
+                    None => None,
+                },
             })
         })
     }
@@ -558,6 +565,14 @@ impl native::Selected for Impact {
                 || !memberships(&opened.raw, &opened.visibility)
                     .is_subset(&memberships(&fresh.raw, &fresh.visibility))
                 || !work_memberships(&opened.activity).is_subset(&work_memberships(&fresh.activity))
+            {
+                return Ok(false);
+            }
+            if let Some(notification) = &opened.notification
+                && !fresh
+                    .notification
+                    .as_ref()
+                    .is_some_and(|fresh| notification.preserves(fresh))
             {
                 return Ok(false);
             }

@@ -62,6 +62,8 @@ pub struct OperationRecipient {
 /// A confirmed notification choice, retained on every child job of the operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NotificationOperation {
+    /// The person whose confirmed act this notice records, retained across child jobs.
+    pub actor: Id,
     /// The operation that groups all independent members.
     pub id: Id,
     /// The visible operation kind, such as lost, recover or host_delete.
@@ -360,11 +362,13 @@ pub async fn notify_operation(
                     .map(|id| format!("/topic/{id}"))
             })
             .or_else(|| {
-                person
-                    .providers
-                    .iter()
-                    .next()
-                    .map(|id| format!("/resources/providers/{id}"))
+                person.providers.iter().next().map(|id| {
+                    if operation.kind == "provider_delete" {
+                        "/resources/providers".into()
+                    } else {
+                        format!("/resources/providers/{id}")
+                    }
+                })
             })
             .or_else(|| {
                 person
@@ -397,7 +401,7 @@ pub async fn notify_operation(
                         .iter()
                         .any(|topic| unavailable_defaults.contains(topic))));
         // A resource manager may know the work count without being able to read its threads.
-        let data = json!({"operation_kind":operation.kind,"name":operation.name,"state":state,"environment_ids":person.environments,"thread_count":person.threads.len(),"default_topics":person.defaults,"provider_ids":person.providers,"resource_ids":person.resources,"path":path,"loss":operation.kind=="lost","default_lost":default_lost,"at":Time::new(at)});
+        let data = json!({"operation_kind":operation.kind,"actor":operation.actor,"name":operation.name,"state":state,"environment_ids":person.environments,"thread_count":person.threads.len(),"default_topics":person.defaults,"provider_ids":person.providers,"resource_ids":person.resources,"path":path,"loss":operation.kind=="lost","default_lost":default_lost,"at":Time::new(at)});
         rows::publish(
             conn,
             operation.id,
