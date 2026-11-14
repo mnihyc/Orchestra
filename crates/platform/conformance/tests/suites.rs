@@ -233,7 +233,7 @@ fn agent_fixture(home: &std::path::Path, work: &std::path::Path, faults: Value) 
             "native_session_ref":null,"upto_turn_ordinal":null,"workspace_root":work,"instruction_root_marker":false,
             "directory":work,"cwd":work,"mounts":[],"model":"fake-large","effort":null,"params":{},
             "approval_mode":"on_request","sandbox_mode":"workspace","instructions":"Complete the controlled turn.",
-            "memory":null,"arrangement":"together","orch_tools":[],"raw_events":false,
+            "memory":null,"arrangement":"together","orch_tools":[],"output_capture_bytes":67108864, "raw_events":false,
             "session_key":format!("{index:032x}"),"archive":null,"history":null,
             "provider":{"path":"native","provider_id":provider},
             "exec":{"executor":null,"tool_set":null,"environment_id":new_id(),"generation":1},"mcp":[]

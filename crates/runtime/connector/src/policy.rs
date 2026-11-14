@@ -1533,6 +1533,7 @@ mod tests {
 
     fn open(directory: &str, executor: Option<&str>) -> SessionOpen {
         SessionOpen {
+            output_capture_bytes: 67_108_864,
             native_model: None,
             transport_only: false,
             turn_changes_require_restart: false,
@@ -1559,6 +1560,7 @@ mod tests {
             subagent_limits: Default::default(),
             prompt_cache_ttl: None,
             background_wake: true,
+            web_action_wait_secs: 120,
             image_generation: None,
             memory: None,
             arrangement: ArrangementType::Together,

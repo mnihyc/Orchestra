@@ -351,10 +351,21 @@ pub enum StartingStep {
     Credential,
     /// A session.
     Session,
+    /// The files of the directory, recorded before the turn so that they can be put back.
+    Recording,
     /// Its files.
     Files,
     /// The turn itself.
     Turn,
+}
+
+/// The command a starting thread's step waits for, and the other work that holds it up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StartingWork {
+    /// The kind of command the step waits for, such as `fs.mkdir`, `git.prepare` or `fs.record`.
+    pub command: String,
+    /// The kind of command of other work, on the same machine and in the same line, that it waits behind.
+    pub behind: Option<String>,
 }
 
 /// The `kind` of a thread: always `thread`.
@@ -818,6 +829,12 @@ pub struct Thread {
     pub side_reading: Option<SideReading>,
     /// What a starting thread is waiting for.
     pub starting_step: Option<StartingStep>,
+    /// When the step it is waiting for began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_since: Option<Time>,
+    /// The command that step waits for, and what holds it up; none while it waits for nothing in particular.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_work: Option<StartingWork>,
     /// Why it cannot go on.
     pub blocked: Option<ThreadBlocked>,
     /// What a person's Stop holds of its queue.
@@ -1159,17 +1176,32 @@ pub enum PasteDelivery {
     File,
 }
 
+/// Exact original byte interval stored in a declared output blob. The end is exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OutputRange {
+    /// Original byte offset of the retained interval.
+    pub offset: i64,
+    /// Actual retained bytes, without synthetic gap markers.
+    pub len: i64,
+}
+
 /// Long text of which only the end is kept in the timeline.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct OutputRef {
     /// The last [`OUTPUT_INLINE_MAX_BYTES`] at most.
     pub inline: String,
+    /// Accepted inline byte allowance; a smaller native capture keeps a smaller live tail too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_limit: Option<u64>,
     /// How many bytes were produced so far.
     pub total_len: i64,
     /// Whether `inline` is shorter than the whole.
     pub truncated: bool,
-    /// The whole, once the item is complete and it was longer than `inline`.
+    /// Retained output bytes; `retained` gives their original interval, which can be partial.
     pub blob: Option<Hash>,
+    /// Original interval of the declared blob; absent where only inline text is retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained: Option<OutputRange>,
 }
 
 impl OutputRef {
@@ -1185,7 +1217,8 @@ impl OutputRef {
     pub fn push(&mut self, chunk: &str) {
         self.total_len += i64::try_from(chunk.len()).unwrap_or(i64::MAX);
         self.inline.push_str(chunk);
-        let most = usize::try_from(OUTPUT_INLINE_MAX_BYTES).unwrap_or(usize::MAX);
+        let most = usize::try_from(self.inline_limit.unwrap_or(OUTPUT_INLINE_MAX_BYTES as u64))
+            .unwrap_or(usize::MAX);
         if self.inline.len() > most {
             let mut cut = self.inline.len() - most;
             while !self.inline.is_char_boundary(cut) {
@@ -1201,7 +1234,19 @@ impl OutputRef {
     pub fn with_blob(mut self, blob: Hash) -> Self {
         if self.truncated {
             self.blob = Some(blob);
+            self.retained = Some(OutputRange {
+                offset: 0,
+                len: self.total_len,
+            });
         }
+        self
+    }
+
+    /// Declares an exact retained original interval, keeping the original produced byte count.
+    #[must_use]
+    pub fn with_retained_blob(mut self, blob: Hash, offset: i64, len: i64) -> Self {
+        self.blob = Some(blob);
+        self.retained = Some(OutputRange { offset, len });
         self
     }
 }
@@ -1678,8 +1723,11 @@ pub struct ToolCallPayload {
     pub started_at: Time,
     /// How long it took, once it ended.
     pub duration_ms: Option<i64>,
-    /// The identical call exactly as the harness issued it.
-    pub raw: RawCall,
+    /// The identical call exactly as the harness issued it. A thread's timeline does not carry it (it is the
+    /// same content as `tool`, and as long); it is read apart by `GET /threads/{id}/items/{item_id}/raw`, and
+    /// stands in an export of the whole record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<RawCall>,
 }
 
 /// A request for approval. Harness cards carry their current projection for this reader,
@@ -3018,6 +3066,11 @@ pub struct Turn {
     pub input_id: Id,
     /// The complete or explicitly unavailable recorded files before this turn.
     pub before_snapshot_id: Option<Id>,
+    /// How many included files the turn changed, whoever changed them: the difference of the files recorded
+    /// before it and the files observed at its end. `null` while either is missing (the files were not
+    /// recorded, or the end has not been observed yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_changed: Option<i64>,
     /// The model's routing name.
     pub model: String,
     /// The model's display name.
@@ -3304,10 +3357,6 @@ pub struct ThreadOpening {
     pub parameters: Option<crate::settings::ThreadParameters>,
     /// The native limits for a new input; absent only when unavailable to this reader.
     pub limits: Option<ThreadLimits>,
-    /// The settings, including each setting's own writability and source.
-    pub settings: Vec<crate::settings::ResolvedSetting>,
-    /// The initial bounded outline page, from the same conversation cut as sync.
-    pub outline: ThreadOutlinePage,
     /// The current tool carrier observation; omitted for a retained conversation view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<crate::nodes::OverviewPart<crate::gateways::ThreadTunnelGatewayStatus>>,
@@ -3630,7 +3679,7 @@ pub struct ThreadOpeningGetQuery {
     pub continuation_id: Option<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_revision: Option<i64>,
-    /// Items in the initial window; the same bounds as [`ThreadSyncGetQuery::limit`].
+    /// Items in the initial window; the resolved `threads.opening_items` default when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -3693,9 +3742,12 @@ pub struct ThreadItemOutputGetQuery {
     /// Where to begin, in bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<i64>,
-    /// How many bytes, at most; [`OUTPUT_DEFAULT_LIMIT_BYTES`] when left out.
+    /// Preferred bytes; the last UTF-8 character is kept whole. Defaults to [`OUTPUT_DEFAULT_LIMIT_BYTES`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
+    /// Exact retained blob being read; a changed output refuses this page before I/O.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_blob: Option<Hash>,
 }
 
 /// The raw events of one segment, newest first.
@@ -4345,6 +4397,28 @@ crate::endpoints! {
         ]);
     /// Reads one item of a thread.
     ThreadItemGet: GET "/threads/{id}/items/{item_id}", Permission("thread.view"), query continuations::ThreadReadSelector, none, json Item, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is not true",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted is true; apply the stored thread restoration rule",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Thread)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]);
+    /// Reads a tool call exactly as its harness made it: its own name for the tool, its arguments and what came back. A thread's items leave this out.
+    ThreadItemRawGet: GET "/threads/{id}/items/{item_id}/raw", Permission("thread.view"), query continuations::ThreadReadSelector, none, json RawCall, 200,
         operation Op::variants(&[
             Variant {
                 name: "read",

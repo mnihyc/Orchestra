@@ -218,8 +218,10 @@ it('the real legacy double marker passes one socket to both owned caches and dem
   await waitFor(() => expect(view.accepted).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(calls.feed).toHaveBeenCalledWith(resultThreadRead(SIDE, one.key.owner)));
   expect(calls.feed).not.toHaveBeenCalledWith(resultThreadRead(SIDE, other.key.owner));
-  expect(threadViewOf(one).items.has('accepted-side-marker')).toBe(true); expect(threadViewOf(other).items.has('accepted-side-marker')).toBe(true);
-  expect(screen.getByTestId('one')).toHaveAttribute('data-open', 'true'); expect(screen.getByTestId('other')).toHaveAttribute('data-open', 'false');
+  await waitFor(() => {
+    expect(threadViewOf(one).items.has('accepted-side-marker')).toBe(true); expect(threadViewOf(other).items.has('accepted-side-marker')).toBe(true);
+    expect(screen.getByTestId('one')).toHaveAttribute('data-open', 'true'); expect(screen.getByTestId('other')).toHaveAttribute('data-open', 'false');
+  });
   const acks = frames.filter((frame) => frame.op === 'subscribed'); expect(acks).toHaveLength(2);
   expect(acks.every((frame) => !Object.hasOwn(frame, 'projection'))).toBe(true);
   expect(threadViewOf(one).read?.projection).toBeNull(); expect(threadViewOf(other).read?.projection).toBeNull();

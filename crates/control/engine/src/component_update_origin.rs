@@ -29,10 +29,7 @@ use orch_db::{
         link::{CommandRow, NewCommand},
     },
 };
-use orch_link_contract::{
-    commands::{CommandKind, MachineUpdateNow, SerialKey},
-    policy::LocalPolicy,
-};
+use orch_link_contract::commands::{CommandKind, MachineUpdateNow, SerialKey};
 use orch_types::{Clock, Id, Json, Time};
 use serde::{Deserialize, Serialize};
 
@@ -257,6 +254,7 @@ impl Origin {
             || command.body
                 != serde_json::to_value(MachineUpdateNow {
                     recommended: self.recommended.clone(),
+                    automatic: false,
                 })?
         {
             return Err(EngineError::unreadable(
@@ -376,17 +374,6 @@ impl Source for HostRequest {
             .await?
             .is_allowed()
             {
-                return Err(Error::Refused);
-            }
-            let policy =
-                orch_db::queries::environment_facts::machine(conn, input.origin.machine, None)
-                    .await?
-                    .and_then(|facts| facts.policy)
-                    .filter(|policy| !policy.is_null())
-                    .map(serde_json::from_value::<LocalPolicy>)
-                    .transpose()
-                    .map_err(EngineError::from)?;
-            if policy.is_none_or(|policy| !policy.update_auto) {
                 return Err(Error::Refused);
             }
             Ok(())

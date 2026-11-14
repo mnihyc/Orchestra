@@ -28,9 +28,6 @@ use crate::credentials::CredentialNeed;
 /// How much of the end of a long text stays in the timeline: 16 KiB, which a screen shows at a glance and
 /// a row carries without cost. The whole is kept as a blob.
 pub use orch_api_contract::threads::OUTPUT_INLINE_MAX_BYTES;
-/// How much of a command's output is kept at most: 64 MiB, beyond which the middle is dropped and the
-/// payload says so.
-pub const OUTPUT_MAX_BYTES: i64 = 64 * 1024 * 1024;
 /// How large a diff may be: 256 KiB, past which it is cut and the file is opened whole instead.
 pub const FILE_CHANGE_DIFF_MAX_BYTES: i64 = 256 * 1024;
 /// How many matches of a file search a payload lists: the first 200.
@@ -1052,6 +1049,8 @@ pub struct SessionTitle {
 /// The session is gone; the next turn reopens it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionLost {
+    /// The native outcome is unavailable, rather than confirmed lost. Preserve admitted work without retry.
+    pub uncertain: bool,
     /// Why.
     pub reason: String,
 }
@@ -1178,7 +1177,7 @@ pub struct ItemCompleted {
     pub status: ItemStatus,
     /// Its final payload.
     pub payload: Json,
-    /// The blob that holds the whole of its output, where it was longer than what stays inline.
+    /// Retained command output bytes, uploaded before publication; the payload declares their original interval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_blob: Option<BlobRef>,
 }
@@ -1576,7 +1575,7 @@ mod tests {
             json!({ "kind": "session.opened", "body": { "native_session_ref": "thr_1", "resumed": false } }),
             json!({ "kind": "session.instructions", "body": { "sources": [] } }),
             json!({ "kind": "session.title", "body": { "title": "Fix the login redirect" } }),
-            json!({ "kind": "session.lost", "body": { "reason": "the harness process exited" } }),
+            json!({ "kind": "session.lost", "body": { "uncertain":false, "reason": "the harness process exited" } }),
             json!({ "kind": "session.background_tasks", "body": { "self_waking": true, "tasks": [], "native_wake": null } }),
             json!({ "kind": "turn.started", "body": { "turn_id": id(1), "native_turn_ref": "turn_9" } }),
             json!({ "kind": "item.started", "body": {

@@ -82,6 +82,7 @@ async fn replay(version: &str, name: &str) {
         windows: None,
     };
     let mut mapper = Mapper::new(MapperConfig {
+        output_capture_bytes: 67_108_864,
         thread_id: Id::from_u128(1),
         segment_id: Id::from_u128(2),
         native_thread: "fixture-thread".into(),

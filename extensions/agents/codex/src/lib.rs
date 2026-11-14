@@ -617,6 +617,21 @@ impl CodexAdapter {
             version: version.clone(),
             exit: Arc::clone(&exit),
             patience: self.patience,
+            native_result_wait: Duration::from_millis(
+                start
+                    .profile
+                    .config
+                    .get("native_result_wait_ms")
+                    .and_then(Json::as_u64)
+                    .unwrap_or(runtime::DEFAULT_NATIVE_RESULT_WAIT_MS),
+            ),
+            native_result_buffer_bytes: start
+                .profile
+                .config
+                .get("native_result_buffer_bytes")
+                .and_then(Json::as_u64)
+                .map(|bytes| usize::try_from(bytes).unwrap_or(usize::MAX))
+                .unwrap_or(runtime::DEFAULT_NATIVE_RESULT_BUFFER_BYTES),
         });
         if let Some(home) = harness_home.as_deref().filter(|_| managed) {
             let (method, expires_at) = provider::read_login_note(home);
@@ -1003,12 +1018,14 @@ impl CodexAdapter {
         let resumed = matches!(mode, SessionMode::Resume | SessionMode::Adopt);
         let settings = &spec.settings;
         let mut mapper = Mapper::new(MapperConfig {
+            output_capture_bytes: settings.output_capture_bytes,
             thread_id: settings.thread_id,
             segment_id: settings.segment_id,
             native_thread: native.clone(),
             directory: settings.directory.clone(),
         })
         .with_native_web_results(true)
+        .with_web_action_wait(Duration::from_secs(settings.web_action_wait_secs))
         .with_external_images(
             spec.exec.executor.is_some()
                 || settings.arrangement
@@ -1109,6 +1126,7 @@ impl CodexAdapter {
             (
                 record.mapper.native_thread().to_owned(),
                 MapperConfig {
+                    output_capture_bytes: record.mapper.output_capture_bytes(),
                     thread_id: record.mapper.thread_id(),
                     segment_id: record.mapper.segment_id(),
                     native_thread: record.mapper.native_thread().to_owned(),
@@ -1844,6 +1862,39 @@ impl AgentAdapter for CodexAdapter {
 
     async fn resync_session(&mut self, thread: ThreadId) -> Result<u32, AdapterError> {
         self.replay(thread).await
+    }
+
+    async fn recover_turn(
+        &mut self,
+        source: orch_agent_contract::history::NativePrefixSource,
+        turn_id: Id,
+        native_turn_ref: Option<String>,
+        directory: String,
+        _cwd: String,
+        output_capture_bytes: u64,
+    ) -> Result<bool, AdapterError> {
+        let (shared, _) = self.live()?;
+        let ctx = Context {
+            clock: shared.clock().as_ref(),
+            outputs: shared.outputs(),
+            windows: None,
+        };
+        let config = MapperConfig {
+            thread_id: source.thread_id,
+            segment_id: source.segment_id,
+            native_thread: source.native_session_ref,
+            directory,
+            output_capture_bytes,
+        };
+        discovery::recover_turn(
+            shared.rpc(),
+            config,
+            turn_id,
+            native_turn_ref,
+            &ctx,
+            shared.sink(),
+        )
+        .await
     }
 
     async fn discover_sessions(&mut self) -> Result<Vec<NativeSession>, AdapterError> {

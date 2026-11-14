@@ -50,10 +50,48 @@ impl PreparedInput {
     }
 }
 
+fn inline_image_input(
+    binding: &orch_provider_contract::capabilities::Binding,
+    input: Json,
+    pixels: &[orch_image_backends::InputImage],
+) -> Result<Json, EngineError> {
+    orch_image_backends::materialize_inline_inputs(binding, input, pixels)
+        .map_err(EngineError::unreadable)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     type Proof = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    #[test]
+    fn inline_image_inputs_larger_than_eight_megabytes_are_prepared_for_the_provider() -> Proof {
+        let binding = orch_provider_contract::capabilities::Binding {
+            request: json!({"body":{
+                "images":{"from_input":"/images"}, "prompt":{"from_input":"/prompt"}
+            }}),
+            extensions: BTreeMap::from([(
+                "x_input_images".into(),
+                json!({
+                    "encoding":"inline-json", "field":"images", "item":{"url":{"from_input":"/url"}}
+                }),
+            )]),
+            ..Default::default()
+        };
+        // Nine MiB of inline text fits the shipped message allowance. The verified
+        // binary pixels are smaller because base64 adds one third.
+        let image = orch_image_backends::InputImage {
+            name: "source-1".into(),
+            media_type: "image/png".into(),
+            bytes: vec![17; 9 * 1024 * 1024 / 4 * 3],
+        };
+        let input = inline_image_input(&binding, json!({"prompt":"An orchard"}), &[image])?;
+        let url = input["images"][0]["url"]
+            .as_str()
+            .ok_or("missing inline image")?;
+        assert!(url.len() > 9 * 1024 * 1024);
+        Ok(())
+    }
 
     #[test]
     fn the_native_image_request_uses_only_declared_neutral_options_and_immutable_tool_identity()
@@ -598,13 +636,7 @@ impl Engine {
                                     bytes: self.image_blob_bytes(*blob, *size).await?,
                                 });
                             }
-                            input.value = orch_image_backends::materialize_inline_inputs(
-                                &binding,
-                                input.value,
-                                &pixels,
-                                orch_link_contract::version::MAX_FRAME_BYTES as usize,
-                            )
-                            .map_err(EngineError::unreadable)?;
+                            input.value = inline_image_input(&binding, input.value, &pixels)?;
                             // The verified pixels are now part of neutral JSON itself. No unresolved
                             // image reference is discarded or delegated to a JSON-only keeper.
                             images.clear();

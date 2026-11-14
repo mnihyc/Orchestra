@@ -1,11 +1,11 @@
 //! Standalone native web actions are proved by their exact retained function result, not end events.
-use crate::events::{OutputStore, TITLE_MAX_CHARS};
+use crate::events::OutputStore;
 use crate::viewed_images::Key;
 use orch_agent_contract::events::{
-    ErrorPayload, ItemCompleted, ItemContent, ItemStarted, ItemStatus, OutputRef, RawCall,
-    SessionEvent, ToolCallPayload, ToolPayload,
+    ErrorPayload, ItemCompleted, ItemContent, ItemStarted, ItemStatus, OutputRef, SessionEvent,
+    ToolCallPayload, ToolPayload,
 };
-use orch_types::{Hash, Id, Json, Time};
+use orch_types::{Hash, Id, Json};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -137,7 +137,11 @@ pub(crate) fn checked_results(
     let mut reported = BTreeMap::new();
     let mut valid = Vec::new();
     let mut refused = BTreeMap::new();
+    let cancelled = source.cancellation();
     for key in keys {
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return BTreeMap::new();
+        }
         let mut completion = read_completion(outputs, snapshots.get(key).copied().flatten());
         let call = completion
             .as_ref()
@@ -193,8 +197,6 @@ pub(crate) struct Pending {
     pub snapshot: Option<Hash>,
     pub turn: Id,
     pub stream: String,
-    pub at: Time,
-    pub title: String,
     pub model: Option<String>,
     pub capability: Option<&'static str>,
     pub unproven: Option<&'static str>,
@@ -233,8 +235,6 @@ impl Pending {
             snapshot,
             turn,
             stream: stream.into(),
-            at: call.started_at,
-            title: call.title.chars().take(TITLE_MAX_CHARS).collect(),
             model,
             capability,
             unproven: None,
@@ -274,41 +274,13 @@ pub(crate) fn finish(
             let call = serde_json::from_value::<ToolCallPayload>(item.payload.clone()).ok()?;
             Some((item, call))
         });
-    let (mut item, mut call) = match parsed {
-        Some((item, call)) => {
-            if item.status != ItemStatus::Completed && outcome == Outcome::Success {
-                outcome = Outcome::Unproven("native_web_sources_disagree");
-            }
-            (item, call)
+    if let Some((item, _)) = &parsed {
+        if item.status != ItemStatus::Completed && outcome == Outcome::Success {
+            outcome = Outcome::Unproven("native_web_sources_disagree");
         }
-        None => {
-            outcome = Outcome::Unproven("native_web_metadata_unavailable");
-            (
-                ItemCompleted {
-                    native_ref: key.call.clone(),
-                    status: ItemStatus::Failed,
-                    payload: Json::Null,
-                    output_blob: None,
-                },
-                ToolCallPayload {
-                    title: pending.title.clone(),
-                    started_at: pending.at,
-                    duration_ms: None,
-                    tool: ToolPayload::Other {
-                        name: "webSearch".into(),
-                        arguments: None,
-                        result: None,
-                    },
-                    raw: RawCall {
-                        name: "webSearch".into(),
-                        input: OutputRef::of("{}"),
-                        output: None,
-                        is_error: true,
-                    },
-                },
-            )
-        }
-    };
+    } else if !matches!(outcome, Outcome::Unproven(_)) {
+        outcome = Outcome::Unproven("native_web_metadata_unavailable");
+    }
     if outcome == Outcome::Success
         && pending.capability.is_some()
         && pending.model.is_none()
@@ -316,17 +288,25 @@ pub(crate) fn finish(
     {
         outcome = Outcome::Unproven("native_web_model_unreported");
     }
-    if proof.output.is_some() {
-        call.raw.output = proof.output.clone();
+    let mut events = Vec::new();
+    if let Some((mut item, mut call)) = parsed {
+        if proof.output.is_some() {
+            call.raw.output = proof.output.clone();
+        }
+        match outcome {
+            Outcome::Success => {
+                item.status = ItemStatus::Completed;
+                call.raw.is_error = false;
+            }
+            Outcome::Failed => {
+                item.status = ItemStatus::Failed;
+                call.raw.is_error = true;
+            }
+            Outcome::Unproven(_) => {}
+        }
+        item.payload = serde_json::to_value(call).unwrap_or(Json::Null);
+        events.push(SessionEvent::ItemCompleted(item));
     }
-    call.raw.is_error = outcome != Outcome::Success;
-    item.status = if outcome == Outcome::Success {
-        ItemStatus::Completed
-    } else {
-        ItemStatus::Failed
-    };
-    item.payload = serde_json::to_value(call).unwrap_or(Json::Null);
-    let mut events = vec![SessionEvent::ItemCompleted(item)];
     let (count, notice) = match outcome {
         Outcome::Success => (Some(1), None),
         Outcome::Failed => (
@@ -378,6 +358,8 @@ pub(crate) fn finish(
 mod tests {
     use super::*;
     use crate::native_history::ResultItem;
+    use orch_agent_contract::events::RawCall;
+    use orch_types::Time;
     fn result(output: Json) -> Result<ResultItem, &'static str> {
         Ok(ResultItem {
             payload: json!({"type":"function_call_output","call_id":"call","output":output}),
@@ -436,6 +418,63 @@ mod tests {
             Outcome::Unproven("missing")
         ));
     }
+    #[test]
+    fn a_cancelled_result_worker_stops_before_reading_more_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let outputs = OutputStore::new(dir.path().join("outputs"));
+        let mut source = crate::viewed_images::Sources::default();
+        source
+            .cancellation()
+            .store(true, std::sync::atomic::Ordering::Release);
+        let key = Key {
+            native_thread: "native".into(),
+            native_turn: "turn".into(),
+            call: "call".into(),
+        };
+        assert!(
+            checked_results(
+                &mut source,
+                std::slice::from_ref(&key),
+                &BTreeMap::from([(key.clone(), None)]),
+                &outputs
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_timed_out_proof_keeps_its_reason_and_does_not_replace_the_reported_action() {
+        let call = call();
+        let key = Key {
+            native_thread: "native".into(),
+            native_turn: "turn".into(),
+            call: "call".into(),
+        };
+        let complete = ItemCompleted {
+            native_ref: key.call.clone(),
+            status: ItemStatus::Completed,
+            payload: serde_json::to_value(&call).unwrap(),
+            output_blob: None,
+        };
+        let pending = Pending::new(&complete, &call, Id::nil(), "main", None, None);
+        let (events, count) = finish(
+            &key,
+            &pending,
+            &Proof::unavailable("native_result_timed_out"),
+            None,
+        );
+        assert_eq!(count, None);
+        assert!(!events.iter().any(
+            |event| matches!(event, SessionEvent::ItemCompleted(item) if item.native_ref == "call")
+        ));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::ItemCompleted(item)
+            if item.payload["details"]["reason"] == "native_result_timed_out"))
+        );
+    }
+
     #[test]
     fn snapshots_are_hash_checked_and_failed_or_missing_results_never_count_success() {
         let dir = tempfile::tempdir().unwrap();

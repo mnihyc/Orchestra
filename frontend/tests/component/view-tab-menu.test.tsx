@@ -88,3 +88,13 @@ it('returns focus to the surviving group when the last tab removes its entire gr
   expect(screen.queryByRole('region', { name: 'Beside' })).not.toBeInTheDocument();
   await waitFor(() => expect(screen.getByRole('tab', { name: 'Main' })).toHaveFocus());
 });
+
+
+it('gives the full view name on focus when the strip shortens its caption', async () => {
+  const title = 'Management · A page with a long readable title';
+  show(<ViewTab id="long-caption" panelId="long-body" title={title} about="Current section" icon={null} active tabbable menu={[]}
+    onSelect={() => undefined} onClose={() => undefined} />);
+  screen.getByRole('tab', { name: title }).focus();
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(title);
+  expect(screen.getByRole('tooltip')).toHaveTextContent('Current section');
+});

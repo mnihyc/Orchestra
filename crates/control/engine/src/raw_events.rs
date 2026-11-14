@@ -100,7 +100,7 @@ pub fn install_master_key(key: MasterKey) -> bool {
     MASTER_KEY.set(key).is_ok()
 }
 
-fn master_key() -> Result<&'static MasterKey, String> {
+pub(crate) fn master_key() -> Result<&'static MasterKey, String> {
     MASTER_KEY
         .get()
         .ok_or_else(|| "the key that opens secrets is not installed".to_owned())
@@ -416,7 +416,7 @@ fn is_secret_pair(members: &serde_json::Map<String, Json>) -> bool {
 /// Masks every text of a JSON value, every name of a member, the value of every member that is
 /// named like a secret, the value of a pair whose name says it is one, and the value of every
 /// `NAME=value` in a text whose name says so.
-fn mask_value(value: &mut Json, redactor: &Redactor) {
+pub(crate) fn mask_value(value: &mut Json, redactor: &Redactor) {
     match value {
         Json::String(text) => *text = mask_assignments(&redactor.mask(text)),
         Json::Array(items) => {

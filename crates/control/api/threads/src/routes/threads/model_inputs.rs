@@ -122,10 +122,14 @@ fn record(row: ModelInputRow) -> ApiResult<ModelInput> {
                 source: block.source,
                 text: if let Some(blob) = block.blob {
                     OutputRef {
+                        inline_limit: None,
                         inline: block.text,
                         total_len: block.total_len.unwrap_or_default(),
                         truncated: block.truncated,
                         blob: Some(blob),
+                        retained: block
+                            .total_len
+                            .map(|len| orch_api_contract::threads::OutputRange { offset: 0, len }),
                     }
                 } else {
                     whole(block.text)
@@ -148,10 +152,12 @@ fn word<T: DeserializeOwned>(word: &str) -> ApiResult<T> {
 /// A text whole, inline.
 fn whole(text: String) -> OutputRef {
     OutputRef {
+        inline_limit: None,
         total_len: i64::try_from(text.len()).unwrap_or(i64::MAX),
         inline: text,
         truncated: false,
         blob: None,
+        retained: None,
     }
 }
 
