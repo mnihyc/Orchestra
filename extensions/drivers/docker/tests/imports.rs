@@ -117,6 +117,11 @@ async fn an_image_is_proposed_from_what_the_host_reads_in_it_and_pinned_to_its_d
     );
     assert!(says(&proposal, NoteLevel::Info, "pinned"));
     assert!(says(&proposal, NoteLevel::Info, "MiB"));
+    // The notes are read by a person: the pin is said in words, and its digest stays in the spec.
+    assert!(
+        !proposal.notes.iter().any(|note| note.text.contains(digest)),
+        "no note shows the digest"
+    );
     assert!(!proposal.is_blocked());
     lab.driver
         .validate(RuntimeKind::Environment, &proposal.spec)

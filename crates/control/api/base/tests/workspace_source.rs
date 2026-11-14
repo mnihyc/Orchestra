@@ -138,6 +138,8 @@ async fn restore_fixture() -> (Site, orch_types::Id, std::sync::Arc<RestoreReade
         &mut conn,
         snapshot,
         &FsRecordResult {
+            indexing: None,
+
             state: RecordState::Complete,
             tree_ref: Some("retained-native-root".into()),
             repository_head: None,
@@ -589,6 +591,7 @@ async fn tree_topic_and_finder_show_independent_nullable_flags_and_true_only_cou
         .call(NameSearchList, &[])
         .token(&site.ada.token)
         .query(&NameSearchListQuery {
+            id: None,
             starred: None,
             participating: None,
             q: Some(thread.base.name.clone()),
@@ -622,6 +625,7 @@ async fn tree_topic_and_finder_show_independent_nullable_flags_and_true_only_cou
         .call(NameSearchList, &[])
         .token(&site.ada.token)
         .query(&NameSearchListQuery {
+            id: None,
             starred: None,
             participating: None,
             q: Some(thread.base.name.clone()),

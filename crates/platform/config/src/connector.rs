@@ -273,10 +273,6 @@ section! {
         rescan_secs: u64 = 60,
         /// How often a listing is uploaded while files keep changing.
         manifest_interval_secs: u64 = 300,
-        /// Above this many entries a workspace is listed live only.
-        index_max_entries: u64 = 250_000,
-        /// The most seconds a full scan gets before the workspace is listed live.
-        index_scan_max_secs: u64 = 10,
         /// Restarts of a crashing tool server before it is reported failed…
         mcp_restarts: u32 = 3,
         /// …within this time.

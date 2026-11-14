@@ -182,6 +182,7 @@ async fn terminal_says(
                 data_sources: None,
                 environment_id: environment,
                 workspace_root: None,
+                workspace: Default::default(),
                 ignore: Vec::new(),
                 index: IndexMode::Full,
                 mounts: None,

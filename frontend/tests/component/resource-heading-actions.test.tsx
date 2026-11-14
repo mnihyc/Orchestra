@@ -53,6 +53,21 @@ for (const theme of ['light', 'dark'] as const) for (const locale of ['en', 'zh-
       expect(refresh).not.toHaveBeenCalled();
     });
 
+    it('names both visible heading acts in its menu and keeps a pending act disabled', async () => {
+      const { user, t } = await prepare();
+      const start = vi.fn(); const edit = vi.fn(); const copy = vi.fn();
+      show(<HeadingActs name="world-box" primary={{ id: 'start', label: t('resources.act.start'), pending: true, run: start }}
+        edit={{ id: 'edit', label: t('resources.act.editButton'), run: edit }}
+        menu={[{ id: 'copy-link', label: t('resources.act.copyLink'), onSelect: copy }]} />);
+      await user.click(screen.getByRole('button', { name: t('resources.act.menuOf', { name: 'world-box' }) }));
+      const menu = screen.getByRole('menu');
+      const primary = within(menu).getByRole('menuitem', { name: t('resources.act.start') });
+      expect(primary).toHaveAttribute('aria-disabled', 'true');
+      await user.click(primary); expect(start).not.toHaveBeenCalled();
+      await user.click(within(menu).getByRole('menuitem', { name: t('resources.act.editButton') }));
+      expect(edit).toHaveBeenCalledOnce(); expect(copy).not.toHaveBeenCalled();
+    });
+
     it('copies the machine command by keyboard and announces success', async () => {
       const {user,t}=await prepare();
       const write=vi.spyOn(navigator.clipboard,'writeText').mockResolvedValue(undefined);

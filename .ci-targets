@@ -1,0 +1,7 @@
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-envhost --lib
+test -p orch-envhost --test environment
+test -p orch-engine --test source --test source_uniform --test live_mounts --test shared_read --test forks --test orch_tools --test recording_cleanup
+test -p orch-node --lib -- file_state_volume::
+test -p orch-agent-contract --lib
+test -p orch-settings-contract --lib

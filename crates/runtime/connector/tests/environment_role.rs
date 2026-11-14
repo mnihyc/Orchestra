@@ -301,6 +301,8 @@ async fn a_directory_reports_its_actual_controllers_and_applies_the_declared_mem
 
 fn attach_body(environment_id: orch_types::Id, root: &std::path::Path) -> EnvAttach {
     EnvAttach {
+        workspace: Default::default(),
+
         resources: None,
         data_generation: None,
         storage: None,
