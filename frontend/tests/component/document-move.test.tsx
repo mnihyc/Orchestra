@@ -8,14 +8,18 @@ import type * as Tree from '@/api/documentTree';
 import type * as Library from '@/api/resourceLibrary';
 import type * as Nodes from '@/api/nodes';
 import type * as Search from '@/api/search';
+import type * as Documents from '@/api/documents';
 import type * as Router from '@tanstack/react-router';
 import { ApiError } from '@/api/client';
 import { TreeActionDialog } from '@/features/documents/TreeActions';
+import { MoveDialog } from '@/features/documents/Placement';
+import { treeWriter, useTreeStore } from '@/realtime/stores/tree';
 import type { DocumentDirectory, DocumentDirectoryContext, DocumentTreeListed, NameHit } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { NetworkError } from '@/lib/requests';
 import { org, me, userRef } from '../doubles/fixtures';
 import { treeNode } from '../doubles/tree-node';
+import { World } from '../doubles/world';
 import { show } from './support';
 const calls = vi.hoisted(() => ({ preview: vi.fn<typeof Moves.previewDocumentMoveDeletion>(), execute: vi.fn<typeof Moves.executeDocumentMove>(), same: vi.fn<() => boolean>(), navigate: vi.fn<(options: { href: string }) => Promise<void>>(), cross: true }));
 vi.mock('@/api/documentMove', async (original) => ({ ...await original<typeof Moves>(), previewDocumentMoveDeletion: calls.preview, executeDocumentMove: calls.execute }));
@@ -29,17 +33,36 @@ vi.mock('@/api/documentTree', async (original) => ({ ...await original<typeof Tr
 }));
 const folderHit: NameHit = { id: 'target-folder', kind: 'document_container', name: 'Notes', home_path: [], path: [], address: null, avatar: null, archived: false, color: null, custom_color: null, owner: null, recent: true, tag: null, thread_attention: null, username: null };
 vi.mock('@/api/search', async (original) => ({ ...await original<typeof Search>(), namesQuery: () => ({ queryKey: ['document-move-folder-names'], queryFn: () => Promise.resolve([folderHit]) }) }));
+vi.mock('@/api/documents', async (original) => ({ ...await original<typeof Documents>(), previewMove: () => Promise.resolve({ gaining: [], losing: [], more: 0 }) }));
+const savedTrees = useTreeStore.getState();
 const source = (kind: 'document' | 'container' = 'document'): DocumentTreeListed => ({ entry: { item: { kind, id: 'source' }, parent: { kind: 'node_docs', id: 'source-node' }, node: 'source-node', root: 'source-org', basename: kind === 'document' ? 'Report.md' : 'Research', title: 'Report', owner: 'author', revision: 7, files: 2, versions: 3, deleted_at: null, deletion: null }, standing: { read: true, write: true, manage: true } });
 function context(at: DocumentDirectory): DocumentDirectoryContext {
   return { at, node: { kind: 'org', id: 'other-org', name: 'Other org', redacted: false }, path: [{ kind: 'org', id: 'other-org', name: 'Other org', redacted: false }], folder: at.kind === 'node_docs' ? null : { ...source('container'), entry: { ...source('container').entry, item: { kind: 'container', id: at.id }, root: 'other-org', node: 'other-org', parent: { kind: 'node_docs', id: 'other-org' }, title: 'Notes', basename: 'Notes' } }, ancestors: [], can_create: true, inspection: null, membership_seq: 1 };
 }
 const full = () => ({ stamp: { entries: [source().entry], authority_epoch: 1, authority_fingerprint: 'native-membership', authority_until: null }, gaining: 0, losing: 1, restore_until: '2030-01-01T00:00:00Z' });
 beforeEach(() => { vi.clearAllMocks(); calls.cross = true; calls.same.mockReturnValue(true); calls.navigate.mockResolvedValue(undefined); calls.preview.mockResolvedValue(full()); calls.execute.mockResolvedValue({ projection: 'receipt', operation: 'native-move', entries: [{ kind: 'document', id: 'new-doc' }] }); });
-afterEach(async () => { cleanup(); await setLocale('en'); });
+afterEach(async () => { cleanup(); useTreeStore.setState(savedTrees); await setLocale('en'); });
 async function choose(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') })); const option = await screen.findByRole('option', { name: 'Other org' });
+  await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') })); const option = await screen.findByRole('treeitem', { name: 'Other org' });
   await waitFor(() => expect(option).not.toHaveAttribute('aria-disabled', 'true')); await user.click(option);
 }
+
+it('finds and selects every placement beyond the former thirty-row cutoff', async () => {
+  const world = new World(), ada = world.people.get('ada');
+  const stored = [...world.documents.docs.values()].find((one) => one.title === 'Rollout plan');
+  if (ada === undefined || stored === undefined) throw new Error('A readable document is required.');
+  const doc = world.documents.full(ada, stored), root = doc.path[0]?.id;
+  if (root === undefined) throw new Error('The document must have a visible root.');
+  treeWriter.reset(root, Array.from({ length: 60 }, (_, index) => treeNode({ id: `destination-${index}`, kind: 'topic', name: `Destination ${index}`, parent_id: root })), 1);
+  const user = userEvent.setup();
+  show(<MoveDialog doc={doc} open onOpenChange={vi.fn()} />);
+  expect(screen.getAllByRole('option')).toHaveLength(60);
+  await user.type(screen.getByRole('textbox', { name: i18n.t('documents.move.search') }), 'Destination 59');
+  expect(screen.getAllByRole('option')).toHaveLength(1);
+  const last = screen.getByRole('option', { name: 'Destination 59' });
+  await user.click(last);
+  expect(last).toHaveAttribute('aria-selected', 'true');
+});
 const confirm = () => screen.getByRole('button', { name: i18n.t('duplicate.moveAcross', { org: 'Other org' }) });
 for (const locale of ['en', 'zh-CN'] as const) {
   it(`reviews actual membership, cancels, then explicitly moves once (${locale})`, async () => {

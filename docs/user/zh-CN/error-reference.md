@@ -145,9 +145,18 @@ summary: Orch 显示的每个错误的含义，以及下一步该做什么。
 | `error:provider.unavailable` | 提供方暂时不可用，请稍后重试。 |
 | `error:harness.sessions_no_runtime` | 此智能体尚未在此提供方上运行。请先使用该智能体开始一个会话，再查看其已有会话。 |
 | `error:harness.sessions_unavailable` | 此智能体未能列出已有会话。请检查其所在机器后重试。 |
+| `error:native_web_no_end` | 原生程序未在已解析的等待时间内报告该网页操作结束。此行说明原因并关闭，轮次继续运行。之后真正到达的结束事件仍可更新同一行，不需要手动停止轮次。 |
+| `error:native_web_action_unproven` | 无法将保留证据匹配到确切的操作、轮次、归属、模型或受支持格式。保留操作已报告的状态，用量保持未知；缺少证据不代表操作失败。 |
+| `error:native_web_action_failed` | 确切匹配的保留原生结果报告失败。操作保留原始详情并标记失败；这本身不会让文字轮次失败。 |
+| `error:native_result_timed_out` | 证据原因：可选的保留结果读取达到声明的等待时间。其他会话继续运行，操作已报告的结果保留为未验证。 |
+| `error:native_result_buffer_full` | 证据原因：等待会话的有序输入缓冲区已满。Orch 结束可选证据读取，处理全部保留及当前输入，不会丢弃任何输入。 |
+| `error:native_result_ordering_unknown` | 证据原因：必须先处理保留的子代理引入记录，才能安全确定新到达子代理输入的归属。只结束该会话的可选证据读取，并保留输入顺序。 |
+| `error:native_result_session_closed` | 证据原因：归属会话在可选证据完成前关闭。迟到的证据不会附加到其他会话。 |
+| `error:native_result_session_changed` | 证据原因：会话、片段、原生归属或结果来源已不再匹配此次读取。丢弃旧证据，不会更新替代会话或记入其用量。 |
 | `error:harness.channels_unavailable` | 无法读取发布渠道。请检查此服务器的网络访问，或设置镜像。 |
 | `error:provider.reset_stale` | 重置项或可用数量已变更。请刷新并重新确认当前重置项。 |
 | `error:provider.reset_unavailable` | 此提供方目前无法使用重置。请刷新其信息或联系管理者。 |
 | `error:environment.unavailable` | 环境暂时不可用，请稍后重试。 |
 | `error:network.restricted_unavailable` | 请求的网络限制尚未验证。请重试更改，或在新的计划中明确选择开放网络。 |
 | `error:network.host_denied` | 网络策略拒绝了这个地址。请选择允许的地址，或联系机器所有者。 |
+| `error:invalid_timezone` | 无法解析已保存的时区。设有安静时段的对外通知保持等待，不消耗投递尝试次数，收件箱仍可使用。时区恢复有效后会自动继续投递，不会擅自改用 UTC。 |

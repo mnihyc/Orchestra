@@ -333,10 +333,7 @@ pub fn explicit_local_keys(text: &str) -> Result<Vec<String>, toml::de::Error> {
         .filter(|key| **key != PolicyKey::PolicyDelegated)
         .filter(|key| match key.as_str().split_once('.') {
             Some((section, member)) => written.get(section).and_then(|v| v.get(member)).is_some(),
-            None => {
-                written.get(key.as_str()).is_some()
-                    || (**key == PolicyKey::Storages && written.get("storage").is_some())
-            }
+            None => written.get(key.as_str()).is_some(),
         })
         .map(|key| key.as_str().into())
         .collect())
@@ -1559,6 +1556,7 @@ mod tests {
             subagent_limits: Default::default(),
             prompt_cache_ttl: None,
             background_wake: true,
+            web_action_wait_secs: 120,
             image_generation: None,
             memory: None,
             arrangement: ArrangementType::Together,

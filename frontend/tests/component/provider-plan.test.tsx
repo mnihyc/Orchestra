@@ -135,10 +135,10 @@ describe('one provider usage card', () => {
   });
   it('marks a gone model with when it was seen without switching it off', () => {
     const provider = planProvider();
-    provider.facts.models = [];
+    provider.facts.models_count = 0;
     provider.facts_state.models = 'empty';
     provider.facts.field_times.models = OBSERVED;
-    const { container } = show(<ModelAvailability provider={provider} name="old-model" />);
+    const { container } = show(<ModelAvailability provider={provider} name="old-model" listing={[]} />);
     expect(screen.getByText(/No longer offered/)).toBeInTheDocument();
     expect(container.querySelector('time')).toHaveAttribute('datetime', OBSERVED);
   });
