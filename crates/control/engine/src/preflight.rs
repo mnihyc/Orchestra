@@ -1043,6 +1043,7 @@ impl Engine {
         }
         let now = Time::new(unit.now());
         let ask = |person: Id| ProviderUse {
+            purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
             person,
             node: thread.node_id,
             provider: thread.provider_id.unwrap_or_else(Id::nil),
@@ -1790,6 +1791,7 @@ impl Engine {
             .provider_use(
                 &mut *unit.conn,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person,
                     node: thread.node_id,
                     provider: provider.id,

@@ -56,7 +56,10 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: i18n.t('models.groups.options') }));
     const dialog = screen.getByRole('dialog', { name: i18n.t('models.groups.optionsTitle', { name: 'frontier' }) });
-    const field = within(dialog).getByRole('textbox', { name: i18n.t('providerOptions.schemaTitle') });
+    await user.click(within(dialog).getByText(i18n.t('providerOptions.schemaTitle'), { selector: 'summary span' }));
+    const raw = within(dialog).getByText(i18n.t('providerFields.raw'), { selector: 'summary' });
+    if (!(raw.closest('details')?.open ?? false)) await user.click(raw);
+    const field = within(dialog).getByRole('textbox', { name: i18n.t('providerFields.raw') });
     expect(field).toHaveValue(JSON.stringify(original.frontier.request_options, null, 2));
     const guide = within(dialog).getByRole('button', { name: i18n.t('models.groups.optionsGuide') });
     expect(guide).toHaveAttribute('data-help-heading', 'request-options');
@@ -78,7 +81,10 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: i18n.t('models.groups.options') }));
     const dialog = screen.getByRole('dialog');
-    const field = within(dialog).getByRole('textbox', { name: i18n.t('providerOptions.schemaTitle') });
+    await user.click(within(dialog).getByText(i18n.t('providerOptions.schemaTitle'), { selector: 'summary span' }));
+    const raw = within(dialog).getByText(i18n.t('providerFields.raw'), { selector: 'summary' });
+    if (!(raw.closest('details')?.open ?? false)) await user.click(raw);
+    const field = within(dialog).getByRole('textbox', { name: i18n.t('providerFields.raw') });
     await user.clear(field); await user.paste('{broken');
     expect(within(dialog).getByRole('button', { name: i18n.t('resources.edit.save') })).toHaveAttribute('aria-disabled', 'true');
     expect(calls.save).not.toHaveBeenCalled();
@@ -115,7 +121,10 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: i18n.t('models.groups.options') }));
     const dialog = screen.getByRole('dialog');
-    const field = within(dialog).getByRole('textbox', { name: i18n.t('providerOptions.schemaTitle') });
+    await user.click(within(dialog).getByText(i18n.t('providerOptions.schemaTitle'), { selector: 'summary span' }));
+    const raw = within(dialog).getByText(i18n.t('providerFields.raw'), { selector: 'summary' });
+    if (!(raw.closest('details')?.open ?? false)) await user.click(raw);
+    const field = within(dialog).getByRole('textbox', { name: i18n.t('providerFields.raw') });
     await user.clear(field); await user.paste(JSON.stringify(selected));
     const save = within(dialog).getByRole('button', { name: i18n.t('resources.edit.save') });
     await user.click(save);

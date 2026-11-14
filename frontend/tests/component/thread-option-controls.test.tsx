@@ -31,6 +31,7 @@ let locale = currentLocale();
 let appearance = useAppearance.getState();
 beforeEach(() => { locale = currentLocale(); appearance = useAppearance.getState(); });
 afterEach(async () => { cleanup(); useAppearance.setState(appearance); await setLocale(locale); });
+const openOptions = () => userEvent.click(screen.getByText('Fixture interface', { selector: 'summary span' }));
 
 describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('thread options %s/%s', (language, theme) => {
   beforeEach(async () => { await setLocale(language); useAppearance.setState({ locale: language, theme, resolvedTheme: theme }); });
@@ -38,6 +39,8 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
   it('uses a list for an opened enum and a fixed field for the provider const', async () => {
     const runs = writer();
     show(<ul><ParameterRow parameter={parameter()} access={access} writable runs={runs} /></ul>);
+    expect(screen.getByRole('textbox', { name: 'Region' })).not.toBeVisible();
+    await openOptions();
     expect(screen.getByRole('textbox', { name: 'Region' })).toHaveValue('local');
     expect(screen.getByRole('textbox', { name: 'Region' })).toBeDisabled();
     expect(screen.getByText(i18n.t('providerOptions.fixedByProvider'))).toBeVisible();
@@ -53,6 +56,7 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     let complete: () => void = () => { throw new Error('the option write has not started'); };
     runs.write.mockImplementation(() => new Promise<void>((resolve) => { complete = resolve; }));
     show(<ul><ParameterRow parameter={parameter()} access={access} writable runs={runs} /></ul>);
+    await openOptions();
     const user = userEvent.setup();
     await user.click(screen.getByRole('combobox', { name: 'Mode' }));
     await user.click(screen.getByRole('option', { name: 'b' }));
@@ -74,6 +78,7 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     runs.write.mockRejectedValue(error);
     const draw = () => <ul><ParameterRow parameter={parameter()} access={access} writable runs={runs} /></ul>;
     const rendered = show(draw());
+    await openOptions();
     const user = userEvent.setup();
     await user.click(screen.getByRole('combobox', { name: 'Mode' }));
     await user.click(screen.getByRole('option', { name: 'b' }));
@@ -87,6 +92,7 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
   it('resets only this interface through the existing parameter reset', async () => {
     const runs = writer();
     show(<ul><ParameterRow parameter={parameter()} access={access} writable runs={runs} /></ul>);
+    await openOptions();
     await userEvent.click(screen.getByRole('button', { name: i18n.t('inspector.parameters.reset', { name: 'Fixture interface' }) }));
     await waitFor(() => expect(runs.reset).toHaveBeenCalledExactlyOnceWith(key));
     expect(runs.write).not.toHaveBeenCalled();
@@ -96,6 +102,7 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     const runs = writer();
     const locked = kind === 'locked' ? { scope: 'topic', node: { id: 'topic-1', kind: 'topic', name: 'Plans', redacted: false } } as ParameterView['locked_by'] : null;
     show(<ul><ParameterRow parameter={parameter({ locked_by: locked })} access={access} writable={kind !== 'reader'} runs={runs} /></ul>);
+    await openOptions();
     const choice = screen.getByRole('combobox', { name: 'Mode' });
     expect(choice).toBeDisabled();
     await userEvent.click(choice);
@@ -119,6 +126,7 @@ describe('the note that a value was saved', () => {
     // looking for `jest`), never with real time: a pause of the machine cannot take the note down before it is looked for.
     vi.useFakeTimers(); vi.stubGlobal('jest', { advanceTimersByTime: (ms: number) => vi.advanceTimersByTime(ms) });
     show(<ul><ParameterRow parameter={parameter()} access={access} writable runs={writer()} /></ul>);
+    await userEvent.setup({ advanceTimers: (ms) => vi.advanceTimersByTime(ms) }).click(screen.getByText('Fixture interface', { selector: 'summary span' }));
     await choose(userEvent.setup({ advanceTimers: (ms) => vi.advanceTimersByTime(ms) }));
     await screen.findByText(i18n.t('inspector.parameters.saved'));
     await act(async () => { await vi.advanceTimersByTimeAsync(2_100); });
@@ -128,6 +136,7 @@ describe('the note that a value was saved', () => {
   it('is not left to be taken down by a timer that nothing holds when its row goes before the two seconds', async () => {
     const set = vi.spyOn(globalThis, 'setTimeout'), cleared = vi.spyOn(globalThis, 'clearTimeout');
     const rendered = show(<ul><ParameterRow parameter={parameter()} access={access} writable runs={writer()} /></ul>);
+    await openOptions();
     await choose(userEvent.setup());
     await screen.findByText(i18n.t('inspector.parameters.saved'));
     const waits = waitsOfTwoSeconds(set);
@@ -141,6 +150,7 @@ describe('the note that a value was saved', () => {
     let complete: () => void = () => { throw new Error('the option write has not started'); };
     runs.write.mockImplementation(() => new Promise<void>((resolve) => { complete = resolve; }));
     const rendered = show(<ul><ParameterRow parameter={parameter()} access={access} writable runs={runs} /></ul>);
+    await openOptions();
     await choose(userEvent.setup());
     await waitFor(() => expect(runs.write).toHaveBeenCalledTimes(1));
     rendered.unmount();

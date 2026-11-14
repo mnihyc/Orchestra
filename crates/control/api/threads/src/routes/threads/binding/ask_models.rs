@@ -57,6 +57,11 @@ async fn inputs(
                         granted
                             .each
                             .iter()
+                            .filter(|allowance| {
+                                allowance.provider.allows_purpose(
+                                    orch_access_contract::permissions::ProviderPurpose::Ask,
+                                )
+                            })
                             .map(|allowance| allowance.provider.clone())
                             .collect(),
                     )
@@ -209,6 +214,9 @@ fn choice(selection: AskModelIdentity, inputs: &Inputs) -> AskModelOption {
                         orch_authz::options::entry_allows(
                             entry,
                             &orch_authz::options::Wanted {
+                                purpose: Some(
+                                    orch_access_contract::permissions::ProviderPurpose::Ask,
+                                ),
                                 model: Some((&choice.selection.model, &model.groups)),
                                 effort: Some(effort),
                                 ..orch_authz::options::Wanted::default()

@@ -190,6 +190,9 @@ impl ResourceAccess for AuthzAccess {
         conn: &mut Conn,
         ask: &ProviderUse<'_>,
     ) -> Result<Answer, AccessFault> {
+        if ask.purpose != orch_access_contract::permissions::ProviderPurpose::Turn {
+            return self.background_provider_use(conn, ask).await;
+        }
         let principal = self.principal(conn, ask.person).await?;
         let policies = Self::policies(conn, ask.provider).await?;
         let place = Self::place(conn, ask.runs_in).await?;
@@ -352,6 +355,7 @@ impl ResourceAccess for AuthzAccess {
                     None => Vec::new(),
                 };
                 let wanted = orch_authz::options::Wanted {
+                    purpose: Some(ask.purpose),
                     model: ask.model.map(|name| (name, groups.as_slice())),
                     effort: ask.effort,
                     at: place.as_ref(),

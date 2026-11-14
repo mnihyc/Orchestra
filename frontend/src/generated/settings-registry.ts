@@ -676,7 +676,9 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "topic"
     ],
     "merge": "map",
-    "default": {},
+    "default": {
+      "codex.cyber_access": true
+    },
     "example": {
       "vision": true
     },
@@ -1687,6 +1689,30 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "acme.*"
     ],
     "text_key": "day100.builtin.providers.allowed",
+    "keywords": []
+  },
+  {
+    "key": "models.add_switches_on",
+    "title": "Switched on when added",
+    "description": "What a model starts with when it is added from its provider's catalogue: everything it offers (all), only its efforts and context sizes (basic), or only its window and efforts (nothing). A manager can switch on the rest afterwards.",
+    "group": "models",
+    "schema": {
+      "type": "string",
+      "enum": [
+        "all",
+        "basic",
+        "nothing"
+      ]
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "replace",
+    "default": "all",
+    "example": "basic",
+    "text_key": "day100.builtin.models.add_switches_on",
     "keywords": []
   },
   {

@@ -199,6 +199,7 @@ pub async fn select(
         orch_provider_contract::calls::requested_effort(params).is_ok_and(|effort| {
             effort.is_none_or(|effort| {
                 person_use.allows(&orch_authz::options::Wanted {
+                    purpose: Some(orch_access_contract::permissions::ProviderPurpose::Ask),
                     effort: Some(effort),
                     ..orch_authz::options::Wanted::default()
                 })
@@ -209,6 +210,7 @@ pub async fn select(
     }
     let effort = orch_provider_contract::calls::requested_effort(&params).map_err(Error::denied)?;
     let wanted = orch_authz::options::Wanted {
+        purpose: Some(orch_access_contract::permissions::ProviderPurpose::Ask),
         model: Some((&model.model, &found.groups)),
         effort,
         ..orch_authz::options::Wanted::default()

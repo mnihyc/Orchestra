@@ -10,7 +10,7 @@ import { askedOptions } from '@/features/access/model';
 import { EntryOptionFacts } from '@/features/access/ShareConsequences';
 import { MissingAccessList } from '@/ui/ErrorState';
 import type { Changes } from '@/features/access/changes';
-import type { Environment, Host, Machine, PermissionPage, PermissionRow, WhereName } from '@/generated/api-types';
+import type { Environment, Host, Machine, PermissionDef, PermissionPage, PermissionRow, WhereName } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { offeredChoice } from '@/i18n/choices';
 import { ADA, CATALOGUE, named, pageFor } from '../unit/general-access-fixtures';
@@ -42,13 +42,13 @@ function rowWith(options: unknown): PermissionRow {
 }
 
 /** Opens the entry's options and answers the change the save would make. */
-function open(options: unknown) {
+function open(options: unknown, definition: PermissionDef = def) {
   const written: unknown[] = [];
   const changes: Changes = {
     run: (request) => { written.push((request as { make: (page: PermissionPage) => unknown }).make(page)); return Promise.resolve(true); },
     busy: false, doing: null, error: null, stale: null, again: () => Promise.resolve(true), forget: () => undefined,
   };
-  show(<EntryOptions open onClose={() => undefined} def={def} row={rowWith(options)} entryId={ENTRY_ID} holder="Ada" changes={changes} />);
+  show(<EntryOptions open onClose={() => undefined} def={definition} row={rowWith(options)} entryId={ENTRY_ID} holder="Ada" changes={changes} />);
   return written;
 }
 
@@ -68,6 +68,24 @@ afterEach(async () => {
 });
 
 const where = () => within(screen.getByRole('group', { name: i18n.t('access.options.where') }));
+
+it.each(['en', 'zh-CN'] as const)('lets a manager grant Ask alone and keeps an explicitly empty purpose list in %s', async (locale) => {
+  await setLocale(locale);
+  const definition = { ...def, options_schema: { type: 'object', properties: {
+    models: { type: 'array', items: { type: 'string' } },
+    purposes: { type: ['array', 'null'], items: { type: 'string', enum: ['turn', 'ask'] } },
+  } } };
+  const user = userEvent.setup();
+  const written = open({ models: ['shared-routing-model'] }, definition);
+  await user.click(screen.getByRole('checkbox', { name: i18n.t('access.options.allPurposes') }));
+  await user.click(screen.getByRole('checkbox', { name: i18n.t('usage.purposes.ask'), exact: true }));
+  await user.click(screen.getByRole('button', { name: i18n.t('access.options.save') }));
+  await waitFor(() => expect(saved(written)).toEqual({ models: ['shared-routing-model'], purposes: ['ask'] }));
+  cleanup();
+  const empty = open({ purposes: [] }, definition);
+  await user.click(screen.getByRole('button', { name: i18n.t('access.options.save') }));
+  await waitFor(() => expect(saved(empty)).toEqual({ purposes: [] }));
+});
 
 async function add(user: ReturnType<typeof userEvent.setup>, name: string) {
   await user.click(screen.getByRole('combobox', { name: i18n.t('access.options.whereAdd', { what: i18n.t('access.options.where') }) }));

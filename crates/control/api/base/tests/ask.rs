@@ -653,6 +653,68 @@ fn simple_answer() -> CommandResult {
 }
 
 #[tokio::test]
+async fn an_ask_only_use_entry_runs_the_ordinary_model_and_a_question_larger_than_one_link_frame() {
+    let s = Scene::new().await;
+    let provider = configured_provider(&s).await;
+    sqlx::query("UPDATE permission_entries SET options=$3 WHERE object_kind='provider' AND object_id=$1 AND permission='provider.use' AND holder_kind='user' AND holder_id=$2 AND removed_at IS NULL")
+        .bind(provider).bind(s.cai.id()).bind(json!({"models":[MODEL],"purposes":["ask"]})).execute(s.rig.db.pool()).await.unwrap();
+    let choices = s
+        .rig
+        .world
+        .app
+        .call(AskModelsGet, &[])
+        .token(&s.cai.token)
+        .query(&AskModelsQuery {
+            root_org_id: s.tree.org.base.id,
+        })
+        .send()
+        .await
+        .ok();
+    assert!(
+        choices
+            .models
+            .iter()
+            .any(|choice| choice.selection.provider_id == provider
+                && choice.selection.model == MODEL
+                && choice.allowed)
+    );
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let seen = calls.clone();
+    s.rig
+        .machine
+        .handler
+        .on(CommandKind::ProviderGenerate, move |command| {
+            let Command::ProviderGenerate(request) = command else {
+                panic!("a real generation command");
+            };
+            seen.lock().unwrap().push(request.model_name.clone());
+            Ok(simple_answer())
+        });
+    let made = create_unseeded(&s, &s.cai).await;
+    s.rig
+        .world
+        .app
+        .call(AskMessageCreate, &[&made.conversation_id])
+        .token(&s.cai.token)
+        .body(&AskMessageBody {
+            client_id: "large-question".into(),
+            content: vec![ContentPart::Text {
+                text: "上下文".repeat(30_000),
+            }],
+            context: None,
+            model: None,
+        })
+        .send()
+        .await
+        .ok();
+    eventually("the allowed question reaches its model", || async {
+        !calls.lock().unwrap().is_empty()
+    })
+    .await;
+    assert_eq!(calls.lock().unwrap().as_slice(), [MODEL]);
+}
+
+#[tokio::test]
 async fn a_named_org_page_resolves_its_real_root_before_ask_birth() {
     // EN: organization page with its named address > Ask > first conversation;
     // the page's actual root governs it, without a fabricated UUID for the name.

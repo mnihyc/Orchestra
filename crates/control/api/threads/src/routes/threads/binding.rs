@@ -1020,8 +1020,13 @@ async fn providers_from(
             })
             .unwrap_or_default();
         let reason = if let Some(granted) = granted {
-            let _ = granted;
-            allowing.is_empty().then_some(NOT_ALLOWED_WHERE)
+            allowing.is_empty().then(|| {
+                if granted.allows(&orch_authz::options::Wanted::default()) {
+                    NOT_ALLOWED_WHERE
+                } else {
+                    NO_USE
+                }
+            })
         } else if each.resource.disabled {
             Some(DISABLED)
         } else if each.resource.subscription.is_some()

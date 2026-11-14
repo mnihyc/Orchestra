@@ -41348,6 +41348,37 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "ProviderModelDefaultsGet",
+    "method": "GET",
+    "path": "/providers/{id}/models/defaults",
+    "title": "The current catalogue defaults for adding one model, under the provider home's add policy, without discovery or a write.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderModelDefaultsGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "id",
+                "kind": "provider"
+              }
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "ProviderModelDelete",
     "method": "DELETE",
     "path": "/providers/{id}/models/{model_id}",

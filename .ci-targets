@@ -1,0 +1,19 @@
+fmt
+clippy
+contracts
+test -p orch-adapter-codex --lib -- parameters::tests::
+test -p orch-link-contract --lib -- frames::
+test -p orch-link --lib -- framing::
+test -p orch-link --test commands
+test -p orch-access-contract --lib
+test -p orch-authz --lib
+test -p orch-engine --lib -- instructions::
+test -p orch-engine --lib -- sessions::byte_stability_tests::
+test -p orch-engine --lib -- ask::context::
+test -p orch-engine --test live_mounts --test delivery
+test -p orch-api-core --lib -- routes::resources::models::
+test -p orch-api-core --test model_entries --test threads_settings --test thread_access --test ask --test access_requests --test page_dependencies
+web typecheck
+web lint
+web test -- tests/component/provider-option-editor.test.tsx tests/component/provider-options.test.tsx tests/component/request-options-managed-effort.test.tsx tests/component/thread-option-controls.test.tsx tests/component/model-picker-rows.test.tsx tests/component/provider-option-layers.test.tsx tests/component/provider-source-models.test.tsx tests/component/model-effort-controlled.test.tsx tests/component/access-where-field.test.tsx tests/component/provider-model-report.test.tsx tests/component/web-search.test.tsx tests/component/access-programs.test.tsx tests/unit/model.test.ts tests/unit/entry-beyond-words.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/acts.test.ts
+web-e2e tests/e2e/resource-picker-access.spec.ts tests/e2e/provider-option-layers.spec.ts tests/e2e/provider-option-catalogue.spec.ts tests/e2e/provider-search-editor.spec.ts --project=chromium

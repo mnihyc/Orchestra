@@ -18,6 +18,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await expect(more).toBeVisible(); await more.click();
     await page.getByRole('menuitem', { name: words.models.list.edit, exact: true }).click();
     const dialog = page.getByRole('dialog', { name: words.models.editor.title });
+    await dialog.locator('summary').filter({ hasText: words.providerOptions.schemaTitle }).click();
     const editor = dialog.locator('[data-option-schema-editor]'); await expect(editor).toBeVisible();
     await editor.locator('summary').filter({ hasText: words.providerFields.raw }).click();
     const raw = editor.getByRole('textbox', { name: words.providerFields.raw });

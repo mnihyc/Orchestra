@@ -288,6 +288,85 @@ pub enum FrameError {
     /// A binary frame carries no data.
     #[error("the binary frame carries no data")]
     Empty,
+    /// A fragmented control record does not follow its ordered priority stream.
+    #[error("the control fragment is invalid: {0}")]
+    InvalidFragment(&'static str),
+}
+
+/// Part of one JSON control record. Physical frames keep the negotiated size; a logical record
+/// may span several. Each of the writer's three priority streams carries one record at a time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextFragment {
+    /// The writer's control, event or ordered-data priority stream.
+    pub lane: u8,
+    /// Begins a new logical record on this stream.
+    pub first: bool,
+    /// Completes the record; it is decoded only when this part arrives.
+    pub last: bool,
+    /// Consecutive bytes of the encoded JSON, possibly splitting a UTF-8 character.
+    pub payload: Bytes,
+}
+
+impl TextFragment {
+    /// Distinct from tunnel data, backplane data and port datagrams.
+    pub const KIND: u8 = 4;
+    /// Kind, priority stream and start/end flags.
+    pub const HEADER_BYTES: usize = 3;
+    /// Exactly the writer's three ordered priority streams.
+    pub const LANES: usize = 3;
+
+    /// Encodes a part within the session's physical frame limit.
+    pub fn encode(&self, max: usize) -> Result<Bytes, FrameError> {
+        if usize::from(self.lane) >= Self::LANES {
+            return Err(FrameError::InvalidFragment("unknown priority stream"));
+        }
+        if self.payload.is_empty() {
+            return Err(FrameError::Empty);
+        }
+        let bytes = Self::HEADER_BYTES + self.payload.len();
+        if bytes > max {
+            return Err(FrameError::TooLarge { bytes, max });
+        }
+        let mut out = BytesMut::with_capacity(bytes);
+        out.put_u8(Self::KIND);
+        out.put_u8(self.lane);
+        out.put_u8(u8::from(self.first) | (u8::from(self.last) << 1));
+        out.extend_from_slice(&self.payload);
+        Ok(out.freeze())
+    }
+
+    /// Validates the physical part before the session adds it to a record.
+    pub fn decode(mut bytes: Bytes, max: usize) -> Result<Self, FrameError> {
+        if bytes.len() > max {
+            return Err(FrameError::TooLarge {
+                bytes: bytes.len(),
+                max,
+            });
+        }
+        if bytes.len() < Self::HEADER_BYTES {
+            return Err(FrameError::Truncated);
+        }
+        let kind = bytes.get_u8();
+        if kind != Self::KIND {
+            return Err(FrameError::UnknownKind(kind));
+        }
+        let lane = bytes.get_u8();
+        let flags = bytes.get_u8();
+        if usize::from(lane) >= Self::LANES || flags & !3 != 0 {
+            return Err(FrameError::InvalidFragment(
+                "unknown priority stream or flags",
+            ));
+        }
+        if bytes.is_empty() {
+            return Err(FrameError::Empty);
+        }
+        Ok(Self {
+            lane,
+            first: flags & 1 != 0,
+            last: flags & 2 != 0,
+            payload: bytes,
+        })
+    }
 }
 
 impl FrameError {

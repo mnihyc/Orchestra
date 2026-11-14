@@ -1,5 +1,6 @@
 /** Request option forms consume the server's resolved schema, just as dispatch does. */
 import { useQuery } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { providerModelsQuery, providerQuery } from '@/api/resources';
 import { record } from '@/features/resources/UnitCommands';
@@ -8,6 +9,9 @@ import type { Schema } from '@/features/resources/templates/schema';
 import { replaceAt, valueAt } from '@/features/resources/templates/schema';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { SkeletonRows } from '@/ui/Skeleton';
+import { Disclosure } from '@/ui/Disclosure';
+import { useAppearance } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
 
 export interface RequestOptionsProps {
   label?: string;
@@ -17,6 +21,16 @@ export interface RequestOptionsProps {
   onChange: (value: unknown) => void;
   /** The surrounding ModelEffort picker owns effort, so it has one control and one value. */
   managedEffort?: boolean;
+  /** The surrounding part already shows the title (a row that opens these options). */
+  hideHeading?: boolean;
+}
+
+export function RequestOptionsDisclosure({ label, value, reveal, children }: { label: string; value: unknown; reveal?: boolean; children: ReactNode }) {
+  const { t } = useTranslation();
+  const locale = useAppearance((state) => state.locale);
+  return <Disclosure title={label} lead={t('providerOptions.fieldsSet', { figure: formatNumber(Object.keys(record(value)).length, locale) })} reveal={reveal}>
+    <div className="flex min-w-0 flex-col gap-2 py-3">{children}</div>
+  </Disclosure>;
 }
 
 const EFFORT_PATHS = [['effort'], ['reasoning_effort'], ['reasoning', 'effort'], ['output_config', 'effort']] as const;
@@ -41,13 +55,14 @@ export function managedEffortForm(schema: unknown, value: unknown) {
   };
 }
 
-export function RequestOptions({ label, schema, value, disabled = false, onChange, managedEffort = false }: RequestOptionsProps) {
+export function RequestOptions({ label, schema, value, disabled = false, onChange, managedEffort = false, hideHeading = false }: RequestOptionsProps) {
   const { t } = useTranslation();
   const form = managedEffort ? managedEffortForm(schema, value) : { schema, value, restore: (next: unknown) => next };
   const change = (next: unknown) => onChange(form.restore(next ?? {}));
-  if (form.schema === undefined) return <OtherJson label={label ?? t('providerOptions.title')} objectOnly value={form.value} disabled={disabled} onChange={change} />;
   const root: Schema = { ...record(form.schema), title: label ?? t('providerOptions.title') };
-  return <SchemaManagedPaths.Provider value={managedEffort ? EFFORT_PATHS : []}><SchemaInput root={root} schema={root} value={value} parts={[]} disabled={disabled} problems={[]} driver="provider-options" onChange={change} /></SchemaManagedPaths.Provider>;
+  const fields = form.schema === undefined ? <OtherJson label={label ?? t('providerOptions.title')} objectOnly value={form.value} disabled={disabled} onChange={change} />
+    : <SchemaManagedPaths.Provider value={managedEffort ? EFFORT_PATHS : []}><SchemaInput root={root} schema={root} value={form.value} parts={[]} disabled={disabled} problems={[]} driver="provider-options" hideHeading onChange={change} /></SchemaManagedPaths.Provider>;
+  return hideHeading ? fields : <RequestOptionsDisclosure label={label ?? t('providerOptions.title')} value={form.value}>{fields}</RequestOptionsDisclosure>;
 }
 
 /** Configuration editors fetch only the selected provider/model; no trial requests discover options. */

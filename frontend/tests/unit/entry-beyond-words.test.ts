@@ -7,6 +7,7 @@ import english from '@/i18n/en.json';
 import chinese from '@/i18n/zh-CN.json';
 
 const SENTENCES = {
+  purposes: 'allows more purposes than any one entry of yours does',
   models: 'allows more models than any one entry of yours does',
   services: 'allows more services than any one entry of yours does',
   efforts: 'allows more efforts than any one entry of yours does',

@@ -504,6 +504,8 @@ pub struct StartSnapshot {
     pub capabilities: Option<instructions::CapabilityLine>,
     /// What it runs on and under, with the limits that touch what it has or can be given.
     pub isolation: Option<orch_driver_contract::isolation::RuntimeIsolation>,
+    /// The environment's current attachment projection, with the machine's observed state.
+    pub mounts: Vec<orch_api_contract::mounts::EnvMount>,
     /// What was found to run a browser and where its profiles are kept.
     pub browser_line: String,
     /// What the people who manage the environment answered about a configuration of the harness's own in its
@@ -657,6 +659,7 @@ impl StartSnapshot {
                 .map(|memory| memory.kept_by),
             capabilities: self.capabilities.as_ref(),
             isolation: self.isolation.as_ref(),
+            mounts: &self.mounts,
             tools: &self.tools,
             browsers: &self.browser_line,
             rates: instructions::ToolRates {
@@ -1498,6 +1501,7 @@ impl Engine {
         let context_sent = threads::context_sent(conn, segment.id).await?;
         // Keep the shared-material future out of the snapshot's accumulated state.
         let material = Box::pin(self.topic_material(conn, thread_id)).await?;
+        let mounts = crate::mounts::views(conn, environment.id, self.inner.clock.now()).await?;
         let mut snapshot = StartSnapshot {
             native_model: None,
             material,
@@ -1530,6 +1534,7 @@ impl Engine {
             tools,
             capabilities,
             isolation,
+            mounts,
             browser_line,
             workspace_configuration,
             cut,

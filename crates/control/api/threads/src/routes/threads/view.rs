@@ -281,6 +281,7 @@ async fn input_access(
             .provider_use(
                 conn,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person: principal.user(),
                     node: thread,
                     provider,

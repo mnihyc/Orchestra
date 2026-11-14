@@ -226,6 +226,13 @@ export const providerModelsQuery = (id: string) =>
       ok(api.GET('/providers/{id}/models', { params: { path: { id } }, signal })),
   });
 
+/** Resolve only the named catalogue entry through the same policy that creates it. */
+export const providerModelDefaultsQuery = (id: string, modelName: string) => queryOptions({
+  queryKey: ['provider-model-defaults', id, modelName] as const,
+  queryFn: ({ signal }): Promise<ModelParameters> => ok(api.GET('/providers/{id}/models/defaults', { params: { path: { id }, query: { model_name: modelName } }, signal })),
+  retry: false,
+});
+
 /** The models the provider's endpoint or harness names that are not listed yet. It fails where the provider cannot be asked. */
 export const providerSuggestionsQuery = (id: string) =>
   queryOptions({

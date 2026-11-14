@@ -2567,13 +2567,23 @@ pub struct ProviderModelCreateBody {
     pub display_name: Option<String>,
     /// What it can be run with here. A default (`default_effort`, `default_service_tier`,
     /// `default_access_program`) has to be among what is enabled; `context_max` may not be below
-    /// `context_window`; `default_context` is at most `context_max` and needs one.
+    /// `context_window`; `default_context` is at most `context_max` and needs one. Omitted uses
+    /// the catalogue defaults. An explicit object is the whole enabled definition; blank factual
+    /// window/efforts still use the catalogue, while cleared optional choices stay off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<ModelParameters>,
     /// The groups to put it in, within the home's configured limit, each named as [`is_model_group_name`]
     /// says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub groups: Option<Vec<String>>,
+}
+
+/// The exact routing name whose current catalogue defaults the add form shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderModelDefaultsQuery {
+    /// A provider catalogue name; an unlisted name returns unknown facts without a guessed window.
+    pub model_name: String,
 }
 
 /// Changes a model of a provider. A routing name is not changed: another model is added.
@@ -2596,9 +2606,10 @@ pub struct ProviderModelUpdateBody {
     pub enabled: Option<bool>,
 }
 
-/// Accepts models that discovery suggested. Each is added with what its suggestion says of it,
-/// except that the service tiers and access programs it lists and a context larger than the usual
-/// one become `parameters.offered`, and none of them is enabled.
+/// Accepts models that discovery suggested. Each is added with what its suggestion says of it, and what
+/// the organization chose to switch on (`models.add_switches_on`) is enabled: by default every effort, the
+/// window, every context size, speed and access program it lists. Whatever is left off stays under
+/// `parameters.offered`, and what a thread starts with is never taken from a suggestion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderModelSuggestionAcceptBody {
@@ -3912,6 +3923,9 @@ crate::endpoints! {
         operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Lists the models a provider lists.
     ProviderModelList: GET "/providers/{id}/models", Rule("any permission on the provider"), none, none, json Vec<ProviderModel>, 200,
+        operation Op::single(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
+    /// The current catalogue defaults for adding one model, under the provider home's add policy, without discovery or a write.
+    ProviderModelDefaultsGet: GET "/providers/{id}/models/defaults", Permission("provider.manage"), query ProviderModelDefaultsQuery, none, json ModelParameters, 200,
         operation Op::single(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
     /// Lists explicit capability backends of this provider at a governed place.
     ProviderCapabilityBackendList: GET "/providers/{id}/capability-backends", Permission("provider.view"), query CapabilityBackendQuery, none, json crate::common::Page<CapabilityBackendCandidate>, 200,

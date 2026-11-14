@@ -160,6 +160,7 @@ impl Setting {
             .provider_use(
                 &mut conn,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person: who.id(),
                     node,
                     provider: self.provider,
@@ -241,6 +242,44 @@ async fn a_person_named_for_one_model_runs_that_one_and_is_told_which_she_lacks_
 }
 
 #[tokio::test]
+async fn an_ask_only_provider_entry_does_not_allow_the_same_model_in_a_thread() {
+    let s = Setting::new().await;
+    s.row(
+        "provider",
+        s.provider,
+        "provider.use",
+        &s.bea,
+        json!({"models":["small"],"purposes":["ask"]}),
+    )
+    .await;
+    let missing = refused(s.turn(&s.bea, "small", s.thread).await);
+    assert_eq!(
+        lacks(&missing),
+        [(ObjectKind::Provider, vec![Permission::ProviderUse])]
+    );
+    assert_eq!(
+        serde_json::to_value(&missing[0].options).unwrap()["purposes"],
+        json!(["turn"])
+    );
+    let ask = ProviderUse {
+        person: s.bea.id(),
+        node: s.topic,
+        provider: s.provider,
+        model: Some("small"),
+        effort: None,
+        runs_in: None,
+        purpose: orch_access_contract::permissions::ProviderPurpose::Ask,
+    };
+    assert!(
+        s.access
+            .background_provider_use(&mut s.world.conn().await, &ask)
+            .await
+            .unwrap()
+            .is_allowed()
+    );
+}
+
+#[tokio::test]
 async fn a_thread_being_made_in_a_topic_is_asked_about_as_the_binding_of_a_new_thread() {
     let s = Setting::new().await;
     s.row("provider", s.provider, "provider.use", &s.bea, json!({}))
@@ -267,6 +306,7 @@ async fn asked_about_the_provider_alone_the_answer_is_about_the_provider_alone()
     let s = Setting::new().await;
     let mut conn = s.world.conn().await;
     let ask = ProviderUse {
+        purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
         person: s.bea.id(),
         node: s.thread,
         provider: s.provider,
@@ -310,6 +350,7 @@ async fn a_subscription_kept_to_its_owner_is_refused_to_others_with_nobody_to_as
     s.row("provider", subscription, "provider.use", &s.bea, json!({}))
         .await;
     let ask = |who: Id| ProviderUse {
+        purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
         person: who,
         node: s.thread,
         provider: subscription,
@@ -538,6 +579,7 @@ impl Setting {
             .provider_use(
                 &mut conn,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person: who.id(),
                     node,
                     provider: self.provider,

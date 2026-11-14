@@ -76,7 +76,7 @@ function SideComposer({ thread, live }: { thread: Thread; live: boolean }) {
             event.preventDefault(); event.stopPropagation(); send();
           }
         }} />
-      <DraftMark status={draft} />
+      <DraftMark status={draft} threadId={thread.id} />
       {turn !== null && <StopControl stop={stop} disabled={!live} />}
       <Button size="sm" variant="primary" icon={<SendHorizontal aria-hidden />} disabled={!live || empty || thread.archived || thread.lock !== null} onClick={send}>
         {t(turn === null ? 'side.lane.send' : 'side.lane.queue')}

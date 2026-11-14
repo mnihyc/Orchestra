@@ -22,19 +22,20 @@ import { currentLocale, i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { defaultThreadRead, resultThreadRead, type ThreadReadTarget } from '@/realtime/threadScope';
 import { threadViewOf, threadWriter } from '@/realtime/stores/thread';
-import { agentMessage, change, command, fileChange, LOGIN_DIFF, marker, threadInput, turn, userMessage } from '../doubles/thread-rows';
+import { agentMessage, change, command, fileChange, LOGIN_DIFF, marker, threadDraft, threadInput, turn, userMessage } from '../doubles/thread-rows';
 import { me, userRef } from '../doubles/fixtures';
 import { show } from './support';
 import { audienceReply } from './thread-audience-fixture';
 
 const calls = vi.hoisted(() => ({
   draft: vi.fn<() => Promise<Draft | null>>(), clear: vi.fn<() => Promise<void>>(),
+  save: vi.fn<typeof ThreadsApi.saveDraft>(),
   send: vi.fn<typeof ThreadsApi.sendInput>(), stop: vi.fn<typeof ThreadsApi.interruptTurn>(),
   remove: vi.fn<typeof NodesApi.deleteNode>(), older: vi.fn<typeof ThreadsApi.fetchItems>(),
   sides: vi.fn<() => Promise<Thread[]>>(),
   panel: vi.fn(), feed: vi.fn<(id: ThreadReadTarget) => void>(), release: vi.fn<(id: ThreadReadTarget) => void>(), ready: true,
 }));
-vi.mock('@/api/threads', async (load) => ({ ...await load<typeof ThreadsApi>(), sendInput: calls.send, interruptTurn: calls.stop, fetchItems: calls.older,
+vi.mock('@/api/threads', async (load) => ({ ...await load<typeof ThreadsApi>(), saveDraft: calls.save, sendInput: calls.send, interruptTurn: calls.stop, fetchItems: calls.older,
   draftQuery: (id: string) => ({ queryKey: ['thread-draft', id], queryFn: calls.draft, staleTime: Infinity }) }));
 vi.mock('@/api/source', async (load) => ({ ...await load<typeof SourceApi>(), clearDraftText: calls.clear }));
 vi.mock('@/api/nodes', async (load) => ({ ...await load<typeof NodesApi>(), deleteNode: calls.remove }));
@@ -82,8 +83,9 @@ let previousUser = client.session.getState().userId;
 beforeEach(() => {
   originalLocale = currentLocale(); appearance = useAppearance.getState(); previousUser = client.session.getState().userId;
   calls.draft.mockReset().mockResolvedValue(null); calls.clear.mockReset().mockResolvedValue(undefined); calls.send.mockReset(); calls.stop.mockReset();
+  calls.save.mockReset().mockImplementation((_id, content, delivery) => Promise.resolve(threadDraft(content, [], { delivery })));
   calls.remove.mockReset(); calls.older.mockReset(); calls.sides.mockReset().mockResolvedValue([]); calls.panel.mockClear(); calls.feed.mockClear(); calls.release.mockClear(); calls.ready = true;
-  client.session.setState({ userId: ADA.id }); useComposerStore.setState({ text: {}, parts: {}, sending: {}, refused: {} });
+  client.session.setState({ userId: ADA.id }); useComposerStore.setState({ text: {}, parts: {}, sending: {}, refused: {}, draftSaves: {}, dirtyDrafts: new Set() });
   timelineUi.forget(PARENT); threadWriter.evict(PARENT); threadWriter.evict(SIDE); seed();
   vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const request = input instanceof Request ? input : new Request(input, init);
@@ -93,7 +95,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
   cleanup(); threadWriter.evict(PARENT); threadWriter.evict(SIDE); threadWriter.evict(resultThreadRead(SIDE, 'side-tab')); timelineUi.forget(PARENT);
-  useComposerStore.setState({ text: {}, parts: {}, sending: {}, refused: {} }); client.session.setState({ userId: previousUser }); useAppearance.setState(appearance); await setLocale(originalLocale);
+  useComposerStore.setState({ text: {}, parts: {}, sending: {}, refused: {}, draftSaves: {}, dirtyDrafts: new Set() }); client.session.setState({ userId: previousUser }); useAppearance.setState(appearance); await setLocale(originalLocale);
 });
 
 describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('a shared aside lane in %s / %s', (locale, theme) => {

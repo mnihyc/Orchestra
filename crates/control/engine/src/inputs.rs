@@ -766,6 +766,7 @@ pub(crate) async fn check_sender_for_turn(
             .provider_use(
                 &mut *unit.conn,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person: caller.user(),
                     node: thread.node_id,
                     provider,

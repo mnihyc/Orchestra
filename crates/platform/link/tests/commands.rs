@@ -11,8 +11,8 @@ use orch_link::commands::{CommandIssuer, Progress};
 use orch_link::machine::{MachineConfig, MachineLink};
 use orch_link_contract::backplane::DownFrame;
 use orch_link_contract::commands::{
-    Cmd, CommandError, CommandKind, ErrorCode, Reference, SerialKey, SessionClose,
-    resolve_references,
+    Cmd, Command, CommandError, CommandKind, CommandResult, ErrorCode, ProviderDiscoverModels,
+    ProviderDiscoverModelsResult, Reference, SerialKey, SessionClose, resolve_references,
 };
 use orch_link_contract::session::{Arch, Os, Platform, Role};
 use orch_link_contract::version::Limits;
@@ -92,6 +92,58 @@ async fn a_command_that_is_sent_again_after_a_reconnect_runs_once_and_gets_one_r
     rig.machine.handler.release();
     let ended = within(30, rig.controller.wait_command(id)).await;
     assert!(matches!(ended, Progress::Succeeded(_)), "{ended:?}");
+    assert_eq!(rig.machine.handler.runs_of(id), 1);
+}
+
+#[tokio::test]
+async fn a_large_model_catalogue_and_its_request_cross_the_default_link_without_configuration() {
+    let rig = rig();
+    rig.machine.link.connected().await;
+    let text = "Model details 模型资料 ".repeat(40_000);
+    let mut request = ProviderDiscoverModels {
+        provider_id: new_id(),
+        models: Some(Default::default()),
+    };
+    request
+        .models
+        .as_mut()
+        .unwrap()
+        .config
+        .insert("description".into(), json!(text));
+    let expected = ProviderDiscoverModelsResult {
+        source: None,
+        suggestions: (0..96)
+            .map(|index| {
+                orch_link_contract::foreign::ModelSuggestion::named(
+                    &format!("model-{index}"),
+                    Some(&format!("Model {index} {}", "details 资料 ".repeat(700))),
+                )
+            })
+            .collect(),
+    };
+    let sent_request = request.clone();
+    let sent_result = expected.clone();
+    rig.machine
+        .handler
+        .on(CommandKind::ProviderDiscoverModels, move |command| {
+            let Command::ProviderDiscoverModels(received) = command else {
+                panic!("the native model request arrives");
+            };
+            assert_eq!(
+                received, &sent_request,
+                "the whole request arrives unchanged"
+            );
+            Ok(CommandResult::ProviderDiscoverModels(sent_result.clone()))
+        });
+    let id = rig
+        .controller
+        .issue(&SerialKey::None, deadline(&rig.clock, 300), &request);
+    let ended = within(15, rig.controller.wait_command(id)).await;
+    let Progress::Succeeded(result) = ended else {
+        panic!("the model catalogue should arrive: {ended:?}");
+    };
+    let received: ProviderDiscoverModelsResult = serde_json::from_value(result).unwrap();
+    assert_eq!(received, expected);
     assert_eq!(rig.machine.handler.runs_of(id), 1);
 }
 

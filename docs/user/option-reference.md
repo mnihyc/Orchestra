@@ -15,6 +15,9 @@ An option is offered only where its interface or program declares it. Provider l
 | --- | --- |
 | `option:ask.models.*.model` | The enabled API model’s routing name. Together with provider_id it identifies one allowed Ask model; child lists can narrow the choices while retaining the parent’s order. |
 | `option:ask.models.*.provider_id` | The API provider’s identity for this allowed Ask model. The person and current payer must still be allowed to use that provider and model in the conversation’s organization. |
+| `option:AccessOptions.purposes` | The purposes requested for provider work. A grant can name Ask alone without allowing turns with the same model. |
+| `option:ProviderUse.purposes` | Work purposes allowed by this Use entry. Omitted permits every purpose; an empty list permits none. A single entry must allow the model, effort, purpose and place together. |
+| `option:ProviderModelDefaultsQuery.model_name` | The exact routing name to preview with the provider home’s catalogue policy. This reads stored facts; it neither starts discovery nor adds a model. An explicit create parameters object saves the complete enabled definition and keeps cleared optional choices off. |
 | `option:AccessOptions.models` | The models. |
 | `option:AccessOptions.services` | Enabled provider services this Use grant allows, by name, family or group. Omitted permits every enabled service; this list is independent of generation models. |
 | `option:AccessOptions.efforts` | The efforts. |

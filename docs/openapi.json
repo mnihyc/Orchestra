@@ -54326,6 +54326,93 @@
         ]
       }
     },
+    "/providers/{id}/models/defaults": {
+      "get": {
+        "operationId": "ProviderModelDefaultsGet",
+        "summary": "The current catalogue defaults for adding one model, under the provider home's add policy, without discovery or a write.",
+        "x-orch-access": "permission",
+        "x-orch-tokens": true,
+        "x-orch-legacy-access-tokens": true,
+        "x-orch-operation": {
+          "operation_id": "ProviderModelDefaultsGet",
+          "method": "GET",
+          "path": "/providers/{id}/models/defaults",
+          "title": "The current catalogue defaults for adding one model, under the provider home's add policy, without discovery or a write.",
+          "delegation": "business",
+          "variants": [
+            {
+              "legacy_tokens": true,
+              "operation": "ProviderModelDefaultsGet",
+              "name": "",
+              "selector": "",
+              "facets": [
+                {
+                  "action": "read",
+                  "resources": [
+                    "provider"
+                  ],
+                  "target": {
+                    "kind": "typed_path",
+                    "value": {
+                      "parameter": "id",
+                      "kind": "provider"
+                    }
+                  },
+                  "usage": "required"
+                }
+              ]
+            }
+          ]
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelParameters"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A problem, with a code a client can act on.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-orch-permission": "provider.manage",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "model_name",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "A provider catalogue name; an unlisted name returns unknown facts without a guessed window."
+            }
+          }
+        ]
+      }
+    },
     "/providers/{id}/capability-backends": {
       "get": {
         "operationId": "ProviderCapabilityBackendList",
@@ -114959,6 +115046,16 @@
       "AccessOptions": {
         "type": "object",
         "properties": {
+          "purposes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/UsagePurpose"
+            },
+            "description": "The purposes the work needs."
+          },
           "models": {
             "type": [
               "array",
@@ -115001,6 +115098,51 @@
           }
         },
         "description": "The least of a provider's models and efforts that would do, and where the work was to run."
+      },
+      "UsagePurpose": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "turn",
+            "description": "A turn of an agent."
+          },
+          {
+            "type": "string",
+            "const": "summary",
+            "description": "The summary of a topic."
+          },
+          {
+            "type": "string",
+            "const": "embeddings",
+            "description": "Vectors of an org's text, or of a query, for search by meaning."
+          },
+          {
+            "type": "string",
+            "const": "review",
+            "description": "An agent permission review, accounted apart from its generation."
+          },
+          {
+            "type": "string",
+            "const": "web_search",
+            "description": "A native or selected service web search."
+          },
+          {
+            "type": "string",
+            "const": "page_fetch",
+            "description": "A native or selected service page fetch."
+          },
+          {
+            "type": "string",
+            "const": "image_generation",
+            "description": "Image generation by the selected offering."
+          },
+          {
+            "type": "string",
+            "const": "ask",
+            "description": "A question explicitly issued by a person."
+          }
+        ],
+        "description": "What a ledger row was spent on."
       },
       "WhereName": {
         "type": "object",
@@ -135235,6 +135377,13 @@
             },
             "description": "The other parameters that are eligible and enabled."
           },
+          "withheld": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WithheldParameter"
+            },
+            "description": "The speeds, access programs and context sizes that the model's managers opened and that this thread cannot use, each with why."
+          },
           "approval_mode": {
             "type": "string",
             "description": "The resolved native permission mode, independent of boundary requests."
@@ -135668,6 +135817,152 @@
           }
         ],
         "description": "When a changed parameter takes effect."
+      },
+      "WithheldParameter": {
+        "type": "object",
+        "properties": {
+          "choice": {
+            "$ref": "#/components/schemas/WithheldChoice",
+            "description": "Which choice it is."
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The key of the agent's parameter that stands for it; none where the agent declares no such parameter."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/WithheldReason",
+            "description": "Why the thread cannot make it."
+          }
+        },
+        "required": [
+          "choice",
+          "reason"
+        ],
+        "description": "A choice that a model's managers opened and that this thread cannot make, with the reason."
+      },
+      "WithheldChoice": {
+        "oneOf": [
+          {
+            "type": "string",
+            "const": "speed",
+            "description": "A speed beside the ordinary one."
+          },
+          {
+            "type": "string",
+            "const": "access",
+            "description": "An access program."
+          },
+          {
+            "type": "string",
+            "const": "context",
+            "description": "A context larger than the model's own window."
+          }
+        ],
+        "description": "The three choices of a thread that a model's entry opens, and that a thread's agent may not offer."
+      },
+      "WithheldReason": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "agent"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The thread's agent takes no such choice."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "access"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs another way of reaching the model: the credential has to stay with the provider."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "placement"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs the other kind of environment: one Orch manages, or a person's own machine."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "provider_kind"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The choice needs the other kind of provider: a subscription or a key."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "feature": {
+                "type": "string",
+                "description": "The feature, as `agent.features` names it."
+              },
+              "why": {
+                "type": "string",
+                "const": "feature"
+              }
+            },
+            "required": [
+              "why",
+              "feature"
+            ],
+            "description": "A feature of agents that is off where the thread runs, as `agent.features` says."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "provider"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "The provider's own rule for the model leaves the choice out."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "why": {
+                "type": "string",
+                "const": "condition"
+              }
+            },
+            "required": [
+              "why"
+            ],
+            "description": "Another condition the agent declares for the choice does not hold."
+          }
+        ],
+        "description": "Why a choice that a manager of the provider switched on for the model is not one this thread can make."
       },
       "ApprovalReviewer": {
         "type": "object",
@@ -175784,7 +176079,7 @@
                 "type": "null"
               }
             ],
-            "description": "What it can be run with here. A default (`default_effort`, `default_service_tier`,\n`default_access_program`) has to be among what is enabled; `context_max` may not be below\n`context_window`; `default_context` is at most `context_max` and needs one."
+            "description": "What it can be run with here. A default (`default_effort`, `default_service_tier`,\n`default_access_program`) has to be among what is enabled; `context_max` may not be below\n`context_window`; `default_context` is at most `context_max` and needs one. Omitted uses\nthe catalogue defaults. An explicit object is the whole enabled definition; blank factual\nwindow/efforts still use the catalogue, while cleared optional choices stay off."
           },
           "groups": {
             "type": [
@@ -178339,6 +178634,20 @@
         ],
         "description": "Chooses where a provider's details come from. An element left out stays as it is; one given takes the place\nof its choice, and its source is asked what it is and read once at once."
       },
+      "ProviderModelDefaultsQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "model_name": {
+            "type": "string",
+            "description": "A provider catalogue name; an unlisted name returns unknown facts without a guessed window."
+          }
+        },
+        "required": [
+          "model_name"
+        ],
+        "description": "The exact routing name whose current catalogue defaults the add form shows."
+      },
       "CapabilityBackendQuery": {
         "type": "object",
         "properties": {
@@ -178560,7 +178869,7 @@
         "required": [
           "model_names"
         ],
-        "description": "Accepts models that discovery suggested. Each is added with what its suggestion says of it,\nexcept that the service tiers and access programs it lists and a context larger than the usual\none become `parameters.offered`, and none of them is enabled."
+        "description": "Accepts models that discovery suggested. Each is added with what its suggestion says of it, and what\nthe organization chose to switch on (`models.add_switches_on`) is enabled: by default every effort, the\nwindow, every context size, speed and access program it lists. Whatever is left off stays under\n`parameters.offered`, and what a thread starts with is never taken from a suggestion."
       },
       "ProviderModelSuggestionAcceptResponse": {
         "anyOf": [
@@ -195037,51 +195346,6 @@
           }
         ],
         "description": "Which program wrote a ledger row."
-      },
-      "UsagePurpose": {
-        "oneOf": [
-          {
-            "type": "string",
-            "const": "turn",
-            "description": "A turn of an agent."
-          },
-          {
-            "type": "string",
-            "const": "summary",
-            "description": "The summary of a topic."
-          },
-          {
-            "type": "string",
-            "const": "embeddings",
-            "description": "Vectors of an org's text, or of a query, for search by meaning."
-          },
-          {
-            "type": "string",
-            "const": "review",
-            "description": "An agent permission review, accounted apart from its generation."
-          },
-          {
-            "type": "string",
-            "const": "web_search",
-            "description": "A native or selected service web search."
-          },
-          {
-            "type": "string",
-            "const": "page_fetch",
-            "description": "A native or selected service page fetch."
-          },
-          {
-            "type": "string",
-            "const": "image_generation",
-            "description": "Image generation by the selected offering."
-          },
-          {
-            "type": "string",
-            "const": "ask",
-            "description": "A question explicitly issued by a person."
-          }
-        ],
-        "description": "What a ledger row was spent on."
       },
       "UsageEventScope": {
         "oneOf": [

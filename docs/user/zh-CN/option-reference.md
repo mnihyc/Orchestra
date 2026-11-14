@@ -16,6 +16,9 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 | --- | --- |
 | `option:ask.models.*.model` | 已启用 API 模型的路由名称，与 provider_id 一起标识一个允许的问一问模型。子级列表可以缩小可选范围，并保留父级顺序。 |
 | `option:ask.models.*.provider_id` | 此项允许的问一问模型所使用的 API 提供方标识。提问者和当前付费人仍须有权在对话所属组织中使用该提供方及模型。 |
+| `option:AccessOptions.purposes` | 申请使用提供方的工作用途。授权可仅允许问一问，而不允许使用同一模型运行线程轮次。 |
+| `option:ProviderUse.purposes` | 此使用条目允许的工作用途。省略时允许所有用途；空列表不允许任何用途。模型、思考强度、用途和运行位置必须由同一个条目共同允许。 |
+| `option:ProviderModelDefaultsQuery.model_name` | 预览提供方所属位置的目录策略下，此确切路由名将使用的默认值。此读取仅使用已保存的事实，不发起发现，也不添加模型。创建请求明确提供 parameters 对象时，按完整定义保存，清除的可选项保持关闭。 |
 | `option:AccessOptions.models` | 此使用权限涵盖的模型。 |
 | `option:AccessOptions.services` | 此使用授权允许的已启用提供方服务，可按名称、系列或分组指定。省略时允许所有已启用服务；它与生成模型列表相互独立。 |
 | `option:AccessOptions.efforts` | 此使用权限涵盖的思考强度。 |

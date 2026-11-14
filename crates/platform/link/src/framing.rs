@@ -19,7 +19,7 @@
 use crate::ports::{Datagram, UdpBudget};
 use async_trait::async_trait;
 use bytes::Bytes;
-use orch_link_contract::frames::{self, DataFrame, Frame, FrameError, Text};
+use orch_link_contract::frames::{self, DataFrame, Frame, FrameError, Text, TextFragment};
 use orch_link_contract::ports::PortDatagram;
 use orch_link_contract::session::MachineFactsRates;
 use orch_link_contract::tunnels::data_frame_bytes;
@@ -365,6 +365,7 @@ pub struct Outgoing {
     events: mpsc::UnboundedSender<Message>,
     data: mpsc::UnboundedSender<Message>,
     datagrams: mpsc::UnboundedSender<Datagram>,
+    serial: Arc<[Mutex<()>; TextFragment::LANES]>,
     #[cfg(feature = "test-observers")]
     observed: [Arc<crate::test_observers::QueueGauge>; 4],
 }
@@ -405,6 +406,7 @@ pub fn queues() -> (Outgoing, Queues) {
             events: events_tx,
             data: data_tx,
             datagrams: datagram_tx,
+            serial: Arc::new(std::array::from_fn(|_| Mutex::new(()))),
             #[cfg(feature = "test-observers")]
             observed: observed.clone(),
         },
@@ -466,6 +468,9 @@ impl Outgoing {
 
     /// Queues text that is already written, as a control frame.
     pub fn control_text(&self, text: String) -> Result<(), SessionOver> {
+        let _serial = self.serial[0]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.send_to(&self.control, 0, Message::Text(text))
     }
 
@@ -476,11 +481,37 @@ impl Outgoing {
         frame: &Frame,
         max_frame_bytes: usize,
     ) -> Result<(), SessionOver> {
-        let text = frames::encode(frame, max_frame_bytes).map_err(|error| {
+        let text = frames::encode(frame, usize::MAX).map_err(|error| {
             tracing::error!(%error, "a frame was not sent");
             SessionOver
         })?;
-        self.send_to(queue, lane, Message::Text(text))
+        // Concurrent producers must not interleave parts of records on one priority stream.
+        let _serial = self.serial[lane]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if text.len() <= max_frame_bytes {
+            return self.send_to(queue, lane, Message::Text(text));
+        }
+        let payload = max_frame_bytes
+            .checked_sub(TextFragment::HEADER_BYTES)
+            .filter(|bytes| *bytes > 0)
+            .ok_or(SessionOver)?;
+        let text = Bytes::from(text);
+        let mut offset = 0;
+        while offset < text.len() {
+            let end = offset.saturating_add(payload).min(text.len());
+            let part = TextFragment {
+                lane: u8::try_from(lane).map_err(|_| SessionOver)?,
+                first: offset == 0,
+                last: end == text.len(),
+                payload: text.slice(offset..end),
+            }
+            .encode(max_frame_bytes)
+            .map_err(|_| SessionOver)?;
+            self.send_to(queue, lane, Message::Binary(part))?;
+            offset = end;
+        }
+        Ok(())
     }
 
     fn send_to(
@@ -639,6 +670,7 @@ pub async fn read_loop(
     // This additional session boundary is conservative for a machine with
     // several environments; no unbounded inbox can precede their own stores.
     let udp = Arc::new(UdpBudget::for_limits(&ports));
+    let mut records: [Option<Vec<u8>>; TextFragment::LANES] = std::array::from_fn(|_| None);
     loop {
         let message = match source.recv().await {
             Ok(Some(message)) => message,
@@ -658,6 +690,14 @@ pub async fn read_loop(
                 Ok(Text::Unknown(kind)) => Inbound::Unknown(kind),
                 Err(error) => Inbound::Broken(error),
             },
+            Message::Binary(bytes) if bytes.first() == Some(&TextFragment::KIND) => {
+                match receive_fragment(bytes, max_frame_bytes, &mut records) {
+                    Ok(Some(Text::Known(frame))) => Inbound::Frame(Box::new(frame)),
+                    Ok(Some(Text::Unknown(kind))) => Inbound::Unknown(kind),
+                    Ok(None) => continue,
+                    Err(error) => Inbound::Broken(error),
+                }
+            }
             Message::Binary(bytes) if bytes.first() == Some(&PortDatagram::KIND) => {
                 match PortDatagram::decode(bytes) {
                     Ok(frame) => match udp.hold(frame) {
@@ -683,6 +723,39 @@ pub async fn read_loop(
     }
 }
 
+fn receive_fragment(
+    bytes: Bytes,
+    max: usize,
+    records: &mut [Option<Vec<u8>>; TextFragment::LANES],
+) -> Result<Option<Text<Frame>>, FrameError> {
+    let part = TextFragment::decode(bytes, max)?;
+    let record = &mut records[usize::from(part.lane)];
+    if part.first {
+        if record.is_some() {
+            return Err(FrameError::InvalidFragment(
+                "a record was restarted before its end",
+            ));
+        }
+        *record = Some(Vec::new());
+    }
+    let buffer = record
+        .as_mut()
+        .ok_or(FrameError::InvalidFragment("a record has no beginning"))?;
+    buffer
+        .try_reserve(part.payload.len())
+        .map_err(|_| FrameError::InvalidFragment("the record cannot fit in memory"))?;
+    buffer.extend_from_slice(&part.payload);
+    if !part.last {
+        return Ok(None);
+    }
+    let bytes = record
+        .take()
+        .ok_or(FrameError::InvalidFragment("the record is missing"))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| FrameError::InvalidFragment("the record is not UTF-8"))?;
+    frames::decode::<Frame>(&text, usize::MAX).map(Some)
+}
+
 /// Sends one frame straight on a sink, as the handshake does before the
 /// queues exist.
 pub async fn send_frame(
@@ -700,6 +773,99 @@ pub async fn send_frame(
 mod measurement_presence_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn incomplete_and_malformed_control_fragments_never_deliver_a_partial_record() {
+        let mut records = std::array::from_fn(|_| None);
+        let part = |lane, first, last, payload: &'static [u8]| {
+            TextFragment {
+                lane,
+                first,
+                last,
+                payload: Bytes::from_static(payload),
+            }
+            .encode(512)
+            .unwrap()
+        };
+        assert!(receive_fragment(part(0, false, true, b"{}"), 512, &mut records).is_err());
+        assert!(
+            receive_fragment(part(0, true, false, b"{\"t\":"), 512, &mut records)
+                .unwrap()
+                .is_none()
+        );
+        assert!(receive_fragment(part(0, true, false, b"{}"), 512, &mut records).is_err());
+        assert!(
+            receive_fragment(
+                part(1, true, true, b"{\"t\":\"future\"}"),
+                512,
+                &mut records
+            )
+            .is_ok()
+        );
+        assert!(receive_fragment(part(0, false, true, b"\"future\"}"), 512, &mut records).is_ok());
+        assert!(receive_fragment(part(0, true, true, &[0xff]), 512, &mut records).is_err());
+        assert!(
+            TextFragment::decode(Bytes::from_static(&[TextFragment::KIND, 3, 3, b'x']), 512)
+                .is_err()
+        );
+        assert!(
+            TextFragment::decode(Bytes::from_static(&[TextFragment::KIND, 0, 4, b'x']), 512)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn large_control_records_keep_their_bytes_on_each_priority_without_exceeding_frame_size()
+    {
+        use orch_link_contract::commands::CmdRes;
+        for lane in 0..3 {
+            let (left, right) = memory_pair(PeerInfo::default(), PeerInfo::default());
+            let (outgoing, queues) = queues();
+            let meter = Arc::new(LinkMeter::default());
+            let ended = CancellationToken::new();
+            let writer = tokio::spawn(write_loop(
+                left.sink,
+                queues,
+                Arc::clone(&meter),
+                ended.clone(),
+            ));
+            let (inbound, mut received) = mpsc::unbounded_channel();
+            let reader = tokio::spawn(read_loop(
+                right.source,
+                inbound,
+                512,
+                orch_link_contract::version::PortLimits::default(),
+                Arc::clone(&meter),
+            ));
+            let frame = Frame::from(
+                CmdRes::ok(
+                    orch_types::new_id(),
+                    &json!({"catalogue": "模型🙂".repeat(10_000)}),
+                )
+                .unwrap(),
+            );
+            let queued = match lane {
+                0 => outgoing.control(&frame, 512),
+                1 => outgoing.events(&frame, 512),
+                _ => outgoing.ordered(&frame, 512),
+            };
+            assert!(
+                queued.is_ok(),
+                "logical records may exceed one physical frame"
+            );
+            let item = tokio::time::timeout(Duration::from_secs(5), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let Inbound::Frame(actual) = item else {
+                panic!("the whole control record should arrive: {item:?}");
+            };
+            assert_eq!(*actual, frame);
+            drop(outgoing);
+            writer.await.unwrap().unwrap();
+            reader.await.unwrap();
+        }
+    }
 
     #[test]
     fn facts_keep_absence_zero_and_independent_direction_samples() {
