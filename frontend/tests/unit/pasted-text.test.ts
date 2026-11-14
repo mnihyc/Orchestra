@@ -1,7 +1,7 @@
 /** Pasted text uses the model's reported estimate and remaining-context boundary before and after draft sync. */
 import { describe, expect, it } from 'vitest';
 import type { Thread } from '@/generated/api-types';
-import { estimatedPasteTokens, pasteContext, pasteFits, pastedPartFits, type PastedTextPart } from '@/lib/pastedText';
+import { estimatedPasteTokens, pasteContext, pasteFits, pastedPartDecision, pastedPartFits, type PastedTextPart } from '@/lib/pastedText';
 
 const usage = { context_window: 1000, context_used: 900 } as NonNullable<Thread['usage']>;
 const paste: PastedTextPart = { type: 'pasted_text', blob: 'a'.repeat(64), name: 'pasted.txt', path: '.orch/attachments/pasted.txt', size: 100, characters: 100, ascii_characters: 100 };
@@ -52,4 +52,13 @@ describe('folded paste delivery', () => {
     if (lower === null || higher === null) throw new Error('Both models have valid estimates');
     expect(higher).toBeGreaterThan(lower);
   });
+});
+
+it('says whether a paste followed an explicit choice, endpoint policy, missing facts or the context estimate', () => {
+  expect(pastedPartDecision({ ...paste, delivery: 'file' }, usage, estimate, 100)).toEqual({ inline: false, reason: 'chosen' });
+  expect(pastedPartDecision(paste, null, null, 100)).toEqual({ inline: true, reason: 'alwaysInline' });
+  expect(pastedPartDecision(paste, usage, estimate, 0)).toEqual({ inline: false, reason: 'alwaysFile' });
+  expect(pastedPartDecision(paste, usage, null, 25)).toEqual({ inline: false, reason: 'unknown' });
+  expect(pastedPartDecision(paste, usage, estimate, 25)).toEqual({ inline: true, reason: 'fits' });
+  expect(pastedPartDecision(paste, usage, estimate, 25, undefined, 1)).toEqual({ inline: false, reason: 'over' });
 });

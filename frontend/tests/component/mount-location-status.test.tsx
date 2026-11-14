@@ -16,9 +16,9 @@ const { read, readMachines, add }=vi.hoisted(()=>({
   readMachines:vi.fn<()=>Promise<Machine[]>>(),
   add:vi.fn<(mount:string,machine:string,body:MountLocationSetBody)=>Promise<Mount>>(),
 }));
-vi.mock('@/api/resources',()=>({machinesQuery:{queryKey:['machines'],queryFn:readMachines}}));
+vi.mock('@/api/resources',async (loadOriginal) => ({ ...await loadOriginal<object>(),machinesQuery:{queryKey:['machines'],queryFn:readMachines}}));
 vi.mock('@/api/resource-tools',()=>({machineMountsQuery:(id:string)=>({queryKey:['mounts','machine',id],queryFn:()=>read(id)}),removeMountLocation:vi.fn(),setMountLocation:add}));
-vi.mock('@tanstack/react-router',()=>({useRouter:()=>({state:{location:{pathname:'/resources/mounts/notes'}},history:{push:vi.fn()}}),Link:({to,params,children}:{to:string;params:{id:string};children:ReactNode})=><a href={to.replace('$id',params.id)}>{children}</a>}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),useRouter:()=>({state:{location:{pathname:'/resources/mounts/notes'}},history:{push:vi.fn()}}),Link:({to,params,children}:{to:string;params:{id:string};children:ReactNode})=><a href={to.replace('$id',params.id)}>{children}</a>}));
 vi.mock('@/ui/UserChip',()=>({UserChip:({user}:{user:{display_name:string}})=><span>{user.display_name}</span>}));
 const mount=():Mount=>({ ...unjudgedProvenance(),id:'notes',name:'shared-notes',address:'team.shared-notes',description:'A host directory, read-only',org_id:'org',home:null,owner:null,
   target:'/mnt/notes',read_only:true,enabled:true,default_fate:'as_is',locations:[],locations_hidden:0,kept:[],revision:1,

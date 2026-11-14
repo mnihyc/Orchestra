@@ -2,6 +2,7 @@
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ModelParameterChoice } from '@/features/composer/ModelParameterChoice';
 import { ContextAvailability } from '@/features/composer/ContextAvailability';
 import { statesOf, type SpeedOrAccess } from '@/features/composer/modelState';
 import { AccessChoice, SpeedChoice } from '@/features/composer/SpeedAndAccess';
@@ -84,4 +85,25 @@ for (const locale of ['en', 'zh-CN'] as const) describe(`availability in ${local
     expect(document.querySelector('[data-context-availability]')).toBeNull();
     expect(statesOf(data, {}).find((state) => state.kind === 'context')).toMatchObject({ force: 100_000, largest: 100_000 });
   });
+});
+
+for (const locale of ['en', 'zh-CN'] as const) for (const kind of ['speed', 'access'] as const) it(`distinguishes the resolved model default from an explicit empty ${kind} choice before sending (${locale})`, async () => {
+  await setLocale(locale);
+  const data = parameters();
+  data.parameters = data.parameters.map((view) => ({ ...view, def: { ...(view.def as Record<string, unknown>), allows_none: true } }));
+  const inherited = choice(data, kind);
+  const choose = vi.fn();
+  const view = show(<ModelParameterChoice state={inherited} writable onChoose={choose} />);
+  const title = i18n.t(kind === 'speed' ? 'composer.model.speed.title' : 'composer.model.access.title');
+  const value = inherited.open.find((option) => option.id === inherited.force)?.label ?? '';
+  const control = screen.getByRole('button', { name: i18n.t('composer.chip.value', { what: title, value }) });
+  expect(control).toHaveAccessibleDescription(expect.stringContaining(i18n.t('composer.model.from.start')));
+  await userEvent.hover(control);
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('composer.model.from.start'));
+  const explicit = statesOf(data, { [inherited.key]: null }, i18n.t).find((state): state is SpeedOrAccess => state.kind === kind);
+  if (explicit === undefined) throw new Error('The same control keeps the explicit empty choice');
+  view.rerender(<ModelParameterChoice state={explicit} writable onChoose={choose} />);
+  const none = i18n.t(kind === 'speed' ? 'composer.model.speed.standard' : 'composer.model.access.none');
+  expect(screen.getByRole('button', { name: i18n.t('composer.chip.value', { what: title, value: none }) })).toHaveAccessibleDescription(expect.stringContaining(i18n.t('composer.model.from.chosen')));
+  expect(choose).not.toHaveBeenCalled();
 });

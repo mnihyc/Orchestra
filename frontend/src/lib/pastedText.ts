@@ -35,14 +35,24 @@ export function pasteContext(usage: PasteContext, fill: Pick<ContextFill, 'used'
   return fill === null || fill === undefined ? usage : { context_used: fill.used, context_window: fill.window ?? usage?.context_window ?? null };
 }
 
-export function pastedPartFits(paste: PastedTextPart, usage: PasteContext, estimate: unknown, share: number, window?: number | null, earlierPastes = 0): boolean {
-  if (paste.delivery !== undefined && paste.delivery !== null) return paste.delivery === 'inline';
-  if (share === 100) return true;
+export type PasteDeliveryReason = 'chosen' | 'alwaysInline' | 'alwaysFile' | 'unknown' | 'fits' | 'over';
+
+/** Delivery and its explanation come from the same decision; visual folding remains independent. */
+export function pastedPartDecision(paste: PastedTextPart, usage: PasteContext, estimate: unknown, share: number, window?: number | null, earlierPastes = 0): { inline: boolean; reason: PasteDeliveryReason } {
+  if (paste.delivery !== undefined && paste.delivery !== null) return { inline: paste.delivery === 'inline', reason: 'chosen' };
+  if (share === 100) return { inline: true, reason: 'alwaysInline' };
+  if (share <= 0) return { inline: false, reason: 'alwaysFile' };
   const reported = usage?.context_window;
   const size = reported !== null && reported !== undefined && window !== null && window !== undefined ? Math.min(reported, window) : reported ?? window;
   const used = usage?.context_used ?? null;
   const tokens = pastedPartTokens(paste, estimate);
-  return share > 0 && size !== null && size !== undefined && used !== null && tokens !== null && tokens + earlierPastes <= Math.floor(Math.max(0, size - used) * share / 100);
+  if (size === null || size === undefined || used === null || tokens === null) return { inline: false, reason: 'unknown' };
+  const inline = share > 0 && tokens + earlierPastes <= Math.floor(Math.max(0, size - used) * share / 100);
+  return { inline, reason: inline ? 'fits' : 'over' };
+}
+
+export function pastedPartFits(paste: PastedTextPart, usage: PasteContext, estimate: unknown, share: number, window?: number | null, earlierPastes = 0): boolean {
+  return pastedPartDecision(paste, usage, estimate, share, window, earlierPastes).inline;
 }
 
 export function pasteFits(text: string, usage: PasteContext, estimate: unknown, share: number, window?: number | null): boolean {
