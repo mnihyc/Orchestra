@@ -52,7 +52,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     });
     // The backend deciding case exercises native scheduling/admission; here the browser consumes
     // exactly its public four-field projection, without installing a full topic snapshot.
-    await page.route(`**/threads/${ACME.mainThread}/opening?**`, async (route) => {
+    await page.route(`**/threads/${ACME.mainThread}/opening**`, async (route) => {
       await route.fulfill({ status: 200, json: { ...native, pending_agent_schedules: { status: 'ready', data: {
         seq, items: cancelled ? [] : [{ id: schedule, name: 'Check the CI run', state: 'active', next_run_at: '2030-01-01T21:30:00Z' }],
       } } } });
@@ -66,7 +66,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await expect(pending.getByText('Check the CI run', { exact: true })).toBeVisible();
     await expect(pending.getByText(words.agentSchedules.continueAt, { exact: true })).toBeVisible();
     await page.waitForLoadState('networkidle');
-    expect(reads.filter((path) => path.startsWith(`/api/v1/threads/${ACME.mainThread}/opening?`))).toHaveLength(1);
+    expect(reads.filter((path) => path.startsWith(`/api/v1/threads/${ACME.mainThread}/opening`))).toHaveLength(1);
     expect(reads.filter((path) => path.startsWith(`/api/v1/topics/${ACME.fixLogin}/sync`))).toEqual([]);
     expect(traffic.length, traffic.join('\n')).toBeLessThanOrEqual(8);
     await info.attach('native-pending-continuation', { body: await page.screenshot(), contentType: 'image/png' });

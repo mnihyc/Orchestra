@@ -21,7 +21,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       const original = await response.json() as Record<string, unknown>;
       await route.fulfill({ response, json: { ...original, capabilities } });
     });
-    await page.route(`**/api/v1/threads/${MAIN}/opening?*`, async (route) => {
+    await page.route(`**/api/v1/threads/${MAIN}/opening*`, async (route) => {
       const response = await route.fetch();
       const original = await response.json() as { parameters: Record<string, unknown> | null };
       await route.fulfill({ response, json: { ...original, parameters: original.parameters === null ? null : { ...original.parameters, capabilities } } });
@@ -83,7 +83,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       const response = await route.fetch();
       await route.fulfill({ response, json: project(await response.json() as Record<string, unknown>) });
     });
-    await page.route(`**/api/v1/threads/${MAIN}/opening?*`, async (route) => {
+    await page.route(`**/api/v1/threads/${MAIN}/opening*`, async (route) => {
       const response = await route.fetch();
       const original = await response.json() as { parameters: Record<string, unknown> | null };
       await route.fulfill({ response, json: { ...original, parameters: original.parameters === null ? null : project(original.parameters) } });

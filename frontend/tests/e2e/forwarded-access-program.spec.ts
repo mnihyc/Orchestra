@@ -36,7 +36,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       const parameters = await response.json() as ThreadParameters;
       await route.fulfill({ response, json: project(parameters) });
     });
-    await page.route(`**/api/v1/threads/${MAIN}/opening?*`, async (route) => {
+    await page.route(`**/api/v1/threads/${MAIN}/opening*`, async (route) => {
       const response = await route.fetch();
       const body = await response.json() as { parameters: ThreadParameters | null };
       await route.fulfill({ response, json: { ...body, parameters: body.parameters === null ? null : project(body.parameters) } });

@@ -2,7 +2,7 @@
 group: providers
 screens: [/help, /thread/$threadId, /resources/providers/$id]
 keywords: [reference, settings, options, states, errors, 参考, 设置, 选项, 状态, 错误]
-summary: Every request option a provider endpoint accepts, and what it changes.
+summary: Declared API and provider options, and what they change.
 ---
 
 # Option field reference
@@ -15,6 +15,12 @@ An option is offered only where its interface or program declares it. Provider l
 | --- | --- |
 | `option:ask.models.*.model` | The enabled API model’s routing name. Together with provider_id it identifies one allowed Ask model; child lists can narrow the choices while retaining the parent’s order. |
 | `option:ask.models.*.provider_id` | The API provider’s identity for this allowed Ask model. The person and current payer must still be allowed to use that provider and model in the conversation’s organization. |
+| `option:EverythingListQuery.resource_rows` | Return compact table rows and the readable sharing summary once per home in the page. Full configuration is read from each resource when opened. |
+| `option:EverythingListQuery.resource_details` | Return full resource views when table rows are not requested. This is used by choices that draw the full configuration. |
+| `option:ThreadOpeningGetQuery.limit` | Positive item count for this opening, overriding the resolved threads.opening_items default. Older items remain available through history cursors. |
+| `option:ThreadOpeningGetQuery.continuation_id` | Choose the history continuation for this read without changing which continuation executes. |
+| `option:ThreadOpeningGetQuery.projection_revision` | Name the known history projection. A stale value returns the native reset with sync.complete=false and the current selector, which can be used to open a fresh window. |
+| `option:ThreadModelParameter.options_partial` | True when additional model choices are deferred. Read the full thread parameters when opening the model chooser. |
 | `option:AccessOptions.models` | The models. |
 | `option:AccessOptions.services` | Enabled provider services this Use grant allows, by name, family or group. Omitted permits every enabled service; this list is independent of generation models. |
 | `option:AccessOptions.efforts` | The efforts. |

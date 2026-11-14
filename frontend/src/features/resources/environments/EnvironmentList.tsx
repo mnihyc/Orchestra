@@ -20,7 +20,7 @@ import { TemporaryStatus } from '@/features/resources/environments/Temporary';
 import { RegisterEnvironmentDialog } from '@/features/resources/machines/RegisterEnvironment';
 import { ResourceList, useSearchText } from '@/features/resources/ResourceList';
 import { oneOf } from '@/features/resources/search';
-import type { Environment, EnvironmentStatus, Machine } from '@/generated/api-types';
+import type { EnvironmentListRow as Environment, EnvironmentStatus, Machine } from '@/generated/api-types';
 import { Badge } from '@/ui/Badge';
 import { UpdateMark } from '@/features/resources/ComponentUpdate';
 import { Button } from '@/ui/Button';

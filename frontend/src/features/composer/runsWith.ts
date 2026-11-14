@@ -131,7 +131,7 @@ export function useRunsWith(thread: Thread, withOwn: boolean): RunsWith {
   const queryClient = useQueryClient();
   // A thread that is not bound to anything yet runs with nothing to choose.
   const bound = thread.binding !== null;
-  const parameters = useQuery({ ...parametersQuery(thread.id), enabled: bound && shown });
+  const parameters = useQuery({ ...parametersQuery(thread.id, withOwn), enabled: bound && shown });
   const settings = useQuery({ ...settingsQuery(thread.id), enabled: withOwn && bound && shown });
   const [refusal, setRefusal] = useState<SettingRefusal | null>(null);
   const written = useThreadPart(
@@ -178,7 +178,7 @@ export function useRunsWith(thread: Thread, withOwn: boolean): RunsWith {
   return {
     parameters: parameters.data,
     settings: settings.data,
-    ready: settings.data !== undefined && settings.error === null && !settings.isFetching && !parameters.isFetching,
+    ready: settings.data !== undefined && settings.error === null && parameters.data?.model.options_partial !== true && !settings.isFetching && !parameters.isFetching,
     refusal,
     refuse,
     clearRefusal: () => setRefusal(null),
@@ -187,7 +187,7 @@ export function useRunsWith(thread: Thread, withOwn: boolean): RunsWith {
     own,
     states,
     reads: withOwn ? [parameters, settings] : [parameters],
-    pending: bound && (parameters.isPending || (withOwn && settings.isPending)),
+    pending: bound && (parameters.isPending || (withOwn && (settings.isPending || parameters.isFetching && parameters.data?.model.options_partial === true))),
     failed: parameters.error ?? settings.error,
     chooser: (key) =>
       chooserOf(

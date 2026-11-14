@@ -1,0 +1,7 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --test everything_resources --test everything_operation_scopes
+web typecheck
+web lint
+web test -- tests/component/resource-names.test.tsx tests/component/resource-inventory.test.tsx tests/component/resource-management-visibility.test.tsx tests/component/resource-status-agreement.test.tsx tests/component/environment-list-view.test.tsx tests/component/host-settings-entry.test.tsx tests/component/machine-management.test.tsx tests/component/fleet-node-moves.test.tsx tests/unit/resource-impact-visibility-double.test.ts tests/unit/cache-updates.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts

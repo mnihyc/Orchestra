@@ -707,6 +707,12 @@ export class ThreadWorld implements Part {
       if (item === undefined) throw new Refusal(404, 'not_found', 'there is no such item');
       return { status: 200, body: this.itemFor(person, found[1] ?? '', item) };
     }
+    if ((found = /^GET \/threads\/([^/]+)\/items\/([^/]+)\/raw$/.exec(route))) {
+      this.places.need(person, found[1] ?? '', 'thread.view');
+      const item = this.held(found[1] ?? '').items.get(found[2] ?? '');
+      if (item?.kind !== 'tool_call' || item.payload.raw === undefined || item.payload.raw === null) throw new Refusal(404, 'not_found', 'there is no such call');
+      return { status: 200, body: item.payload.raw };
+    }
     if ((found = /^GET \/threads\/([^/]+)\/items\/([^/]+)\/output$/.exec(route))) {
       this.places.need(person, found[1] ?? '', 'thread.view');
       const item = this.held(found[1] ?? '').items.get(found[2] ?? '');
@@ -1016,6 +1022,14 @@ export class ThreadWorld implements Part {
           writable: writable && (held.lockedBy === null || held.lockedBy === undefined) }];
       });
     return {
+      composer: {
+        default_delivery: this.world.settings.valueAt(threadId, 'collab.default_delivery').value,
+        paste_inline_context_share: this.world.settings.valueAt(threadId, 'composer.paste_inline_context_share').value,
+        plan_first: this.world.settings.valueAt(threadId, 'thread.plan_first').value,
+        owner_reads: this.world.settings.valueAt(threadId, 'orch_tools.owner_reads').value,
+      },
+      agent: thread.binding === null ? undefined : { agent: thread.binding.agent, parameters: this.world.resources.declaredBy(thread.binding.agent.id) },
+      environment: thread.environment === null || !thread.environment_permissions.includes('files.view') ? undefined : this.world.resources.workspaceRow(thread.environment.id),
       provider: providerId === '' ? undefined : this.world.resources.providerForFacts(person, providerId),
       effort: { source, supported: true, value: thread.effort, writable },
       model: { options, source, value: thread.model, writable },
@@ -1163,6 +1177,8 @@ export class ThreadWorld implements Part {
 
   /** Timeline snapshots belong to the current reader and are never kept in the shared item map. */
   private itemFor(person: Person, threadId: string, item: Item): Item {
+    // A thread's items leave out the call as its harness made it; it is read apart.
+    if (item.kind === 'tool_call') return { ...item, payload: { ...item.payload, raw: undefined } };
     if (item.kind !== 'approval') return item;
     const approval = this.approvals.get(item.payload.approval_id);
     return { ...item, payload: { approval_id: item.payload.approval_id,

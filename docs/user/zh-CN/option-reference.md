@@ -3,7 +3,7 @@ group: providers
 screens: [/help, /thread/$threadId, /resources/providers/$id]
 keywords: [选项, 字段, 搜索, 参考, options, fields]
 heading_id.条目: entries
-summary: 提供方接口接受的每个请求选项，以及它改变什么。
+summary: 已声明的 API 和提供方选项，以及它们改变什么。
 ---
 
 # 选项字段参考
@@ -16,6 +16,12 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 | --- | --- |
 | `option:ask.models.*.model` | 已启用 API 模型的路由名称，与 provider_id 一起标识一个允许的问一问模型。子级列表可以缩小可选范围，并保留父级顺序。 |
 | `option:ask.models.*.provider_id` | 此项允许的问一问模型所使用的 API 提供方标识。提问者和当前付费人仍须有权在对话所属组织中使用该提供方及模型。 |
+| `option:EverythingListQuery.resource_rows` | 返回紧凑的表格行，并在每页中为各个归属位置附带一次可读的共享摘要。打开资源时再读取其完整配置。 |
+| `option:EverythingListQuery.resource_details` | 未请求表格行时，返回资源的完整视图。需要展示完整配置的选择器使用此选项。 |
+| `option:ThreadOpeningGetQuery.limit` | 此次首屏读取的正数条目数，覆盖解析后的 threads.opening_items 默认值。较早条目仍可通过历史游标继续读取。 |
+| `option:ThreadOpeningGetQuery.continuation_id` | 选择此次读取的历史延续，不改变当前执行的延续。 |
+| `option:ThreadOpeningGetQuery.projection_revision` | 指定已知的历史投影版本。版本过旧时，返回 sync.complete=false 的原生重置和当前选择器；使用该选择器可重新读取当前窗口。 |
+| `option:ThreadModelParameter.options_partial` | 为真表示其他模型选项推迟读取。打开模型选择器时，再读取完整的线程参数。 |
 | `option:AccessOptions.models` | 此使用权限涵盖的模型。 |
 | `option:AccessOptions.services` | 此使用授权允许的已启用提供方服务，可按名称、系列或分组指定。省略时允许所有已启用服务；它与生成模型列表相互独立。 |
 | `option:AccessOptions.efforts` | 此使用权限涵盖的思考强度。 |
