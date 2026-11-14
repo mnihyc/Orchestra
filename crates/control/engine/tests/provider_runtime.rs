@@ -15,13 +15,17 @@ use hosting::{ScriptedHost, phases, serve, wait_over};
 use orch_authz::{Caller, Principal};
 use orch_db::queries::resources::provider_runtime as rows;
 use orch_engine::jobs::provider_provision::Mode;
-use orch_engine::provider_runtime::{RuntimeError, RuntimeStart, StopWhy};
-use orch_link_contract::commands::{CommandError, CommandKind as K, ErrorCode};
+use orch_engine::provider_runtime::{HoldWhy, RuntimeError, RuntimeStart, StopWhy};
+use orch_link_contract::commands::{
+    CommandError, CommandKind as K, CommandResult, Empty, ErrorCode,
+};
 use orch_types::{Id, Time, new_id};
 use runtimes::{
     enrol, made, managed_subscription, managed_world_provider, provider_template, queue,
 };
 use serde_json::json;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 async fn runtime_state(world: &World, runtime: Id) -> String {
     sqlx::query_scalar("SELECT state FROM runtimes WHERE id = $1")
@@ -307,6 +311,16 @@ async fn remove_from_host(
     runtime: Id,
     volumes: bool,
 ) -> Result<(), RuntimeError> {
+    remove_from_host_with(world, host, runtime, volumes, false).await
+}
+
+async fn remove_from_host_with(
+    world: &World,
+    host: Id,
+    runtime: Id,
+    volumes: bool,
+    force: bool,
+) -> Result<(), RuntimeError> {
     let mut tx = world.pool.begin().await.unwrap();
     let principal = Principal::load(
         &mut tx,
@@ -324,6 +338,7 @@ async fn remove_from_host(
             host,
             runtime,
             volumes,
+            force,
         )
         .await
 }
@@ -1231,4 +1246,882 @@ async fn a_declared_directory_runtime_attaches_and_detaches_without_starting_or_
         .await
         .unwrap_err();
     assert!(matches!(none, RuntimeError::NotFound), "{none:?}");
+}
+
+/// Marks a runtime `stopping` as the sweep of a disabled resource does, without the host having said
+/// anything yet.
+async fn begin_stopping(world: &World, runtime: Id, why: &str) {
+    sqlx::query("UPDATE runtimes SET state = 'stopping', state_detail = $2 WHERE id = $1")
+        .bind(runtime)
+        .bind(why)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_unit_whose_container_exited_while_it_was_stopping_reads_as_stopped_and_is_started_as_it_is()
+ {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-exited", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "Exited while stopping").await;
+    let (runtime, unit) = made(&world, &host, provider).await;
+    begin_stopping(&world, runtime, rows::STOPPED_PERSON).await;
+    host.tell(runtime, "stopped", Some("the unit stopped by itself"))
+        .await;
+    eventually(
+        "the unit the host finds exited to read as stopped",
+        || async { runtime_state(&world, runtime).await == "stopped" },
+    )
+    .await;
+    let detail: Option<String> =
+        sqlx::query_scalar("SELECT state_detail FROM runtimes WHERE id=$1")
+            .bind(runtime)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        detail.as_deref(),
+        Some(rows::STOPPED_PERSON),
+        "a person's stop stays a person's stop, so that nothing starts it by itself"
+    );
+    // The same unit is started again, not a new one made.
+    let RuntimeStart::Job(job) = world
+        .engine()
+        .start_provider_runtime(provider, Some(world.ada))
+        .await
+        .unwrap()
+    else {
+        panic!("a stopped runtime is started by a job");
+    };
+    let (state, progress, error) = wait_over(&world, job.id).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    assert_eq!(
+        phases(&progress)
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["start", "enroll", "after_up", "verify", "commit"]
+    );
+    assert_eq!(host.count(K::NodeRuntimeCreate), 1);
+    assert_eq!(runtime_state(&world, runtime).await, "running");
+    assert_eq!(machine_of(&world, provider).await, Some(unit.id));
+}
+
+#[tokio::test]
+async fn a_unit_the_host_no_longer_has_while_it_was_stopping_reads_as_stopped_and_the_next_start_makes_a_new_one()
+ {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-deleted", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "Deleted while stopping").await;
+    let (runtime, _unit) = made(&world, &host, provider).await;
+    begin_stopping(&world, runtime, "Its resource was disabled").await;
+    host.tell(runtime, "absent", Some("the unit is gone")).await;
+    eventually(
+        "the unit the host does not have to read as stopped",
+        || async { runtime_state(&world, runtime).await == "stopped" },
+    )
+    .await;
+    assert!(machine_of(&world, provider).await.is_none());
+    let RuntimeStart::Job(job) = world
+        .engine()
+        .start_provider_runtime(provider, Some(world.ada))
+        .await
+        .unwrap()
+    else {
+        panic!("a stopped runtime is started by a job");
+    };
+    host.wait_for(K::NodeRuntimeStart, 2).await;
+    let second = host.started().unwrap();
+    assert_ne!(
+        second, runtime,
+        "a unit the host does not have is made again, not started"
+    );
+    let _unit = enrol(&world, second).await;
+    let (state, progress, error) = wait_over(&world, job.id).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    assert_eq!(phases(&progress)[0].0, "schedule");
+    assert_eq!(runtime_state(&world, runtime).await, "retired");
+    assert_eq!(runtime_state(&world, second).await, "running");
+    // Each unit is told which runtime it is of, so that the connector in the new unit does not take the
+    // machine of the old one, which was revoked, for its own.
+    let creates: Vec<_> = host
+        .calls()
+        .into_iter()
+        .filter(|call| call.kind == K::NodeRuntimeCreate)
+        .collect();
+    assert_eq!(creates.len(), 2);
+    assert_eq!(creates[0].body["env"]["ORCH_RUNTIME_ID"], json!(runtime));
+    assert_eq!(creates[1].body["env"]["ORCH_RUNTIME_ID"], json!(second));
+}
+
+#[tokio::test]
+async fn a_stop_the_host_answers_with_no_such_unit_settles_as_stopped_and_does_not_put_the_unit_back_to_running()
+ {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-no-unit", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "Container deleted by hand").await;
+    let (runtime, _unit) = made(&world, &host, provider).await;
+    host.refuse(
+        K::NodeRuntimeStop,
+        CommandError::new(ErrorCode::NotFound, "this host has no unit for the runtime"),
+    );
+    world
+        .engine()
+        .stop_provider_runtime(provider, false, StopWhy::Person(world.ada))
+        .await
+        .unwrap();
+    assert_eq!(runtime_state(&world, runtime).await, "stopped");
+    assert!(
+        machine_of(&world, provider).await.is_none(),
+        "a provider whose unit is not there has no machine"
+    );
+    let missing: bool = sqlx::query_scalar("SELECT loss_missing FROM runtimes WHERE id = $1")
+        .bind(runtime)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert!(
+        missing,
+        "the host's word that it has no such unit is written down, so that the next start makes one"
+    );
+}
+
+#[tokio::test]
+async fn a_forced_stop_settles_a_unit_whose_host_says_nothing_and_the_host_is_told_when_it_can_be()
+{
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-silent", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "The host says nothing").await;
+    let (runtime, _unit) = made(&world, &host, provider).await;
+    host.added.machine.handler.hold(K::NodeRuntimeStop);
+    tokio::time::timeout(
+        common::PATIENCE,
+        world.engine().stop_provider_runtime_with(
+            provider,
+            false,
+            StopWhy::Person(world.ada),
+            true,
+        ),
+    )
+    .await
+    .expect("a forced stop does not wait for the host")
+    .unwrap();
+    assert_eq!(runtime_state(&world, runtime).await, "stopped");
+    assert!(
+        machine_of(&world, provider).await.is_none(),
+        "a provider whose unit is stopped has no machine"
+    );
+    let detail: Option<String> =
+        sqlx::query_scalar("SELECT state_detail FROM runtimes WHERE id=$1")
+            .bind(runtime)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        detail.as_deref(),
+        Some(rows::STOPPED_FORCED),
+        "a stop by force that the host has not confirmed says so, and nothing starts the unit by itself"
+    );
+    host.added.machine.handler.release();
+    eventually("the host to be told to stop the unit", || async {
+        host.calls().iter().any(|call| {
+            call.kind == K::NodeRuntimeStop && call.body["runtime_id"] == json!(runtime)
+        })
+    })
+    .await;
+    eventually(
+        "the host's answer to turn the reason into the plain one of a person's stop",
+        || async { detail_of(&world, runtime).await.as_deref() == Some(rows::STOPPED_PERSON) },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_job_that_makes_a_unit_is_named_when_it_stops_a_stop_and_is_ended_by_a_forced_one() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-waiting", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "Waiting for its connector").await;
+    // The unit is made and started, and its connector never comes online: the job waits for it.
+    let job = queue(&world, provider, Mode::Make).await;
+    host.wait_for(K::NodeRuntimeStart, 1).await;
+    let runtime = host.started().unwrap();
+    eventually("the job to wait for the connector in the unit", || async {
+        sqlx::query_scalar::<_, String>("SELECT progress->>'phase' FROM jobs WHERE id=$1")
+            .bind(job)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap()
+            == "enroll"
+    })
+    .await;
+    let refused = world
+        .engine()
+        .stop_provider_runtime_with(provider, false, StopWhy::Person(world.ada), false)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, RuntimeError::Held(hold) if hold.why == HoldWhy::OwnWork
+            && hold.work == Some("make")
+            && hold.step.as_deref() == Some("enroll")),
+        "the reason names the work and where it is: {refused:?}"
+    );
+    world
+        .engine()
+        .stop_provider_runtime_with(provider, false, StopWhy::Person(world.ada), true)
+        .await
+        .unwrap();
+    let (state, _, _) = wait_over(&world, job).await;
+    assert_eq!(state, "cancelled", "the job a person overruled is over");
+    assert_eq!(runtime_state(&world, runtime).await, "stopped");
+}
+
+#[tokio::test]
+async fn a_host_manager_forces_the_removal_of_a_unit_a_job_works_on_and_the_choice_of_volumes_stays()
+ {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-forced-removal", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "Forced removal").await;
+    let job = queue(&world, provider, Mode::Make).await;
+    host.wait_for(K::NodeRuntimeStart, 1).await;
+    let runtime = host.started().unwrap();
+    eventually("the job to wait for the connector in the unit", || async {
+        sqlx::query_scalar::<_, String>("SELECT progress->>'phase' FROM jobs WHERE id=$1")
+            .bind(job)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap()
+            == "enroll"
+    })
+    .await;
+    let refused = remove_from_host_with(&world, host.id, runtime, false, false)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, RuntimeError::Held(hold) if hold.why == HoldWhy::OwnWork && hold.work == Some("make")),
+        "the reason names the work: {refused:?}"
+    );
+    assert_eq!(
+        runtime_state(&world, runtime).await,
+        "creating",
+        "a refused removal changes nothing"
+    );
+    remove_from_host_with(&world, host.id, runtime, false, true)
+        .await
+        .unwrap();
+    eventually("the unit to be removed", || async {
+        runtime_state(&world, runtime).await == "removed"
+    })
+    .await;
+    let (state, _, _) = wait_over(&world, job).await;
+    assert_eq!(state, "cancelled");
+    assert_eq!(
+        host.count(K::NodeVolumeRemove),
+        0,
+        "the volumes were kept, as the manager chose"
+    );
+}
+
+/// Stops a unit as a host manager does, in a transaction of its own.
+async fn stop_from_host(
+    world: &World,
+    host: Id,
+    runtime: Id,
+    interrupt: bool,
+    force: bool,
+) -> Result<(), RuntimeError> {
+    let mut tx = world.pool.begin().await.unwrap();
+    let principal = Principal::load(
+        &mut tx,
+        Caller::session(world.ada),
+        Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    world
+        .engine()
+        .stop_host_provider_unit_in(
+            tx,
+            &principal,
+            &orch_db::audit::Origin::default(),
+            host,
+            runtime,
+            interrupt,
+            force,
+        )
+        .await
+}
+
+async fn job_state(world: &World, job: Id) -> String {
+    sqlx::query_scalar("SELECT state FROM jobs WHERE id = $1")
+        .bind(job)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap()
+}
+
+async fn detail_of(world: &World, runtime: Id) -> Option<String> {
+    sqlx::query_scalar("SELECT state_detail FROM runtimes WHERE id = $1")
+        .bind(runtime)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_forced_stop_or_removal_that_is_refused_for_a_turn_that_runs_ends_no_job() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-refused", 16_384).await;
+    let template = provider_template(&world).await;
+    let runtime = managed_world_provider(&world, &host, template).await;
+    let thread = world.thread("work").await;
+    let (_start, _) = world.running_turn(thread, "go").await;
+    // A job works on the unit, and the host does not answer what it asked.
+    host.added.machine.handler.hold(K::NodeRuntimeStart);
+    let job = queue(&world, world.provider, Mode::Start).await;
+    host.wait_began(K::NodeRuntimeStart, 1).await;
+    let stop = stop_from_host(&world, host.id, runtime, false, true)
+        .await
+        .unwrap_err();
+    assert!(matches!(stop, RuntimeError::Busy(1)), "{stop:?}");
+    let removal = remove_from_host_with(&world, host.id, runtime, false, true)
+        .await
+        .unwrap_err();
+    assert!(matches!(removal, RuntimeError::Busy(1)), "{removal:?}");
+    assert!(
+        matches!(job_state(&world, job).await.as_str(), "queued" | "running"),
+        "a person who was refused ended nothing: {}",
+        job_state(&world, job).await
+    );
+    assert_eq!(runtime_state(&world, runtime).await, "running");
+    host.added.machine.handler.release();
+}
+
+#[tokio::test]
+async fn a_host_that_refuses_the_stop_a_person_forced_is_told_again_until_it_answers() {
+    let (log, _guard) = capture_log();
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-refusing", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "The host refuses once").await;
+    let (runtime, _unit) = made(&world, &host, provider).await;
+    let may_stop = Arc::new(AtomicBool::new(false));
+    let answer = Arc::clone(&may_stop);
+    host.answer(K::NodeRuntimeStop, move |_| {
+        if answer.load(Ordering::SeqCst) {
+            Ok(CommandResult::NodeRuntimeStop(Empty {}))
+        } else {
+            Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the host cannot stop it just now",
+            ))
+        }
+    });
+    world
+        .engine()
+        .stop_provider_runtime_with(provider, false, StopWhy::Person(world.ada), true)
+        .await
+        .unwrap();
+    assert_eq!(runtime_state(&world, runtime).await, "stopped");
+    host.wait_for(K::NodeRuntimeStop, 1).await;
+    assert_eq!(
+        detail_of(&world, runtime).await.as_deref(),
+        Some(rows::STOPPED_FORCED),
+        "a refusal keeps the person's stop pending at the host"
+    );
+    let pending = {
+        let mut conn = world.pool.acquire().await.unwrap();
+        rows::forced_stops(&mut conn, &[], 100).await.unwrap()
+    };
+    assert!(
+        pending.iter().any(|row| row.id == runtime),
+        "the schedule can find the stop that the host refused: {:?}",
+        log.lines()
+    );
+    let retried = tokio::time::timeout(common::PATIENCE, async {
+        while host.count(K::NodeRuntimeStop) < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        retried.is_ok(),
+        "the host is told again after refusing; sweeps: {}; log: {:?}",
+        world.engine().sweeps_run(),
+        log.lines()
+    );
+    let stops = world.commands.issued_commands(K::NodeRuntimeStop.as_str());
+    let commands: std::collections::HashSet<Id> = stops
+        .iter()
+        .filter(|(machine, command)| {
+            *machine == host.machine && command.body["runtime_id"] == json!(runtime)
+        })
+        .map(|(_, command)| command.id)
+        .collect();
+    assert!(commands.len() >= 2, "each attempt has a new command");
+    may_stop.store(true, Ordering::SeqCst);
+    eventually(
+        "the host to have taken the stop, which the record says by the plain reason of a person's stop",
+        || async { detail_of(&world, runtime).await.as_deref() == Some(rows::STOPPED_PERSON) },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_forced_stop_keeps_telling_its_host_while_unrelated_upkeep_waits() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-beside-busy-upkeep", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "A stop beside other work").await;
+    let (runtime, _unit) = made(&world, &host, provider).await;
+    // The environment sweep writes this table even when its candidate list is empty. Hold that
+    // unrelated work at its actual database lock while the provider's stop remains free to proceed.
+    let mut gate = world.pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE environments IN SHARE MODE")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await
+        .unwrap();
+    eventually("unrelated upkeep to wait at the held table", || async {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+              WHERE datname = current_database() AND wait_event_type = 'Lock'
+                AND $1 = ANY(pg_blocking_pids(pid)))",
+        )
+        .bind(blocker)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap()
+    })
+    .await;
+    host.refuse(
+        K::NodeRuntimeStop,
+        CommandError::new(ErrorCode::Conflict, "the host cannot stop it just now"),
+    );
+    tokio::time::timeout(
+        common::PATIENCE,
+        world.engine().stop_provider_runtime_with(
+            provider,
+            false,
+            StopWhy::Person(world.ada),
+            true,
+        ),
+    )
+    .await
+    .expect("the provider's forced stop does not wait for unrelated upkeep")
+    .unwrap();
+    host.wait_for(K::NodeRuntimeStop, 2).await;
+    eventually("the host to confirm the forced stop", || async {
+        detail_of(&world, runtime).await.as_deref() == Some(rows::STOPPED_PERSON)
+    })
+    .await;
+    assert_eq!(runtime_state(&world, runtime).await, "stopped");
+    gate.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_unit_stopped_by_force_that_its_host_then_reports_stopped_is_not_told_again() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-reports", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "The host says it stopped").await;
+    let (runtime, _unit) = made(&world, &host, provider).await;
+    host.added.machine.handler.hold(K::NodeRuntimeStop);
+    world
+        .engine()
+        .stop_provider_runtime_with(provider, false, StopWhy::Person(world.ada), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        detail_of(&world, runtime).await.as_deref(),
+        Some(rows::STOPPED_FORCED)
+    );
+    // The host does not answer the command, and says by itself that the unit stopped.
+    host.tell(runtime, "stopped", Some("the unit stopped by itself"))
+        .await;
+    eventually(
+        "the host's report to turn the reason into the plain one of a person's stop",
+        || async { detail_of(&world, runtime).await.as_deref() == Some(rows::STOPPED_PERSON) },
+    )
+    .await;
+    assert_eq!(runtime_state(&world, runtime).await, "stopped");
+    host.added.machine.handler.release();
+}
+
+#[tokio::test]
+async fn a_forced_stop_of_a_unit_the_record_calls_stopped_tells_its_host_all_the_same() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-ghost", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "A ghost the record does not know").await;
+    let (runtime, _unit) = made(&world, &host, provider).await;
+    sqlx::query("UPDATE runtimes SET state = 'stopped', state_detail = $2 WHERE id = $1")
+        .bind(runtime)
+        .bind(rows::STOPPED_PERSON)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    let before = host.count(K::NodeRuntimeStop);
+    world
+        .engine()
+        .stop_provider_runtime_with(provider, false, StopWhy::Person(world.ada), true)
+        .await
+        .unwrap();
+    host.wait_for(K::NodeRuntimeStop, before + 1).await;
+    assert_eq!(runtime_state(&world, runtime).await, "stopped");
+}
+
+#[tokio::test]
+async fn a_unit_shown_as_being_made_that_no_job_makes_is_settled_by_what_its_host_reports() {
+    for told in ["running", "stopped", "absent"] {
+        let world = World::new().await;
+        serve(&world);
+        let host = ScriptedHost::on(&world, "host-half-made", 16_384).await;
+        let _template = provider_template(&world).await;
+        let provider = managed_subscription(&world, "Left half made").await;
+        let (runtime, _unit) = made(&world, &host, provider).await;
+        // The job that was making it is over and the unit still reads as being made.
+        sqlx::query("UPDATE runtimes SET state = 'creating' WHERE id = $1")
+            .bind(runtime)
+            .execute(world.pool.pool())
+            .await
+            .unwrap();
+        host.tell(runtime, told, Some("what the host found of it"))
+            .await;
+        eventually(
+            &format!("a unit that its host tells as {told} to stop reading as being made"),
+            || async { runtime_state(&world, runtime).await != "creating" },
+        )
+        .await;
+        assert_eq!(runtime_state(&world, runtime).await, "failed", "{told}");
+        assert!(
+            detail_of(&world, runtime).await.is_some(),
+            "the reason is kept with the unit: {told}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_stop_the_host_never_took_is_asked_again_with_a_new_command_and_not_with_the_one_that_expired()
+ {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-expired", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "A stop that expired").await;
+    let (runtime, _unit) = made(&world, &host, provider).await;
+    // The stop was begun long ago and its command ran out of time before the host took it.
+    let long_ago = world.clock.now() - Duration::minutes(10);
+    sqlx::query(
+        "UPDATE runtimes SET state = 'stopping', state_detail = $2, updated_at = $3 WHERE id = $1",
+    )
+    .bind(runtime)
+    .bind(rows::STOPPED_PERSON)
+    .bind(long_ago)
+    .execute(world.pool.pool())
+    .await
+    .unwrap();
+    let updated: chrono::DateTime<Utc> =
+        sqlx::query_scalar("SELECT updated_at FROM runtimes WHERE id = $1")
+            .bind(runtime)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    let expired = orch_engine::ids::derived(
+        "node.runtime.stop",
+        &[
+            runtime.as_bytes().as_slice(),
+            &updated.timestamp_micros().to_le_bytes(),
+        ],
+    );
+    sqlx::query(
+        "INSERT INTO commands (id, machine_id, kind, body, state, deadline_at, created_at, updated_at)
+         VALUES ($1, $2, 'node.runtime.stop', $3, 'expired', $4, $5, $4)",
+    )
+    .bind(expired)
+    .bind(host.machine)
+    .bind(json!({ "runtime_id": runtime }))
+    .bind(world.clock.now() - Duration::minutes(8))
+    .bind(long_ago)
+    .execute(world.pool.pool())
+    .await
+    .unwrap();
+    // The schedule asks, finds its command run out, and dates the unit again, so that the next asking is another command.
+    let updated_at = || async {
+        sqlx::query_scalar::<_, chrono::DateTime<Utc>>(
+            "SELECT updated_at FROM runtimes WHERE id = $1",
+        )
+        .bind(runtime)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap()
+    };
+    eventually(
+        "the stop that ran out to be found, and the unit to be dated again",
+        || async { updated_at().await > updated },
+    )
+    .await;
+    // By the schedule's measure the stop is old again; this time it is a command of its own, and the host takes it.
+    sqlx::query("UPDATE runtimes SET updated_at = $2 WHERE id = $1 AND state = 'stopping'")
+        .bind(runtime)
+        .bind(long_ago - Duration::minutes(1))
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    eventually(
+        "the stop to be asked again, and the host's answer to settle the unit",
+        || async { runtime_state(&world, runtime).await == "stopped" },
+    )
+    .await;
+}
+
+/// What the engine writes to its log while a test runs, to be read back.
+#[derive(Clone, Default)]
+struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+impl Captured {
+    /// The lines written so far.
+    fn lines(&self) -> Vec<String> {
+        String::from_utf8_lossy(
+            &self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+        .lines()
+        .map(str::to_owned)
+        .collect()
+    }
+
+    /// Whether a line says all of `words`.
+    fn says(&self, words: &[&str]) -> bool {
+        self.lines()
+            .iter()
+            .any(|line| words.iter().all(|word| line.contains(word)))
+    }
+}
+
+/// Writes the log of this test thread, where the engine's tasks run too, into what [`Captured`] reads back.
+fn capture_log() -> (Captured, tracing::subscriber::DefaultGuard) {
+    let captured = Captured::default();
+    let guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(captured.clone())
+            .finish(),
+    );
+    (captured, guard)
+}
+
+#[tokio::test]
+async fn every_step_of_making_a_unit_is_in_the_log_with_the_provider_and_the_unit_and_a_failure_with_its_reason()
+ {
+    let (log, _guard) = capture_log();
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-logged", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "A unit that is logged").await;
+    let (runtime, _unit) = made(&world, &host, provider).await;
+    let (provider_is, runtime_is) = (format!("provider={provider}"), format!("runtime={runtime}"));
+    // Each step of making it begins and ends in the log, and the step that makes the unit says which unit.
+    for phase in ["schedule", "image", "create", "enroll", "commit"] {
+        let at = format!("phase=\"{phase}\"");
+        assert!(
+            log.says(&["a step begins", &provider_is, &at]),
+            "the beginning of {phase} is logged with the provider"
+        );
+        // A step that has nothing to do may be skipped, which is logged as that.
+        if phase != "image" {
+            assert!(
+                log.says(&["a step is done", &provider_is, &runtime_is, &at]),
+                "the end of {phase} is logged with the provider and the unit"
+            );
+        }
+    }
+    // A unit that cannot be made says why, with the step it failed at.
+    let failing = managed_subscription(&world, "A unit that cannot be made").await;
+    host.refuse(
+        K::NodeRuntimeCreate,
+        CommandError::new(ErrorCode::Conflict, "there is no room for the unit"),
+    );
+    let job = queue(&world, failing, Mode::Make).await;
+    let (state, _, _) = wait_over(&world, job).await;
+    assert_eq!(state, "failed");
+    assert!(
+        log.says(&[
+            "a step failed",
+            &format!("provider={failing}"),
+            "phase=\"create\"",
+            "there is no room for the unit",
+        ]),
+        "the failure is logged with the provider, the step and the host's reason: {:?}",
+        log.lines()
+    );
+}
+
+#[tokio::test]
+async fn stopping_and_removing_a_unit_are_in_the_log_with_the_provider_the_unit_and_the_reason_of_a_refusal()
+ {
+    let (log, _guard) = capture_log();
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-stopping", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "A unit that is stopped").await;
+    let (runtime, _unit) = made(&world, &host, provider).await;
+    let (provider_is, runtime_is) = (format!("provider={provider}"), format!("runtime={runtime}"));
+    // The host refuses the stop: the log says who refused what and why, and the unit reads as running again.
+    host.refuse(
+        K::NodeRuntimeStop,
+        CommandError::new(ErrorCode::Conflict, "the host cannot stop it just now"),
+    );
+    world
+        .engine()
+        .stop_provider_runtime(provider, false, StopWhy::Person(world.ada))
+        .await
+        .unwrap_err();
+    assert!(
+        log.says(&[
+            "refused to stop the unit",
+            &provider_is,
+            &runtime_is,
+            "the host cannot stop it just now",
+        ]),
+        "{:?}",
+        log.lines()
+    );
+    // The stop that the host takes is logged with the unit it is of.
+    world
+        .engine()
+        .stop_provider_runtime(provider, false, StopWhy::Person(world.ada))
+        .await
+        .unwrap();
+    assert!(log.says(&[
+        "the unit of a provider's runtime is stopped",
+        &provider_is,
+        &runtime_is
+    ]));
+    // The removal begins and ends each step in the log with the provider and the unit.
+    remove_from_host(&world, host.id, runtime, false)
+        .await
+        .unwrap();
+    eventually("the unit to be removed", || async {
+        runtime_state(&world, runtime).await == "removed"
+    })
+    .await;
+    for phase in ["stop", "unit", "forget"] {
+        let at = format!("phase=\"{phase}\"");
+        assert!(
+            log.says(&[
+                "a step of its removal begins",
+                &provider_is,
+                &runtime_is,
+                &at
+            ]),
+            "{phase}"
+        );
+        assert!(
+            log.says(&[
+                "a step of its removal is done",
+                &provider_is,
+                &runtime_is,
+                &at
+            ]),
+            "{phase}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_forced_stop_is_in_the_log_with_the_provider_and_the_unit_and_a_unit_replaced_by_an_update_is_not_stopped_by_force()
+ {
+    let (log, _guard) = capture_log();
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-forced-logged", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "A unit stopped by force").await;
+    let (runtime, _unit) = made(&world, &host, provider).await;
+    world
+        .engine()
+        .stop_provider_runtime_with(provider, false, StopWhy::Person(world.ada), true)
+        .await
+        .unwrap();
+    assert!(
+        log.says(&[
+            "stopped the unit of a provider's runtime by force",
+            &format!("provider={provider}"),
+            &format!("runtime={runtime}"),
+        ]),
+        "{:?}",
+        log.lines()
+    );
+    // A unit that an update replaced waits to be taken away; stopping it by force is refused, with its reason, and
+    // the host is told nothing.
+    let replaced = managed_subscription(&world, "A unit an update replaced").await;
+    let (old, _other) = made(&world, &host, replaced).await;
+    sqlx::query(
+        "UPDATE runtimes SET state = 'retired', remove_at = now() + interval '1 day' WHERE id = $1",
+    )
+    .bind(old)
+    .execute(world.pool.pool())
+    .await
+    .unwrap();
+    let refused = stop_from_host(&world, host.id, old, false, true)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, RuntimeError::Held(hold) if hold.why == HoldWhy::Replaced),
+        "{refused:?}"
+    );
+    assert!(
+        host.calls().iter().all(|call| !(call.kind == K::NodeRuntimeStop
+            && call.body["runtime_id"] == json!(old))),
+        "the host was told nothing of the unit that waits to be taken away"
+    );
 }

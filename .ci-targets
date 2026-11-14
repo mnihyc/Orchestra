@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-engine --test provider_runtime --test provider_updates
+test -p orch-api-core --test provider_managed
