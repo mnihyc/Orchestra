@@ -1108,6 +1108,9 @@ pub enum DiscussionResolvedFilter {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NodeDocumentListQuery {
+    /// A literal case-insensitive substring of the document title, applied before paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// Only ordinary page access, independent of native administrator reach; before paging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub participating: Option<bool>,

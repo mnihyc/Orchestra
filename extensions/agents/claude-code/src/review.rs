@@ -145,7 +145,7 @@ mod tests {
     use orch_agent_contract::events::SessionEvent;
 
     fn settings() -> SessionSettings {
-        serde_json::from_value(json!({"agent_id":orch_types::new_id(),"thread_id":orch_types::new_id(),"segment_id":orch_types::new_id(),"mode":"new","native_session_ref":null,"upto_turn_ordinal":null,"workspace_root":"/workspace","instruction_root_marker":false,"directory":"/workspace","cwd":"/workspace","mounts":[],"model":"claude-opus-5","effort":null,"params":{},"approval_mode":"auto","available_models":["claude-opus-5"],"sandbox_mode":"workspace","instructions":"","memory":null,"arrangement":"together","orch_tools":[],"raw_events":false})).unwrap()
+        serde_json::from_value(json!({"agent_id":orch_types::new_id(),"thread_id":orch_types::new_id(),"segment_id":orch_types::new_id(),"mode":"new","native_session_ref":null,"upto_turn_ordinal":null,"workspace_root":"/workspace","instruction_root_marker":false,"directory":"/workspace","cwd":"/workspace","mounts":[],"model":"claude-opus-5","effort":null,"params":{},"approval_mode":"auto","available_models":["claude-opus-5"],"web_action_wait_secs":120,"sandbox_mode":"workspace","instructions":"","memory":null,"arrangement":"together","orch_tools":[],"raw_events":false})).unwrap()
     }
 
     #[test]

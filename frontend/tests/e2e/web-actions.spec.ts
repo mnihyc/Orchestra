@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 import type { Item } from '../../src/generated/api-types';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
-import { AT, threadInput, toolCall, turn, userMessage } from '../doubles/thread-rows';
+import { AT, rawOf, threadInput, toolCall, turn, userMessage } from '../doubles/thread-rows';
 import { ADA } from '../doubles/thread-scenes';
 import { ACME, configureThread, emit, scenario, signIn } from './support';
 
@@ -15,7 +15,7 @@ function step(id: string, action: Action, nativeAction: object): Item {
   const item = toolCall(id, tool, { title: 'Native web action', turn: 'web-turn', at: AT });
   if (item.kind !== 'tool_call') throw new Error('The fixture is a tool call');
   const input = JSON.stringify({ action: nativeAction, query: 'orchards' });
-  return { ...item, payload: { ...item.payload, raw: { ...item.payload.raw, name: 'webSearch',
+  return { ...item, payload: { ...item.payload, raw: { ...rawOf(item), name: 'webSearch',
     input: { inline: input, total_len: new TextEncoder().encode(input).length, truncated: false, blob: null } } } };
 }
 
