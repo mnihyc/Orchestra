@@ -1,11 +1,12 @@
 /** Resource sub-sections use the shared settings navigation and mount only the selected work. */
-import { Activity, type ComponentProps, type ReactNode, isValidElement, useContext, useId, useState } from 'react';
+import { Activity, type ComponentProps, type ReactNode, isValidElement, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { PageSectionContext } from '@/shell/Page';
+import { ScrollSections } from '@/shell/ScrollSections';
 import { Button } from '@/ui/Button';
 import { ContentBoundary } from '@/ui/ContentBoundary';
 import { cx } from '@/ui/cx';
-import { SectionNav } from '@/ui/SectionNav';
+import { SectionContent, SectionNav } from '@/ui/SectionNav';
 import { Tabs, type TabsProps } from '@/ui/Tabs';
 import { HeadingActs } from '@/features/resources/acts';
 import type { MenuEntry } from '@/ui/Menu';
@@ -44,31 +45,39 @@ export function ResourceTabs<Value extends string>(props: TabsProps<Value>) {
 }
 
 export interface DetailSection<Value extends string> { value: Value; label: string; panel: ReactNode }
-export function DetailSections<Value extends string>({ label, sections, value, defaultValue, onValueChange, hrefOf, blocked = false, className, panelClassName }: {
+export function DetailSections<Value extends string>({ label, sections, value, defaultValue, onValueChange, hrefOf, blocked = false, stacked = false, className, panelClassName }: {
   label: string; sections: readonly DetailSection<Value>[]; value?: Value; defaultValue?: Value; onValueChange?: (value: Value) => void;
-  hrefOf?: (value: Value) => string; blocked?: boolean; className?: string; panelClassName?: string;
+  hrefOf?: (value: Value) => string; blocked?: boolean;
+  /** Settings forms are all on the page, one under the other, with the list marking the one the page is at; sections of other work are one at a time, as pages of their own. */
+  stacked?: boolean; className?: string; panelClassName?: string;
 }) {
   const id = useId();
-  const owner = useContext(PageSectionContext);
   const [local, setLocal] = useState<Value | undefined>(defaultValue ?? sections[0]?.value);
   const [visited, setVisited] = useState<ReadonlySet<Value>>(new Set());
   const selected = sections.find((section) => section.value === (value ?? local)) ?? sections[0];
   if (selected === undefined) return null;
+  if (stacked) {
+    if (sections.length === 1) return <div className={className}>{selected.panel}</div>;
+    return <ScrollSections label={label} className={className} sections={sections.map((section) => ({ id: section.value, title: section.label,
+      body: <ContentBoundary resetKey={section.value}>{section.panel}</ContentBoundary> }))} />;
+  }
   if (!visited.has(selected.value)) setVisited((before) => new Set(before).add(selected.value));
   const change = (next: Value) => { if (!blocked) { if (onValueChange === undefined) setLocal(next); else onValueChange(next); } };
-  return <div data-resource-sections className={cx('flex min-w-0 flex-col gap-4 @min-[600px]:flex-row @min-[600px]:items-start', className)}>
-    <SectionNav label={label} hidePickerLabel={owner?.title === label} current={selected.value} items={sections.map((section) => ({ id: section.value, label: section.label,
-      link: <a id={`${id}-choice-${section.value}`} href={hrefOf?.(section.value) ?? `#${id}-${section.value}`} aria-controls={`${id}-${section.value}`} aria-disabled={blocked || undefined} onClick={(event) => {
-        if (hrefOf !== undefined && (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0)) return;
-        event.preventDefault(); change(section.value);
-      }} />,
-    }))} />
-    <div className={cx('@container min-w-0 flex-1', panelClassName)}>{sections.map((section) => (section.value === selected.value || visited.has(section.value)) &&
-      <Activity key={section.value} mode={section.value === selected.value ? 'visible' : 'hidden'}>
-        <div id={`${id}-${section.value}`} data-resource-section={section.value} className="min-h-0 min-w-0 h-full">
-          <ContentBoundary resetKey={section.value}><PageSectionContext value={{ title: section.label, id: `${id}-choice-${section.value}` }}>{section.panel}</PageSectionContext></ContentBoundary>
-        </div>
-      </Activity>)}</div>
+  return <div className={cx('@container min-w-0', className)}>
+    <div data-resource-sections className="flex h-full min-w-0 flex-col gap-4 @min-[600px]:flex-row @min-[600px]:items-start">
+      <SectionNav label={label} current={selected.value} items={sections.map((section) => ({ id: section.value, label: section.label,
+        link: <a id={`${id}-choice-${section.value}`} href={hrefOf?.(section.value) ?? `#${id}-${section.value}`} aria-controls={`${id}-${section.value}`} aria-disabled={blocked || undefined} onClick={(event) => {
+          if (hrefOf !== undefined && (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0)) return;
+          event.preventDefault(); change(section.value);
+        }} />,
+      }))} />
+      <SectionContent><div className={cx('@container min-w-0 flex-1', panelClassName)}>{sections.map((section) => (section.value === selected.value || visited.has(section.value)) &&
+        <Activity key={section.value} mode={section.value === selected.value ? 'visible' : 'hidden'}>
+          <div id={`${id}-${section.value}`} data-resource-section={section.value} className="min-h-0 min-w-0 h-full">
+            <ContentBoundary resetKey={section.value}><PageSectionContext value={{ title: section.label, id: `${id}-choice-${section.value}` }}>{section.panel}</PageSectionContext></ContentBoundary>
+          </div>
+        </Activity>)}</div></SectionContent>
+    </div>
   </div>;
 }
 

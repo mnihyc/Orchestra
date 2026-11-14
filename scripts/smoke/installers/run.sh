@@ -117,7 +117,10 @@ expect "the local settings still match" "$CONFIG_BEFORE" "$(sha256sum "$CONFIG" 
 check "the supplied replacement token is printed nowhere" bash -c "! grep -qF -- '$AGAIN_TOKEN' '$PERSON.log'"
 
 step "a connector that does not match the manifest is refused and nothing is left"
-SERVED="$(find -L "$STACK/runtime/server/current/connectors" -maxdepth 1 -name 'orch-connector-linux-*' | head -n 1)"
+# The connector this host's installer takes: the one of its own architecture. Any other is never fetched here, and
+# changing it would let the installation succeed with an untouched file.
+case "$(uname -m)" in x86_64 | amd64) NATIVE=x86_64 ;; aarch64 | arm64) NATIVE=aarch64 ;; *) NATIVE="$(uname -m)" ;; esac
+SERVED="$(find -L "$STACK/runtime/server/current/connectors" -maxdepth 1 -name "orch-connector-linux-$NATIVE*" | sort | head -n 1)"
 if [ -z "$SERVED" ]; then
   fail "the release serves a Linux connector"
 elif ! cp "$SERVED" "$WORK/served-connector" || ! printf 'x' >> "$SERVED" 2> /dev/null; then

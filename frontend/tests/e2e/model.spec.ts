@@ -274,7 +274,7 @@ test('the limits that cover a model are listed by its name, its family and its g
   await expect(add).toHaveCount(0);
 });
 
-test('a suggestion that lists a faster speed, a program and a larger context is added with all of it offered and none of it on', async ({ page }) => {
+test('a suggestion that lists a faster speed, a program and a larger context is added with all of it switched on', async ({ page }) => {
   await control('/resources/model-observation', {
     provider_id: CODEX,
     at: MADE_AT,
@@ -293,18 +293,21 @@ test('a suggestion that lists a faster speed, a program and a larger context is 
   await openModels(page, CODEX);
   const suggestion = page.getByRole('checkbox', { name: /GPT-6 Sol \(A\)/ });
   await expect(suggestion).toBeVisible();
-  await expect(page.getByText('Offered, not switched on: Fast, Daybreak Blue, context up to 1M')).toBeVisible();
+  await expect(page.getByText('Offers: Fast, Daybreak Blue, context up to 1M')).toBeVisible();
   await suggestion.check();
   await page.getByRole('button', { name: 'Add selected' }).click();
   await expect(page.getByText('1 model was added', { exact: true })).toBeVisible();
 
+  // Adding a model switches on what it offers, as the organization's settings ship.
   const row = page.getByRole('row', { name: /GPT-6 Sol \(A\)/ });
-  await expect(row).toContainText('Offered, not switched on: Fast, Daybreak Blue, context up to 1M');
-  await expect(row).not.toContainText('Speeds');
+  await expect(row).toContainText('Context 272K, up to 1M');
+  await expect(row).toContainText('Speeds Fast');
+  await expect(row).toContainText('Programs Daybreak Blue');
+  await expect(row).not.toContainText('Offered, not switched on');
   await openEditor(page, 'GPT-6 Sol (A)');
-  await expect(editor(page).getByRole('switch', { name: 'Fast' })).not.toBeChecked();
-  await expect(editor(page).getByRole('switch', { name: 'Daybreak Blue' })).not.toBeChecked();
-  await expect(editor(page).getByLabel('Largest, in tokens')).toHaveValue('');
+  await expect(editor(page).getByRole('switch', { name: 'Fast' })).toBeChecked();
+  await expect(editor(page).getByRole('switch', { name: 'Daybreak Blue' })).toBeChecked();
+  await expect(editor(page).getByLabel('Largest, in tokens')).toHaveValue('1000000');
 });
 
 test('the editor is worked by the keyboard alone: opened from a row, a switch turned on, what a thread starts with chosen, saved', async ({ page }) => {

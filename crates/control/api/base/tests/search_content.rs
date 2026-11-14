@@ -79,6 +79,58 @@ fn key(hit: &SearchHit) -> (String, Id, Option<Id>) {
 }
 
 #[tokio::test]
+async fn an_empty_search_reports_its_index_scope_and_effective_conversation_allowance() {
+    use orch_api_contract::search::{SearchStreamEvent, SearchStreamList};
+    let desk = Desk::new().await;
+    let mut conn = desk.world.app.app.db.acquire().await.unwrap();
+    orch_db::queries::settings::put(
+        &mut conn,
+        None,
+        "search.text_chars",
+        &orch_db::queries::settings::Stored {
+            value: &serde_json::json!(24_000),
+            locked: false,
+            by: Some(desk.ada.id()),
+            at: desk.world.now(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    let response = desk
+        .world
+        .app
+        .call(SearchStreamList, &[])
+        .token(&desk.ada.token)
+        .query(&SearchListQuery {
+            scope: Some(desk.topic),
+            immediate: Some(true),
+            ..query("absent")
+        })
+        .send_bytes()
+        .await;
+    assert_eq!(response.status, 200);
+    let events: Vec<SearchStreamEvent> = response
+        .raw
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SearchStreamEvent::Coverage {
+            conversation_chars: 24_000
+        }
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SearchStreamEvent::Hit { .. }))
+    );
+}
+
+#[tokio::test]
 async fn injected_context_never_matches_and_old_echoes_are_repaired_without_losing_the_actual_answer()
  {
     use orch_engine::{

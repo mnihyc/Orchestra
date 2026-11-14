@@ -40,6 +40,7 @@ the actual Review changes action rather than repeating a paragraph on every turn
 
 - `Timeline.tsx`: Virtualized main stream, history loading and stable scroll anchors.
 - `rows.ts`: The rows the conversation is drawn as: which items stand alone, which are folded into one line for their turn, and where the lines that belong to no item go.
+- `rowKinds.ts`: What each item is to the reader: the conversation, the agent's work, or diagnostics. Main, stored and child conversations share its visibility and notice pairing; actionable reports remain visible with lifecycle history hidden, and explicit navigation reveals the requested item.
 - `titles.ts`: The words and the figure of a step's row, made from what the tool call was and not from the server's own line: so they come in the reader's language.
 - `waiting.ts`: What a thread is waiting for, in words: the step of its start, the reason it is blocked, the job that holds it.
 - `turnTime.ts`: A turn's working time excludes the human waits recorded by its live feed.
@@ -71,6 +72,7 @@ the actual Review changes action rather than repeating a paragraph on every turn
 - `items/Approval.tsx`: Harness request and decision card, with one visible subject shared with answer fields, the original decision/cache/decider rules and help in its shared rail home.
 - `items/Announcement.tsx`: What a thread was told: an announcement, or a milestone raised to the topic, with its origin and severity; or a message another thread sent to this one, with its files.
 - `items/Marker.tsx`: The lines of a thread's history between its items: who created it, changed its model, its page or its owners, switched or forked it, or let a turn past a limit; and segment and lifecycle markers.
+- `items/MarkerTime.tsx`: A compact control opens an exact marker timestamp by keyboard, pointer or touch.
 - `items/Error.tsx`: Actionable failure and retry.
 - `tools/Command.tsx`: Command, exit state, output as it prints and working directory; one left running shown as such, with Stop; what it was for, where the harness says.
 - `tools/FileChange.tsx`: Paths and differences in the file's own colours with the changed words marked, in one column or two; each opening in the code view; Undo this change.
