@@ -9,7 +9,7 @@ use orch_provider_contract::capabilities::{
 };
 use orch_summarizer_contract::descriptor::SummaryField;
 use orch_summarizer_contract::summarizer::{SummarizeError, SummaryLimits, SummaryRequest};
-use orch_summarizer_model::{Complete, capabilities};
+use orch_summarizer_model::{Complete, CompletionAnswer, CompletionRequest, capabilities};
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -23,15 +23,16 @@ impl Complete for Host {
     async fn complete(
         &self,
         _node: Id,
-        request: ProviderComplete,
-    ) -> Result<ProviderCompleteResult, SummarizeError> {
-        self.seen.lock().unwrap().push(request);
+        request: CompletionRequest,
+    ) -> Result<CompletionAnswer, SummarizeError> {
+        self.seen.lock().unwrap().push(request.into_api()?);
         Ok(ProviderCompleteResult {
             text: "A completed step.\nThe next step remains.".into(),
             usage: Default::default(),
             request_ref: Some("synthetic-summary".into()),
             timing: Default::default(),
-        })
+        }
+        .into())
     }
 }
 
@@ -170,6 +171,43 @@ fn request(node: Id, provider: Id) -> SummaryRequest {
         },
         config: json!({"provider_id":provider,"model_name":"small"}),
     }
+}
+
+#[tokio::test]
+async fn an_unimplemented_consumer_codec_is_refused_before_the_executor_runs() {
+    let host = Arc::new(Host {
+        seen: Mutex::new(vec![]),
+    });
+    let source = CallSource::default();
+    let mut executors = Executors::default();
+    executors
+        .register(
+            capabilities::EXECUTOR,
+            Arc::new(capabilities::Executor::new(host.clone(), source.clone())),
+        )
+        .unwrap();
+    let call = CapabilityCall {
+        source,
+        capability: "summary".into(),
+        route: cap::ResolvedRoute {
+            id: capabilities::ROUTE.into(),
+            executor: Some(capabilities::EXECUTOR.into()),
+            execution: Some(cap::ExecutionSupport {
+                input: "unimplemented.request".into(),
+                result: "unimplemented.result".into(),
+                ..cap::ExecutionSupport::default()
+            }),
+            ..cap::ResolvedRoute::default()
+        },
+        item: "summary".into(),
+        ledger_unit: "token".into(),
+        input: Json::Null,
+    };
+    assert_eq!(
+        executors.execute(call).await.unwrap_err().code,
+        SourceErrorCode::Unsupported
+    );
+    assert!(host.seen.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

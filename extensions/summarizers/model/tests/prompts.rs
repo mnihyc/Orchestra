@@ -12,7 +12,7 @@ use orch_summarizer_contract::descriptor::SummaryField;
 use orch_summarizer_contract::summarizer::{
     SummarizeError, Summarizer, SummaryLimits, SummaryRequest,
 };
-use orch_summarizer_model::{Complete, Model};
+use orch_summarizer_model::{Complete, CompletionAnswer, CompletionRequest, Model};
 use orch_types::{Id, new_id};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -27,9 +27,9 @@ impl Complete for Port {
     async fn complete(
         &self,
         _node: Id,
-        request: ProviderComplete,
-    ) -> Result<ProviderCompleteResult, SummarizeError> {
-        self.requests.lock().unwrap().push(request);
+        request: CompletionRequest,
+    ) -> Result<CompletionAnswer, SummarizeError> {
+        self.requests.lock().unwrap().push(request.into_api()?);
         Ok(ProviderCompleteResult {
             timing: Default::default(),
             text: self.text.clone(),
@@ -40,7 +40,8 @@ impl Complete for Port {
                 ..Default::default()
             },
             request_ref: Some("completion-1".to_owned()),
-        })
+        }
+        .into())
     }
 }
 
@@ -205,4 +206,32 @@ async fn a_handoff_keeps_exact_paths_and_refuses_oversized_text_whole() {
         .unwrap();
     assert_eq!(refused.text, None);
     assert_eq!(refused.usage.unwrap().tokens.total_tokens, 120);
+}
+
+#[tokio::test]
+async fn an_unreported_completion_keeps_its_usage_unknown() {
+    struct Unreported;
+    #[async_trait]
+    impl Complete for Unreported {
+        async fn complete(
+            &self,
+            _node: Id,
+            _request: CompletionRequest,
+        ) -> Result<orch_summarizer_model::CompletionAnswer, SummarizeError> {
+            Ok(orch_summarizer_model::CompletionAnswer {
+                text: "A bounded summary".into(),
+                usage: None,
+                request_ref: Some("native-unreported".into()),
+            })
+        }
+    }
+    let result = Model::new(Arc::new(Unreported))
+        .summarize(request(SummaryField::Description))
+        .await
+        .unwrap();
+    assert_eq!(result.text.as_deref(), Some("A bounded summary"));
+    assert!(
+        result.usage.is_none(),
+        "a missing native report cannot become a measured zero"
+    );
 }

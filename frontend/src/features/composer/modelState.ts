@@ -13,6 +13,8 @@ import type { ModelParameters, ParameterView, Rate, ServiceTier, SettingLock, Th
 
 export type ChoiceKind = 'speed' | 'access';
 export type Kind = ChoiceKind | 'context';
+/** The controls of the box that open a list of their own: the model, its effort, and the three choices of what it runs with. */
+export type ControlName = 'model' | 'effort' | Kind;
 
 /** What a parameter's definition says, cut down to what the control reads; anything else it holds is left alone. */
 export interface ParamDef {

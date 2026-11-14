@@ -35,7 +35,7 @@ function goalOf(patch: Partial<ThreadGoal>): ThreadGoal {
 
 function threadOf(goal: ThreadGoal | null, permissions = ['thread.view', 'thread.interact']): Thread {
   return { id: 'thread-goal', name: 'Fix the tests', archived: false, side_of: null, state: 'idle', goal,
-    access: { permissions }, binding: { agent: { name: 'Scripted agent' }, plan_mode: false } } as unknown as Thread;
+    access: { permissions }, binding: { agent: { id: 'agent', name: 'Scripted agent' }, provider: { id: 'provider', name: 'Team subscription' }, plan_mode: false } } as unknown as Thread;
 }
 
 beforeEach(() => { vi.clearAllMocks(); goals.updateGoal.mockResolvedValue(base); goals.clearGoal.mockResolvedValue(base); goals.setGoal.mockResolvedValue(base); });
@@ -45,6 +45,7 @@ const STATES = [
   { patch: {}, chip: 'working' },
   { patch: { waiting: 'approval' }, chip: 'waiting' },
   { patch: { status: 'paused', reason: 'person' }, chip: 'paused' },
+  { patch: { status: 'paused', reason: 'unchecked' }, chip: 'unchecked' },
   { patch: { status: 'paused', reason: 'blocked', detail: 'The staging key is missing' }, chip: 'waiting' },
   { patch: { status: 'met', ended_at: '2026-10-28T11:00:00Z' }, chip: 'met' },
   { patch: { status: 'stopped', reason: 'turns' }, chip: 'stopped' },
@@ -90,6 +91,19 @@ it('leaves the acts to people who may drive the thread, and says so', async () =
   expect(pause).toHaveAttribute('aria-disabled', 'true');
   await userEvent.click(pause);
   expect(goals.updateGoal).not.toHaveBeenCalled();
+});
+
+for (const action of ['accept', 'resume'] as const) it(`leaves an unchecked report for the person's ${action} decision`, async () => {
+  const goal = goalOf({ status: 'paused', reason: 'unchecked', last_report: {
+    id: 'report', turn: 1, status: 'met', evidence: 'The agent reports that the tests pass', next: null,
+    outcome: 'unchecked', checked_by: null, reason: 'The independent check is unavailable', at: '2026-11-14T09:00:00Z',
+  } });
+  show(<GoalLine thread={threadOf(goal)} />);
+  expect(screen.getByText('Unchecked')).toBeInTheDocument();
+  expect(goals.updateGoal).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button', { name: action === 'accept' ? 'Mark met' : 'Keep working' }));
+  await waitFor(() => expect(goals.updateGoal).toHaveBeenCalledOnce());
+  expect(goals.updateGoal.mock.calls[0]?.[1]).toEqual({ action });
 });
 
 for (const status of ['paused', 'stopped'] as const) {
