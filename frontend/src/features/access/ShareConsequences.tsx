@@ -11,6 +11,7 @@ import { AREAS, stepOf } from '@/features/access/agentShares';
 import { HolderView } from '@/features/access/holders';
 import { usePermissionName } from '@/features/access/names';
 import { optionLabel } from '@/features/access/EntryOptions';
+import { purposeNames } from './purposes';
 import { WhereNames, whereNames } from '@/features/access/WhereField';
 import { SettingReadout } from '@/features/settings/SettingReadout';
 import { offeredChoice } from '@/i18n/choices';
@@ -26,11 +27,12 @@ export function EntryOptionFacts({ options, word }: { options: unknown; word: (t
   const { t } = useTranslation();
   const given = typeof options === 'object' && options !== null && !Array.isArray(options) ? options as Record<string, unknown> : null;
   const names = whereNames(given?.where);
-  const { where: _places, ...rest } = given ?? {};
-  if (given === null || names.length === 0) return <ValueSummary value={options} label={t('shareReview.options')} fieldName={(name) => optionLabel(t, name)} word={word} />;
+  const { where: _places, purposes, ...rest } = given ?? {};
+  if (given === null || purposes === undefined && names.length === 0) return <ValueSummary value={options} label={t('shareReview.options')} fieldName={(name) => optionLabel(t, name)} word={word} />;
   return <>
     {Object.keys(rest).length > 0 && <ValueSummary value={rest} label={t('shareReview.options')} fieldName={(name) => optionLabel(t, name)} word={word} />}
-    <p className="text-sm"><span className="text-text-muted">{t('access.options.where')}</span>{': '}<WhereNames names={names} /></p>
+    {Array.isArray(purposes) && <p className="text-sm"><span className="text-text-muted">{t('access.options.purposes')}</span>{': '}{purposeNames(t, purposes.map(String))}</p>}
+    {names.length > 0 && <p className="text-sm"><span className="text-text-muted">{t('access.options.where')}</span>{': '}<WhereNames names={names} /></p>}
   </>;
 }
 

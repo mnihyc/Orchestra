@@ -363,9 +363,9 @@ pub struct InvitationCreateBody {
     /// How many people a shared link may serve; one when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_uses: Option<i64>,
-    /// How long it stays good; the policy's default when left out.
+    /// How many minutes it stays good; the policy's default when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_in_hours: Option<i64>,
+    pub expires_in_minutes: Option<i64>,
     /// A note for whoever manages invitations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,

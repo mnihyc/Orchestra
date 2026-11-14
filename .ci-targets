@@ -1,0 +1,13 @@
+fmt
+clippy
+contracts
+test -p orch-types --lib
+test -p orch-authz --lib
+test -p orch-authz --test external_lifetime
+test -p orch-api-core --lib -- --skip realtime::background_read_tests::
+test -p orch-api-core --test group_join_requests --test users --test access_requests --test ports_core
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test orch_capabilities
+web typecheck
+web lint
+web test -- tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts

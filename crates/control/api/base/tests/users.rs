@@ -22,7 +22,7 @@ use orch_api_contract::users::{
     InvitationLookup, UserGet, UserSearch, UserSearchQuery,
 };
 use orch_settings::Target;
-use orch_types::Id;
+use orch_types::{Id, Time};
 use places::{Who, join, make_org, make_project, person};
 use serde_json::json;
 use support::World;
@@ -58,7 +58,7 @@ fn org_invitation(org: Id) -> InvitationCreateBody {
         permissions: None,
         email: None,
         max_uses: None,
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: None,
     }
 }
@@ -167,6 +167,61 @@ async fn people_are_found_among_those_who_share_an_org_and_by_exact_name_anywher
 }
 
 #[tokio::test]
+async fn a_five_minute_invitation_ends_on_its_displayed_minute_and_is_refused_at_that_instant() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    world.advance(Duration::milliseconds(45_678));
+    let body: InvitationCreateBody = serde_json::from_value(json!({
+        "kind":"org", "org_id":s.acme, "expires_in_minutes":5
+    }))
+    .unwrap();
+    let made = invite(&world, &s.boss, &body).await.ok();
+    let end = Time::new(world.now() + Duration::minutes(5)).to_minute();
+    assert_eq!(made.invitation.expires_at, end);
+    world.advance(end.get() - world.now() - Duration::milliseconds(1));
+    world
+        .app
+        .call(InvitationLookup, &[&made.token])
+        .send()
+        .await
+        .ok();
+    world.advance(Duration::milliseconds(1));
+    assert_eq!(
+        world
+            .app
+            .call(InvitationLookup, &[&made.token])
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::Gone
+    );
+}
+
+#[tokio::test]
+async fn a_very_long_default_invitation_stays_readable_without_changing_the_policy() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    for key in ["invitations.default_minutes", "invitations.max_minutes"] {
+        world
+            .set_at(orch_settings::Target::System, key, json!(i64::MAX))
+            .await;
+    }
+    let mut body = org_invitation(s.acme);
+    let made = invite(&world, &s.boss, &body).await.ok();
+    assert_eq!(
+        made.invitation.expires_at,
+        "9999-12-31T23:59:00.000Z".parse().unwrap()
+    );
+    body.expires_in_minutes = Some(i64::MAX);
+    assert_eq!(
+        invite(&world, &s.boss, &body).await.problem().code,
+        ErrorCode::RequestInvalid,
+        "an explicitly requested length must fit the public clock"
+    );
+}
+
+#[tokio::test]
 async fn an_org_invitation_brings_a_person_in_as_a_member_with_the_role_it_carries() {
     let world = World::new().await;
     let s = setup(&world).await;
@@ -258,7 +313,7 @@ async fn an_invitation_is_made_only_by_whoever_manages_the_members_and_within_wh
         "the max_uses field must report the policy's exact bound"
     );
     let mut long = org_invitation(s.acme);
-    long.expires_in_hours = Some(721);
+    long.expires_in_minutes = Some(43260);
     let problem = invite(&world, &s.boss, &long).await.problem();
     assert_eq!(problem.code, ErrorCode::RequestInvalid);
     assert!(
@@ -267,10 +322,10 @@ async fn an_invitation_is_made_only_by_whoever_manages_the_members_and_within_wh
             .unwrap()
             .iter()
             .any(|fault| {
-                fault["path"] == "expires_in_hours"
+                fault["path"] == "expires_in_minutes"
                     && fault["message"]
                         .as_str()
-                        .is_some_and(|message| message.contains("720"))
+                        .is_some_and(|message| message.contains("43200"))
             }),
         "the lifetime field must report the policy's exact bound"
     );
@@ -443,7 +498,7 @@ async fn a_node_invitation_names_a_person_on_one_place_and_makes_them_no_member(
         permissions: Some(vec!["project.view".to_owned()]),
         email: None,
         max_uses: None,
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: Some("for the audit".to_owned()),
     };
     assert_eq!(
@@ -521,7 +576,7 @@ async fn the_system_invites_through_its_admins_alone() {
         permissions: None,
         email: None,
         max_uses: Some(3),
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: None,
     };
     assert_eq!(
@@ -667,7 +722,7 @@ fn system_invitation(uses: i64) -> InvitationCreateBody {
         permissions: None,
         email: None,
         max_uses: Some(uses),
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: None,
     }
 }
@@ -1210,7 +1265,7 @@ async fn an_expired_composed_invitation_makes_no_account_while_open_standalone_r
     let s = setup(&world).await;
     world.set("registration.mode", json!("open")).await;
     let mut offer = org_invitation(s.acme);
-    offer.expires_in_hours = Some(1);
+    offer.expires_in_minutes = Some(60);
     let made = invite(&world, &s.boss, &offer).await.ok();
     world.advance(Duration::hours(2));
     assert_eq!(

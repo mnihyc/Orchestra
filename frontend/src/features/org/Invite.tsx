@@ -19,7 +19,8 @@ import { useIdentityRules } from '@/features/auth/identityRules';
 import type { InvitationCreateResponse, Org, ResolvedSetting, Role } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { useActKey, useForm } from '@/lib/forms';
-import { formatDateTime } from '@/lib/time';
+import { formatDateTime, formatSpan, MINUTE_MS, type TimeContext } from '@/lib/time';
+import { durationMinutes, MinuteDuration, type MinuteUnit } from '@/features/access/MinuteDuration';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
@@ -34,17 +35,17 @@ import { InvitationResult, invitationWasCreated } from './InvitationResult';
 export const INVITED_ROLES: readonly Role[] = ['viewer', 'interactor', 'developer', 'admin'];
 
 /** How long an invitation can be good for, offered in these steps up to what the org allows: a day, three, a week, two weeks, a month. */
-const DURATION_STEPS_HOURS = [24, 72, 168, 336, 720] as const;
+const DURATION_STEPS_MINUTES = [1440, 4320, 10080, 20160, 43200] as const;
 
 /** What an org's settings say of its invitations; what is missing from them is what the system ships. */
 export interface InvitationRules {
   forms: readonly ('link' | 'email')[];
-  defaultHours: number;
-  maxHours: number;
+  defaultMinutes: number;
+  maxMinutes: number;
   maxUses: number;
 }
 
-const SHIPPED: InvitationRules = { forms: ['link', 'email'], defaultHours: 168, maxHours: 720, maxUses: 100 };
+const SHIPPED: InvitationRules = { forms: ['link', 'email'], defaultMinutes: 10080, maxMinutes: 43200, maxUses: 100 };
 
 export function invitationRules(settings: readonly ResolvedSetting[] | undefined): InvitationRules {
   const value = (key: string): unknown => settings?.find((setting) => setting.key === key)?.value;
@@ -55,18 +56,18 @@ export function invitationRules(settings: readonly ResolvedSetting[] | undefined
   const forms = value('invitations.forms');
   return {
     forms: Array.isArray(forms) ? forms.filter((form): form is 'link' | 'email' => form === 'link' || form === 'email') : SHIPPED.forms,
-    defaultHours: number('invitations.default_hours', SHIPPED.defaultHours),
-    maxHours: number('invitations.max_hours', SHIPPED.maxHours),
+    defaultMinutes: number('invitations.default_minutes', SHIPPED.defaultMinutes),
+    maxMinutes: number('invitations.max_minutes', SHIPPED.maxMinutes),
     maxUses: number('invitations.max_uses', SHIPPED.maxUses),
   };
 }
 
 /** The lengths of time offered: the steps up to the most, and the default and the most themselves. */
-export function durationsFor(rules: Pick<InvitationRules, 'defaultHours' | 'maxHours'>): number[] {
-  const steps = new Set<number>(DURATION_STEPS_HOURS.filter((hours) => hours <= rules.maxHours));
-  steps.add(rules.defaultHours);
-  steps.add(rules.maxHours);
-  return [...steps].filter((hours) => hours <= rules.maxHours).sort((one, other) => one - other);
+export function durationsFor(rules: Pick<InvitationRules, 'defaultMinutes' | 'maxMinutes'>): number[] {
+  const steps = new Set<number>(DURATION_STEPS_MINUTES.filter((minutes) => minutes <= rules.maxMinutes));
+  steps.add(rules.defaultMinutes);
+  steps.add(rules.maxMinutes);
+  return [...steps].filter((minutes) => minutes <= rules.maxMinutes).sort((one, other) => one - other);
 }
 
 /** A no-mail system starts with a usable shared link, while the org's allowed forms still decide. */
@@ -91,13 +92,17 @@ export function InviteDialog({ target, open, onClose }: InviteDialogProps) {
   const rules = useMemo(() => invitationRules(settings.data), [settings.data]);
   const [kind, setKind] = useState<'email' | 'link' | null>(null);
   const [role, setRole] = useState<Role>('viewer');
-  const [hours, setHours] = useState<number | null>(null);
+  const [minutes, setMinutes] = useState<number | null>(null);
+  const [customLength, setCustomLength] = useState(false);
+  const [amount, setAmount] = useState('');
+  const [unit, setUnit] = useState<MinuteUnit>('minutes');
   const [made, setMade] = useState<InvitationCreateResponse | null>(null);
 
   // What is asked for begins as what the org gives by default, and is what the person changes from there.
   const chosenKind = kind !== null && rules.forms.includes(kind) ? kind : initialInvitationKind(rules.forms, meta.data?.mail === true);
   const ready = settings.isSuccess && meta.isSuccess && rules.forms.length > 0;
-  const chosenHours = hours ?? rules.defaultHours;
+  const chosenMinutes = customLength ? durationMinutes(amount, unit) : Math.min(minutes ?? rules.defaultMinutes, rules.maxMinutes);
+  const lifetimeValid = chosenMinutes !== null && chosenMinutes <= rules.maxMinutes;
   const form = useForm(
     { email: '', uses: '1' },
     {
@@ -112,9 +117,10 @@ export function InviteDialog({ target, open, onClose }: InviteDialogProps) {
 
   const make = useMutation({
     mutationFn: (values: { email: string; uses: string }) => {
+      if (chosenMinutes === null) throw new Error(t('access.request.lengthRule'));
       const body = {
         ...(org === null ? { kind: 'system' as const } : { kind: 'org' as const, org_id: org.id, role }),
-        expires_in_hours: chosenHours,
+        expires_in_minutes: chosenMinutes,
         ...(chosenKind === 'email' ? { email: values.email.trim() } : { max_uses: Number(values.uses) }),
       };
       return createInvitation(body, actKey(body));
@@ -150,7 +156,7 @@ export function InviteDialog({ target, open, onClose }: InviteDialogProps) {
             <Button disabled={make.isPending} onClick={onClose}>
               {t('common.cancel')}
             </Button>
-            <Button type="submit" form="invite-form" variant="primary" pending={make.isPending} disabled={!ready}>
+            <Button type="submit" form="invite-form" variant="primary" pending={make.isPending} disabled={!ready || !lifetimeValid}>
               {t('places.invite.submit')}
             </Button>
           </>
@@ -173,7 +179,7 @@ export function InviteDialog({ target, open, onClose }: InviteDialogProps) {
           noValidate
           className="flex flex-col gap-4 py-2"
           onSubmit={form.submit((values) => {
-            if (!make.isPending && ready) make.mutate(values);
+            if (!make.isPending && ready && lifetimeValid) make.mutate(values);
           })}
         >
           <SegmentedControl
@@ -216,12 +222,13 @@ export function InviteDialog({ target, open, onClose }: InviteDialogProps) {
             />}
             <Select
               label={t('places.invite.goodFor')}
-              value={String(chosenHours)}
-              onValueChange={(value) => setHours(Number(value))}
-              hint={t('places.invite.most', { max: durationLabel(rules.maxHours, t), org: root })}
-              options={durationsFor(rules).map((value) => ({ value: String(value), ...choiceOption(t, 'dynamic.value', { name: durationLabel(value, t), context: t('places.invite.goodFor') }) }))}
+              value={customLength ? 'custom' : String(chosenMinutes)}
+              onValueChange={(value) => { setCustomLength(value === 'custom'); if (value !== 'custom') setMinutes(Number(value)); }}
+              hint={t('places.invite.most', { max: durationLabel(rules.maxMinutes, format), org: root })}
+              options={[...durationsFor(rules).map((value) => ({ value: String(value), ...choiceOption(t, 'dynamic.value', { name: durationLabel(value, format), context: t('places.invite.goodFor') }) })), { value: 'custom', label: t('access.request.customLength') }]}
             />
           </div>
+          {customLength && <MinuteDuration amount={amount} unit={unit} onAmount={setAmount} onUnit={setUnit} maxMinutes={rules.maxMinutes} />}
           <p className="text-sm text-text-muted">
             {org === null ? t('places.invite.becomesSystem') : org.parent_id === null
               ? t('places.invite.becomesRoot', { role: roleName, org: org.name })
@@ -253,7 +260,7 @@ export function InviteDialog({ target, open, onClose }: InviteDialogProps) {
   );
 }
 
-/** A length of time in words: whole days where it is whole days, hours otherwise. */
-export function durationLabel(hours: number, t: (key: 'places.duration.days' | 'places.duration.hours', options: { count: number }) => string): string {
-  return hours % 24 === 0 ? t('places.duration.days', { count: hours / 24 }) : t('places.duration.hours', { count: hours });
+/** A minute-precision lifetime displayed in the reader's familiar duration units. */
+export function durationLabel(minutes: number, context: TimeContext): string {
+  return formatSpan(minutes * MINUTE_MS, context, 'long');
 }

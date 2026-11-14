@@ -194,20 +194,47 @@ pub(super) async fn org_tree_in(
     if kind != NodeKind::Org || !is_root || place.org != root {
         return Err(ApiError::not_found());
     }
-    if query.since.is_some() && (query.cursor.is_some() || query.limit.is_some()) {
+    if let Some(parent) = query.parent_id {
+        let (parent_place, _) = placed(conn, parent).await?;
+        if parent_place.org != root {
+            return Err(ApiError::not_found());
+        }
+    }
+    if query.since.is_some()
+        && (query.cursor.is_some() || query.limit.is_some() || query.parent_id.is_some())
+    {
         return Err(invalid(
             "since",
-            "cannot be combined with a full-load cursor or limit",
+            "cannot be combined with a snapshot cursor, page size or parent",
         ));
     }
-    let limit = query.limit.map_or(TREE_SYNC_MAX_CHANGES, i64::from);
-    if !(1..=TREE_SYNC_MAX_CHANGES).contains(&limit) {
-        return Err(invalid("limit", "must be between 1 and 5000"));
+    let limit = if let Some(limit) = query.limit {
+        i64::from(limit)
+    } else if let Some(parent) = query.parent_id {
+        orch_settings::get::<i64>(
+            conn,
+            orch_settings::Place::Node(parent),
+            orch_settings_contract::registry::keys::NAVIGATION_TREE_PAGE_SIZE,
+        )
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::internal("the hierarchy page size has no value"))?
+    } else {
+        TREE_SYNC_MAX_CHANGES
+    };
+    if limit < 1 {
+        return Err(invalid("limit", "must be positive"));
     }
+    let branch = query
+        .parent_id
+        .map_or_else(|| "-".to_owned(), |id| id.to_string());
     let (seq, after) = if let Some(cursor) = query.cursor.as_deref() {
         let bad = || invalid("cursor", "is not a cursor of this tree");
         let parts: Vec<&str> = cursor.split('|').collect();
-        if parts.len() != 4 || parts[0] != root.to_string() || parts[1] != caller.user().to_string()
+        if parts.len() != 5
+            || parts[0] != root.to_string()
+            || parts[1] != caller.user().to_string()
+            || parts[3] != branch
         {
             return Err(bad());
         }
@@ -215,7 +242,7 @@ pub(super) async fn org_tree_in(
         if seq < 0 {
             return Err(bad());
         }
-        (seq, Some(parts[3].parse::<Id>().map_err(|_| bad())?))
+        (seq, Some(parts[4].parse::<Id>().map_err(|_| bad())?))
     } else {
         (hierarchy::tree_seq(conn, root).await?, None)
     };
@@ -252,7 +279,14 @@ pub(super) async fn org_tree_in(
         let mut selected = Vec::new();
         let mut position = after;
         'pages: loop {
-            let batch = hierarchy::tree_page(conn, root, position, limit + 1).await?;
+            let batch = hierarchy::tree_page(
+                conn,
+                root,
+                query.parent_id,
+                position,
+                limit.saturating_add(1),
+            )
+            .await?;
             let exhausted = i64::try_from(batch.len()).unwrap_or(i64::MAX) <= limit;
             if let Some(last) = batch.last() {
                 position = Some(last.id);
@@ -282,7 +316,7 @@ pub(super) async fn org_tree_in(
         if query.since.is_none() && i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit {
             rows.truncate(usize::try_from(limit).unwrap_or(0));
             rows.last()
-                .map(|row| format!("{root}|{}|{seq}|{}", caller.user(), row.id))
+                .map(|row| format!("{root}|{}|{seq}|{branch}|{}", caller.user(), row.id))
         } else {
             None
         };

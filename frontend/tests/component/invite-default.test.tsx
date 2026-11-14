@@ -41,7 +41,19 @@ it.each(modes)('opens directly on Link when mail cannot leave, without an email 
   expect(screen.getByRole('spinbutton', { name: i18n.t('places.invite.uses') })).toHaveValue(1);
   await userEvent.click(screen.getByRole('button', { name: i18n.t('places.invite.submit') }));
   await waitFor(() => expect(calls.make).toHaveBeenCalledTimes(1));
-  expect(calls.make.mock.calls[0]?.[0]).toEqual({ kind: 'org', org_id: 'acme', role: 'viewer', expires_in_hours: 168, max_uses: 1 });
+  expect(calls.make.mock.calls[0]?.[0]).toEqual({ kind: 'org', org_id: 'acme', role: 'viewer', expires_in_minutes: 10080, max_uses: 1 });
+});
+
+it.each(['en', 'zh-CN'] as const)('creates an invitation with a custom five-minute lifetime in %s', async (locale) => {
+  await setLocale(locale);
+  const user = userEvent.setup();
+  show(<InviteDialog target={{ kind: 'org', org: org('acme', 'acme', 'Acme', ADA) }} open onClose={() => undefined} />);
+  await user.click(await screen.findByRole('combobox', { name: i18n.t('places.invite.goodFor') }));
+  await user.click(screen.getByRole('option', { name: i18n.t('access.request.customLength') }));
+  await user.type(screen.getByRole('spinbutton', { name: i18n.t('access.request.length') }), '5');
+  await user.click(screen.getByRole('button', { name: i18n.t('places.invite.submit') }));
+  await waitFor(() => expect(calls.make).toHaveBeenCalledOnce());
+  expect(calls.make.mock.calls[0]?.[0]).toMatchObject({ expires_in_minutes: 5 });
 });
 it('keeps an email-only org on Email even without a mail transport', async () => {
   calls.forms = ['email'];
@@ -61,5 +73,5 @@ it.each(modes)('offers bounded system registration without an org or role in %s/
   expect(screen.getByText(i18n.t('places.invite.becomesSystem'))).toBeVisible();
   await userEvent.click(screen.getByRole('button', { name: i18n.t('places.invite.submit') }));
   await waitFor(() => expect(calls.make).toHaveBeenCalledTimes(1));
-  expect(calls.make.mock.calls[0]?.[0]).toEqual({ kind: 'system', expires_in_hours: 168, max_uses: 1 });
+  expect(calls.make.mock.calls[0]?.[0]).toEqual({ kind: 'system', expires_in_minutes: 10080, max_uses: 1 });
 });

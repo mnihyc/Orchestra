@@ -37,6 +37,9 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:agents.harness_trust_mirror` | **信任镜像校验和** — 允许发布镜像自行提供程序校验和。这些版本会标为镜像校验和，而不是厂商校验和。 |
 | `setting:agents.harness_mirror` | **发布镜像** — 在此服务器无法访问厂商时，提供厂商发布文件的服务器。 |
 | `setting:agents.prompt_cache_ttl` | **提示缓存时长** — 为代理程序的主对话指定缓存时长。不设置时使用程序自身的默认值；不支持此控制的程序会忽略它。 |
+| `setting:agents.web_action_wait_secs` | **网页操作等待时间** — 关闭尚未报告结束的原生 Codex 网页操作行，并说明原因。默认 120 秒，沿所在位置的设置继承，没有固定上限。轮次继续运行，之后真正到达的结束事件仍可更新同一行。会话重新打开时生效。 |
+| `setting:agents.native_result_wait_ms` | **原生结果等待时间** — 为声明了保留证据读取等待的程序提供系统默认值 2000 毫秒。程序配置可在引擎的中断等待窗口内选择其他值。读取超时保留操作已报告的结果，未证实用量保持未知，其他会话继续运行。程序重新启动时生效。 |
+| `setting:agents.native_result_buffer_bytes` | **原生结果缓冲区** — 会话读取可选证据时，按顺序保留后续原生输入的系统默认值，默认为 8 MiB。程序配置可选择其他大小，包括零。缓冲区满时，只将可选读取结束为未验证；所有输入继续处理。程序重新启动时生效。 |
 | `setting:agents.subagents_at_once` | **同时运行的子智能体** — 代理程序可同时运行的子代理数量。此处及上级位置中的最小值生效；不支持的控件会说明无法适用的原因。 |
 | `setting:agents.subagent_depth` | **子智能体层数** — 子代理可启动的层数；1 表示不能再嵌套。此处及上级位置中的最小值生效；不支持的控件会说明无法适用的原因。 |
 | `setting:agents.skills` | **技能** — 按技能指定此处线程的智能体可使用哪些技能：关闭、最新版本或固定版本；下级位置可以更改或关闭继承的技能。 |
@@ -62,6 +65,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:models.allowed` | **允许的模型** — 填写在此处允许使用的模型名称模式。 |
 | `setting:services.allowed` | **允许的服务** — 指定此处允许使用的已启用供应商服务名称模式；设置列表的每一层范围都必须允许该服务。 |
 | `setting:providers.allowed` | **允许的提供者** — 用提供者的 Orch 地址匹配规则限制选择；每个设置了列表的位置都必须允许此处工作所用的提供者。 |
+| `setting:models.add_switches_on` | **添加时开启的内容** — 从提供方的目录添加模型时，模型一开始带有什么：它提供的全部内容（全部）、只有强度和上下文大小（基本），或只有它自己的窗口和强度（无）。其余内容之后可由管理者开启。 |
 | `setting:collab.attribution` | **署名** — Orch 编写的输入、停止、拒绝和转发说明是否点名：自动在第二个人的话实际送达后署名、始终署名，或永不署名。永不署名时写作某人或审批人，仍保留来源、时间和备注；聊天和文档中的作者署名不变。 |
 | `setting:collab.default_delivery` | **消息发送方式** — 线程忙碌时，消息排队、送入当前运行，或中断后优先发送。 |
 | `setting:composer.paste_inline_context_share` | **消息中的粘贴文本** — 粘贴文本默认占用剩余上下文的比例。0 表示始终作为文件，100 表示始终放入消息。发送者可以逐次选择。 |
@@ -116,6 +120,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:orch_tools.search_query_chars` | **共享搜索查询预算** — 向本线程智能体公布并供共享搜索使用的查询字符预算。默认为 1000，可调大以支持更长的查询。 |
 | `setting:orch_tools.search_results` | **共享搜索结果预算** — 向本线程智能体公布并供共享搜索使用的结果预算。默认为 200；达到字节或时间预算时仍提供续查游标。 |
 | `setting:orch_tools.search_context` | **共享搜索上下文预算** — 向本线程智能体公布并供共享搜索摘要使用的前后行数预算。默认为 5，可调大以查看更广的上下文。 |
+| `setting:threads.opening_items` | **线程首屏条目** — 首次打开线程时读取的时间线条目数，须为正数，默认 40。请求可明确指定其他初始窗口，较早内容仍可通过游标继续读取。 |
 | `setting:threads.offline_deadline` | **离线回合期限** — 机器离线达到这个秒数后结束当前回合；不设置则一直等待。每次离线沿用它开始时的设置。 |
 | `setting:threads.background_wake` | **后台唤醒** — 后台任务或子代理结束时唤醒代理。关闭后，Codex 的结果随下一次输入送达；Claude Code 不提供后台任务，命令在前台运行。变更在下次会话生效。 |
 | `setting:threads.agent_access` | **智能体访问权限** — 创建会话时显示的初始范围及各区域权限。创建者确认自己可以授予的权限。仅适用于新会话，不改写已有授权。 |
@@ -126,7 +131,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `option:threads.agent_access.parts.timeline` | 线程历史的权限。 |
 | `option:threads.agent_access.parts.thread_fork` | 派生线程的权限。 |
 | `option:threads.agent_access.parts.thread_archive` | 归档线程的权限。 |
-| `setting:threads.let_viewers_in` | **允许会话查看者进入环境** — 新建会话时，是否默认允许其查看者使用环境。创建者确认该选择；更改此默认值本身不会授予任何权限。 |
+| `setting:threads.let_viewers_in` | **查看者可以打开环境** — 新建会话时，是否默认允许查看者阅读文件、终端和显示画面，不授予使用或修改权限。创建者确认该选择；更改此默认值本身不会授予任何权限。 |
 | `setting:broadcast.chat_messages_per_hour` | **智能体每小时聊天消息** — 同一来源在滚动一小时内向所有聊天成功发送的消息数量；零表示禁止发送。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:sharing.snapshot_max_bytes` | **最大分享副本** — 单次请求可分享给智能体的最大副本大小，以字节计。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:export.max_bytes` | **最大导出文件** — 此处内容单次导出的最大文件大小，以字节计。超过上限时不开始导出，并说明实际大小。 下级只能降低此上限，不能取消上级设定的限制。 |
@@ -141,6 +146,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:source.secret_name` | **源代码读取机密** — 现有 HTTPS Git 读取机密的名称；其值仅密封发送给准备命令。 |
 | `setting:workspace.record_days` | **工作轮次文件保留时间** — 在环境中保留完整轮次文件和恢复撤销文件的天数；零表示关闭记录。 |
 | `setting:workspace.record_max_bytes` | **最大记录目录** — 允许进行完整状态记录的文件和链接总字节数；更大的目录使用逐文件撤销。 |
+| `setting:workspace.record_wait_secs` | **等待轮次文件** — 轮次开始前等待记录其文件的秒数；超时仍未就绪时，轮次改用逐文件撤销开始，并在轮次上说明。 |
 | `setting:broadcast.delivery` | **公告送达方式** — 公告如何送达正在运行的线程：中断、在当前轮次中引导，或等待下一轮。 |
 | `setting:broadcast.fallback` | **无法引导时** — 公告原本需要引导当前轮次，但智能体不支持引导时采用的替代方式。 |
 | `setting:broadcast.wake_idle` | **允许唤醒空闲线程** — 此处是否允许发送者唤醒空闲线程，出厂开启。每条公告或线程消息单独选择唤醒，省略时为 false。 |
@@ -154,7 +160,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:ports.enabled` | **端口访问** — 已有环境入口权限的人是否可通过 Orch 访问归属该环境的 TCP 和 UDP 端口。 下级可以关闭此权限，不能推翻上级的禁止。 |
 | `setting:ports.max_open` | **扩大开放的端口数** — 有扩大访问范围或待审批访问范围的不同端口数量上限；零仍保留已有入口的自身访问。 |
 | `setting:ports.link_max_secs` | **端口链接有效期** — 端口链接从创建起的最长有效时间，包括后来更改到期时间的情况。 |
-| `setting:requests.expiry_hours` | **智能体请求等待期限** — 智能体发起的边界审批请求最长可以等待多久；请求的端口链接若更早到期，也会结束该请求。 |
+| `setting:requests.expiry_minutes` | **智能体请求等待期限** — 智能体发起的边界审批请求最长可以等待多久；请求的端口链接若更早到期，也会结束该请求。 |
 | `setting:browser.preset` | **浏览器启动方式** — 没有另行选择时如何启动浏览器：无窗口无显示桌面，或在 Orch 为其打开的显示桌面中显示窗口。 |
 | `setting:browser.args` | **浏览器启动参数** — 添加到浏览器启动命令的参数；不能在此设置 Orch 自行提供的参数、配置文件目录或控制地址。 |
 | `setting:browser.viewport` | **浏览器窗口大小** — 新浏览器窗口的宽和高，从 320×240 到 3840×2160。 |
@@ -226,7 +232,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:broadcast.rate_per_hour` | **每小时公告数** — 一个线程的智能体在滚动一小时内最多发送多少条公告；默认 12，零表示不允许发送。线程消息单独计数。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:broadcast.thread_messages_per_hour` | **每小时线程消息数** — 一个发送线程的智能体在滚动一小时内最多向单个线程发送多少条消息；默认 60，零表示不允许发送。系统、组织、项目或话题可替换继承值，但须遵守锁定。公告单独计数。 |
 | `setting:capability.recreate_grace_secs` | **重建等待时间** — 重建在中断运行中的工作轮次前，允许它们完成的等待秒数；0 表示立即中断。 |
-| `setting:access.request_expiry_days` | **访问请求有效期** — 无人决定的访问请求多少天后到期。 |
+| `setting:access.request_expiry_minutes` | **访问请求有效期** — 无人决定的访问请求多少分钟后到期。 |
 | `setting:access.max_pending_requests` | **待处理访问请求数** — 一个人最多可以有多少个等待决定的访问请求。 |
 | `setting:access.quick_grant_durations` | **快捷授权时长** — 一键授予访问权限的可选时长：正整数天数后加 d，或用 always 表示永久。 下级可以移除允许的选项，不能加入上级排除的选项。 |
 | `setting:nodes.new_color` | **新位置颜色** — 新位置采用所属类型的图标颜色，还是从十二种颜色中随机选择。 |
@@ -263,7 +269,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `option:capability.policy.*.approver_scope` | 由哪个区域提供审批人。 |
 | `setting:sharing.allow_external` | **所有者可分享给外部人员** — 允许此处内容的所有者在权限页中添加组织树以外的人。 下级可以关闭此权限，不能推翻上级的禁止。 |
 | `setting:sharing.allow_copy_out` | **复制到其他组织** — 是否允许把此处的对象复制或移动到其他组织。默认开启。下级可以关闭此权限，不能推翻上级的禁止；导出和在目标位置创建仍需各自的权限。 |
-| `setting:sharing.external_max_days` | **外部访问有效期** — 点名外部人员的访问条目从写入或续期起最多可以有效多少天。 |
+| `setting:sharing.external_max_minutes` | **外部访问有效期** — 点名外部人员的访问条目从写入或续期起最多可以有效多少分钟。 |
 | `setting:sharing.allow_holders` | **权限持有人可分享** — 不拥有对象也不管理权限页的人，是否可在自己已有权限范围内分享：添加权限持有人、授予位置角色或分享给智能体。关闭时，仅所有者和权限页管理者可分享。 下级可以关闭此权限，不能推翻上级的禁止。 |
 | `setting:sharing.on_link` | **发送时共享查看权限** — 此处发送链接时的默认查看权限共享选项。每个人也可以在个人设置中关闭。 |
 | `setting:usage.rates` | **价格表** — 按模型 ID 匹配规则设置使用价格，以点数计。 |
@@ -318,7 +324,9 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:documents.links.mentions_counted` | **统计的提及数** — 单个来源中统计到多少处对该文档的提及，再显示为“以上”。 |
 | `setting:documents.links.access_checks` | **链接权限检查数** — “被引用”每页检查阅读权限的来源数。被大量引用的文档会用游标继续。 |
 | `setting:documents.links.graph_nodes` | **关系图节点数** — “链接”关系图最多绘制的节点数。 |
+| `setting:documents.readme_blocks` | **README 预览** — 位置的 README 预览显示的顶层块数，同时保留其子块。遇到更早的分页符时结束预览；“打开文档”始终可查看完整页面。 |
 | `setting:chat.attachment_max_bytes` | **聊天附件大小** — 单条聊天消息所附单个文件的最大字节数。 下级只能降低此上限，不能取消上级设定的限制。 |
+| `setting:search.text_chars` | **对话搜索文本** — 每条对话记录脱敏后索引的字符数。更改适用于新文本及重新构建的索引；不索引原始调用、输出、隐藏推理、子线程以及无法读取脱敏所需信息的文本。 |
 | `setting:search.word_recent_candidates` | **近期文本样本** — 探查文本索引前抽样的近期记录数。 |
 | `setting:search.word_candidates` | **文字候选数** — 每个索引字段在权限检查和排序前提取的候选数。 |
 | `setting:search.word_probe_candidates` | **文字索引采样** — 转为按时间扫描前，采样的索引匹配数。 |
@@ -331,6 +339,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `option:search.word_tuning.tiers.heading` | 章节标题文字或其排序权重。 |
 | `option:search.word_tuning.tiers.body` | 正文文字或其排序权重。 |
 | `setting:search.page_size` | **每页条数** — 点击显示更多前展示的结果数。 |
+| `setting:navigation.tree_page_size` | **层级每页条数** — 层级分支每页默认读取的条数，初始为 50。调用方可以请求更大的页面；这是默认值，不是上限。 |
 | `setting:search.reorder_window_secs` | **排序窗口** — 新结果可以调整首屏顺序的持续时间。 |
 | `setting:search.meaning_pause_ms` | **输入停顿** — 输入停顿多久后请求嵌入，单位为毫秒。 |
 | `setting:search.cursor_entries` | **保留的搜索** — 为每位读者保留的搜索续读位置。 |
@@ -390,8 +399,8 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:registration.mode` | **注册方式** — 允许谁注册：无人、持邀请的人，或能访问此系统的任何人。 |
 | `setting:org.terms` | **加入者须接受的条款** — 加入此组织或接受其位置、聊天的访客邀请前需接受的 Markdown 条款。先显示根组织的条款，再显示各级下属组织的条款。空文本不添加条款；修改后不会要求现有成员再次接受。 |
 | `setting:invitations.forms` | **邀请方式** — 此组织树内可创建的邀请形式。 下级可以移除允许的选项，不能加入上级排除的选项。 |
-| `setting:invitations.default_hours` | **邀请有效时间** — 邀请人未另作选择时，邀请默认有效多少小时。 |
-| `setting:invitations.max_hours` | **邀请的最长有效时间** — 邀请最多可以有效多少小时。 下级只能降低此上限，不能取消上级设定的限制。 |
+| `setting:invitations.default_minutes` | **邀请有效时间** — 邀请人未另作选择时，邀请默认有效多少分钟。 |
+| `setting:invitations.max_minutes` | **邀请的最长有效时间** — 邀请最多可以有效多少分钟。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:invitations.max_uses` | **共享链接的使用次数** — 一个共享邀请链接最多可以邀请多少人。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:mail.shared` | **共享邮件服务器** — 没有独立邮件服务器的根组织是否通过系统邮件服务器发送邮件。 |
 | `setting:api.idempotency_window` | **创建重试保留时间** — 创建请求的键保留已接受对象标识的小时数；0 表示不保留。可按需要延长，24 小时是默认值。 |
@@ -489,10 +498,12 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:ask.retention_min_days` | **Ask 最短保留时间** — 会话根组织的管理员规定的最短历史保留时间。 下级只能提高此下限。 |
 | `setting:ask.retention_max_days` | **Ask 最长保留时间** — 会话根组织的管理员允许的最长历史保留时间。 |
 | `setting:ask.max_steps` | **Ask 每轮模型步骤数** — 每个问题允许的模型步骤数，达到后请提问者选择继续。 |
-| `setting:ask.max_output_tokens` | **Ask 回答令牌数** — 每次 Ask 模型请求允许的最大输出令牌数，也会在安排对话上下文前预留。系统和组织设置中的最小值生效。 |
-| `setting:ask.context_tokens` | **Ask 上下文令牌数** — 未设置时使用所选模型的上下文窗口。设置后仅对 Ask 取较小值，仍需留足输出和工具结果空间。系统和组织设置中的最小值生效。 |
+| `setting:ask.max_output_tokens` | **Ask 回答令牌数** — 每次 Ask 模型请求允许的最大输出令牌数。请求按窗口减去此值来安排，且回答最多占窗口的一半。系统和组织设置中的最小值生效。 |
+| `setting:ask.context_tokens` | **Ask 上下文令牌数** — 未设置时使用所选模型的上下文窗口；未记录窗口的模型不会被当作小窗口。设置后仅对 Ask 取较小值。窗口不超过回答令牌数两倍时，回答占其一半。系统和组织设置中的最小值生效。 |
 | `setting:ask.max_tools` | **Ask 每轮读取操作数** — 每个问题允许的读取操作数，达到后请提问者缩小问题范围。 |
-| `setting:ask.tool_bytes` | **Ask 单个来源大小** — 交给模型的单次读取结果的最大字节数，并提供指向完整来源的标准链接。 |
-| `setting:ask.turn_tool_bytes` | **Ask 每轮来源总量** — 回答一个问题时提供给模型的读取结果总字节数。 |
+| `setting:ask.docs_hits` | **Ask 每次搜索的指南页数** — Ask 每次搜索帮助时交给模型的指南页面数上限；中英文同时匹配时交替给出。 |
+| `setting:ask.docs_excerpt_tokens` | **Ask 指南摘录大小** — Ask 搜索帮助时交给模型的单个指南页面的最大令牌数，并附上该页面的链接。 |
+| `setting:ask.max_operations` | **Ask 每次搜索的操作数** — Ask 每次搜索读取目录时返回的读取操作数上限。 |
+| `setting:ask.max_links` | **Ask 每个来源的链接数** — Ask 在一次读取中保留的标准来源链接数上限。 |
 | `setting:providers.model_groups_max` | **模型分组数** — 每个模型可加入的分组数，默认 8 个，可提高。设为 0 时不允许新加入分组，已有分组不变。 |
 | `option:usage.rates.*.web_fetch_per_call` | 每次成功网页抓取调用的点数。 |

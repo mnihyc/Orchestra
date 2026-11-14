@@ -160,6 +160,7 @@ impl Setting {
             .provider_use(
                 &mut conn,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person: who.id(),
                     node,
                     provider: self.provider,
@@ -267,6 +268,7 @@ async fn asked_about_the_provider_alone_the_answer_is_about_the_provider_alone()
     let s = Setting::new().await;
     let mut conn = s.world.conn().await;
     let ask = ProviderUse {
+        purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
         person: s.bea.id(),
         node: s.thread,
         provider: s.provider,
@@ -310,6 +312,7 @@ async fn a_subscription_kept_to_its_owner_is_refused_to_others_with_nobody_to_as
     s.row("provider", subscription, "provider.use", &s.bea, json!({}))
         .await;
     let ask = |who: Id| ProviderUse {
+        purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
         person: who,
         node: s.thread,
         provider: subscription,
@@ -538,6 +541,7 @@ impl Setting {
             .provider_use(
                 &mut conn,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person: who.id(),
                     node,
                     provider: self.provider,

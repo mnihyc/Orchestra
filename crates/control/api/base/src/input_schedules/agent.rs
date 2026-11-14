@@ -269,7 +269,7 @@ impl ScheduleTools for Tools {
 
 fn view(row: &rows::ScheduleRow) -> ApiResult<Json> {
     Ok(
-        json!({"id":row.id,"kind":"agent","name":row.name,"timing":row.timing,
+        json!({"id":row.id,"kind":"agent","name":row.name,"timing":row.timing,"plan":row.plan,"delivery":row.delivery,
         "state":row.state,"next_run_at":row.next_run_at,"agent":metadata(row)?}),
     )
 }
@@ -503,7 +503,7 @@ async fn dispatch(app: &App, call: &CallContext) -> ApiResult<Json> {
                     "the end must include a future occurrence and max_runs must be positive",
                 ));
             }
-            let agent:Id=sqlx::query_scalar("SELECT s.agent_id FROM turns t JOIN segments s ON s.id=t.segment_id WHERE t.id=$1 AND t.thread_id=$2")
+            let (agent, plan):(Id,bool)=sqlx::query_as("SELECT s.agent_id,t.plan FROM turns t JOIN segments s ON s.id=t.segment_id WHERE t.id=$1 AND t.thread_id=$2")
                 .bind(call.turn).bind(thread.node_id).fetch_one(&mut *tx).await.map_err(DbError::from)?;
             let id = orch_engine::ids::derived(
                 "agent-input-schedule",
@@ -542,6 +542,8 @@ async fn dispatch(app: &App, call: &CallContext) -> ApiResult<Json> {
                         thread_id: thread.node_id,
                     })?,
                     content: encode(&vec![ContentPart::Text { text: note.into() }])?,
+                    plan,
+                    delivery: "queue".into(),
                     native_action: None,
                     definition_authority: Some(encode(&definition)?),
                     timing: encode(&timing)?,

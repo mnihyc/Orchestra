@@ -5,7 +5,7 @@
 //! it is asks a [`Clock`], never the system, so that every rule about time
 //! can be tested without waiting.
 
-use chrono::{DateTime, Duration, SecondsFormat, SubsecRound, Utc};
+use chrono::{DateTime, Datelike, Duration, SecondsFormat, SubsecRound, Timelike, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::{Arc, Mutex};
@@ -31,6 +31,31 @@ impl Time {
     #[must_use]
     pub fn unix_millis(self) -> i64 {
         self.0.timestamp_millis()
+    }
+
+    /// The start of this minute, for an expiry displayed and chosen to minute precision.
+    #[must_use]
+    pub fn to_minute(self) -> Self {
+        Self(self.0.trunc_subsecs(0) - Duration::seconds(i64::from(self.0.second())))
+    }
+
+    /// Adds a minute length only while its end fits RFC 3339's four-digit UTC year.
+    #[must_use]
+    pub fn checked_add_minutes(self, minutes: i64) -> Option<Self> {
+        let at = self.0.checked_add_signed(Duration::try_minutes(minutes)?)?;
+        (0..=9999).contains(&at.year()).then_some(Self::new(at))
+    }
+
+    /// The latest millisecond readable by the public RFC 3339 time representation.
+    #[must_use]
+    #[expect(
+        clippy::expect_used,
+        reason = "the last four-digit UTC date is a constant valid RFC 3339 literal"
+    )]
+    pub fn maximum() -> Self {
+        "9999-12-31T23:59:59.999Z"
+            .parse()
+            .expect("the public clock boundary is a valid time")
     }
 }
 
@@ -163,9 +188,38 @@ mod tests {
     }
 
     #[test]
+    fn expiry_precision_ends_at_the_start_of_its_minute_including_before_the_epoch() {
+        for (given, expected) in [
+            ("2026-10-08T17:04:59.999Z", "2026-10-08T17:04:00.000Z"),
+            ("1969-12-31T23:59:59.999Z", "1969-12-31T23:59:00.000Z"),
+        ] {
+            let instant: Time = given.parse().unwrap();
+            assert_eq!(instant.to_minute().to_string(), expected);
+            assert_eq!(instant.to_minute().to_minute(), instant.to_minute());
+        }
+    }
+
+    #[test]
     fn read_from_any_offset_as_utc() {
         let read: Time = serde_json::from_str("\"2026-10-08T19:04:05.5+02:00\"").unwrap();
         assert_eq!(read.to_string(), "2026-10-08T17:04:05.500Z");
+    }
+
+    #[test]
+    fn long_minute_lengths_stay_readable_by_the_public_time_format() {
+        let start: Time = "2026-10-08T17:04:05.123Z".parse().unwrap();
+        let ten_thousand_years = 10_000 * 366 * 24 * 60;
+        for minutes in [1, ten_thousand_years, i64::MAX] {
+            let end = start
+                .checked_add_minutes(minutes)
+                .unwrap_or_else(Time::maximum)
+                .to_minute();
+            let written = serde_json::to_string(&end).unwrap();
+            assert_eq!(serde_json::from_str::<Time>(&written).unwrap(), end);
+            assert!(end > start);
+        }
+        assert!(start.checked_add_minutes(ten_thousand_years).is_none());
+        assert_eq!(Time::maximum().to_string(), "9999-12-31T23:59:59.999Z");
     }
 
     #[test]

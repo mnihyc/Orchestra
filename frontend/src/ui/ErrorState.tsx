@@ -10,6 +10,7 @@ import { Trans, useTranslation } from 'react-i18next';
 
 import { ApiError, invitationIssuerAuthorityLost } from '@/api/client';
 import { WhereNames } from '@/features/access/WhereField';
+import { purposeNames } from '@/features/access/purposes';
 import { SecondStepGate, waitsForSecondStep } from '@/features/auth/SecondStepGate';
 import type { MissingAccess } from '@/generated/api-types';
 import { permissionDenial } from '@/lib/permissions';
@@ -118,6 +119,7 @@ export function MissingAccessList({ missing, className }: { missing: readonly Mi
               <span className="font-medium">{what}</span>
             </span>
             {entry.options?.where !== undefined && entry.options.where !== null && entry.options.where.length > 0 && <span><Trans i18nKey="access.missing.notWhere" components={{ names: <WhereNames names={entry.options.where} unreadable={t('access.missing.thatPlace')} /> }} /></span>}
+            {entry.options?.purposes !== undefined && entry.options.purposes !== null && <span>{t('access.options.purposes')}{': '}{purposeNames(t, entry.options.purposes)}</span>}
             {entry.closed !== null || entry.ask.length === 0 ? <span className="text-text-muted">{answer}</span> : <span className="flex flex-wrap items-center gap-1 text-text-muted">
               <span className="sr-only">{answer}</span>
               <Trans i18nKey="access.missing.askPeople" components={{ people: entry.ask.length === 1 && entry.ask_more === 0 && entry.ask[0] !== undefined ? <UserChip user={entry.ask[0]} size={24} /> : <AvatarStack users={entry.ask} total={entry.ask.length + entry.ask_more} size={24} /> }} />

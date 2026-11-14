@@ -50,8 +50,6 @@ use crate::sign_in::throttle;
 
 use chrono::DateTime;
 
-use chrono::Duration;
-
 use chrono::Utc;
 
 use orch_access_contract::audit::AuditAction;
@@ -370,8 +368,8 @@ async fn permitted_chat(
 struct Policies {
     forms: Vec<String>,
     forms_scope: Option<NodeRef>,
-    default_hours: i64,
-    max_hours: i64,
+    default_minutes: i64,
+    max_minutes: i64,
     max_uses: i64,
 }
 
@@ -399,8 +397,8 @@ async fn policies_at(conn: &mut Conn, place: Place) -> ApiResult<Policies> {
             .and_then(|value| serde_json::from_value(value.clone()).ok())
             .unwrap_or_default(),
         forms_scope: scope,
-        default_hours: number(conn, keys::INVITATIONS_DEFAULT_HOURS).await?,
-        max_hours: number(conn, keys::INVITATIONS_MAX_HOURS).await?,
+        default_minutes: number(conn, keys::INVITATIONS_DEFAULT_MINUTES).await?,
+        max_minutes: number(conn, keys::INVITATIONS_MAX_MINUTES).await?,
         max_uses: number(conn, keys::INVITATIONS_MAX_USES).await?,
     })
 }
@@ -642,11 +640,11 @@ async fn invitation_create(
                 uses
             }
         };
-        let hours = body.expires_in_hours.unwrap_or(policies.default_hours);
-        if hours < 1 || hours > policies.max_hours {
+        let minutes = body.expires_in_minutes.unwrap_or(policies.default_minutes.min(policies.max_minutes));
+        if minutes < 1 || minutes > policies.max_minutes {
             return Err(invalid(
-                "expires_in_hours",
-                &format!("must be from 1 to {}", policies.max_hours),
+                "expires_in_minutes",
+                &format!("must be from 1 to {}", policies.max_minutes),
             ));
         }
         let (role, rows): (Option<String>, Vec<String>) = match body.kind {
@@ -713,9 +711,18 @@ async fn invitation_create(
         };
         let token = new_token(INVITATION_TOKEN_PREFIX);
         let id = new_id();
-        let expires_at = Duration::try_hours(hours)
-            .and_then(|life| ctx.now.checked_add_signed(life))
-            .ok_or_else(|| invalid("expires_in_hours", "is outside the supported clock range"))?;
+        let expires_at = match Time::new(ctx.now).checked_add_minutes(minutes) {
+            Some(end) => end,
+            None if body.expires_in_minutes.is_none() => Time::maximum(),
+            None => {
+                return Err(invalid(
+                    "expires_in_minutes",
+                    "is outside the supported clock range",
+                ));
+            }
+        }
+        .to_minute()
+        .get();
         let issuer_origin = invitation_operation::capture(&ctx, principal)?;
         identity::create_invitation(
             &mut tx,

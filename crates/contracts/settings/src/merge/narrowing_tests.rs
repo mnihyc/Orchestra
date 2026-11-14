@@ -279,7 +279,7 @@ fn preferences_and_parameters_keep_their_existing_replace_choices() {
         keys::USAGE_CATALOGUE,
         keys::USAGE_CATALOGUE_SCALE,
         keys::ASK_PAID_BY,
-        keys::INVITATIONS_DEFAULT_HOURS,
+        keys::INVITATIONS_DEFAULT_MINUTES,
         keys::TERMINAL_RECORD,
         keys::ENV_REMOVED_KEEP_DAYS,
         keys::RETENTION_ARCHIVE_IDLE_DAYS,

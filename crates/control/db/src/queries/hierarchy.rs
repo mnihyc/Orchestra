@@ -1217,18 +1217,19 @@ pub async fn tree(
     since: Option<i64>,
     limit: i64,
 ) -> Result<Vec<TreeRow>, DbError> {
-    tree_rows(conn, root, since, since.map(|_| limit), None).await
+    tree_rows(conn, root, since, since.map(|_| limit), None, None).await
 }
 
-/// One id-keyset page of a full tree. Callers continue until there is no next
-/// row, independently of how many rows the reader may view in this page.
+/// One id-keyset page of a root tree or a parent's direct children. Metadata and document
+/// counts are read only for the candidate page, independently of how large the tree is.
 pub async fn tree_page(
     conn: &mut Conn,
     root: Id,
+    parent: Option<Id>,
     after: Option<Id>,
     limit: i64,
 ) -> Result<Vec<TreeRow>, DbError> {
-    tree_rows(conn, root, None, Some(limit), after).await
+    tree_rows(conn, root, None, Some(limit), after, parent).await
 }
 
 async fn tree_rows(
@@ -1237,10 +1238,20 @@ async fn tree_rows(
     since: Option<i64>,
     limit: Option<i64>,
     after: Option<Id>,
+    parent: Option<Id>,
 ) -> Result<Vec<TreeRow>, DbError> {
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(
-        "WITH document_counts AS (
+        "WITH candidate_nodes AS MATERIALIZED (
+            SELECT n.* FROM nodes n
+             WHERE n.org_id = $1
+               AND (($2::bigint IS NULL AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL))
+                    OR n.tree_seq > $2)
+               AND ($4::uuid IS NULL OR n.id > $4)
+               AND ($5::uuid IS NULL OR n.parent_id = $5)
+             ORDER BY n.id LIMIT $3
+         ), document_counts AS (
             SELECT d.node_id, count(*) AS docs FROM documents d
+             JOIN candidate_nodes selected ON selected.id = d.node_id
              WHERE d.org_id = $1 AND d.deleted_at IS NULL
                AND NOT EXISTS (SELECT 1 FROM permission_rows r
                                 WHERE r.object_kind = 'document' AND r.object_id = d.id
@@ -1261,23 +1272,19 @@ async fn tree_rows(
                 (SELECT count(*) FROM approvals a WHERE a.thread_id = n.id AND a.state = 'pending') AS pending_approvals,
                 th.activity_seq, th.last_activity_at,
                 c.id AS chat_id, COALESCE(c.last_message_seq, 0) AS chat_seq
-           FROM nodes n
+           FROM candidate_nodes n
            LEFT JOIN topics t ON t.node_id = n.id
            LEFT JOIN threads th ON th.node_id = n.id
            LEFT JOIN chats c ON c.node_id = n.id
            LEFT JOIN document_counts dc ON dc.node_id = n.id
            LEFT JOIN document_tree_scopes ds ON ds.node_id = n.id
-          WHERE n.org_id = $1
-            AND (($2::bigint IS NULL AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL))
-                 OR n.tree_seq > $2)
-            AND ($4::uuid IS NULL OR n.id > $4)
-          ORDER BY n.id
-          LIMIT $3".replace("__WORK_ATTENTION__", super::source::ATTENTION_SQL),
+          ORDER BY n.id".replace("__WORK_ATTENTION__", super::source::ATTENTION_SQL),
     ))
     .bind(root)
     .bind(since)
     .bind(limit)
     .bind(after)
+    .bind(parent)
     .fetch_all(conn)
     .await?)
 }

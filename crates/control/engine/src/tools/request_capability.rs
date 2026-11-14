@@ -12,7 +12,7 @@
 //! a key already held is available, one already asked for is pending under the same request, and the policy of
 //! the capability, as it holds where the environment lives, allows, asks or denies. Asking raises an approval of
 //! the kind `capability` that the people of the policy's scope decide; it lapses after
-//! `capability.approval_expiry_hours`.
+//! `requests.expiry_minutes`.
 //!
 //! The same call asked again finds what it made: the request has an identifier derived from the call.
 
@@ -45,7 +45,7 @@ struct Arguments {
 /// A repeated identical denied boundary request waits one hour before raising another card.
 const DENIAL_HOLD_HOURS: i64 = 1;
 /// The shared requests registry defaults to one day when a snapshot has no explicit value.
-const REQUEST_EXPIRY_DEFAULT_HOURS: i64 = 24;
+const REQUEST_EXPIRY_DEFAULT_MINUTES: i64 = 1440;
 
 /// What is said when the key is none of the environment's.
 fn none_offered() -> &'static str {
@@ -220,7 +220,11 @@ impl Engine {
                         title: &format!("{} asks for \"{label}\"", thread.name),
                         request: &request,
                         approver_scope: &policy.approver_scope,
-                        expires_at: now + Duration::hours(REQUEST_EXPIRY_DEFAULT_HOURS),
+                        expires_at: Time::new(now)
+                            .checked_add_minutes(REQUEST_EXPIRY_DEFAULT_MINUTES)
+                            .unwrap_or_else(Time::maximum)
+                            .to_minute()
+                            .get(),
                         at: now,
                     },
                 )
@@ -263,7 +267,11 @@ impl Engine {
                             title: &format!("{} asks for \"{label}\"", thread.name),
                             request: &request,
                             approver_scope: &policy.approver_scope,
-                            expires_at: now + Duration::hours(REQUEST_EXPIRY_DEFAULT_HOURS),
+                            expires_at: Time::new(now)
+                                .checked_add_minutes(REQUEST_EXPIRY_DEFAULT_MINUTES)
+                                .unwrap_or_else(Time::maximum)
+                                .to_minute()
+                                .get(),
                             at: now,
                         },
                     )
@@ -339,16 +347,16 @@ impl Engine {
                 Ok(done("granted", &notice, None))
             }
             _ => {
-                let expiry_hours = {
-                    let wanted = [crate::tools::definition_of(keys::REQUESTS_EXPIRY_HOURS)?];
+                let expiry_minutes = {
+                    let wanted = [crate::tools::definition_of(keys::REQUESTS_EXPIRY_MINUTES)?];
                     let snapshot = Snapshot::load(
                         &mut conn,
                         Place::Node(view.facts.home_node_id),
                         Wanted::Keys(&wanted),
                     )
                     .await?;
-                    crate::tools::setting::<i64>(&snapshot, keys::REQUESTS_EXPIRY_HOURS)?
-                        .unwrap_or(REQUEST_EXPIRY_DEFAULT_HOURS)
+                    crate::tools::setting::<i64>(&snapshot, keys::REQUESTS_EXPIRY_MINUTES)?
+                        .unwrap_or(REQUEST_EXPIRY_DEFAULT_MINUTES)
                 };
                 let request = self
                     .request_json(&mut conn, &view.facts, &definition, &arguments.reason)
@@ -370,7 +378,11 @@ impl Engine {
                             title: &title,
                             request: &request,
                             approver_scope: &policy.approver_scope,
-                            expires_at: now + Duration::hours(expiry_hours),
+                            expires_at: Time::new(now)
+                                .checked_add_minutes(expiry_minutes)
+                                .unwrap_or_else(Time::maximum)
+                                .to_minute()
+                                .get(),
                             at: now,
                         },
                     )

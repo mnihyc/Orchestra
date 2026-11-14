@@ -56,3 +56,23 @@ it.each(modes)('starts compact and sends the chosen person/level without opening
   await waitFor(() => expect(writes).toHaveLength(1));
   expect(writes[0]).toMatchObject({ expected_revision: page.revision, name: [{ choice: 'full_view', holders: [{ kind: 'user', id: BEA.id }] }] });
 });
+
+it.each(modes)('grants Ask alone in the first sharing write without a broader interim entry in %s/%s', async (locale, theme) => {
+  await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
+  document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
+  const page = pageFor('provider'), writes: PageChange[] = [];
+  const changes: Changes = { busy: false, doing: null, error: null, stale: null, forget: () => undefined, again: () => Promise.resolve(false), run: (request) => {
+    writes.push(request.make(page)); return Promise.resolve(true);
+  } };
+  show(<AddHolders target={{ kind: 'provider', id: page.object.id, name: 'Questions', orgId: 'acme' }} page={page} catalogue={CATALOGUE} changes={changes} initial="full_interact" />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: i18n.t('access.roster.options') }));
+  await user.click(screen.getByRole('combobox', { name: i18n.t('access.options.purposes') }));
+  await user.click(screen.getByRole('option', { name: i18n.t('access.options.purpose.ask') }));
+  await user.type(screen.getByRole('combobox', { name: i18n.t('access.add.label') }), 'Bea');
+  await user.click(await screen.findByRole('option', { name: 'Bea' }));
+  expect(writes).toHaveLength(0);
+  await user.click(screen.getByRole('button', { name: i18n.t('access.add.button') }));
+  await waitFor(() => expect(writes).toHaveLength(1));
+  expect(writes[0]?.name).toEqual([{ choice: 'full_interact', holders: [{ kind: 'user', id: BEA.id }], options: { purposes: ['ask'] } }]);
+});
