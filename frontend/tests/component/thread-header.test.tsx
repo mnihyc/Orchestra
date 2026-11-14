@@ -1,5 +1,5 @@
 import { executionDisplay } from '../doubles/thread-display';
-/** Frequent thread acts stay visible and unique; the session menu keeps the remaining actions. */
+/** The head is one row: the title, the state, Changes, Find and the way of reading; the session menu keeps every other act, and the lines that tell of the thread stand in the notes at the top of the conversation. */
 import { defaultThreadRead } from '@/realtime/threadScope';
 import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -22,10 +22,12 @@ import { commandsNow } from '@/features/finder/commands';
 import { show } from './support';
 import { backgroundWake, backgroundWork } from '../doubles/background-wake';
 import { snapshot } from '../unit/continuation-fixtures';
-import { ALLOW_DENY, approvalItem, harnessApproval } from '../doubles/thread-rows';
+import { ALLOW_DENY, approvalItem, harnessApproval, toolCall } from '../doubles/thread-rows';
+import type { MessageNav } from '@/features/thread/messageMoves';
+import type { ComponentProps } from 'react';
 import { me, memberAccess, userRef } from '../doubles/fixtures';
 
-const calls = vi.hoisted(() => ({ approval: vi.fn<(id: string) => Promise<Approval>>(), settings: vi.fn(), detail: vi.fn(), review: vi.fn(), share: vi.fn(), update: vi.fn(), apply: vi.fn(), fork: vi.fn(), change: vi.fn(), ask: vi.fn(), find: vi.fn(), goal: vi.fn(), starred: false, items: new Map<string, Item>(), segments: [] as Segment[], background: null as ThreadBackground | null, backgroundClosed: false }));
+const calls = vi.hoisted(() => ({ approval: vi.fn<(id: string) => Promise<Approval>>(), settings: vi.fn(), review: vi.fn(), share: vi.fn(), update: vi.fn(), apply: vi.fn(), fork: vi.fn(), change: vi.fn(), ask: vi.fn(), find: vi.fn(), goal: vi.fn(), starred: false, items: new Map<string, Item>(), segments: [] as Segment[], background: null as ThreadBackground | null, backgroundClosed: false }));
 vi.mock('@/api/approvals', async (original) => {
   const actual = await original<typeof ApprovalsApi>();
   return { ...actual, approvalQuery: (id: string) => ({ ...actual.approvalQuery(id), queryFn: () => calls.approval(id) }) };
@@ -57,7 +59,7 @@ vi.mock('@/features/timeline/FindInConversation', () => ({ openFind: calls.find 
 vi.mock('@/features/inbox/away/Catchup', () => ({ CatchupRequest: () => null }));
 vi.mock('@/features/running/Running', async (importOriginal) => ({ ...await importOriginal<typeof RunningUi>(), RunningDialog: ({ thread, close, endTarget }: { thread: string; close: () => void; endTarget?: unknown }) => { calls.review(endTarget); return <div role="dialog" aria-label={i18n.t('running.title')} data-running-thread={thread}><button onClick={close}>{i18n.t('common.close')}</button></div>; } }));
 vi.mock('@/features/running/live', () => ({ useRunning: () => ({ roster: calls.background, closed: calls.backgroundClosed, error: null }) }));
-vi.mock('@/features/timeline/preferences', () => ({ useTimelinePreferences: () => ({ detail: 'steps', hideHistory: false, setDetail: calls.detail, setHideHistory: vi.fn() }) }));
+vi.mock('@/features/timeline/preferences', () => ({ useTimelinePreferences: () => ({ detail: 'steps', hideHistory: false, setHideHistory: vi.fn() }) }));
 vi.mock('@/realtime/stores/thread', async (importOriginal) => {
   const actual = await importOriginal<typeof ThreadStore>();
   return { ...actual, runningTurn: () => null,
@@ -77,18 +79,22 @@ const approvalRequest: HarnessRequest = { request_kind: 'command', options: ALLO
 
 const background = (more: Partial<ThreadBackground> = {}): ThreadBackground => ({ supported: true, state: 'live', total: 0, items: [], next_cursor: null, list_ref: null, expires_at: null, as_of: null, can_end: true, reason: null, ...more });
 beforeEach(() => { vi.clearAllMocks(); calls.approval.mockReset().mockRejectedValue(new Error('No approval fixture was supplied')); calls.starred = false; calls.items.clear(); calls.segments = []; calls.background = background(); calls.backgroundClosed = false; });
-afterEach(async () => { cleanup(); await setLocale('en'); });
+const hosts: HTMLElement[] = [];
+afterEach(async () => { cleanup(); for (const host of hosts.splice(0)) host.remove(); await setLocale('en'); });
 
-function draw(more: Partial<Thread> = {}, cache?: QueryClient) {
+function draw(more: Partial<Thread> = {}, cache?: QueryClient, props: Omit<ComponentProps<typeof ThreadHeader>, 'thread' | 'notes'> = {}) {
   const native = snapshot().thread;
   const thread: Thread = { ...native, id: 'thread-1', kind: 'thread', name: 'Repair login', revision: 4, description: '', title_source: 'user', auto_updated_at: null,
     org_id: 'org-1', parent_id: 'topic-1', topic_id: 'topic-1', path,
     display: executionDisplay(more.state ?? 'idle'), state: 'idle', lock: null, blocked: null, archived: false, side_of: null, sides: { open: 0, allowed: true, max: 2, mode: 'read_only', reason: null }, pending_approvals: 0,
     owner: { ...native.owner, id: 'ada', display_name: 'Ada' }, access: { ...native.access, permissions: ['thread.view', 'thread.interact', 'thread.manage'] }, can: { ...native.can, fork: true, place: true, archive: true },
     ...more };
-  const content = <ThreadHeader thread={thread} />;
+  // The lines under the title are drawn by the header into the place the screen gives them, at the top of the conversation.
+  const notes = document.body.appendChild(document.createElement('div'));
+  hosts.push(notes);
+  const content = <ThreadHeader thread={thread} notes={notes} {...props} />;
   const drawn = show(cache === undefined ? content : <QueryClientProvider client={cache}>{content}</QueryClientProvider>);
-  return { thread, header: screen.getByRole('banner'), ...drawn };
+  return { thread, header: screen.getByRole('banner'), notes, ...drawn };
 }
 
 async function confirmFork(user: ReturnType<typeof userEvent.setup>) {
@@ -123,14 +129,16 @@ it.each([
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
 
-it.each(['en', 'zh-CN'] as const)('shows native work from an earlier turn beside Idle in the actual header (%s)', async (locale) => {
+it.each(['en', 'zh-CN'] as const)('shows native work from an earlier turn beside Idle, in the notes and in the Running entry (%s)', async (locale) => {
   await setLocale(locale);
   calls.background = background({ total: 2, items: ['one', 'two'].map((id) => ({ id, segment_id: 'earlier-segment', turn_id: 'earlier-turn', item_id: `source-${id}`, command: 'sleep 300', command_truncated: false, cwd: null, cwd_redacted: false, place: 'environment', since: null, cpu_percent: null, memory_bytes: null })) });
-  const { header } = draw({ state: 'idle' });
+  const { header, notes, thread } = draw({ state: 'idle' });
   expect(within(header).getByText(i18n.t('state.idle'), { exact: true })).toBeVisible();
-  const count = within(header).getByRole('button', { name: i18n.t('running.count', { count: 2 }) });
-  expect(count).toBeVisible();
-  expect(count.closest('[data-thread-title-row]')).not.toBeNull();
+  expect(within(notes).getAllByText('sleep 300')).toHaveLength(2);
+  expect(header).not.toContainElement(notes);
+  await userEvent.click(within(header).getByRole('button', { name: actionName('actions', thread.name) }));
+  await userEvent.click(screen.getByRole('menuitem', { name: i18n.t('thread.header.view') }));
+  expect(await screen.findByRole('menuitem', { name: i18n.t('running.title') })).toBeVisible();
 });
 
 it.each(['en', 'zh-CN'] as const)('opens the exact thread Changes from the header View menu in %s', async (locale) => {
@@ -143,18 +151,6 @@ it.each(['en', 'zh-CN'] as const)('opens the exact thread Changes from the heade
   act(() => view.focus()); await user.keyboard('{ArrowRight}');
   await user.click(await screen.findByRole('menuitem', { name: i18n.t('views.changes.title') }));
   expect(changesView).toHaveBeenCalledExactlyOnceWith(thread.id, thread.current_turn_id ?? undefined);
-});
-
-it.each(['en', 'zh-CN'] as const)('keeps every existing depth reachable through the same header writer in %s', async (locale) => {
-  await setLocale(locale);
-  const { thread } = draw(); const user = userEvent.setup();
-  for (const depth of ['everything', 'summary', 'steps'] as const) {
-    await user.click(screen.getByRole('button', { name: actionName('actions', thread.name) }));
-    await user.click(screen.getByRole('menuitem', { name: i18n.t('thread.header.view') }));
-    await user.click(screen.getByRole('menuitemradio', { name: i18n.t(`choiceCatalog.workDetail.${depth}.name`) }));
-    expect(calls.detail).toHaveBeenLastCalledWith(depth);
-  }
-  expect(calls.detail).toHaveBeenCalledTimes(3);
 });
 
 async function openRunningFromView(user: ReturnType<typeof userEvent.setup>, thread: Thread) {
@@ -215,11 +211,11 @@ describe('a thread header', () => {
     await setLocale(locale);
     calls.segments = [importedSegment];
     const t = i18n.getFixedT(locale), user = userEvent.setup();
-    const { header } = draw({ binding: null, state: 'blocked', display: executionDisplay('blocked', { blocked_reason: 'unbound' }) });
-    expect(within(header).getByText(t('thread.header.importedHistory'))).toBeVisible();
+    const { header, notes } = draw({ binding: null, state: 'blocked', display: executionDisplay('blocked', { blocked_reason: 'unbound' }) });
+    expect(within(notes).getByText(t('thread.header.importedHistory'))).toBeVisible();
     expect(within(header).getByText(t('thread.header.needsSetup'))).toBeVisible();
     expect(within(header).queryByText(t('state.blocked'), { exact: true })).not.toBeInTheDocument();
-    const setup = within(header).getByRole('button', { name: t('thread.header.chooseAgentProvider') });
+    const setup = within(notes).getByRole('button', { name: t('thread.header.chooseAgentProvider') });
     if (via === 'pointer') await user.click(setup);
     else { act(() => setup.focus()); await user.keyboard('{Enter}'); }
     expect(screen.getByRole('dialog', { name: 'Setup Repair login' })).toBeVisible();
@@ -228,32 +224,32 @@ describe('a thread header', () => {
   });
 
   it('does not claim an unbound local thread was imported', () => {
-    const { header } = draw({ binding: null, state: 'blocked', display: executionDisplay('blocked', { blocked_reason: 'unbound' }) });
+    const { header, notes } = draw({ binding: null, state: 'blocked', display: executionDisplay('blocked', { blocked_reason: 'unbound' }) });
     expect(within(header).getByText('Needs setup')).toBeVisible();
-    expect(within(header).queryByText('Imported history')).not.toBeInTheDocument();
-    expect(within(header).queryByRole('button', { name: 'Choose agent and provider…' })).not.toBeInTheDocument();
+    expect(within(notes).queryByText('Imported history')).not.toBeInTheDocument();
+    expect(within(notes).queryByRole('button', { name: 'Choose agent and provider…' })).not.toBeInTheDocument();
   });
 
   it('keeps imported history visible after local setup without offering initial setup again', () => {
     calls.segments = [importedSegment];
-    const { header } = draw({ binding: snapshot().thread.binding });
-    expect(within(header).getByText('Imported history')).toBeVisible();
+    const { header, notes } = draw({ binding: snapshot().thread.binding });
+    expect(within(notes).getByText('Imported history')).toBeVisible();
     expect(within(header).getByText('Idle', { exact: true })).toBeVisible();
-    expect(within(header).queryByRole('button', { name: 'Choose agent and provider…' })).not.toBeInTheDocument();
+    expect(within(notes).queryByRole('button', { name: 'Choose agent and provider…' })).not.toBeInTheDocument();
   });
 
   it('shows archived imported history without a setup action', () => {
     calls.segments = [importedSegment];
-    const { header } = draw({ binding: null, archived: true, display: executionDisplay('idle', { state: 'archived' }) });
-    expect(within(header).getByText('Imported history')).toBeVisible();
+    const { header, notes } = draw({ binding: null, archived: true, display: executionDisplay('idle', { state: 'archived' }) });
+    expect(within(notes).getByText('Imported history')).toBeVisible();
     expect(within(header).getByText('Archived', { exact: true })).toBeVisible();
-    expect(within(header).queryByRole('button', { name: 'Choose agent and provider…' })).not.toBeInTheDocument();
+    expect(within(notes).queryByRole('button', { name: 'Choose agent and provider…' })).not.toBeInTheDocument();
   });
 
   it('keeps initial setup unavailable to someone who only reads the imported thread', async () => {
     calls.segments = [importedSegment];
-    const { header } = draw({ binding: null, access: { ...memberAccess, permissions: ['thread.view'] } });
-    const setup = within(header).getByRole('button', { name: 'Choose agent and provider…' });
+    const { notes } = draw({ binding: null, access: { ...memberAccess, permissions: ['thread.view'] } });
+    const setup = within(notes).getByRole('button', { name: 'Choose agent and provider…' });
     expect(setup).toHaveAttribute('aria-disabled', 'true');
     await userEvent.click(setup);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -297,113 +293,115 @@ describe('a thread header', () => {
     expect(calls.goal).not.toHaveBeenCalled();
   });
 
-  it('shows title, state and the frequent acts without runtime or next-turn chip rows', async () => {
+  it('shows title, state, Find and the way of reading in one row, and nothing else of the old head', () => {
     const { header, thread } = draw();
     const head = within(header);
     expect(head.getByRole('heading', { name: thread.name })).toBeVisible();
     expect(head.getByText('Idle', { exact: true })).toBeVisible();
-    expect(head.getByRole('button', { name: 'Star' })).toBeVisible();
-    expect(head.getByRole('button', { name: 'Notifications' })).toBeVisible();
-    const frequent = head.getByRole('group', { name: 'Thread actions' });
-    for (const name of ['Duplicate', 'Duplicate to…', 'Switch provider or agent…', 'Side thread…', 'Find in the conversation']) {
-      const button = within(frequent).getByRole('button', { name });
-      expect(button).toBeVisible();
-      expect(button.textContent).toBe('');
-      expect(button.querySelector('svg')).not.toBeNull();
-      expect(button).toHaveClass('size-(--control-sm)');
+    const find = head.getByRole('button', { name: 'Find in the conversation' });
+    expect(find).toBeVisible();
+    expect(find.textContent).toBe('');
+    expect(find).toHaveClass('size-(--control-sm)');
+    // One row of the control height that never wraps: nothing in it may wrap or stack.
+    expect(header).toHaveClass('h-(--control-md)');
+    expect(header.className).not.toMatch(/flex-wrap|flex-col/);
+    for (const name of ['Star', 'Notifications', 'Duplicate', 'Duplicate to…', 'Switch provider or agent…', 'Side thread…', i18n.t('thread.header.shareThread')]) {
+      expect(head.queryByRole('button', { name })).not.toBeInTheDocument();
     }
-    expect(within(frequent).getAllByRole('button')).toHaveLength(5);
-    expect(frequent.closest('[data-thread-actions-row]')).toContainElement(head.getByRole('button', { name: i18n.t('thread.header.shareThread') }));
+    expect(head.queryByRole('group', { name: 'Thread actions' })).not.toBeInTheDocument();
     expect(head.queryByText('Add a description')).not.toBeInTheDocument();
     expect(head.queryByRole('button', { name: /Model and effort|Approval mode|Context|Edit links|Details/ })).not.toBeInTheDocument();
     expect(head.queryByText(/Run with provider|Separated|not_a_repository/)).not.toBeInTheDocument();
-    await userEvent.click(head.getByRole('button', { name: i18n.t('thread.header.shareThread') }));
-    expect(calls.share).toHaveBeenCalledWith({ kind: 'thread', id: thread.id, name: thread.name });
   });
 
-  it('puts adding a description and the existing session actions in More', async () => {
+  it('puts every other act of the head, and the description, in More', async () => {
     const user = userEvent.setup();
-    const { header } = draw();
+    const { header, thread } = draw();
     await user.click(within(header).getByRole('button', { name: /Actions/ }));
-    for (const name of ['Export', 'Archive', 'Delete']) expect(screen.getByRole('menuitem', { name })).toBeVisible();
-    for (const name of ['Duplicate', 'Duplicate to…', 'Switch provider or agent…', 'Side thread…', 'Find in the conversation', 'Star']) expect(screen.queryByRole('menuitem', { name })).not.toBeInTheDocument();
-    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').length).toBeLessThanOrEqual(10);
+    for (const name of ['Duplicate', 'Duplicate to…', 'Switch provider or agent…', 'Side thread…', 'Find in the conversation', 'Star', i18n.t('thread.bell.label'), i18n.t('thread.header.shareThread'), 'Export', 'Archive', 'Delete']) expect(screen.getByRole('menuitem', { name })).toBeVisible();
     expect(screen.getByRole('menuitem', { name: 'Organize' })).toBeVisible();
     expect(screen.getByRole('menuitem', { name: 'View' })).toBeVisible();
+    await user.click(screen.getByRole('menuitem', { name: i18n.t('thread.header.shareThread') }));
+    expect(calls.share).toHaveBeenCalledWith({ kind: 'thread', id: thread.id, name: thread.name });
+    await user.click(within(header).getByRole('button', { name: /Actions/ }));
     await user.click(screen.getByRole('menuitem', { name: 'Add a description' }));
     expect(within(screen.getByRole('dialog')).getByRole('textbox')).toBeVisible();
     expect(within(header).queryByText('Add a description')).not.toBeInTheDocument();
   });
 
-  it.each(['en', 'zh-CN'] as const)('runs the same fork, fork-to, switch, side-ask and find producers directly from the header in %s', async (locale) => {
+  it.each(['en', 'zh-CN'] as const)('runs the same fork, fork-to, switch, side-ask and find producers from the menu and the row in %s', async (locale) => {
     await setLocale(locale);
     const t = i18n.getFixedT(locale);
     const user = userEvent.setup();
     const { header, thread } = draw();
-    const actions = within(header).getByRole('group', { name: t('thread.header.quickActions') });
-    await user.click(within(actions).getByRole('button', { name: t('duplicate.now') }));
+    const choose = async (name: string) => {
+      await user.click(within(header).getByRole('button', { name: actionName('actions', thread.name) }));
+      await user.click(screen.getByRole('menuitem', { name }));
+    };
+    await choose(t('duplicate.now'));
     await confirmFork(user);
     expect(calls.fork).toHaveBeenCalledOnce();
-    await user.click(within(actions).getByRole('button', { name: t('duplicate.to') }));
+    await choose(t('duplicate.to'));
     expect(calls.change).toHaveBeenCalledWith({ kind: 'thread', id: thread.id, name: thread.name }, { kind: 'fork' });
-    await user.click(within(actions).getByRole('button', { name: t('change.menu.switch') }));
+    await choose(t('change.menu.switch'));
     expect(calls.change).toHaveBeenCalledWith({ kind: 'thread', id: thread.id, name: thread.name }, { kind: 'switch', focus: 'provider' });
-    await user.click(within(actions).getByRole('button', { name: t('side.menu.ask') }));
+    await choose(t('side.menu.ask'));
     expect(calls.ask).toHaveBeenCalledWith({ threadId: thread.id, threadName: thread.name, toTurn: null, text: '', read: defaultThreadRead(thread.id) });
-    await user.click(within(actions).getByRole('button', { name: t('search.find.command') }));
+    await user.click(within(header).getByRole('button', { name: t('search.find.command') }));
     expect(calls.find).toHaveBeenCalledWith(thread.id, undefined);
+    await choose(t('search.find.command'));
+    expect(calls.find).toHaveBeenCalledTimes(2);
   });
 
-  it.each([false, true])('keeps the compact Star button and repeats its name in Organize (starred=%s)', async (starred) => {
+  it.each([false, true])('offers Star by its state in More, once (starred=%s)', async (starred) => {
     calls.starred = starred;
     const { header } = draw();
-    expect(within(header).getAllByRole('button', { name: starred ? 'Unstar' : 'Star' })).toHaveLength(1);
+    expect(within(header).queryByRole('button', { name: starred ? 'Unstar' : 'Star' })).not.toBeInTheDocument();
     await userEvent.click(within(header).getByRole('button', { name: /Actions/ }));
-    const organize = screen.getByRole('menuitem', { name: 'Organize' });
-    act(() => organize.focus());
-    await userEvent.keyboard('{ArrowRight}');
-    expect(await screen.findByRole('menuitem', { name: starred ? 'Unstar' : 'Star' })).toBeVisible();
+    expect(screen.getAllByRole('menuitem', { name: starred ? 'Unstar' : 'Star' })).toHaveLength(1);
   });
 
-  it('repeats the visible Fork action by name with the same handler in the menu', async () => {
+  it('keeps Duplicate in the menu with the one handler, outside the placement submenu', async () => {
     const { header } = draw();
-    expect(within(header).getByRole('button', { name: /^Duplicate$/ })).toBeDefined();
     await userEvent.click(within(header).getByRole('button', { name: /Actions/ }));
+    const fork = screen.getByRole('menuitem', { name: /^Duplicate$/ });
     const submenu = screen.getByRole('menuitem', { name: 'Agent and environment' });
     act(() => submenu.focus());
     await userEvent.keyboard('{ArrowRight}');
-    const fork = await screen.findByRole('menuitem', { name: /^Duplicate$/ });
+    expect(screen.getAllByRole('menuitem', { name: /^Duplicate$/ })).toHaveLength(1);
     act(() => fork.focus()); await userEvent.keyboard('{Enter}');
     await confirmFork(userEvent.setup());
     expect(calls.fork).toHaveBeenCalledOnce();
   });
 
-  it('does not promote a mutation the viewer is not offered, and keeps Find available', () => {
+  it('does not offer a mutation the viewer is not offered, and keeps Find available', async () => {
     const { header } = draw({ access: { permissions: ['thread.view'] } as Thread['access'], can: { fork: false, place: false, archive: false, export: false } });
-    const actions = within(header).getByRole('group', { name: 'Thread actions' });
-    expect(within(actions).getAllByRole('button')).toHaveLength(1);
-    expect(within(actions).getByRole('button', { name: 'Find in the conversation' })).toBeVisible();
+    expect(within(header).getByRole('button', { name: 'Find in the conversation' })).toBeVisible();
+    await userEvent.click(within(header).getByRole('button', { name: /Actions/ }));
+    expect(screen.queryByRole('menuitem', { name: 'Duplicate' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Switch provider or agent…' })).not.toBeInTheDocument();
     expect(calls.fork).not.toHaveBeenCalled();
     expect(calls.change).not.toHaveBeenCalled();
     expect(calls.ask).not.toHaveBeenCalled();
   });
 
-  it('keeps the page and Find readable when a cached row has no capabilities, without offering a guessed fork', () => {
-    const { header, thread, rerender } = draw();
+  it('keeps the page and Find readable when a cached row has no capabilities, without offering a guessed fork', async () => {
+    const { header, notes, thread, rerender } = draw();
     Reflect.deleteProperty(thread, 'can');
-    rerender(<ThreadHeader thread={thread} />);
+    rerender(<ThreadHeader thread={thread} notes={notes} />);
     expect(within(header).getByRole('heading', { name: 'Repair login' })).toBeVisible();
     expect(within(header).getByRole('button', { name: 'Find in the conversation' })).toBeVisible();
-    expect(within(header).queryByRole('button', { name: 'Duplicate' })).not.toBeInTheDocument();
-    expect(within(header).queryByRole('button', { name: 'Duplicate to…' })).not.toBeInTheDocument();
+    await userEvent.click(within(header).getByRole('button', { name: /Actions/ }));
+    expect(screen.queryByRole('menuitem', { name: 'Duplicate' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Duplicate to…' })).not.toBeInTheDocument();
     expect(calls.fork).not.toHaveBeenCalled();
   });
 
-  it('shows only a present description’s first line below the title and opens Edit directly from More', async () => {
+  it('shows only a present description’s first line in the notes and opens Edit directly from More', async () => {
     const user = userEvent.setup();
-    const { header } = draw({ description: 'Track the login repair\nKeep the tests green' });
-    expect(within(header).getByText('Track the login repair')).toBeVisible();
-    expect(within(header).queryByText('Keep the tests green')).not.toBeInTheDocument();
+    const { header, notes } = draw({ description: 'Track the login repair\nKeep the tests green' });
+    expect(within(notes).getByText('Track the login repair')).toBeVisible();
+    expect(within(notes).queryByText('Keep the tests green')).not.toBeInTheDocument();
     await user.click(within(header).getByRole('button', { name: /Actions/ }));
     await user.click(screen.getByRole('menuitem', { name: 'Edit the description' }));
     expect(within(screen.getByRole('dialog')).getByRole('textbox')).toHaveValue('Track the login repair\nKeep the tests green');
@@ -416,26 +414,25 @@ describe('a thread header', () => {
     expect(within(header).getByRole('textbox')).toHaveValue('Repair login');
   });
 
-  it.each([['en', 'pointer'], ['en', 'keyboard'], ['zh-CN', 'pointer'], ['zh-CN', 'keyboard']] as const)('omits an unsupported aside while keeping both Fork actions in %s via %s', async (locale, via) => {
+  it.each([['en', 'pointer'], ['en', 'keyboard'], ['zh-CN', 'pointer'], ['zh-CN', 'keyboard']] as const)('omits an unsupported aside while keeping both Fork actions in the menu in %s via %s', async (locale, via) => {
     await setLocale(locale);
     const t = i18n.getFixedT(locale), user = userEvent.setup();
     const { header } = draw({ sides: { open: 0, allowed: true, max: 2, mode: null, reason: 'The adapter cannot restrict this aside safely.' } });
-    const actions = within(header).getByRole('group', { name: t('thread.header.quickActions') });
-    const buttons = within(actions).getAllByRole('button');
-    expect(buttons[0]).toHaveAccessibleName(t('duplicate.now'));
-    expect(buttons[1]).toHaveAccessibleName(t('duplicate.to'));
-    expect(within(actions).queryByRole('button', { name: t('side.menu.ask') })).not.toBeInTheDocument();
+    const open = () => user.click(within(header).getByRole('button', { name: /Actions|操作/ }));
+    await open();
+    const forkNow = screen.getByRole('menuitem', { name: t('duplicate.now') });
+    expect(screen.getByRole('menuitem', { name: t('duplicate.to') })).toBeVisible();
+    expect(screen.queryByRole('menuitem', { name: t('side.menu.ask') })).not.toBeInTheDocument();
     expect(calls.ask).not.toHaveBeenCalled();
-    if (via === 'pointer') await user.click(buttons[0]!);
-    else { act(() => buttons[0]!.focus()); await user.keyboard('{Enter}'); }
+    if (via === 'pointer') await user.click(forkNow);
+    else { act(() => forkNow.focus()); await user.keyboard('{Enter}'); }
     await confirmFork(user);
     expect(calls.fork).toHaveBeenCalledOnce();
-    if (via === 'pointer') await user.click(buttons[1]!);
-    else { act(() => buttons[1]!.focus()); await user.keyboard('{Enter}'); }
+    await open();
+    const forkTo = screen.getByRole('menuitem', { name: t('duplicate.to') });
+    if (via === 'pointer') await user.click(forkTo);
+    else { act(() => forkTo.focus()); await user.keyboard('{Enter}'); }
     expect(calls.change).toHaveBeenCalledWith({ kind: 'thread', id: 'thread-1', name: 'Repair login' }, { kind: 'fork' });
-    await user.click(within(header).getByRole('button', { name: /Actions|操作/ }));
-    expect(screen.queryByRole('menuitem', { name: t('duplicate.to') })).not.toBeInTheDocument();
-    expect(screen.queryByRole('menuitem', { name: t('side.menu.ask') })).not.toBeInTheDocument();
   });
 
   it.each([true, false])('addresses the current approval’s actual decider (can decide: %s)', (canDecide) => {
@@ -512,9 +509,7 @@ describe('a thread header', () => {
     await user.click(within(header).getByRole('button', { name: /Actions/ }));
     expect(screen.queryByRole('menuitemcheckbox')).not.toBeInTheDocument();
     expect(screen.queryByRole('menuitem', { name: 'Resume the automatic title' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('menuitem', { name: 'Work detail' })).not.toBeInTheDocument();
     await user.click(screen.getByRole('menuitem', { name: 'View' }));
-    expect(screen.getByRole('menuitemradio', { name: 'Steps' })).toHaveAttribute('aria-checked', 'true');
     expect(screen.getByRole('menuitemcheckbox')).toBeVisible();
     expect(screen.getByRole('menuitem', { name: 'Resume the automatic title' })).toBeVisible();
     expect(screen.queryByRole('menuitem', { name: 'Resume the automatic description' })).not.toBeInTheDocument();
@@ -534,31 +529,94 @@ describe('a thread header', () => {
 it.each(['en', 'zh-CN'] as const)('binds recorded tasks, one scoped wake setting and reviewed End in %s', async (locale) => {
   await setLocale(locale);
   const task = backgroundWork();
-  const { header } = draw({ background: backgroundWake({ tasks: [task] }) });
-  expect(within(header).getByText('Build web')).toBeVisible();
-  await userEvent.click(within(header).getByRole('button', { name: i18n.t('backgroundWake.settingOn') }));
+  const { notes } = draw({ background: backgroundWake({ tasks: [task] }) });
+  expect(within(notes).getByText('Build web')).toBeVisible();
+  await userEvent.click(within(notes).getByRole('button', { name: i18n.t('backgroundWake.settingOn') }));
   expect(calls.settings.mock.lastCall?.[0]).toMatchObject({ target: { kind: 'node', id: 'thread-1' }, only: ['threads.background_wake'], scope: 'thread' });
   await userEvent.click(within(screen.getByRole('dialog', { name: i18n.t('backgroundWake.settingTitle') })).getByRole('button', { name: i18n.t('common.close') }));
-  await userEvent.click(within(header).getByRole('button', { name: i18n.t('backgroundWake.endNamed', { name: task.label }) }));
+  await userEvent.click(within(notes).getByRole('button', { name: i18n.t('backgroundWake.endNamed', { name: task.label }) }));
   expect(calls.review).toHaveBeenLastCalledWith({ task: { id: task.id, item_id: task.item_id, turn_id: task.turn_id } });
 });
 
 it('drops a forbidden live task observation without reusing its recorded End target', () => {
   calls.background = background({ wake: backgroundWake({ tasks: [backgroundWork({ label: 'Current private work' })] }) });
   const view = draw();
-  expect(within(view.header).getByText('Current private work')).toBeVisible();
+  expect(within(view.notes).getByText('Current private work')).toBeVisible();
   calls.backgroundClosed = true;
-  view.rerender(<ThreadHeader thread={view.thread} />);
-  expect(within(view.header).queryByText('Current private work')).not.toBeInTheDocument();
+  view.rerender(<ThreadHeader thread={view.thread} notes={view.notes} />);
+  expect(within(view.notes).queryByText('Current private work')).not.toBeInTheDocument();
 });
 
 it('retires the wake-setting opening across a target change and does not reopen it on return', async () => {
   const task = backgroundWork();
   const view = draw({ background: backgroundWake({ tasks: [task] }) });
-  await userEvent.click(within(view.header).getByRole('button', { name: i18n.t('backgroundWake.settingOn') }));
+  await userEvent.click(within(view.notes).getByRole('button', { name: i18n.t('backgroundWake.settingOn') }));
   expect(screen.getByRole('dialog', { name: i18n.t('backgroundWake.settingTitle') })).toBeVisible();
-  view.rerender(<ThreadHeader thread={{ ...view.thread, id: 'other-thread' }} />);
+  view.rerender(<ThreadHeader thread={{ ...view.thread, id: 'other-thread' }} notes={view.notes} />);
   expect(screen.queryByRole('dialog', { name: i18n.t('backgroundWake.settingTitle') })).not.toBeInTheDocument();
-  view.rerender(<ThreadHeader thread={view.thread} />);
+  view.rerender(<ThreadHeader thread={view.thread} notes={view.notes} />);
   expect(screen.queryByRole('dialog', { name: i18n.t('backgroundWake.settingTitle') })).not.toBeInTheDocument();
+});
+
+const moves = (more: Partial<MessageNav> = {}): MessageNav => ({ messages: [], pinned: null, place: null, whole: true, canPrevious: true, canNext: false,
+  previous: vi.fn(() => true), next: vi.fn(() => true), go: vi.fn(), ...more });
+
+it.each(['en', 'zh-CN'] as const)('draws the arrows and the Messages list beside the state, and the same moves in the View menu in %s', async (locale) => {
+  await setLocale(locale);
+  const nav = moves();
+  const { header, thread } = draw({}, undefined, { nav });
+  const head = within(header);
+  const previous = head.getByRole('button', { name: i18n.t('thread.messages.previous') });
+  expect(previous).toBeEnabled();
+  expect(head.getByRole('button', { name: i18n.t('thread.messages.next') })).toBeDisabled();
+  await userEvent.click(previous);
+  expect(nav.previous).toHaveBeenCalledOnce();
+  await userEvent.click(head.getByRole('button', { name: i18n.t('thread.messages.title') }));
+  expect(await screen.findByText(i18n.t('thread.messages.none'))).toBeVisible();
+  await userEvent.keyboard('{Escape}');
+  await userEvent.click(head.getByRole('button', { name: actionName('actions', thread.name) }));
+  await userEvent.click(screen.getByRole('menuitem', { name: i18n.t('thread.header.view') }));
+  expect(await screen.findByRole('menuitem', { name: i18n.t('thread.messages.previous') })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: i18n.t('thread.messages.next') })).toHaveAttribute('aria-disabled', 'true');
+  expect(screen.getByRole('menuitem', { name: i18n.t('thread.messages.title') })).toBeVisible();
+});
+
+it.each(['en', 'zh-CN'] as const)('shows how many agents the thread has or had with a dot, lists a finished one, and opens one or the main conversation in %s', async (locale) => {
+  await setLocale(locale);
+  const subagent = (id: string, name: string, state: 'running' | 'completed') => ({ ...toolCall(id, { kind: 'subagent', child_stream: `sub:${id}`, name, role: null, prompt: null, state }, { title: name, status: state === 'running' ? 'in_progress' : 'completed' }), thread_id: 'thread-1' });
+  calls.items.set('sub-run', subagent('sub-run', 'runner', 'running'));
+  calls.items.set('sub-done', subagent('sub-done', 'reviewer', 'completed'));
+  const onAgent = vi.fn();
+  const { header } = draw({}, undefined, { onAgent });
+  const button = within(header).getByRole('button', { name: i18n.t('thread.agents.count', { count: 2 }) });
+  expect(within(button).getByRole('img', { name: i18n.t('thread.agents.dot.working') })).toBeVisible();
+  await userEvent.click(button);
+  const active = await screen.findByRole('region', { name: i18n.t('thread.agents.active') });
+  const done = screen.getByRole('region', { name: i18n.t('thread.agents.done') });
+  expect(within(active).getByText('runner')).toBeVisible();
+  // Finished ones stay listed.
+  expect(within(done).getByText('reviewer')).toBeVisible();
+  await userEvent.click(within(done).getByRole('button', { name: /reviewer/ }));
+  expect(onAgent).toHaveBeenLastCalledWith('sub-done');
+  await userEvent.click(button);
+  await userEvent.click(await screen.findByRole('button', { name: i18n.t('thread.agents.main') }));
+  expect(onAgent).toHaveBeenLastCalledWith(null);
+});
+
+it('shows no agents where the thread never had one', () => {
+  const { header } = draw();
+  expect(within(header).queryByRole('button', { name: /agents?$/ })).not.toBeInTheDocument();
+});
+
+it('reads the thread’s title, then the sub-agent’s name, in place of the title, with the title leading back and no moves between messages', async () => {
+  const nav = moves();
+  const onAgent = vi.fn();
+  const { header, thread } = draw({}, undefined, { nav, agent: { id: 'sub-run', name: 'runner' }, onAgent });
+  expect(within(header).getByRole('heading', { name: 'runner', level: 1 })).toBeVisible();
+  expect(within(header).queryByRole('button', { name: i18n.t('thread.messages.previous') })).not.toBeInTheDocument();
+  expect(within(header).queryByRole('button', { name: i18n.t('thread.messages.title') })).not.toBeInTheDocument();
+  await userEvent.click(within(header).getByRole('button', { name: i18n.t('thread.agents.backTo', { name: thread.name }) }));
+  expect(onAgent).toHaveBeenCalledExactlyOnceWith(null);
+  // The title is no longer a field to rename while the sub-agent is shown.
+  expect(within(header).queryByRole('button', { name: /Rename/ })).not.toBeInTheDocument();
 });

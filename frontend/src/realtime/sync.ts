@@ -13,7 +13,7 @@
  * What the rows are, and where they are kept, is the feed's own business: this module is given the
  * request that loads them and the store that takes them.
  */
-import { retryPause, retryRead } from '@/lib/requests';
+import { READ_RETRY_PAUSES_MS, retryPause, retryRead } from '@/lib/requests';
 import type { FeedFrame, RealtimeSocket, Subscription } from '@/realtime/socket';
 
 /** An answer of a feed's HTTP request. */
@@ -64,6 +64,14 @@ export interface DurableFeed<Data> {
   subscribed?: (frame: Extract<FeedFrame, { op: 'subscribed' }>) => void;
 }
 
+/**
+ * Whether a read ended because it was cancelled or overtaken (its history was replaced, its view left), and not because
+ * anything went wrong: such a read has no answer and no fault, and a reader who scrolls quickly makes many of them.
+ */
+export function isCancellation(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
 export interface FeedFollower {
   /** The sequence the page has come to; `null` before the first load. */
   lastSeq: () => number | null;
@@ -89,12 +97,25 @@ export function followFeed<Data>(socket: RealtimeSocket, feed: DurableFeed<Data>
   let busy: Promise<void> = Promise.resolve();
   const current = (version: number): boolean => !stoppedNow && version === generation;
 
+  /** How many reads in a row were cancelled while this follower still stood: they are asked for again, not reported. */
+  let cancelled = 0;
   const run = (work: (version: number) => Promise<void>): void => {
     const version = generation;
     busy = busy.then(async () => {
       if (!current(version)) return;
-      try { await work(version); }
-      catch (error) { if (current(version)) feed.failed?.(error); }
+      try { await work(version); cancelled = 0; }
+      catch (error) {
+        if (!current(version)) return;
+        // A cancelled read is not a failure of the feed: the history it read was replaced or overtaken by a newer read,
+        // and the feed asks again after a pause. Only a feed whose every attempt is cancelled says that it failed.
+        if (isCancellation(error) && cancelled < READ_RETRY_PAUSES_MS.length) {
+          const pause = retryPause(cancelled);
+          cancelled += 1;
+          setTimeout(() => { if (current(version)) run(repair); }, pause);
+          return;
+        }
+        feed.failed?.(error);
+      }
     });
   };
 

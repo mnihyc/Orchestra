@@ -1,54 +1,51 @@
-/** The agent's work as steps: the turn that runs and the last finished one step by step, older turns folded to a line; and the depth a person chose (Steps, Summary, Everything), kept for them.
+/** The agent's work in a turn as one group: a line that says what it came to, and the steps and sentences under it.
  *
- * Turns whose steps are not shown one by one stand as one line: "Read 4 files, ran 3 commands, edited
- * 2 files · 12 s", with a danger mark when a step failed, and the line opens to the steps. While the
- * turn runs, the line names the step in hand with its timer. The depth a reader chose (Steps, Summary
- * or Everything) decides which turns fold; the choice is theirs and follows them to every device.
+ * Everything the agent did between a person's message and its answer, and the sentences it said between
+ * the steps, is one group. Once the turn is over it is one line, drawn as a thin rule with its label, "Worked for 1m 31s ·
+ * 29 commands · 3 files edited", which opens to the steps in place; while the turn is at it, the group is open as a
+ * preview of the latest steps in a box of a bounded height that follows its own end. A turn that failed or was stopped
+ * says so on the line of the work it ended in; a step that failed and was got past does not. What a person chose to open
+ * or close holds while the screen is open.
  */
 import type { TFunction } from 'i18next';
-import { ChevronDown, ChevronRight, LoaderCircle, OctagonAlert } from 'lucide-react';
-import { memo } from 'react';
+import { ChevronDown, ChevronUp } from 'lucide-react';
+import { memo, useEffect, useId, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 
-import type { Item } from '@/generated/api-types';
+import type { Item, Turn } from '@/generated/api-types';
 import { useTimelineContext } from '@/features/timeline/context';
-import { timelineUi } from '@/features/timeline/state';
-import { describeStep, stepFailed, type ToolItem } from '@/features/timeline/titles';
-import { turnActiveMs, turnWaiting } from '@/features/timeline/turnTime';
+import { ItemRow } from '@/features/timeline/ItemRow';
+import { isOver } from '@/features/timeline/rows';
+import { timelineUi, useThreadUi } from '@/features/timeline/state';
+import type { ToolItem } from '@/features/timeline/titles';
+import { turnActiveMs } from '@/features/timeline/turnTime';
 import { useFormatContext } from '@/lib/appearance';
-import { formatSpan, useRunningClock } from '@/lib/time';
-import { useThreadPart } from '@/realtime/stores/thread';
+import { formatSpan } from '@/lib/time';
+import { type ThreadView, useThreadPart } from '@/realtime/stores/thread';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
-import { cx } from '@/ui/cx';
 import { webAction } from './tools/webAction';
 
 /** What a turn's work came to, by kind of step. */
 export interface WorkSummary {
   reads: number;
   commands: number;
+  /** Files changed, each counted once. */
   edits: number;
   searches: number;
   fetches: number;
   tools: number;
   subagents: number;
-  failed: boolean;
-  /** The step that is under way, if one is. */
-  current: ToolItem | null;
-  /** The time the steps took, added together. */
-  stepMs: number;
 }
 
 const isTool = (item: Item | undefined): item is ToolItem => item?.kind === 'tool_call';
 
 export function summarize(items: readonly (Item | undefined)[]): WorkSummary {
-  const summary: WorkSummary = { reads: 0, commands: 0, edits: 0, searches: 0, fetches: 0, tools: 0, subagents: 0, failed: false, current: null, stepMs: 0 };
+  const summary: WorkSummary = { reads: 0, commands: 0, edits: 0, searches: 0, fetches: 0, tools: 0, subagents: 0 };
+  const files = new Set<string>();
   for (const item of items) {
     if (!isTool(item)) continue;
     const tool = item.payload.tool;
-    if (stepFailed(item)) summary.failed = true;
-    if (item.status === 'in_progress') summary.current = item;
-    summary.stepMs += item.payload.duration_ms ?? 0;
     switch (tool.kind) {
       case 'file_read':
         summary.reads += 1;
@@ -61,7 +58,7 @@ export function summarize(items: readonly (Item | undefined)[]): WorkSummary {
         break;
       }
       case 'file_change':
-        summary.edits += tool.changes.length;
+        for (const change of tool.changes) files.add(change.path);
         break;
       case 'file_search':
         summary.searches += 1;
@@ -83,58 +80,133 @@ export function summarize(items: readonly (Item | undefined)[]): WorkSummary {
         summary.tools += 1;
     }
   }
+  summary.edits = files.size;
   return summary;
 }
 
-/** "Read 4 files, ran 3 commands, edited 2 files". */
+/** "29 commands · 3 files edited": what the work came to, in a few words. */
 export function describeWork(summary: WorkSummary, t: TFunction): string {
   const parts: string[] = [];
-  if (summary.reads > 0) parts.push(t('timeline.work.read', { count: summary.reads }));
-  if (summary.searches > 0) parts.push(t('timeline.work.searched', { count: summary.searches }));
-  if (summary.commands > 0) parts.push(t('timeline.work.ran', { count: summary.commands }));
-  if (summary.edits > 0) parts.push(t('timeline.work.edited', { count: summary.edits }));
-  if (summary.fetches > 0) parts.push(t('timeline.work.fetched', { count: summary.fetches }));
-  if (summary.subagents > 0) parts.push(t('timeline.work.subagents', { count: summary.subagents }));
-  if (summary.tools > 0) parts.push(t('timeline.work.tools', { count: summary.tools }));
-  const text = parts.join(t('timeline.work.separator'));
-  return text.charAt(0).toUpperCase() + text.slice(1);
+  if (summary.commands > 0) parts.push(t('timeline.group.commands', { count: summary.commands }));
+  if (summary.edits > 0) parts.push(t('timeline.group.edited', { count: summary.edits }));
+  if (summary.reads > 0) parts.push(t('timeline.group.read', { count: summary.reads }));
+  if (summary.searches > 0) parts.push(t('timeline.group.searched', { count: summary.searches }));
+  if (summary.fetches > 0) parts.push(t('timeline.group.fetched', { count: summary.fetches }));
+  if (summary.subagents > 0) parts.push(t('timeline.group.subagents', { count: summary.subagents }));
+  if (summary.tools > 0) parts.push(t('timeline.group.tools', { count: summary.tools }));
+  return parts.join(' · ');
 }
 
-function WorkFoldView({ turnId, ids, open }: { turnId: string; ids: readonly string[]; open: boolean }) {
+/** The name of the agent that took a turn over from another, or null where it is the agent of the turn before. */
+export function changedAgent(view: ThreadView, turn: Turn | undefined): string | null {
+  if (turn === undefined) return null;
+  let before: Turn | undefined;
+  for (const candidate of view.turns.values()) {
+    if (candidate.ordinal < turn.ordinal && (before === undefined || candidate.ordinal > before.ordinal)) before = candidate;
+  }
+  if (before === undefined) return null;
+  const agentOf = (of: Turn) => view.segments.find((segment) => segment.id === of.segment_id)?.agent ?? view.thread?.binding?.agent ?? null;
+  const now = agentOf(turn);
+  const then = agentOf(before);
+  return now !== null && then !== null && now.id !== then.id ? now.name : null;
+}
+
+/** How near its end the preview has to be scrolled to go on following it, in pixels. */
+const FOLLOWING_SLACK_PX = 24;
+
+interface WorkGroupProps {
+  rowKey: string;
+  turnId: string;
+  ids: readonly string[];
+  last: boolean;
+  live: boolean;
+  only: boolean;
+}
+
+function WorkGroupView({ rowKey, turnId, ids, last, live, only }: WorkGroupProps) {
   const { t } = useTranslation();
   const format = useFormatContext();
-  const { threadId, readOnly, detail } = useTimelineContext();
+  const { threadId } = useTimelineContext();
   const read = useThreadReadRef(threadId);
+  const ui = useThreadUi(threadId);
+  const body = useId();
   const items = useThreadPart(threadId, useShallow((view) => ids.map((id) => view.items.get(id))));
   const turn = useThreadPart(threadId, (view) => view.turns.get(turnId));
-  const summary = summarize(items);
-  const running = readOnly !== true && turn !== undefined && (turn.state === 'running' || turn.state === 'starting');
-  const active = running && !turnWaiting(turn);
-  const now = useRunningClock(active);
-  const durationMs = turn === undefined ? summary.stepMs : turnActiveMs(turn, now) ?? summary.stepMs;
-  const current = summary.current;
-  const toolCalls = items.filter(isTool);
-  const changedFiles = new Set(toolCalls.flatMap((item) => item.payload.tool.kind === 'file_change' ? item.payload.tool.changes.map((change) => change.path) : []));
-  const work = describeWork(summary, t) || t('timeline.work.nothing');
-  const line = detail === 'summary' ? [t('thread.viewModes.toolCalls', { count: toolCalls.length }), durationMs > 0 ? formatSpan(durationMs, format) : null,
-    t('thread.viewModes.files', { count: changedFiles.size })].filter((part) => part !== null).join(' · ')
-    : active && current !== null
-      ? `${describeStep(current, t).text} (${formatSpan(durationMs, format)})`
-      : `${work}${durationMs > 0 ? ` (${formatSpan(durationMs, format)})` : ''}`;
+  const agent = useThreadPart(threadId, (view) => changedAgent(view, turn));
+  const open = ui.steps.get(rowKey) ?? live;
+
+  // The preview of a turn that is at it follows its own end until its reader scrolls up in it.
+  const box = useRef<HTMLDivElement>(null);
+  const list = useRef<HTMLOListElement>(null);
+  const following = useRef(true);
+  useEffect(() => {
+    const element = box.current;
+    const inner = list.current;
+    if (!live || !open || element === null || inner === null) return;
+    const follow = () => {
+      if (following.current) element.scrollTop = element.scrollHeight;
+    };
+    follow();
+    if (typeof ResizeObserver === 'undefined') return;
+    const watch = new ResizeObserver(follow);
+    watch.observe(inner);
+    return () => watch.disconnect();
+  }, [live, open, ids.length]);
+
+  // How long it worked: the turn's own working time where this is all its work, else from the first step to the last.
+  const present = items.flatMap((item) => item === undefined ? [] : [item]);
+  const first = present[0];
+  const end = present.at(-1);
+  const span = first === undefined || end === undefined ? 0 : Math.max(0, Date.parse(end.updated_at) - Date.parse(first.created_at));
+  const whole = only && turn !== undefined && turn.completed_at !== null ? turnActiveMs(turn, Date.parse(turn.completed_at)) : null;
+  const took = live ? 0 : whole ?? span;
+  const time = took >= 1000 ? formatSpan(took, format) : null;
+  const ending = last && turn !== undefined && isOver(turn) ? turn.state : null;
+
+  const head = live ? t('timeline.group.working')
+    : ending === 'failed' ? (time === null ? t('timeline.group.failed') : t('timeline.group.failedAfter', { time }))
+      : ending === 'interrupted' ? (time === null ? t('timeline.group.stopped') : t('timeline.group.stoppedAfter', { time }))
+        : time === null ? t('timeline.group.worked') : t('timeline.group.workedFor', { time });
+  const stopper = ending === 'interrupted' ? turn?.interrupted_by ?? null : null;
+  const by = stopper === null ? null : t('timeline.group.stoppedBy', { name: stopper.display_name });
+  const counts = describeWork(summarize(present), t);
+  const label = [agent, head, by, counts === '' ? null : counts].filter((part) => part !== null).join(' · ');
+
   return (
-    <button
-      type="button"
-      aria-expanded={open}
-      data-fold={turnId}
-      onClick={() => timelineUi.toggleFold(read, turnId)}
-      className={cx('flex min-h-8 w-full items-center gap-2 rounded-md px-2 py-1 text-left text-sm text-text-muted hover:bg-bg-muted hover:text-text', summary.failed && 'text-danger-text')}
-    >
-      {open ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />}
-      {active ? <LoaderCircle className="animate-spin text-info" aria-hidden /> : summary.failed ? <OctagonAlert className="text-danger" aria-hidden /> : null}
-      <span className="min-w-0 flex-1 truncate">{line === '' ? t('timeline.work.nothing') : line}</span>
-      {summary.failed && <span className="sr-only">{t('timeline.step.failed')}</span>}
-    </button>
+    <div className="flex min-w-0 flex-col gap-2" data-work={rowKey}>
+      <div className="flex min-w-0 items-center gap-3 text-sm text-text-muted">
+        <span aria-hidden className="h-px min-w-4 flex-1 bg-border" />
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={body}
+          data-fold={turnId}
+          onClick={() => timelineUi.setStep(read, rowKey, !open)}
+          className="flex min-h-8 min-w-0 max-w-full items-center gap-1 rounded-md px-2 hover:bg-bg-muted hover:text-text"
+        >
+          <span data-overflow-text={label} className="min-w-0 truncate">{label}</span>
+          {open ? <ChevronUp className="shrink-0" aria-hidden /> : <ChevronDown className="shrink-0" aria-hidden />}
+        </button>
+        <span aria-hidden className="h-px min-w-4 flex-1 bg-border" />
+      </div>
+      {open && (
+        <div
+          id={body}
+          ref={box}
+          tabIndex={live ? 0 : undefined}
+          onScroll={live ? (event) => {
+            const element = event.currentTarget;
+            following.current = element.scrollHeight - element.scrollTop - element.clientHeight < FOLLOWING_SLACK_PX;
+          } : undefined}
+          className={live ? 'max-h-(--work-preview-height) overflow-y-auto overscroll-contain' : undefined}
+        >
+          <ol ref={list} role="list" className="flex list-none flex-col gap-1">
+            {ids.map((id) => <li key={id} className="min-w-0"><ItemRow id={id} quiet /></li>)}
+          </ol>
+        </div>
+      )}
+    </div>
   );
 }
 
-export const WorkFold = memo(WorkFoldView);
+export const WorkGroup = memo(WorkGroupView);

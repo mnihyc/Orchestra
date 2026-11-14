@@ -28,7 +28,7 @@ import { NOT_PICKING, type PromptFocus, type SelectPromptVersion, type TimelineC
 import { usePromptFocus } from '@/features/timeline/usePromptFocus';
 import { useTimelineWindowKey } from '@/features/timeline/windowKey';
 import { ConversationLane } from '@/features/timeline/Lane';
-import { recentTurns, queuedInputs, sendingInTray } from '@/features/timeline/rows';
+import { queuedInputs, sendingInTray } from '@/features/timeline/rows';
 import { sideLaneKey, timelineUi, useThreadUi } from '@/features/timeline/state';
 import { revealView } from '@/features/workbench/openView';
 import { useViewShown, type ViewProps } from '@/features/workbench/views';
@@ -232,10 +232,9 @@ function SideConversationBody({ parentId, sideId, panel = false, by, at, readOwn
   };
   const jump = () => { onVersionSelect(location.continuationId); reloadThread(read); };
   const thread = view.thread;
-  const recent = useMemo(() => recentTurns(view.turns), [view.turns]);
-  const context = useMemo<TimelineContext>(() => ({ threadId: sideId, threadName: thread?.name ?? '', detail: 'steps', recent, layout: 'one', setLayout: () => undefined,
+  const context = useMemo<TimelineContext>(() => ({ threadId: sideId, threadName: thread?.name ?? '', detail: 'normal', layout: 'one', setLayout: () => undefined,
     meId, canInteract: !readOnly && holds(thread?.access, 'thread.interact'), canManage: !readOnly && holds(thread?.access, 'thread.manage'), readOnly, live, lit: null, selection: NOT_PICKING,
-    onVersionSelect, laneThreads: [...(parent.laneThreads ?? []), sideId] }), [sideId, thread?.name, thread?.access, recent, meId, live, parent.laneThreads, readOnly, onVersionSelect]);
+    onVersionSelect, laneThreads: [...(parent.laneThreads ?? []), sideId] }), [sideId, thread?.name, thread?.access, meId, live, parent.laneThreads, readOnly, onVersionSelect]);
   const queued = useThreadPart(sideId, useShallow(queuedInputs));
   const pending = useMemo(() => sendingInTray(view, sending), [view, sending]);
   if (view.closed === 'deleted') return <p className="text-sm text-text-muted">{t('side.lane.closedUnknown', { name: thread?.name ?? t('side.lane.unnamed') })}</p>;
@@ -249,7 +248,7 @@ function SideConversationBody({ parentId, sideId, panel = false, by, at, readOwn
   const mayDrive = context.canInteract && !thread.archived;
   const mayClose = (meId === thread.owner.id || context.canManage || parent.canManage) && live;
   return <ConversationLane kind="side" identity={sideId} label={t('side.lane.label', { name: thread.name })} activityLabel={t('side.lane.conversation')}
-    itemsRef={itemsRoot} context={context} ids={view.order} loading={view.loaded === 'none'} empty={t('side.lane.empty')} agentHeads
+    itemsRef={itemsRoot} context={context} ids={view.order} loading={view.loaded === 'none'} empty={t('side.lane.empty')}
     header={<>
       {panel && <><ThreadStateIcon display={thread.display} /><span className="min-w-0 wrap-anywhere font-medium">{thread.name}</span></>}
       {!panel && by !== undefined && <span data-side-started-by className="inline-flex min-w-0 flex-wrap items-center gap-1 text-sm text-text-muted"><UserChip user={by} /><span>{t('side.lane.started')}</span></span>}

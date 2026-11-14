@@ -26,7 +26,7 @@ describe('failure ownership', () => {
     const held = view([ended], errors);
     expect(errors.every((item) => hiddenFailureItem(held, item))).toBe(true);
     expect(failureGroup(held, ended)).toEqual({ owner: ended.id, attempts: 2 });
-    expect(buildRows(held, { detail: 'steps', hideHistory: false, foldOpened: new Set(), meId: null })).toEqual([{ kind: 'footer', key: 'footer:failed', turnId: 'failed' }]);
+    expect(buildRows(held, { detail: 'normal', hideHistory: false, meId: null })).toEqual([{ kind: 'footer', key: 'footer:failed', turnId: 'failed' }]);
   });
 
   it('groups the same failure across derived continuations but keeps an independently authored failure separate', () => {

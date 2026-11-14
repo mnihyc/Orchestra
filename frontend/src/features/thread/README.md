@@ -1,17 +1,21 @@
 # Shared conversation screen
 
-Built: the screen of a thread (`/thread/$threadId`, an item named by `?item=`): its header (the title and
-description changed in place, the compact state, the star, the bell, Share, and a menu that offers what
-the caller may do). A present description takes one muted line below the title; adding one is in the menu,
-alongside running commands, side threads and who is looking. Binding, model, native approval mode and
+Built: the screen of a thread (`/thread/$threadId`, an item named by `?item=`, a sub-agent's conversation by `?agent=`) in three
+parts, of which only the middle one scrolls: the head (one row that never wraps), the conversation, and the dock (the queue,
+the plan, the one status line and the composer). The head holds the title (a click renames it), the compact state, the
+arrows and the list of Messages, how many agents, Changes with its line counts, Find, the way of reading and a menu that offers
+everything else, and what the caller may do; what does not fit leaves the row, the last first, into the menu. A present description
+and the lines that tell of the thread stand at the top of the conversation; adding a description is in the menu, alongside
+running commands, side threads and who is looking. Binding, model, native approval mode and
 context stand beside the message; the status bar reuses the existing runtime, usage and source readers.
 View holds work detail, history visibility and automatic-title actions. Side thread uses
 the verified side mode; when unavailable it keeps the reason and offers Fork to beside it. A waiting
 question addresses its actual decider; other readers see Waiting for an answer. Header observes older
 cards' existing approval cache without making another read or inferring authority from a role.
-On phones the complete title and state stand above one row of icon actions; a blocked banner's action
-goes below its reason. Fork, Fork to, Side thread, Switch and Find keep their original producers;
-Organize, View and placement submenus keep the remaining menu to ten entries without dropping acts.
+A blocked banner's action goes below its reason. Fork, Fork to, Side thread, Switch, Star, Notifications and Share keep their original
+producers in the menu; Organize, View and placement submenus keep the rest of it in order without dropping acts. A person's message
+is found by Ctrl+Alt+Up and Ctrl+Alt+Down, the arrows, the list of Messages and the sticky line under the head; a sub-agent's own
+conversation is entered from the list of agents or from its step, read-only, and left by the title, Escape or Main.
 An incomplete cached frame is contained in this view with an explicit Retry. A missing capability
 never grants a fork, move, archive or export; the next complete live frame restores the conversation.
 The first load uses the native thread opening, hydrating draft, parameters, limits, resolved settings,
@@ -26,7 +30,15 @@ modules supply sub-agent and side-thread lanes, the inspector, files, export, fi
 and the History view.
 
 - `Thread.tsx`: The thread as a screen of the workbench: the conversation with its composer, and its other views in the arrangement chosen.
-- `Header.tsx`: Title and compact state, one Star, icon-only Fork/Fork to/Ask/Switch/Find in one row, and grouped remaining acts; exported state/time/reason readers for the status bar.
+- `Header.tsx`: The one-row head: title, compact state, arrows and Messages, agents, Changes, Find, the way of reading and the menu with the rest; exported state/time/reason readers for the status bar.
+- `rowFit.ts`: A row that never wraps: what does not fit is hidden, the last first, and comes back when there is room.
+- `ChangesButton.tsx`: Changes in the head, with the lines the thread added and removed.
+- `messages.ts`, `messageMoves.ts`, `MessageParts.tsx`: The people's messages, the moves between them (keys and arrows) and the sticky line and the list of Messages.
+- `agents.ts`, `AgentsPanel.tsx`, `agentSwitch.ts`: The sub-agents of a thread, running and finished, the panel that lists them, and the way a lane opens one in place of the main conversation.
+- `sentMessages.ts`, `SentMessageBlock.tsx`: A message on its way to an idle thread is the person's message at once, dimmed; the queue keeps the rest.
+- `replyRoom.ts`, `FollowButton.tsx`: After Send the sent message holds the top of the view while the reply grows; the round button goes to the end.
+- `WhereChip.tsx`: Where a thread works, "<environment> · <directory>", in one chip beside the composer controls; it opens the change of the environment and the directory.
+- `openWhere.ts`: The one function that opens where a thread works, called by the chip, by `/directory` and by the act that a reason about the environment offers.
 - `cached.ts`: Recognizable conversation frames and reported capabilities at a cached-view boundary; no permission inference.
 - `Description.tsx`: Manual or automatic progress text with override controls.
 - `BindingSummary.tsx`: Provider, model and effort, the thread's environment with its owner, and the arrangement's type, what the agent works with there and isolation facts.

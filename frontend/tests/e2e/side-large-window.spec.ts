@@ -82,7 +82,8 @@ test('a full 200-item side window remains usable inline and in its own panel', a
   await openHistory(page);
   const draft = page.getByRole('textbox', { name: 'Message to the agent', exact: true });
   await draft.fill('Keep the parent draft during the large side read');
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Side thread…', exact: true }).click();
+  await page.locator('[data-thread-header] [data-thread-more]').click();
+  await page.getByRole('menuitem', { name: 'Side thread…', exact: true }).click();
   const ask = page.getByRole('dialog', { name: 'Side thread', exact: true });
   await ask.getByRole('textbox', { name: 'What to ask' }).fill('Review the retained side history');
   const inlineStart = await page.evaluate(() => performance.now());

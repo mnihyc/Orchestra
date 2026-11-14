@@ -11,6 +11,8 @@ export interface PageNavigation {
   search?: Record<string, unknown> | true | ((before: Record<string, unknown>) => Record<string, unknown>);
   hash?: string;
   replace?: boolean;
+  /** A change of the page's own address replaces the history entry that stands, unless it asks to be a step of its own: `push` adds an entry, so that the browser's Back undoes the change. */
+  push?: boolean;
 }
 export interface PageContextValue {
   id: string;
@@ -32,6 +34,10 @@ export function usePageSearch<R extends AnyRoute>(route: R): R['types']['fullSea
 }
 export function usePageNavigate<R extends AnyRoute>(route: R): UseNavigateResult<R['types']['fullPath']> {
   return useTarget(route).navigate as UseNavigateResult<R['types']['fullPath']>;
+}
+/** The page's own navigation with what only a hosted page may ask beyond the router's options (`push`): an address change that is a step the browser's Back undoes. */
+export function usePagePush(route: AnyRoute): PageContextValue['navigate'] {
+  return useTarget(route).navigate;
 }
 
 /** Feature controls inside a page read that page's locator; shell consumers retain the outer route. */

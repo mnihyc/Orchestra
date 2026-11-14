@@ -14,9 +14,9 @@ import { viewedItemQuery } from '@/api/threadHistory';
 import { selectThreadContinuation, threadQueryRead } from '@/api/threadRead';
 import { ApiError } from '@/api/client';
 import { NOT_PICKING, TimelineContextValue, type TimelineContext, useTimelineContext } from '@/features/timeline/context';
+import { useAgentSwitch } from '@/features/thread/agentSwitch';
 import { ConversationLane } from '@/features/timeline/Lane';
 import { useRecordedItem } from '@/features/timeline/historical';
-import { recentTurns } from '@/features/timeline/rows';
 import { useViewShown, type ViewProps } from '@/features/workbench/views';
 import type { Item } from '@/generated/api-types';
 import { forgetThreadRead, useSocketStatus, useThreadFeed } from '@/realtime/live';
@@ -44,6 +44,7 @@ function ChildStream({ item, tool, panel }: { item: ToolItem; tool: ChildTool; p
   const { t } = useTranslation();
   const context = useTimelineContext();
   const format = useFormatContext();
+  const switchTo = useAgentSwitch();
   const recorded = useRecordedItem(context.threadId, item);
   const running = tool.state === 'running' && !recorded;
   const now = useRunningClock(running);
@@ -83,6 +84,7 @@ function ChildStream({ item, tool, panel }: { item: ToolItem; tool: ChildTool; p
       {panel && <><Bot className="shrink-0 text-text-muted" aria-hidden /><span className="wrap-anywhere font-medium">{name}</span></>}
       {tool.role !== null && tool.role !== '' && <span className="text-text-muted">{t('timeline.subagent.role', { role: tool.role })}</span>}
       {tool.model !== undefined && tool.model !== '' && <span data-subagent-model className="wrap-anywhere text-text-muted">{tool.model}</span>}
+      {!panel && switchTo !== null && <Button size="sm" variant="ghost" onClick={() => switchTo(item.id)}>{t('thread.agents.open')}</Button>}
       {panel && <span className="text-text-muted">{t(recorded && tool.state === 'running' ? 'timeline.step.recordedRunning' : `timeline.step.subagentState.${tool.state}`)}</span>}
       {panel && tookMs !== null && tookMs >= 1000 && <span data-subagent-time className="text-xs text-text-muted tabular-nums">{formatSpan(tookMs, format)}</span>}
     </>}
@@ -102,13 +104,18 @@ export function SubagentLane({ item, panel = false }: { item: ToolItem; panel?: 
   return <ChildStream item={item} tool={tool} panel={panel} />;
 }
 
-function Panel({ threadId, itemId, continuationId }: { threadId: string; itemId: string; continuationId: string | null }) {
+/**
+ * One sub-agent's own conversation, read-only: the lane of the step that started it, with its name, state and clock, the prompt it was
+ * given and its items. The side panel shows it in a scrolling region of its own; the screen of a thread shows it in place of the main
+ * conversation.
+ */
+export function SubagentConversation({ threadId, itemId, frame = 'page' }: { threadId: string; itemId: string; frame?: 'page' | 'panel' }) {
   const { t } = useTranslation();
   const read = useThreadReadRef(threadId);
-  useLayoutEffect(() => selectThreadContinuation(read, continuationId), [read, continuationId]);
-  useThreadFeed(read);
   const view = useThreadView(threadId);
   const socket = useSocketStatus();
+  // What a conversation is told by default (how the work is shown) comes from the context, not from this lane.
+  const base = useTimelineContext();
   const held = view.items.get(itemId);
   const parentOptions = viewedItemQuery(read, itemId);
   const parent = useQuery({ ...parentOptions, enabled: held === undefined && view.thread !== null && view.closed === null && parentOptions.enabled, retry: false });
@@ -119,8 +126,17 @@ function Panel({ threadId, itemId, continuationId }: { threadId: string; itemId:
   if (item === undefined) return <SkeletonRows rows={3} />;
   if (item.kind !== 'tool_call' || item.payload.tool.kind !== 'subagent') return <p className="p-3 text-sm">{t('timeline.subagent.unavailable')}</p>;
   const readOnly = threadReadOnly(view);
-  const context: TimelineContext = { threadId, threadName: view.thread?.name ?? '', detail: 'steps', recent: recentTurns(view.turns), layout: 'one', setLayout: () => undefined, meId: null, canInteract: !readOnly && holds(view.thread?.access, 'thread.interact'), canManage: !readOnly && holds(view.thread?.access, 'thread.manage'), readOnly, live: socket.phase === 'ready', lit: null, selection: NOT_PICKING, compact: true };
-  return <TimelineContextValue.Provider value={context}><ScrollArea role="region" aria-label={t('timeline.subagent.panelTitle')} tabIndex={0} className="focus-inset h-full p-3" data-subagent-panel={item.id}><SubagentLane item={item} panel /></ScrollArea></TimelineContextValue.Provider>;
+  const context: TimelineContext = { ...base, threadId, threadName: view.thread?.name ?? '', layout: 'one', setLayout: () => undefined, meId: null, canInteract: !readOnly && holds(view.thread?.access, 'thread.interact'), canManage: !readOnly && holds(view.thread?.access, 'thread.manage'), readOnly, live: socket.phase === 'ready', lit: null, selection: NOT_PICKING, compact: true };
+  const lane = <TimelineContextValue.Provider value={context}><SubagentLane item={item} panel /></TimelineContextValue.Provider>;
+  return frame === 'page' ? <div data-subagent-conversation={item.id}>{lane}</div>
+    : <ScrollArea role="region" aria-label={t('timeline.subagent.panelTitle')} tabIndex={0} className="focus-inset h-full p-3" data-subagent-panel={item.id}>{lane}</ScrollArea>;
+}
+
+function Panel({ threadId, itemId, continuationId }: { threadId: string; itemId: string; continuationId: string | null }) {
+  const read = useThreadReadRef(threadId);
+  useLayoutEffect(() => selectThreadContinuation(read, continuationId), [read, continuationId]);
+  useThreadFeed(read);
+  return <SubagentConversation threadId={threadId} itemId={itemId} frame="panel" />;
 }
 
 export function SubagentPanel({ tab }: ViewProps) {

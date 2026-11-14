@@ -1,19 +1,20 @@
-/** Title, compact state and measured header actions; shared state readers for the status bar.
+/** The thread's header row, and the state readers shared with the status bar.
  *
- * The head of the screen of a thread. The title can be renamed where it stands; the description is its
- * first line below it when present. The title and compact state share one line with Star, Notifications,
- * Share and the session menu; actions fold into that menu before they cut the title. On a phone the complete title
- * takes its own row above all the icon controls. The next turn's controls belong to the composer; runtime facts belong to
- * the status bar. The state reader below remains exported for that bar's richer clock and reason.
+ * The head of the screen of a thread is one row that never wraps and stays where it is while the conversation
+ * scrolls: the title (a click renames it), the state, Changes with its line counts, Find, the way of reading and the
+ * menu. What does not fit leaves the row, the last first, and is in the menu; everything else that the head once
+ * held (Star, Notifications, Share, forks, switches, the running work) is in the menu too. The lines that told of
+ * the thread (background work, imported history, an admin's reach, the description) are content: they are drawn at
+ * the top of the scrolling part, through the host the screen gives. The next turn's controls belong to the composer;
+ * runtime facts belong to the status bar. The state reader below remains exported for that bar's richer clock and reason.
  * Every menu action still follows the caller's authority and changes only what it names.
  */
 import { Hint } from '@/features/help/Hint';
-import { cx } from '@/ui/cx';
-import { useCompactControls } from '@/features/workbench/Narrow';
 import { useViewInstance } from '@/features/workbench/instance';
 import { useMutation, useQueries } from '@tanstack/react-query';
-import { ArrowRightLeft, Box, Ellipsis, GitFork, History, LoaderCircle, MessageSquareDashed, Search, SquareTerminal } from 'lucide-react';
+import { ArrowRightLeft, Box, ChevronRight, Ellipsis, GitFork, History, LoaderCircle, MessageSquareDashed, MessagesSquare, Search, SquareTerminal } from 'lucide-react';
 import { useContext, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { AdminReachNotice } from '@/features/access/AdminReachNotice';
 import { useMenuCommands } from '@/features/finder/menuCommands';
@@ -35,9 +36,11 @@ import { SetUpThread } from '@/features/start/SetUpThread';
 import { sideReadingAvailable, sideRefusal } from '@/features/side-threads/availability';
 import { threadCapabilities } from '@/features/thread/cached';
 import { SideThreadList } from '@/features/side-threads/SideChips';
-import { SubagentChips } from '@/features/timeline/SubagentChips';
+import { AgentsFace, AgentsPanel } from '@/features/thread/AgentsPanel';
+import { useAgents } from '@/features/thread/agents';
+import type { MessageNav } from '@/features/thread/messageMoves';
+import { MessageArrows, MessagesPanel } from '@/features/thread/MessageParts';
 import { openAccess } from '@/features/access/AccessDialog';
-import { StarButton } from '@/features/navigation/favorites';
 import { useNodeMenu } from '@/features/navigation/NodeMenu';
 import { openFind } from '@/features/timeline/FindInConversation';
 import { CatchupRequest } from '@/features/inbox/away/Catchup';
@@ -45,7 +48,7 @@ import { placeOfNode } from '@/features/navigation/places';
 import { DescriptionLine, DescriptionPanel } from '@/features/thread/Description';
 import { SubscriptionBell } from '@/features/thread/SubscriptionBell';
 import { useImmediateFork } from '@/features/thread/ImmediateFork';
-import { RunningControl, RunningDialog } from '@/features/running/Running';
+import { RunningDialog } from '@/features/running/Running';
 import { useRunning } from '@/features/running/live';
 import { BackgroundWorkLine, NativeBackgroundCommands } from '@/features/running/BackgroundWork';
 import type { BackgroundEndTarget } from '@/features/running/review';
@@ -54,10 +57,9 @@ import { ViewOpeningContext } from '@/features/workbench/viewOpening';
 import { restorePromptFocus } from '@/ui/PromptScope';
 import { MoveToTopic } from '@/features/thread-move/MoveToTopic';
 import { useTimelinePreferences } from '@/features/timeline/preferences';
-import { useTitlePriority } from '@/features/thread/titlePriority';
+import { useRowFit } from '@/features/thread/rowFit';
+import { ChangesButton } from '@/features/thread/ChangesButton';
 import { DetailControl } from '@/features/thread/DetailControl';
-import { ThreadNowChip, useProvidedThreadNow } from '@/features/thread/NowLine';
-import type { WorkDetail } from '@/features/timeline/rows';
 import { isAgentHistoryRemoving, waitingWords } from '@/features/timeline/waiting';
 import { holds } from '@/lib/permissions';
 import { useRunningClock } from '@/lib/time';
@@ -65,7 +67,6 @@ import { turnActiveMs, turnWaiting } from '@/features/timeline/turnTime';
 import { approvalAtItem } from '@/features/approvals/current';
 import { runningTurn, threadReadOnly, threadWriter, useThreadPart } from '@/realtime/stores/thread';
 import { ActionIcon, actionName } from '@/ui/actions';
-import { choiceName } from '@/ui/Choice';
 import { Dialog } from '@/ui/Dialog';
 import { Button } from '@/ui/Button';
 import { ErrorAlert } from '@/ui/ErrorState';
@@ -118,7 +119,7 @@ function Title({ thread, mayEdit }: { thread: Thread; mayEdit: boolean }) {
   if (editing) {
     return (
       <form
-        className="flex min-w-0 flex-col gap-1"
+        className="relative flex min-w-0 flex-col"
         onSubmit={(event) => {
           event.preventDefault();
           commit();
@@ -140,7 +141,8 @@ function Title({ thread, mayEdit }: { thread: Thread; mayEdit: boolean }) {
           }}
           fieldClassName="w-(--chip-width) max-w-full"
         />
-        {save.error !== null && <ErrorAlert error={save.error} />}
+        {/* The row is one line high: a refusal stands under it, over the conversation. */}
+        {save.error !== null && <div className="absolute inset-x-0 top-full z-(--layer-sticky) pt-1"><ErrorAlert error={save.error} /></div>}
       </form>
     );
   }
@@ -152,15 +154,14 @@ function Title({ thread, mayEdit }: { thread: Thread; mayEdit: boolean }) {
         setValue(thread.name);
         setEditing(true);
       }}
-      className="group/title flex min-w-0 max-w-full items-start gap-1 rounded-md text-left"
+      className="group/title flex min-w-0 max-w-full items-center gap-1 rounded-md text-left"
     >
-      {/* The title's line is as tall as the rename mark beside it, so its first line and every mark of the row share one
-          centre. */}
-      <h1 className="min-w-0 wrap-anywhere whitespace-normal text-lg leading-7 font-semibold text-text sm:truncate">{thread.name}</h1>
+      {/* One line, cut with an ellipsis: the whole title is in its tooltip and in the tab. */}
+      <h1 title={thread.name} className="min-w-0 truncate text-lg leading-7 font-semibold text-text">{thread.name}</h1>
       <span className="inline-flex h-7 shrink-0 items-center"><ActionIcon action="rename" className="text-text-subtle opacity-0 transition-opacity group-focus-visible/title:opacity-100 group-hover/title:opacity-100" /></span>
     </button>
   ) : (
-    <h1 className="min-w-0 wrap-anywhere whitespace-normal text-lg leading-7 font-semibold text-text sm:truncate">{thread.name}</h1>
+    <h1 title={thread.name} className="min-w-0 truncate text-lg leading-7 font-semibold text-text">{thread.name}</h1>
   );
 }
 
@@ -181,8 +182,6 @@ export function useThreadState(thread: Thread) {
 /** Compact in the header; the full state and its reason remain available to other surfaces. */
 export function StateFact({ thread, compact = false }: { thread: Thread; compact?: boolean }) {
   const { t } = useTranslation();
-  const phone = useCompactControls();
-  const currentNow = useProvidedThreadNow();
   const { state, label, words } = useThreadState(thread);
   const items = useThreadPart(thread.id, (view) => view.items);
   const pending = useMemo(() => [...items.values()].flatMap((item) => item.kind === 'approval' && item.status === 'pending' ? [item] : []), [items]);
@@ -193,7 +192,6 @@ export function StateFact({ thread, compact = false }: { thread: Thread; compact
   const canAnswer = approvals.some((current) => current?.state === 'pending' && current.can_decide);
   const answerUnknown = pending.length < thread.pending_approvals || approvals.some((current) => current === undefined);
   if (state === undefined) return <ThreadStateIcon display={null} />;
-  if (compact && phone && currentNow?.now.thread?.id === thread.id && currentNow.now.active) return <ThreadNowChip state={state} />;
   if (compact) {
     const short = isAgentHistoryRemoving(thread) && !thread.archived ? label
       : state === 'blocked' && thread.display.blocked_reason === 'unbound' ? t('thread.header.needsSetup')
@@ -210,8 +208,26 @@ export function StateFact({ thread, compact = false }: { thread: Thread; compact
   </span>;
 }
 
-export function ThreadHeader({ thread, onRevealItem, recoverySwitchVisible = false }: { thread: Thread; onRevealItem?: ((itemId: string) => void) | undefined; recoverySwitchVisible?: boolean }) {
-  const compact = useCompactControls();
+/** What may leave the row, in the order it stays: the last leaves first. */
+const FOLDABLE = ['messages-nav', 'messages', 'agents', 'changes', 'find', 'view', 'help'] as const;
+
+/** The sub-agent shown in place of the main conversation: its step, its name and the way back. */
+export interface ShownAgent {
+  id: string;
+  name: string;
+}
+
+export function ThreadHeader({ thread, onRevealItem, recoverySwitchVisible = false, notes = null, nav, agent = null, onAgent }: {
+  thread: Thread;
+  onRevealItem?: ((itemId: string) => void) | undefined;
+  recoverySwitchVisible?: boolean;
+  notes?: HTMLElement | null;
+  /** The people's messages and the moves between them; none while a sub-agent's conversation is shown. */
+  nav?: MessageNav | undefined;
+  agent?: ShownAgent | null;
+  /** Shows a sub-agent's conversation in place of the main one (its step), or the main one again (`null`). */
+  onAgent?: ((step: string | null) => void) | undefined;
+}) {
   const instance = useViewInstance();
   const read = useThreadReadRef(thread.id);
   const { t } = useTranslation();
@@ -230,6 +246,8 @@ export function ThreadHeader({ thread, onRevealItem, recoverySwitchVisible = fal
   const [tagging, setTagging] = useState(false);
   const [editingDescription, setEditingDescription] = useState(false);
   const [catchupOpen, setCatchupOpen] = useState(false);
+  const [messagesOpen, setMessagesOpen] = useState(false);
+  const [agentsOpen, setAgentsOpen] = useState(false);
   const [runningFor, setRunningFor] = useState<string | null>(null);
   const [endTarget, setEndTarget] = useState<BackgroundEndTarget | null>(null);
   const [wakeSettingsFor, setWakeSettingsFor] = useState<string | null>(null);
@@ -258,9 +276,10 @@ export function ThreadHeader({ thread, onRevealItem, recoverySwitchVisible = fal
   const runningEntry = { id: 'running', label: t('running.title'), onSelect: openRunning };
   const changesTurn = thread.current_turn_id ?? [...turns.values()].reduce<{ ordinal: number; id: string } | null>((held, turn) => held === null || turn.ordinal > held.ordinal ? turn : held, null)?.id;
   const changesKeys = useActionKeys('thread-changes');
+  const changesBlocked = thread.environment === null ? t('inspector.frame.noEnvironment') : !thread.environment_permissions.includes('files.view') ? t('files.permission.view') : false;
+  const openChanges = () => openThreadChanges(thread.id, changesTurn);
   const changesEntry: MenuEntry = { id: 'changes', label: t('views.changes.title'), ...(changesKeys === undefined ? {} : { shortcut: changesKeys }),
-    disabled: thread.environment === null ? t('inspector.frame.noEnvironment') : !thread.environment_permissions.includes('files.view') ? t('files.permission.view') : false,
-    onSelect: () => openThreadChanges(thread.id, changesTurn) };
+    disabled: changesBlocked, onSelect: openChanges };
   const [sidesOpen, setSidesOpen] = useState(false);
   const [peopleOpen, setPeopleOpen] = useState(false);
   const [movingTopic, setMovingTopic] = useState(false);
@@ -274,6 +293,10 @@ export function ThreadHeader({ thread, onRevealItem, recoverySwitchVisible = fal
   const mayDrive = holds(thread.access, 'thread.interact') && !thread.archived;
   const wake = readOnly ? null : (background.closed ? null : background.roster?.wake) ?? thread.background ?? null;
   const goal = thread.goal ?? null;
+  const agents = useAgents(thread.id, wake?.tasks);
+  const mayEnd = mayDrive && !readOnly && !background.closed;
+  // The moves between messages belong to the main conversation, not to a sub-agent's.
+  const moves = nav !== undefined && agent === null ? nav : null;
   const goalEditable = goal !== null && (isLive(goal) || goal.status === 'stopped');
   const place = placeOfNode(thread);
   const nodeEntries = useNodeMenu(place, { where: 'screen', node: thread });
@@ -320,22 +343,29 @@ export function ThreadHeader({ thread, onRevealItem, recoverySwitchVisible = fal
   useMenuCommands([...sourceChanges, ...(instance === null || instance.focusedContent ? [runningEntry] : [])], { prefix: 'thread', name: thread.name, icons: COMMAND_ICONS });
   const headerActions = sourceChanges.flatMap((entry) => inHeader(entry) && !(recoverySwitchVisible && entry.id === 'change-switch') && 'onSelect' in entry ? [entry] : []);
   const headerRef = useRef<HTMLElement>(null);
-  const titleLayout = useTitlePriority(headerRef, compact, thread.name, headerActions.map((entry) => entry.id).join('|'));
-  const foldQuick = titleLayout.actions !== 'all';
-  const foldPrimary = titleLayout.actions === 'menu';
+  const folded = useRowFit(headerRef, FOLDABLE);
   const findEntry: MenuEntry = { id: 'find', label: t('search.find.command'), icon: <Search aria-hidden />, onSelect: () => openFind(thread.id, instance?.id) };
   const notificationsEntry: MenuEntry = { id: 'notifications', label: t('thread.bell.label'), onSelect: () => setNotificationsOpen(true) };
   const share = () => openAccess({ kind: 'thread' as const, id: thread.id, name: thread.name });
   // Each folded action keeps its original handler, authority, pending state and refusal.
-  const otherChanges = foldQuick ? sourceChanges.filter((entry) => !headerActions.some((action) => action.id === entry.id)) : sourceChanges;
+  const otherChanges = sourceChanges.filter((entry) => !headerActions.some((action) => action.id === entry.id));
   const remainingNode = nodeEntries.filter((entry) => entry.id !== 'duplicate' && entry.id !== 'duplicate-to');
   const exported = remainingNode.filter((entry) => entry.id.startsWith('export'));
   const endings = remainingNode.filter((entry) => ['archive', 'unarchive', 'delete'].includes(entry.id));
-  const organized = remainingNode.filter((entry) => !entry.id.startsWith('export') && !['archive', 'unarchive', 'delete'].includes(entry.id) && entry.type !== 'separator' && !(foldPrimary && ['star', 'unstar', 'share'].includes(entry.id)));
+  const organized = remainingNode.filter((entry) => !entry.id.startsWith('export') && !['archive', 'unarchive', 'delete'].includes(entry.id) && entry.type !== 'separator' && !['star', 'unstar', 'share'].includes(entry.id));
+  // What left the row is offered in a dialog instead of a card beside its button.
+  const messagesFolded = folded.has('messages');
+  const agentsFolded = folded.has('agents');
+  const moveEntries: MenuEntry[] = moves === null ? [] : [
+    { id: 'previous-message', label: t('thread.messages.previous'), shortcut: 'Mod+Alt+ArrowUp', disabled: moves.canPrevious ? false : t('thread.messages.noEarlier'), onSelect: () => { moves.previous(); } },
+    { id: 'next-message', label: t('thread.messages.next'), shortcut: 'Mod+Alt+ArrowDown', disabled: moves.canNext ? false : t('thread.messages.noLater'), onSelect: () => { moves.next(); } },
+    { id: 'messages', label: t('thread.messages.title'), onSelect: () => setMessagesOpen(true) },
+  ];
   const entries: MenuEntry[] = [
-    ...(foldQuick ? [...headerActions, findEntry] : []),
-    ...(foldPrimary ? [...remainingNode.filter((entry) => ['star', 'unstar'].includes(entry.id)), notificationsEntry, { id: 'share', label: t('thread.header.shareThread'), icon: <ActionIcon action="share" />, onSelect: share } as MenuEntry] : []),
-    ...(foldQuick ? [{ type: 'separator', id: 'header-separator' } as MenuEntry] : []),
+    // Everything the head once held beside the title, in the order it stood.
+    ...headerActions, findEntry,
+    ...remainingNode.filter((entry) => ['star', 'unstar'].includes(entry.id)), notificationsEntry, { id: 'share', label: t('thread.header.shareThread'), icon: <ActionIcon action="share" />, onSelect: share },
+    { type: 'separator', id: 'header-separator' },
     ...(thread.description.trim() !== '' || mayDescribe ? [{ id: 'description', label: t(thread.description.trim() === '' ? 'thread.description.add' : mayDescribe ? 'thread.description.edit' : 'thread.description.expand'), onSelect: () => { setEditingDescription(mayDescribe); setDescribing(true); } } as MenuEntry] : []),
     { id: 'goal', label: t(goalEditable ? 'goals.act.edit' : 'goals.menu.set'), disabled: goalActionReason(thread, t) ?? false, onSelect: () => openGoalEditor(thread.id) },
     { type: 'sub', id: 'organize', label: t('thread.header.organize'), entries: [
@@ -348,25 +378,13 @@ export function ThreadHeader({ thread, onRevealItem, recoverySwitchVisible = fal
       id: 'view',
       label: t('thread.header.view'),
       entries: [
-        ...(!foldQuick ? [findEntry] : []),
-        ...(!foldPrimary ? [notificationsEntry] : []),
+        ...moveEntries,
+        ...(agents.length > 0 ? [{ id: 'agents', label: t('thread.agents.title'), onSelect: () => setAgentsOpen(true) } as MenuEntry] : []),
         runningEntry,
         changesEntry,
         ...((thread.sides?.open ?? 0) > 0 ? [{ id: 'side-threads', label: t('side.chip.text', { count: thread.sides?.open ?? 0 }), onSelect: () => setSidesOpen(true) } as MenuEntry] : []),
         ...(presence.some((entry) => entry.user.id !== meId) ? [{ id: 'presence', label: t('ui.presence.here', { names: presence.filter((entry) => entry.user.id !== meId).map((entry) => entry.user.display_name).join(', ') }), onSelect: () => setPeopleOpen(true) } as MenuEntry] : []),
         { id: 'catchup', label: t('away.inbox.catchup'), icon: <History aria-hidden />, onSelect: () => setCatchupOpen(true) },
-        {
-          type: 'radio',
-          id: 'detail',
-          label: t('thread.header.workDetail'),
-          value: preferences.detail,
-          onValueChange: (value) => preferences.setDetail(value as WorkDetail),
-          options: [
-            { value: 'steps', ...choiceOption(t, 'workDetail.steps') },
-            { value: 'summary', ...choiceOption(t, 'workDetail.summary') },
-            { value: 'everything', ...choiceOption(t, 'workDetail.everything') },
-          ],
-        },
         { type: 'check', id: 'hide-history', ...choiceOption(t, 'navigationShow.hide_history'), description: t('thread.header.hideHistory'), checked: preferences.hideHistory, onCheckedChange: preferences.setHideHistory },
         ...(automatic.length > 0 ? [{ type: 'separator', id: 'auto-separator' } as MenuEntry, ...automatic] : []),
       ],
@@ -380,43 +398,67 @@ export function ThreadHeader({ thread, onRevealItem, recoverySwitchVisible = fal
     ...(endings.length > 0 ? [{ type: 'separator', id: 'node-separator' } as MenuEntry, ...endings] : []),
   ];
 
+  // The lines that tell of the thread are content: they stand at the top of the scrolling part, not in the row.
+  const notesNode = <>
+    <BackgroundWorkLine status={wake} endUnavailableReason={background.roster?.supported === false ? background.roster.reason : null} showHeldCompletions={readOnly} canManage={mayManage && !thread.archived && !readOnly} mayEnd={mayDrive && !readOnly && !background.closed} onSetting={() => setWakeSettingsFor(runningScope)} onEnd={endTask}>
+      <NativeBackgroundCommands roster={readOnly || background.closed ? null : background.roster} represented={wake?.tasks ?? []} mayEnd={mayDrive && !readOnly && !background.closed} onEnd={endCommand} />
+    </BackgroundWorkLine>
+    {importedHistory && <StateLine compact icon={<History aria-hidden />} message={t('thread.header.importedHistory')}
+      action={thread.binding === null && thread.program?.id !== 'orch' && !thread.archived && thread.side_of === null ? <Tooltip content={setupReason}>
+        <Button size="sm" blocked={setupReason !== null} onClick={() => setSettingUp(thread.id)}>{t('thread.header.chooseAgentProvider')}</Button>
+      </Tooltip> : undefined} />}
+    <AdminReachNotice of={thread.access.admin_access?.place} private={thread.page === 'restricted'} object={{ kind: 'thread', id: thread.id }} />
+    {thread.description.trim() !== '' && <DescriptionLine thread={thread} open={describing} onToggle={() => { setEditingDescription(false); setDescribing(true); }} mayEdit={false} />}
+  </>;
+
   return (
-    <><StatusPlace place="header" threadId={thread.id} className="shrink-0"><header ref={headerRef} className="flex shrink-0 flex-col gap-1 border-b border-border px-4 py-2" aria-label={t('thread.header.label')} data-thread-header data-thread-actions-mode={titleLayout.actions}>
-      <div className="flex min-w-0 flex-wrap items-center gap-2" data-thread-title-row>
-        <div className={cx('flex min-w-0 flex-col gap-1', compact ? 'basis-full' : 'basis-0 flex-1')}>
-          <div className="flex min-w-0 flex-wrap items-center gap-2" data-thread-identity><div className={cx('min-w-0 flex-1', (compact || titleLayout.stacked) && 'basis-full')}><Title thread={thread} mayEdit={mayManage && !thread.archived} /></div><StateFact thread={thread} compact /><DetailControl preferences={preferences} /><RunningControl roster={background.roster} closed={background.closed} opened={runningFor === runningScope} onOpen={openRunning} /><Hint id="thread-states" popover /></div>
-          <BackgroundWorkLine status={wake} endUnavailableReason={background.roster?.supported === false ? background.roster.reason : null} showHeldCompletions={readOnly} canManage={mayManage && !thread.archived && !readOnly} mayEnd={mayDrive && !readOnly && !background.closed} onSetting={() => setWakeSettingsFor(runningScope)} onEnd={endTask}>
-            <NativeBackgroundCommands roster={readOnly || background.closed ? null : background.roster} represented={wake?.tasks ?? []} mayEnd={mayDrive && !readOnly && !background.closed} onEnd={endCommand} />
-            <SubagentChips threadId={thread.id} onReveal={onRevealItem} {...(wake === null ? {} : { tasks: wake.tasks })} mayEnd={mayDrive && !readOnly && !background.closed} onEnd={endTask} />
-          </BackgroundWorkLine>
-        </div>
-        <div className={cx('relative flex shrink-0 items-center gap-1', compact ? 'w-full' : 'w-auto')} data-thread-actions-row>
-          <div role="group" aria-label={t('thread.header.quickActions')} data-thread-quick-actions aria-hidden={foldQuick || undefined} inert={foldQuick} className={cx('flex w-max shrink-0 items-center gap-1', foldQuick && 'pointer-events-none invisible absolute right-0 top-0')}>
-            {headerActions.map((entry) => <IconButton key={entry.id} size="sm" label={choiceName(entry)} icon={entry.icon} blocked={Boolean(entry.disabled)}
-              reason={typeof entry.disabled === 'string' ? entry.disabled : undefined} onClick={entry.onSelect} />)}
-            <IconButton size="sm" icon={<Search aria-hidden />} label={t('search.find.command')} onClick={() => openFind(thread.id, instance?.id)} />
-          </div>
-          <div data-thread-primary-actions aria-hidden={foldPrimary || undefined} inert={foldPrimary} className={cx('flex w-max shrink-0 items-center gap-1', compact && 'ml-auto', foldPrimary && 'pointer-events-none invisible absolute right-0 top-0')}>
-          <StarButton place={place} />
-          <SubscriptionBell thread={thread} />
-          <IconButton size="sm" action="share" label={t('thread.header.shareThread')} onClick={share} />
-          </div>
-          <Menu label={actionName('actions', thread.name)} align="end" entries={entries} trigger={<IconButton ref={actionsButton} data-thread-more size="sm" label={actionName('actions', thread.name)} icon={<Ellipsis aria-hidden />} />} />
-        </div>
+    <><StatusPlace place="header" threadId={thread.id} className="shrink-0"><header ref={headerRef} className="flex h-(--control-md) shrink-0 items-center gap-1 border-b border-border px-4" aria-label={t('thread.header.label')} data-thread-header data-thread-title-row data-thread-folded={[...folded].join(' ')}>
+      <div data-fold-title className="flex min-w-28 flex-1 items-center">
+        {agent === null ? <Title thread={thread} mayEdit={mayManage && !thread.archived} /> : (
+          // A sub-agent is shown in place of the conversation: the title leads back, the name says whose it is.
+          <span className="flex min-w-0 items-center gap-1 text-lg leading-7 font-semibold">
+            <button type="button" title={thread.name} aria-label={t('thread.agents.backTo', { name: thread.name })} onClick={() => onAgent?.(null)}
+              className="focus-inset min-w-0 shrink truncate rounded-md text-left text-text-muted hover:text-text">{thread.name}</button>
+            <ChevronRight className="shrink-0 text-text-subtle" aria-hidden />
+            <h1 title={agent.name} className="min-w-0 truncate text-text">{agent.name}</h1>
+          </span>
+        )}
       </div>
-      {importedHistory && <StateLine compact icon={<History aria-hidden />} message={t('thread.header.importedHistory')}
-        action={thread.binding === null && thread.program?.id !== 'orch' && !thread.archived && thread.side_of === null ? <Tooltip content={setupReason}>
-          <Button size="sm" blocked={setupReason !== null} onClick={() => setSettingUp(thread.id)}>{t('thread.header.chooseAgentProvider')}</Button>
-        </Tooltip> : undefined} />}
-      <AdminReachNotice of={thread.access.admin_access?.place} private={thread.page === 'restricted'} object={{ kind: 'thread', id: thread.id }} />
-      {thread.description.trim() !== '' && <DescriptionLine thread={thread} open={describing} onToggle={() => { setEditingDescription(false); setDescribing(true); }} mayEdit={false} />}
-      {wakeSettingsFor === runningScope && <Dialog open onOpenChange={(open) => { if (!open) setWakeSettingsFor(null); }} title={t('backgroundWake.settingTitle')}>
-        <SettingsEditor target={{ kind: 'node', id: thread.id }} scope="thread" only={['threads.background_wake']} compact place={{ name: thread.name, owner: thread.owner, access: thread.access, kind: 'thread' }} />
-      </Dialog>}
-      {describing && <Dialog open onOpenChange={setDescribing} title={t('thread.description.field')}><DescriptionPanel key={`${thread.description}:${editingDescription}`} thread={thread} initialEdit={editingDescription} mayEdit={mayManage && !thread.archived} onClose={() => setDescribing(false)} /></Dialog>}
-      {tagging && <Dialog open onOpenChange={setTagging} title={t('placeTags.title')}><TagPicker place={thread} allowed={holds(thread.access, 'thread.interact') && !thread.archived} /></Dialog>}
-      {catchupOpen && <CatchupRequest threadId={thread.id} open onOpenChange={setCatchupOpen} />}
+      <span data-fold-fixed className="inline-flex shrink-0 items-center"><StateFact thread={thread} compact /></span>
+      <span data-fold="help" hidden={folded.has('help')} className="inline-flex shrink-0 items-center"><Hint id="thread-states" popover /></span>
+      {moves !== null && <span data-fold="messages-nav" hidden={folded.has('messages-nav')} className="inline-flex shrink-0 items-center"><MessageArrows nav={moves} /></span>}
+      {moves !== null && <span data-fold="messages" hidden={folded.has('messages')} className="inline-flex shrink-0 items-center">
+        <Popover label={t('thread.messages.title')} open={messagesOpen && !folded.has('messages')} onOpenChange={setMessagesOpen}
+          trigger={<IconButton size="sm" icon={<MessagesSquare aria-hidden />} label={t('thread.messages.title')} />}>
+          <MessagesPanel threadId={thread.id} nav={moves} onGo={(id) => { setMessagesOpen(false); moves.go(id); }} />
+        </Popover>
+      </span>}
+      {agents.length > 0 && <span data-fold="agents" hidden={folded.has('agents')} className="inline-flex shrink-0 items-center">
+        <Popover label={t('thread.agents.title')} open={agentsOpen && !folded.has('agents')} onOpenChange={setAgentsOpen}
+          trigger={<Button size="sm" variant="ghost" aria-label={t('thread.agents.count', { count: agents.length })}><AgentsFace entries={agents} /></Button>}>
+          <AgentsPanel entries={agents} current={agent === null ? null : agent.id} onEnd={mayEnd ? endTask : null}
+            onMain={() => { setAgentsOpen(false); onAgent?.(null); }} onOpen={(step) => { setAgentsOpen(false); onAgent?.(step); }} />
+        </Popover>
+      </span>}
+      {changesBlocked === false && <span data-fold="changes" hidden={folded.has('changes')} className="inline-flex shrink-0 items-center"><ChangesButton threadId={thread.id} onOpen={openChanges} /></span>}
+      <span data-fold="find" hidden={folded.has('find')} className="inline-flex shrink-0 items-center"><IconButton size="sm" icon={<Search aria-hidden />} label={t('search.find.command')} onClick={() => openFind(thread.id, instance?.id)} /></span>
+      <span data-fold="view" hidden={folded.has('view')} className="inline-flex shrink-0 items-center"><DetailControl preferences={preferences} /></span>
+      <span data-fold-fixed className="inline-flex shrink-0 items-center"><Menu label={actionName('actions', thread.name)} align="end" entries={entries} trigger={<IconButton ref={actionsButton} data-thread-more size="sm" label={actionName('actions', thread.name)} icon={<Ellipsis aria-hidden />} />} /></span>
     </header></StatusPlace>
+    {notes !== null && createPortal(notesNode, notes)}
+    {moves !== null && messagesOpen && messagesFolded && <Dialog open onOpenChange={setMessagesOpen} title={t('thread.messages.title')}>
+      <MessagesPanel threadId={thread.id} nav={moves} onGo={(id) => { setMessagesOpen(false); moves.go(id); }} />
+    </Dialog>}
+    {agentsOpen && agentsFolded && <Dialog open onOpenChange={setAgentsOpen} title={t('thread.agents.title')}>
+      <AgentsPanel entries={agents} current={agent === null ? null : agent.id} onEnd={mayEnd ? endTask : null}
+        onMain={() => { setAgentsOpen(false); onAgent?.(null); }} onOpen={(step) => { setAgentsOpen(false); onAgent?.(step); }} />
+    </Dialog>}
+    {wakeSettingsFor === runningScope && <Dialog open onOpenChange={(open) => { if (!open) setWakeSettingsFor(null); }} title={t('backgroundWake.settingTitle')}>
+      <SettingsEditor target={{ kind: 'node', id: thread.id }} scope="thread" only={['threads.background_wake']} compact place={{ name: thread.name, owner: thread.owner, access: thread.access, kind: 'thread' }} />
+    </Dialog>}
+    {describing && <Dialog open onOpenChange={setDescribing} title={t('thread.description.field')}><DescriptionPanel key={`${thread.description}:${editingDescription}`} thread={thread} initialEdit={editingDescription} mayEdit={mayManage && !thread.archived} onClose={() => setDescribing(false)} /></Dialog>}
+    {tagging && <Dialog open onOpenChange={setTagging} title={t('placeTags.title')}><TagPicker place={thread} allowed={holds(thread.access, 'thread.interact') && !thread.archived} /></Dialog>}
+    {catchupOpen && <CatchupRequest threadId={thread.id} open onOpenChange={setCatchupOpen} />}
     {settingUp === thread.id && thread.binding === null && thread.program?.id !== 'orch' && !thread.archived && thread.side_of === null && setupReason === null && <SetUpThread thread={thread} onClose={() => setSettingUp(null)} />}
     {notificationsOpen && <Dialog open onOpenChange={setNotificationsOpen} title={t('thread.bell.label')}><SubscriptionBell thread={thread} /></Dialog>}
     {runningFor === runningScope && !background.closed && <RunningDialog key={JSON.stringify([runningScope, endTarget])} thread={thread.id} close={closeRunning} {...(endTarget === null ? {} : { endTarget })} />}

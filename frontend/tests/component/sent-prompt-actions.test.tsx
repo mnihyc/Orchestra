@@ -26,7 +26,7 @@ function message({ mine = true, unavailable = false } = {}) {
   threadWriter.reset(sync.thread.id, { ...sync, thread: { ...sync.thread, current_turn_id: null, queue: { ...sync.thread.queue, revision: 8 } },
     items: [item], prompt_summaries: [prompt] }, false, captureThreadRead(sync.thread.id));
   const select = vi.fn();
-  const context: TimelineContext = { threadId: sync.thread.id, threadName: sync.thread.name, detail: 'steps', recent: new Set(),
+  const context: TimelineContext = { threadId: sync.thread.id, threadName: sync.thread.name, detail: 'normal',
     layout: 'one', setLayout: () => undefined, meId: mine ? author.id : 'another-person', canInteract: true, canManage: true,
     live: true, lit: null, selection: NOT_PICKING, onVersionSelect: select };
   show(<TimelineContextValue.Provider value={context}><UserMessage item={item} /></TimelineContextValue.Provider>);
