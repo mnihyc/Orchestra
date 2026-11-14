@@ -13,6 +13,12 @@ An option is offered only where its interface or program declares it. Provider l
 
 | Reference | Meaning |
 | --- | --- |
+| `option:ProviderPauseQuery.note` | A short note beside the provider stop, visible in affected threads. |
+| `option:ProviderPauseQuery.notify` | Explicitly send one grouped lifecycle notice per affected person when disabling a provider; omitted is silent. The dialog begins with Operation notices and lets the confirmer change it. |
+| `option:ResourceDeleteQuery.notify` | Explicitly send one grouped lifecycle notice per affected person when deleting a provider or MCP definition; omitted is silent. Provider child-job progress updates the same Inbox item. MCP removal records the definition change while durable machine cleanup continues. |
+| `option:ResourceImpact.notification` | The current notification audience and initial checkbox value for a provider-wide disable, provider deletion or MCP definition deletion; absent for other impact kinds and individual models. |
+| `option:ResourceOperationNotification.audience` | Visible affected people and the count whose association remains private; the confirming person is excluded and each person is counted once. |
+| `option:ResourceOperationNotification.default_on` | The inherited Operation notices default for this consequence; the confirmer may change the choice before acting. |
 | `option:ask.models.*.model` | The enabled API model’s routing name. Together with provider_id it identifies one allowed Ask model; child lists can narrow the choices while retaining the parent’s order. |
 | `option:ask.models.*.provider_id` | The API provider’s identity for this allowed Ask model. The person and current payer must still be allowed to use that provider and model in the conversation’s organization. |
 | `option:AccessOptions.models` | The models. |
@@ -25,6 +31,7 @@ An option is offered only where its interface or program declares it. Provider l
 | `option:BindingOptions.providers` | The providers, each with its models and agents. |
 | `option:BindingOptions.environments` | Every existing environment the caller manages. This topic's come first (its default, then those its threads use or that were made for it), and the rest follow. |
 | `option:BindingOptions.environment_default` | What a new thread does about its environment unless told. |
+| `option:BindingOptions.default_environment` | The environment the nearest setting names as the default, wherever it is set, and why the reader cannot use it when they cannot; absent when no setting names one and when an existing thread is bound again. |
 | `option:BindingOptions.source` | Safe resolved repository settings and the place supplying the repository address. |
 | `option:BindingOptions.access` | The permission page that a thread created here would begin with. |
 | `option:BindingOptions.agent_access` | Agent privilege choices for this creation context. Rebinding an existing holder does not create another contribution and leaves this field absent. |

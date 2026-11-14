@@ -104,6 +104,7 @@ pub(super) struct CurrentImpact {
     activity: activity::PreparedProjection,
     stopping: bool,
     displays: BTreeMap<Id, orch_api_contract::threads::ThreadDisplay>,
+    notification: Option<super::notices::PreparedNotice>,
 }
 
 fn grouped(
@@ -398,6 +399,14 @@ async fn require_impact(
     principal: &Principal,
     target: &FactTarget,
 ) -> ApiResult<String> {
+    if target.object.kind == ObjectKind::McpServer {
+        let row = orch_db::queries::resources::mcp::servers(conn, &[target.object.id])
+            .await?
+            .pop()
+            .ok_or_else(ApiError::not_found)?;
+        super::mcp::require_row(conn, principal, &row, false).await?;
+        return Ok(row.name);
+    }
     let source = facts::authorities(conn, principal, &[target.object.id])
         .await
         .map_err(engine_error)?
@@ -444,15 +453,31 @@ impl native::Selected for Impact {
         Box::pin(async move {
             if !matches!(
                 target.object.kind,
-                ObjectKind::Provider | ObjectKind::Agent | ObjectKind::Environment
+                ObjectKind::Provider
+                    | ObjectKind::Agent
+                    | ObjectKind::Environment
+                    | ObjectKind::McpServer
             ) || target.model_id.is_some() && target.object.kind != ObjectKind::Provider
             {
                 return Err(ApiError::invalid(
                     "object",
-                    "must be a provider, profile, environment or a model of its provider",
+                    "must be a provider, profile, environment, MCP server or a model of its provider",
                 ));
             }
-            let mut bound = roots(subjects::select(conn, &[target.object]).await?, false)?;
+            let selected = subjects::select(conn, &[target.object]).await?;
+            let parents = selected
+                .iter()
+                .filter_map(|subject| subject.environment.clone())
+                .collect::<Vec<_>>();
+            let mut bound = roots(selected, false)?;
+            bound.push(native::Facts::collection(
+                Source::OwnedEnvironments,
+                if parents.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![(KeyTargetKind::Object(ObjectKind::Environment), parents)]
+                },
+            ));
             let known = native::bind_known(ctx, &sources::IMPACT, &bound)?;
             let principal = native::preparation_principal(ctx, conn, caller, &known).await?;
             let name = require_impact(conn, &principal, target).await?;
@@ -480,13 +505,20 @@ impl native::Selected for Impact {
             bound.push(names);
             let threads: BTreeSet<_> = visibility
                 .named_edges(&raw)
-                .filter(|(_, edge)| edge.relation == DependentRelation::Binding)
+                .filter(|(_, edge)| {
+                    matches!(
+                        edge.relation,
+                        DependentRelation::Binding | DependentRelation::Attachment
+                    )
+                })
                 .filter_map(|(_, edge)| {
                     edge.object
                         .filter(|object| object.kind == ObjectKind::Thread)
                         .map(|object| object.id)
                 })
                 .collect();
+            let notification =
+                super::notices::prepare(conn, &principal, target, &raw[0], &threads).await?;
             let displays = node_view::refs(
                 conn,
                 &principal,
@@ -509,6 +541,7 @@ impl native::Selected for Impact {
                     activity,
                     stopping,
                     displays,
+                    notification,
                 },
                 bound,
             ))
@@ -542,6 +575,10 @@ impl native::Selected for Impact {
                 activity: value.activity.project(),
                 stopping: value.stopping,
                 thread_displays: value.displays.clone(),
+                notification: match &value.notification {
+                    Some(notification) => Some(notification.project(conn).await?),
+                    None => None,
+                },
             })
         })
     }
@@ -558,6 +595,14 @@ impl native::Selected for Impact {
                 || !memberships(&opened.raw, &opened.visibility)
                     .is_subset(&memberships(&fresh.raw, &fresh.visibility))
                 || !work_memberships(&opened.activity).is_subset(&work_memberships(&fresh.activity))
+            {
+                return Ok(false);
+            }
+            if let Some(notification) = &opened.notification
+                && !fresh
+                    .notification
+                    .as_ref()
+                    .is_some_and(|fresh| notification.preserves(fresh))
             {
                 return Ok(false);
             }

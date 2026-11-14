@@ -269,6 +269,7 @@ pub(super) async fn create(ctx: &Ctx, body: ForkCreateBody) -> ApiResult<Job> {
         .await?
         .ok_or_else(ApiError::not_found)?;
     let operation = notifications::NotificationOperation {
+        actor: principal.user(),
         id: body.preflight_id,
         kind: "provider_recover".into(),
         name: state.name,

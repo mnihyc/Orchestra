@@ -42662,11 +42662,23 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "resources": [
               "provider",
               "agent",
-              "environment"
+              "environment",
+              "mcp_server"
             ],
             "target": {
               "kind": "resolved",
               "value": "requested_resources"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "environment"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "library_owned_environments"
             },
             "usage": "required"
           },

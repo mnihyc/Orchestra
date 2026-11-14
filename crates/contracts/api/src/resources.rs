@@ -73,6 +73,9 @@ pub struct MachineRef {
     pub platform_os: MachineOs,
     /// Whether it is a person's own machine or one the system manages.
     pub placement: Placement,
+    /// The host of a managed machine, independent of the host's displayed name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<Id>,
 }
 
 /// A host, named wherever another thing points at one.
@@ -2596,9 +2599,10 @@ pub struct ProviderModelUpdateBody {
     pub enabled: Option<bool>,
 }
 
-/// Accepts models that discovery suggested. Each is added with what its suggestion says of it,
-/// except that the service tiers and access programs it lists and a context larger than the usual
-/// one become `parameters.offered`, and none of them is enabled.
+/// Accepts models that discovery suggested. Each is added with what its suggestion says of it, and what
+/// the organization chose to switch on (`models.add_switches_on`) is enabled: by default every effort, the
+/// window, every context size, speed and access program it lists. Whatever is left off stays under
+/// `parameters.offered`, and what a thread starts with is never taken from a suggestion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderModelSuggestionAcceptBody {
@@ -3827,9 +3831,9 @@ crate::endpoints! {
             },
         ]));
     /// Deletes a provider that no thread is bound to, signing its harness out first and retiring its runtime.
-    ProviderDelete: DELETE "/providers/{id}", Permission("provider.manage"), none, none, none, 204;
+    ProviderDelete: DELETE "/providers/{id}", Permission("provider.manage"), query crate::resource_facts::ResourceDeleteQuery, none, none, 204;
     /// Switches a provider off.
-    ProviderDisable: POST "/providers/{id}/disable", Permission("provider.manage"), query crate::resource_facts::ResourcePauseQuery, none, json Provider, 200,
+    ProviderDisable: POST "/providers/{id}/disable", Permission("provider.manage"), query crate::resource_facts::ProviderPauseQuery, none, json Provider, 200,
         operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Switches a provider on again.
     ProviderEnable: POST "/providers/{id}/enable", Permission("provider.manage"), query crate::resource_facts::ResourceResumeQuery, none, json Provider, 200,
@@ -4052,7 +4056,7 @@ crate::endpoints! {
     McpServerUpdate: PATCH "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), none, json McpServerUpdateBody, json McpServerUpdateResponse, 200,
         operation Op::receipt(&Op::facets(&crate::mcp_sources::UPDATE_FACETS));
     /// Deletes an MCP server; one imported from a machine has that machine's connector forget its copy.
-    McpServerDelete: DELETE "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), none, none, none, 204,
+    McpServerDelete: DELETE "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), query crate::resource_facts::ResourceDeleteQuery, none, none, 204,
         operation Op::facets(&[
             Facet::required(Manage, &[Object(K::McpServer)], Target::Resolved("server_subject")),
             Facet::required(Manage, &[Object(K::Machine)], Target::ResolvedCollection("forgotten_copies")),

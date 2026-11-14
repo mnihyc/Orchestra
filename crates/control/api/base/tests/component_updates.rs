@@ -51,6 +51,19 @@ async fn a_contended_physical_update_fence_returns_retry_without_waiting_in_a_tr
     assert!(matches!(attempted, Err(orch_db::DbError::Retry)));
 }
 
+#[test]
+fn the_system_states_that_a_connector_older_than_its_release_can_carry_has_to_update() {
+    use orch_link_contract::version::Standing;
+    let versions = orch_api_core::backplane::LinkSettings::from_config(
+        &orch_config::server::ServerConfig::default(),
+        "0.1.3",
+    )
+    .versions;
+    assert_eq!(versions.recommended, "0.1.3");
+    assert_eq!(versions.standing("0.1.2"), Ok(Standing::TooOld));
+    assert_eq!(versions.standing("0.1.3"), Ok(Standing::Current));
+}
+
 async fn physical(world: &World, owner: &Who, enabled: bool) -> Id {
     let mut conn = world.conn().await;
     let id = fixtures::insert_persons_machine(&mut conn, owner.id(), "workstation")

@@ -306,6 +306,7 @@ CREATE TABLE hosts (
     load jsonb DEFAULT '{}'::jsonb NOT NULL,
     load_at timestamp with time zone,
     storages jsonb DEFAULT '[]'::jsonb NOT NULL,
+    mount_sizes jsonb DEFAULT '[]'::jsonb NOT NULL,
     schedulable boolean DEFAULT true NOT NULL,
     disabled boolean DEFAULT false NOT NULL,
     when_full text,

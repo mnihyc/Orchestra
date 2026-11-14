@@ -1216,3 +1216,70 @@ async fn selecting_a_different_found_definition_needs_both_server_management_and
     let audit:Json=sqlx::query_scalar("SELECT details FROM audit_log WHERE action='mcp.imported' AND object_id=$1 ORDER BY at DESC,id DESC LIMIT 1").bind(selected.id).fetch_one(&world.db.pool).await.unwrap();
     assert_eq!(audit["definition_after"], json!(different));
 }
+
+#[tokio::test]
+async fn removing_a_shared_mcp_server_notifies_its_affected_environment_owner_only_when_chosen() {
+    for notify in [false, true] {
+        let world = World::new().await;
+        let c = company(&world).await;
+        let (env, _) = environment(&world, &c, true).await;
+        let made = world
+            .app
+            .call(McpServerCreate, &[])
+            .token(&c.boss.token)
+            .body(&McpServerCreateBody {
+                name: "notice-tools".into(),
+                description: None,
+                home_id: Some(c.acme),
+                spec: spec(),
+                secrets: None,
+                access: Some(NewResourceAccess::Defaults),
+            })
+            .send()
+            .await
+            .ok();
+        sqlx::query("UPDATE environments SET config=jsonb_set(config,'{mcp.enabled}',jsonb_build_object($2::text,true),true) WHERE id=$1")
+            .bind(env).bind(made.id.to_string()).execute(&world.db.pool).await.unwrap();
+        let impact = world
+            .app
+            .call(orch_api_contract::resource_facts::ResourceImpactRead, &[])
+            .token(&c.boss.token)
+            .body(&json!({"object":{"kind":"mcp_server","id":made.id},"model_id":null}))
+            .send()
+            .await;
+        assert_eq!(impact.status, 200, "{:?}", impact.body);
+        let data: Json = serde_json::from_slice(&impact.raw).unwrap();
+        assert!(data["notification"].is_object());
+        let reply = world
+            .app
+            .call(McpServerDelete, &[&made.id])
+            .token(&c.boss.token)
+            .raw_query(if notify {
+                "notify=true"
+            } else {
+                "notify=false"
+            })
+            .send()
+            .await;
+        assert_eq!(reply.status, 204, "{:?}", reply.body);
+        let notices: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+        )
+        .bind(c.admin.id())
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(notices, i64::from(notify));
+        if notify {
+            let data: Json = sqlx::query_scalar(
+                "SELECT data FROM notifications WHERE user_id=$1 AND kind='environment.attention'",
+            )
+            .bind(c.admin.id())
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+            assert_eq!(data["actor"], json!(c.boss.id()));
+            assert_eq!(data["path"], format!("/resources/environments/{env}"));
+        }
+    }
+}
