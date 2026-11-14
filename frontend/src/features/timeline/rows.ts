@@ -6,13 +6,15 @@
  * of the thread's history that one person made within a minute become one; the "New" line stands
  * before the first thing the reader has not seen; a turn that is over ends in its footer; the next
  * waiting inputs belong to the queue above the composer; and what the thread is doing now, when it
- * is no item, is the last line.
+ * is no item, is the last line. The harness's own state (`rowKinds.ts`) is drawn only when the reader
+ * asked for diagnostics; the beginning of a thread is one line that opens into the lines it stands for.
  */
 import { approvalSnapshot } from '@/features/approvals/snapshot';
 import type { SendingInput } from '@/features/composer/Draft';
 import type { Item, Thread, ThreadInput, Turn } from '@/generated/api-types';
 import { runningTurn, threadReadOnly, type ThreadView, waitingInputs } from '@/realtime/stores/thread';
 import { hiddenFailureItem } from './failures';
+import { noticeKey, rowKind, toldReportKey } from './rowKinds';
 
 export type WorkDetail = 'steps' | 'summary' | 'everything';
 
@@ -35,7 +37,9 @@ export type Row =
   /** What the thread is doing, when that is no item. */
   | { kind: 'status'; key: string }
   /** Where what an adopted session held before Orch took it in begins: the heading of those items. */
-  | { kind: 'before'; key: string };
+  | { kind: 'before'; key: string }
+  /** How the thread began: it was created, its source prepared, its agent started; drawn as one line that opens into those lines. */
+  | { kind: 'start'; key: string; ids: readonly string[] };
 
 export interface RowOptions {
   detail: WorkDetail;
@@ -44,6 +48,8 @@ export interface RowOptions {
   foldOpened: ReadonlySet<string>;
   /** The person looking: what they wrote themselves is never "new" to them. */
   meId: string | null;
+  /** Whether the harness's own state is drawn too; it is kept either way. */
+  diagnostics?: boolean;
 }
 
 /** Items that are the agent's work between what it says: they fold when their turn does. */
@@ -118,6 +124,54 @@ export function buildRows(view: ThreadView, options: RowOptions): Row[] {
   const order = view.order.filter((id) => !contentSources.has(id));
   const rows: Row[] = [];
   const recent = recentTurns(turns);
+
+  // A contradiction between what the person chose and what the harness reports is told once, by the line of the
+  // report; the notice error that the harness adds beside it belongs with the diagnostics.
+  const told = new Set<string>();
+  for (const id of order) {
+    const item = items.get(id);
+    const key = item === undefined ? null : toldReportKey(item);
+    if (key !== null) told.add(key);
+  }
+  const isDiagnostics = (item: Item): boolean => {
+    if (rowKind(item) === 'diagnostics') return true;
+    const key = noticeKey(item);
+    return key !== null && told.has(key);
+  };
+
+  // An earlier message of a turn that was not given as its answer, and that a later message of the same turn repeats
+  // word for word, stands once: as the later one.
+  const repeated = new Set<string>();
+  const later = new Set<string>();
+  for (let at = order.length - 1; at >= 0; at--) {
+    const id = order[at] ?? '';
+    const item = items.get(id);
+    if (item?.kind !== 'agent_message' || item.turn_id === null) continue;
+    const said = item.payload.text.trim();
+    if (said.length === 0) continue;
+    const key = JSON.stringify([item.turn_id, item.stream, said]);
+    if (item.payload.phase !== 'final' && later.has(key)) repeated.add(id);
+    later.add(key);
+  }
+
+  // How the thread began, before its first turn: created, its source prepared, its agent started.
+  const startIds: string[] = [];
+  let started = false;
+  if (!view.hasOlder) {
+    for (const id of order) {
+      const item = items.get(id);
+      if (item === undefined) continue;
+      if (item.kind === 'user_message' || (item.kind !== 'marker' && item.turn_id !== null)) break;
+      if (item.kind !== 'marker') continue;
+      const beginning = item.payload;
+      if (beginning.marker === 'created' || beginning.marker === 'source_prepared') startIds.push(id);
+      else if (beginning.marker === 'segment_started' && !beginning.data.resumed && !started) {
+        started = true;
+        startIds.push(id);
+      }
+    }
+  }
+  const startLines = started ? new Set(startIds) : new Set<string>();
 
   // The turns whose work has a step in it, and the last place each turn is seen in the order.
   const lastOfTurn = new Map<string, {last:number;inputItemId?:string}>();
@@ -194,18 +248,34 @@ export function buildRows(view: ThreadView, options: RowOptions): Row[] {
     if (item === undefined) return;
     const preceding = sideBefore.get(index);
     if (preceding !== undefined) { flushMarkers(); rows.push(...preceding); }
+    // What stays out of the reading (the harness's own state, an answer said twice) leaves no line, no divider and no heading.
+    const hidden = (options.diagnostics !== true && isDiagnostics(item)) || repeated.has(id);
     // Items of a sub-agent's stream are not in the order; the order is the main stream.
-    placeDivider(item);
+    if (!hidden) placeDivider(item);
 
     // A failed adoption has no historical items yet. Its before-Orch band still explains the missing record.
     const missingHistory = item.kind === 'marker' && item.payload.marker === 'adopted' && item.payload.data.history_missing !== null;
-    if (!beforePlaced && (item.before_orch || missingHistory)) {
+    if (!hidden && !beforePlaced && (item.before_orch || missingHistory)) {
       flushMarkers();
       beforePlaced = true;
       rows.push({ kind: 'before', key: 'before-orch' });
     }
 
-    if (item.kind === 'marker' && (item.payload.marker === 'side_started' || item.payload.marker === 'side_closed')) {
+    if (startLines.has(id)) {
+      if (options.hideHistory) {
+        // History lines are not drawn.
+      } else if (options.diagnostics === true) {
+        // Where the reader asked for everything, each line of the beginning stands as it was made.
+        flushMarkers();
+        rows.push({ kind: 'markers', key: `markers:${id}`, ids: [id] });
+      } else if (id === startIds[0]) {
+        // The lines of the beginning stand in one line, where the first of them stands.
+        flushMarkers();
+        rows.push({ kind: 'start', key: 'start', ids: startIds });
+      }
+    } else if (hidden) {
+      // Kept as it was, and drawn where the reader asked for it.
+    } else if (item.kind === 'marker' && (item.payload.marker === 'side_started' || item.payload.marker === 'side_closed')) {
       flushMarkers();
       // A matching close is part of the source row. A window with only the close still says what ended.
       if (item.payload.marker === 'side_closed' && !starts.has(item.payload.data.side.id)) rows.push({ kind: 'side', key: id, id });
@@ -218,8 +288,12 @@ export function buildRows(view: ThreadView, options: RowOptions): Row[] {
       // A turn's recorded cause precedes its output even when ordinary lifecycle history is hidden.
       flushMarkers();
       rows.push({ kind: 'item', key: id, id });
+    } else if (item.kind === 'marker' && item.payload.marker === 'harness_changed' && rowKind(item) === 'conversation') {
+      // Warnings and failures explain this answer even when lifecycle history is hidden.
+      flushMarkers();
+      rows.push({ kind: 'item', key: id, id });
     } else if (item.kind === 'marker') {
-      if (!options.hideHistory) {
+      if (!options.hideHistory || (options.diagnostics === true && rowKind(item) === 'diagnostics')) {
         const last = pendingMarkers.length > 0 ? items.get(pendingMarkers[pendingMarkers.length - 1] ?? '') : undefined;
         const joins =
           last?.kind === 'marker' && last.payload.marker !== 'agent_history' && item.payload.marker !== 'agent_history' &&
@@ -306,6 +380,8 @@ export function estimateRow(row: Row, items: ReadonlyMap<string, Item>): number 
       return 32;
     case 'before':
       return 56;
+    case 'start':
+      return 32;
     case 'side':
       // A folded aside is an ordinary control row; open lanes are measured by the list.
       return 36;

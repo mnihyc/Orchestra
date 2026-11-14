@@ -5,6 +5,7 @@ import type { CapStatus, ProviderChoiceUsage } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { detailEnvironment, detailHost } from '../component/resource-detail-fixtures';
 import { planProvider } from './provider-plan-fixtures';
+import { host as hostPlace } from './start-fixtures';
 import { choiceCap } from './resource-facts-fixtures';
 
 const now = Date.parse('2026-10-25T12:00:00Z');
@@ -74,9 +75,16 @@ describe('model hints', () => {
 describe('host and environment hints', () => {
   it('uses the server fullness decision and separates measured memory from declarations', () => {
     const host = { ...detailHost, usage: { cpu_percent_milli: 12_500, memory_used_mb: 4096, observed_at: new Date(now).toISOString() }, full: false };
-    expect(hostHint({ kind: 'host', host }, context())).toEqual({ text: '1 running · 25% memory', warning: false });
+    expect(hostHint({ kind: 'host', host }, context())).toEqual({ text: '1 running · 12 GiB free of 16 GiB memory', warning: false });
     expect(hostHint({ kind: 'host', host: { ...host, full: true } }, context())).toEqual({ text: 'Full', warning: true });
     expect(hostHint({ kind: 'host', host: { ...host, machine: { ...host.machine, online: false }, offline_since: '2026-10-25T14:03:00Z' } }, context())).toEqual({ text: 'Offline since 14:03', warning: true });
+  });
+  it('says what a host has free of what it has, measured, and never what its environments declare they need', () => {
+    const place = hostPlace('h1', 'Build host', { declared: { cpu_millis: 9000, memory_mb: 99_999, disk_gb: 999 } });
+    expect(hostHint({ kind: 'host', host: place.host, place }, context())).toEqual({ text: '1 running · 7 GiB free of 8 GiB memory · 92 of 100 GB disk free', warning: false });
+    const untold = hostPlace('h1', 'Build host', { used: { cpu_percent: null, memory_mb: null, disk_gb: null } });
+    expect(hostHint({ kind: 'host', host: untold.host, place: untold }, context()).text).toBe('1 running · 8 GiB memory');
+    expect(hostHint({ kind: 'host', host: place.host, place }, context()).text).not.toMatch(/declared|%/u);
   });
   it('shows activity, stopped idle time and actual failures without guessing a loss', () => {
     const environment = { ...detailEnvironment, activity: { running_threads: 2, idle_threads: 1, blocked_threads: 0, active_turns: 2, open_shells: 0 } };

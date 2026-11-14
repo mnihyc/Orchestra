@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-adapter-codex --lib
+test -p orch-adapter-codex --test fake --test performance --test recorded_failures
+test -p orch-engine --test goals
+test -p orch-api-core --test input_schedules --test schedule_operation_scopes
+web typecheck
+web lint
+web test -- tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/api-error-words.test.ts tests/component/harness-unrecognized-marker.test.tsx tests/component/thread-turn-files.test.tsx tests/component/goal-mode.test.tsx tests/component/send-later.test.tsx tests/unit/send-later-api.test.ts tests/unit/send-later-draft.test.ts tests/unit/agent-schedule-requests.test.ts tests/unit/agent-schedule-facts.test.ts tests/unit/cache-other-shapes.test.ts
