@@ -1,0 +1,7 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --test thread_opening_scopes --test thread_child_windows --test threads_settings --test threads_read --test threads_bound
+web typecheck
+web lint
+web test -- tests/component/thread-opening.test.tsx tests/component/workbench-content-routing.test.tsx tests/unit/thread-opening-choices-double.test.ts tests/unit/thread-read-handles.test.ts tests/unit/side-opening-double.test.ts tests/component/composer-controls.test.tsx tests/component/composer-mode-row.test.tsx tests/component/composer-delivery.test.tsx tests/component/pasted-text.test.tsx tests/component/pasted-pending.test.tsx tests/component/paste-delivery-choice.test.tsx tests/component/visible-options.test.tsx

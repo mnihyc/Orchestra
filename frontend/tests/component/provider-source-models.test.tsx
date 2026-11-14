@@ -10,9 +10,9 @@ import { answerChanges } from '@/api/actAnswers';
 import { applyChanges } from '@/api/acts';
 import { ProviderModels } from '@/features/resources/providers/Models';
 import { ProviderSetupNotice } from '@/features/resources/providers/SetupNotice';
-import type { Provider,ProviderModel,ProviderModelSuggestionAcceptReply } from '@/generated/api-types';
+import type { ModelSuggestion,Provider,ProviderModel,ProviderModelSuggestionAcceptReply } from '@/generated/api-types';
 import { i18n,setLocale } from '@/i18n';
-import { planProvider,SOURCE_DESCRIPTOR } from '../unit/provider-plan-fixtures';
+import { listUpstreamModels,planProvider,SOURCE_DESCRIPTOR } from '../unit/provider-plan-fixtures';
 import { show } from './support';
 
 vi.mock('@/api/resources',async(load)=>({...await load<typeof Resources>(),acceptSuggestions:vi.fn()}));
@@ -21,13 +21,14 @@ function Page({initial}:{initial:Provider}) {
   const query=useQuery({queryKey:providerKey(initial.id),queryFn:read,initialData:initial,staleTime:Infinity});
   return <><ProviderSetupNotice provider={query.data} manage currentTab="models" onTab={vi.fn()}/><ProviderModels provider={query.data} manage/></>;
 }
+const LISTED:ModelSuggestion[]=[{model_name:'gpu-small',display_name:'GPU Small',listed:true,parameters:{context_window:32768}},
+  {model_name:'gpu-large',display_name:'GPU Large',listed:true,parameters:{context_window:131072}}];
 function sourceProvider():Provider {
   const provider=planProvider({kind:'api',status:'needs_setup',status_detail:'it needs an enabled model',models:[],
     upstreams:[{protocol:'openai-chat',base_url:'https://gpu.example/v1',options:{auth:'none'}}]});
   provider.sources.models={...provider.sources.models,by:'program',name:'gpu-box',descriptor:{...SOURCE_DESCRIPTOR,name:'gpu-box',title:'GPU box'}};
   provider.facts_state.models='told';
-  provider.facts.models=[{model_name:'gpu-small',display_name:'GPU Small',listed:true,parameters:{context_window:32768}},
-    {model_name:'gpu-large',display_name:'GPU Large',listed:true,parameters:{context_window:131072}}];
+  provider.facts.models_count=LISTED.length;
   return provider;
 }
 afterEach(async()=>{cleanup();vi.clearAllMocks();delete document.documentElement.dataset.theme;await setLocale('en');});
@@ -35,7 +36,7 @@ afterEach(async()=>{cleanup();vi.clearAllMocks();delete document.documentElement
 for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'])it(`accepts GPU Small and GPU Large without a false setup error or another read (${locale}, ${theme})`,async()=>{
   await setLocale(locale);document.documentElement.dataset.theme=theme;
   const initial=sourceProvider();const client=new QueryClient({defaultOptions:{queries:{retry:false},mutations:{retry:false}}});
-  const added:ProviderModel[]=(initial.facts.models ?? []).map((proposal)=>({...MODEL_ESTIMATE,id:proposal.model_name,model_name:proposal.model_name,
+  const added:ProviderModel[]=LISTED.map((proposal)=>({...MODEL_ESTIMATE,id:proposal.model_name,model_name:proposal.model_name,
     display_name:proposal.display_name,parameters:proposal.parameters,groups:[],enabled:true,source:'suggested'}));
   const ready={...initial,status:'ready' as const,status_detail:null,models:added};
   const reply:ProviderModelSuggestionAcceptReply={added,provider:ready};
@@ -47,6 +48,7 @@ for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'])
       resolve(reply.added);
     };
   }));
+  listUpstreamModels(client,initial,LISTED);
   const user=userEvent.setup();show(<QueryClientProvider client={client}><Page initial={initial}/></QueryClientProvider>);
   expect(await screen.findByText('GPU Small',{exact:true})).toBeVisible();expect(screen.getByText('GPU Large',{exact:true})).toBeVisible();
   expect(screen.queryByText(i18n.t('providers.phrase.needsModel'))).not.toBeInTheDocument();
@@ -63,7 +65,9 @@ for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'])
 
 it('keeps an actual models-source failure visible on its recovery panel',()=>{
   const provider=sourceProvider();provider.sources.models.last_error={code:'unavailable',message:'GPU box could not be read',at:'2026-10-16T00:00:00Z'};
-  show(<Page initial={provider}/>);
+  const client=new QueryClient({defaultOptions:{queries:{retry:false},mutations:{retry:false}}});
+  listUpstreamModels(client,provider,LISTED);
+  show(<Page initial={provider}/>,client);
   expect(screen.getByRole('alert')).toBeVisible();
   expect(screen.queryByText(i18n.t('providers.phrase.needsModel'))).not.toBeInTheDocument();
 });

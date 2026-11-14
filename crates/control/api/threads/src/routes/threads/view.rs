@@ -341,7 +341,7 @@ async fn input_access(
 /// rows of its four doors, which are the environment's and on no thread's page. Nothing for a
 /// thread that has no environment, or whose environment is gone. Whether the caller manages it,
 /// which is what deciding where the thread runs takes, is among them.
-async fn held_on_environment(
+pub(super) async fn held_on_environment(
     conn: &mut Conn,
     principal: &Principal,
     environment: Option<Id>,

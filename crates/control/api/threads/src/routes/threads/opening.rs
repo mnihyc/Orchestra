@@ -20,8 +20,6 @@ use crate::routes::access::page::NameBounds;
 
 use crate::routes::settings::readers;
 
-use crate::routes::settings::readers::PreparedSettings;
-
 use crate::routes::usage::caps;
 
 use crate::routes::usage::caps::PreparedReached;
@@ -57,8 +55,6 @@ use orch_api_contract::threads::ThreadOpening;
 use orch_api_contract::threads::ThreadOpeningGet;
 
 use orch_api_contract::threads::ThreadOpeningGetQuery;
-
-use orch_api_contract::threads::ThreadOutlineGetQuery;
 
 use orch_api_contract::threads::ThreadSyncGetQuery;
 
@@ -175,11 +171,9 @@ struct Witness {
 
 struct Prepared {
     query: ThreadOpeningGetQuery,
-    settings: PreparedSettings,
     reached: Option<PreparedReached>,
     provider: Option<crate::routes::resources::providers::PreparedProjection>,
     bounds: NameBounds,
-    offer_modes: bool,
     pending: Option<crate::input_schedules::PreparedThreadPending>,
     witness: Witness,
 }
@@ -443,11 +437,9 @@ impl native::Selected for Opening {
             Ok((
                 Prepared {
                     query: query.clone(),
-                    settings,
                     reached,
                     provider,
                     bounds,
-                    offer_modes,
                     pending,
                     witness,
                 },
@@ -472,7 +464,16 @@ impl native::Selected for Opening {
     ) -> BoxFuture<'a, ApiResult<ThreadOpening>> {
         Box::pin(async move {
             let query = &value.query;
-            let sync = super::read::sync_in(
+            let configured = orch_settings::get::<u32>(
+                conn,
+                orch_settings::Place::Node(ctx.id("id")?),
+                orch_settings_contract::registry::keys::THREADS_OPENING_ITEMS,
+            )
+            .await
+            .map_err(ApiError::internal)?
+            .unwrap_or(40);
+            let limit = super::read::limit_of(query.limit, configured, u32::MAX)?;
+            let sync = super::read::sync_window_in(
                 ctx,
                 conn,
                 ThreadSyncGetQuery {
@@ -481,17 +482,7 @@ impl native::Selected for Opening {
                     projection_revision: query.projection_revision,
                     ..Default::default()
                 },
-            )
-            .await?;
-            let outline = super::read::outline_in(
-                ctx,
-                conn,
-                ThreadOutlineGetQuery {
-                    limit: query.limit,
-                    continuation_id: query.continuation_id,
-                    projection_revision: query.projection_revision,
-                    ..Default::default()
-                },
+                limit,
             )
             .await?;
             let draft = if value.witness.draft {
@@ -499,7 +490,7 @@ impl native::Selected for Opening {
             } else {
                 None
             };
-            let parameters = if value.witness.parameters {
+            let mut parameters = if value.witness.parameters {
                 available(
                     super::parameters::parameters_in(
                         ctx,
@@ -539,15 +530,14 @@ impl native::Selected for Opening {
                 }
                 None => None,
             };
-            let settings = readers::show_settings_with_controls(
-                ctx,
-                conn,
-                principal,
-                &value.settings,
-                &value.bounds,
-                value.offer_modes,
-            )
-            .await?;
+            if let Some(parameters) = &mut parameters {
+                let selected = parameters.model.value.as_deref();
+                parameters
+                    .model
+                    .options
+                    .retain(|option| Some(option.model_name.as_str()) == selected);
+                parameters.model.options_partial = true;
+            }
             let follows_active = sync
                 .projection
                 .as_ref()
@@ -598,8 +588,6 @@ impl native::Selected for Opening {
                 draft,
                 parameters,
                 limits,
-                settings,
-                outline,
                 gateway,
                 pending_agent_schedules,
             })

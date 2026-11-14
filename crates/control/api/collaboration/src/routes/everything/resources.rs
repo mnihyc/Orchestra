@@ -166,6 +166,16 @@ pub(super) async fn page(
     Ok(keyed(values))
 }
 
+/// The rows of a list as its table draws them, where the kind has a smaller row than its whole view: a
+/// provider's (see `Provider::thin_for_list`).
+pub(super) fn list_rows(views: &mut HashMap<String, EverythingResource>) {
+    for view in views.values_mut() {
+        if let EverythingResource::Provider(provider) = view {
+            provider.thin_for_list();
+        }
+    }
+}
+
 fn keyed(values: Vec<EverythingResource>) -> HashMap<String, EverythingResource> {
     values
         .into_iter()

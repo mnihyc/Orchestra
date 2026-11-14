@@ -2318,6 +2318,8 @@ registry! {
         "Shared search result budget", "The result budget advertised to this thread's agent and used by shared search. Defaults to 200; byte and time budgets still produce a continuation.";
     ORCH_TOOLS_SEARCH_CONTEXT = "orch_tools.search_context", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("5"), int(0, Unit::Count),
         "Shared search context budget", "The surrounding-line budget advertised to this thread's agent and used by shared-search snippets. Defaults to 5; increase it for wider context.";
+    THREADS_OPENING_ITEMS = "threads.opening_items", Collaboration, Parameter, SYSTEM_TO_THREAD, Replace, value("40"), int(1, Unit::Count),
+        "Thread opening items", "Timeline items in the first screen. Older items remain available by scrolling; a reader may request another window size.";
     THREADS_OFFLINE_DEADLINE = "threads.offline_deadline", Agent, Parameter, SYSTEM_TO_THREAD, Replace, NULL, Schema::Nullable { of: &int(0, Unit::Seconds) },
         "Offline turn deadline", "End the active turn after this many offline seconds; none keeps waiting. Each outage retains the setting it began with.";
     THREADS_BACKGROUND_WAKE = "threads.background_wake", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("\"on\""), choice(&["on", "off"]),

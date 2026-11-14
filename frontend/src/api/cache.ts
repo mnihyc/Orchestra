@@ -391,14 +391,23 @@ function writeRow(cache: QueryClient, change: RowChange['row'], thread?: Thread)
   else if (!threadView && change.value !== null && change.partial !== true) cache.setQueryData([detail, change.id], change.value);
 }
 
+/**
+ * Whether a row is the whole view of its resource. A provider's row in a list, or a thread's own row of its provider, says how
+ * many models there are and holds none of them: it does not stand for the provider's page.
+ */
+function wholeRow(kind: string, row: Record<string, unknown>): boolean {
+  if (kind !== 'provider' || typeof row.models_count !== 'number') return true;
+  return Array.isArray(row.models) && row.models.length >= row.models_count;
+}
+
 /** Use a list's already-authorized native row before asking the API for the same detail. */
 export function cachedRow<Kind extends keyof CachedResources>(cache: QueryClient, kind: Kind, id: string): CachedResources[Kind] | undefined {
   const find = (value: unknown): Record<string, unknown> | undefined => {
     if (Array.isArray(value)) {
       for (const one of value as unknown[]) { const found = find(one); if (found !== undefined) return found; }
     } else if (record(value)) {
-      if (value.id === id && value.content_hidden !== true && record(value.resource) && value.resource.kind === kind && record(value.resource.value)) return value.resource.value;
-      if (value.id === id && value.content_hidden !== true && record(value.access) && !('resource' in value)) return value;
+      if (value.id === id && value.content_hidden !== true && record(value.resource) && value.resource.kind === kind && record(value.resource.value) && wholeRow(kind, value.resource.value)) return value.resource.value;
+      if (value.id === id && value.content_hidden !== true && record(value.access) && !('resource' in value) && wholeRow(kind, value)) return value;
       for (const one of Object.values(value)) if (Array.isArray(one) || record(one)) { const found = find(one); if (found !== undefined) return found; }
     }
     return undefined;

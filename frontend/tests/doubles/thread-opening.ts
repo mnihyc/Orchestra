@@ -34,14 +34,14 @@ export async function threadOpening(world: World, person: Person, threadId: stri
     draft: await optional(`/threads/${threadId}/draft`) as ThreadOpening['draft'],
     parameters: await optional(`/threads/${choices}/parameters`) as ThreadOpening['parameters'],
     limits: await optional(`/threads/${choices}/limits`) as ThreadOpening['limits'],
-    settings: await read(`/nodes/${choices}/settings`) as ThreadOpening['settings'],
-    outline: parent === undefined
-      ? await read(`/threads/${threadId}/outline`, new URLSearchParams({ limit: String(limit) })) as ThreadOpening['outline']
-      : world.workspace.outlineSnapshot(sync, new URLSearchParams({ limit: String(limit) })),
     gateway: sync.projection?.follows_active === false ? null : {
       status: 'ready' as const, data: await read(`/threads/${threadId}/gateway`) as NonNullable<Extract<NonNullable<ThreadOpening['gateway']>, { status: 'ready' }>['data']>,
     },
     ...(pending === undefined ? {} : { pending_agent_schedules: pending }),
   };
+  if (opening.parameters !== null) {
+    opening.parameters.model.options = opening.parameters.model.options.filter((option) => option.model_name === opening.parameters?.model.value);
+    opening.parameters.model.options_partial = true;
+  }
   return opening;
 }
