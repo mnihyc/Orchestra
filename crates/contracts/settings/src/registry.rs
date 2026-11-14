@@ -2462,7 +2462,7 @@ registry! {
         "Upstreams without TLS", "Whether an API endpoint may be reached without TLS, as for a model server on a private network.";
     PROVIDERS_MODEL_GROUPS_MAX = "providers.model_groups_max", Providers, Parameter, SYSTEM_ORG, Replace, value("8"), int(0, Unit::Count),
         "Model groups", "The maximum number of named groups per model. The default is 8 and can be raised; 0 allows no new group memberships. Existing memberships are kept.";
-    PROVIDERS_EXPIRY_NOTICE_DAYS = "providers.expiry_notice_days", Providers, Parameter, SYSTEM_ORG, Replace, value("14"), int(0, Unit::Days),
+    PROVIDERS_EXPIRY_NOTICE_DAYS = "providers.expiry_notice_days", Providers, Parameter, UNIT_RUNTIME_SCOPES, Replace, value("14"), int(0, Unit::Days),
         "Expiry notice", "How many days before a token that a provider runs on lapses its managers are told; 0 tells them only once it has lapsed.";
     PROVIDERS_SUBSCRIPTION_HARNESSES = "providers.subscription_harnesses", Providers, Policy, SYSTEM_ORG, Intersect, UNSET, set(&TEXT),
         "Subscriptions allowed", "The kinds of harness whose subscription may be added as a provider here.";
@@ -2531,6 +2531,8 @@ registry! {
         "Allowed arrangements", "The arrangement types that may be used here.";
     CREDENTIAL_REFRESH_MARGIN_SECS = "credential.refresh_margin_secs", Confinement, Policy, SYSTEM, Replace, value("300"), int(30, Unit::Seconds),
         "Credential refresh margin", "A shared copy of a credential that expires is renewed when fewer than this many seconds remain.";
+    CREDENTIAL_REFRESH_MIN_INTERVAL_SECS = "credential.refresh_min_interval_secs", Confinement, Parameter, SYSTEM, Replace, value("30"), int(0, Unit::Seconds),
+        "Credential renewal interval", "Minimum seconds between automatic renewals of a shared credential. Harness requests are served as soon as the current issue finishes; 0 imposes no interval.";
     AUTO_TITLE = "auto.title", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("\"harness\""), choice(&["off", "first_input", "harness", "summarizer"]),
         "Titles", "Who writes automatic titles: nobody, the first input, the harness, or the summarizer.";
     AUTO_TAGS = "auto.tags", Automation, Parameter, SYSTEM_TO_THREAD, Replace, value("\"off\""), OFF_OR_SUMMARIZER,
@@ -2747,6 +2749,13 @@ registry! {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_provider_can_override_the_notice_before_its_credential_expires() {
+        use super::*;
+        let def = get(keys::PROVIDERS_EXPIRY_NOTICE_DAYS).unwrap();
+        assert!(def.set_at(Scope::Provider));
+    }
+
     #[test]
     fn messaging_defaults_keep_wake_explicit_and_hourly_budgets_separate() {
         use super::*;

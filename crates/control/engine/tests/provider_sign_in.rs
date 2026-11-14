@@ -628,6 +628,64 @@ async fn a_look_at_a_sign_in_that_still_works_tells_nobody() {
 }
 
 #[tokio::test]
+async fn a_provider_can_choose_its_expiry_notice_and_unset_it_to_follow_its_home() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-with-a-provider-notice", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "A notice chosen for this provider").await;
+    let (_runtime, _unit) = made(&world, &host, provider).await;
+    world
+        .set(world.root, "providers.expiry_notice_days", json!(0))
+        .await;
+    sqlx::query(
+        "UPDATE providers SET status = 'ready', runtime_config = runtime_config || $3,
+                facts = jsonb_build_object('credential', jsonb_build_object(
+                    'method', 'setup_token', 'yields', 'token', 'expires_at', $2::text))
+          WHERE id = $1",
+    )
+    .bind(provider)
+    .bind((Utc::now() + Duration::days(10)).to_rfc3339())
+    .bind(json!({"providers.expiry_notice_days":14}))
+    .execute(world.pool.pool())
+    .await
+    .unwrap();
+    let told = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM notifications WHERE user_id = $1 AND kind = 'provider.attention'",
+        )
+        .bind(world.ada)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap()
+    };
+    eventually(
+        "this provider's notice to override the home's disabled notice",
+        || async { told().await == 1 },
+    )
+    .await;
+    world
+        .set(world.root, "providers.expiry_notice_days", json!(14))
+        .await;
+    // A different expiry has its own notice. Removing the override makes this one follow home.
+    sqlx::query(
+        "UPDATE providers SET runtime_config = runtime_config - 'providers.expiry_notice_days',
+                facts = jsonb_set(facts, '{credential,expires_at}', to_jsonb($2::text))
+          WHERE id = $1",
+    )
+    .bind(provider)
+    .bind((Utc::now() + Duration::days(11)).to_rfc3339())
+    .execute(world.pool.pool())
+    .await
+    .unwrap();
+    eventually(
+        "the provider with no override to follow the home's notice",
+        || async { told().await == 2 },
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn a_token_whose_end_is_known_is_told_ahead_once_and_again_when_it_has_lapsed_and_the_provider_needs_a_sign_in()
  {
     let world = World::new().await;

@@ -43,6 +43,8 @@ export interface FieldFormProps {
    * the line that would stand under the field. A field that declares no help is given nothing to draw.
    */
   helpFor?: (field: FieldDeclaration) => ReactNode;
+  /** Stored scalar secrets show a mask without supplying a value to the draft. */
+  storedSecrets?: readonly string[];
 }
 
 const asText = (value: FormValue | undefined): string => (typeof value === 'string' ? value : '');
@@ -281,7 +283,7 @@ function SecretText({
   );
 }
 
-export function FieldForm({ fields, values, onChange, errors = {}, disabled = false, className, helpFor }: FieldFormProps) {
+export function FieldForm({ fields, values, onChange, errors = {}, disabled = false, className, helpFor, storedSecrets = [] }: FieldFormProps) {
   const { t } = useTranslation();
   return (
     <div className={cx('flex flex-col gap-4', className)}>
@@ -334,6 +336,7 @@ export function FieldForm({ fields, values, onChange, errors = {}, disabled = fa
             return (
               <PasswordInput
                 key={field.name}
+                stored={storedSecrets.includes(field.name)}
                 label={field.label}
                 optional={!field.required}
                 hint={help}

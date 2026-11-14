@@ -1,0 +1,9 @@
+fmt
+clippy
+contracts
+test -p orch-settings-contract --lib
+test -p orch-adapter-claude-code --lib
+test -p orch-engine --test provider_sign_in
+web typecheck
+web lint
+web test -- tests/component/provider-sources.test.tsx tests/component/provider-source-create.test.tsx

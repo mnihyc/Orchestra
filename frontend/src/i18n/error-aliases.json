@@ -23,6 +23,7 @@
   "insufficient_quota": "ui.error.quota",
   "insufficient_balance": "ui.error.quota",
   "cancelled": "ui.error.cancelled",
+  "overruled": "ui.error.overruled",
   "aborted": "network.aborted",
   "unsupported": "errors.capability.unsupported",
   "after_up_failed": "ui.error.afterStart",

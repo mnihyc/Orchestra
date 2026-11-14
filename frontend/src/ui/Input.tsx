@@ -74,8 +74,13 @@ export function Input({
   );
 }
 
+export interface PasswordInputProps extends Omit<InputProps, 'type' | 'trailing'> {
+  /** A stored value is represented by a fixed mask; neither its value nor its length is read back. */
+  stored?: boolean;
+}
+
 /** A password, hidden as it is typed, with a button that shows it. */
-export function PasswordInput(props: Omit<InputProps, 'type' | 'trailing'>) {
+export function PasswordInput({ stored = false, ...props }: PasswordInputProps) {
   const { t } = useTranslation();
   const [shown, setShown] = useState(false);
   const field = typeof props.label === 'string' ? props.label.trim() : '';
@@ -85,6 +90,7 @@ export function PasswordInput(props: Omit<InputProps, 'type' | 'trailing'>) {
   return (
     <Input
       {...props}
+      placeholder={props.placeholder ?? (stored ? t('ui.password.storedMask') : undefined)}
       type={shown ? 'text' : 'password'}
       // A password is never corrected, capitalised or kept by the keyboard.
       autoCapitalize="none"

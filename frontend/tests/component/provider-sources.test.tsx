@@ -70,8 +70,11 @@ it('marks plain HTTP and refuses Save while its policy is off', () => {
 it('keeps a saved authorization blank and requires a new value for a different address', async () => {
   show(<Form initial={{...emptySourceDraft(),by:'address',url:'https://reports.example/details',auth:'bearer'}} savedAddress={{url:'https://reports.example/details',auth:'bearer',header:''}} authorizationSet />);
   expect(screen.getByLabelText('Authorization value')).toHaveValue('');
+  expect(screen.getByLabelText('Authorization value')).toHaveAttribute('placeholder','••••••••');
   expect(screen.getByText('Set; replace')).toBeVisible();
   expect(screen.getByRole('button',{name:'Save sources'})).toBeEnabled();
+  await userEvent.click(screen.getByRole('button',{name:'Save sources'}));
+  expect(save).toHaveBeenLastCalledWith(expect.objectContaining({authorization:''}));
   await userEvent.clear(screen.getByRole('textbox',{name:'Address'}));
   await userEvent.type(screen.getByRole('textbox',{name:'Address'}),'https://other.example/details');
   expect(screen.getByRole('button',{name:'Save sources'})).toBeDisabled();
@@ -80,6 +83,25 @@ it('keeps a saved authorization blank and requires a new value for a different a
   expect(screen.queryByText('a-new-secret')).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole('button',{name:'Save sources'}));
   expect(save).toHaveBeenCalledWith(expect.objectContaining({authorization:'a-new-secret',url:'https://other.example/details'}));
+});
+
+it.each(['en','zh-CN'] as const)('shows a saved admin key as a mask without putting it into the draft, and can remove or replace it (%s)', async(locale) => {
+  await setLocale(locale);
+  try {
+    const field:Field={name:'admin_key',label:'Admin key',type:'secret',required:false,default:null,choices:null,help:null,max_bytes:null};
+    show(<Form initial={{...emptySourceDraft(),by:'default',fields:{admin_key:''}}} defaultFields={[field]} secretFieldsSet={['admin_key']} />);
+    const input=screen.getByPlaceholderText('••••••••');
+    expect(input).toHaveValue('');
+    expect(input).toHaveAccessibleName(/Admin key/u);
+    await userEvent.click(screen.getByRole('button',{name:'Save sources'}));
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({fields:{admin_key:''}}));
+    await userEvent.click(screen.getByRole('button',{name:i18n.t('providerSources.removeSavedKey')}));
+    expect(input).not.toHaveAttribute('placeholder','••••••••');
+    expect(input).toHaveValue('');
+    await userEvent.type(input,'replacement-program-secret');
+    await userEvent.click(screen.getByRole('button',{name:'Save sources'}));
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({fields:{admin_key:'replacement-program-secret'},removedSecrets:[]}));
+  } finally {await setLocale('en');}
 });
 
 it('never offers a sign-in to an address', () => {
@@ -146,7 +168,16 @@ it('keeps an authorization draft on a refused save and on a newer provider until
   await waitFor(() => expect(refused).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(screen.getByRole('button',{name:'Save sources'})).toBeEnabled());
   expect(facts.getByLabelText('Authorization value')).toHaveValue('keep-this-draft');
-  const newer=structuredClone(initial);newer.revision+=1;
+  // The provider's revision moves whenever its state or figures are read again: that is no edit of its sources,
+  // so the draft stays, nothing is warned of, and the form can still be saved.
+  const refreshed=structuredClone(initial);refreshed.revision+=1;
+  view.rerender(<SourcesForm provider={refreshed} {...props} />);
+  expect(screen.queryByText(/This provider changed while you were editing/)).toBeNull();
+  expect(screen.getByRole('button',{name:'Save sources'})).toBeEnabled();
+  expect(facts.getByLabelText('Authorization value')).toHaveValue('keep-this-draft');
+  // Somebody else saving other sources under the draft is the conflict.
+  const newer=structuredClone(refreshed);newer.revision+=1;
+  newer.sources.models={...newer.sources.models,by:'program' as const,name:'acme'};
   view.rerender(<SourcesForm provider={newer} {...props} />);
   expect(screen.getByText(/This provider changed while you were editing/)).toBeVisible();
   expect(screen.getByRole('button',{name:'Save sources'})).toBeDisabled();

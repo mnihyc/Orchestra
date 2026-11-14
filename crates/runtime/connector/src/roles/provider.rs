@@ -40,7 +40,7 @@ use orch_model_contract::endpoint::{EndpointOptions, check_base_url};
 use orch_model_contract::protocol::SecretHeaders;
 use orch_pki::certificates::LeafKey;
 use orch_plugin_contract::Secret;
-use orch_types::{Clock, Id, Json, Time};
+use orch_types::{Clock, Id, Json};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -734,7 +734,7 @@ impl ProviderRole {
                 .into_iter()
                 .find(|form| form.form == body.form)
                 .ok_or_else(|| unsupported("the form is not issued"))?;
-            check_issue(&lease, &declared, &body.recipient, now)?;
+            check_issue(&lease, &declared, &body.recipient)?;
             protocol
                 .protocol()
                 .issue_credential(&body.form, &credential, endpoint.base_url())
@@ -746,7 +746,7 @@ impl ProviderRole {
                     other => internal(other.to_string()).retryable(),
                 })?
         } else {
-            self.issue_from_login(&lease, &body, now).await?
+            self.issue_from_login(&lease, &body).await?
         };
         let sealed = seal_issued(
             &self.services.keys,
@@ -765,7 +765,6 @@ impl ProviderRole {
         &self,
         lease: &Lease,
         body: &orch_link_contract::commands::ProviderCredentialIssue,
-        now: Time,
     ) -> Result<IssuedCredential, CommandError> {
         let known = self
             .store()
@@ -803,7 +802,7 @@ impl ProviderRole {
                 .ok_or_else(|| {
                     unsupported(format!("the harness issues no form {:?}", body.form))
                 })?;
-            check_issue(lease, &declared, &body.recipient, now)?;
+            check_issue(lease, &declared, &body.recipient)?;
             // Write the destination before a login can move away. A failed store must never
             // leave a credential in transit with no durable route home.
             let name = provider_custodian_name(body.provider_id);
