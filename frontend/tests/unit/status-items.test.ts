@@ -61,3 +61,10 @@ it('resets the saved status arrangement with the existing Layout reset', () => {
   expect(loadWorkspace('status-reset-person', 'thread').kept?.statusItems).toEqual(defaultStatus());
   useWorkbench.getState().leave();
 });
+
+it('says how full the context is as a share of its window, and as the tokens alone where no window was reported', () => {
+  const context = statusContext(), read = (usage: { context_used: number | null; context_window: number | null }) => STATUS_ITEMS.find((item) => item.id === 'context')?.read({ ...context, turn: null, thread: { ...context.thread, usage: { ...context.thread.usage!, ...usage } } });
+  expect(read({ context_used: 152_000, context_window: 400_000 })?.text).toBe('Context 38%');
+  expect(read({ context_used: 152_000, context_window: null })?.text).toBe('Context 152k');
+  expect(read({ context_used: null, context_window: 400_000 })).toBeNull();
+});

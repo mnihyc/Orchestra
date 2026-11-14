@@ -5,7 +5,7 @@ import { ACME, scenario } from './support';
 import { ASK_ID } from '../unit/ask-fixtures';
 
 for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const) {
-  for (const code of ['ask_context_no_room', 'ask_context_too_long'] as const) test(`Ask context refusal: question → reason → new conversation (${code}, ${locale}, ${width}, ${theme})`, async ({ page, request }) => {
+  for (const code of ['ask_context_too_long', 'ask_turn_too_long'] as const) test(`Ask context refusal: question → reason → new conversation (${code}, ${locale}, ${width}, ${theme})`, async ({ page, request }) => {
     // EN: topic > Ask > send > see the setting/model reason > New; the original
     // question stays in history and no second question is sent automatically.
     // 中文：话题 > 问一问 > 发送 > 阅读设置或模型容量原因 > 新建；原问题仍在历史中，
@@ -20,7 +20,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await box.fill(question); await box.press('Enter');
     await expect.poll(() => server.sends.length).toBe(1);
     await server.contextRefusal(code, 'Chosen model');
-    const reason = code === 'ask_context_no_room' ? t('ask.contextNoRoom') : t('ask.contextTooLong', { model: 'Chosen model' });
+    const reason = t(code === 'ask_turn_too_long' ? 'ask.turnTooLong' : 'ask.contextTooLong', { model: 'Chosen model' });
     await expect(panel.getByText(reason, { exact: true })).toBeVisible();
     await expect(panel.getByText(question, { exact: true })).toBeVisible();
     await expect(panel.getByRole('button', { name: t('composer.stop'), exact: true })).toHaveCount(0);
