@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/summarizer-editor.test.tsx tests/component/settings-drafts.test.tsx tests/component/summary-targets-editor.test.tsx tests/component/settings-required-members.test.tsx tests/component/managed-provider-settings.test.tsx tests/component/access-where-field.test.tsx tests/component/ask-stream-lifetime.test.tsx tests/unit/ask-refusal-words.test.ts tests/unit/ask-root.test.ts tests/unit/entry-beyond-words.test.ts tests/unit/help-summaries.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

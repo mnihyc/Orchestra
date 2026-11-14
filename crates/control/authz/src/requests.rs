@@ -451,6 +451,7 @@ pub async fn givers_for(
             // names the models, services and efforts that were asked for, and no type and no
             // place: the givers are those who could write that entry, as the approval holds them.
             let writes = orch_access_contract::permissions::ProviderUse {
+                purposes: None,
                 models: options.and_then(|options| options.models.clone()),
                 services: options.and_then(|options| options.services.clone()),
                 efforts: options.and_then(|options| options.efforts.clone()),
@@ -838,6 +839,7 @@ fn options_given(asked: &Asked, chosen: Option<&Json>) -> Result<Json, GrantErro
         )
     })?;
     let Options::ProviderUse(ProviderUse {
+        purposes,
         models,
         services,
         efforts,
@@ -893,7 +895,7 @@ fn options_given(asked: &Asked, chosen: Option<&Json>) -> Result<Json, GrantErro
     // The types and the places are not asked for, so none is held to what was asked. What the
     // approver writes is held to what they hold when the change is made, as for any entry: a
     // type in which the credential leaves, or a place, is theirs to give only if they hold it.
-    let _ = (arrangements, r#where);
+    let _ = (purposes, arrangements, r#where);
     Ok(written)
 }
 
