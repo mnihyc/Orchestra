@@ -6,6 +6,7 @@ import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 import type { ResourceSubject } from '@/features/resource-facts/facts';
 import { Badge } from '@/ui/Badge';
 import { modelName, type ChoiceOrigin, type Resolved } from './choices';
+import { unusableEnvironmentWords } from './words';
 
 export function ChoiceOriginMark({ origin }: { origin: ChoiceOrigin | 'manual' }) {
   const { t } = useTranslation();
@@ -43,7 +44,9 @@ export function StartValues({ resolved }: { resolved: Resolved }) {
     <span role="list" className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
       {visible.map(({ field, name, subject }) => <span key={field} role="listitem" className="inline-flex min-w-0 flex-wrap items-center gap-1" data-start-value={field}>
         {subject===undefined ? <span className="max-w-full truncate" title={name ?? undefined}>{name}</span> : <ResourceChip subject={subject} hint={false}>{name}</ResourceChip>}
-        {resolved.origins[field] !== common && <ChoiceOriginMark origin={resolved.origins[field] ?? 'manual'} />}
+        {field === 'environment' && resolved.environmentNote?.kind === 'unusable'
+          ? <span className="text-text-muted">{unusableEnvironmentWords(resolved.environmentNote, t)}</span>
+          : resolved.origins[field] !== common && <ChoiceOriginMark origin={resolved.origins[field] ?? 'manual'} />}
       </span>)}
     </span>
   </>;

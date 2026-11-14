@@ -76,8 +76,14 @@ fn lets_run(
     let granted: ProviderUse = options::read(permission, entry)
         .map(|read| options::of_provider(&read))
         .unwrap_or_default();
-    model.is_none_or(|model| options::allows_model(&granted, model, groups))
-        && effort.is_none_or(|effort| granted.allows_effort(effort))
+    options::entry_allows(
+        &granted,
+        &options::Wanted {
+            model: model.map(|model| (model, groups)),
+            effort,
+            ..Default::default()
+        },
+    )
 }
 
 /// Whether the holder `entry` covers every person the holder `held` stands for: the same holder,
@@ -368,11 +374,15 @@ fn can_give(
     // The people have it when one single entry of theirs has the model and the effort together.
     grant.each.iter().any(|allowance| {
         let options = &allowance.provider;
-        model.map_or(options.models.is_none(), |model| {
-            options::allows_model(options, model, groups)
-        }) && effort.map_or(options.efforts.is_none(), |effort| {
-            options.allows_effort(effort)
-        })
+        orch_access_contract::permissions::ProviderUsePurpose::ALL
+            .iter()
+            .all(|purpose| options.allows_purpose(*purpose))
+            && model.map_or(options.models.is_none(), |model| {
+                options::allows_model(options, model, groups)
+            })
+            && effort.map_or(options.efforts.is_none(), |effort| {
+                options.allows_effort(effort)
+            })
     })
 }
 
