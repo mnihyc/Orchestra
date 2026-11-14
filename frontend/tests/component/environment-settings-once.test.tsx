@@ -26,7 +26,7 @@ vi.mock('@/api/settings', async (load) => {
   };
 });
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useLocation: () => ({ pathname: '/resources/environments/unit', searchStr: '?tab=settings' }) }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const priorAppearance = useAppearance.getState();
 beforeEach(() => {
   vi.clearAllMocks();

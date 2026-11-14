@@ -3,6 +3,7 @@ import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
+import * as HelpOpening from '@/features/help/open';
 import { SettingHint } from '@/features/help/SettingHint';
 import { SettingEntry } from '@/features/help/SettingEntry';
 import { GuideSettings } from '@/features/help/GuideSettings';
@@ -18,10 +19,9 @@ import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 const open = vi.hoisted(() => vi.fn());
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => open }));
-vi.mock('@/features/workbench/Narrow', () => ({ useShape: () => 'wide' }));
+vi.mock('@/features/workbench/Narrow', async (loadOriginal) => ({ ...await loadOriginal<object>(), useShape: () => 'wide' }));
 
-beforeEach(() => { open.mockClear(); useHelpState.setState({ guideContext: null, settingContext: null }); });
+beforeEach(() => { open.mockClear(); vi.spyOn(HelpOpening, 'useHelpOpener').mockReturnValue(open); useHelpState.setState({ guideContext: null, settingContext: null }); });
 afterEach(async () => { await setLocale('en'); });
 
 it.each(['en', 'zh-CN'] as const)('explains unrecorded file types and links to the filter guide in %s', async (locale) => {

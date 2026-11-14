@@ -35,7 +35,7 @@ vi.mock('@/api/access', async (load) => ({ ...await load<typeof AccessApi>(), re
 }));
 vi.mock('@/api/share', async (load) => ({ ...await load<typeof ShareApi>(), shareWithAgents: calls.share }));
 vi.mock('@/features/people/ThreadIdentity', () => ({ ThreadIdentity: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 
 const target = { kind: 'document' as const, id: 'document', name: 'Plan' };

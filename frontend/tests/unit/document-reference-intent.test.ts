@@ -1,14 +1,29 @@
 /** Caret reference reads belong to the current visible editor and reader. */
 import { beforeEach, expect, it, vi } from 'vitest';
+import type * as ClientModule from '@/api/client';
+import type * as QueryModule from '@/api/query';
+import type * as TreeModule from '@/realtime/stores/tree';
 import { referenceChoices, type ReferenceContext } from '@/features/documents/referenceChoices';
 
 const wire = vi.hoisted(() => ({ reader: 1, read: vi.fn<() => Promise<{ pages: { items: { id: string; title: string }[] }[] }>>() }));
-vi.mock('@/api/client', () => ({ client: { session: { getState: () => ({ readerVersion: wire.reader }) } } }));
-vi.mock('@/api/query', () => ({ queryClient: { infiniteQuery: wire.read } }));
+vi.mock('@/api/client', async (loadOriginal) => {
+  const actual = await loadOriginal<typeof ClientModule>();
+  return { ...actual, client: { ...actual.client, session: { ...actual.client.session,
+    getState: () => ({ ...actual.client.session.getState(), readerVersion: wire.reader }),
+  } } };
+});
+vi.mock('@/api/query', async (loadOriginal) => {
+  const actual = await loadOriginal<typeof QueryModule>();
+  return { ...actual, queryClient: Object.assign(actual.queryClient, { infiniteQuery: wire.read }) };
+});
 vi.mock('@/api/documents', () => ({ documentsOfNodeQuery: (id: string) => ({ queryKey: ['documents', id] }) }));
-vi.mock('@/realtime/stores/tree', () => ({ useTreeStore: { getState: () => ({ byOrg: new Map([
-  ['root', { nodes: new Map([['topic', { id: 'topic', kind: 'topic', name: 'Visible topic', deleted: false }]]) }],
-]) }) } }));
+vi.mock('@/realtime/stores/tree', async (loadOriginal) => {
+  const actual = await loadOriginal<typeof TreeModule>();
+  const state = actual.useTreeStore.getState;
+  return { ...actual, useTreeStore: Object.assign(actual.useTreeStore, { getState: () => ({ ...state(), byOrg: new Map([
+    ['root', { nodes: new Map([['topic', { id: 'topic', kind: 'topic', name: 'Visible topic', deleted: false }]]) }],
+  ]) }) }) };
+});
 
 const document: ReferenceContext['document'] = { id: 'current', node: { id: 'topic', kind: 'topic', name: 'Topic', redacted: false },
   path: [{ id: 'root', kind: 'org', name: 'Root', redacted: false }] };

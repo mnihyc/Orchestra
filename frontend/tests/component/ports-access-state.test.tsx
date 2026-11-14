@@ -14,9 +14,9 @@ let door: DoorState = { kind: 'loading' };
 const read = vi.hoisted(() => vi.fn());
 const retry = vi.hoisted(() => vi.fn());
 vi.mock('@/features/files/door', () => ({ useRouteThread: () => 'thread-1', useThreadDoor: () => door }));
-vi.mock('@/realtime/live', () => ({ refreshThread: retry }));
-vi.mock('@/api/environments', () => ({ environmentQuery: (id: string) => ({ queryKey: ['implicit-port-environment', id], queryFn: read }) }));
-vi.mock('@/features/browser/View', () => ({ portsBrowser: () => undefined, showBrowserBeside: vi.fn() }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), refreshThread: retry }));
+vi.mock('@/api/environments', async (original) => ({ ...await original<object>(), environmentQuery: (id: string) => ({ queryKey: ['implicit-port-environment', id], queryFn: read }) }));
+vi.mock('@/features/browser/View', async (loadOriginal) => ({ ...await loadOriginal<object>(), portsBrowser: () => undefined, showBrowserBeside: vi.fn() }));
 vi.mock('@/features/ports/Ports', () => ({ PortsPanel: () => <div data-testid="current-ports">Current port inventory</div> }));
 
 function ready(allowed: boolean): DoorState {

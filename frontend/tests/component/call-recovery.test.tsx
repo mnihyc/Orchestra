@@ -14,8 +14,8 @@ import { recoveryCause } from '@/features/calls/History';
 
 vi.mock('@/features/settings/ProviderChoice', () => ({ ProviderDefaultChoice: ({ label }: { label: string }) => <span>{label}</span> }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<object>(), providerModelsQuery: (id: string) => ({ queryKey: ['test-models', id], queryFn: () => Promise.resolve([]) }), providerQuery: (id:string)=>({queryKey:['test-provider',id],queryFn:()=>Promise.resolve({id,kind:'api',protocols:['openai-responses'],agent:null,agent_id:null,harness_kind:null})}), agentsQuery:()=>({queryKey:['test-agents'],queryFn:()=>Promise.resolve([])}) }));
-vi.mock('@/features/change/target', () => ({ openChange: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/change/target', async (loadOriginal) => ({ ...await loadOriginal<object>(), openChange: vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const appearance = useAppearance.getState();
 afterEach(async () => { vi.useRealTimers(); useAppearance.setState(appearance); await setLocale('en'); });
 

@@ -14,7 +14,7 @@ import { formatSpan } from '@/lib/time';
 import { show } from './support';
 
 const state = vi.hoisted(() => ({ jobs: new Map<string, Job>(), stop: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/forks', async (original) => ({ ...await original<object>(),
   jobQuery: (id: string) => ({ queryKey: ['live-work-job', id], queryFn: () => Promise.resolve(state.jobs.get(id)) }),
   cancelJob: state.stop,

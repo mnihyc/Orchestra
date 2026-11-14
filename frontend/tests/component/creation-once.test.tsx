@@ -74,10 +74,10 @@ vi.mock('@/api/documents', async (original) => ({ ...await original<object>(), d
 vi.mock('@/api/chats', async (original) => ({ ...await original<object>(), orgChatsQuery: (id: string) => emptyPages(['one-create-chats', id]) }));
 vi.mock('@/realtime/live', async (original) => ({ ...await original<object>(), useOrgTreeFeed: vi.fn() }));
 vi.mock('@/realtime/stores/tree', async (original) => ({ ...await original<object>(), useOrgTree: () => ({ nodes, loaded: true, error: null }) }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: vi.fn() }));
 vi.mock('@/shell/org', async (load) => ({ ...await load<typeof OrgState>(), selectOrg: vi.fn() }));
-vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: calls.dialog }));
-vi.mock('@/features/navigation/NodeMenu', () => ({ NodeMenuButton: () => null }));
+vi.mock('@/features/navigation/NodeDialogs', async (loadOriginal) => ({ ...await loadOriginal<object>(), openNodeDialog: calls.dialog }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), NodeMenuButton: () => null }));
 vi.mock('@/features/navigation/places', async (original) => ({ ...await original<object>(),
   PlaceLink: ({ place, children }: { place: { id: string }; children: ReactNode }) => <a href={`#${place.id}`}>{children}</a>,
 }));

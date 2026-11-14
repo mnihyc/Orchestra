@@ -8,7 +8,7 @@ import { show } from './support';
 import { agentDescriptor } from '../doubles/agent-descriptor';
 
 const registry = vi.hoisted(() => ({ read: vi.fn<() => Promise<HarnessKindInfo[]>>() }));
-vi.mock('@/api/resources', () => ({ harnessKindsQuery: { queryKey: ['declared-programs'], queryFn: registry.read } }));
+vi.mock('@/api/resources', async (loadOriginal) => ({ ...await loadOriginal<object>(), harnessKindsQuery: { queryKey: ['declared-programs'], queryFn: registry.read } }));
 
 function Name({ kind }: { kind: string }) {
   const title = useHarnessTitle();

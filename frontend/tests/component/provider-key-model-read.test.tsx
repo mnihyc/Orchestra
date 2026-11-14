@@ -12,7 +12,7 @@ import { i18n, setLocale } from '@/i18n';
 import { planProvider } from '../unit/provider-plan-fixtures';
 import { show } from './support';
 
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
 const setup:ProviderSetup={ grouping: [],machines:[],key_machines:[],subscriptions:[],subscriptions_withheld:[],subscriptions_unshared:[],
   http_allowed:false,presets:[],api_arrangements:[],runtime_templates:[],sources:[],

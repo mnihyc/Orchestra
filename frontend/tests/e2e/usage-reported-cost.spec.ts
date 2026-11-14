@@ -40,7 +40,12 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       await expect(details).toContainText(source === 'reported' ? '0.0194 USD' : '0.0071000000000000001 USD');
       await expect(details).toContainText(words.usageRequest.countedCredits);
       await expect(details).toContainText(source === 'reported' ? '0.038800' : '3.000000');
-      if(source === 'reported') { await expect(details).toContainText(words.usage.records.fromReported); await expect(details).toContainText('lease.close'); }
+      if(source === 'reported') {
+        await expect(details).toContainText(words.usage.records.fromReported);
+        // The adapter's request reference is not a word of the record: it is one Copy ID act in its row.
+        await expect(details).not.toContainText('lease.close');
+        await expect(details.getByRole('button',{name:words.common.copyId}).first()).toBeVisible();
+      }
       if(source === 'rate_card') await expect(details).toContainText(words.usage.records.fromCard);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await info.attach(`reported-cost-${source}-${locale}-${theme}-${width}`,{body:await page.screenshot({fullPage:true}),contentType:'image/png'});

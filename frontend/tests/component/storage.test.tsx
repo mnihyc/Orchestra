@@ -12,9 +12,9 @@ import { show } from './support';
 
 const read=vi.hoisted(()=>vi.fn<(query:StorageQuery)=>void>());
 vi.mock('@/api/storage',()=>({storagePagesQuery:(query:StorageQuery)=>({queryKey:['storage-test',query],initialPageParam:null as string|null,queryFn:()=>{read(query);return Promise.resolve(storageReport(query));},getNextPageParam:()=>null})}));
-vi.mock('@/features/access/AdminMode',()=>({useManagementAvailable:()=>false,useAdminMode:()=>({data:{as_admin:false},isSuccess:true}),AdminModeEnableAction:()=>null}));
-vi.mock('@/shell/screen',()=>({useScreenHeading:()=>undefined}));
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/access/AdminMode',async (loadOriginal) => ({ ...await loadOriginal<object>(),useManagementAvailable:()=>false,useAdminMode:()=>({data:{as_admin:false},isSuccess:true}),AdminModeEnableAction:()=>null}));
+vi.mock('@/shell/screen',async (loadOriginal) => ({ ...await loadOriginal<object>(),useScreenHeading:()=>undefined}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 
 afterEach(async()=>{cleanup();read.mockClear();document.documentElement.removeAttribute('data-theme');await setLocale('en');});
 

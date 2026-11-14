@@ -30,8 +30,8 @@ const calls = vi.hoisted(() => ({ request: vi.fn<typeof AccessApi.requestAccess>
 vi.mock('@/features/composer/Draft', async original => ({ ...await original<typeof Draft>(), submitInput: calls.submit, useDraftSync: (...args: Parameters<typeof Draft.useDraftSync>) => calls.draft(...args) }));
 vi.mock('@/realtime/live', async original => ({ ...await original<typeof Live>(), useThreadFeed: () => undefined, useOrgTreeFeed: () => undefined, useSocketStatus: () => ({ phase: 'ready' }), reloadThread: calls.reload }));
 vi.mock('@/shell/screen', async original => ({ ...await original<typeof Screen>(), useScreenHeading: () => undefined }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
-vi.mock('@/features/inbox/Counters', () => ({ useReadWhenOpened: () => undefined }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
+vi.mock('@/features/inbox/Counters', async (loadOriginal) => ({ ...await loadOriginal<object>(), useReadWhenOpened: () => undefined }));
 vi.mock('@/features/thread/Header', () => ({ ThreadHeader: ({ thread }: { thread: Thread }) => <header><h1>{thread.name}</h1></header> }));
 vi.mock('@/features/thread/ConnectionBanner', () => ({ ConnectionBanner: () => null }));
 vi.mock('@/features/schedules/Schedules', () => ({ PendingAgentSchedules: () => null }));
@@ -127,8 +127,10 @@ describe.each(modes)('a live viewer at $width px in $theme', mode => {
     const controls = within(screen.getByRole('group', { name: i18n.t('composer.row.label') }));
     expect(controls.getByRole('button', { name: i18n.t('composer.plus.label') })).toBeDisabled();
     expect(view.container.querySelector('input[type="file"]')).toBeDisabled();
-    const model = controls.getByRole('button', { name: i18n.t('composer.model.current', { model: 'Reasoner (High)' }) });
-    expect(model).toBeDisabled(); expect(model).toHaveTextContent('Reasoner (High)');
+    const model = controls.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.chip'), value: 'Reasoner' }) });
+    expect(model).toBeDisabled(); expect(model).toHaveTextContent('Reasoner');
+    const effort = controls.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.effort.title'), value: 'High' }) });
+    expect(effort).toBeDisabled(); expect(effort).toHaveTextContent('High');
     const send = controls.getByRole('button', { name: i18n.t('composer.send') });
     expect(send).toBeVisible(); expect(send).toBeDisabled();
     expect(controls.getByRole('button', { name: i18n.t('composer.deliveryMenu') })).toBeDisabled();
@@ -213,8 +215,10 @@ it.each(['archived', 'inspection'] as const)('retains the existing %s exclusion 
 it.each(['en', 'zh-CN'] as const)('shows the disabled placeholder, model, effort and access action in %s', async locale => {
   await setLocale(locale); draw();
   expect(screen.getByRole('textbox', { name: i18n.t('composer.label') })).toHaveAttribute('placeholder', i18n.t('thread.watching.title'));
-  const value = `Reasoner (${i18n.t('choiceCatalog.effort.high.name')})`;
-  const model = screen.getByRole('button', { name: i18n.t('composer.model.current', { model: value }) });
-  expect(model).toBeDisabled(); expect(model).toHaveTextContent(value);
+  const high = i18n.t('choiceCatalog.effort.high.name');
+  const model = screen.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.chip'), value: 'Reasoner' }) });
+  expect(model).toBeDisabled(); expect(model).toHaveTextContent('Reasoner');
+  const effort = screen.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.effort.title'), value: high }) });
+  expect(effort).toBeDisabled(); expect(effort).toHaveTextContent(high);
   expect(screen.getByRole('button', { name: i18n.t('access.request.title') })).toBeEnabled();
 });

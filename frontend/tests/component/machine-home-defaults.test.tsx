@@ -22,7 +22,7 @@ vi.mock('@/api/nodes', async (load) => ({ ...await load<typeof Nodes>(),
     queryFn: () => Promise.resolve([org('other-home', 'another', 'Another home', userRef(me(1, 'ada', 'Ada')))]) },
 }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useNavigate: () => vi.fn(), useLocation: () => ({ pathname: '/machine', searchStr: '' }) }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 afterEach(async () => { cleanup(); writes.register.mockClear(); useTreeStore.setState({ byOrg: new Map() }); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const override of [false, true]) it(`registers a provider with ${override ? 'the chosen override' : 'the machine default'} in ${locale}`, async () => {

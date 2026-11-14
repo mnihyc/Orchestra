@@ -12,14 +12,14 @@ import { useAppearance } from '@/lib/appearance';
 import { ACME, acmeTree, me, memberAccess, org, userRef } from '../doubles/fixtures';
 import { show } from './support';
 
-vi.mock('@tanstack/react-router', () => ({ Link: ({ to, params, children, ...anchor }: ComponentProps<'a'> & { to: string; params: { slug: string } }) =>
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ to, params, children, ...anchor }: ComponentProps<'a'> & { to: string; params: { slug: string } }) =>
   <a {...anchor} href={to.replace('$slug', params.slug)}>{children}</a>,
 }));
 vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(), nodeQuery: vi.fn((id: string) => ({
   queryKey: ['lazy-folder-detail', id], queryFn: () => Promise.reject(new Error('opening a list must use its held names')),
 })) }));
-vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: vi.fn() }));
-vi.mock('@/features/navigation/NodeMenu', () => ({ NodeMenuButton: ({ place }: { place: { name: string } }) =>
+vi.mock('@/features/navigation/NodeDialogs', async (loadOriginal) => ({ ...await loadOriginal<object>(), openNodeDialog: vi.fn() }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), NodeMenuButton: ({ place }: { place: { name: string } }) =>
   <button aria-label={i18n.t('places.menu.of', { name: place.name })} />,
 }));
 vi.mock('@/features/navigation/places', async (original) => ({ ...await original<object>(),

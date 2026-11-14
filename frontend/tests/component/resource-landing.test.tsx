@@ -11,8 +11,8 @@ import { ViewOpeningContext, ViewRouteContext } from '@/features/workbench/viewO
 import { show } from './support';
 
 const world = vi.hoisted(() => ({ summary: vi.fn(), names: vi.fn<(kind: string) => void>(), navigate: vi.fn(), path: '/resources' }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: () => undefined }));
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: () => undefined }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   Link: ({ children, to, ...props }: { children: ReactNode; to: string }) => createElement('a', { ...props, href: to }, children),
   useNavigate: () => world.navigate,
   useRouterState: () => world.path,

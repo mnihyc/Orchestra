@@ -9,11 +9,12 @@ import type * as SettingsApi from '@/api/settings';
 import { ProviderSources } from '@/features/resources/providers/Sources';
 import type { MachinePolicy, ProviderSetup } from '@/generated/api-types';
 import { i18n } from '@/i18n';
+import { SECRET_DOTS } from '@/ui/SecretField';
 import { planProvider, SOURCE_DESCRIPTOR } from '../unit/provider-plan-fixtures';
 import { show } from './support';
 
-vi.mock('@/features/help/open', () => ({useHelpOpener:() => vi.fn()}));
-vi.mock('@tanstack/react-router', () => ({Link:({children}:{children:ReactNode}) => <a href="#machine-policy">{children}</a>}));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:() => vi.fn()}));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(),Link:({children}:{children:ReactNode}) => <a href="#machine-policy">{children}</a>}));
 vi.mock('@/api/settings', async (load) => ({...await load<typeof SettingsApi>(),settingsQuery:(id:string) => ({queryKey:['settings',id],queryFn:() => Promise.resolve([])})}));
 vi.mock('@/api/resources', async (load) => ({...await load<typeof ResourcesApi>(),
   providerSetupQuery:vi.fn((org:string,provider?:string) => ({queryKey:['provider-setup',org,provider],queryFn:() => Promise.resolve(servedSetup)})),
@@ -71,6 +72,11 @@ it('marks a locally blocked address and HTTP refusal, then drops that providerâ€
   view.rerender(<ProviderSources provider={other} />);
   group=within(await screen.findByRole('group',{name:'Details from'}));
   expect(group.getByRole('textbox',{name:'Address'})).toHaveValue('https://other.example/read');
+  // The other provider's own saved key shows as set, with nothing of the draft typed for the first; Replace opens an empty field.
+  expect(group.getByLabelText('Authorization value')).toHaveValue(SECRET_DOTS);
+  expect(group.getByText(i18n.t('settingsEditors.secret.set'))).toBeVisible();
+  expect(screen.queryByDisplayValue('old-provider-draft')).not.toBeInTheDocument();
+  await userEvent.click(group.getByRole('button',{name:i18n.t('settingsEditors.secret.replace')}));
   expect(group.getByLabelText('Authorization value')).toHaveValue('');
   expect(setProviderSources).not.toHaveBeenCalled();
   expect(providerSetupQuery).toHaveBeenCalledWith(other.home.id,other.id);

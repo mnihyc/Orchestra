@@ -14,9 +14,9 @@ import { useAppearance } from '@/lib/appearance';
 import { show, skipOverflowFallback } from './support';
 
 skipOverflowFallback();
-vi.mock('@/features/navigation/places',()=>({PlaceLink:({place,children}:{place:NodeRef;children:React.ReactNode})=><a href={`#${place.id}`}>{children}</a>}));
+vi.mock('@/features/navigation/places',async (loadOriginal) => ({ ...await loadOriginal<object>(),PlaceLink:({place,children}:{place:NodeRef;children:React.ReactNode})=><a href={`#${place.id}`}>{children}</a>}));
 vi.mock('@/features/resources/machines/MachineLink',()=>({MachineLink:({machine}:{machine:{id:string;name:string}})=><a href={`#${machine.id}`}>{machine.name}</a>}));
-vi.mock('@/features/access/AccessDialog',()=>({openAccess:vi.fn()}));
+vi.mock('@/features/access/AccessDialog',async (loadOriginal) => ({ ...await loadOriginal<object>(),openAccess:vi.fn()}));
 const appearance=useAppearance.getState();const session=client.session.getState();
 afterEach(async()=>{cleanup();localStorage.clear();client.session.setState(session);useAppearance.setState(appearance);await setLocale('en');});
 const alpha:NodeRef={id:'alpha-home',name:'Alpha home',kind:'project',redacted:false};

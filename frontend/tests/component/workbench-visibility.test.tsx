@@ -12,7 +12,7 @@ const read = vi.fn(() => Promise.resolve('Current data'));
 const subscribe = vi.fn();
 const unsubscribe = vi.fn();
 const renderBody = vi.fn();
-vi.mock('@/features/navigation/placeLabels', () => ({ useNodeLabel: (_id: string | undefined, title: string) => title }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodeLabel: (_id: string | undefined, title: string) => title }));
 
 function Body() {
   renderBody();

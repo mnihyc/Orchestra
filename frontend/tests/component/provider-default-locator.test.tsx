@@ -26,8 +26,8 @@ vi.mock('@/api/client', async (load) => {
   const actual = await load<typeof Client>();
   return { ...actual, api: { ...actual.api, GET: async (path: string, options?: Options) => resourceCardRead(path, options) ?? ({ data: await calls.read(path, options), response: new Response() }) } };
 });
-vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map([['hidden home', [{ id: home.id, name: 'Private cached home', above: [] }]]]) }));
-vi.mock('@/features/resources/ResourceCreation', () => ({ ResourceCreateButton: ({ onCreated }: { onCreated?: (id: string) => void }) => {
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKnownPlaces: () => new Map([['hidden home', [{ id: home.id, name: 'Private cached home', above: [] }]]]) }));
+vi.mock('@/features/resources/ResourceCreation', async (loadOriginal) => ({ ...await loadOriginal<object>(), ResourceCreateButton: ({ onCreated }: { onCreated?: (id: string) => void }) => {
   const [open, setOpen] = useState(false);
   return <><button type="button" onClick={() => setOpen(true)}>{i18n.t('resourceCreation.providers')}</button>
     {open && <Dialog open title="Existing provider creation" onOpenChange={setOpen}>
