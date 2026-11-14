@@ -93,7 +93,7 @@ export function ViewTab({
       <div
         role="presentation"
         className={cx(
-          'group/tab relative flex snap-start snap-always h-(--tab-strip-height) min-w-0 max-w-full shrink-0 items-stretch border-r border-border',
+          'group/tab relative flex snap-start snap-always h-(--tab-strip-height) min-w-0 max-w-[min(16rem,100%)] shrink-0 items-stretch border-r border-border',
           active ? 'bg-bg text-text' : 'text-text-muted hover:bg-bg-muted hover:text-text',
           carried && 'opacity-50',
         )}
@@ -101,7 +101,7 @@ export function ViewTab({
         {dropBefore && (
           <span aria-hidden className="absolute inset-y-1 -left-px z-(--layer-sticky) w-0.5 rounded-full bg-accent" />
         )}
-        <Tooltip content={compact ? said : about} side="bottom">
+        <Tooltip content={said} side="bottom">
           <div
             role="tab"
             id={id}

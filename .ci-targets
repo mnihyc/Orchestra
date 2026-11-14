@@ -1,0 +1,4 @@
+test -p orch-notifier-email --lib
+test -p orch-worker-core --test channel_setup
+test -p orch-api-core --test notifications_routes --test accounts
+test -p orchctl --test channel
