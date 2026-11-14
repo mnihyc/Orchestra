@@ -262,6 +262,11 @@ async fn native_tool_answers_have_only_one_model_facing_form() {
 }
 
 #[tokio::test]
+async fn a_checkpoint_before_an_earlier_message_forks_exactly_there_and_leaves_the_source_whole() {
+    shared("input_prefix").await;
+}
+
+#[tokio::test]
 async fn a_managed_pinned_build_refuses_updates_before_any_download_can_run() {
     let mut rig = common::Rig::new()
         .await

@@ -74,6 +74,8 @@ pub struct SessionConfiguration {
     pub prompt_cache_ttl: Option<orch_agent_contract::session::PromptCacheTtl>,
     /// The background completion preference accepted when the session opened.
     pub background_wake: bool,
+    /// The native web action wait accepted when the session opened.
+    pub web_action_wait_secs: u64,
     /// Native image generation accepted when the session opened.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_generation: Option<bool>,
@@ -97,6 +99,7 @@ impl From<&orch_link_contract::commands::SessionOpen> for SessionConfiguration {
             cwd: open.cwd.clone(),
             prompt_cache_ttl: open.prompt_cache_ttl,
             background_wake: open.background_wake,
+            web_action_wait_secs: open.web_action_wait_secs,
             image_generation: open.image_generation,
             native_configuration: open
                 .native_model
@@ -811,9 +814,9 @@ impl Engine {
     /// set takes its default, or less where `[engine] interrupt_force_secs` leaves less (see
     /// [`orch_agent_contract::turn_end_delays`]). A value the profile sets is kept as it is; the profile that sets one
     /// that does not fit is refused when a turn is prepared, not here.
-    fn profile_under_the_bound(&self, agent: &AgentRow) -> Result<Json, EngineError> {
+    async fn profile_under_the_bound(&self, agent: &AgentRow) -> Result<Json, EngineError> {
         let mut profile = agent.profile.clone();
-        let Some(delays) = descriptor_of(agent)?
+        let Some(mut delays) = descriptor_of(agent)?
             .as_ref()
             .and_then(crate::preflight::declared_turn_end_delays)
         else {
@@ -821,6 +824,47 @@ impl Engine {
         };
         let mut config = profile.get("config").cloned().unwrap_or(Json::Null);
         let before = config.clone();
+        for delay in &mut delays.delays {
+            if let Some(buffer) = &mut delay.pending_buffer
+                && config
+                    .pointer(&buffer.pointer)
+                    .and_then(Json::as_u64)
+                    .is_none()
+            {
+                buffer.default_bytes = orch_settings::get::<u64>(
+                    &mut *self.inner.db.acquire().await?,
+                    orch_settings::Place::System,
+                    &buffer.default_setting,
+                )
+                .await?
+                .ok_or_else(|| {
+                    EngineError::unreadable(format!(
+                        "the native notification buffer setting {} has no default",
+                        buffer.default_setting
+                    ))
+                })?;
+            }
+            if config
+                .pointer(&delay.pointer)
+                .and_then(Json::as_u64)
+                .is_some()
+            {
+                continue;
+            }
+            if let Some(setting) = &delay.default_setting {
+                delay.default_ms = orch_settings::get::<u64>(
+                    &mut *self.inner.db.acquire().await?,
+                    orch_settings::Place::System,
+                    setting,
+                )
+                .await?
+                .ok_or_else(|| {
+                    EngineError::unreadable(format!(
+                        "the native wait setting {setting} has no default"
+                    ))
+                })?;
+            }
+        }
         match delays.fit(&mut config, self.inner.config.interrupt_force) {
             Ok(lowered) => {
                 for each in lowered {
@@ -884,7 +928,7 @@ impl Engine {
             provider_kind,
             agent_id: key.agent,
             harness_kind: agent.harness_kind.clone(),
-            profile: serde_json::from_value(self.profile_under_the_bound(agent)?)?,
+            profile: serde_json::from_value(self.profile_under_the_bound(agent).await?)?,
             home,
             provider_config,
             runtime: crate::provider_runtime::harness_variables(
@@ -1682,6 +1726,7 @@ mod tests {
             cwd: "/workspace/child".into(),
             prompt_cache_ttl: None,
             background_wake: true,
+            web_action_wait_secs: 120,
             image_generation: None,
             native_configuration: Default::default(),
             model_details: None,
