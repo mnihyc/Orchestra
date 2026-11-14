@@ -23,7 +23,6 @@ export function useStatusValues(threadId: string, place: StatusPlace, activeLabe
   const needsSpeed = selected.some((entry) => entry.id === 'speed'), needsTokens = selected.some((entry) => entry.id === 'tokens');
   const needsText = (needsSpeed || needsTokens) && (turn?.usage?.output_tokens ?? 0) <= 0;
   const outputCounts = useThreadPart(threadId, (view) => needsText && view.outputCounts.turnId === turn?.id ? view.outputCounts.counts : null);
-  const providerNeeded = selected.some((entry) => entry.id === 'provider_window' || entry.id === 'provider_running');
   const environmentNeeded = selected.some((entry) => entry.id === 'environment_cpu' || entry.id === 'environment_memory' || entry.id === 'host_load');
   const hostNeeded = selected.some((entry) => entry.id === 'host_load');
   // Opening/Composer owns parameters. Its permitted provider projection is also the status source.
@@ -33,7 +32,8 @@ export function useStatusValues(threadId: string, place: StatusPlace, activeLabe
   const tokenEstimate = useMemo(() => modelTokenEstimate(modelOptions?.find((option) => option.model_name === activeModel)), [modelOptions, activeModel]);
   const providerId = thread?.binding?.provider.id ?? '';
   const supplied = parameters.data?.provider?.id === providerId && providerId !== '' ? parameters.data.provider : undefined;
-  const provider = useQuery({ ...providerQuery(providerId), ...(!providerNeeded || supplied === undefined ? {} : { initialData: supplied }), enabled: false });
+  // The provider as the page that reads it keeps it is fresher than the thread's row of it, which carries what these values need.
+  const provider = useQuery({ ...providerQuery(providerId), enabled: false });
   const environmentId = thread?.environment?.id ?? '';
   const environment = useQuery({ ...environmentQuery(environmentId), enabled: environmentNeeded && environmentId !== '' });
   const mayWatch = environmentNeeded && environment.data !== undefined && holds(environment.data.access, 'terminal.view') && environment.data.status === 'running';
@@ -42,7 +42,7 @@ export function useStatusValues(threadId: string, place: StatusPlace, activeLabe
   const host = useQuery({ ...hostQuery(hostId), enabled: hostNeeded && hostId !== '' });
   const now = useRunningClock(turn !== null && thread?.state === 'running' && selected.some((entry) => entry.id === 'speed' || entry.id === 'elapsed'));
   if (thread === null) return [];
-  const context: StatusContext = { ...format, t, now, thread, turn, outputCounts, tokenEstimate, provider: supplied ?? provider.data, environment: environment.data, sample, host: host.data, activeLabel };
+  const context: StatusContext = { ...format, t, now, thread, turn, outputCounts, tokenEstimate, provider: provider.data ?? supplied, environment: environment.data, sample, host: host.data, activeLabel };
   return selected.flatMap((entry) => {
     const definition = STATUS_ITEMS.find((item) => item.id === entry.id);
     if (!definition?.places.includes(place)) return [];

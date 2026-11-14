@@ -82,6 +82,7 @@
     "noModels": "No API models available here",
     "modelUnavailable": "This model is unavailable here",
     "sources": "Sources",
+    "noAnswer": "No answer was written. Try again.",
     "sourceUnavailable": "Source no longer available",
     "copy": "Copy answer",
     "retry": "Retry answer",
@@ -91,7 +92,6 @@
     "noHistory": "No conversations yet",
     "retention": "Kept for {{days}} days after the last message",
     "expires": "Expires",
-    "adminNotice": "This organization’s admins can inspect and export this conversation",
     "inspection": "Read-only admin inspection",
     "readOnlyTools": "Reads as you · cites sources · makes no changes",
     "paidBy": "Paid by",
@@ -99,7 +99,9 @@
     "privateThread": "Creates a Private permanent thread in this organization",
     "destination": "Destination topic",
     "defaultDestination": "Use the page’s topic or an authorized default",
-    "contextNoRoom": "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves.",
+    "contextNoRoom": "ask.context_tokens leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Increase ask.context_tokens or reduce ask.max_output_tokens.",
+    "windowNoRoom": "The context window of {{model}} leaves no room for the conversation after the answer’s reserve (ask.max_output_tokens). Use a model with a larger window or reduce ask.max_output_tokens.",
+    "windowUnknown": "The context window of {{model}} is not recorded and is assumed to be small, and the answer’s reserve (ask.max_output_tokens) leaves no room for the conversation. Record the model’s context window or reduce ask.max_output_tokens.",
     "contextTooLong": "This conversation is too long for {{model}}; start a new one or keep it as a thread."
   },
   "viewWindow": {
@@ -5010,6 +5012,7 @@
       "label": "Context {{used}} of {{window}} ({{percent}}); shortens at {{compact}}",
       "labelBare": "Context {{used}} of {{window}} ({{percent}})",
       "open": "Show what fills the context ({{label}})",
+      "labelUsed": "Context {{used}} used; no window reported",
       "modelLabel": "{{model}}: {{context}}"
     },
     "panel": {
@@ -5131,7 +5134,7 @@
     "requested": "Restart requested"
   },
   "placeReview": {
-    "observedDeleted": "The place is retained after deletion; revision {{revision}}. This read is not an Undo receipt.",
+    "observedDeleted": "The place is retained after deletion. This read is not an Undo receipt.",
     "undone": "Undone",
     "private": "Private place",
     "privateEnvironment": "Private environment",
@@ -5202,8 +5205,8 @@
     "skipped": "Not applied",
     "partial": "Some rows did not succeed. Each result below stands on its own.",
     "uncertainAbout": "The write may have happened. Read the current state; this does not invent a confirmation or an Undo receipt.",
-    "observedArchive": "Current archive state: {{state}}; revision {{revision}}.",
-    "observedParent": "Current parent: {{parent}}; revision {{revision}}.",
+    "observedArchive": "Current archive state: {{state}}.",
+    "observedParent": "Current parent: {{parent}}.",
     "notReadable": "The place is not currently readable. That alone does not prove a delete succeeded.",
     "undoChanged": "A newer revision prevents Undo. Nothing was overwritten.",
     "newReviewRequired": "The place or its consequences changed. Review again before applying."
@@ -5239,7 +5242,7 @@
     "system": "System",
     "notAllowed": "This share is not allowed.",
     "changed": "The page changed during review. Go back and review again.",
-    "observed": "Current permission page, revision {{revision}}. This read is not a confirmation of the lost write."
+    "observed": "Current permission page. This read is not a confirmation of the lost write."
   },
   "backupRestore": {
     "none": "No verified restore list",
@@ -5260,6 +5263,7 @@
     "inspect_other": "{{count}} environments need inspection",
     "noLocations": "No locations enumerated in this category.",
     "location": "Recorded location",
+    "identifiers": "Identifiers",
     "unknownLocation": "Location not reported",
     "copy": "Separate backup copy",
     "uninspectedCopy": "Availability not checked",
@@ -5294,7 +5298,9 @@
     "title": "Kept installed files",
     "lead": "Owned layers kept for each environment, including archived environments. Shared base-image bytes are excluded; flattening makes a complete owned filesystem.",
     "environment": "Environment",
-    "generation": "Generation",
+    "which": "Layer",
+    "latest": "Latest",
+    "earlier": "Earlier",
     "size": "Kept layers",
     "carried": "Installed programs and files are carried too: {{size}} of kept layers. The image archive also carries its base layers."
   },
@@ -7048,7 +7054,7 @@
       "credits": "Credits",
       "summary": "A summary of the topic",
       "embeddings": "Embeddings",
-      "turn": "turn {{id}}",
+      "turn": "turn {{number}}",
       "prompt": "The prompt was {{tokens}} tokens",
       "noRate": "This model had no rate, so its credits are not counted.",
       "prices": "Counted at {{input}} / {{cached}} / {{output}} credits per million tokens (input / cached input / output)",
@@ -7909,8 +7915,7 @@
       "history": "History",
       "refused": "You need a current browser sign-in and provider.manage. Ask a provider manager.",
       "review": "Review again",
-      "windowsMissing": "Affected windows not reported",
-      "receipt": "This request: {{id}}"
+      "windowsMissing": "Affected windows not reported"
     },
     "recovery": {
       "refused": "The vendor refused this provider’s sign-in.",
@@ -7947,7 +7952,6 @@
       "tokenLink": "Manage API tokens",
       "failed": "Sign-in failed",
       "expired": "The sign-in request expired",
-      "request": "POST /providers/{{id}}/login · method: {{method}}",
       "status": "Sign-in state: {{state}}"
     }
   },
@@ -8268,6 +8272,8 @@
     "copied": "Copied",
     "copyRefused": "The browser did not allow copying",
     "linkCopied": "Link copied",
+    "copyId": "Copy ID",
+    "idCopied": "ID copied",
     "refresh": "Refresh"
   },
   "ui": {
@@ -9874,7 +9880,11 @@
         "right": "Hide the right bar",
         "bottom": "Hide the bottom"
       },
-      "pin": "Keep open as a bar"
+      "pin": "Keep open as a bar",
+      "peek": {
+        "title": "Bars",
+        "label": "Show hidden bars on hover: {{state}}"
+      }
     },
     "sash": {
       "left": "Width of the left bar",
@@ -9941,9 +9951,10 @@
       "shellsHint": "Your shells in this environment. Open Terminal.",
       "connecting": "Connecting…",
       "connectingHint": "Connecting to live updates.",
-      "reconnectingSince": "Reconnecting… · {{time}}",
       "reconnecting": "Reconnecting…",
       "reconnectingHint": "What is on screen stays and can be read. Approving and steering wait for the connection; typing does not.",
+      "noLive": "No live updates · {{time}}",
+      "noLiveHint": "Live updates cannot connect, so this page reads again every few seconds. If this stays, ask whoever runs this system to check that the HTTPS front passes WebSocket upgrades for /api/v1/ws; orchctl doctor --url shows it as edge-ws.",
       "slow": "Slow connection · {{ms}} ms",
       "slowHint": "Sending, saving and shells take longer. Nothing you type waits."
     },
@@ -12792,6 +12803,7 @@
       "copyOutput": "Copy raw output",
       "copyInputShown": "Copy shown input",
       "copyOutputShown": "Copy shown output",
+      "readFailure": "The call as the harness made it could not be read.",
       "fullInput": "Full input",
       "fullOutput": "Full output",
       "cut": "Only part of this is held.",
@@ -12819,6 +12831,11 @@
       "changed_one": "{{count}} file changed (+{{added}} −{{removed}})",
       "changed_other": "{{count}} files changed (+{{added}} −{{removed}})",
       "retry": "Retry this turn"
+    },
+    "start": {
+      "line": "Started with {{agent}} on {{provider}}",
+      "created": "Created by {{by}}",
+      "open": "Show how this thread began"
     },
     "catchup": {
       "title": "Since you were last here",
@@ -13518,6 +13535,8 @@
       "focusedAbout": "Keep inputs, answers and waiting approvals visible; fold the other work.",
       "fullAbout": "Show the work step by step, with tool output closed until opened.",
       "liveAbout": "Open current tool output as it arrives and follow the latest work until you scroll up.",
+      "diagnostics": "Diagnostics",
+      "diagnosticsAbout": "Show everything in Full, and the program's own status lines: session status, tool servers, collaboration mode and events Orch does not read.",
       "toolCalls_one": "{{count}} tool call",
       "toolCalls_other": "{{count}} tool calls",
       "files_one": "{{count}} file changed",
@@ -13566,6 +13585,7 @@
     "starting": {
       "none": "Starting",
       "environment": "Waking the environment",
+      "environmentMaking": "Its environment is being made",
       "source": "Preparing the source",
       "files": "Preparing the environment",
       "provider": "Starting {{provider}}'s runtime",
@@ -15991,6 +16011,12 @@
       "renew": "Started to renew at",
       "updates": "What it is behind in",
       "update": "{{name}}: {{from}} → {{to}}",
+      "toolAdded": "{{name}} {{release}} is added",
+      "toolRebuilt": "{{name}}: a newer build of {{release}}",
+      "tools": {
+        "connector": "Orch connector",
+        "executor": "Orch tools"
+      },
       "lastProgramError": "Last program error"
     },
     "models": {
@@ -16048,6 +16074,7 @@
       "suggestions": "Suggestions",
       "suggestionsNote": "Only models listed here can be used. Suggestions are detected best-effort.",
       "noSuggestions": "The endpoint suggests no model that is not listed.",
+      "suggestionsReadFailure": "The list of suggested models could not be read.",
       "addSelected": "Add selected",
       "addAll": "Add all",
       "suggestionsAdded_one": "{{count}} model was added",
@@ -17522,7 +17549,7 @@
       "labelsHint": "Separated by commas.",
       "save": "Save settings",
       "changed": "Somebody changed this host first",
-      "changedLead": "It was read again; it is now at revision {{revision}}. Look at what changed, then save again."
+      "changedLead": "It was read again, and it has changed. Look at what changed, then save again."
     },
     "runtimes": {
       "title": "What runs on it",
@@ -17532,7 +17559,7 @@
       "unit": "Unit",
       "state": "State",
       "driver": "Driver",
-      "machine": "Machine",
+      "unowned": "A container with no owner",
       "active": "Last busy",
       "never": "Never",
       "actions": "Actions",
@@ -19009,8 +19036,6 @@
     "none": {
       "size": "Size",
       "type": "Type",
-      "hash": "Hash",
-      "copyHash": "Copy the hash",
       "openAsText": "Open as text"
     },
     "edit": {
@@ -19140,9 +19165,8 @@
   },
   "resourceDetails": {
     "copyPath": "Copy path",
-    "copyId": "Copy ID",
+    "copyValue": "Copy value",
     "copyCommand": "Copy command",
-    "unitGeneration": "Runtime {{generation}}",
     "definitionChanged": "Runtime configuration changed",
     "resourceLimitsChanged": "Resource limits changed",
     "homeChanged": "Workspace or home storage changed",
@@ -20802,7 +20826,6 @@
     "about": "Listeners, openings and connections of this environment.",
     "exposed": "Open outside",
     "exposedReason": "People beyond Ports holders may enter this port",
-    "generation": "Generation {{generation}}",
     "observed": "Observed",
     "refresh": "Refresh",
     "old": "Old observation",
@@ -23235,7 +23258,6 @@
       },
       "plan": {
         "recreate": "A new unit, with nothing new in it",
-        "update": "{{name}}: {{from}} → {{to}}",
         "staysOwners": "Stays {{name}}’s, with the page it has",
         "rollback": {
           "unit": "The old unit of {{name}} comes back as it was",
@@ -23395,6 +23417,9 @@
       "askBoxAbout": "Sends this to a side thread and leaves the turn alone.",
       "moveOut": "Move to another org",
       "moveOutReason": "Moves with its main thread · Keep it to move it alone"
+    },
+    "slash": {
+      "about": "Ask a question on the side, without disturbing the turn"
     },
     "ask": {
       "title": "Side thread",
@@ -24163,7 +24188,7 @@
     "enabledAt": "Enabled in",
     "kind": "Used for",
     "image": "Image",
-    "imageDigest": "Digest",
+    "imagePinned": "Pinned",
     "usedByLabel": "Used by",
     "program": "Program",
     "provider": "Provider",
@@ -24417,6 +24442,9 @@
     "runtimeCount_other": "{{number}} runtimes",
     "offInBuild": "Off in this version: {{feature}}",
     "caseUnavailable": "Unavailable",
+    "checkedPending_one": "Checked · {{number}} check pending",
+    "checkedPending_other": "Checked · {{number}} checks pending",
+    "casesPending": "Not verified yet: {{names}}",
     "notChecked": "This version has not been checked",
     "checkFailed": "Compatibility check failed · review its results",
     "policySummary": "{{name}}: {{choice}}",
@@ -25020,6 +25048,7 @@
       "running": "Cleaning up",
       "results": "Cleanup results",
       "outcome": "Outcome",
+      "itemUnknown": "A kept item",
       "manageRequired": "Manage required",
       "choices": {
         "keep": "Keep",
@@ -25827,7 +25856,7 @@
     "measurements": "Measured round trips",
     "measured": "Measured",
     "milliseconds": "{{value}} ms",
-    "unavailable": "Unavailable ({{id}})",
+    "unavailable": "Unavailable gateway",
     "toolConnection": "Tool connection",
     "unreachable": "$t(errors.tunnel.gateway_unreachable)",
     "attempted": "Attempted gateways",
@@ -25838,7 +25867,6 @@
       "unavailable": "Unavailable",
       "unknown": "Not reported"
     },
-    "revision": "Revision {{revision}}",
     "edit": "Edit",
     "editTitle": "Edit gateways",
     "empty": "No gateways advertised",
@@ -25928,7 +25956,7 @@
     "attempt": "Attempt",
     "tools": "Tool calls",
     "toolTime": "Tool time",
-    "providerId": "Provider request ID",
+    "providerId": "Provider's request",
     "adapterId": "Request reference",
     "owner": "Thread owner",
     "reasons": {
@@ -25966,6 +25994,7 @@
     "expand": "Expand {{name}}",
     "sharingPolicy": "Sharing policy",
     "from": "From",
+    "fromContainer": "From the container on <host/>",
     "current": "Group by: {{name}}",
     "noOwner": "Owner unavailable",
     "selectionUnavailable": "Selection unavailable",
@@ -26192,6 +26221,8 @@
     "resultsRootPending": "The results’ organization cannot be opened",
     "model": "Model summarizer",
     "details": "Summary details",
+    "hide": "Hide summary",
+    "show": "Show summary",
     "inputFacts": "Source items: {{included}} included · {{shortened}} shortened · {{omitted}} omitted",
     "baseRates": "Configured model base rates",
     "noRates": "No base rates reported",

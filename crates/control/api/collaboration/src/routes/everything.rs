@@ -388,6 +388,7 @@ struct ListRows {
     continuation: Option<String>,
     kinds: Vec<String>,
     details: bool,
+    rows: bool,
     facts: Vec<(orch_access_contract::key_scope::KeyTargetKind, Id)>,
     grouping: grouping::Prepared,
 }
@@ -397,6 +398,7 @@ struct ListSelection {
     limit: u32,
     kinds: Vec<String>,
     details: bool,
+    rows: bool,
     parent: Option<String>,
     access_parent: Option<Id>,
     after: Option<Cursor>,
@@ -430,6 +432,13 @@ fn list_selection(query: &EverythingListQuery) -> ApiResult<ListSelection> {
     }
     let kinds = kinds(query)?;
     let details = query.resource_details.unwrap_or(false);
+    let rows = query.resource_rows.unwrap_or(false);
+    if rows && !details {
+        return Err(ApiError::invalid(
+            "resource_rows",
+            "Ask for the resource details to ask for their rows.",
+        ));
+    }
     let resource_filter = details
         || query.resource_state.is_some()
         || query.harness.is_some()
@@ -514,6 +523,7 @@ fn list_selection(query: &EverythingListQuery) -> ApiResult<ListSelection> {
         limit,
         kinds,
         details,
+        rows,
         parent,
         access_parent,
         after,
@@ -622,6 +632,7 @@ async fn list_rows(
     let limit = selected.limit;
     let kinds = &selected.kinds;
     let details = selected.details;
+    let thin_rows = selected.rows;
     let parent = &selected.parent;
     let after = &selected.after;
     let system = selected.system;
@@ -740,6 +751,7 @@ async fn list_rows(
         continuation,
         kinds: kinds.clone(),
         details,
+        rows: thin_rows,
         facts,
         grouping: grouping::Prepared::default(),
     })
@@ -760,6 +772,7 @@ async fn render_rows(
         continuation,
         kinds,
         details,
+        rows: thin,
         facts: _,
         grouping,
     } = rows;
@@ -774,6 +787,9 @@ async fn render_rows(
     } else {
         std::collections::HashMap::new()
     };
+    if thin {
+        resources::list_rows(&mut resource_views);
+    }
     let mut library_facts = if details {
         match prepared_library {
             Some(prepared) => prepared.render(),

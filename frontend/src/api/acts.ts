@@ -252,7 +252,7 @@ const files = (id: string): Change[] => [...ones(id, 'workspace-stat', 'workspac
 
 /** One provider, with what its pages and every chooser of a provider read. */
 const provider = (id: string): Change[] => [
-  ...ones(id, 'provider', 'provider-settings', 'provider-models', 'provider-suggestions', 'provider-threads', 'provider-caps', 'provider-login', 'settings'),
+  ...ones(id, 'provider', 'provider-settings', 'provider-models', 'provider-facts-models', 'provider-threads', 'provider-caps', 'provider-login', 'settings'),
   ...kinds('providers', 'provider-setup', 'start-options', 'usage', 'thread-parameters', AGENT_REACH),
 ];
 

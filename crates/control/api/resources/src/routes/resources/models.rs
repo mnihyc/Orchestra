@@ -86,6 +86,11 @@ pub fn mount(registry: &mut Registry) {
             list,
         )
         .on_with_operation(
+            api::ProviderFactsModelsGet,
+            crate::key_operations::direct::declared,
+            facts_models,
+        )
+        .on_with_operation(
             api::ProviderModelCreate,
             crate::key_operations::direct::declared,
             create,
@@ -354,6 +359,20 @@ async fn list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ProviderModel>> {
         .iter()
         .map(model_view)
         .collect()
+}
+
+/// The models the provider's source last listed, as the provider keeps them: neither its own list (the
+/// allowlist) nor the question `suggestions` puts to the vendor. A provider's view says only how many there are,
+/// so a page that draws the list asks for it here.
+async fn facts_models(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<ModelSuggestion>> {
+    let id = ctx.id("id")?;
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    let row = provider_for(&mut conn, &principal, id, Permission::ProviderView).await?;
+    let Some(listed) = row.facts.get("models").filter(|listed| listed.is_array()) else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_value(listed.clone()).map_err(ApiError::internal)
 }
 
 /// Adds a model to a provider, enabled.

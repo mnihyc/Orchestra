@@ -58,6 +58,8 @@ use orch_api_contract::settings::ThreadParameterGet;
 
 use orch_api_contract::settings::ThreadParameters;
 
+use orch_api_contract::settings::ThreadProvider;
+
 use orch_authz::Principal;
 
 use orch_db::Conn;
@@ -573,7 +575,7 @@ pub(super) async fn parameters_in(
     capability_options(&mut parameters, &capabilities);
     Ok(ThreadParameters {
         capabilities,
-        provider,
+        provider: provider.map(ThreadProvider::of),
         model: ThreadModelParameter {
             value: current,
             source: model.source,

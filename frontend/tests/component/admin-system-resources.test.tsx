@@ -38,7 +38,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await screen.findByRole('button', { name: i18n.t('templates.list.add') });
     await waitFor(() => expect(calls.list).toHaveBeenCalledOnce());
     const first = calls.filter.mock.calls.at(-1)?.[0];
-    expect(first).toMatchObject({ scope: 'system', kinds: ['template'], resource: { details: true } });
+    expect(first).toMatchObject({ scope: 'system', kinds: ['template'], resource: { details: true, rows: true } });
     expect(first?.resource?.kind).toBeUndefined();
     expect(calls.heading).toHaveBeenLastCalledWith('templates', expect.anything(), undefined, undefined, false);
     expect(calls.nav).not.toHaveBeenCalled();
@@ -47,7 +47,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await userEvent.click(screen.getByRole('button', { name: i18n.t('resources.controls.filter') }));
     const provider = screen.getByRole('radio', { name: i18n.t('templates.purposeChoices.provider.name') });
     await userEvent.click(provider);
-    await waitFor(() => expect(calls.filter).toHaveBeenLastCalledWith(expect.objectContaining({ scope: 'system', resource: { details: true, kind: 'provider', view: 'usable' } })));
+    await waitFor(() => expect(calls.filter).toHaveBeenLastCalledWith(expect.objectContaining({ scope: 'system', resource: { details: true, rows: true, kind: 'provider', view: 'usable' } })));
   });
 
   it(`opens the working MCP preset list at system scope with its ordinary creation act in ${locale}`, async () => {
@@ -55,7 +55,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     show(<Mcp />);
     await screen.findByRole('button', { name: i18n.t('resourceDetails.mcp.add') });
     await waitFor(() => expect(calls.list).toHaveBeenCalledOnce());
-    expect(calls.filter).toHaveBeenLastCalledWith(expect.objectContaining({ scope: 'system', kinds: ['mcp_server'], resource: { details: true, view: 'usable' } }));
+    expect(calls.filter).toHaveBeenLastCalledWith(expect.objectContaining({ scope: 'system', kinds: ['mcp_server'], resource: { details: true, rows: true, view: 'usable' } }));
     expect(calls.heading).toHaveBeenLastCalledWith('mcp', expect.anything(), undefined, undefined, false);
     expect(calls.nav).not.toHaveBeenCalled();
     expect(screen.queryByRole('heading', { name: i18n.t('screens.mcp.title') })).not.toBeInTheDocument();

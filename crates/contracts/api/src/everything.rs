@@ -270,6 +270,11 @@ pub struct EverythingListQuery {
     /// Requires exactly one resource kind and parent=resources.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_details: Option<bool>,
+    /// With `resource_details`: each row is the kind's list row, what a table of the kind draws of it, and not its
+    /// whole view. A provider's row has no models (`models_count` says how many), no seven-day performance and no
+    /// descriptors of its sources; the whole view is read from the provider's own page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_rows: Option<bool>,
     /// A resource's own state, applied before the page limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_state: Option<String>,

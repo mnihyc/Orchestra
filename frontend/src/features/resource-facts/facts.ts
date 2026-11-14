@@ -52,9 +52,16 @@ export interface Hint { text: string; warning: boolean }
 export interface FactContext extends TimeContext { t: TFunction; now: number }
 const hint = (text: string, warning = false): Hint => ({ text, warning });
 
-/** Only a fully readable provider can disclose vendor amounts or its caps. */
+/** A provider with what its hints read: a list's row of it has these and no models, and so does a thread's own row of it. */
+type ProviderStanding = ProviderFacts & Pick<Provider, 'facts' | 'facts_state' | 'access' | 'running_threads'>;
+function hasStanding(provider: ProviderFacts): provider is ProviderStanding {
+  return provider.facts !== undefined && provider.facts_state !== undefined && provider.access !== undefined && provider.running_threads !== undefined;
+}
+
+/** Only a fully readable provider can disclose vendor amounts or its caps, and draw its whole card: a list's row of it lacks its models. */
 export function fullProvider(provider: ProviderFacts): provider is Provider {
-  return provider.facts !== undefined && provider.facts_state !== undefined && provider.access !== undefined;
+  return hasStanding(provider) && provider.models !== undefined && provider.models_count !== undefined && provider.models.length >= provider.models_count
+    && provider.sources !== undefined;
 }
 
 export function fullHost(host: HostFacts): host is Host { return host.capacity !== undefined && host.machine !== undefined && host.access !== undefined; }
@@ -76,7 +83,7 @@ export function providerHint(provider: ProviderFacts, context: FactContext, scop
   const { t, locale } = context;
   if (provider.status === undefined) return hint(t('providerPlan.notReported'));
   if (provider.status !== 'ready' && provider.status !== 'exhausted') return hint(t('resourceFacts.unavailable'), true);
-  if (!fullProvider(provider)) return hint(t('providerPlan.notReported'));
+  if (!hasStanding(provider)) return hint(t('providerPlan.notReported'));
   if (privateProvider(provider)) return hint(t('providerPlan.roomHidden'));
   const caps = (provider.choice_usage?.caps ?? []).filter(({ cap }) => cap.models.length === 0 && cap.tiers.length === 0 && cap.harness_kinds.length === 0 && cap.node === null && (scope === 'choice' || cap.meter !== 'running'));
   const reached = caps.find((cap) => cap.state === 'reached');

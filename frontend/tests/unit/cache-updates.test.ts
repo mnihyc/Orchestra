@@ -190,6 +190,17 @@ describe('answers replace rows', () => {
     cache.clear();
   });
 
+  it('does not seed a provider page from a list row that holds none of its models', () => {
+    const cache = new QueryClient();
+    const row = { ...before, models_count: 2, models: [] };
+    cache.setQueryData(['everything', 'u1', 'resources'], { pages: [{ items: [{ id: 'p1', kind: 'provider', resource: { kind: 'provider', value: row } }] }], pageParams: [null] });
+    expect(cachedRow(cache, 'provider', 'p1')).toBeUndefined();
+    const whole = { ...row, models: [{ id: 'm1' }, { id: 'm2' }] };
+    cache.setQueryData(['providers'], [whole]);
+    expect(cachedRow(cache, 'provider', 'p1')).toEqual(whole);
+    cache.clear();
+  });
+
   it('removes a withdrawn private name stored beside readable resource rows', () => {
     const cache = new QueryClient();
     const hidden: HiddenItem = { id: 'hidden-provider', kind: 'provider', name: 'Private', parent_id: null, owner: null, private: true, content_hidden: true };

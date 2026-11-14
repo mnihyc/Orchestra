@@ -1,0 +1,9 @@
+fmt
+clippy
+contracts
+test -p orch-engine --lib
+test -p orch-engine --test forks
+test -p orch-api-core --test provider_harness --test provider_models --test thread_read_tools --test thread_child_windows
+web typecheck
+web lint
+web test -- tests/component/admin-system-resources.test.tsx tests/component/question-item.test.tsx
