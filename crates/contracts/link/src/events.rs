@@ -1131,6 +1131,13 @@ pub struct EnvironmentFacts {
     /// The actual exceeded entry limit, reported only for that Live reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_entry_limit: Option<u64>,
+    /// While the machine looks at the whole tree to bring what it keeps of it up to date: how far it
+    /// has come. Omitted when it is not doing so, which is nearly always.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<IndexingProgress>,
+    /// The root directory's current whole-recording coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<RecordingCoverage>,
     /// What became of the mounts it was to have.
     pub mounts: Vec<EnvironmentFactsMount>,
     /// Whether a mount can be attached with changes of the environment's
@@ -1142,6 +1149,24 @@ pub struct EnvironmentFacts {
     pub git: bool,
     /// How many times it was made anew.
     pub generation: i64,
+}
+
+/// Whether a whole recording is ready, or why per-file restore is used instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RecordingCoverage {
+    /// Complete or unavailable; unavailable never promises partial whole coverage.
+    pub state: crate::source::RecordState,
+    /// The reason when whole recording is unavailable.
+    pub reason: Option<String>,
+}
+
+/// How far a machine is in looking at a whole tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IndexingProgress {
+    /// The files it has looked at.
+    pub done: u64,
+    /// The files it has to look at.
+    pub total: u64,
 }
 
 /// The body of `env.status`.

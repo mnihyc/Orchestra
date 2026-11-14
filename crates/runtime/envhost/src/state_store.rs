@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
@@ -40,6 +40,14 @@ pub struct RecordPolicy {
 struct RecordedReply {
     request_hash: Hash,
     reply: FsRecordResult,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingCursor {
+    attachment: Id,
+    directory: String,
+    cursor: Option<u64>,
 }
 
 /// A recorded root protected while one bounded operation reads or applies it.
@@ -72,7 +80,13 @@ struct Operations {
 }
 
 #[derive(Debug, Default)]
-struct LiveOperations(Mutex<Operations>);
+struct DeferredObjects {
+    files: BTreeSet<PathBuf>,
+    directories: BTreeMap<PathBuf, platform::Dir>,
+}
+
+#[derive(Debug, Default)]
+struct LiveOperations(Mutex<Operations>, Mutex<DeferredObjects>);
 
 fn store_busy() -> HostError {
     HostError::Busy("This environment is publishing, reading or replacing recorded files. Retry after the operation finishes.".to_owned())
@@ -218,6 +232,10 @@ pub struct ObjectStore {
     // the physical store's pin/exclusive gate. Retiring one attachment never revives its clones.
     retired: Arc<AtomicBool>,
     durability: DirectoryDurability,
+    /// How many objects were ever written without their own flush, and how many flushes of the
+    /// batches were flushed for them.
+    written: Arc<AtomicU64>,
+    flushes: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -269,11 +287,17 @@ impl DirectoryDurability {
     }
 
     fn ensure(&self, path: &Path) -> Result<()> {
+        self.ensure_with(path, true)
+    }
+
+    /// Makes the directory exist. With `durable` each edge is flushed at once; without it the
+    /// caller flushes the whole store later (see `ObjectStore::make_durable`).
+    fn ensure_with(&self, path: &Path, durable: bool) -> Result<()> {
         match std::fs::symlink_metadata(path) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if let Some(parent) = directory_parent(path) {
-                    self.ensure(parent)?;
+                    self.ensure_with(parent, durable)?;
                 }
                 match std::fs::create_dir(path) {
                     Ok(()) =>
@@ -300,7 +324,7 @@ impl DirectoryDurability {
         }
         // A failed parent barrier may leave the directory visible. Retrying an existing name
         // must flush that edge too, before creating a child or publishing a file inside it.
-        if let Some(parent) = directory_parent(path) {
+        if durable && let Some(parent) = directory_parent(path) {
             self.sync(parent)?;
         }
         Ok(())
@@ -314,6 +338,7 @@ enum DirectoryEvent {
     Sync(PathBuf),
     Synced(PathBuf),
     Published(PathBuf),
+    FileSynced(PathBuf),
 }
 
 #[cfg(test)]
@@ -434,6 +459,8 @@ impl ObjectStore {
             live,
             retired: Arc::new(AtomicBool::new(false)),
             durability,
+            written: Arc::new(AtomicU64::new(0)),
+            flushes: Arc::new(AtomicU64::new(0)),
         };
         if !store.root.join("git/HEAD").exists() {
             store.write_metadata(
@@ -635,6 +662,56 @@ impl ObjectStore {
             .join("roots")
             .join(format!("{snapshot}.json"))
             .exists()
+    }
+
+    /// Keeps the first watcher cursor even when this directory cannot be recorded as a whole.
+    /// A retry never moves the start past changes that already belong to this turn.
+    pub(crate) fn remember_changes(
+        &self,
+        snapshot: Id,
+        directory: &str,
+        attachment: Id,
+        cursor: Option<u64>,
+    ) -> Result<()> {
+        let path = self
+            .root
+            .join("results")
+            .join(format!("{snapshot}.changes"));
+        if path.exists() {
+            return Ok(());
+        }
+        let bytes = serde_json::to_vec(&RecordingCursor {
+            attachment,
+            directory: directory.to_owned(),
+            cursor,
+        })
+        .map_err(|error| HostError::Internal(error.to_string()))?;
+        self.write_metadata(&path, &bytes)
+    }
+
+    /// An attachment's journal can never stand in for one lost on detach or restart.
+    pub(crate) fn changes_cursor(
+        &self,
+        snapshot: Id,
+        directory: &str,
+        attachment: Id,
+    ) -> Result<Option<u64>> {
+        let path = self
+            .root
+            .join("results")
+            .join(format!("{snapshot}.changes"));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = read_bounded(&path, manifest::MANIFEST_MAX_EXPANDED_BYTES)?;
+        let saved: RecordingCursor = serde_json::from_slice(&bytes).map_err(|error| {
+            HostError::Unsupported(format!("recording cursor is invalid: {error}"))
+        })?;
+        Ok(
+            (saved.attachment == attachment && saved.directory == directory)
+                .then_some(saved.cursor)
+                .flatten(),
+        )
     }
 
     /// The first durable recording reply for an identity, including a reasoned fallback.
@@ -1102,30 +1179,173 @@ impl ObjectStore {
             .join(&oid[2..]))
     }
 
-    fn publish_object(&self, staged: tempfile::NamedTempFile, oid: &str) -> Result<()> {
+    /// Publishes immutable objects without replacing a verified copy that a root already names.
+    /// Deferred objects share one pending set across every handle of this physical store.
+    fn publish_object(
+        &self,
+        staged: tempfile::NamedTempFile,
+        oid: &str,
+        durable: bool,
+        kind: &str,
+        size: i64,
+        expected: Hash,
+    ) -> Result<()> {
         let path = self.object_path(oid)?;
         let parent = path
             .parent()
             .ok_or_else(|| HostError::Internal("a Git object has no directory".to_owned()))?;
-        self.durability.ensure(parent)?;
-        staged
-            .as_file()
-            .sync_all()
-            .map_err(|error| HostError::io("syncing a recorded object", error))?;
-        // Replacing this name publishes the same verified object content, and also repairs an
-        // existing corrupt copy instead of declaring a newly recorded blob complete over it.
-        staged
-            .persist(&path)
-            .map_err(|error| HostError::io("publishing a recorded object", error.error))?;
-        #[cfg(test)]
-        if let Some(control) = &self.durability.control {
-            control.record(DirectoryEvent::Published(path.clone()));
+        let mut pending = self.live.1.lock().unwrap_or_else(PoisonError::into_inner);
+        self.durability.ensure_with(parent, durable)?;
+        let existing = path.exists()
+            && self
+                .verify_object_into(oid, kind, Some(size), Some(expected), &mut std::io::sink())
+                .is_ok();
+        if existing {
+            // Replacing identical bytes could put a new, unflushed inode under an already durable
+            // root. Keep the verified inode; a newly opened store still includes it in its barrier.
+            if durable {
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|error| HostError::io("syncing a recorded object", error))?;
+            }
+        } else {
+            if durable {
+                staged
+                    .as_file()
+                    .sync_all()
+                    .map_err(|error| HostError::io("syncing a recorded object", error))?;
+            }
+            staged
+                .persist(&path)
+                .map_err(|error| HostError::io("publishing a recorded object", error.error))?;
+            #[cfg(test)]
+            if let Some(control) = &self.durability.control {
+                control.record(DirectoryEvent::Published(path.clone()));
+            }
         }
-        self.durability.sync(parent)
+        if durable {
+            self.durability.sync(parent)?;
+            pending.files.remove(&path);
+        } else {
+            // There are only 256 fanouts in the two-hex-digit object representation. Keep their
+            // directory handles, rather than opening a handle for every pending file.
+            for directory in [parent.to_owned(), self.root.join("git/objects")] {
+                if let std::collections::btree_map::Entry::Vacant(slot) =
+                    pending.directories.entry(directory)
+                {
+                    let handle = platform::Dir::open_path(slot.key()).map_err(|error| {
+                        HostError::io("opening recorded object directories", error)
+                    })?;
+                    slot.insert(handle);
+                }
+            }
+            pending.files.insert(path);
+            self.written.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// Distinct object files still awaiting the store's own barrier.
+    #[must_use]
+    pub fn unsynced_objects(&self) -> u64 {
+        self.live
+            .1
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .files
+            .len() as u64
+    }
+
+    /// How many objects were ever written without their own flush: what the baselines have read.
+    #[must_use]
+    pub fn deferred_written(&self) -> u64 {
+        self.written.load(Ordering::SeqCst)
+    }
+
+    /// How many batches of recorded files were made durable.
+    #[must_use]
+    pub fn flushes(&self) -> u64 {
+        self.flushes.load(Ordering::SeqCst)
+    }
+
+    /// Flushes only recorded objects and their directory handles. Files are batched across the
+    /// CPU concurrency available to this process, so their writes can settle together. No barrier
+    /// includes unrelated dirty files on the filesystem. Failed batches remain pending for retry.
+    pub fn make_durable(&self) -> Result<()> {
+        let mut pending = self.live.1.lock().unwrap_or_else(PoisonError::into_inner);
+        if pending.files.is_empty() {
+            return Ok(());
+        }
+        let files: Vec<_> = pending.files.iter().collect();
+        let workers = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(files.len());
+        std::thread::scope(|scope| -> Result<()> {
+            let mut joins = Vec::new();
+            for batch in files.chunks(files.len().div_ceil(workers)) {
+                joins.push(scope.spawn(move || -> Result<()> {
+                    for path in batch {
+                        #[cfg(test)]
+                        if let Some(control) = &self.durability.control {
+                            control.before_sync(path)?;
+                        }
+                        OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(path)
+                            .and_then(|file| file.sync_all())
+                            .map_err(|error| HostError::io("flushing a recorded object", error))?;
+                        #[cfg(test)]
+                        if let Some(control) = &self.durability.control {
+                            control.record(DirectoryEvent::FileSynced((*path).clone()));
+                        }
+                    }
+                    Ok(())
+                }));
+            }
+            for join in joins {
+                join.join().map_err(|_| {
+                    HostError::Internal("flushing recorded files stopped unexpectedly".to_owned())
+                })??;
+            }
+            Ok(())
+        })?;
+        // Children before their parent: fanout entries, then the names of new fanouts and removal
+        // of staging names in git/objects. Every file barrier has completed before either step.
+        for directory in pending.directories.values().rev() {
+            #[cfg(test)]
+            if let Some(control) = &self.durability.control {
+                control.before_sync(directory.path())?;
+            }
+            directory
+                .sync()
+                .map_err(|error| HostError::io("flushing a recorded object directory", error))?;
+            #[cfg(test)]
+            if let Some(control) = &self.durability.control {
+                control.record(DirectoryEvent::Synced(directory.path().to_owned()));
+            }
+        }
+        pending.files.clear();
+        pending.directories.clear();
+        self.flushes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Stores raw file bytes as an owned Git blob and returns its Git and BLAKE3 identifiers.
     pub fn write_blob(&self, file: &mut File, size: u64) -> Result<(String, Hash)> {
+        self.write_blob_with(file, size, true)
+    }
+
+    /// Stores raw file bytes like [`ObjectStore::write_blob`], without flushing the object: for a
+    /// baseline, whose objects are flushed together by [`ObjectStore::make_durable`].
+    pub fn write_blob_deferred(&self, file: &mut File, size: u64) -> Result<(String, Hash)> {
+        self.write_blob_with(file, size, false)
+    }
+
+    fn write_blob_with(&self, file: &mut File, size: u64, durable: bool) -> Result<(String, Hash)> {
         let before = platform::file_meta(file)
             .map_err(|error| HostError::io("checking a recorded file", error))?;
         if !before.is_file() || before.size != size {
@@ -1177,12 +1397,31 @@ impl ObjectStore {
         let staged = encoder
             .finish()
             .map_err(|error| HostError::io("finishing a recorded blob", error))?;
-        self.publish_object(staged, &oid)?;
-        Ok((oid, Hash::finish(&hash)))
+        let hash = Hash::finish(&hash);
+        self.publish_object(
+            staged,
+            &oid,
+            durable,
+            "blob",
+            i64::try_from(size)
+                .map_err(|_| HostError::Unsupported("a recorded object is too large".to_owned()))?,
+            hash,
+        )?;
+        Ok((oid, hash))
     }
 
     /// Stores an owned Git blob or tree without any project attribute or filter processing.
     pub fn write_object(&self, kind: &str, bytes: &[u8]) -> Result<String> {
+        self.write_object_with(kind, bytes, true)
+    }
+
+    /// Stores an object like [`ObjectStore::write_object`], without flushing it: for the trees of a
+    /// state and the link text of a baseline, flushed together by [`ObjectStore::make_durable`].
+    pub fn write_object_deferred(&self, kind: &str, bytes: &[u8]) -> Result<String> {
+        self.write_object_with(kind, bytes, false)
+    }
+
+    fn write_object_with(&self, kind: &str, bytes: &[u8], durable: bool) -> Result<String> {
         if !matches!(kind, "blob" | "tree") {
             return Err(HostError::Unsupported(
                 "only recorded blobs and trees are stored".to_owned(),
@@ -1205,6 +1444,11 @@ impl ObjectStore {
                 .finish()
                 .map_err(|error| HostError::io("finishing a recorded object", error))?,
             &oid,
+            durable,
+            kind,
+            i64::try_from(bytes.len())
+                .map_err(|_| HostError::Unsupported("a recorded object is too large".to_owned()))?,
+            Hash::of(bytes),
         )?;
         Ok(oid)
     }
@@ -1307,7 +1551,7 @@ impl ObjectStore {
                 self.verify_object(&oid, "tree", Some(body.len() as i64), Some(Hash::of(&body)))?;
                 oid
             } else {
-                self.write_object("tree", &body)?
+                self.write_object_deferred("tree", &body)?
             };
             let path = RelPath::parse(&directory, PathStyle::Posix)?;
             if let Some(parent) = path.parent() {
@@ -1326,6 +1570,7 @@ impl ObjectStore {
 
     /// Publishes a complete root only after its manifest and every owned object are durable.
     pub fn keep(&self, state: &StateRoot, manifest: &[u8]) -> Result<()> {
+        self.make_durable()?;
         RelPath::parse(&state.directory, PathStyle::Posix)?;
         if Hash::of(manifest) != state.manifest_blob {
             return Err(HostError::Unsupported(
@@ -1423,6 +1668,20 @@ impl ObjectStore {
         wanted_size: Option<i64>,
         wanted_hash: Option<Hash>,
     ) -> Result<tempfile::NamedTempFile> {
+        let mut out = tempfile::NamedTempFile::new_in(&self.root)
+            .map_err(|error| HostError::io("staging verified recorded bytes", error))?;
+        self.verify_object_into(oid, wanted_kind, wanted_size, wanted_hash, &mut out)?;
+        Ok(out)
+    }
+
+    fn verify_object_into(
+        &self,
+        oid: &str,
+        wanted_kind: &str,
+        wanted_size: Option<i64>,
+        wanted_hash: Option<Hash>,
+        out: &mut impl Write,
+    ) -> Result<()> {
         let file = File::open(self.object_path(oid)?)
             .map_err(|error| HostError::io("opening a recorded object", error))?;
         let mut source = BufReader::new(ZlibDecoder::new(file));
@@ -1457,8 +1716,6 @@ impl ObjectStore {
                 "a recorded object has the wrong type or size".to_owned(),
             ));
         }
-        let mut out = tempfile::NamedTempFile::new_in(&self.root)
-            .map_err(|error| HostError::io("staging verified recorded bytes", error))?;
         let mut object_hash = Sha1::new();
         object_hash.update(&header);
         let mut content_hash = Hash::hasher();
@@ -1492,7 +1749,7 @@ impl ObjectStore {
                 "a recorded object failed hash verification".to_owned(),
             ));
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Reads one verified file or raw link, including its BLAKE3 and Git object checks.

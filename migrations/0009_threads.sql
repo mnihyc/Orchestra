@@ -515,6 +515,9 @@ CREATE TABLE threads (
     blocked_reason text,
     blocked_detail text,
     starting_step text,
+    starting_step_at timestamp with time zone,
+    starting_command text,
+    starting_behind text,
     agent_id uuid,
     provider_id uuid,
     arrangement text,
@@ -547,7 +550,8 @@ CREATE TABLE threads (
     CONSTRAINT threads_execution_revision_check CHECK ((execution_revision > 0)),
     CONSTRAINT threads_pending_notice_preview_bounded CHECK (((jsonb_typeof(pending_notices) = 'array'::text) AND (jsonb_array_length(pending_notices) <= 64))),
     CONSTRAINT threads_side_reading_check CHECK ((side_reading = ANY (ARRAY['read_only'::text, 'approval_gated'::text, 'no_tools'::text]))),
-    CONSTRAINT threads_starting_step_check CHECK ((starting_step = ANY (ARRAY['environment'::text, 'source'::text, 'provider'::text, 'harness'::text, 'credential'::text, 'session'::text, 'files'::text, 'turn'::text]))),
+    CONSTRAINT threads_starting_step_check CHECK ((starting_step = ANY (ARRAY['environment'::text, 'source'::text, 'provider'::text, 'harness'::text, 'credential'::text, 'session'::text, 'recording'::text, 'files'::text, 'turn'::text]))),
+    CONSTRAINT threads_starting_work_check CHECK (starting_step IS NOT NULL OR (starting_step_at IS NULL AND starting_command IS NULL AND starting_behind IS NULL)),
     CONSTRAINT threads_state_check CHECK ((state = ANY (ARRAY['idle'::text, 'starting'::text, 'running'::text, 'waiting_approval'::text, 'blocked'::text]))),
     CONSTRAINT threads_pkey PRIMARY KEY (node_id),
     CONSTRAINT threads_agent_fk FOREIGN KEY (agent_id) REFERENCES agents(id),
@@ -558,6 +562,23 @@ CREATE TABLE threads (
     CONSTRAINT threads_side_of_fkey FOREIGN KEY (side_of) REFERENCES threads(node_id) ON DELETE CASCADE,
     CONSTRAINT threads_topic_id_fkey FOREIGN KEY (topic_id) REFERENCES nodes(id)
 );
+-- When a starting thread's step began, kept by the database for every writer: a step that changes starts its
+-- clock again and forgets the command and the wait noted for the step before; no step, nothing noted.
+CREATE FUNCTION orch_thread_starting_step() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.starting_step IS NULL THEN
+        NEW.starting_step_at := NULL;
+        NEW.starting_command := NULL;
+        NEW.starting_behind := NULL;
+    ELSIF OLD.starting_step IS DISTINCT FROM NEW.starting_step THEN
+        NEW.starting_step_at := now();
+        NEW.starting_command := NULL;
+        NEW.starting_behind := NULL;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER threads_starting_step BEFORE UPDATE OF starting_step ON threads FOR EACH ROW EXECUTE FUNCTION orch_thread_starting_step();
 
 CREATE INDEX thread_display_topic_page_idx ON threads USING btree (topic_id, node_id);
 
@@ -1338,7 +1359,9 @@ CREATE TABLE turns (
     before_snapshot_id uuid,
     end_manifest_blob bytea,
     files_work_pending boolean DEFAULT false NOT NULL,
-    files_end_manifest jsonb,
+    files_changed integer CHECK (files_changed >= 0),
+    files_changed_paths jsonb,
+    recording_notice text,
     files_end_due boolean DEFAULT false NOT NULL,
     model text NOT NULL,
     effort text,

@@ -403,6 +403,40 @@ pub async fn set_work(
         .bind(thread).bind(observation).bind(seq).execute(conn).await?.rows_affected() == 1)
 }
 
+/// A complete unsolicited report updates and announces every sharing thread in one statement.
+/// Explicit reads keep their reservation; delayed or replayed reports never move facts backwards.
+pub async fn remember_work_report(
+    conn: &mut Conn,
+    environment: Id,
+    directory: &str,
+    observation: &Json,
+    at: orch_types::Time,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "WITH locked AS MATERIALIZED (
+        SELECT t.node_id FROM threads t JOIN nodes n ON n.id = t.node_id
+        WHERE t.environment_id = $1 AND t.workspace_dir = $2 AND n.deleted_at IS NULL
+        ORDER BY t.node_id FOR UPDATE OF t
+    ), changed AS (
+        UPDATE threads t SET work_observed = $3, seq_state = t.next_seq, next_seq = t.next_seq + 1
+        FROM locked WHERE t.node_id = locked.node_id
+          AND t.environment_id = $1 AND t.workspace_dir = $2
+          AND NOT COALESCE(t.work_observed ? '_requested', false)
+          AND (t.work_observed IS NULL OR (t.work_observed->>'as_of')::timestamptz <= $4)
+          AND t.work_observed IS DISTINCT FROM $3::jsonb
+        RETURNING t.node_id, t.seq_state
+    ) SELECT pg_notify($5, node_id::text || ':' || seq_state::text) FROM changed",
+    )
+    .bind(environment)
+    .bind(directory)
+    .bind(observation)
+    .bind(at.get())
+    .bind(crate::sequences::THREAD_CHANNEL)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 /// Reserves a requested observation without replacing the previous public facts.
 pub async fn reserve_work(
     conn: &mut Conn,
@@ -549,16 +583,31 @@ pub async fn set_before_state(conn: &mut Conn, turn: Id, snapshot: Id) -> Result
         == 1)
 }
 
+/// Keeps how many included files a turn changed, from its before-state and its observed end; none when either
+/// is unknown.
+pub async fn set_end_changes(
+    conn: &mut Conn,
+    turn: Id,
+    changed: Option<i32>,
+    paths: Option<&Json>,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE turns SET files_changed = $2, files_changed_paths = $3 WHERE id = $1")
+        .bind(turn)
+        .bind(changed)
+        .bind(paths)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// Keeps complete end hashes or explicit unknown coverage before this thread's next turn.
 pub async fn set_end_manifest(
     conn: &mut Conn,
     turn: Id,
-    manifest: Option<&Json>,
     blob: Option<&Hash>,
 ) -> Result<(), DbError> {
-    sqlx::query("UPDATE turns SET files_end_manifest = $2, end_manifest_blob = $3 WHERE id = $1")
+    sqlx::query("UPDATE turns SET end_manifest_blob = $2 WHERE id = $1")
         .bind(turn)
-        .bind(manifest)
         .bind(blob.map(|hash| hash.as_bytes().to_vec()))
         .execute(conn)
         .await?;

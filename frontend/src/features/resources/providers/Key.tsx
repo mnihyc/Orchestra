@@ -15,21 +15,26 @@ import { Button } from '@/ui/Button';
 import { adminSpec, type AdminActSpec } from '@/ui/AdminAct';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { PasswordInput } from '@/ui/Input';
+import { SavedSecret } from '@/ui/SecretField';
 import { toast } from '@/ui/Toast';
 import { HelpHint } from '@/ui/HelpHint';
 import { ProviderLogin } from './Login';
 
 /** A secret to write: its own field and its own button, so that one is changed without the others. */
-function SecretRow({ label, onWrite, button, pendingLabel, admin }: { label: string; onWrite: (value: string) => Promise<unknown>; button: string; pendingLabel?:string; admin?: AdminActSpec }) {
+function SecretRow({ label, onWrite, button, pendingLabel, admin, set = false }: { label: string; onWrite: (value: string) => Promise<unknown>; button: string; pendingLabel?:string; admin?: AdminActSpec; set?: boolean }) {
   const { t } = useTranslation();
   const [value, setValue] = useState('');
+  // A secret that is set shows as dots with Replace; the field to type a new value opens when it is asked for.
+  const [replacing, setReplacing] = useState(false);
   const write = useMutation({
     mutationFn: () => onWrite(value),
     onSuccess: () => {
       setValue('');
+      setReplacing(false);
       toast({ tone: 'success', title: t('providers.key.written', { name: label }) });
     },
   });
+  if (set && !replacing) return <SavedSecret label={label} fieldClassName="min-w-0 flex-1 basis-[15rem]" onReplace={() => setReplacing(true)} />;
   return (
     <form
       className="flex flex-col gap-2"
@@ -43,6 +48,7 @@ function SecretRow({ label, onWrite, button, pendingLabel, admin }: { label: str
         <Button admin={admin} type="submit" variant="primary" pending={write.isPending} blocked={value === ''}>
           {write.isPending ? pendingLabel ?? button : button}
         </Button>
+        {set && <Button variant="ghost" disabled={write.isPending} onClick={() => { setValue(''); setReplacing(false); }}>{t('settingsEditors.secret.keep')}</Button>}
       </div>
       {write.error !== null && <ErrorAlert error={write.error} />}
     </form>
@@ -103,6 +109,7 @@ function ApiKey({ provider }: { provider: Provider }) {
       <Section id="provider-key" title={t('providers.key.title')} action={<HelpHint term={t('providers.key.title')} what={<ProviderGuideLink guide="provider-credential"/>}/>} lead={keyMachine === null ? t('providers.key.heldByOrch') : t('providers.key.onMachine', { machine: keyMachine.name })}>
         <SecretRow
           admin={adminSpec(provider, 'provider.manage')}
+          set={provider.key_set}
           label={t('providers.key.value')}
           button={t('providers.key.save')}
           pendingLabel={t('providerNativeLogin.readingModels')}
@@ -120,7 +127,7 @@ function ApiKey({ provider }: { provider: Provider }) {
           <ul className="flex flex-col gap-3">
             {resourceSecrets.map((name) => (
               <li key={name}>
-                <SecretRow admin={adminSpec(provider, 'provider.manage')} label={name} button={t('providers.key.replaceSecret', { name })} onWrite={(value) => setProviderSecret(provider.id, name, value)} />
+                <SecretRow admin={adminSpec(provider, 'provider.manage')} set label={name} button={t('providers.key.replaceSecret', { name })} onWrite={(value) => setProviderSecret(provider.id, name, value)} />
               </li>
             ))}
           </ul>
