@@ -14,6 +14,50 @@ async fn native_scene() -> Proof<(Scene, Id)> {
     Ok((scene, provider))
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_program_without_the_requested_codec_is_unavailable_before_a_helper_is_created() -> Proof
+{
+    let (scene, provider) = native_scene().await?;
+    let mut descriptor: Json = scene
+        .world
+        .scalar(
+            "SELECT descriptor FROM agents WHERE id=$1",
+            scene.world.agent,
+        )
+        .await;
+    descriptor["x_capability_program"]["access"]["native"]["native"]["image_generation"]["execution"] =
+        json!([]);
+    scene.world.declares(descriptor).await;
+    let engine = scene.world.engine();
+    let sources = engine
+        .inner
+        .capability_services
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .ok_or("no installed declarations")?;
+    let result = crate::tools::capability_service::delegation::native_state(
+        &mut scene.world.pool.acquire().await?,
+        &sources,
+        provider,
+        NATIVE_MODEL,
+        "image_generation",
+    )
+    .await?;
+    assert!(
+        result.is_err(),
+        "a delegated mode alone does not prove an implemented input and result codec"
+    );
+    let helpers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM nodes WHERE kind='thread' AND name='Capability helper'",
+    )
+    .fetch_one(scene.world.pool.pool())
+    .await?;
+    assert_eq!(helpers, 0);
+    scene.end_original().await?;
+    Ok(())
+}
+
 async fn native_scene_with_file_failure() -> Proof<(Scene, Id, Arc<AtomicBool>)> {
     Box::pin(native_scene_with_input_keys(false)).await
 }
@@ -31,6 +75,7 @@ async fn native_scene_with_input_keys(keyed: bool) -> Proof<(Scene, Id, Arc<Atom
     "title":"Fixture image program", "access":{"native":{"orch_tools":true,"native":{
         "generation":{"enabled":true,"modes":["native"],"default_mode":"native"},
         "image_generation":{"enabled":true,"modes":["off","on"],"default_mode":"off","delegated_mode":"on",
+            "execution":[{"input":"image.request","result":"image.generated"}],
             "eligible_when":{"required":["plan"],"properties":{"plan":{"const":"fixture-paid"}}},
             "delegation_label":{"en":"Fixture image program","zh-CN":"测试图像程序"}}
     }}}});
@@ -132,7 +177,7 @@ async fn helper(scene: &Scene, call: &str) -> Proof<Id> {
     let answer = crate::ids::tool_result(scene.thread, call);
     tokio::time::timeout(common::PATIENCE, async {
         loop {
-            let helper:Option<Id>=sqlx::query_scalar("SELECT (e.value->>'helper')::uuid FROM thread_tool_calls c CROSS JOIN LATERAL jsonb_each(c.plan) e WHERE c.answer_id=$1 AND e.key LIKE 'delegated_capability:%'")
+            let helper:Option<Id>=sqlx::query_scalar("SELECT helper_id FROM delegated_program_work WHERE request_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1")
                 .bind(answer).fetch_optional(scene.world.pool.pool()).await?;
             if let Some(helper)=helper {return Ok(helper);}
             tokio::time::sleep(common::config().sweep_every).await;

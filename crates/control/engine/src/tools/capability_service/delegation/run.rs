@@ -10,9 +10,8 @@ fn link(call: &CallContext) -> Result<ParentLink, EngineError> {
     );
     let attempt = recovery_binding::command(root)?;
     Ok(ParentLink {
-        answer: source::Source::captured()?.answer(),
+        work: crate::ids::derived("capability.work", &[attempt.as_bytes()]),
         helper: crate::ids::derived("capability.helper", &[attempt.as_bytes()]),
-        slot: format!("{SLOT}:{attempt}"),
     })
 }
 

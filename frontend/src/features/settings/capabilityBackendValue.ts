@@ -3,6 +3,13 @@ import declarations from '../../../../shared/capabilities.json';
 import type { BackendRef } from '@/generated/api-types';
 
 export const objectValue = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** Exact route, offering and adapter options identify a choice; object member order does not. */
+export function backendIdentity(backend: BackendRef): string {
+  const ordered = (value: unknown): unknown => Array.isArray(value) ? value.map(ordered) : objectValue(value)
+    ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, ordered(value[key])])) : value;
+  return JSON.stringify(ordered(backend));
+}
 export function backendCapabilities(key: string): { id: string; title: string }[] {
   return Object.entries(declarations.capabilities).flatMap(([id, capability]) =>
     'backend_setting' in capability && capability.backend_setting === key ? [{ id, title: capability.title }] : []);

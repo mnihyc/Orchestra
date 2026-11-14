@@ -752,10 +752,7 @@ mod tests {
         let actor = new_id();
         let original = InputAuthority::from_caller(&admitted(actor, "ThreadInputCreate")).unwrap();
         let link: crate::tools::capability_service::delegation::ParentLink =
-            serde_json::from_value(
-                json!({"answer":new_id(),"helper":new_id(),"slot":"delegated_capability:attempt"}),
-            )
-            .unwrap();
+            serde_json::from_value(json!({"work":new_id(),"helper":new_id()})).unwrap();
         let conditioned = original
             .clone()
             .with_capability_parent(link.clone())
@@ -772,10 +769,7 @@ mod tests {
         assert_eq!(edited.origins, original.origins);
         assert!(edited.has_actor_origins());
         let wrong: crate::tools::capability_service::delegation::ParentLink =
-            serde_json::from_value(
-                json!({"answer":new_id(),"helper":new_id(),"slot":"delegated_capability:another"}),
-            )
-            .unwrap();
+            serde_json::from_value(json!({"work":new_id(),"helper":new_id()})).unwrap();
         assert!(conditioned.clone().with_capability_parent(wrong).is_err());
         assert!(
             saved(Some(&json!({"capability_parent":link}))).is_err(),

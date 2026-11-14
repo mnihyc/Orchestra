@@ -3,19 +3,29 @@ use super::*;
 use futures::future::BoxFuture;
 use orch_api_contract::threads::ContentPart;
 use orch_authz::CapturedCaller;
+use orch_db::queries::capability_work;
+use orch_provider_contract::capabilities::ExecutionSupport;
 use serde_json::json;
 
 const SLOT: &str = "delegated_capability";
 mod run;
 pub(super) use run::{execute, failure};
 
+/// These codecs are implemented by the installed native result reader, not by a route declaration.
+pub(crate) fn execution_support() -> Vec<ExecutionSupport> {
+    vec![ExecutionSupport {
+        input: "image.request".into(),
+        result: "image.generated".into(),
+        ..ExecutionSupport::default()
+    }]
+}
+
 /// A conjunctive condition on the helper's real creator/input authority, never an acting credential.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ParentLink {
-    answer: Id,
+    work: Id,
     helper: Id,
-    slot: String,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -53,19 +63,40 @@ impl Record {
 }
 
 impl ParentLink {
+    /// A copied condition cannot make a later independent input part of this attempt.
+    pub(crate) async fn owns_input(&self, conn: &mut Conn, input: Id) -> Result<bool, EngineError> {
+        Ok(capability_work::program(conn, self.work)
+            .await?
+            .is_some_and(|work| work.helper == self.helper && work.input == Some(input)))
+    }
+
     async fn record(&self, conn: &mut Conn) -> Result<Record, EngineError> {
+        let work = capability_work::program(conn, self.work)
+            .await?
+            .ok_or(EngineError::StaleToolSource)?;
+        let answer = work.source_answer.ok_or(EngineError::StaleToolSource)?;
+        let slot = format!("{SLOT}:{}", work.attempt);
         let stored: Option<Json> =
             sqlx::query_scalar("SELECT plan->$2 FROM thread_tool_calls WHERE answer_id=$1")
-                .bind(self.answer)
-                .bind(&self.slot)
+                .bind(answer)
+                .bind(&slot)
                 .fetch_optional(conn)
                 .await
                 .map_err(orch_db::DbError::from)?
                 .flatten();
         let record: Record = serde_json::from_value(stored.ok_or(EngineError::StaleToolSource)?)?;
         if record.helper != self.helper
-            || record.source.answer() != self.answer
-            || self.slot != format!("{SLOT}:{}", record.attempt)
+            || record.source.answer() != answer
+            || record.source.answer() != work.request
+            || work.id != crate::ids::derived("capability.work", &[record.attempt.as_bytes()])
+            || work.helper != self.helper
+            || work.actor != record.actor
+            || work.node != record.call.thread
+            || work.purpose != record.capability
+            || work.attempt != record.attempt
+            || work.backend != serde_json::to_value(&record.selected.reference)?
+            || work.record != json!({"source":record.source,"slot":slot})
+            || work.deadline != record.deadline.get()
         {
             return Err(EngineError::StaleToolSource);
         }
@@ -107,7 +138,7 @@ impl ParentLink {
             let unfinished: bool = sqlx::query_scalar(
                 "SELECT NOT(completed OR retired) FROM thread_tool_calls WHERE answer_id=$1",
             )
-            .bind(self.answer)
+            .bind(record.source.answer())
             .fetch_optional(&mut *conn)
             .await
             .map_err(orch_db::DbError::from)?
@@ -405,6 +436,39 @@ pub(crate) async fn native_state(
         .filter_map(Json::as_str)
         .map(str::to_owned)
         .collect();
+    let program_support = registry
+        .declarations()
+        .programs
+        .get(&descriptor.kind)
+        .and_then(|program| program.access.get("native"))
+        .and_then(|access| access.native.get(capability));
+    let installed = execution_support();
+    let implemented = sources
+        .capabilities()
+        .declarations()
+        .routes
+        .values()
+        .filter(|route| {
+            route.executor.as_deref() == Some("program-session")
+                && route.capabilities.iter().any(|id| id == capability)
+        })
+        .filter_map(|route| route.execution.as_ref())
+        .any(|required| {
+            installed.iter().any(|support| support.satisfies(required))
+                && program_support.is_some_and(|program| {
+                    program
+                        .execution
+                        .iter()
+                        .any(|support| support.satisfies(required))
+                })
+        });
+    if !implemented {
+        return Ok(Err(CapabilityFailure::unavailable(
+            capability,
+            "program_execution_unavailable",
+            "The selected program has no verified input and result codec for this capability.",
+        )));
+    }
     let context = cap::ThreadContext {
         choices: BTreeMap::from([(capability.into(), Some(mode))]),
         program: descriptor.kind,
@@ -623,12 +687,31 @@ impl Engine {
             return Err(EngineError::StaleToolSource);
         }
         let link = ParentLink {
-            answer: record.source.answer(),
+            work: crate::ids::derived("capability.work", &[record.attempt.as_bytes()]),
             helper,
-            slot,
         };
         let mut tx = self.db().begin().await?;
         source::check_call(&mut tx, call).await?;
+        let backend = serde_json::to_value(&record.selected.reference)?;
+        let locator = json!({"source":record.source,"slot":slot});
+        let journal = capability_work::retain_program(
+            &mut tx,
+            &capability_work::NewProgramWork {
+                id: link.work,
+                source_answer: record.source.answer(),
+                attempt: record.attempt,
+                helper: record.helper,
+                actor: record.actor,
+                node: record.call.thread,
+                purpose: &record.capability,
+                backend: &backend,
+                record: &locator,
+                at: self.inner.clock.now(),
+                deadline: record.deadline.get(),
+            },
+        )
+        .await?
+        .ok_or(EngineError::StaleToolSource)?;
         // Birth and the later native command share the same original callers and current Use.
         // A metadata-eligible sign-in is not permission to create work on that provider.
         if !link
@@ -642,6 +725,9 @@ impl Engine {
             return Err(EngineError::StaleToolSource);
         }
         if threads::thread(&mut tx, helper).await?.is_none() {
+            if journal.input.is_some() {
+                return Err(EngineError::StaleToolSource);
+            }
             let origins = source::original_callers_with_limits(
                 &mut tx,
                 call,
@@ -731,6 +817,9 @@ impl Engine {
                 .bind(input.id).bind(serde_json::to_value(authority)?).bind(helper).bind(record.actor).bind(input.submission_authority)
                 .execute(&mut *tx).await.map_err(orch_db::DbError::from)?.rows_affected();
             if wrote != 1 {
+                return Err(EngineError::StaleToolSource);
+            }
+            if !capability_work::bind_program_input(&mut tx, link.work, input.id).await? {
                 return Err(EngineError::StaleToolSource);
             }
         }

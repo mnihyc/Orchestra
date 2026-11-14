@@ -71,7 +71,23 @@ export async function loadSearchCatalogues(): Promise<void> {
   await Promise.all(LOCALES.map(({ locale }) => load(locale)));
 }
 
-/** Starts the catalogues in `locale`. Called once, before anything is drawn. */
+/**
+ * Waits for the browser to be idle, and for `ms` at the latest. What is fetched for safety, and not for the first draw, is fetched
+ * in this way, so that it never stands beside what the page is showing.
+ */
+function whenIdle(work: () => void, ms: number): void {
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(work, { timeout: ms });
+  else setTimeout(work, ms);
+}
+
+/** How long after the first draw English is fetched as the fallback of another language, if the browser has not been idle before. */
+export const FALLBACK_WORDS_AFTER_MS = 2000;
+
+/**
+ * Starts the catalogues in `locale`. Called once, before anything is drawn. The reader's own words are all that the first draw
+ * needs (the two catalogues hold the same keys, and tests keep them so); English, the fallback, is fetched once the browser is
+ * idle, so that a reader of another language does not wait for two catalogues.
+ */
 export async function startI18n(locale: Locale): Promise<void> {
   const warnMissing = import.meta.env.DEV;
   await i18next.use(initReactI18next).init({
@@ -89,9 +105,10 @@ export async function startI18n(locale: Locale): Promise<void> {
       }
     },
   });
-  await Promise.all(locale === 'en' ? [load('en')] : [load('en'), load(locale)]);
+  await load(locale);
   // The bundle arrived after the start: tell what is already drawn.
   await i18next.changeLanguage(locale);
+  if (locale !== 'en') whenIdle(() => { void load('en').catch(() => undefined); }, FALLBACK_WORDS_AFTER_MS);
 }
 
 /** Changes the language of everything on screen, fetching its catalogue first. */

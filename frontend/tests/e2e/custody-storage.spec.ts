@@ -36,10 +36,10 @@ for(const width of [1440,400]) for(const theme of ['light','dark'] as const) for
     await page.getByRole('option',{name:caption('@storage.kinds.image',locale),exact:true}).click();
     await expect(page).toHaveURL(/kind=image/u);
     await expect(page.getByText('Workspace recovery',{exact:true})).toHaveCount(0);
-    await expect(page.getByText('Cached image',{exact:true})).toBeVisible();
+    await expect(records).toContainText(caption('@storage.kinds.image',locale));
     await page.goto('/storage');
     await expect(page).toHaveURL(/kind=image/u);
-    await expect(page.getByText('Cached image',{exact:true})).toBeVisible();
+    await expect(records).toContainText(caption('@storage.kinds.image',locale));
     await page.getByRole('button',{name:caption('@storage.clearFilters',locale),exact:true}).click();
     await expect(page.getByText('Workspace recovery',{exact:true})).toBeVisible();
     await page.getByRole('button',{name:caption('@storage.guide',locale),exact:true}).click();

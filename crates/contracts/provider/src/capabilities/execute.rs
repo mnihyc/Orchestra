@@ -63,6 +63,10 @@ pub struct CapabilityResult {
 /// Model, API and later program-session implementations register the same execution port.
 #[async_trait]
 pub trait CapabilityExecutor: Send + Sync {
+    /// Only installed code declares the codecs and facilities it really implements.
+    fn support(&self) -> Vec<ExecutionSupport> {
+        Vec::new()
+    }
     /// Use the existing current-authority, credential-custody, IO and usage paths.
     async fn execute(&self, call: CapabilityCall) -> Result<CapabilityResult, SourceError>;
 }
@@ -103,6 +107,14 @@ impl Executors {
     pub fn names(&self) -> Vec<String> {
         self.entries.keys().cloned().collect()
     }
+    /// Supply these facts to the same resolver that previews a capability's actual route.
+    #[must_use]
+    pub fn support(&self) -> BTreeMap<String, Vec<ExecutionSupport>> {
+        self.entries
+            .iter()
+            .map(|(name, executor)| (name.clone(), executor.support()))
+            .collect()
+    }
     /// An unavailable adapter never falls back to another provider or kind.
     pub async fn execute(&self, call: CapabilityCall) -> Result<CapabilityResult, SourceError> {
         let executor = call
@@ -116,6 +128,17 @@ impl Executors {
                     "the selected capability executor is unavailable",
                 )
             })?;
+        if call.route.execution.as_ref().is_some_and(|required| {
+            !executor
+                .support()
+                .iter()
+                .any(|support| support.satisfies(required))
+        }) {
+            return Err(SourceError::new(
+                SourceErrorCode::Unsupported,
+                "the selected executor does not implement this consumer's codecs or execution constraints",
+            ));
+        }
         let expected = call.item.clone();
         let result = executor.execute(call).await?;
         if result.items.iter().any(|item| item.family != expected) {

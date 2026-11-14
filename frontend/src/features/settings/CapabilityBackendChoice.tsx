@@ -10,14 +10,14 @@ import type { BackendRef, CapabilityBackendCandidate } from '@/generated/api-typ
 import { ResourceName } from '@/features/resource-facts/ResourceFacts';
 import { ProviderDefaultChoice } from '@/features/settings/ProviderChoice';
 import type { ValueControlProps } from '@/features/settings/ValueControl';
-import { backendCapabilities, changeBackend, selectedBackend } from './capabilityBackendValue';
+import { backendCapabilities, backendIdentity, changeBackend, selectedBackend } from './capabilityBackendValue';
 import { useDebounced } from '@/lib/debounce';
 import { ErrorState } from '@/ui/ErrorState';
 import { Pagination } from '@/ui/Pagination';
 import { ResourcePickerLookup } from '@/ui/ResourcePicker';
 
 const hidden = (error: unknown) => error instanceof ApiError && [401, 403, 404].includes(error.status);
-const identity = (backend: BackendRef) => JSON.stringify([backend.route, backend.offering?.provider, backend.offering?.offering]);
+const identity = backendIdentity;
 
 function useWords() {
   const { t, i18n } = useTranslation();

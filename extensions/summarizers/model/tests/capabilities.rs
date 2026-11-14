@@ -173,6 +173,43 @@ fn request(node: Id, provider: Id) -> SummaryRequest {
 }
 
 #[tokio::test]
+async fn an_unimplemented_consumer_codec_is_refused_before_the_executor_runs() {
+    let host = Arc::new(Host {
+        seen: Mutex::new(vec![]),
+    });
+    let source = CallSource::default();
+    let mut executors = Executors::default();
+    executors
+        .register(
+            capabilities::EXECUTOR,
+            Arc::new(capabilities::Executor::new(host.clone(), source.clone())),
+        )
+        .unwrap();
+    let call = CapabilityCall {
+        source,
+        capability: "summary".into(),
+        route: cap::ResolvedRoute {
+            id: capabilities::ROUTE.into(),
+            executor: Some(capabilities::EXECUTOR.into()),
+            execution: Some(cap::ExecutionSupport {
+                input: "unimplemented.request".into(),
+                result: "unimplemented.result".into(),
+                ..cap::ExecutionSupport::default()
+            }),
+            ..cap::ResolvedRoute::default()
+        },
+        item: "summary".into(),
+        ledger_unit: "token".into(),
+        input: Json::Null,
+    };
+    assert_eq!(
+        executors.execute(call).await.unwrap_err().code,
+        SourceErrorCode::Unsupported
+    );
+    assert!(host.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn the_adapter_uses_one_host_completion_and_rejects_other_sources_models_and_zero_budgets() {
     let node = new_id();
     let provider = new_id();
