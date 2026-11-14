@@ -504,7 +504,7 @@ mod tests {
     fn codex_keeps_the_interface_and_cases_its_adapter_was_written_against() {
         let codex = Programs::builtin().program("codex").unwrap();
         let probe = codex.checks.interface.as_ref().unwrap();
-        assert_eq!(probe.needs.len(), 74);
+        assert_eq!(probe.needs.len(), 79);
         for name in [
             "thread/environment/connected",
             "thread/environment/disconnected",
@@ -532,12 +532,13 @@ mod tests {
                 "native_import",
                 "tools.result_form",
                 "history.native_import",
+                "background_commands",
             ]
         );
         assert_eq!(codex.probe_programs(), ["codex"]);
         let claude = Programs::builtin().program("claude-code").unwrap();
         assert_eq!(claude.checks.interface.as_ref().unwrap().needs.len(), 25);
-        assert_eq!(claude.checks.conformance.len(), 6);
+        assert_eq!(claude.checks.conformance.len(), 7);
         assert_eq!(claude.probe_programs(), ["claude-code", "claude"]);
         assert_eq!(claude.program_names(), ["claude", "claude-code"]);
     }

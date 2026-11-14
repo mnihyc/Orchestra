@@ -13,14 +13,16 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { create } from 'zustand';
 
-import { ApiError, client } from '@/api/client';
+import { ApiError, client, ReceiptAcknowledged } from '@/api/client';
 import { draftQuery, saveDraft, sendInput } from '@/api/threads';
 import { clearDraftText } from '@/api/source';
 import type { ContentPart, Delivery, LimitBypassRequest, NativeInvocation } from '@/generated/api-types';
+import { i18n } from '@/i18n';
 import { isForwarded } from '@/lib/content';
 import { NetworkError, newActKey } from '@/lib/requests';
 import { runningTurn, threadViewOf, threadWriter } from '@/realtime/stores/thread';
 import { defaultThreadRead, type ThreadReadTarget } from '@/realtime/threadScope';
+import { toast } from '@/ui/Toast';
 
 /** How long after the last key the draft is saved: a pause in typing, not a rhythm of it. */
 export const DRAFT_SAVE_AFTER_MS = 1_000;
@@ -30,12 +32,15 @@ export const DRAFT_SAVE_AFTER_MS = 1_000;
 interface DraftWrite { key: string; request: Promise<void>; settled: boolean }
 const draftWrites = new Map<string, DraftWrite>();
 const draftWriters = new Map<string, Map<symbol, () => void>>();
+const draftNotices = new Map<string, () => void>();
 let draftLifetime = 0;
 client.onSession((event) => {
   if (event.type !== 'signed_in' && event.type !== 'signed_out') return;
   draftLifetime += 1;
   draftWrites.clear();
-  useComposerStore.setState({ nativeSelection: {} });
+  for (const dismiss of draftNotices.values()) dismiss();
+  draftNotices.clear();
+  useComposerStore.setState({ nativeSelection: {}, draftSaves: {}, dirtyDrafts: new Set() });
 });
 
 /** One visible editor owns the debounce even when its lane and panel are both mounted. */
@@ -67,26 +72,61 @@ function writeDraftOnce(threadId: string, content: ContentPart[], delivery: Deli
   const previous = draftWrites.get(threadId);
   if (previous?.key === key) return previous.request;
   const lifetime = draftLifetime;
+  const name = threadViewOf(threadId).thread?.name ?? '';
+  draftSaveState(threadId, storeKey, 'saving');
+  let acknowledged = false;
   const write = async () => {
     // A queued write from the previous account must never use the next account's credentials.
     if (lifetime !== draftLifetime || stillCurrent?.() === false) return;
-    if (clear && nativeAction === undefined) await clearDraftText(threadId);
-    else if (nativeAction === undefined) await saveDraft(threadId, content, delivery);
-    else await saveDraft(threadId, content, delivery, nativeAction);
+    try {
+      if (clear && nativeAction === undefined) await clearDraftText(threadId);
+      else if (nativeAction === undefined) await saveDraft(threadId, content, delivery);
+      else await saveDraft(threadId, content, delivery, nativeAction);
+    } catch (error) {
+      if (!(error instanceof ReceiptAcknowledged)) throw error;
+    }
+    acknowledged = true;
   };
   const request = previous === undefined ? write() : previous.request.catch(() => undefined).then(write);
   const pending = { key, request, settled: false };
   draftWrites.set(threadId, pending);
   void request.then(() => {
+    if (lifetime !== draftLifetime) return;
+    if (!acknowledged) {
+      if (draftWrites.get(threadId) === pending) { draftWrites.delete(threadId); draftSaveState(threadId, storeKey, 'idle'); }
+      return;
+    }
     pending.settled = true;
+    const confirmed = draftContentKey(content);
+    const latest = draftWrites.get(threadId) === pending;
+    draftSaveState(threadId, storeKey, latest ? 'idle' : undefined, null, confirmed);
+    if (latest) {
+      draftNotices.get(storeKey)?.();
+      draftNotices.delete(storeKey);
+    }
     if (!draftWriters.has(threadId) && useComposerStore.getState().text[storeKey] === undefined && draftWrites.get(threadId) === pending) draftWrites.delete(threadId);
-  }, () => {
-    if (draftWrites.get(threadId) === pending) draftWrites.delete(threadId);
+  }, (error: unknown) => {
+    if (lifetime !== draftLifetime || draftWrites.get(threadId) !== pending) return;
+    draftWrites.delete(threadId);
+    draftSaveState(threadId, storeKey, 'failed', error);
+    if (!draftWriters.has(threadId)) {
+      draftNotices.get(storeKey)?.();
+      const dismiss = toast({ tone: 'danger', title: name === '' ? i18n.t('composer.draft.failed') : i18n.t('composer.draft.failedNamed', { name }), description: i18n.t('composer.draft.kept'),
+        action: { label: i18n.t('common.tryAgain'), run: () => {
+          if (lifetime !== draftLifetime) return;
+          const current = useComposerStore.getState().draftSaves[storeKey];
+          if (current?.status !== 'failed') return;
+          draftNotices.get(storeKey)?.();
+          draftNotices.set(storeKey, toast({ tone: 'info', title: i18n.t('composer.draft.saving'), persistent: true }));
+          void persistComposerDraft(threadId, storeKey).catch(() => undefined);
+        } } });
+      draftNotices.set(storeKey, dismiss);
+    }
   });
   return request;
 }
 
-/** Background attachment completion uses the same serialized writer as the visible composer. */
+/** Saves the current private draft through the shared writer, including attachment completion and retries. */
 export function persistComposerDraft(threadId: string, storeKey = threadId, attached?: ContentPart): Promise<void> {
   const local = useComposerStore.getState(), text = local.text[storeKey] ?? '';
   const content: ContentPart[] = [...(text === '' ? [] : [{ type: 'text', text } as const]), ...local.parts[storeKey] ?? [], ...(attached === undefined ? [] : [attached])];
@@ -123,9 +163,68 @@ interface ComposerStore {
   cannotSteer: Record<string, string>;
   /** The composer's Plan switch per thread, where the person set it; unset follows `thread.plan_first`. */
   planning: Record<string, boolean>;
+  /** Save acknowledgement belongs to the private draft, including when its last editor has left. */
+  draftSaves: Record<string, { threadId: string; status: DraftStatus; error: unknown; confirmed: string | null }>;
+  dirtyDrafts: ReadonlySet<string>;
 }
 
-export const useComposerStore = create<ComposerStore>(() => ({ passNext: {}, text: {}, parts: {}, nativeSelection: {}, refused: {}, sending: {}, cannotSteer: {}, planning: {} }));
+export const useComposerStore = create<ComposerStore>(() => ({ passNext: {}, text: {}, parts: {}, nativeSelection: {}, refused: {}, sending: {}, cannotSteer: {}, planning: {}, draftSaves: {}, dirtyDrafts: new Set() }));
+
+const draftKeyOf = (text: string, parts: readonly ContentPart[]): string => JSON.stringify({ text: parts.length === 0 && text.trim() === '' ? '' : text, parts });
+const draftContentKey = (content: readonly ContentPart[]): string => draftKeyOf(content.filter((part) => !isForwarded(part) && part.type === 'text').map((part) => 'text' in part ? part.text : '').join('\n'), content.filter((part) => !isForwarded(part) && part.type !== 'text'));
+
+function markDraftDirty(storeKey: string, dirty: boolean): void {
+  useComposerStore.setState((state) => {
+    if (state.dirtyDrafts.has(storeKey) === dirty) return state;
+    const dirtyDrafts = new Set(state.dirtyDrafts);
+    if (dirty) dirtyDrafts.add(storeKey); else dirtyDrafts.delete(storeKey);
+    return { dirtyDrafts };
+  });
+}
+
+function draftSaveState(threadId: string, storeKey: string, status?: DraftStatus, error: unknown = null, confirmed?: string): void {
+  useComposerStore.setState((state) => {
+    const held = state.draftSaves[storeKey];
+    if (held !== undefined && held.threadId !== threadId && status === undefined) return state;
+    const before = held?.threadId === threadId ? held : undefined;
+    const next: ComposerStore['draftSaves'][string] = { threadId, status: status ?? before?.status ?? 'idle', error: status === undefined ? before?.error ?? null : error, confirmed: confirmed ?? before?.confirmed ?? null };
+    const dirtyDrafts = new Set(state.dirtyDrafts);
+    if (next.status === 'saving' || next.status === 'failed' || draftKeyOf(state.text[storeKey] ?? '', state.parts[storeKey] ?? []) !== next.confirmed) dirtyDrafts.add(storeKey);
+    else dirtyDrafts.delete(storeKey);
+    return { draftSaves: { ...state.draftSaves, [storeKey]: next }, dirtyDrafts };
+  });
+}
+
+// Uploads and quotes can change a private draft after its last editor has left.
+useComposerStore.subscribe((state, before) => {
+  if (state.text === before.text && state.parts === before.parts) return;
+  const keys = new Set([...Object.keys(state.text), ...Object.keys(before.text), ...Object.keys(state.parts), ...Object.keys(before.parts)]);
+  const dirtyDrafts = new Set(state.dirtyDrafts);
+  let changed = false;
+  for (const key of keys) {
+    if (state.text[key] === before.text[key] && state.parts[key] === before.parts[key]) continue;
+    const held = Object.hasOwn(state.text, key) || Object.hasOwn(state.parts, key);
+    const saved = state.draftSaves[key];
+    const text = state.text[key] ?? '', parts = state.parts[key] ?? NOPARTS;
+    const dirty = held && (saved === undefined ? text.trim() !== '' || parts.length > 0
+      : saved.status === 'saving' || saved.status === 'failed' || draftKeyOf(text, parts) !== saved.confirmed);
+    if (dirtyDrafts.has(key) === dirty) continue;
+    if (dirty) dirtyDrafts.add(key); else dirtyDrafts.delete(key);
+    changed = true;
+  }
+  if (changed) useComposerStore.setState({ dirtyDrafts });
+});
+
+/** The shell protects unsaved private words even after the editor is paused or removed. */
+export function useComposerDraftGuard(): void {
+  const dirty = useComposerStore((state) => state.dirtyDrafts.size > 0);
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty]);
+}
 
 /** A learned refusal belongs only to the active turn that actually returned it. */
 export function steerRefusedFor(state: Pick<ComposerStore, 'cannotSteer'>, threadId: string, turnId: string | null): boolean {
@@ -300,10 +399,12 @@ export function useDraftSync(threadId: string, enabled: boolean, delivery: Deliv
   const writes = useDraftWriter(threadId, enabled, storeKey);
   const text = useComposerStore((state) => state.text[storeKey] ?? '');
   const parts = useComposerStore((state) => state.parts[storeKey] ?? NOPARTS);
+  const persistence = useComposerStore((state) => state.draftSaves[storeKey]);
   const identity = `${threadId}:${storeKey}`;
   const draft = useQuery({ ...draftQuery(threadId), enabled: enabled && reading, retry: false });
   const restored = useRef<string | null>(null);
   const saved = useRef<string | null>(null);
+  const attempted = useRef<string | null>(null);
   const currentDelivery = useRef(delivery);
   useEffect(() => { currentDelivery.current = delivery; }, [delivery]);
   useEffect(() => {
@@ -315,7 +416,7 @@ export function useDraftSync(threadId: string, enabled: boolean, delivery: Deliv
       if (!enabled || lifetime !== draftLifetime || restored.current !== identity || draftWriters.has(threadId)) return;
       const local = useComposerStore.getState();
       const words = local.text[storeKey] ?? '', attached = local.parts[storeKey] ?? NOPARTS;
-      if (JSON.stringify({ text: words, parts: attached }) === saved.current) return;
+      if (draftKeyOf(words, attached) === saved.current && useComposerStore.getState().draftSaves[storeKey]?.status !== 'failed') return;
       const content: ContentPart[] = [...(words === '' ? [] : [{ type: 'text' as const, text: words }]), ...attached];
       void writeDraftOnce(threadId, content, currentDelivery.current, storeKey).catch(() => undefined);
     };
@@ -323,6 +424,7 @@ export function useDraftSync(threadId: string, enabled: boolean, delivery: Deliv
 
   useEffect(() => {
     if (!enabled || !draft.isSuccess || restored.current === identity) return;
+    attempted.current = null;
     restored.current = identity;
     const first = draft.data?.content.find((part) => part.type === 'text');
     // An explicitly emptied local draft is still known: a cached older server answer must
@@ -334,29 +436,40 @@ export function useDraftSync(threadId: string, enabled: boolean, delivery: Deliv
       composerWriter.setParts(storeKey, draft.data?.content.filter((part) => !isForwarded(part) && part.type !== 'text') ?? []);
     }
     if (!Object.hasOwn(useComposerStore.getState().nativeSelection, storeKey)) useComposerStore.setState((state) => ({ nativeSelection: { ...state.nativeSelection, [storeKey]: draft.data?.native_action ?? null } }));
-    saved.current = JSON.stringify({ text: first?.text ?? '', parts: draft.data?.content.filter((part) => !isForwarded(part) && part.type !== 'text') ?? [] });
-  }, [enabled, draft.isSuccess, draft.data, identity, storeKey]);
+    const baseline = draftContentKey(draft.data?.content ?? []);
+    const held = useComposerStore.getState().draftSaves[storeKey];
+    saved.current = held?.threadId === threadId && held.confirmed !== null ? held.confirmed : baseline;
+    if (held?.threadId !== threadId) draftSaveState(threadId, storeKey, 'idle', null, baseline);
+  }, [enabled, draft.isSuccess, draft.data, identity, threadId, storeKey]);
 
-  const save = useMutation({
-    mutationFn: (value: { text: string; parts: ContentPart[]; threadId: string; storeKey: string; delivery: Delivery; identity: string }) => writeDraftOnce(value.threadId, value.text.trim() === '' && value.parts.length === 0 ? [] : [...(value.text === '' ? [] : [{ type: 'text' as const, text: value.text }]), ...value.parts], value.delivery, value.storeKey),
+  useEffect(() => {
+    if (restored.current === identity && persistence?.threadId === threadId && persistence.confirmed !== null) saved.current = persistence.confirmed;
+  }, [identity, persistence, threadId]);
+
+  const { mutate } = useMutation({
+    mutationFn: (value: { text: string; parts: ContentPart[]; threadId: string; storeKey: string; delivery: Delivery; identity: string; lifetime: number }) => value.lifetime !== draftLifetime ? Promise.resolve()
+      : writeDraftOnce(value.threadId, value.text.trim() === '' && value.parts.length === 0 ? [] : [...(value.text === '' ? [] : [{ type: 'text' as const, text: value.text }]), ...value.parts], value.delivery, value.storeKey),
   });
-  const { mutate } = save;
   useEffect(() => {
     // Save only local differences from the restored server baseline.
     // A newly allocated conversation can already have local text and parts when its first read finishes.
-    const key = JSON.stringify({ text, parts });
-    if (!writes || restored.current !== identity || key === saved.current) return;
+    const key = draftKeyOf(text, parts);
+    if (!writes || restored.current !== identity || key === saved.current || key === attempted.current) return;
+    const lifetime = draftLifetime;
     const timer = setTimeout(() => {
-      saved.current = key;
-      mutate({ text, parts, threadId, storeKey, delivery, identity });
+      if (lifetime !== draftLifetime) return;
+      attempted.current = key;
+      draftSaveState(threadId, storeKey, 'saving');
+      mutate({ text, parts, threadId, storeKey, delivery, identity, lifetime });
     }, DRAFT_SAVE_AFTER_MS);
     return () => clearTimeout(timer);
-  }, [text, parts, writes, identity, threadId, storeKey, delivery, mutate, draft.isSuccess]);
+  }, [text, parts, writes, identity, threadId, storeKey, delivery, mutate, draft.isSuccess, persistence?.confirmed]);
 
-  const current = save.variables?.identity === identity;
   useEffect(() => {
-    const changed = restored.current !== identity || saved.current === null ? text !== '' || parts.length > 0 : JSON.stringify({ text, parts }) !== saved.current;
-    onDirty?.(changed || current && (save.isPending || save.isError));
-  }, [text, parts, identity, draft.isSuccess, draft.data, current, save.isPending, save.isError, onDirty]);
-  return current && save.isPending ? 'saving' : current && save.isError ? 'failed' : 'idle';
+    const changed = restored.current !== identity || saved.current === null ? text !== '' || parts.length > 0 : draftKeyOf(text, parts) !== saved.current;
+    const dirty = changed || persistence?.status === 'saving' || persistence?.status === 'failed';
+    markDraftDirty(storeKey, dirty);
+    onDirty?.(dirty);
+  }, [text, parts, identity, storeKey, draft.isSuccess, draft.data, onDirty, persistence]);
+  return enabled && persistence?.threadId === threadId ? persistence.status : 'idle';
 }

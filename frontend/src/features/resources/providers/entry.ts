@@ -31,7 +31,7 @@ export interface EntryForm {
   requestOptions: string;
   efforts: string;
   defaultEffort: string;
-  images: boolean;
+  images: boolean | null;
   searchModes: string[];
   defaultSearch: string;
   /** The model's own window. */
@@ -85,7 +85,7 @@ export function formOf(parameters: ModelParameters, groups: readonly string[] = 
     requestOptions: parameters.request_options === undefined || parameters.request_options === null ? '' : JSON.stringify(parameters.request_options, null, 2),
     efforts: (parameters.efforts ?? []).join(', '),
     defaultEffort: parameters.default_effort ?? '',
-    images: parameters.input_images === true,
+    images: parameters.input_images ?? null,
     searchModes: parameters.web_search ?? [],
     defaultSearch: parameters.default_web_search ?? 'disabled',
     window: text(parameters.context_window),
@@ -138,10 +138,10 @@ export function groupFault(name: string, t: TFunction): string | null {
 }
 
 /** What is wrong with the form, in words, field by field: what the server would refuse, said before it is asked. */
-export function faultsOf(form: EntryForm, t: TFunction, locale = 'en-US', maximumGroups = GROUPS_MOST, existingGroups: readonly string[] = []): Faults {
+export function faultsOf(form: EntryForm, t: TFunction, locale = 'en-US', maximumGroups = GROUPS_MOST, existingGroups: readonly string[] = [], windowFallback: number | null = null): Faults {
   const found: Faults = {};
   if (form.requestOptions.trim() !== '' && requestOptions(form.requestOptions) === undefined) found.requestOptions = t('providerOptions.invalidSchema');
-  const window = readTokens(form.window);
+  const window = readTokens(form.window) ?? windowFallback;
   const largest = readTokens(form.largest);
   if (form.window.trim() !== '' && !isSize(form.window)) found.window = t('models.fault.size');
   if (form.largest.trim() !== '' && !isSize(form.largest)) found.largest = t('models.fault.size');
@@ -220,13 +220,13 @@ const OWNED = [
 ] as const satisfies readonly (keyof ModelParameters)[];
 
 /** What the entry says once the form is saved: what is left empty is left out, so that an entry says only what a manager said. */
-export function parametersOf(form: EntryForm, base: ModelParameters): ModelParameters {
+export function parametersOf(form: EntryForm, base: ModelParameters, windowFallback: number | null = null): ModelParameters {
   const owned: readonly string[] = OWNED;
   const kept = Object.fromEntries(Object.entries(base).filter(([member]) => !owned.includes(member))) as ModelParameters;
   const efforts = effortsOf(form);
   const window = readTokens(form.window);
   const largest = readTokens(form.largest);
-  const started = form.start === 'window' ? window : form.start === 'number' ? readTokens(form.startNumber) : null;
+  const started = form.start === 'window' ? window ?? windowFallback : form.start === 'number' ? readTokens(form.startNumber) : null;
   const rate = rateOf(form);
   const optionSchemas = requestOptions(form.requestOptions);
   return {
@@ -234,7 +234,7 @@ export function parametersOf(form: EntryForm, base: ModelParameters): ModelParam
     ...(optionSchemas === undefined ? {} : { request_options: optionSchemas }),
     ...(efforts.length === 0 ? {} : { efforts }),
     ...(efforts.includes(form.defaultEffort) ? { default_effort: form.defaultEffort } : {}),
-    ...(form.images ? { input_images: true } : {}),
+    ...(form.images === null ? {} : { input_images: form.images }),
     ...(form.searchModes.length === 0 ? {} : { web_search: form.searchModes }),
     ...(form.defaultSearch !== 'disabled' && form.searchModes.includes(form.defaultSearch) ? { default_web_search: form.defaultSearch } : {}),
     ...(form.tiers.length === 0 ? {} : { service_tiers: form.tiers }),
@@ -301,6 +301,18 @@ export function refusedAt(error: unknown): { faults: Faults; rest: boolean } {
     placed = true;
   }
   return { faults, rest: !placed };
+}
+
+/**
+ * The window a model's source reports: what its catalogue entry gives as its own window, else the largest context
+ * the source says it takes, else what that source last offered on the entry the provider already holds. None where
+ * nothing reported a size; an unknown size may stay unknown.
+ */
+export function reportedWindow(catalogue: ModelParameters | null | undefined, held?: ModelParameters | null, largest: number | null = null): number | null {
+  for (const size of [catalogue?.context_window, catalogue?.offered?.context_max, catalogue?.context_max, held?.offered?.context_max]) {
+    if (size !== undefined && size !== null && size >= 1 && (largest === null || size <= largest)) return size;
+  }
+  return null;
 }
 
 /** What the entry has of each list that is switched on, to say at a glance. */

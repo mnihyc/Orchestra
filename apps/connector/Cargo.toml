@@ -37,6 +37,7 @@ orch-plugin.workspace = true
 orch-plugin-contract.workspace = true
 orch-protocol-anthropic-messages.workspace = true
 orch-protocol-openai-responses.workspace = true
+orch-protocol-google-interactions.workspace = true
 orch-provider-contract.workspace = true
 orch-provider-builtins.workspace = true
 orch-provider-deepseek.workspace = true

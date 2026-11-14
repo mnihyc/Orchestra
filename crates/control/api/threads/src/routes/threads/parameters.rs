@@ -8,7 +8,9 @@
 //!
 //! **Only what exists for the thread is listed.** A parameter is shown when it is eligible for the thread's
 //! model, provider and place and its feature is on; a speed, an access program or a context that the
-//! thread's model does not have open is not there, whatever the harness supports. Each parameter carries its
+//! thread's model does not have open is not there, whatever the harness supports. A speed, an access
+//! program or a context that the model's managers did open and that the thread cannot use is not a
+//! parameter either: it is named in `withheld`, with the reason. Each parameter carries its
 //! definition, with the range of a number (the most of a context is what the model's managers opened) and
 //! where its options and its start come from. The value is what was chosen for the thread; what it runs with
 //! when nothing was chosen, or when the choice is no longer open, is what the model starts with, which the
@@ -58,6 +60,8 @@ use orch_api_contract::settings::ThreadParameterGet;
 
 use orch_api_contract::settings::ThreadParameters;
 
+use orch_api_contract::settings::ThreadProvider;
+
 use orch_authz::Principal;
 
 use orch_db::Conn;
@@ -103,6 +107,41 @@ fn capability_options(
             });
         }
     }
+}
+
+/// A recorded option needs its key and meaning; profile help and unrelated controls stay out.
+fn recorded_parameter(def: &orch_agent_contract::parameters::ParameterDef) -> Option<Value> {
+    use orch_agent_contract::parameters::{ModelLimit, ModelList, ParameterOptions, RangeMax};
+    let options = match &def.options {
+        Some(ParameterOptions::FromModel { from_model })
+            if matches!(
+                from_model,
+                ModelList::ServiceTiers | ModelList::AccessPrograms
+            ) =>
+        {
+            Some(from_model)
+        }
+        _ => None,
+    };
+    let range = def.range.filter(|range| {
+        matches!(
+            range.max,
+            RangeMax::FromModel {
+                from_model: ModelLimit::ContextMax
+            }
+        )
+    });
+    if options.is_none() && range.is_none() {
+        return None;
+    }
+    let mut value = serde_json::json!({"key":def.key});
+    if let Some(from_model) = options {
+        value["options"] = serde_json::json!({"from_model":from_model});
+    }
+    if let Some(range) = range {
+        value["range"] = serde_json::json!(range);
+    }
+    Some(value)
 }
 
 /// Binds this module's requests.
@@ -184,7 +223,15 @@ pub(super) async fn parameters_in(
     provider_view: ProviderView<'_>,
 ) -> ApiResult<ThreadParameters> {
     let thread = ctx.id("id")?;
-    let mut setting_keys = vec![keys::AGENT_MODEL, keys::AGENT_EFFORT, keys::AGENT_PARAMS];
+    let mut setting_keys = vec![
+        keys::AGENT_MODEL,
+        keys::AGENT_EFFORT,
+        keys::AGENT_PARAMS,
+        keys::COLLAB_DEFAULT_DELIVERY,
+        keys::COMPOSER_PASTE_INLINE_CONTEXT_SHARE,
+        keys::THREAD_PLAN_FIRST,
+        keys::ORCH_TOOLS_OWNER_READS,
+    ];
     setting_keys.extend(
         orch_engine::capability_routes::setting_definitions(&ctx.app.builtin_sources)
             .iter()
@@ -372,6 +419,16 @@ pub(super) async fn parameters_in(
                 .is_some_and(|eligibility| def.is_shown(eligibility, &settings.features))
         })
         .collect();
+    // What the model's managers opened and this thread cannot use stays in the read, with why, so that a
+    // screen can show the choice off and say what stands in its way.
+    let withheld = match (descriptor, eligibility.as_ref()) {
+        (Some(descriptor), Some(eligibility)) => orch_agent_contract::parameters::withheld(
+            &descriptor.parameters,
+            eligibility,
+            &settings.features,
+        ),
+        _ => Vec::new(),
+    };
     let values = params.value.clone().unwrap_or(Value::Null);
     let mut parameters: Vec<ParameterView> = declared
         .into_iter()
@@ -499,6 +556,7 @@ pub(super) async fn parameters_in(
                 .capability_use_preview(
                     conn,
                     &orch_engine::access::ProviderUse {
+                        purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                         person: principal.user(),
                         node: thread,
                         provider: binding.provider.id,
@@ -571,14 +629,90 @@ pub(super) async fn parameters_in(
         Vec::new()
     };
     capability_options(&mut parameters, &capabilities);
+    let agent = parts
+        .binding
+        .as_ref()
+        .map(|binding| orch_api_contract::settings::ThreadAgent {
+            agent: binding.agent.clone(),
+            parameters: binding
+                .descriptor
+                .as_ref()
+                .map(|descriptor| {
+                    descriptor
+                        .parameters
+                        .iter()
+                        .filter_map(recorded_parameter)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        });
+    let mut environment = None;
+    if let Some(reference) = &parts.facts.environment
+        && super::view::held_on_environment(conn, principal, Some(reference.id))
+            .await?
+            .iter()
+            .any(|permission| permission == "files.view")
+        && let Some(row) =
+            orch_db::queries::environments::thread_engine::environment(conn, reference.id).await?
+    {
+        let reported = row
+            .facts
+            .get("workspace_root")
+            .and_then(Value::as_str)
+            .filter(|_| {
+                row.facts.get("generation").and_then(Value::as_i64)
+                    == Some(i64::from(row.generation))
+            })
+            .map(|root| root.replace('\\', "/"))
+            .filter(|root| {
+                let bytes = root.as_bytes();
+                root.starts_with('/')
+                    || (bytes.len() >= 3
+                        && bytes[0].is_ascii_alphabetic()
+                        && bytes[1] == b':'
+                        && bytes[2] == b'/')
+            });
+        environment = Some(orch_api_contract::settings::ThreadEnvironment {
+            id: row.id,
+            workspace_root: reported.unwrap_or_else(|| row.workspace_root.clone()),
+            registered_root: row.workspace_root,
+            generation: row.generation,
+        });
+    }
     Ok(ThreadParameters {
+        composer: Some(orch_api_contract::settings::ThreadComposer {
+            default_delivery: of(keys::COLLAB_DEFAULT_DELIVERY)
+                .value
+                .as_ref()
+                .and_then(Value::as_str)
+                .unwrap_or("queue")
+                .to_owned(),
+            paste_inline_context_share: of(keys::COMPOSER_PASTE_INLINE_CONTEXT_SHARE)
+                .value
+                .as_ref()
+                .and_then(Value::as_i64)
+                .unwrap_or(25),
+            plan_first: of(keys::THREAD_PLAN_FIRST)
+                .value
+                .as_ref()
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            owner_reads: of(keys::ORCH_TOOLS_OWNER_READS)
+                .value
+                .as_ref()
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }),
+        agent,
+        environment,
         capabilities,
-        provider,
+        provider: provider.map(ThreadProvider::of),
         model: ThreadModelParameter {
             value: current,
             source: model.source,
             writable: model.writable,
             options,
+            options_partial: false,
         },
         effort: ThreadEffortParameter {
             value: effort
@@ -592,6 +726,7 @@ pub(super) async fn parameters_in(
             supported,
         },
         parameters,
+        withheld,
         approval_mode: serde_json::to_value(settings.approval_mode)
             .map_err(ApiError::internal)?
             .as_str()

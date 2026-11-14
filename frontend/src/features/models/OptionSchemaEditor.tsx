@@ -1,5 +1,5 @@
 /** Documented options edit the existing schema draft; unfamiliar schema structure remains raw. */
-import { useRef, useState } from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { documentedOptions, suggestedRule, type DocumentedOption } from './optionCatalogue';
 import { optionProperty, setOptionProperty, type OptionProperty } from './requestOptionSchema';
@@ -11,6 +11,9 @@ import { Switch } from '@/ui/Switch';
 import { Textarea } from '@/ui/Textarea';
 import { Button } from '@/ui/Button';
 import { InlineAlert } from '@/ui/InlineAlert';
+import { Disclosure } from '@/ui/Disclosure';
+import { useAppearance } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
 
 type Mode = 'inherit' | 'allow' | 'block' | 'fixed' | 'remove' | 'custom';
 const simpleKeys = new Set(['type', 'enum', 'default', 'const', 'items', 'x-orch-replace']);
@@ -99,26 +102,40 @@ export interface OptionSchemaEditorProps {
   protocols: readonly string[];
   disabled?: boolean;
   error?: string;
+  guide?: ReactNode;
 }
-export function OptionSchemaEditor({ value, onChange, protocols, disabled = false, error }: OptionSchemaEditorProps) {
+export function OptionSchemaEditor({ value, onChange, protocols, disabled = false, error, guide }: OptionSchemaEditorProps) {
   const { t } = useTranslation();
+  const locale = useAppearance((state) => state.locale);
   const [selected, setSelected] = useState(protocols[0] ?? '');
-  const [rawOpen, setRawOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const rawDetails = useRef<HTMLDetailsElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   let document: Record<string, unknown> | undefined;
   try { const parsed: unknown = value.trim() === '' ? {} : JSON.parse(value); if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) document = parsed as Record<string, unknown>; } catch { /* The raw draft remains intact. */ }
   const available = [...new Set([...protocols, ...Object.keys(document ?? {}).filter((name) => name !== 'native')])];
   const protocol = available.includes(selected) ? selected : available[0] ?? '';
   const fields = documentedOptions(protocol);
-  const openRaw = () => { setRawOpen(true); requestAnimationFrame(() => textarea.current?.focus()); };
-  return <div className="flex min-w-0 flex-col gap-3" data-option-schema-editor>
+  const needle = query.trim().normalize('NFKC').toLocaleLowerCase();
+  const shown = fields.filter((option) => `${t(`providerFields.fields.${option.id}`)} ${option.path.join('.')}`.normalize('NFKC').toLocaleLowerCase().includes(needle));
+  const invalid = document === undefined;
+  useEffect(() => {
+    if ((invalid || error !== undefined || fields.length === 0) && rawDetails.current !== null) rawDetails.current.open = true;
+  }, [invalid, error, fields.length, protocol]);
+  const openRaw = () => { if (rawDetails.current !== null) rawDetails.current.open = true; requestAnimationFrame(() => textarea.current?.focus()); };
+  return <Disclosure title={t('providerOptions.schemaTitle')} lead={t('providerOptions.formatsSet', { figure: formatNumber(Object.keys(document ?? {}).length, locale) })} reveal={document === undefined || error !== undefined}>
+    <div className="flex min-w-0 flex-col gap-3 py-3" data-option-schema-editor>
+    {guide !== undefined && <div className="flex justify-end">{guide}</div>}
     {available.length > 0 && <Select<string> size="sm" label={t('providerFields.protocol')} value={protocol} options={available.map((format) => ({ value: format, label: format }))} disabled={disabled} onValueChange={setSelected} />}
     {document === undefined ? <InlineAlert tone="danger">{t('providerOptions.invalidSchema')}</InlineAlert> : fields.length === 0 ? null
-      : <ul className="flex min-w-0 flex-col">{fields.map((option) => <OptionRow key={`${protocol}:${option.path.join('.')}`} option={option} property={optionProperty(document, protocol, option.path)} disabled={disabled}
-        raw={openRaw} change={(rule) => { const next = setOptionProperty(document, protocol, option.path, rule); if (next.ok) onChange(JSON.stringify(next.value, null, 2)); else openRaw(); }} />)}</ul>}
-    <details open={rawOpen || document === undefined || error !== undefined || fields.length === 0} onToggle={(event) => setRawOpen(event.currentTarget.open)}>
+      : <><Input label={t('providerFields.find')} hideLabel placeholder={t('providerFields.find')} value={query} autoComplete="off" onChange={(event) => setQuery(event.target.value)} />
+        {shown.length === 0 ? <p role="status" className="text-sm text-text-muted">{t('composer.pick.nothing')}</p>
+          : <ul className="flex max-h-(--list-max-height) min-w-0 flex-col overflow-y-auto">{shown.map((option) => <OptionRow key={`${protocol}:${option.path.join('.')}`} option={option} property={optionProperty(document, protocol, option.path)} disabled={disabled}
+            raw={openRaw} change={(rule) => { const next = setOptionProperty(document, protocol, option.path, rule); if (next.ok) onChange(JSON.stringify(next.value, null, 2)); else openRaw(); }} />)}</ul>}</>}
+    <details ref={rawDetails}>
       <summary className="cursor-default text-sm font-medium text-accent-text">{t('providerFields.raw')}</summary>
       <Textarea ref={textarea} hideLabel label={t('providerFields.raw')} data-scroll-allow="code" className="mt-2 font-mono" rows={6} value={value} disabled={disabled} error={error} onChange={(event) => onChange(event.target.value)} />
     </details>
-  </div>;
+    </div>
+  </Disclosure>;
 }

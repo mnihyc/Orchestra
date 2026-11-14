@@ -77,3 +77,16 @@ it('refuses a retired setting advertised as a current control', () => {
       .toContain(`reference.setting_unknown: ${language}:setting:retired.setting`);
   }
 });
+
+
+it('documents view-opening choices and topic thread search in both shipped languages', () => {
+  const article = content.guide.articles.find((entry) => entry.id === 'option-reference');
+  if (article === undefined) throw new Error('The shipped option reference is required');
+  for (const locale of ['en', 'zh-CN'] as const) {
+    const body = locale === 'en' ? article.body : article.translations?.[locale]?.body;
+    if (body === undefined) throw new Error('The translated option reference is required');
+    expect(documentedReferences(body).map((entry) => entry.id)).toEqual(expect.arrayContaining([
+      'option:PersonalState.sidebar.open_links', 'option:TopicSearch.q',
+    ]));
+  }
+});

@@ -36,6 +36,9 @@ pub enum AuthMode {
     /// `x-api-key: <key>`.
     #[serde(rename = "x-api-key")]
     XApiKey,
+    /// `x-goog-api-key: <key>`.
+    #[serde(rename = "x-goog-api-key")]
+    GoogleApiKey,
     /// The key as the value of the header named in `auth_header`.
     #[serde(rename = "header")]
     Header,
@@ -51,6 +54,7 @@ impl AuthMode {
         match self {
             Self::Bearer => "bearer",
             Self::XApiKey => "x-api-key",
+            Self::GoogleApiKey => "x-goog-api-key",
             Self::Header => "header",
             Self::None => "none",
         }
@@ -194,6 +198,7 @@ impl EndpointOptions {
         match self.auth.unwrap_or(default_auth) {
             AuthMode::Bearer => Some("authorization"),
             AuthMode::XApiKey => Some("x-api-key"),
+            AuthMode::GoogleApiKey => Some("x-goog-api-key"),
             AuthMode::Header => self.auth_header.as_deref(),
             AuthMode::None => None,
         }
@@ -371,7 +376,7 @@ pub fn authorize_joined(
     joined: &[&str],
 ) -> Result<Vec<(String, String)>, AuthorizeError> {
     let bad = |name: &str| AuthorizeError::BadHeader(name.to_owned());
-    for name in ["authorization", "x-api-key", "cookie"]
+    for name in ["authorization", "x-api-key", "x-goog-api-key", "cookie"]
         .into_iter()
         .chain(HOP_BY_HOP)
     {
@@ -394,6 +399,9 @@ pub fn authorize_joined(
         AuthMode::None => None,
         AuthMode::Bearer => Some((header::AUTHORIZATION, format!("Bearer {}", key()?))),
         AuthMode::XApiKey => Some((HeaderName::from_static("x-api-key"), key()?.to_owned())),
+        AuthMode::GoogleApiKey => {
+            Some((HeaderName::from_static("x-goog-api-key"), key()?.to_owned()))
+        }
         AuthMode::Header => {
             let name = options
                 .auth_header
@@ -445,7 +453,7 @@ pub fn authorize_joined(
         .collect())
 }
 
-/// The options both built-in protocols declare, in the one shape in which a person is asked for a value.
+/// The common endpoint options, in the shape in which a person is asked for a value.
 #[must_use]
 pub fn standard_options() -> Vec<Field> {
     let mut auth = Field::new("auth", "How the key is presented", FieldType::Choice);
@@ -454,6 +462,7 @@ pub fn standard_options() -> Vec<Field> {
         [
             ("bearer", "Authorization: Bearer <key>"),
             ("x-api-key", "x-api-key: <key>"),
+            ("x-goog-api-key", "x-goog-api-key: <key>"),
             ("header", "A header of your choice"),
             ("none", "No key"),
         ]
@@ -792,7 +801,16 @@ mod tests {
                 .iter()
                 .all(|field| !field.required && field.help.is_some())
         );
-        assert_eq!(fields[0].choices.as_ref().unwrap().len(), 4);
+        assert_eq!(
+            fields[0]
+                .choices
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>(),
+            ["bearer", "x-api-key", "x-goog-api-key", "header", "none"]
+        );
         // What a form can give is accepted by the options.
         assert_eq!(
             orch_types::fields::validate(

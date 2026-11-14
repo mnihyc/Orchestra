@@ -730,3 +730,65 @@ async fn resource_impact_publication_rechecks_the_original_model_qualified_bindi
         }
     }
 }
+
+#[tokio::test]
+async fn a_resource_list_carries_sharing_only_from_homes_readable_in_that_same_inventory() {
+    let world = World::new().await;
+    let owner = person(&world, "sharing-inventory-reader").await;
+    let home = make_org(
+        &world,
+        &owner,
+        "Sharing inventory home",
+        "sharing-inventory-home",
+    )
+    .await
+    .base
+    .id;
+    let provider = resource(&world, &owner, home, "provider", "Listed with sharing").await;
+    let ask = EverythingListQuery {
+        resource_details: None,
+        resource_rows: Some(true),
+        limit: Some(20),
+        ..query("provider")
+    };
+    let ordinary = read(&world, &owner, &ask).await;
+    assert!(
+        ordinary
+            .items
+            .iter()
+            .filter_map(|row| row.sharing.as_ref())
+            .any(|summary| summary.rows.is_some())
+    );
+    for operation in ["NodeDefaultsGet", "EverythingList.mine"] {
+        let token = key(
+            &world,
+            owner.id(),
+            vec![
+                rule("EverythingList.mine", "provider", provider, "self"),
+                rule(operation, "org", home, "self"),
+            ],
+        )
+        .await;
+        let page: Page<EverythingRow> = accepted(
+            world
+                .app
+                .call(EverythingList, &[])
+                .token(&token)
+                .query(&ask)
+                .send_bytes()
+                .await,
+        );
+        assert_eq!(page.items.len(), 1);
+        assert!(page.items[0].resource_row.is_some() && page.items[0].resource.is_none());
+        let disclosed = page
+            .items
+            .iter()
+            .filter_map(|row| row.sharing.as_ref())
+            .any(|summary| summary.rows.is_some());
+        assert_eq!(
+            disclosed,
+            operation == "EverythingList.mine",
+            "another operation never lends its sharing read to the inventory"
+        );
+    }
+}

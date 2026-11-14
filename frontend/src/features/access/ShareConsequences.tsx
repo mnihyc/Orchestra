@@ -26,11 +26,13 @@ export function EntryOptionFacts({ options, word }: { options: unknown; word: (t
   const { t } = useTranslation();
   const given = typeof options === 'object' && options !== null && !Array.isArray(options) ? options as Record<string, unknown> : null;
   const names = whereNames(given?.where);
-  const { where: _places, ...rest } = given ?? {};
-  if (given === null || names.length === 0) return <ValueSummary value={options} label={t('shareReview.options')} fieldName={(name) => optionLabel(t, name)} word={word} />;
+  const purposes = Array.isArray(given?.purposes) ? given.purposes.filter((purpose): purpose is string => typeof purpose === 'string') : null;
+  const { where: _places, purposes: _purposes, ...rest } = given ?? {};
+  if (given === null || names.length === 0 && purposes === null) return <ValueSummary value={options} label={t('shareReview.options')} fieldName={(name) => optionLabel(t, name)} word={word} />;
   return <>
     {Object.keys(rest).length > 0 && <ValueSummary value={rest} label={t('shareReview.options')} fieldName={(name) => optionLabel(t, name)} word={word} />}
-    <p className="text-sm"><span className="text-text-muted">{t('access.options.where')}</span>{': '}<WhereNames names={names} /></p>
+    {purposes !== null && <p className="text-sm"><span className="text-text-muted">{t('access.options.purposes')}</span>{': '}{purposes.length === 0 ? t('access.options.noPurposes') : purposes.map((purpose) => t(`usage.purposes.${purpose}`)).join(', ')}</p>}
+    {names.length > 0 && <p className="text-sm"><span className="text-text-muted">{t('access.options.where')}</span>{': '}<WhereNames names={names} /></p>}
   </>;
 }
 

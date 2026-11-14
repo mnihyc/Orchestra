@@ -284,7 +284,7 @@ async fn switching_auto_off_while_a_build_is_staged_discards_it_without_installi
                 public_url: "https://orch.test".into(),
             },
             pin: "test".into(),
-            protocol_version: 1,
+            protocol_version: orch_link_contract::version::PROTOCOL_VERSION,
             enrolled_at: rig.clock.time(),
             managed: false,
         })

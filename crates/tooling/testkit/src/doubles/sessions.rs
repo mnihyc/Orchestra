@@ -52,6 +52,7 @@ pub async fn prepare(
         "workspace_root": root, "instruction_root_marker": false,
         "directory": directory, "cwd": directory, "mounts": [], "model": "fake-1", "effort": null,
         "params": {}, "approval_mode": "auto", "sandbox_mode": "workspace", "instructions": "", "memory": null,
+        "web_action_wait_secs": 120,
         "arrangement": row.try_get::<String, _>("arrangement")?, "provider": {"path":"native", "provider_id":provider},
         "exec": {"executor":row.try_get::<Option<String>, _>("executor")?, "tool_set":row.try_get::<Option<String>, _>("tool_set")?,
             "environment_id":row.try_get::<Id, _>("environment_id")?, "generation":row.try_get::<i32, _>("env_generation")?, "ticket":null},

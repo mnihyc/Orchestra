@@ -12,8 +12,8 @@ use orch_api_core::dispatch::{CommandOutcome, DispatchError};
 use orch_db::queries::settings::put_secret;
 use orch_db::secrets::MasterKey;
 use orch_link_contract::commands::{
-    Command, CommandError, CommandKind, CommandResult, Empty, ErrorCode, ProviderStart, Secret,
-    SerialKey, SessionClose,
+    Command, CommandError, CommandKind, CommandResult, Empty, ErrorCode, ProviderDiscoverModels,
+    ProviderDiscoverModelsResult, ProviderStart, Secret, SerialKey, SessionClose,
 };
 use orch_link_contract::enrollment::Trust;
 use orch_link_contract::session::Role;
@@ -25,6 +25,60 @@ use std::time::Duration;
 
 fn later(seconds: i64) -> Time {
     Time::new(chrono::Utc::now() + chrono::Duration::seconds(seconds))
+}
+
+#[tokio::test]
+async fn model_catalogues_larger_than_a_backplane_frame_arrive_whole_in_both_directions() {
+    let mut world = World::start().await;
+    let enrolled = world.enroll("catalogue-machine").await;
+    let machine = world.start_machine(&enrolled, enrolled.endpoints(Trust::Pinned));
+    tokio::time::timeout(PATIENCE, machine.link.connected())
+        .await
+        .unwrap();
+    let mut request = ProviderDiscoverModels {
+        provider_id: new_id(),
+        models: Some(Default::default()),
+    };
+    request.models.as_mut().unwrap().config.insert(
+        "catalogue_note".into(),
+        serde_json::json!("A structured source description. ".repeat(160_000)),
+    );
+    assert!(serde_json::to_vec(&request).unwrap().len() > 4 * 1024 * 1024);
+    let expected = ProviderDiscoverModelsResult { source: None, suggestions: (0..96).map(|at| {
+        let mut model = orch_link_contract::foreign::ModelSuggestion::named(&format!("model-{at}"), None);
+        model.parameters.request_options = Some(BTreeMap::from([("openai-responses".into(), serde_json::json!({"type":"object","properties":{"native_option":{"type":"string","description":"Documented native option. ".repeat(2_000)}}}))]));
+        model
+    }).collect() };
+    assert!(serde_json::to_vec(&expected).unwrap().len() > 4 * 1024 * 1024);
+    let original = request.clone();
+    let reply = expected.clone();
+    machine
+        .handler
+        .on(CommandKind::ProviderDiscoverModels, move |command| {
+            let Command::ProviderDiscoverModels(received) = command else {
+                panic!("the catalogue command arrives");
+            };
+            assert_eq!(received, &original);
+            Ok(CommandResult::ProviderDiscoverModels(reply.clone()))
+        });
+    let command = new_id();
+    world
+        .api
+        .link
+        .dispatcher()
+        .issue_as(command, machine.id, &SerialKey::None, later(300), &request)
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(PATIENCE, world.api.link.dispatcher().wait(command))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        outcome,
+        CommandOutcome::Succeeded(serde_json::to_value(expected).unwrap())
+    );
+    assert_eq!(machine.handler.runs_of(command), 1);
+    world.stop().await;
 }
 
 async fn state_of(world: &World, command: orch_types::Id) -> String {
