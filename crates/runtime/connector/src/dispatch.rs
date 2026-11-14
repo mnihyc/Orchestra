@@ -1218,7 +1218,7 @@ mod tests {
             "mode": "new", "native_session_ref": null, "archive": null, "history": null,
             "upto_turn_ordinal": null, "workspace_root": "/etc", "instruction_root_marker": false,
             "directory": "/etc", "cwd": "/etc", "mounts": [],
-            "model": "m", "effort": null, "params": {}, "approval_mode": "on_request",
+            "model": "m", "effort": null, "params": {}, "approval_mode": "on_request", "web_action_wait_secs": 120,
             "sandbox_mode": "workspace", "instructions": "", "memory": null,
             "arrangement": "together",
             "provider": { "path": "native", "provider_id": new_id() },

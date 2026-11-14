@@ -734,6 +734,9 @@ CREATE INDEX runtimes_mount_host_idx ON runtimes USING btree (host_id, environme
 
 CREATE UNIQUE INDEX runtimes_provider_key ON runtimes USING btree (provider_id) WHERE ((kind = 'provider'::text) AND (state <> ALL (ARRAY['retired'::text, 'removed'::text])) AND (successor_of IS NULL));
 
+ALTER TABLE providers ADD CONSTRAINT providers_connection_environment_fk FOREIGN KEY (connection_environment_id) REFERENCES environments(id);
+CREATE INDEX providers_connection_environment_idx ON providers(connection_environment_id) WHERE connection_environment_id IS NOT NULL AND deleted_at IS NULL;
+
 CREATE INDEX runtimes_resource_facts_idx ON runtimes USING gin (resources_used jsonb_path_ops);
 
 CREATE INDEX runtimes_volume_facts_idx ON runtimes USING gin (volumes);
