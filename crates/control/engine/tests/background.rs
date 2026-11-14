@@ -394,3 +394,58 @@ async fn end_availability_names_current_interact_support_and_native_target_witho
     drop(conn);
     world.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_native_snapshot_expiring_mid_read_restarts_transparently_without_missing_or_duplicate_rows()
+ {
+    let world = World::new().await;
+    let thread = world.thread("A slow roster read").await;
+    world.running_turn(thread, "Begin").await;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    world
+        .machine
+        .handler
+        .on(CommandKind::SessionBackground, move |command| {
+            let Command::SessionBackground(body) = command else {
+                panic!("a roster read")
+            };
+            let step = observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if step == 1 {
+                assert!(body.cursor.is_some());
+                return Err(orch_link_contract::commands::CommandError::new(
+                    orch_link_contract::commands::ErrorCode::Conflict,
+                    "the snapshot expired",
+                ));
+            }
+            if step == 2 {
+                assert!(body.cursor.is_none());
+            }
+            Ok(CommandResult::SessionBackground(NativeBackground {
+                supported: true,
+                as_of: None,
+                state: BackgroundState::Live,
+                reason: None,
+                items: if step == 0 {
+                    vec![native("old")]
+                } else {
+                    (0..2_501).map(|index| native(&index.to_string())).collect()
+                },
+                next_cursor: if step == 0 {
+                    Some("expired/1".into())
+                } else {
+                    None
+                },
+                total: Some(2_501),
+            }))
+        });
+    let capture = world.engine().capture_background(thread).await.unwrap();
+    assert_eq!(capture.sessions.len(), 1);
+    let roster = &capture.sessions[0].1;
+    assert_eq!(roster.state, BackgroundState::Live);
+    assert_eq!(roster.total, Some(2_501));
+    assert_eq!(roster.items.len(), 2_501);
+    assert!(roster.items.iter().all(|command| command.id != "old"));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    world.shutdown().await;
+}

@@ -37,6 +37,7 @@ import { Page, PageHeader } from '@/shell/Page';
 import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { Tooltip } from '@/ui/Tooltip';
+import { Popover } from '@/ui/Popover';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { Input } from '@/ui/Input';
 import { FilterBar } from '@/ui/FilterBar';
@@ -204,7 +205,7 @@ function SearchResults({ params, onParams, onUnavailable }: SearchPageProps & {o
           {ready && length === null && !search.unfinished && error === null && hits.length === 0 && (
             <EmptyState
               icon={<SearchX aria-hidden />}
-              title={t('search.state.nothing', { query: params.q ?? '' })}
+              title={t(search.conversationChars === null ? 'search.state.nothing' : 'search.state.nothingIndexed', { query: params.q ?? '' })}
               description={narrowing(params) > 0 ? t('search.state.nothingNarrow') : t('search.state.nothingAbout')}
               action={params.org !== 'all' && (orgs?.length ?? 0) > 1 ? <AcrossOrgs params={params} onParams={onParams} /> : undefined}
             />
@@ -212,6 +213,13 @@ function SearchResults({ params, onParams, onUnavailable }: SearchPageProps & {o
 
           {length === null && error === null && <p role="status" className="min-h-5 text-sm text-text-muted tabular-nums">
             {!ready ? t('common.loading') : search.unfinished ? t('search.searching', {count: search.total, number: formatNumber(search.total, locale)}) : t('search.total', {count: search.total, number: formatNumber(search.total, locale)})}
+            {search.conversationChars !== null && <> · <Popover label={t('search.coverage.label')} className="w-(--menu-max-width) [--floating-width:var(--menu-max-width)]"
+              trigger={<button type="button" className="focus-inset rounded-sm text-left">{t('search.coverage.label')}</button>}>
+              <div className="flex flex-col gap-2 text-sm text-text-muted">
+                <p>{t('search.coverage.about', { number: formatNumber(search.conversationChars, locale) })}</p>
+                <p>{t('search.coverage.omitted')}</p>
+              </div>
+            </Popover></>}
             {search.unavailable.meaning === true && <> · <MeaningStatus label={t('search.meaningUnavailable')} reason={meaningReason} /></>}
             {search.unavailable.meaning !== true && indexPaused && <> · <MeaningStatus label={t('search.indexPaused')} reason={meaningReason} /></>}
             {search.unavailable.meaning !== true && !indexPaused && search.reasons.meaning !== undefined && search.reasons.meaning !== null && <span> · {t(`search.wordsOnly.${search.reasons.meaning}`, {defaultValue: search.reasons.meaning})}</span>}

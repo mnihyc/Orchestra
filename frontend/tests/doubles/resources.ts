@@ -96,7 +96,13 @@ function directoryStorage(record: MachineRecord): EnvironmentDataStorage {
 }
 
 /** The fake API exposes reported provider facts without legacy credit/use inputs. */
-function emptyProviderFacts():Provider['facts'] {
+/** What the fake keeps of a provider's facts: the members of the view and the list its upstream gave, which the view leaves out. */
+type RecordedFacts = Omit<Provider['facts'], 'models_count'> & { models: ModelSuggestion[] | null };
+/** What a provider's view shows of them: how many models the upstream listed, and not the list. */
+function shownFacts({ models, ...facts }: RecordedFacts): Provider['facts'] {
+  return { ...facts, models_count: models === null ? null : models.length };
+}
+function emptyProviderFacts():RecordedFacts {
   return {models:null,available_resets:null,extra_usage:null,balances:[],spend:[],ordinary_usage_allowed:null,credential_verified:null,field_times:{},plan:null,windows:[],limit_reached:null,identity:null,credential:null};
 }
 const SOURCE_MEMBERS:readonly FactMember[]=['identity','credential','credential_verified','plan','windows','limit_reached','ordinary_usage_allowed','balances','spend','extra_usage','available_resets'];
@@ -226,7 +232,7 @@ type ModelRecord = ProviderModel;
 
 interface EnrollmentSelection { kind: 'connector' | 'node'; roles: string[]; delegate: string[]; dedicated: boolean; home?: string | null }
 
-type ProviderFactsFixture = Pick<Provider, 'name' | 'facts' | 'facts_state' | 'sources'>;
+type ProviderFactsFixture = Pick<Provider, 'name' | 'facts_state' | 'sources'> & { facts: RecordedFacts };
 
 interface ProviderRecord {
   modelGroupOptions?: NonNullable<Provider['model_group_options']>;
@@ -235,7 +241,7 @@ interface ProviderRecord {
   modelGroupsMaximum?: number;
   /** Native reports are shared by HTTP reads and the resource feed. */
   harnessReports?: Provider['harnesses'];
-  planUsage?:PlanSeed;
+  planUsage?:PlanSeed<RecordedFacts>;
   id: string;
   name: string;
   kind: 'api' | 'subscription';
@@ -253,7 +259,7 @@ interface ProviderRecord {
   models: ModelRecord[];
   keySet: boolean;
   secrets: string[];
-  facts: Provider['facts'];
+  facts: RecordedFacts;
   sources?: Provider['sources'];
   /** Explicit source-view fixtures are shared by direct and admitted native reads. */
   sourceFactStates?: Provider['facts_state'];
@@ -962,6 +968,11 @@ export class Resources {
   }
 
   /** Whether the profile is there, and its harness has said what it is: until then no thread can be placed on it. */
+  workspaceRow(id: string) {
+    const record = this.findEnvironment(id);
+    return { id, registered_root: record.root, workspace_root: record.root, generation: record.generation ?? 0 };
+  }
+
   agentReported(agentId: string): boolean {
     return Object.keys(this.agents.find((candidate) => candidate.id === agentId)?.descriptor ?? {}).length > 0;
   }
@@ -1223,7 +1234,7 @@ export class Resources {
       access:{permissions:['machine.view','machine.use','machine.manage','access.own','access.manage'],admin_only:[],administers:false,admin_access:null,participating:true,through:[{kind:'owner'}]},
       installation:this.installation(record),
       environment_sandboxes: [],
-      software_update: this.componentUpdates.get(record.id) ?? {running_version:record.connector,recommended_version:record.connector,behind:false,status:'current',detail:null,command:'orch-connector update'},
+      software_update: this.componentUpdates.get(record.id) ?? {automatic:false,running_version:record.connector,recommended_version:record.connector,behind:false,status:'current',detail:null,command:'orch-connector update'},
       id: record.id,
       name: record.name,
       online: record.online && record.status === 'active',
@@ -1343,13 +1354,14 @@ export class Resources {
       status_detail: record.statusDetail,
       status_at: LATER_AT,
       ...(withPlan && record.planUsage!==undefined ? {plan_forecasts:record.planUsage.forecasts} : {}),
-      facts: record.facts,
+      facts: shownFacts(record.facts),
       facts_state: record.sourceFactStates ?? record.fixtureFactsState ?? factsState,
       sources,
       facts_overridden: [],
       last_reset: null,
       facts_at: record.planUsage?.at ?? (record.facts.plan === null ? null : new Date(this.born - 5 * 60_000).toISOString()),
       facts_requested_at: record.facts.plan === null ? null : record.planUsage?.at ?? new Date(this.born - 5 * 60_000).toISOString(),
+      models_count: record.models.length,
       models: record.models,
       running_threads: record.running,
       runtime: null,
@@ -1511,7 +1523,7 @@ export class Resources {
     const keptData = access.permissions.includes('host.manage') ? this.world.trace.hostKeptData(person, record.id) : [];
     return {
       offline_since: record.online === false ? record.offlineSince ?? null : null,
-      software_update: this.componentUpdates.get(record.id) ?? {running_version:'0.1.0',recommended_version:'0.1.0',behind:false,status:'current',detail:null,command:'orch-node update'},
+      software_update: this.componentUpdates.get(record.id) ?? {automatic:false,running_version:'0.1.0',recommended_version:'0.1.0',behind:false,status:'current',detail:null,command:'orch-node update'},
       id: record.id,
       name: record.name,
       address: record.home === null ? `system.${record.name}` : `acme.${record.owner ?? 'ada'}.${record.name}`,
@@ -2494,12 +2506,11 @@ export class Resources {
     if (method === 'POST' && updateRoute !== null) {
       const id = updateRoute[2] ?? '';
       const node = updateRoute[1] === 'hosts';
-      const machine = node ? undefined : this.findMachine(person,id);
+      if (!node) this.findMachine(person,id);
       if (node) this.mustManageHost(person,this.findHost(id));
       const held = this.componentUpdates.get(id);
       if (held === undefined) throw new Refusal(409,'conflict.exists','No update is available.');
-      const disabled = machine?.policy['update.auto'] === false;
-      const next:ComponentUpdate = {...held,status:disabled?'refused':'updating',detail:disabled?`update.auto is off on this machine. Run \`${held.command}\` on the machine to update it locally.`:null};
+      const next:ComponentUpdate = {...held,automatic:false,status:'updating',detail:null};
       this.componentUpdates.set(id,next);
       this.world.users.tellAll({what:'resources',kind:node?'host':'machine',id});
       return {status:200,body:next};
@@ -2677,6 +2688,10 @@ export class Resources {
       this.mustManageProvider(person,record);this.revisionOk(body,record.revision);
       this.chooseSources(person,record,body);record.revision+=1;
       return {status:200,body:this.provider(person,record)};
+    }
+    if ((found = /^GET \/providers\/([^/]+)\/facts\/models$/.exec(route))) {
+      // The list the upstream gave is read apart from the provider's view.
+      return { status: 200, body: this.findProvider(person, found[1] ?? '').facts.models ?? [] };
     }
     if ((found = /^GET \/providers\/([^/]+)\/plan$/.exec(route))) {
       const record=this.findProvider(person,found[1] ?? '');
@@ -3120,7 +3135,7 @@ export class Resources {
             || !Array.isArray(view.secrets_set) || view.secrets_set.some((value) => typeof value !== 'string')) return { status: 422 };
           // Presentation facts only; ownership, reach and write authority keep the native record.
           record.sources = structuredClone(view.sources) as Provider['sources'];
-          record.facts = structuredClone(view.facts) as Provider['facts'];
+          record.facts = { models: null, ...structuredClone(view.facts) } as RecordedFacts;
           record.sourceFactStates = structuredClone(view.facts_state) as Provider['facts_state'];
           record.secrets = (view.secrets_set as unknown[]).filter((value): value is string => typeof value === 'string');
           record.revision += 1;
@@ -3295,7 +3310,7 @@ export class Resources {
         const reconnect = body.reconnect === true;
         const running = reconnect ? recommended : [asText(body.running), machine?.connector, previous?.running_version].find((version) => typeof version === 'string' && version !== '') ?? '0.1.0';
         if (machine !== undefined) {machine.connector=running;machine.online=true;}
-        const next:ComponentUpdate = {running_version:running,recommended_version:recommended,behind:running!==recommended,status:'current',detail:null,command:host===undefined?'orch-connector update':'orch-node update'};
+        const next:ComponentUpdate = {automatic:false,running_version:running,recommended_version:recommended,behind:running!==recommended,status:'current',detail:null,command:host===undefined?'orch-connector update':'orch-node update'};
         this.componentUpdates.set(id,next);
         this.world.users.tellAll({what:'resources',kind:host===undefined?'machine':'host',id});
         return {status:200,body:{id,...next}};

@@ -763,6 +763,7 @@ mod tests {
     fn spec(mode: SessionMode) -> SessionSpec {
         SessionSpec {
             settings: SessionSettings {
+                output_capture_bytes: 67_108_864,
                 native_model: None,
                 agent_id: orch_types::new_id(),
                 thread_id: orch_types::new_id(),
@@ -784,6 +785,7 @@ mod tests {
                 subagent_limits: Default::default(),
                 prompt_cache_ttl: None,
                 background_wake: true,
+                web_action_wait_secs: 120,
                 image_generation: None,
                 instructions: String::new(),
                 memory: None,

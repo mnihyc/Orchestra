@@ -319,6 +319,7 @@ async fn switching_auto_off_while_a_build_is_staged_discards_it_without_installi
     tokio::pin!(updating);
     let grant = MachineUpdateNow {
         recommended: "2.0.0".into(),
+        automatic: true,
     };
     let granted = rig.send(&SerialKey::Machine, &grant);
     tokio::pin!(granted);
@@ -461,11 +462,15 @@ async fn a_connector_killed_in_the_middle_of_a_turn_says_on_its_return_what_beca
         .into_iter()
         .find(|e| e.kind == "session.lost")
         .unwrap();
+    assert_eq!(
+        lost.body["uncertain"], true,
+        "the synthetic adapter cannot reattach the admitted native turn"
+    );
     assert!(
         lost.body["reason"]
             .as_str()
             .unwrap()
-            .contains("turn was running")
+            .contains("unavailable")
     );
     for (place, event) in rig.applied(thread, segment).iter().enumerate() {
         assert_eq!(event.seq, place as i64 + 1);

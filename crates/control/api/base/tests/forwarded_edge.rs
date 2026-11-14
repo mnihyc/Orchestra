@@ -175,6 +175,14 @@ async fn edge(world: &World) -> Edge {
         )
         .replace("https://api:8443", &format!("https://127.0.0.1:{api_port}"))
         .replace(
+            "server api:8443 resolve;",
+            &format!("server 127.0.0.1:{api_port};"),
+        )
+        .replace(
+            "server gateway:9444 resolve;",
+            &format!("server 127.0.0.1:{api_port};"),
+        )
+        .replace(
             "https://gateway:9444",
             &format!("https://127.0.0.1:{api_port}"),
         )

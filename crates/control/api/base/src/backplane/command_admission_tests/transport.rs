@@ -210,7 +210,7 @@ fn opening(fixture: &Fixture, thread: Id) -> Proof<SessionOpen> {
         "arrangement":"together",
         "provider":{"path":"forwarded", "provider_id":new_id(), "protocol":"openai-responses", "ticket":"synthetic-first-transport"},
         "exec":{"executor":null, "environment_id":fixture.environment, "generation":1},
-        "mcp":[], "orch_tools":[], "raw_events":false
+        "mcp":[], "orch_tools":[], "output_capture_bytes":67108864, "raw_events":false
     }))?)
 }
 

@@ -156,7 +156,7 @@ fn session_spec(agent: &str, thread: &str, segment: &str) -> SessionSpec {
         "upto_turn_ordinal": null, "workspace_root": "/workspace", "instruction_root_marker": false,
         "directory": "/workspace/web", "cwd": "/workspace/web", "mounts": [],
         "model": "tiny-1", "effort": null, "params": {}, "approval_mode": "auto", "sandbox_mode": "open",
-        "instructions": "", "memory": null, "arrangement": "together", "orch_tools": [], "raw_events": false,
+        "instructions": "", "memory": null, "arrangement": "together", "orch_tools": [], "output_capture_bytes":67108864, "raw_events": false,
         "session_key": "0123456789abcdef0123456789abcdef", "archive": null, "history": null,
         "provider": { "path": "native", "provider_id": PROVIDER },
         "exec": { "executor": null, "environment_id": "0199abcd-1234-7000-8000-0000000000f1", "generation": 1 },

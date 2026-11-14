@@ -38,6 +38,7 @@ pub mod login;
 pub mod loopback;
 pub mod native;
 pub mod observations;
+pub mod output;
 pub mod parameters;
 pub mod profile_parameters;
 pub mod read_tools;
