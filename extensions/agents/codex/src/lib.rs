@@ -1846,6 +1846,32 @@ impl AgentAdapter for CodexAdapter {
         self.replay(thread).await
     }
 
+    async fn recover_turn(
+        &mut self,
+        source: orch_agent_contract::history::NativePrefixSource,
+        turn_id: Id,
+        native_turn_ref: Option<String>,
+        directory: String,
+        _cwd: String,
+    ) -> Result<bool, AdapterError> {
+        let (shared, _) = self.live()?;
+        let ctx = Context {
+            clock: shared.clock().as_ref(),
+            outputs: shared.outputs(),
+            windows: None,
+        };
+        discovery::recover_turn(
+            shared.rpc(),
+            source,
+            turn_id,
+            native_turn_ref,
+            &ctx,
+            shared.sink(),
+            &directory,
+        )
+        .await
+    }
+
     async fn discover_sessions(&mut self) -> Result<Vec<NativeSession>, AdapterError> {
         let (shared, _) = self.live()?;
         discovery::discover_sessions(shared.rpc()).await

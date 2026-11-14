@@ -62,6 +62,90 @@ fn remote_text(error: &RpcError) -> String {
     }
 }
 
+/// Replays only a confirmed terminal native turn, with the identity it was admitted under.
+/// Reading metadata/history performs no resume, interruption, model call or native write.
+pub(crate) async fn recover_turn(
+    rpc: &Rpc,
+    source: orch_agent_contract::history::NativePrefixSource,
+    admitted: orch_types::Id,
+    native: Option<String>,
+    ctx: &crate::events::Context<'_>,
+    sink: &orch_agent_contract::adapter::EventSink,
+    directory: &str,
+) -> Result<bool, AdapterError> {
+    let read = rpc
+        .call(
+            "thread/read",
+            json!({"threadId":source.native_session_ref,"includeTurns":false}),
+        )
+        .await
+        .map_err(|error| {
+            let detail = remote_text(&error);
+            if detail.to_ascii_lowercase().contains("not found") {
+                AdapterError::SessionNotFound(source.native_session_ref.clone())
+            } else {
+                AdapterError::HarnessError(detail)
+            }
+        })?;
+    let thread = read.get("thread").ok_or_else(|| {
+        AdapterError::HarnessError("the native session inspection returned no identity".into())
+    })?;
+    if thread.get("id").and_then(Json::as_str) != Some(source.native_session_ref.as_str()) {
+        return Err(AdapterError::HarnessError(
+            "the native inspection returned a different session identity".into(),
+        ));
+    }
+    let Some(native) = native else {
+        return Ok(false);
+    };
+    let mut cursor = None;
+    let mut progress = CursorProgress::new();
+    loop {
+        let page=rpc.call("thread/turns/list",json!({"threadId":source.native_session_ref,"sortDirection":"desc","limit":1,"cursor":cursor,"itemsView":"full"})).await
+            .map_err(|error|AdapterError::HarnessError(remote_text(&error)))?;
+        for turn in page
+            .get("data")
+            .and_then(Json::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if turn.get("id").and_then(Json::as_str) != Some(native.as_str()) {
+                continue;
+            }
+            if !matches!(
+                turn.get("status").and_then(Json::as_str),
+                Some("completed" | "failed" | "interrupted")
+            ) {
+                return Ok(false);
+            }
+            let mut replay = crate::events::Replay::new(crate::events::MapperConfig {
+                thread_id: source.thread_id,
+                segment_id: source.segment_id,
+                native_thread: source.native_session_ref.clone(),
+                directory: directory.to_owned(),
+            });
+            let mut ended = false;
+            for event in replay.page(std::slice::from_ref(turn), ctx, |_| admitted) {
+                ended |= matches!(&event,orch_agent_contract::events::SessionEvent::TurnCompleted(done) if done.turn_id==admitted);
+                sink.session(source.thread_id, source.segment_id, event)
+                    .await
+                    .map_err(|_| {
+                        AdapterError::Internal("the native recovery event stream closed".into())
+                    })?;
+            }
+            return Ok(ended);
+        }
+        cursor = page
+            .get("nextCursor")
+            .and_then(Json::as_str)
+            .map(str::to_owned);
+        let Some(next) = &cursor else {
+            return Ok(false);
+        };
+        progress.observe(next)?;
+    }
+}
+
 /// The sessions the harness already has, newest first.
 pub async fn discover_sessions(rpc: &Rpc) -> Result<Vec<NativeSession>, AdapterError> {
     let mut found = Vec::new();

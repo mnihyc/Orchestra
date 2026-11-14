@@ -522,6 +522,8 @@ impl AgentRole {
                 mcp: body.mcp.iter().map(|server| server.name.clone()).collect(),
                 skills,
             };
+            let recorded_directory = spec.settings.directory.clone();
+            let recorded_cwd = spec.settings.cwd.clone();
             let opened = process
                 .call(move |adapter| {
                     Box::pin(async move {
@@ -556,7 +558,12 @@ impl AgentRole {
                 .await;
             match opened {
                 Ok(opened) => {
-                    process.session_opened(&binding, &opened.session.native_session_ref);
+                    process.session_opened(
+                        &binding,
+                        &opened.session.native_session_ref,
+                        &recorded_directory,
+                        &recorded_cwd,
+                    );
                     if fenced {
                         process.fence_continuation(body.thread_id);
                     }
@@ -1135,6 +1142,7 @@ impl RoleHandler for AgentRole {
                     body.segment_id,
                     body.cursor.as_deref(),
                     initial,
+                    body.limits,
                 )?)
             }
             Command::SessionNativeActions(body) => {

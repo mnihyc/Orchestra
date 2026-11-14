@@ -1139,6 +1139,7 @@ impl Mapper {
             self.pending_turn = None;
             // Unloaded is not evidence that native tools or child processes ended.
             out.push(SessionEvent::SessionLost(SessionLost {
+                uncertain: false,
                 reason: "Codex closed the session while a turn was running.".into(),
             }));
         }
@@ -1721,16 +1722,6 @@ impl Mapper {
         );
         if self.background_records.get(&key) == Some(&task) {
             return;
-        }
-        if !self.background_records.contains_key(&key)
-            && self.background_records.len() >= orch_agent_contract::background::SNAPSHOT_COMMANDS
-        {
-            self.background_records.retain(|_, task| {
-                task.state == orch_agent_contract::background::BackgroundTaskState::Running
-            });
-            if self.background_records.len() >= orch_agent_contract::background::SNAPSHOT_COMMANDS {
-                return;
-            }
         }
         self.background_records.insert(key, task.clone());
         self.background_changes.push(task);
@@ -4090,6 +4081,7 @@ impl Mapper {
         self.turn = None;
         self.pending_turn = None;
         out.push(SessionEvent::SessionLost(SessionLost {
+            uncertain: false,
             reason: reason.to_owned(),
         }));
         out
@@ -5677,6 +5669,58 @@ mod tests {
             call.raw.output.is_none() && call.raw.is_error,
             "a call that was refused has no output"
         );
+    }
+
+    #[test]
+    fn streamed_command_output_is_retained_whole_when_completion_omits_aggregated_output() {
+        let mut rig = Rig::new();
+        rig.begin();
+        rig.item_started(command(
+            "c1",
+            "inProgress",
+            json!("1"),
+            Json::Null,
+            Json::Null,
+        ));
+        let whole = format!("{}END", "ordinary output\n".repeat(5_000));
+        for part in whole.as_bytes().chunks(4_096) {
+            rig.feed("item/commandExecution/outputDelta",json!({"threadId":THREAD,"turnId":TURN,"itemId":"c1","delta":std::str::from_utf8(part).unwrap()}));
+        }
+        let done = rig.item_completed(command("c1", "completed", json!("1"), Json::Null, json!(0)));
+        let SessionEvent::ItemCompleted(item) = &done[0] else {
+            panic!("completed")
+        };
+        let blob = item
+            .output_blob
+            .as_ref()
+            .expect("every captured byte survives beyond the inline tail");
+        assert_eq!(
+            std::fs::read(rig.outputs.directory().join(blob.hash.to_string())).unwrap(),
+            whole.as_bytes()
+        );
+    }
+
+    #[test]
+    fn retained_output_never_changes_the_original_produced_byte_count() {
+        let mut rig = Rig::new();
+        rig.begin();
+        let whole = "x".repeat(usize::try_from(OUTPUT_MAX_BYTES).unwrap() + 8_192);
+        let done = rig.item_completed(command(
+            "c1",
+            "completed",
+            json!("1"),
+            json!(whole),
+            json!(0),
+        ));
+        let SessionEvent::ItemCompleted(item) = &done[0] else {
+            panic!("completed")
+        };
+        let call: ToolCallPayload = serde_json::from_value(item.payload.clone()).unwrap();
+        let ToolPayload::Command { output, .. } = call.tool else {
+            panic!("command")
+        };
+        assert_eq!(output.total_len, OUTPUT_MAX_BYTES + 8_192);
+        assert!(item.output_blob.as_ref().unwrap().size <= OUTPUT_MAX_BYTES);
     }
 
     #[test]

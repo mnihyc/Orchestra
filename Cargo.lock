@@ -4620,6 +4620,7 @@ dependencies = [
  "orch-testkit",
  "orch-types",
  "regex",
+ "regex-syntax",
  "serde",
  "serde_json",
  "sqlx",

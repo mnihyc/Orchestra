@@ -49,8 +49,14 @@ pub struct HostedSession {
     pub segment_id: Id,
     /// The harness's id for it.
     pub native_session_ref: String,
+    /// Recorded workspace context keeps recovered file identities relative to their original directory.
+    pub directory: String,
+    /// Recorded process working directory.
+    pub cwd: String,
     /// The turn that was running when the record was last written.
     pub running_turn: Option<Id>,
+    /// Exact native identity observed for that admitted turn; absent before native acceptance.
+    pub native_turn_ref: Option<String>,
 }
 
 /// A harness process the connector started.
@@ -243,12 +249,28 @@ impl Ledger {
         {
             if session.running_turn != turn {
                 session.running_turn = turn;
+                session.native_turn_ref = None;
                 changed = true;
             }
         }
         if changed {
             self.write(&record);
         }
+    }
+
+    /// Captures the native acceptance identity before publishing the corresponding event.
+    pub fn turn_native(&self, thread: Id, turn: Id, native: &str) {
+        let mut record = self.record();
+        for session in record
+            .harnesses
+            .iter_mut()
+            .flat_map(|harness| &mut harness.sessions)
+            .filter(|session| session.thread_id == thread)
+        {
+            session.running_turn = Some(turn);
+            session.native_turn_ref = Some(native.to_owned());
+        }
+        self.write(&record);
     }
 
     /// The calls of Orch's tools kept after their answer did not come in time.
@@ -321,7 +343,10 @@ mod tests {
             thread_id: thread,
             segment_id: new_id(),
             native_session_ref: "fake_1".into(),
+            directory: "/workspace".into(),
+            cwd: "/workspace".into(),
             running_turn: None,
+            native_turn_ref: None,
         }
     }
 
@@ -333,7 +358,7 @@ mod tests {
             let ledger = Ledger::open(dir.path()).unwrap();
             ledger.harness_started(&start(provider, agent), Some("/data/harness/p/a".into()));
             ledger.session_opened(provider, agent, session(thread));
-            ledger.turn_running(thread, Some(turn));
+            ledger.turn_native(thread, turn, "native-accepted-turn");
         }
         let again = Ledger::open(dir.path()).unwrap();
         let hosted = again.hosted();
@@ -341,6 +366,10 @@ mod tests {
         assert_eq!(hosted[0].home.as_deref(), Some("/data/harness/p/a"));
         assert_eq!(hosted[0].sessions[0].thread_id, thread);
         assert_eq!(hosted[0].sessions[0].running_turn, Some(turn));
+        assert_eq!(
+            hosted[0].sessions[0].native_turn_ref.as_deref(),
+            Some("native-accepted-turn")
+        );
     }
 
     #[test]

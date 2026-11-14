@@ -605,7 +605,7 @@ async fn a_carried_history_is_told_to_the_new_thread_in_pages_and_in_order() {
 
 #[tokio::test]
 async fn a_harness_older_than_the_range_is_refused_and_a_newer_one_is_untested() {
-    for version in ["0.159.0", "0.162.1"] {
+    for version in ["0.159.0", "0.162.1", "0.166.9"] {
         let mut old = setup(FakeLauncher::plain());
         old.fake.state.set_version(version);
         let error = old
@@ -2581,4 +2581,57 @@ async fn managed_command_checkpoints_and_network_prompts_always_wait_for_each_pe
         assert_eq!(setup.fake.state.calls("turn/start").len(), 1);
         setup.adapter.stop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn retained_native_completion_recovers_only_its_admitted_turn_without_starting_or_resuming_input()
+ {
+    let mut setup = setup(FakeLauncher::new(|method, params| match method {
+        "thread/read" => Ok(json!({"thread":{"id":"retained-native","cwd":"/workspace/web"}})),
+        "thread/turns/list" => {
+            if params["cursor"].is_null() {
+                Ok(
+                    json!({"data":[{"id":"some-other-turn","status":"completed","items":[]}],"nextCursor":"older"}),
+                )
+            } else {
+                Ok(
+                    json!({"data":[{"id":"accepted-native-turn","status":"completed","items":[{"id":"answer","type":"agentMessage","text":"Recovered answer","phase":"final"}]}],"nextCursor":null}),
+                )
+            }
+        }
+        _ => Ok(json!({})),
+    }));
+    setup
+        .adapter
+        .start(setup.start_request(), setup.sink.clone())
+        .await
+        .unwrap();
+    let source = orch_agent_contract::history::NativePrefixSource {
+        thread_id: new_id(),
+        segment_id: new_id(),
+        native_session_ref: "retained-native".into(),
+    };
+    let admitted = new_id();
+    assert!(
+        setup
+            .adapter
+            .recover_turn(
+                source.clone(),
+                admitted,
+                Some("accepted-native-turn".into()),
+                "/workspace/web".into(),
+                "/workspace/web".into()
+            )
+            .await
+            .unwrap()
+    );
+    let events=setup.until(|event|matches!(event,AdapterEvent::Session{event:SessionEvent::TurnCompleted(done),..} if done.turn_id==admitted)).await;
+    assert!(events.iter().any(|event|matches!(event,AdapterEvent::Session{thread_id,segment_id,event:SessionEvent::ItemCompleted(item)} if *thread_id==source.thread_id && *segment_id==source.segment_id && item.native_ref=="answer")));
+    for method in ["turn/start", "thread/start", "thread/resume", "thread/fork"] {
+        assert!(
+            setup.fake.state.calls(method).is_empty(),
+            "recovery performs no {method}"
+        );
+    }
+    setup.adapter.stop().await.unwrap();
 }

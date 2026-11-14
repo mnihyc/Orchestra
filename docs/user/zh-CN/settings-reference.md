@@ -117,6 +117,10 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:orch_tools.search_results` | **共享搜索结果预算** — 向本线程智能体公布并供共享搜索使用的结果预算。默认为 200；达到字节或时间预算时仍提供续查游标。 |
 | `setting:orch_tools.search_context` | **共享搜索上下文预算** — 向本线程智能体公布并供共享搜索摘要使用的前后行数预算。默认为 5，可调大以查看更广的上下文。 |
 | `setting:threads.offline_deadline` | **离线回合期限** — 机器离线达到这个秒数后结束当前回合；不设置则一直等待。每次离线沿用它开始时的设置。 |
+| `setting:threads.background_snapshot_seconds` | **命令列表保留时间** — 原生命令快照和已审阅结束目标的空闲保留秒数，默认 30。读取下一页会续期；过期的读取会在确认前自动重新开始。 |
+| `setting:threads.background_page_items` | **原生命令列表分页** — 每页期望的原生命令数量，默认 200。完整列表没有行数上限，所有分页均会传输。 |
+| `setting:threads.background_page_bytes` | **原生命令分页字节数** — 每页期望的字节数，默认 131072。单条完整命令可以超过此目标；协商的传输限制仍然生效。 |
+| `setting:threads.background_preview_bytes` | **命令预览字节数** — 每条命令的预览字节数，默认 4096。较长的预览会明确标记截断，所有命令身份仍可访问。 |
 | `setting:threads.background_wake` | **后台唤醒** — 后台任务或子代理结束时唤醒代理。关闭后，Codex 的结果随下一次输入送达；Claude Code 不提供后台任务，命令在前台运行。变更在下次会话生效。 |
 | `setting:threads.agent_access` | **智能体访问权限** — 创建会话时显示的初始范围及各区域权限。创建者确认自己可以授予的权限。仅适用于新会话，不改写已有授权。 |
 | `option:threads.agent_access.where` | 代理权限贡献所适用的区域。 |

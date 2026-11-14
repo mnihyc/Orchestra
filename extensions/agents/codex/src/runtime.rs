@@ -1222,8 +1222,7 @@ impl Shared {
         thread: ThreadId,
     ) -> Result<orch_agent_contract::background::NativeBackground, AdapterError> {
         use orch_agent_contract::background::{
-            BackgroundPlace, BackgroundState, COMMAND_PREVIEW_BYTES, NativeBackground,
-            NativeBackgroundCommand, SNAPSHOT_COMMANDS,
+            BackgroundPlace, BackgroundState, NativeBackground, NativeBackgroundCommand,
         };
         let (native, place) = self.with_session(thread, |record| {
             (
@@ -1247,23 +1246,20 @@ impl Shared {
                     "this native build does not offer exact background command control",
                 ));
             }
+            Err(RpcError::Shape { .. }) => {
+                return Ok(NativeBackground::unsupported(
+                    crate::native_schema::FORM_UNKNOWN,
+                ));
+            }
             Err(error) => return Err(crate::map_rpc(error)),
         };
         let mut items = Vec::new();
-        for terminal in terminals.into_iter().take(SNAPSHOT_COMMANDS) {
+        for terminal in terminals {
             let turn_id = self.with_session(thread, |record| {
                 record.mapper.command_turn(&terminal.item_id)
             })?;
-            let mut command = terminal.command;
-            let command_truncated = command.as_mut().is_some_and(|text| {
-                let mut end = text.len().min(COMMAND_PREVIEW_BYTES);
-                while !text.is_char_boundary(end) {
-                    end -= 1;
-                }
-                let shortened = end < text.len();
-                text.truncate(end);
-                shortened
-            });
+            let command = terminal.command;
+            let command_truncated = false;
             items.push(NativeBackgroundCommand {
                 id: command_identity(&native, &terminal.item_id, &terminal.process_id),
                 native_item_ref: Some(terminal.item_id),
@@ -1314,10 +1310,17 @@ impl Shared {
                 reason: None,
             });
         }
-        let (terminals, _) = self
-            .background_terminals(&native)
-            .await
-            .map_err(crate::map_rpc)?;
+        let terminals = match self.background_terminals(&native).await {
+            Ok((terminals, _)) => terminals,
+            Err(RpcError::Shape { .. }) => {
+                return Ok(NativeBackgroundEnd {
+                    id: id.to_owned(),
+                    state: BackgroundEndState::Unknown,
+                    reason: Some(crate::native_schema::FORM_UNKNOWN.into()),
+                });
+            }
+            Err(error) => return Err(crate::map_rpc(error)),
+        };
         let Some(terminal) = terminals.into_iter().find(|terminal| {
             command_identity(&native, &terminal.item_id, &terminal.process_id) == id
         }) else {
@@ -1374,10 +1377,6 @@ impl Shared {
                 )
                 .await?;
             items.extend(page.data);
-            if items.len() > orch_agent_contract::background::SNAPSHOT_COMMANDS {
-                items.truncate(orch_agent_contract::background::SNAPSHOT_COMMANDS);
-                return Ok((items, false));
-            }
             cursor = page.next_cursor;
             let Some(next) = &cursor else {
                 return Ok((items, true));

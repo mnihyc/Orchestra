@@ -1052,6 +1052,8 @@ pub struct SessionTitle {
 /// The session is gone; the next turn reopens it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionLost {
+    /// The native outcome is unavailable, rather than confirmed lost. Preserve admitted work without retry.
+    pub uncertain: bool,
     /// Why.
     pub reason: String,
 }
@@ -1576,7 +1578,7 @@ mod tests {
             json!({ "kind": "session.opened", "body": { "native_session_ref": "thr_1", "resumed": false } }),
             json!({ "kind": "session.instructions", "body": { "sources": [] } }),
             json!({ "kind": "session.title", "body": { "title": "Fix the login redirect" } }),
-            json!({ "kind": "session.lost", "body": { "reason": "the harness process exited" } }),
+            json!({ "kind": "session.lost", "body": { "uncertain":false, "reason": "the harness process exited" } }),
             json!({ "kind": "session.background_tasks", "body": { "self_waking": true, "tasks": [], "native_wake": null } }),
             json!({ "kind": "turn.started", "body": { "turn_id": id(1), "native_turn_ref": "turn_9" } }),
             json!({ "kind": "item.started", "body": {

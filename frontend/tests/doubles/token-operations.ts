@@ -26112,7 +26112,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "operation_id": "MachineUpdateNow",
     "method": "POST",
     "path": "/machines/{id}/update",
-    "title": "Requests a verified physical connector update, drained under its local update.auto policy.",
+    "title": "Requests an explicit verified physical connector update after its active work drains.",
     "delegation": "business",
     "variants": [
       {

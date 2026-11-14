@@ -2320,6 +2320,14 @@ registry! {
         "Shared search context budget", "The surrounding-line budget advertised to this thread's agent and used by shared-search snippets. Defaults to 5; increase it for wider context.";
     THREADS_OFFLINE_DEADLINE = "threads.offline_deadline", Agent, Parameter, SYSTEM_TO_THREAD, Replace, NULL, Schema::Nullable { of: &int(0, Unit::Seconds) },
         "Offline turn deadline", "End the active turn after this many offline seconds; none keeps waiting. Each outage retains the setting it began with.";
+    THREADS_BACKGROUND_SNAPSHOT_SECONDS = "threads.background_snapshot_seconds", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("30"), int(1, Unit::Seconds),
+        "Roster retention", "Idle seconds to retain a native command snapshot and its reviewed End identities. Active page reads renew it; an expired read restarts transparently before confirmation.";
+    THREADS_BACKGROUND_PAGE_ITEMS = "threads.background_page_items", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("200"), int(1, Unit::Count),
+        "Native roster page", "Preferred commands in one native roster page. Every page is transferred; the complete roster has no row cap.";
+    THREADS_BACKGROUND_PAGE_BYTES = "threads.background_page_bytes", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("131072"), int(1, Unit::Bytes),
+        "Native roster page bytes", "Preferred bytes in one native roster page. One command can exceed this target; the negotiated transport allowance still applies.";
+    THREADS_BACKGROUND_PREVIEW_BYTES = "threads.background_preview_bytes", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("4096"), int(0, Unit::Bytes),
+        "Roster command preview", "Command bytes shown in each native roster preview. Longer commands retain an explicit preview-truncated fact; all command identities remain available.";
     THREADS_BACKGROUND_WAKE = "threads.background_wake", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("\"on\""), choice(&["on", "off"]),
         "Background wake", "Wake when background tasks or subagents finish. Off: results of background work arrive with the next input; a program that cannot keep background work without waking is not offered it. Changes apply to the next session.";
     THREADS_AGENT_SCHEDULES = "threads.agent_schedules", Agent, Parameter, SYSTEM_TO_THREAD, Replace, value("\"off\""), choice(&["on", "off"]),

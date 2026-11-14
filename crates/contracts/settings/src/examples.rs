@@ -136,6 +136,14 @@ pub const ORCH_TOOLS_SEARCH_RESULTS: &str = "300";
 pub const ORCH_TOOLS_SEARCH_CONTEXT: &str = "10";
 /// No final offline deadline is imposed by default.
 pub const THREADS_OFFLINE_DEADLINE: &str = "null";
+/// Native snapshots renew their ordinary idle retention while being read.
+pub const THREADS_BACKGROUND_SNAPSHOT_SECONDS: &str = "30";
+/// Native transfer pages keep a convenient row target without capping complete lists.
+pub const THREADS_BACKGROUND_PAGE_ITEMS: &str = "200";
+/// Native page bytes are a transfer target, not a complete-list allowance.
+pub const THREADS_BACKGROUND_PAGE_BYTES: &str = "131072";
+/// Long commands retain explicit preview truncation at the selected size.
+pub const THREADS_BACKGROUND_PREVIEW_BYTES: &str = "4096";
 pub const THREADS_BACKGROUND_WAKE: &str = r#""on""#;
 pub const THREADS_AGENT_SCHEDULES: &str = r#""off""#;
 pub const THREADS_AGENT_SCHEDULE_HOURS: &str = "24";

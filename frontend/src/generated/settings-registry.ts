@@ -2782,6 +2782,117 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
+    "key": "threads.background_snapshot_seconds",
+    "title": "Roster retention",
+    "description": "Idle seconds to retain a native command snapshot and its reviewed End identities. Active page reads renew it; an expired read restarts transparently before confirmation.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 30,
+    "example": 30,
+    "text_key": "day100.builtin.threads.background_snapshot_seconds",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.background_page_items",
+    "title": "Native roster page",
+    "description": "Preferred commands in one native roster page. Every page is transferred; the complete roster has no row cap.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 200,
+    "example": 200,
+    "text_key": "day100.builtin.threads.background_page_items",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.background_page_bytes",
+    "title": "Native roster page bytes",
+    "description": "Preferred bytes in one native roster page. One command can exceed this target; the negotiated transport allowance still applies.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 131072,
+    "example": 131072,
+    "text_key": "day100.builtin.threads.background_page_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.background_preview_bytes",
+    "title": "Roster command preview",
+    "description": "Command bytes shown in each native roster preview. Longer commands retain an explicit preview-truncated fact; all command identities remain available.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 4096,
+    "example": 4096,
+    "text_key": "day100.builtin.threads.background_preview_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
     "key": "threads.background_wake",
     "title": "Background wake",
     "description": "Wake when background tasks or subagents finish. Off: results of background work arrive with the next input; a program that cannot keep background work without waking is not offered it. Changes apply to the next session.",

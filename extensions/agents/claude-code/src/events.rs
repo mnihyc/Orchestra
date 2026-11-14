@@ -2655,16 +2655,6 @@ impl EventMapper {
         let Some(key) = key else { return };
         let identity = serde_json::json!([key.task_id, key.run_id]).to_string();
         let prior = self.background_records.get(&identity);
-        if prior.is_none()
-            && self.background_records.len() >= orch_agent_contract::background::SNAPSHOT_COMMANDS
-        {
-            self.background_records
-                .retain(|_, task| task.state == BackgroundTaskState::Running);
-            if self.background_records.len() >= orch_agent_contract::background::SNAPSHOT_COMMANDS {
-                return;
-            }
-        }
-        let prior = self.background_records.get(&identity);
         let is_background = tool.async_launched
             || frame.get("is_backgrounded").and_then(Json::as_bool) == Some(true)
             || frame
@@ -2704,13 +2694,7 @@ impl EventMapper {
             .or_else(|| tool.input.get("description").and_then(Json::as_str))
             .or_else(|| tool.input.get("command").and_then(Json::as_str))
             .unwrap_or(&key.task_id);
-        let mut end = label
-            .len()
-            .min(orch_agent_contract::background::COMMAND_PREVIEW_BYTES);
-        while !label.is_char_boundary(end) {
-            end -= 1;
-        }
-        let label = label[..end].to_owned();
+        let label = label.to_owned();
         let task = BackgroundTask {
             id: key.task_id,
             run_id: key.run_id,
@@ -2746,10 +2730,7 @@ impl EventMapper {
         let Some(tasks) = frame.get("tasks").and_then(Json::as_array) else {
             return;
         };
-        for task in tasks
-            .iter()
-            .take(orch_agent_contract::background::SNAPSHOT_COMMANDS)
-        {
+        for task in tasks {
             if task.get("ambient").and_then(Json::as_bool) == Some(true) {
                 continue;
             }
@@ -2790,17 +2771,6 @@ impl EventMapper {
         }
         self.native_tasks
             .retain(|_, task| self.tools.contains_key(&task.tool_ref));
-        if !self.native_tasks.contains_key(&key.task_id)
-            && self.native_tasks.len() == orch_agent_contract::background::SNAPSHOT_COMMANDS
-        {
-            return false;
-        }
-        let weight = |task: &NativeTask| {
-            std::mem::size_of::<NativeTask>()
-                .saturating_add(task.key.task_id.capacity().saturating_mul(2))
-                .saturating_add(task.key.run_id.as_ref().map_or(0, String::capacity))
-                .saturating_add(task.tool_ref.capacity())
-        };
         let task = NativeTask {
             key,
             tool_ref: id.to_owned(),
@@ -2808,15 +2778,6 @@ impl EventMapper {
             resumed,
             tool_reused,
         };
-        let used = self
-            .native_tasks
-            .values()
-            .map(weight)
-            .fold(0usize, usize::saturating_add)
-            .saturating_sub(self.native_tasks.get(&task.key.task_id).map_or(0, weight));
-        if used.saturating_add(weight(&task)) > crate::config::FRAME_MAX_BYTES {
-            return false;
-        }
         self.native_tasks.insert(task.key.task_id.clone(), task);
         true
     }
@@ -2982,13 +2943,7 @@ impl EventMapper {
             state.native_terminal = Some(terminal);
         }
         if let Some(title) = title.filter(|title| !title.is_empty()) {
-            let mut end = title
-                .len()
-                .min(orch_agent_contract::background::COMMAND_PREVIEW_BYTES);
-            while !title.is_char_boundary(end) {
-                end -= 1;
-            }
-            let title = title[..end].to_owned();
+            let title = title.to_owned();
             changed |= state.progress_title.as_ref() != Some(&title);
             state.progress_title = Some(title);
         }

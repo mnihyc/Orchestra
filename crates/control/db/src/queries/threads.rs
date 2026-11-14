@@ -2635,6 +2635,41 @@ pub async fn user_message_kept(
         .await?)
 }
 
+/// Stream delivery needs identity and the durable cursor, not a copy of the growing payload.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct StreamItemRow {
+    /// Item identity.
+    pub id: Id,
+    /// Owning thread.
+    pub thread_id: Id,
+    /// Owning turn.
+    pub turn_id: Option<Id>,
+    /// Timeline stream.
+    pub stream: String,
+    /// Current item state.
+    pub status: String,
+    /// Committed presentation cursor, including pending durable pieces.
+    pub visible_len: i64,
+}
+
+/// Pending pieces supply the cursor; only the first piece after coalescing reads the full field.
+pub async fn stream_item(
+    conn: &mut Conn,
+    segment: Id,
+    native_ref: &str,
+    field: &str,
+) -> Result<Option<StreamItemRow>, DbError> {
+    Ok(sqlx::query_as("SELECT i.id,i.thread_id,i.turn_id,i.stream,i.status,
+        COALESCE((SELECT p.part_offset+p.part_len FROM item_stream_parts p WHERE p.item_id=i.id AND p.field=$3 ORDER BY p.part_offset DESC LIMIT 1),
+          CASE $3 WHEN 'text' THEN char_length(COALESCE(i.payload->>'text',''))::bigint
+          WHEN 'summary' THEN char_length(COALESCE(i.payload->>'summary',''))::bigint
+          ELSE COALESCE((i.payload #>> '{tool,output,total_len}')::bigint,0) END) AS visible_len
+        FROM items i WHERE (i.segment_id=$1 AND i.native_ref=$2) OR
+          (i.thread_id=(SELECT thread_id FROM segments WHERE id=$1) AND i.native_ref='fork-history:' || $1::uuid::text || ':' || $2)
+        ORDER BY (i.segment_id=$1) DESC LIMIT 1")
+        .bind(segment).bind(native_ref).bind(field).fetch_optional(conn).await?)
+}
+
 /// What an item is changed to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ItemChange<'a> {

@@ -260,6 +260,8 @@ pub struct Machine {
 /// The running hello version compared with the server's recommendation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ComponentUpdate {
+    /// The pending request was automatic rather than an explicit Update action.
+    pub automatic: bool,
     /// Version reported by the currently executing program.
     pub running_version: String,
     /// Build served by this server and announced in ready.versions.
@@ -270,7 +272,7 @@ pub struct ComponentUpdate {
     pub status: String,
     /// A machine's refusal or verification failure, in its own words.
     pub detail: Option<String>,
-    /// The local command, including when local policy refuses the web action.
+    /// The explicit local verified update command, available independently of Auto.
     pub command: String,
 }
 
@@ -4087,7 +4089,7 @@ crate::endpoints! {
     /// Saves delegated connector roles and reconnects after its answer is journaled.
     MachineRolesSet: PUT "/machines/{id}/roles", Rule("machine.manage; machine.roles must be handed over and enabled"), none, json MachineRolesSetBody, json MachineRolesResponse, 200,
         operation Op::receipt(&Op::facets(&crate::machine_sources::ACK_FACETS));
-    /// Requests a verified physical connector update, drained under its local update.auto policy.
+    /// Requests an explicit verified physical connector update after its active work drains.
     MachineUpdateNow: POST "/machines/{id}/update", Rule("machine.manage, or host.manage on its node facade"), none, none, json MachineUpdateNowResponse, 200,
         operation Op::receipt(&Op::facets(&crate::machine_sources::AGAIN_FACETS));
     /// Requests the same verified procedure for a host's node, after its units finish their turns.

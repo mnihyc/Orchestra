@@ -319,6 +319,7 @@ async fn switching_auto_off_while_a_build_is_staged_discards_it_without_installi
     tokio::pin!(updating);
     let grant = MachineUpdateNow {
         recommended: "2.0.0".into(),
+        automatic: true,
     };
     let granted = rig.send(&SerialKey::Machine, &grant);
     tokio::pin!(granted);

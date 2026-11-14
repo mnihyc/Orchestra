@@ -85,6 +85,42 @@ pub fn find_transcript(home: &Path, session_id: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// An exhaustive exact lookup distinguishes absent history from unreadable native storage.
+pub(crate) fn find_transcript_checked(
+    home: &Path,
+    session: &str,
+) -> std::io::Result<Option<PathBuf>> {
+    if session.is_empty() || session.contains(['/', '\\']) || session.contains("..") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the retained native session identity is invalid",
+        ));
+    }
+    let projects = projects_directory(home);
+    let name = format!("{session}.jsonl");
+    let managed = projects.join(MANAGED_PROJECT_DIR).join(&name);
+    match std::fs::metadata(&managed) {
+        Ok(meta) if meta.is_file() => return Ok(Some(managed)),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    for project in std::fs::read_dir(projects)? {
+        let project = project?;
+        if !project.file_type()?.is_dir() {
+            continue;
+        }
+        let candidate = project.path().join(&name);
+        match std::fs::metadata(&candidate) {
+            Ok(meta) if meta.is_file() => return Ok(Some(candidate)),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
 fn version_in_reader(input: impl Read) -> Option<String> {
     #[derive(serde::Deserialize)]
     struct Version {
@@ -203,6 +239,89 @@ pub fn replay(
         rows: reader::Rows::new(transcript, settings, clock, false, Arc::default())?,
         items: 0,
     })
+}
+
+pub(crate) struct Recovery {
+    pub source: orch_agent_contract::history::NativePrefixSource,
+    pub admitted: orch_types::Id,
+    pub native: String,
+    pub image_outputs: Option<std::path::PathBuf>,
+}
+
+/// Reobserves one admitted input identity without treating the end of a partial transcript as completion.
+/// Native turn identities that are not retained as transcript inputs remain explicitly unavailable.
+pub(crate) async fn recover_turn(
+    transcript: &Path,
+    settings: MapperSettings,
+    clock: Arc<dyn Clock>,
+    sink: orch_agent_contract::adapter::EventSink,
+    recovery: Recovery,
+) -> Result<bool, HistoryError> {
+    let Recovery {
+        source,
+        admitted,
+        native,
+        image_outputs,
+    } = recovery;
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _guard = reader::CancelOnDrop(Arc::clone(&cancel));
+    let path = transcript.to_path_buf();
+    let (sender, mut events) =
+        orch_agent_contract::flow::channel(|event: &(SessionEvent, usize)| event.1);
+    let runtime = tokio::runtime::Handle::current();
+    let work = tokio::task::spawn_blocking(move || {
+        let mut rows = reader::Rows::new(&path, settings, clock, false, cancel)?;
+        if let Some(directory) = image_outputs {
+            rows.set_image_outputs(directory);
+        }
+        let mut selected = false;
+        for row in rows {
+            match row?.kind {
+                reader::Kind::Words { uuid, .. } => selected = uuid == native,
+                reader::Kind::Event(event) if selected => {
+                    let mut event = *event;
+                    if !matches!(
+                        event,
+                        SessionEvent::ItemCompleted(_) | SessionEvent::TurnCompleted(_)
+                    ) {
+                        continue;
+                    }
+                    let ended = if let SessionEvent::TurnCompleted(done) = &mut event {
+                        done.turn_id = admitted;
+                        true
+                    } else {
+                        false
+                    };
+                    let value = serde_json::to_value(&event).map_err(std::io::Error::other)?;
+                    let weight = orch_agent_contract::flow::json_weight(&value);
+                    runtime
+                        .block_on(sender.send((event, weight)))
+                        .map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::Interrupted,
+                                "the recovery event stream closed",
+                            )
+                        })?;
+                    if ended {
+                        return Ok::<_, HistoryError>(true);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(false)
+    });
+    while let Some((event, _)) = events.recv().await {
+        sink.session(source.thread_id, source.segment_id, event)
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "the recovery event stream closed",
+                )
+            })?;
+    }
+    work.await.map_err(std::io::Error::other)?
 }
 
 /// Delivers historical events with bounded producer backpressure and cancellation between source pages.
@@ -433,6 +552,79 @@ mod tests {
     use crate::config::{PORTABLE_ARCHIVE_CANDIDATE, TRANSCRIPT_FORMAT};
     use orch_agent_contract::discovery::{RECORD_FORMAT, RECORD_MAX_BYTES, RecordedEntry};
     use std::io::{BufWriter, Write};
+
+    #[tokio::test]
+    async fn native_recovery_replays_only_an_exact_ended_input_and_never_closes_a_partial_one() {
+        use orch_agent_contract::adapter::EventSink;
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("recovery.jsonl");
+        let native = orch_types::new_id();
+        let admitted = orch_types::new_id();
+        let start = serde_json::json!({"type":"user","uuid":native,"cwd":"/work","message":{"content":"accepted input"}});
+        let finish = serde_json::json!({"type":"assistant","message":{"id":"native-answer","model":"mock-model","content":[{"type":"text","text":"Recovered answer"}],"stop_reason":"end_turn"}});
+        for ended in [false, true] {
+            let content = if ended {
+                format!("{start}\n{finish}\n")
+            } else {
+                format!("{start}\n")
+            };
+            std::fs::write(&path, &content).unwrap();
+            let (sink, mut events) = EventSink::channel();
+            let source = orch_agent_contract::history::NativePrefixSource {
+                thread_id: orch_types::new_id(),
+                segment_id: orch_types::new_id(),
+                native_session_ref: "retained-native".into(),
+            };
+            let recovered = recover_turn(
+                &path,
+                MapperSettings {
+                    directory: "/work".into(),
+                    cwd: "/work".into(),
+                    raw_events: false,
+                },
+                clock(),
+                sink,
+                Recovery {
+                    source: source.clone(),
+                    admitted,
+                    native: native.to_string(),
+                    image_outputs: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(recovered, ended);
+            let mut completions = 0;
+            while let Some(event) = events.recv().await {
+                if let orch_agent_contract::adapter::AdapterEvent::Session {
+                    thread_id,
+                    segment_id,
+                    event: SessionEvent::TurnCompleted(done),
+                } = event
+                {
+                    assert_eq!(
+                        (thread_id, segment_id, done.turn_id),
+                        (source.thread_id, source.segment_id, admitted)
+                    );
+                    completions += 1;
+                }
+            }
+            assert_eq!(completions, usize::from(ended));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        }
+    }
+
+    #[test]
+    fn native_recovery_distinguishes_an_empty_readable_history_directory_from_unavailable_storage()
+    {
+        let home = tempfile::tempdir().unwrap();
+        assert!(find_transcript_checked(home.path(), "retained-native").is_err());
+        std::fs::create_dir(projects_directory(home.path())).unwrap();
+        assert_eq!(
+            find_transcript_checked(home.path(), "retained-native").unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn a_ten_billion_item_native_report_keeps_one_aggregate_instead_of_visiting_items() {

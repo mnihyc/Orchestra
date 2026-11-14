@@ -249,9 +249,9 @@ section! {
 section! {
     /// `[spool]`
     Spool {
-        /// The most bytes it holds.
+        /// Waiting diagnostics give way above this allowance; authoritative events wait for ACK.
         max_bytes: u64 = 268_435_456,
-        /// The oldest event it holds.
+        /// Waiting diagnostics expire at this age; authoritative events wait for ACK.
         max_age_days: u64 = 7,
         /// The size of one of its files.
         segment_bytes: u64 = 8_388_608,

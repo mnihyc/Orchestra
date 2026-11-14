@@ -116,6 +116,10 @@ For personal read-only questions, see [Ask](ask.md). Interpret reported lifecycl
 | `setting:orch_tools.search_results` | **Shared search result budget** — The result budget advertised to this thread's agent and used by shared search. Defaults to 200; byte and time budgets still produce a continuation. |
 | `setting:orch_tools.search_context` | **Shared search context budget** — The surrounding-line budget advertised to this thread's agent and used by shared-search snippets. Defaults to 5; increase it for wider context. |
 | `setting:threads.offline_deadline` | **Offline turn deadline** — End the active turn after this many offline seconds; none keeps waiting. Each outage retains the setting it began with. |
+| `setting:threads.background_snapshot_seconds` | **Roster retention** — Idle seconds for native snapshots and reviewed End identities; default 30. Page reads renew retention; expired reads restart before confirmation. |
+| `setting:threads.background_page_items` | **Native roster page** — Preferred commands per native page; default 200. Every page transfers, without a complete-list row cap. |
+| `setting:threads.background_page_bytes` | **Native roster page bytes** — Preferred bytes per native page; default 131072. One complete command may exceed the target; negotiated transport limits still apply. |
+| `setting:threads.background_preview_bytes` | **Roster command preview** — Preview bytes per command; default 4096. Longer previews are explicitly marked truncated; every identity remains available. |
 | `setting:threads.background_wake` | **Background wake** — Wake when background tasks or subagents finish. Off keeps Codex results for the next input. Claude Code background tasks are not offered and commands run in the foreground. Changes apply to the next session. |
 | `setting:threads.agent_access` | **Agent access** — The initial reach and area levels shown when creating a thread. The creator confirms what they may give. Applies to new threads, without rewriting existing grants. |
 | `option:threads.agent_access.where` | The area to which the agent contribution applies. |

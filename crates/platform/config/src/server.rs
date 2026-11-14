@@ -365,6 +365,9 @@ section! {
         dead_after_secs: u64 = 60,
         /// The largest frame.
         max_frame_bytes: u64 = 262_144,
+        /// The byte allowance of an ordinary message. A message over a frame travels in parts;
+        /// catalogue kinds with growing lists or model content span this allowance through pages.
+        max_message_bytes: u64 = 16_777_216,
         /// How much of a tunnel may be on its way unacknowledged.
         tunnel_window_bytes: u64 = 1_048_576,
         /// How long a tunnel whose session dropped may be taken up again.
@@ -715,8 +718,8 @@ section! {
         login_pending_secs: u64 = 4_500,
         /// The shortest time between two checks of a running turn against its caps.
         cap_check_secs: u64 = 5,
-        /// How long the text an item gains while it grows is held before it is written to the item; every piece
-        /// reaches live readers at once, and anything else the session says writes it first. 0 writes each piece.
+        /// How long durable streamed pieces wait before being coalesced into their item row.
+        /// Live readers see each piece immediately; 0 writes the full item for each piece.
         stream_flush_ms: u64 = 1_000,
         /// A provider page reads at most once per minute by default.
         provider_facts_page_secs: u64 = 60,
@@ -983,6 +986,15 @@ impl Validate for ServerConfig {
                 "link.dead_after_secs",
                 "must be longer than link.heartbeat_secs",
             ));
+        }
+        if self.link.max_message_bytes < self.link.max_frame_bytes {
+            return Err(invalid(
+                "link.max_message_bytes",
+                "must be at least link.max_frame_bytes",
+            ));
+        }
+        if u32::try_from(self.link.max_message_bytes).is_err() {
+            return Err(invalid("link.max_message_bytes", "must be less than 4 GiB"));
         }
 
         if !matches!(self.log.format.as_str(), "text" | "json") {

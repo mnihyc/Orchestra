@@ -936,6 +936,54 @@ impl AgentAdapter for ClaudeCodeAdapter {
         .map_err(|error| AdapterError::Internal(error.to_string()))
     }
 
+    async fn recover_turn(
+        &mut self,
+        source: orch_agent_contract::history::NativePrefixSource,
+        turn_id: orch_types::Id,
+        native_turn_ref: Option<String>,
+        directory: String,
+        cwd: String,
+    ) -> Result<bool, AdapterError> {
+        let started = self.started()?.clone();
+        let home = Self::files_home(&started.setup).ok_or_else(|| {
+            AdapterError::HarnessUnavailable("the native home is unavailable for recovery".into())
+        })?;
+        let lookup_home = home.clone();
+        let lookup_native = source.native_session_ref.clone();
+        let transcript = tokio::task::spawn_blocking(move || {
+            history::find_transcript_checked(&lookup_home, &lookup_native)
+        })
+        .await
+        .map_err(|error| AdapterError::HarnessUnavailable(error.to_string()))?
+        .map_err(|error| {
+            AdapterError::HarnessUnavailable(format!(
+                "the exact native history could not be inspected: {error}"
+            ))
+        })?
+        .ok_or_else(|| AdapterError::SessionNotFound(source.native_session_ref.clone()))?;
+        let Some(native) = native_turn_ref else {
+            return Ok(false);
+        };
+        history::recover_turn(
+            &transcript,
+            MapperSettings {
+                directory,
+                cwd,
+                raw_events: false,
+            },
+            Arc::clone(&self.clock),
+            started.sink.clone(),
+            history::Recovery {
+                source,
+                admitted: turn_id,
+                native,
+                image_outputs: Some(home.join("outputs")),
+            },
+        )
+        .await
+        .map_err(|error| AdapterError::Internal(error.to_string()))
+    }
+
     async fn discover_sessions(&mut self) -> Result<Vec<NativeSession>, AdapterError> {
         let setup = Arc::clone(&self.started()?.setup);
         let home = Self::files_home(&setup)

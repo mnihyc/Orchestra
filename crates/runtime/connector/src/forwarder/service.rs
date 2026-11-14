@@ -10,6 +10,11 @@ use orch_provider_contract::services::{catalogue, definition_hash};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+/// A service result larger than this is kept as content, uploaded for its command, and the answer names it,
+/// so that the answer stays small in the journal and in the system's rows. It is a choice of where the
+/// result is kept; what a message may be is the link's to say.
+const INLINE_SERVICE_RESULT_BYTES: usize = 128 * 1024;
+
 impl Forwarder {
     /// Only a controller-admitted command can reach this transport. Its declaration hash is no Use proof.
     pub async fn service(
@@ -344,7 +349,7 @@ impl Forwarder {
         }
         let encoded = serde_json::to_vec(&result.output)
             .map_err(|_| service_failure(&result, "the service result could not be encoded"))?;
-        if encoded.len() > orch_link_contract::version::MAX_FRAME_BYTES as usize / 2 {
+        if encoded.len() > INLINE_SERVICE_RESULT_BYTES {
             let directory = self.services.content.directory_of(command);
             tokio::fs::create_dir_all(&directory).await.map_err(|_| {
                 service_failure(&result, "the service result could not be retained")
@@ -357,14 +362,6 @@ impl Forwarder {
                 |_| service_failure(&result, "the service result could not be uploaded"),
             )?);
             result.output = Value::Null;
-        }
-        let frame_bytes = serde_json::to_vec(&result)
-            .map_err(|_| service_failure(&result, "the service result could not be encoded"))?;
-        if frame_bytes.len() > orch_link_contract::version::MAX_FRAME_BYTES as usize / 2 {
-            return Err(service_failure(
-                &result,
-                "the service result metadata exceeds the command frame budget",
-            ));
         }
         Ok(result)
     }
