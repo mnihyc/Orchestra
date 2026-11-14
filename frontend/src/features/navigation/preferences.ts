@@ -17,6 +17,7 @@ import { meStateKey, meStateQuery, setMeState } from '@/api/personal';
 import { queryClient } from '@/api/query';
 import { i18n } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
+import { useFrameReady } from '@/shell/FrameReadiness';
 import { errorText } from '@/ui/errorText';
 import { toast } from '@/ui/Toast';
 
@@ -38,6 +39,8 @@ export interface SidebarChoices {
   show: Readonly<Record<Layer, boolean>>;
   /** Whether topics that are done are left out of the tree. */
   hideDone: boolean;
+  /** Whether a hidden bar peeks over the page when the pointer rests at its edge: only where the person turned it on. A hidden bar is otherwise opened by its button and its key alone. */
+  peek?: boolean;
 }
 
 /**
@@ -67,13 +70,15 @@ export function readChoices(kept: unknown): SidebarChoices {
     folded: Array.isArray(kept.folded) ? SECTIONS.filter((section) => (kept.folded as unknown[]).includes(section)) : SHIPPED_CHOICES.folded,
     show,
     hideDone: typeof kept.hide_done === 'boolean' ? kept.hide_done : SHIPPED_CHOICES.hideDone,
+    ...(kept.peek === true ? { peek: true } : {}),
   };
 }
 
 /** The value to keep after a change: the choices as they then stand, with whatever else is kept beside them left as it is. */
 export function withChoices(kept: unknown, change: Partial<SidebarChoices>): Record<string, unknown> {
   const next = { ...readChoices(kept), ...change };
-  return { ...(isRecord(kept) ? kept : {}), folded: [...next.folded], show: { ...next.show }, hide_done: next.hideDone, ...(next.participating === undefined ? {} : { participating: next.participating }) };
+  const others = isRecord(kept) ? Object.fromEntries(Object.entries(kept).filter(([key]) => key !== 'peek')) : {};
+  return { ...others, folded: [...next.folded], show: { ...next.show }, hide_done: next.hideDone, ...(next.participating === undefined ? {} : { participating: next.participating }), ...(next.peek === true ? { peek: true } : {}) };
 }
 
 const storageKey = (userId: string) => `orch.${userId}.sidebar`;
@@ -150,6 +155,7 @@ export interface SidebarPreferences extends SidebarChoices {
   setShown: (layer: Layer, shown: boolean) => void;
   setHideDone: (hidden: boolean) => void;
   setParticipating: (on: boolean) => void;
+  setPeek: (on: boolean) => void;
 }
 
 const setFolded = (section: SectionId, on: boolean): void =>
@@ -160,10 +166,14 @@ const setFolded = (section: SectionId, on: boolean): void =>
 const setShown = (layer: Layer, shown: boolean): void => changeSidebar((choices) => ({ show: { ...choices.show, [layer]: shown } }));
 const setHideDone = (hidden: boolean): void => changeSidebar(() => ({ hideDone: hidden }));
 const setParticipating = (on: boolean): void => changeSidebar(() => ({ participating: on }));
+const setPeek = (on: boolean): void => changeSidebar(() => ({ peek: on }));
 
+/** The choices of the bars. Until the frame's one bootstrap has answered they are what the cache or this device holds: no screen adds a request of its own before it. */
 export function useSidebarPreferences(): SidebarPreferences {
   const userId = useStore(client.session, (state) => state.userId);
-  const state = useQuery(meStateQuery);
+  // The shell's first read carries this state: nothing here asks for it before that read has landed (the device's copy draws until then).
+  const ready = useFrameReady();
+  const state = useQuery({ ...meStateQuery, enabled: ready });
   // What the server says once it has answered; until then what this device saw last.
   const kept = state.data === undefined ? readDevice(userId) : state.data.sidebar;
   const choices = useMemo(() => readChoices(kept), [kept]);
@@ -175,5 +185,5 @@ export function useSidebarPreferences(): SidebarPreferences {
     if (answered) writeDevice(userId, served);
   }, [answered, served, userId]);
 
-  return useMemo(() => ({ ...choices, isFolded: (section) => choices.folded.includes(section), setFolded, setShown, setHideDone, setParticipating }), [choices]);
+  return useMemo(() => ({ ...choices, isFolded: (section) => choices.folded.includes(section), setFolded, setShown, setHideDone, setParticipating, setPeek }), [choices]);
 }

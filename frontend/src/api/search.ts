@@ -154,6 +154,7 @@ export interface SearchFilters {
   q: string;
   /** A node: only what lies in it and below it. */
   scope?: string | undefined;
+  stream?: string | undefined;
   kinds?: readonly SearchKind[] | undefined;
   author?: string | undefined;
   created_by?: string | undefined;
@@ -178,7 +179,7 @@ export function tooShort(q: string, scope: { narrow: boolean; streamed?: boolean
 }
 
 export const searchKey = (filters: SearchFilters) =>
-  ['search', filters.q.trim(), filters.scope ?? '', filters.kinds === undefined ? '*' : filters.kinds.join(','), filters.author ?? '', filters.created_by ?? '', filters.edited_by ?? '', filters.owner ?? '', filters.date_field ?? '', filters.title_only ?? false, filters.shared_with_me ?? false, filters.file_type ?? '', filters.from ?? '', filters.to ?? '', filters.chat_id ?? '', filters.document_id ?? '', filters.with_file ?? false, filters.mentions_me ?? false, filters.regex ?? false, filters.sort ?? 'newest', filters.participating ?? false] as const;
+  ['search', filters.q.trim(), filters.scope ?? '', filters.kinds === undefined ? '*' : filters.kinds.join(','), filters.author ?? '', filters.created_by ?? '', filters.edited_by ?? '', filters.owner ?? '', filters.date_field ?? '', filters.title_only ?? false, filters.shared_with_me ?? false, filters.file_type ?? '', filters.from ?? '', filters.to ?? '', filters.chat_id ?? '', filters.document_id ?? '', filters.with_file ?? false, filters.mentions_me ?? false, filters.regex ?? false, filters.sort ?? 'newest', filters.participating ?? false, filters.stream ?? ''] as const;
 
 /** The hits of a search, newest first, a page at a time. */
 export const searchQuery = (filters: SearchFilters, limit: number = SEARCH_PAGE_SIZE, historyThread?: ThreadReadTarget) => {
@@ -200,6 +201,7 @@ export const searchQuery = (filters: SearchFilters, limit: number = SEARCH_PAGE_
               ...(filters.sort === undefined ? {} : { sort: filters.sort }),
               ...(filters.participating === true ? { participating: true } : {}),
               ...(filters.scope === undefined ? {} : { scope: filters.scope }),
+              ...(filters.stream === undefined ? {} : { stream: filters.stream }),
               ...(filters.kinds === undefined ? {} : { kinds: filters.kinds.join(',') }),
               ...(filters.author === undefined ? {} : { author_id: filters.author }),
               ...(filters.created_by === undefined ? {} : { created_by_id: filters.created_by }),
@@ -244,7 +246,8 @@ export const searchPreviewQuery = (filters: SearchFilters) =>
   queryOptions({
     queryKey: ['search-preview', ...searchKey(filters)] as const,
     queryFn: async ({ signal }): Promise<SearchHitPage> =>
-      (await ok(api.GET('/search', { params: { query: { q: filters.q.trim(), limit: SEARCH_PREVIEW, ...(filters.scope === undefined ? {} : { scope: filters.scope }), ...(filters.participating === true ? { participating: true } : {}), ...(filters.sort === undefined ? {} : { sort: filters.sort }) } }, signal }))) as SearchHitPage,
+      (await ok(api.GET('/search', { params: { query: { q: filters.q.trim(), limit: SEARCH_PREVIEW, ...(filters.scope === undefined ? {} : { scope: filters.scope }),
+              ...(filters.stream === undefined ? {} : { stream: filters.stream }), ...(filters.participating === true ? { participating: true } : {}), ...(filters.sort === undefined ? {} : { sort: filters.sort }) } }, signal }))) as SearchHitPage,
     staleTime: 15_000,
     retry: false,
     // A different org must never paint the previous org's preview.
@@ -258,6 +261,7 @@ export async function streamSearch(filters: SearchFilters, receive: (event: Sear
     ...(filters.regex === true ? {regex: true} : {}),
     ...(filters.sort === undefined ? {} : {sort: filters.sort}),
     ...(filters.scope === undefined ? {} : {scope: filters.scope}),
+    ...(filters.stream === undefined ? {} : {stream: filters.stream}),
     ...(filters.kinds === undefined ? {} : {kinds: filters.kinds.join(',')}),
     ...(filters.author === undefined ? {} : {author_id: filters.author}),
     ...(filters.created_by === undefined ? {} : {created_by_id: filters.created_by}),

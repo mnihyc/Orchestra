@@ -4,32 +4,41 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type * as ThreadsApi from '@/api/threads';
+import type { OutlineOptions } from '@/api/threads';
 import type * as OpenView from '@/features/workbench/openView';
 import { NOT_PICKING, TimelineContextValue, type TimelineContext } from '@/features/timeline/context';
 import { ToolCallRow } from '@/features/timeline/items/ToolCall';
-import { SubagentChips } from '@/features/timeline/SubagentChips';
+import { AgentsFace, AgentsPanel } from '@/features/thread/AgentsPanel';
+import { listAgents, useAgentCatalog } from '@/features/thread/agents';
+import { AgentSwitchContext } from '@/features/thread/agentSwitch';
 import { ViewOpeningContext } from '@/features/workbench/viewOpening';
 import { SubagentLane, SubagentPanel } from '@/features/timeline/SubagentLane';
-import { timelineUi, useTimelineUi } from '@/features/timeline/state';
 import { buildRows } from '@/features/timeline/rows';
-import type { Item, Thread, ThreadItemListReply } from '@/generated/api-types';
+import { timelineUi } from '@/features/timeline/state';
+import type { Item, OutlineEntry, Thread, ThreadItemListReply, ThreadOutlinePage } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { defaultThreadRead } from '@/realtime/threadScope';
 import { threadViewOf, threadWriter } from '@/realtime/stores/thread';
 import { ACME } from '../doubles/fixtures';
 import { backgroundWork } from '../doubles/background-wake';
 import { World } from '../doubles/world';
-import { agentMessage, change, command, fileChange, LOGIN_DIFF, toolCall, turn } from '../doubles/thread-rows';
+import { agentMessage, change, command, fileChange, LOGIN_DIFF, marker, reasoning, toolCall, turn } from '../doubles/thread-rows';
 import { show } from './support';
 import { retiredCopy } from './retired-copy';
 
-const calls = vi.hoisted(() => ({ read: vi.fn<typeof ThreadsApi.fetchSubagentItems>(), panel: vi.fn() }));
-vi.mock('@/api/threads', async (importOriginal) => ({ ...await importOriginal<typeof ThreadsApi>(), fetchSubagentItems: calls.read }));
+const calls = vi.hoisted(() => ({ read: vi.fn<typeof ThreadsApi.fetchSubagentItems>(), outline: vi.fn<(options: OutlineOptions, before: number | null) => Promise<ThreadOutlinePage>>(), panel: vi.fn() }));
+vi.mock('@/api/threads', async (importOriginal) => {
+  const actual = await importOriginal<typeof ThreadsApi>();
+  return { ...actual, fetchSubagentItems: calls.read, outlineQuery: (target: Parameters<typeof actual.outlineQuery>[0], options: OutlineOptions = {}) => ({
+    ...actual.outlineQuery(target, options), enabled: true,
+    queryFn: ({ pageParam }: { pageParam: number | null }) => calls.outline(options, pageParam),
+  }) };
+});
 vi.mock('@/features/workbench/openView', async (importOriginal) => ({ ...await importOriginal<typeof OpenView>(), revealView: calls.panel }));
 
 const THREAD = 'thread-1';
 const STREAM = 'sub:reviewer';
-const context: TimelineContext = { threadId: THREAD, threadName: 'Repair login', detail: 'steps', recent: new Set(['turn-1']), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: THREAD, threadName: 'Repair login', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: false, canManage: false, live: true, lit: null, selection: NOT_PICKING };
 
 function parent(state: 'running' | 'completed' = 'running', model?: string) {
@@ -46,6 +55,7 @@ function page(items: Item[] = [], older = false): ThreadItemListReply { return {
 
 beforeEach(() => {
   calls.read.mockReset(); calls.read.mockResolvedValue(page()); calls.panel.mockClear();
+  calls.outline.mockReset().mockResolvedValue({ entries: [], next_before: null, total: 0, seq: 20 });
   timelineUi.forget(THREAD);
   threadWriter.evict(THREAD);
   const world = new World(), person = world.people.get('ada'), node = world.places.rowOf(ACME.mainThread);
@@ -66,12 +76,74 @@ beforeEach(() => {
 });
 afterEach(async () => { cleanup(); threadWriter.evict(THREAD); timelineUi.forget(THREAD); vi.useRealTimers(); await setLocale('en'); document.documentElement.removeAttribute('data-theme'); });
 
-function draw(open = true) {
+function draw(open = true, reader = context) {
   timelineUi.setStep(THREAD, 'review-call', open);
-  return show(<TimelineContextValue.Provider value={context}><ToolCallRow threadId={THREAD} id="review-call" /></TimelineContextValue.Provider>);
+  return show(<TimelineContextValue.Provider value={reader}><ToolCallRow threadId={THREAD} id="review-call" /></TimelineContextValue.Provider>);
 }
 
 describe('a sub-agent lane', () => {
+  it.each(['normal', 'verbose', 'diagnostics'] as const)('uses the chosen %s turn shape with its own answer and file card while the parent still works', async (detail) => {
+    const items = [numbered(parent('completed'), 1),
+      numbered(reasoning('own-thought', 'Thinking about the redirect', { turn: 'turn-1', stream: STREAM }), 2),
+      numbered(agentMessage('own-commentary', 'I will check it', { turn: 'turn-1', stream: STREAM, phase: 'commentary' }), 3),
+      numbered(command('own-check', { turn: 'turn-1', stream: STREAM, command: 'check redirect', output: 'Only this child check', exit: 0 }), 4),
+      numbered(fileChange('own-edit', { turn: 'turn-1', stream: STREAM, changes: [change('child.py', LOGIN_DIFF, { added: 4, removed: 1 })] }), 5),
+      numbered(agentMessage('own-final', 'The child answer', { turn: 'turn-1', stream: STREAM, phase: 'final' }), 6),
+      numbered(fileChange('parent-edit', { turn: 'turn-1', changes: [change('parent.py', LOGIN_DIFF, { added: 100, removed: 3 })] }), 7)];
+    threadWriter.window(THREAD, items, false, false);
+    const view = draw(true, { ...context, detail });
+    const lane = screen.getByRole('region', { name: 'Sub-agent reviewer' });
+    expect(within(lane).getByText('The child answer')).toBeVisible();
+    expect(lane.querySelector('[data-turn-figures="turn-1"]')).not.toBeNull();
+    const group = lane.querySelector('[data-work]');
+    if (detail === 'normal') {
+      expect(group).not.toBeNull();
+      expect(within(group as HTMLElement).getByRole('button', { expanded: false })).toBeVisible();
+      expect(lane).not.toHaveTextContent('I will check it');
+      await userEvent.click(within(group as HTMLElement).getByRole('button', { expanded: false }));
+      expect(lane).toHaveTextContent('I will check it');
+    } else expect(group).toBeNull();
+    const card = lane.querySelector<HTMLElement>('[data-turn-files]');
+    expect(card).toHaveTextContent(i18n.t('timeline.footer.changed', { count: 1, added: 4, removed: 1 }));
+    expect(card).not.toHaveTextContent('+104');
+    await userEvent.click(within(card!).getByRole('button', { name: i18n.t('thread.turnFiles.review') }));
+    const review = screen.getByRole('dialog', { name: i18n.t('views.changes.title') });
+    expect(review).toHaveTextContent('child.py');
+    expect(review).not.toHaveTextContent('parent.py');
+    expect(view.container.querySelector('[data-footer="turn-1"]')).not.toHaveTextContent(i18n.t('timeline.footer.failed'));
+  });
+
+  it('enters a child’s own conversation from its starting row and keeps Open in panel beside it', async () => {
+    const select = vi.fn();
+    show(<AgentSwitchContext.Provider value={select}><TimelineContextValue.Provider value={context}><ToolCallRow threadId={THREAD} id="review-call" /></TimelineContextValue.Provider></AgentSwitchContext.Provider>);
+    await userEvent.click(screen.getByRole('button', { name: /^Sub-agent reviewer/ }));
+    expect(select).toHaveBeenCalledExactlyOnceWith('review-call');
+    expect(screen.queryByRole('region', { name: 'Sub-agent reviewer' })).not.toBeInTheDocument();
+    expect(calls.read).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('timeline.subagent.openPanel') }));
+    expect(calls.panel).toHaveBeenCalledExactlyOnceWith('subagent', { thread: THREAD, item: 'review-call' });
+  });
+
+  it.each([false, true])('uses the main conversation classification with Diagnostics %s', (diagnostics) => {
+    const reports = [
+      ['session_status', { type: 'active', active_flags: [] }, 'Quiet session program'],
+      ['mcp_startup', { status: 'starting' }, 'Starting service program'],
+      ['mcp_startup', { status: 'ready' }, 'Ready service program'],
+      ['mcp_startup', { status: 'failed', message: 'Credentials expired' }, 'Failed service program'],
+    ] as const;
+    act(() => threadWriter.apply(THREAD, { items: reports.map(([change, value, program], index) => numbered(marker(`child-report-${index}`, { marker: 'harness_changed', data: {
+      program, change, subject: 'Source catalog', previous: { state: 'unsupported' }, value, expected: { state: 'unsupported' },
+      changed: false, diverged: false, next_turn: false, turn_id: 'turn-1', reported_at: '2026-10-01T10:00:00.000Z',
+    } }, { stream: STREAM, turn: 'turn-1' }), 22 + index)) }));
+    draw(true, { ...context, detail: diagnostics ? 'diagnostics' : 'normal' });
+    const lane = screen.getByRole('region', { name: 'Sub-agent reviewer' });
+    expect(lane).toHaveTextContent('Failed service program');
+    for (const program of ['Quiet session program', 'Starting service program', 'Ready service program']) {
+      if (diagnostics) expect(lane).toHaveTextContent(program);
+      else expect(lane).not.toHaveTextContent(program);
+    }
+  });
+
   it('keeps a running child collapsed without a history request until its row is opened', async () => {
     show(<TimelineContextValue.Provider value={context}><ToolCallRow threadId={THREAD} id="review-call" /></TimelineContextValue.Provider>);
     expect(screen.queryByRole('region', { name: 'Sub-agent reviewer' })).not.toBeInTheDocument();
@@ -129,7 +201,7 @@ describe('a sub-agent lane', () => {
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });
 
-  it.each(['steps', 'summary', 'everything'] as const)('starts recent edits, successful commands and failed commands as closed rows at %s detail', (detail) => {
+  it.each(['normal', 'verbose', 'diagnostics'] as const)('starts recent edits, successful commands and failed commands as closed rows in %s reading', (detail) => {
     const items = [fileChange('latest-edit', { turn: 'turn-1', changes: [change('src/session.rs', LOGIN_DIFF)] }),
       command('ok-run', { turn: 'turn-1', command: 'check redirect', exit: 0, output: 'All checks pass' }),
       command('failed-run', { turn: 'turn-1', command: 'check expiry', exit: 1, output: 'The expiry check failed' })].map((item, index) => numbered(item, 22 + index));
@@ -271,50 +343,134 @@ describe('a sub-agent lane', () => {
     expect(threadViewOf(THREAD).streams.get(STREAM)?.slice(0, 2)).toEqual(['first-review', 'older-review']);
   });
 
-  it('uses the running header chip to open the turn and lane, then removes it when the child completes', async () => {
-    const reveal = vi.fn();
-    timelineUi.toggleRaw(THREAD, 'review-call');
-    show(<SubagentChips threadId={THREAD} onReveal={reveal} />);
-    await userEvent.click(screen.getByRole('button', { name: "Show reviewer's activity" }));
-    expect(reveal).toHaveBeenCalledExactlyOnceWith('review-call');
-    const ui = useTimelineUi.getState().byThread.get(THREAD)!;
-    expect(ui.steps.get('review-call')).toBe(true);
-    expect(ui.raw.has('review-call')).toBe(false);
-    const rows = buildRows(threadViewOf(THREAD), { detail: 'summary', hideHistory: false, foldOpened: ui.folds, meId: null });
-    expect(rows.some((row) => row.kind === 'item' && row.id === 'review-call')).toBe(true);
+  it('puts the step that started a child among the work of its turn, and none of the child\u2019s own items in a row of the main conversation', () => {
+    const rows = buildRows(threadViewOf(THREAD), { detail: 'normal', hideHistory: false, meId: null });
+    expect(rows.some((row) => row.kind === 'work' && row.ids.includes('review-call'))).toBe(true);
     expect(rows.some((row) => row.kind === 'item' && row.id === child.id)).toBe(false);
+  });
+
+  it('lists the running child under Active with its line of activity, opens it from the panel, and keeps it under Done when it completes', async () => {
+    const open = vi.fn();
+    const entries = () => listAgents(threadViewOf(THREAD), [], i18n.t);
+    const view = show(<AgentsPanel entries={entries()} current={null} onMain={vi.fn()} onOpen={open} onEnd={null} />);
+    const active = screen.getByRole('region', { name: 'Active' });
+    expect(within(active).getByText('reviewer')).toBeVisible();
+    // What it is doing is the last thing its own stream says: its newest step.
+    expect(within(active).getByText(/npm test login/)).toBeVisible();
+    await userEvent.click(within(active).getByRole('button', { name: /reviewer/ }));
+    expect(open).toHaveBeenCalledExactlyOnceWith('review-call');
     act(() => threadWriter.apply(THREAD, { items: [{ ...numbered(parent('completed'), 1), seq_updated: 22 }] }));
-    expect(screen.queryByRole('group', { name: 'Running sub-agents' })).not.toBeInTheDocument();
+    view.rerender(<AgentsPanel entries={entries()} current={null} onMain={vi.fn()} onOpen={open} onEnd={null} />);
+    expect(screen.queryByRole('region', { name: 'Active' })).not.toBeInTheDocument();
+    const done = screen.getByRole('region', { name: 'Done' });
+    expect(within(done).getByText('reviewer')).toBeVisible();
+    // A finished sub-agent says what it came to.
+    expect(within(done).getByText('The redirect is safe on the same origin.')).toBeVisible();
   });
 });
 
-it('keeps the named task on its existing child lane and separates native End from opening the lane', async () => {
+it('keeps the named task on its existing child lane and separates native Stop from opening the conversation', async () => {
   const task = backgroundWork({ id: 'recorded-review', kind: 'subagent', item_id: 'review-call', turn_id: 'turn-1', label: 'Authentication reviewer' });
-  const end = vi.fn();
-  show(<SubagentChips threadId={THREAD} tasks={[task]} mayEnd onEnd={end} />);
-  expect(screen.getAllByRole('button', { name: i18n.t('timeline.subagent.jump', { name: task.label }) })).toHaveLength(1);
-  await userEvent.click(screen.getByRole('button', { name: i18n.t('backgroundWake.endNamed', { name: task.label }) }));
+  const end = vi.fn(), open = vi.fn();
+  show(<AgentsPanel entries={listAgents(threadViewOf(THREAD), [task], i18n.t)} current={null} onMain={vi.fn()} onOpen={open} onEnd={end} />);
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('backgroundWake.endNamed', { name: 'reviewer' }) }));
   expect(end).toHaveBeenCalledExactlyOnceWith(task);
-  expect(calls.panel).not.toHaveBeenCalled();
-  await userEvent.click(screen.getByRole('button', { name: i18n.t('timeline.subagent.jump', { name: task.label }) }));
-  expect(calls.panel).toHaveBeenCalledWith('subagent', expect.objectContaining({ thread: THREAD, item: 'review-call' }));
+  expect(open).not.toHaveBeenCalled();
 });
 
-it('keeps an unsupported or lost subagent named without advertising End or reviving its running state', () => {
-  const task = backgroundWork({ id: 'recorded-review', kind: 'subagent', item_id: 'review-call', turn_id: 'turn-1', label: 'Authentication reviewer', can_end: false, state: 'lost' });
-  show(<SubagentChips threadId={THREAD} tasks={[task]} mayEnd onEnd={vi.fn()} />);
-  expect(screen.getByRole('button', { name: i18n.t('timeline.subagent.jump', { name: task.label }) })).toHaveTextContent(i18n.t('backgroundWake.states.lost'));
-  expect(screen.queryByRole('button', { name: i18n.t('backgroundWake.endNamed', { name: task.label }) })).not.toBeInTheDocument();
+it('offers no Stop for a sub-agent that cannot be stopped, or to a reader who may not, and never for a finished one', () => {
+  const task = backgroundWork({ id: 'recorded-review', kind: 'subagent', item_id: 'review-call', turn_id: 'turn-1', label: 'Authentication reviewer', can_end: false });
+  show(<AgentsPanel entries={listAgents(threadViewOf(THREAD), [task], i18n.t)} current={null} onMain={vi.fn()} onOpen={vi.fn()} onEnd={vi.fn()} />);
+  expect(screen.queryByRole('button', { name: i18n.t('backgroundWake.endNamed', { name: 'reviewer' }) })).not.toBeInTheDocument();
+  cleanup();
+  show(<AgentsPanel entries={listAgents(threadViewOf(THREAD), [backgroundWork({ kind: 'subagent', item_id: 'review-call', turn_id: 'turn-1' })], i18n.t)} current={null} onMain={vi.fn()} onOpen={vi.fn()} onEnd={null} />);
+  expect(screen.queryByRole('button', { name: /Stop|End/ })).not.toBeInTheDocument();
 });
 
-it('does not restore a finished background child from a stale running transcript row', () => {
+it('does not list a finished background child as running from a stale running transcript row', () => {
   const previous = threadViewOf(THREAD).turns.get('turn-1');
   if (previous === undefined) throw new Error('The child needs its retained source turn.');
   act(() => threadWriter.apply(THREAD, { turns: [{ ...turn('turn-1', { ordinal: 1, state: 'completed', inputId: 'input-1' }), seq_updated: previous.seq_updated + 1 }] }));
-  show(<SubagentChips threadId={THREAD} tasks={[]} mayEnd onEnd={vi.fn()} />);
-  expect(screen.queryByRole('group', { name: i18n.t('timeline.subagent.running') })).not.toBeInTheDocument();
+  show(<AgentsPanel entries={listAgents(threadViewOf(THREAD), [], i18n.t)} current={null} onMain={vi.fn()} onOpen={vi.fn()} onEnd={vi.fn()} />);
+  expect(screen.queryByRole('region', { name: 'Active' })).not.toBeInTheDocument();
+  expect(within(screen.getByRole('region', { name: 'Done' })).getByText(i18n.t('timeline.step.recordedRunning'))).toBeVisible();
 });
 
+it('shows a native lost child as lost instead of trusting its stale running transcript', () => {
+  const task = backgroundWork({ kind: 'subagent', item_id: 'review-call', turn_id: 'turn-1', state: 'lost', can_end: false });
+  show(<AgentsPanel entries={listAgents(threadViewOf(THREAD), [task], i18n.t)} current={null} onMain={vi.fn()} onOpen={vi.fn()} onEnd={vi.fn()} />);
+  expect(screen.queryByRole('region', { name: 'Active' })).not.toBeInTheDocument();
+  expect(within(screen.getByRole('region', { name: 'Done' })).getByText(i18n.t('backgroundWake.states.lost'))).toBeVisible();
+  expect(screen.queryByRole('button', { name: /Stop|End/ })).not.toBeInTheDocument();
+});
+
+it('finds an agent by name in a long narrow list and opens the matching conversation', async () => {
+  const tool = parent().payload.tool;
+  if (tool.kind !== 'subagent') throw new Error('The source is a subagent');
+  const children = Array.from({ length: 12 }, (_, index) => numbered(toolCall(`child-${index}`, { ...tool, name: `Reviewer ${index}`, child_stream: `sub:${index}`, state: 'completed' }, { turn: 'turn-1', title: `Reviewer ${index}`, status: 'completed' }), index + 30));
+  act(() => threadWriter.apply(THREAD, { items: children }));
+  const open = vi.fn();
+  const view = show(<div style={{ width: 400 }}><AgentsPanel entries={listAgents(threadViewOf(THREAD), [], i18n.t)} current={null} onMain={vi.fn()} onOpen={open} onEnd={null} /></div>);
+  await userEvent.type(screen.getByRole('textbox', { name: i18n.t('thread.agents.search') }), 'Reviewer 11');
+  expect(screen.queryByRole('button', { name: /Reviewer 0\b/ })).not.toBeInTheDocument();
+  const match = screen.getByRole('button', { name: /Reviewer 11\b/ });
+  expect(match.closest('ul')).toHaveClass('overflow-y-auto');
+  expect(view.container.querySelector('[data-agents-panel]')).toHaveClass('max-w-[calc(100vw-2rem)]');
+  await userEvent.click(match);
+  expect(open).toHaveBeenCalledExactlyOnceWith('child-11');
+});
+
+it('keeps a native running child active and stoppable after its parent turn has ended', async () => {
+  const previous = threadViewOf(THREAD).turns.get('turn-1');
+  if (previous === undefined) throw new Error('The child has its source turn');
+  act(() => threadWriter.apply(THREAD, { turns: [{ ...previous, state: 'completed', seq_updated: previous.seq_updated + 1 }] }));
+  const task = backgroundWork({ kind: 'subagent', item_id: 'review-call', turn_id: 'turn-1', state: 'running' });
+  const end = vi.fn();
+  show(<AgentsPanel entries={listAgents(threadViewOf(THREAD), [task], i18n.t)} current={null} onMain={vi.fn()} onOpen={vi.fn()} onEnd={end} />);
+  expect(within(screen.getByRole('region', { name: 'Active' })).getByText('reviewer')).toBeVisible();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('backgroundWake.endNamed', { name: 'reviewer' }) }));
+  expect(end).toHaveBeenCalledExactlyOnceWith(task);
+});
+
+it('keeps roster-known work reachable after its starting row leaves the held history', () => {
+  threadWriter.window(THREAD, [], true, true);
+  const task = backgroundWork({ kind: 'subagent', item_id: 'old-review', turn_id: 'turn-1', label: 'Earlier reviewer', state: 'running' });
+  const entries = listAgents(threadViewOf(THREAD), [task], i18n.t);
+  expect(entries).toEqual([expect.objectContaining({ id: 'old-review', name: 'Earlier reviewer', state: 'running', task })]);
+});
+
+it('lists a finished older child from compact history facts without retaining its prompt body', () => {
+  threadWriter.window(THREAD, [], true, false);
+  const entries = listAgents(threadViewOf(THREAD), [], i18n.t, [{ item_id: 'old-review', seq: 1, at: '2026-10-01T10:00:00Z', title: 'Earlier reviewer', kind: 'subagent',
+    agent: { stream: 'sub:older', turn_id: 'turn-1', name: 'Earlier reviewer', state: 'completed', started_at: '2026-10-01T10:00:00Z', duration_ms: 1200, tokens_out: 90, result: 'The earlier check passes', recorded: false, updated_seq: 10 } }]);
+  show(<AgentsPanel entries={entries} current={null} onMain={vi.fn()} onOpen={vi.fn()} onEnd={null} />);
+  expect(within(screen.getByRole('region', { name: 'Done' })).getByText('Earlier reviewer')).toBeVisible();
+  expect(screen.getByText('The earlier check passes')).toBeVisible();
+  expect(entries[0]?.stream).toBe('sub:older');
+});
+
+it('pages and searches the complete older child register without reading their conversation bodies', async () => {
+  threadWriter.window(THREAD, [], true, true);
+  const point = (id: string, seq: number): OutlineEntry => ({ item_id: id, seq, at: '2026-10-01T10:00:00Z', title: id, kind: 'subagent',
+    agent: { stream: `sub:${id}`, turn_id: 'turn-1', name: id, state: 'completed', started_at: null, duration_ms: null, tokens_out: null, result: null, recorded: false, updated_seq: seq } });
+  calls.outline.mockImplementation((options, before) => Promise.resolve({ entries: [point(options.q === 'hidden reviewer' ? 'Hidden reviewer' : before === null ? 'Recent reviewer' : 'Earlier reviewer', before === null ? 10 : 1)],
+    next_before: options.q === '' && before === null ? 10 : null, total: 3, seq: 20 }));
+  function Register() {
+    const catalog = useAgentCatalog(THREAD);
+    return <><AgentsFace entries={catalog.entries} count={catalog.count} /><AgentsPanel entries={catalog.entries} history={catalog.history} current={null} onMain={vi.fn()} onOpen={vi.fn()} onEnd={null} /></>;
+  }
+  show(<Register />);
+  expect(await screen.findByText('Recent reviewer')).toBeVisible();
+  expect(screen.getByText(i18n.t('thread.agents.count', { count: 3 }))).toBeVisible();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('ui.pagination.more') }));
+  expect(await screen.findByText('Earlier reviewer')).toBeVisible();
+  await userEvent.type(screen.getByRole('textbox', { name: i18n.t('thread.agents.search') }), 'Hidden reviewer');
+  expect(await screen.findByText('Hidden reviewer')).toBeVisible();
+  expect(screen.getByRole('button', { name: i18n.t('thread.agents.main') })).toBeVisible();
+  expect(calls.outline).toHaveBeenCalledWith(expect.objectContaining({ selection: 'agents', q: 'hidden reviewer' }), null);
+  expect(calls.read).not.toHaveBeenCalled();
+  expect(threadViewOf(THREAD).items.size).toBe(0);
+});
 
 it.each(['en', 'zh-CN'] as const)('keeps a foreign parent and an unavailable child stream from opening a reader in %s', async (locale) => {
   await setLocale(locale);

@@ -2,11 +2,12 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
+import userEvent from '@testing-library/user-event';
 import { parametersQuery } from '@/api/threads';
 import { queryClient } from '@/api/query';
 import type { ThreadParameters } from '@/generated/api-types';
 import { StatusPlace } from '@/features/status-items/StatusPlace';
-import { defaultStatus } from '@/features/status-items/arrangement';
+import { defaultStatus, showStatus } from '@/features/status-items/arrangement';
 import { useWorkbench } from '@/features/workbench/store';
 import { threadWriter } from '@/realtime/stores/thread';
 import { statusContext } from '../unit/status-items-fixtures';
@@ -18,7 +19,7 @@ vi.mock('@/api/client', async (load) => ({ ...await load<object>(), api: { GET: 
 vi.mock('@/lib/time', async (load) => ({ ...await load<object>(), useRunningClock: () => server.now }));
 afterEach(() => { useWorkbench.setState({ statusItems: defaultStatus() }); });
 
-it('uses reported live counts for ten updates while retaining the exact zero-read count', () => {
+it('keeps live usage as a breakdown without a summed request figure or reads on any tick', async () => {
   const context = statusContext();
   if (context.turn === null) throw new Error('The running turn is required');
   const { thread } = context, turn = context.turn;
@@ -28,7 +29,8 @@ it('uses reported live counts for ten updates while retaining the exact zero-rea
   const parameters: ThreadParameters = { provider: planProvider({ id: thread.binding?.provider.id ?? 'provider' }), approval_mode: 'on_request', approval_reviewer: null,
     model: { value: thread.model, writable: true, options: [], source }, effort: { value: thread.effort, supported: true, writable: true, source }, parameters: [] };
   cache.setQueryData(parametersQuery(thread.id).queryKey, parameters);
-  useWorkbench.setState({ statusItems: defaultStatus() });
+  // The line shows what is being done and one clock until a person adds more: here the person has added speed and usage details.
+  useWorkbench.setState({ statusItems: showStatus(showStatus(defaultStatus(), 'speed', 'live', true), 'usage', 'live', true) });
   threadWriter.reset(thread.id, { thread, turns: [turn] }, false);
   const view = show(<QueryClientProvider client={cache}><StatusPlace place="bar" threadId={thread.id} /><StatusPlace place="live" threadId={thread.id} /></QueryClientProvider>);
   expect(screen.getByRole('button', { name: 'Output speed' })).toHaveTextContent('48 tok/s');
@@ -40,7 +42,13 @@ it('uses reported live counts for ten updates while retaining the exact zero-rea
     });
   }
   expect(screen.getByRole('button', { name: 'Output speed' })).toHaveTextContent('48 tok/s');
-  expect(screen.getByRole('button', { name: 'Turn tokens' })).toHaveTextContent('1,060 tokens');
+  const usage = screen.getByRole('button', { name: 'Turn usage' });
+  expect(usage).toHaveTextContent('Usage');
+  expect(view.container).not.toHaveTextContent('1,060 tokens');
+  await userEvent.click(usage);
+  expect(await screen.findByText('100')).toBeVisible();
+  expect(screen.getByText('960')).toBeVisible();
+  expect(screen.getByText('Cached input')).toBeVisible();
   expect(server.reads).not.toHaveBeenCalled();
   view.unmount(); threadWriter.evict(thread.id); cache.clear();
 });

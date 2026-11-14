@@ -126,6 +126,8 @@ pub struct EngineConfig {
     pub project_depth: u32,
     /// What the deployment says of itself in the header of an Orch package it writes.
     pub deployment: Deployment,
+    /// Configured browser origins whose document links name this installation's shared objects.
+    pub public_origins: Vec<String>,
     /// The largest single file an archive takes in (`[limits] export_file_max_bytes`).
     pub export_file_max_bytes: i64,
     /// Where an archive is written before it is put in the store of content: the `tmp/` of the storage root, which
@@ -164,6 +166,7 @@ impl Default for EngineConfig {
             imports_per_user: orch_config::ServerConfig::default().limits.imports_per_user,
             project_depth: orch_config::ServerConfig::default().limits.project_depth,
             deployment: Deployment::of(&orch_config::ServerConfig::default()),
+            public_origins: vec![orch_config::ServerConfig::default().system.public_url],
             export_file_max_bytes: i64::try_from(
                 orch_config::ServerConfig::default()
                     .limits
@@ -208,6 +211,10 @@ impl EngineConfig {
             imports_per_user: config.limits.imports_per_user,
             project_depth: config.limits.project_depth,
             deployment: Deployment::of(config),
+            public_origins: std::iter::once(config.system.public_url.clone())
+                .chain(config.system.alternate_urls.iter().cloned())
+                .filter(|address| !address.is_empty())
+                .collect(),
             export_file_max_bytes: i64::try_from(config.limits.export_file_max_bytes)
                 .unwrap_or(i64::MAX),
             scratch: Some(config.storage.scratch_dir()),

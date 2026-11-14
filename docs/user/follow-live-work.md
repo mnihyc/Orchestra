@@ -37,7 +37,9 @@ its phase. Read its outcome before repeating a change that may have committed.
 The status bar, thread header and live line can show speed, elapsed time,
 tokens, cost, context, usage and resource load. Only reported values and
 explicit estimates appear. A provider limit and a model's context are separate
-facts; opening their card explains each one.
+facts; opening their card explains each one. The live line above the composer
+shows what is being done and the elapsed time of the turn until you add more,
+such as speed or tokens.
 
 Open an item's context menu to hide it or Move to another place. Choose
 Customize, or Layout → Status items, for the common editor. Select a place,

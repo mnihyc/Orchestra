@@ -51,7 +51,7 @@ const SIDE_READ = defaultThreadRead(SIDE);
 const ADA = userRef(me(1, 'ada', 'Ada'));
 const OTHER = userRef(me(2, 'grace', 'Grace'));
 const reference: NodeRef = { id: SIDE, kind: 'thread', name: 'Login (side)', redacted: false };
-const context: TimelineContext = { threadId: PARENT, threadName: 'Login', detail: 'steps', recent: new Set(['main-turn']), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: PARENT, threadName: 'Login', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: ADA.id, canInteract: true, canManage: false, live: true, lit: null, selection: NOT_PICKING };
 const closed: MarkerSideClosed = { side: reference, by: ADA, turns: 2, why: 'closed', into: null };
 const numbered = (item: Item, seq: number): Item => ({ ...item, thread_id: SIDE, segment_id: 'side-segment', seq_created: seq, seq_updated: seq });
@@ -98,6 +98,37 @@ afterEach(async () => {
 
 describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('a shared aside lane in %s / %s', (locale, theme) => {
   beforeEach(async () => { await setLocale(locale); useAppearance.setState({ locale, theme, resolvedTheme: theme }); });
+
+  it('groups its own finished work and puts its own actions and changed-files card under its answer', () => {
+    const held = threadViewOf(SIDE);
+    threadWriter.window(SIDE, [...held.items.values()].map((item) => ({ ...item, seq_created: item.seq_created * 2, seq_updated: item.seq_updated * 2 })), false, false);
+    threadWriter.apply(SIDE, { items: [numbered(fileChange('side-edit', { turn: 'side-turn', changes: [change('side.py', LOGIN_DIFF, { added: 4, removed: 1 })] }), 5)] });
+    draw();
+    const lane = document.querySelector<HTMLElement>('[data-side-lane]');
+    expect(lane?.querySelector('[data-work]')).not.toBeNull();
+    expect(lane?.querySelector('[data-turn-figures="side-turn"]')).not.toBeNull();
+    expect(lane?.querySelector('[data-turn-files="side-turn"]')).toHaveTextContent(i18n.t('timeline.footer.changed', { count: 1, added: 4, removed: 1 }));
+  });
+
+  it.each([false, true])('uses the main conversation classification with Diagnostics %s', (diagnostics) => {
+    const reports = [
+      ['session_status', { type: 'active', active_flags: [] }, 'Quiet session program'],
+      ['mcp_startup', { status: 'starting' }, 'Starting service program'],
+      ['mcp_startup', { status: 'ready' }, 'Ready service program'],
+      ['mcp_startup', { status: 'failed', message: 'Credentials expired' }, 'Failed service program'],
+    ] as const;
+    act(() => threadWriter.apply(SIDE, { items: reports.map(([change, value, program], index) => numbered(marker(`side-report-${index}`, { marker: 'harness_changed', data: {
+      program, change, subject: 'Source catalog', previous: { state: 'unsupported' }, value, expected: { state: 'unsupported' },
+      changed: false, diverged: false, next_turn: false, turn_id: 'side-turn', reported_at: '2026-10-01T10:00:00.000Z',
+    } }, { turn: 'side-turn' }), 22 + index)) }));
+    draw(true, { ...context, detail: diagnostics ? 'diagnostics' : 'normal' });
+    const lane = screen.getByRole('region', { name: i18n.t('side.lane.label', { name: reference.name }) });
+    expect(lane).toHaveTextContent('Failed service program');
+    for (const program of ['Quiet session program', 'Starting service program', 'Ready service program']) {
+      if (diagnostics) expect(lane).toHaveTextContent(program);
+      else expect(lane).not.toHaveTextContent(program);
+    }
+  });
 
   it('uses the same bordered frame, messages and command displays as a child stream, then follows the actual answer', async () => {
     draw();
@@ -260,6 +291,9 @@ it('uses the same side draft and full tool displays when moved to its panel', as
   expect(screen.getByRole('textbox')).toHaveValue('Continue in the panel');
   expect(calls.feed).toHaveBeenLastCalledWith(panelRead);
   expect(screen.queryByRole('table', { name: /notes\/login.md/ })).not.toBeInTheDocument();
+  const work = document.querySelector<HTMLElement>('[data-side-panel] [data-work]');
+  if (work === null) throw new Error('The side work uses the shared turn group');
+  await userEvent.click(within(work).getByRole('button', { expanded: false }));
   await userEvent.click(screen.getByRole('button', { expanded: false, name: /Edited notes\/login.md/ }));
   expect(screen.getByRole('table', { name: /notes\/login.md/ })).toBeVisible();
   expect(calls.draft).toHaveBeenCalledTimes(1);

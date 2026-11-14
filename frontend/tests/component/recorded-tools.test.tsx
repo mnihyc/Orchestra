@@ -5,7 +5,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Files from '@/features/files/FileTabs';
 import { NOT_PICKING, TimelineContextValue, type TimelineContext } from '@/features/timeline/context';
 import { ToolCallRow } from '@/features/timeline/items/ToolCall';
-import { SubagentChips } from '@/features/timeline/SubagentChips';
+import { AgentsPanel } from '@/features/thread/AgentsPanel';
+import { listAgents } from '@/features/thread/agents';
 import { timelineUi } from '@/features/timeline/state';
 import type { Segment, Thread } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
@@ -31,7 +32,7 @@ beforeEach(() => {
     arrangement: native.binding.arrangement, credential_path: native.binding.isolation.credential_path, executor: null, tool_set: null,
     env_generation: 1, started_by: native.owner, started_at: '2026-10-15T10:00:00Z', ended_at: '2026-10-15T10:01:00Z',
     end_reason: null, import_fidelity: null, import_report: null, seq_updated: 1 };
-  context = { threadId: native.id, threadName: native.name, detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined,
+  context = { threadId: native.id, threadName: native.name, detail: 'normal', layout: 'one', setLayout: () => undefined,
     meId: null, canInteract: false, canManage: false, live: true, lit: null, selection: NOT_PICKING };
   threadWriter.reset(native.id, { thread: native, segments: [ended] }, false);
 });
@@ -54,16 +55,17 @@ it.each(['en', 'zh-CN'] as const)('names a message step once for either target i
   }
 });
 
-it.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('keeps an ended session’s reported running step factual, without a live clock or header chip, in %s/%s', async (locale, look) => {
+it.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('keeps an ended session’s reported running step factual, without a live clock or an active agent, in %s/%s', async (locale, look) => {
   await setLocale(locale); document.documentElement.setAttribute('data-theme', look); vi.useFakeTimers();
   const item = { ...toolCall('old-helper', { kind: 'subagent', child_stream: 'sub:old-helper', name: 'reviewer', role: 'review', prompt: null, state: 'running' },
     { title: 'Review', status: 'in_progress' }), thread_id: native.id, segment_id: ended.id, seq_created: 2, seq_updated: 2 };
   act(() => threadWriter.apply(native.id, { items: [item] }));
-  show(<TimelineContextValue.Provider value={context}><SubagentChips threadId={native.id} /><ToolCallRow threadId={native.id} id={item.id} /></TimelineContextValue.Provider>);
+  show(<TimelineContextValue.Provider value={context}><AgentsPanel entries={listAgents(threadViewOf(native.id), [], i18n.t)} current={null} onMain={vi.fn()} onOpen={vi.fn()} onEnd={null} /><ToolCallRow threadId={native.id} id={item.id} /></TimelineContextValue.Provider>);
   const row = document.querySelector('[data-tool-row]');
   if (!(row instanceof HTMLElement)) throw new Error('The historical step has its own tool row');
   expect(within(row).getByRole('button', { expanded: false })).toHaveTextContent(i18n.t('timeline.step.recordedRunning'));
-  expect(screen.queryByRole('group', { name: i18n.t('timeline.subagent.running') })).not.toBeInTheDocument();
+  expect(screen.queryByRole('region', { name: i18n.t('thread.agents.active') })).not.toBeInTheDocument();
+  expect(within(screen.getByRole('region', { name: i18n.t('thread.agents.done') })).getByText(i18n.t('timeline.step.recordedRunning'))).toBeVisible();
   expect(document.querySelector('.animate-spin')).toBeNull(); expect(document.querySelector('[data-tool-duration]')).toBeNull();
   await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
   expect(document.querySelector('[data-tool-duration]')).toBeNull();
