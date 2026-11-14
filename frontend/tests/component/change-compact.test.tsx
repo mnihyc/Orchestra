@@ -199,7 +199,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
   });
 }
 
-it('keeps host capacity and policy refusals inside the open picker without weakening the gate', async () => {
+it('keeps the host refusal compact inside the open picker without weakening the gate', async () => {
   const host: PlaceHost = hostPlace('host', 'Build host', {
     host: { id: 'host', name: 'Build host', address: 'team.owner.build' }, owner,
     when_full: 'block', usable: false, policy_refusal: 'Machine policy forbids writes.',
@@ -212,7 +212,7 @@ it('keeps host capacity and policy refusals inside the open picker without weake
   const option = screen.getByRole('option', { name: 'Build host' });
   expect(option).toHaveAttribute('aria-disabled', 'true');
   expect(option).toHaveAccessibleDescription(/Machine policy forbids writes/);
-  expect(screen.getByRole('meter', { name: '2 of 8 GB declared' })).toBeVisible();
+  expect(within(option).queryByRole('meter')).toBeNull();
   await userEvent.click(option);
   expect(changed).not.toHaveBeenCalled();
 });

@@ -5,7 +5,7 @@ import { createMemoryHistory, createRootRoute, createRouter, RouterProvider } fr
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '@/api/client';
 import { client } from '@/api/client';
 import { meStateKey } from '@/api/personal';
@@ -26,6 +26,8 @@ vi.mock('@/api/client', async (original) => {
   const actual = await original<typeof ClientModule>();
   return { ...actual, api: { ...actual.api, GET: calls.get }, ok: (request: Promise<unknown>) => request };
 });
+// The finder's code is fetched when it is first opened; here it is fetched before, so that no case waits for it.
+beforeAll(async () => { await import('@/features/finder/Finder'); });
 const session = client.session.getState();
 const finder = useFinder.getState();
 const help = useHelpState.getState();
