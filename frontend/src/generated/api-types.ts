@@ -40583,6 +40583,10 @@ export interface components {
             option_constraints?: {
                 [key: string]: unknown;
             };
+            /** @description Declared per-thread option forms, keyed by outgoing interface, shared by thread and place defaults. */
+            parameter_forms?: {
+                [key: string]: unknown;
+            };
             /** @description What it can be run with here. */
             parameters: components["schemas"]["ModelParameters"];
             /** @description Where it came from. */

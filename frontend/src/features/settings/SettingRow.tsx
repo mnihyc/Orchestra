@@ -1,7 +1,7 @@
 /** A compact registry setting: direct edits, guarded drafts, and short links to whoever sets a read-only value. */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Copy, Info, RotateCcw, Settings2, X } from 'lucide-react';
-import { type ReactNode, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { ApiError } from '@/api/client';
@@ -14,8 +14,11 @@ import { TellMembers } from '@/features/admin-messages/TellMembers';
 import { SettingHint } from '@/features/help/SettingHint';
 import { ORDERED_KEYS } from '@/features/settings/ValueControl';
 import { SettingValue } from '@/features/settings/SettingValue';
+import { clearsSetting, draftComplete } from '@/features/settings/draftChecks';
+import { DraftFaults, DraftValidity, useHoldDraft } from '@/features/settings/drafts';
 import { isCapabilityBackendSetting } from '@/features/settings/capabilityBackendValue';
 import { isResourceSetting } from '@/features/settings/ResourceChoice';
+import { isThingSetting } from '@/features/settings/ThingChoice';
 import { SourceSettingLink } from '@/features/settings/SourceSettingLink';
 import { emptySettingText, emptySettingValue, SettingSummary } from '@/features/settings/SettingSummary';
 import { SettingReachLine } from '@/features/settings/Reach';
@@ -28,6 +31,7 @@ import { formatBytes } from '@/lib/format';
 import { holds } from '@/lib/permissions';
 import { isComposing } from '@/lib/shortcuts';
 import { Button } from '@/ui/Button';
+import { cx } from '@/ui/cx';
 import { IconButton } from '@/ui/IconButton';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
@@ -70,12 +74,16 @@ export interface SettingRowProps {
   quiet?: boolean;
   /** A resource can state its declared lifecycle/apply constraint in this same row. */
   effectNote?: ReactNode;
+  /** Whether this row holds a structured value as an unsaved draft: the list that shows rows keeps such a row shown and mounted until it is saved or discarded. */
+  onDraft?: (key: string, held: boolean) => void;
 }
+
+const NO_FAULTS: readonly { path: string; message: string }[] = [];
 
 interface SavedSetting { before: ResolvedSetting['own']; revision: number | null }
 interface WriteChange { value: unknown; locked?: boolean; before: ResolvedSetting['own']; guard: number | null }
 
-export function SettingRow({ def, setting: incoming, target, place, onChanged, effectNote }: SettingRowProps) {
+export function SettingRow({ def, setting: incoming, target, place, onChanged, effectNote, onDraft }: SettingRowProps) {
   const { t, i18n: instance } = useTranslation();
   const client = useQueryClient();
   const locale = instance.resolvedLanguage ?? 'en';
@@ -94,7 +102,7 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
   // A discrete choice commits immediately; free input commits on leaving its field/form or Enter.
   const joining = def.merge !== 'replace';
   const backendChoice = isCapabilityBackendSetting(def.key);
-  const instant = (!joining || narrowsOnly(def.merge) && def.merge !== 'intersect') && (shape.type === 'bool' || shape.type === 'choice' || def.key === 'agent.default_provider_id' || def.key === 'calls.rules' || isResourceSetting(def.key) || backendChoice);
+  const instant = (!joining || narrowsOnly(def.merge) && def.merge !== 'intersect') && (shape.type === 'bool' || shape.type === 'choice' || def.key === 'agent.default_provider_id' || isThingSetting(def.key) || def.key === 'calls.rules' || def.key === 'agent.model' || def.key === 'agent.effort' || isResourceSetting(def.key) || backendChoice);
   const inForce = editableValue(def, setting, shape);
   // A remote ancestor or own change must not discard what this person is still writing.
   const [draft, setDraft] = useState<unknown>(inForce);
@@ -188,6 +196,11 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
   const shown = write.isPending && instant ? write.variables.value : draft;
   const error = write.error ?? reset.error ?? undo.error;
   const stale = error instanceof ApiError && error.is('conflict.stale_revision');
+  const clearFieldFaults = () => {
+    if (write.error instanceof ApiError && !write.error.is('conflict.stale_revision') && write.error.faults().length > 0) write.reset();
+    if (reset.error instanceof ApiError && !reset.error.is('conflict.stale_revision') && reset.error.faults().length > 0) reset.reset();
+    if (undo.error instanceof ApiError && !undo.error.is('conflict.stale_revision') && undo.error.faults().length > 0) undo.reset();
+  };
   const faults = error instanceof ApiError ? error.faults() : [];
   const fault = faults.find((entry) => entry.path === 'value' || entry.path === '')?.message ?? faults[0]?.message ?? (invalid ? t('settings.compact.invalidValue') : undefined);
 
@@ -195,6 +208,27 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
   const locked = honoursLocks(def) && setting.own?.locked === true;
 
   const complex = !backendChoice && (joining || !['bool', 'int', 'choice', 'text', 'id', 'time'].includes(shape.type) || shape.type === 'text' && (shape.maxLength ?? 0) > 200);
+  // An object or a list is written as a whole, once, by its own Save; nothing else on the page saves, closes or hides it.
+  const structured = ['object', 'list', 'map', 'json'].includes(shape.type) || shape.type === 'nullable' && ['object', 'list', 'map'].includes(shape.of.type);
+  const drafted = structured && !instant && !backendChoice && writable;
+  // The first thing an editor learned from the server that stops its draft being saved as it stands: a provider that cannot be used, a model that is not offered.
+  const [blocked, setBlocked] = useState<string | null>(null);
+  const [valid, setValid] = useState(true);
+  // Every edit asks the form again, since text that cannot be read yet leaves the draft as it was; a closed editor holds no form, and what it last said stands.
+  const [edits, setEdits] = useState(0);
+  useLayoutEffect(() => {
+    if (form.current === null) return;
+    const ok = form.current.checkValidity();
+    setValid((held) => held === ok ? held : ok);
+  }, [draft, attempt, editorOpen, edits]);
+  const complete = draftComplete(def.key, draft);
+  const mayWrite = !busy && writable && !stale && !ownChanged && valid && complete && blocked === null;
+  // A draft that cannot be saved as it stands says so even while its editor is closed.
+  const faulty = invalid || drafted && edited && (!valid || !complete);
+  // Why Save is off, in words beside it: nothing changed, a value that cannot be read, or something the editor marks at its field (a number that is too small,
+  // a provider that cannot be used). The marks say what is wrong, and a value changed elsewhere says so in its own notice, so that nothing is said twice.
+  const whyNot: string | null = !drafted ? null : !dirty ? t('settingsEditors.draft.nothingToSave') : stale || ownChanged ? null
+    : invalid || !valid ? t('settings.compact.invalidValue') : !complete || blocked !== null ? t('settingsEditors.draft.fixMarked') : null;
   useLayoutEffect(() => {
     if (busy || !refocus.current) return;
     refocus.current = false;
@@ -204,8 +238,13 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
   }, [attempt, busy, complex]);
   const commit = (keepFocus = true) => {
     if (!dirty || busy || !writable || instant || stale || ownChanged) return;
-    if (form.current?.checkValidity() !== true) { setInvalid(true); return; }
+    if (form.current?.checkValidity() !== true || !complete || blocked !== null) { setInvalid(true); return; }
     if (sameValue(draft, base)) { setTouched(false); setInvalid(false); setAttempt((count) => count + 1); return; }
+    // "None here" takes the value of this place away, so that what is above applies again; where this place has none there is nothing to take away.
+    if (clearsSetting(def.key, draft)) {
+      if (setting.own === null) { discardDraft(); return; }
+      write.reset(); undo.reset(); reset.mutate({ before: baseOwn, guard: baseRevision }); return;
+    }
     writeValue(draft, undefined, keepFocus);
   };
   // An explicit Apply uses the control's new value before the row has rendered that draft.
@@ -216,6 +255,35 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
     if (sameValue(value, base)) { setTouched(false); setAttempt((count) => count + 1); setEditorOpen(false); return; }
     writeValue(value);
   };
+
+  // Putting the saved value back, with its draft: the one thing a draft's Discard does, and what a question to leave the page does for every draft it holds.
+  const discardDraft = () => {
+    setDraft(inForce); setBase(inForce); setBaseRevision(setting.own?.revision ?? null); setBaseOwn(setting.own); setTouched(false); setInvalid(false);
+    setAttempt((count) => count + 1); setEditorOpen(false); write.reset(); reset.reset();
+  };
+  const holder = useRef<{ save: () => Promise<boolean>; discard: () => void }>({ save: () => Promise.resolve(false), discard: () => undefined });
+  useLayoutEffect(() => {
+    holder.current = {
+      save: async () => {
+        if (!dirty) return true;
+        if (!mayWrite) return false;
+        try {
+          if (clearsSetting(def.key, draft)) {
+            if (setting.own === null) discardDraft();
+            else await reset.mutateAsync({ before: baseOwn, guard: baseRevision });
+          }
+          else await write.mutateAsync({ value: draft, before: baseOwn, guard: baseRevision });
+          return true;
+        } catch { return false; }
+      },
+      discard: discardDraft,
+    };
+  });
+  const holding = drafted && dirty;
+  useHoldDraft(holding, { save: () => holder.current.save(), discard: () => holder.current.discard() });
+  useEffect(() => {
+    onDraft?.(def.key, holding);
+  }, [holding, def.key, onDraft]);
 
   const copyKey = () => copyText(def.key, t('settings.editor.keyCopied', { key: def.key }));
   const resetEntry: MenuEntry | null = setting.own !== null && writable
@@ -242,8 +310,8 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
       : provenance.kind === 'here' ? <span>{t('settings.compact.setOn', { place: place.name })}</span>
       : <SourceSettingLink inherited={provenance.kind === 'inherited'} source={setting.source} def={def} target={target} fallback={place.name} />;
 
-  const controls = <form ref={form} className="flex min-w-0 max-w-full flex-wrap items-center gap-2" aria-busy={busy || undefined}
-    onBlur={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
+  const controls = <form ref={form} className={drafted ? 'flex min-w-0 max-w-full flex-col items-stretch gap-3' : 'flex min-w-0 max-w-full flex-wrap items-center gap-2'} aria-busy={busy || undefined}
+    onBlur={(event) => { if (!drafted && (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget))) {
       commit(event.relatedTarget instanceof Node && event.currentTarget.closest('[data-setting-row]')?.contains(event.relatedTarget) === true);
     } }}
     onKeyDown={(event) => {
@@ -260,12 +328,20 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
     }}
     onSubmit={(event) => { event.preventDefault(); commit(); }}>
     {showsDefault && !emptyDefault && <span className="text-xs text-text-muted">{t('settings.compact.defaultPrefix')}</span>}
-    <SettingValue key={attempt} shape={shape} def={def} setting={setting} target={target} display={def.display} placeholder={emptyDefault ? emptySettingText(def.key, true, t, def.display) : undefined}
-      value={shown} label={def.title} disabled={busy} error={fault} onEdited={() => { setTouched(true); setInvalid(false); }} say={say}
-      ordered={ORDERED_KEYS.has(def.key)} onApply={applyValue} onChange={(next) => { setDraft(next); setTouched(true); setInvalid(false); if (instant && writable) writeValue(next); }} />
-    {dirty && write.isError && !stale && !ownChanged && <Button size="sm" pending={busy} onClick={() => { if (instant) writeValue(draft); else commit(); }}>{t('common.tryAgain')}</Button>}
-    {dirty && !instant && <>
-      <Button size="sm" icon={<X aria-hidden />} disabled={busy} onClick={() => { setDraft(inForce); setBase(inForce); setBaseRevision(setting.own?.revision ?? null); setBaseOwn(setting.own); setTouched(false); setInvalid(false); setAttempt((count) => count + 1); setEditorOpen(false); write.reset(); }}>{t('common.cancel')}</Button></>}
+    <DraftValidity value={setBlocked}><DraftFaults value={drafted ? faults : NO_FAULTS}>
+      <SettingValue key={attempt} shape={shape} def={def} setting={setting} target={target} scope={place.kind ?? target.kind} display={def.display} placeholder={emptyDefault ? emptySettingText(def.key, true, t, def.display) : undefined}
+        value={shown} label={def.title} disabled={busy} error={fault} onEdited={() => { clearFieldFaults(); setTouched(true); setInvalid(false); setEdits((count) => count + 1); }} say={say}
+        ordered={ORDERED_KEYS.has(def.key)} onApply={applyValue} onClear={setting.own === null || !writable ? undefined : () => { write.reset(); undo.reset(); reset.mutate({ before: baseOwn, guard: baseRevision }); }}
+        onChange={(next) => { clearFieldFaults(); setDraft(next); setTouched(true); setInvalid(false); if (instant && writable) writeValue(next); }} />
+    </DraftFaults></DraftValidity>
+    {!drafted && dirty && write.isError && !stale && !ownChanged && <Button size="sm" pending={busy} onClick={() => { if (instant) writeValue(draft); else commit(); }}>{t('common.tryAgain')}</Button>}
+    {!drafted && dirty && !instant && <>
+      <Button size="sm" icon={<X aria-hidden />} disabled={busy} onClick={discardDraft}>{t('common.cancel')}</Button></>}
+    {drafted && <div data-draft-foot className="flex flex-wrap items-center gap-2">
+      <Button size="sm" variant="primary" type="submit" pending={write.isPending || reset.isPending} disabled={busy ? false : !dirty || !mayWrite}>{t('common.save')}</Button>
+      <Button size="sm" disabled={busy} onClick={discardDraft}>{t('settingsEditors.draft.discard')}</Button>
+      {editorOpen && whyNot !== null && <span className="min-w-0 text-sm text-text-muted">{whyNot}</span>}
+    </div>}
   </form>;
   const showsMemory = (def.key === 'env.resources' || def.key === 'runtime.resources') && (target.kind === 'environment' || target.kind === 'provider');
   const unusedProgram = setting.not_applicable_reason === 'prompt_cache_ttl_unsupported' && 'not_applicable_program' in setting && typeof setting.not_applicable_program === 'string' ? setting.not_applicable_program : null;
@@ -304,15 +380,25 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
             <WhereSet additionalOnly values setting={setting} def={def} target={target} />
           </div>
       ) : undefined,
-      status: stricterAbove || unusedNote !== null || setting.automation_reason?.startsWith('calls.') === true || busy || !dirty && feedback !== null || effectNote !== undefined && effectNote !== null || effect !== null || showsMemory || invalid || ownChanged && edited || error !== null || !editorOpen && complex && edited ? <>
+      status: stricterAbove || unusedNote !== null || setting.automation_reason?.startsWith('calls.') === true || busy || !dirty && feedback !== null || effectNote !== undefined && effectNote !== null || effect !== null || showsMemory || faulty || ownChanged && edited || error !== null || !editorOpen && complex && edited ? <>
         {stricterAbove && !edited && !busy && <p role="status" className="text-sm text-text-muted">{t('settings.compact.aboveStricter')}</p>}
         {unusedNote !== null && <p role="status" className="text-sm text-text-muted">{unusedNote}</p>}
         {setting.automation_reason?.startsWith('calls.') === true && <p role="status" className="flex flex-wrap items-center gap-1 text-sm text-text-muted">{t(setting.automation_reason, { defaultValue: t('calls.servicePaused') })}<CallHelp section="services" /></p>}
         {busy && <p className="text-sm text-text-muted">{t('settings.editor.saving')}</p>}
         {!busy && !dirty && feedback !== null && <div role="status" className="flex items-center gap-2 text-xs text-text-muted"><span>{t(feedback === 'saved' ? 'settings.compact.saved' : 'settings.compact.undone')}</span>
           {saved !== null && <Tooltip content={undoBlocked ? t('settings.compact.undoStale') : undefined}><Button size="sm" variant="ghost" icon={<RotateCcw aria-hidden />} blocked={undoBlocked} aria-label={t('settings.compact.undoNamed', { name: def.title })} onClick={() => { write.reset(); reset.reset(); undo.mutate(saved); }}>{t('settings.compact.undo')}</Button></Tooltip>}</div>}
-        {!editorOpen && complex && edited && !busy && !invalid && <p role="status" className="text-xs text-text-muted">{t('settings.compact.draft')}</p>}
-        {invalid && complex && !editorOpen && <p role="alert" className="text-xs text-danger-text">{t('settings.compact.invalidValue')}</p>}
+        {!editorOpen && drafted && edited && !busy
+          // A draft left behind a closed editor keeps its Save and its Discard beside the words, with the reason Save is off where it is.
+          ? <div data-unsaved-draft role={faulty ? 'alert' : 'status'} className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
+            <span className={faulty ? 'text-danger-text' : undefined}>{t('settings.compact.draft')}</span>
+            <Button size="sm" variant="primary" disabled={!mayWrite} onClick={() => void holder.current.save()}>{t('common.save')}</Button>
+            <Button size="sm" onClick={discardDraft}>{t('settingsEditors.draft.discard')}</Button>
+            {whyNot !== null && <span className={cx('min-w-0 basis-full', faulty && 'text-danger-text')}>{whyNot}</span>}
+          </div>
+          : <>
+            {!editorOpen && complex && edited && !busy && !faulty && <p role="status" className="text-xs text-text-muted">{t('settings.compact.draft')}</p>}
+            {faulty && complex && !editorOpen && <p role="alert" className="text-xs text-danger-text">{t('settings.compact.invalidValue')}</p>}
+          </>}
         {effectNote !== undefined ? effectNote : effect !== null && <p className="text-sm text-text-muted">{t('runtimeChanges.takesEffect')}: {t(`runtimeChanges.${effect}`)}</p>}
         {effectNote === undefined && effect === 'pendingResources' && <p role="status" className="text-sm text-warning-text">{runtime?.pending_reason}</p>}
         {showsMemory && (

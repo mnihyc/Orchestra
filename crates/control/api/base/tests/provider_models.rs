@@ -781,3 +781,44 @@ async fn accepted_suggestions_are_added_with_what_they_offer_and_none_of_it_enab
     assert!(again.added.is_empty());
     assert_eq!(again.provider.models.len(), 2);
 }
+
+#[tokio::test]
+async fn model_choices_publish_the_same_declared_option_forms_that_threads_edit() {
+    let world = world().await;
+    let c = company(&world).await;
+    let id = provider(&world, &c.boss, c.acme, None).await.base.id;
+    let parameters: ModelParameters = serde_json::from_value(json!({
+        "request_options": {"openai-responses": {
+            "type":"object", "additionalProperties":false,
+            "properties":{"temperature":{"type":"number","minimum":0,"maximum":1}}
+        }}
+    }))
+    .unwrap();
+    world
+        .app
+        .call(ProviderModelCreate, &[&id])
+        .token(&c.boss.token)
+        .body(&ProviderModelCreateBody {
+            model_name: "declared-model".to_owned(),
+            display_name: None,
+            parameters: Some(parameters),
+            groups: None,
+        })
+        .send()
+        .await
+        .ok();
+    let listed = world
+        .app
+        .call(ProviderModelList, &[&id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    let shown = serde_json::to_value(listed).unwrap();
+    let form = &shown[0]["parameter_forms"]["openai-responses"];
+    assert_eq!(form["properties"]["temperature"]["minimum"], json!(0));
+    assert_eq!(form["properties"]["temperature"]["maximum"], json!(1));
+    assert_eq!(form["additionalProperties"], json!(false));
+    assert!(form["properties"].get("model").is_none());
+    assert!(shown[0]["parameter_forms"].get("native").is_none());
+}

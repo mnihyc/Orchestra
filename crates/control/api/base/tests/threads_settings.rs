@@ -835,6 +835,58 @@ async fn a_threads_parameters_list_only_what_exists_for_its_model_and_carry_the_
     );
 }
 
+#[tokio::test]
+async fn an_access_program_a_manager_enabled_for_the_model_is_offered_in_a_thread_at_shipped_settings()
+ {
+    let s = Scene::new().await;
+    let id = s.thread().await.base.id;
+    // The adapter puts its access program behind its own feature, as Codex does.
+    let mut parameters = declared();
+    parameters[1]["feature"] = json!("codex.cyber_access");
+    sqlx::query("UPDATE agents SET descriptor = jsonb_set(descriptor, '{parameters}', $1)")
+        .bind(parameters)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE provider_models SET parameters = $1 WHERE model_name = $2")
+        .bind(json!({ "access_programs": ["blue"], "default_access_program": "blue" }))
+        .bind(MODEL)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let shown = || async {
+        s.rig
+            .world
+            .app
+            .call(ThreadParameterGet, &[&id])
+            .token(&s.ada.token)
+            .send()
+            .await
+            .ok()
+            .parameters
+            .into_iter()
+            .map(|view| view.key)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        shown().await.contains(&"access_program".to_owned()),
+        "nobody switched the feature on, and the program is there"
+    );
+    // A place that does not want it offered under it says so.
+    s.rig
+        .world
+        .set_at(
+            Target::Node(s.tree.org.base.id),
+            "agent.features",
+            json!({ "codex.cyber_access": false }),
+        )
+        .await;
+    assert!(
+        !shown().await.contains(&"access_program".to_owned()),
+        "switched off under the org, it is not offered"
+    );
+}
+
 #[path = "threads_settings/prompt_cache_ttl.rs"]
 mod prompt_cache_ttl;
 
