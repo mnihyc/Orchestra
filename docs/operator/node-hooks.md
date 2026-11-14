@@ -11,12 +11,11 @@ orch-node policy set hooks '{"pre_up":"/etc/orch/hooks/check-tunnel.sh","post_up
 orch-node policy show
 ```
 
-The command writes the node's data-directory `config.toml`, with explicit local ownership. On upgrade,
-the previous `[node.hooks]`, `[ports]`, `[[node.storage]]` and driver tables are still accepted and imported
-once as kept policy values. The console names the replacement command. Later edits use `orch-node policy`;
-the old file is no second source and cannot overwrite a newer local policy value.
+The command writes the node's data-directory `config.toml`, with explicit local ownership. Hooks,
+ports, storages and driver policy use this one file and the `orch-node policy` commands. Opening policy
+imports no values from the deployment file and changes no delegation.
 
-For a new deployment's initial network pool, the compatible node configuration still accepts:
+The node's operational Docker network settings can be declared as:
 
 ```toml
 [node.docker.networks]
