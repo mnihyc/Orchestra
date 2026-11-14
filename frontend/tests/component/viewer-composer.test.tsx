@@ -127,8 +127,10 @@ describe.each(modes)('a live viewer at $width px in $theme', mode => {
     const controls = within(screen.getByRole('group', { name: i18n.t('composer.row.label') }));
     expect(controls.getByRole('button', { name: i18n.t('composer.plus.label') })).toBeDisabled();
     expect(view.container.querySelector('input[type="file"]')).toBeDisabled();
-    const model = controls.getByRole('button', { name: i18n.t('composer.model.current', { model: 'Reasoner (High)' }) });
-    expect(model).toBeDisabled(); expect(model).toHaveTextContent('Reasoner (High)');
+    const model = controls.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.chip'), value: 'Reasoner' }) });
+    expect(model).toBeDisabled(); expect(model).toHaveTextContent('Reasoner');
+    const effort = controls.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.effort.title'), value: 'High' }) });
+    expect(effort).toBeDisabled(); expect(effort).toHaveTextContent('High');
     const send = controls.getByRole('button', { name: i18n.t('composer.send') });
     expect(send).toBeVisible(); expect(send).toBeDisabled();
     expect(controls.getByRole('button', { name: i18n.t('composer.deliveryMenu') })).toBeDisabled();
@@ -213,8 +215,43 @@ it.each(['archived', 'inspection'] as const)('retains the existing %s exclusion 
 it.each(['en', 'zh-CN'] as const)('shows the disabled placeholder, model, effort and access action in %s', async locale => {
   await setLocale(locale); draw();
   expect(screen.getByRole('textbox', { name: i18n.t('composer.label') })).toHaveAttribute('placeholder', i18n.t('thread.watching.title'));
-  const value = `Reasoner (${i18n.t('choiceCatalog.effort.high.name')})`;
-  const model = screen.getByRole('button', { name: i18n.t('composer.model.current', { model: value }) });
-  expect(model).toBeDisabled(); expect(model).toHaveTextContent(value);
+  const high = i18n.t('choiceCatalog.effort.high.name');
+  const model = screen.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.chip'), value: 'Reasoner' }) });
+  expect(model).toBeDisabled(); expect(model).toHaveTextContent('Reasoner');
+  const effort = screen.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.effort.title'), value: high }) });
+  expect(effort).toBeDisabled(); expect(effort).toHaveTextContent(high);
   expect(screen.getByRole('button', { name: i18n.t('access.request.title') })).toBeEnabled();
+});
+
+describe.each(modes)('the thread dock at $width px in $theme', mode => {
+  it('keeps where the thread runs with its composer controls as the conversation scrolls', () => {
+    const view = draw(mode);
+    const where = view.container.querySelector('[data-where-chip]');
+    expect(where).not.toBeNull();
+    expect(view.container.querySelectorAll('[data-where-chip]')).toHaveLength(1);
+    expect(view.container.querySelector('[data-composer-controls]')).toContainElement(where as HTMLElement);
+    expect(view.container.querySelector('[data-thread-dock]')).toContainElement(where as HTMLElement);
+    expect(view.container.querySelector('[data-scroll-area]')).not.toContainElement(where as HTMLElement);
+    expect(view.container.querySelector('header')).not.toContainElement(where as HTMLElement);
+    expect(where).toHaveTextContent(native.environment?.name ?? '');
+    if (native.directory !== '') expect(where).toHaveTextContent(native.directory);
+    expect(view.container.querySelector('[data-runs-line]')).toBeNull();
+  });
+
+  it.each(['archived', 'inspection'] as const)('keeps one read-only set of run facts and location in the %s dock', state => {
+    const view = draw(mode, { ...native, archived: state === 'archived', archived_by: null }, state === 'inspection');
+    expect(view.container.querySelector('[data-composer]')).toBeNull();
+    const runs = screen.getByRole('group', { name: i18n.t('composer.row.runsWith') });
+    expect(view.container.querySelectorAll('[data-runs-line]')).toHaveLength(1);
+    expect(view.container.querySelector('[data-thread-dock]')).toContainElement(runs);
+    expect(view.container.querySelector('[data-scroll-area]')).not.toContainElement(runs);
+    expect(runs.querySelector('[data-readonly-chip="agent"]')).toHaveTextContent(native.binding?.agent.name ?? '');
+    expect(runs.querySelector('[data-readonly-chip="model"]')).toHaveTextContent('Reasoner');
+    expect(runs.querySelector('[data-readonly-chip="effort"]')).toHaveTextContent('High');
+    const where = runs.querySelector('[data-where-chip]');
+    expect(where).not.toBeNull();
+    expect(view.container.querySelectorAll('[data-where-chip]')).toHaveLength(1);
+    expect(where).toHaveAttribute('aria-disabled', 'true');
+    expect(where).toHaveTextContent(native.environment?.name ?? '');
+  });
 });

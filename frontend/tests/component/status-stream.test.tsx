@@ -6,7 +6,7 @@ import { parametersQuery } from '@/api/threads';
 import { queryClient } from '@/api/query';
 import type { ThreadParameters } from '@/generated/api-types';
 import { StatusPlace } from '@/features/status-items/StatusPlace';
-import { defaultStatus } from '@/features/status-items/arrangement';
+import { defaultStatus, showStatus } from '@/features/status-items/arrangement';
 import { useWorkbench } from '@/features/workbench/store';
 import { threadWriter } from '@/realtime/stores/thread';
 import { statusContext } from '../unit/status-items-fixtures';
@@ -28,7 +28,8 @@ it('uses reported live counts for ten updates while retaining the exact zero-rea
   const parameters: ThreadParameters = { provider: planProvider({ id: thread.binding?.provider.id ?? 'provider' }), approval_mode: 'on_request', approval_reviewer: null,
     model: { value: thread.model, writable: true, options: [], source }, effort: { value: thread.effort, supported: true, writable: true, source }, parameters: [] };
   cache.setQueryData(parametersQuery(thread.id).queryKey, parameters);
-  useWorkbench.setState({ statusItems: defaultStatus() });
+  // The line shows what is being done and one clock until a person adds more: here the person has added the speed and the tokens.
+  useWorkbench.setState({ statusItems: showStatus(showStatus(defaultStatus(), 'speed', 'live', true), 'tokens', 'live', true) });
   threadWriter.reset(thread.id, { thread, turns: [turn] }, false);
   const view = show(<QueryClientProvider client={cache}><StatusPlace place="bar" threadId={thread.id} /><StatusPlace place="live" threadId={thread.id} /></QueryClientProvider>);
   expect(screen.getByRole('button', { name: 'Output speed' })).toHaveTextContent('48 tok/s');

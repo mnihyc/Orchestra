@@ -15,8 +15,6 @@ import { formatSpan, useRunningClock } from '@/lib/time';
 import { runningTurn, threadReadOnly, useThreadPart } from '@/realtime/stores/thread';
 import { useSocketStatus } from '@/realtime/live';
 import { Tooltip } from '@/ui/Tooltip';
-import { StateChip, type WorkState } from '@/ui/StateChip';
-import { useCompactControls } from '@/features/workbench/Narrow';
 
 type ApprovalItem = Extract<Item, { kind: 'approval' }>;
 
@@ -68,8 +66,12 @@ export function useThreadNow(threadId: string) {
   const since = activity?.since === null || activity?.since === undefined ? NaN : Date.parse(activity.since);
   const time = Number.isFinite(since) ? formatSpan(Math.max(0, now - since), format) : null;
   const label = activity === null ? '' : [activity.text, time].filter((part) => part !== null).join(' · ');
-  return { active, label, toolCalls: current.filter((one) => one.kind === 'tool_call').length, approvals: waiting.length, thread, turn, live, readOnly };
+  return { active, label, text: activity?.text ?? '', toolRunning: current.some((one) => one.kind === 'tool_call' && one.status === 'in_progress'),
+    toolCalls: current.filter((one) => one.kind === 'tool_call').length, approvals: waiting.length, thread, turn, live, readOnly };
 }
+
+/** What the thread is doing now, as the page reads it: the activity in words, its clock and whether a tool runs. */
+export type ThreadNow = ReturnType<typeof useThreadNow>;
 
 interface ThreadNowValue {
   now: ReturnType<typeof useThreadNow>;
@@ -79,7 +81,7 @@ interface ThreadNowValue {
 const ThreadNowContext = createContext<ThreadNowValue | null>(null);
 export const useProvidedThreadNow = () => useContext(ThreadNowContext);
 
-/** Header and its line share the same activity, clock and interruption in one screen. */
+/** The status line of the dock and whatever else of one screen names the activity share its words, its clock and its interruption. */
 export function ThreadNowProvider({ threadId, children }: { threadId: string; children: ReactNode }) {
   const now = useThreadNow(threadId);
   const mayStop = now.thread !== null && holds(now.thread.access, 'thread.interact') && now.live && !now.readOnly;
@@ -87,37 +89,12 @@ export function ThreadNowProvider({ threadId, children }: { threadId: string; ch
   return <ThreadNowContext.Provider value={{ now, stop, mayStop }}>{children}</ThreadNowContext.Provider>;
 }
 
-function NowStop() {
+/** Stop, for the turn that runs: its words and failures are the composer's, which stands beside it. */
+export function NowStop() {
   const { t } = useTranslation();
   const context = useProvidedThreadNow();
   if (context === null) return null;
   const { now, stop, mayStop } = context;
   const reason = !mayStop ? t(now.live ? 'composer.row.readOnly' : 'approvals.waitForLine') : null;
-  return <Tooltip content={reason}><span><StopControl stop={stop} disabled={!mayStop} /></span></Tooltip>;
-}
-
-export function ThreadNowChip({ state }: { state: WorkState }) {
-  const { t } = useTranslation();
-  const context = useProvidedThreadNow();
-  if (!context?.now.active) return null;
-  const { now } = context;
-  const counts = `${t('thread.viewModes.toolCalls', { count: now.toolCalls })} · ${t('thread.now.approvals', { count: now.approvals })}`;
-  return <div data-thread-now-chip className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
-    <Tooltip content={counts}><span role="img" tabIndex={0} aria-label={`${now.label} · ${counts}`} className="min-w-0 max-w-full"><StateChip state={state} label={now.label} /></span></Tooltip>
-    <NowStop />
-  </div>;
-}
-
-export function NowLine({ threadId }: { threadId: string }) {
-  const { t } = useTranslation();
-  const compact = useCompactControls();
-  const context = useProvidedThreadNow();
-  if (context === null) return <ThreadNowProvider threadId={threadId}><NowLine threadId={threadId} /></ThreadNowProvider>;
-  const { now } = context;
-  if (!now.active || compact || now.thread?.id !== threadId) return null;
-  return <div data-thread-now role="status" className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-4 py-1 text-sm text-text-muted">
-    <span className="min-w-0 flex-1 wrap-anywhere">{now.label}</span>
-    <span>{t('thread.viewModes.toolCalls', { count: now.toolCalls })} · {t('thread.now.approvals', { count: now.approvals })}</span>
-    <NowStop />
-  </div>;
+  return <Tooltip content={reason}><span><StopControl stop={stop} disabled={!mayStop} inlineFeedback={false} /></span></Tooltip>;
 }

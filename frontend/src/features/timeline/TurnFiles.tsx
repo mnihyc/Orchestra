@@ -1,10 +1,17 @@
-/** One turn's admitted file changes; opening their list does not open another history or workspace. */
+/** One turn's admitted file changes, as one card at the end of the turn: "3 files changed +10 −3", opening the list, with Review.
+ *
+ * It stands once, under a turn that is over, and never says the same thing twice; opening the list does not open another
+ * history or workspace.
+ */
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { FileChange, Item, Turn } from '@/generated/api-types';
 import { FileLink } from '@/features/files/FileLink';
+import { openTurnReview } from '@/features/inspector/reviewTarget';
 import { useTimelineContext } from '@/features/timeline/context';
 import { useThreadPart } from '@/realtime/stores/thread';
+import { Button } from '@/ui/Button';
 import { Tooltip } from '@/ui/Tooltip';
 
 export interface TurnChanges {
@@ -36,19 +43,25 @@ export function useTurnChanges(threadId: string, turnId: string): TurnChanges {
 
 export function TurnFiles({ turn, changes }: { turn: Turn; changes: TurnChanges }) {
   const { t } = useTranslation();
-  const { detail } = useTimelineContext();
+  const { threadId, inspection } = useTimelineContext();
   const [open, setOpen] = useState(false);
   const count = changes.files.length;
   if (count === 0) return null;
-  if (detail === 'summary') return <span data-turn-files-count={turn.id}>{t('thread.viewModes.files', { count })}</span>;
-  return <details data-turn-files={turn.id} onToggle={(event) => setOpen(event.currentTarget.open)} className="basis-full text-xs text-text-muted">
-    <summary className="w-fit cursor-pointer rounded-md py-1">{t('thread.viewModes.files', { count })}</summary>
-    {open && <ul className="flex flex-col gap-1 py-1" aria-label={t('thread.turnFiles.list')}>
+  return <div data-turn-files={turn.id} className="flex min-w-0 flex-col rounded-lg border border-border bg-surface text-sm">
+    <div className="flex min-h-(--control-md) min-w-0 items-center gap-2 pr-1 pl-3">
+      <button type="button" aria-expanded={open} onClick={() => setOpen((on) => !on)} className="flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-md text-left" data-turn-changes={turn.id}>
+        {open ? <ChevronDown className="shrink-0 text-text-subtle" aria-hidden /> : <ChevronRight className="shrink-0 text-text-subtle" aria-hidden />}
+        <span className="min-w-0 truncate">{t('timeline.footer.changed', { count, added: changes.added, removed: changes.removed })}</span>
+      </button>
+      {inspection === undefined && <Button size="sm" variant="ghost" onClick={() => openTurnReview(threadId, turn.id)}>{t('thread.turnFiles.review')}</Button>}
+    </div>
+    {open && <ul className="flex flex-col gap-1 border-t border-border px-3 py-2" aria-label={t('thread.turnFiles.list')}>
       {changes.files.map(({ change }) => <li key={change.path} className="flex min-w-0 flex-wrap items-center gap-2">
         <code className="min-w-0 flex-1 wrap-anywhere">{change.path}</code>
-        {change.change === 'delete' ? <Tooltip content={t('inspector.changes.deleted')}><span aria-disabled="true">{t('inspector.changes.openFile')}</span></Tooltip>
+        <span className="shrink-0 text-xs text-text-muted tabular-nums">{t('timeline.step.changed', { added: change.added, removed: change.removed })}</span>
+        {change.change === 'delete' ? <Tooltip content={t('inspector.changes.deleted')}><span aria-disabled="true" className="text-text-muted">{t('inspector.changes.openFile')}</span></Tooltip>
           : <FileLink path={change.path}>{t('inspector.changes.openFile')}</FileLink>}
       </li>)}
     </ul>}
-  </details>;
+  </div>;
 }

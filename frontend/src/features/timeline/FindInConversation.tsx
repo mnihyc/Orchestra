@@ -7,16 +7,23 @@ import { useRegisterCommands, type Command } from '@/features/finder/commands';
 import { useViewFind } from '@/features/search/ViewFind';
 import { useViewInstance } from '@/features/workbench/instance';
 import type { TimelineHandle } from '@/features/timeline/Timeline';
+import { timelineUi } from '@/features/timeline/state';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { threadViewOf } from '@/realtime/stores/thread';
 import { sameThreadProjection } from '@/realtime/threadScope';
-import type { SearchHit } from '@/generated/api-types';
+import type { Item, SearchHit } from '@/generated/api-types';
 
 const owners = new Map<string, { thread: string; show: () => void }>();
 export function openFind(threadId: string, owner?: string): void {
   const focused = document.activeElement instanceof HTMLElement ? document.activeElement.closest<HTMLElement>('[data-view-instance]')?.dataset.viewInstance : undefined;
   const entry = owners.get(owner ?? focused ?? threadId);
   if (entry?.thread === threadId) entry.show();
+}
+
+/** Whether an item of a turn is part of its work, which a folded line holds: its steps, what the agent says between them and what was decided. */
+function stands(item: Item): boolean {
+  return item.kind === 'tool_call' || item.kind === 'reasoning' || item.kind === 'plan' || item.kind === 'approval'
+    || item.kind === 'agent_message' && item.payload.phase !== 'final';
 }
 
 export interface FindInConversationProps {
@@ -33,6 +40,9 @@ export function FindInConversation({ threadId, timeline, root }: FindInConversat
     if (found.kind !== 'item' || found.thread.id !== threadId) return;
     const projection = threadViewOf(read).read?.projection;
     if (projection !== undefined && projection !== null && (found.projection === undefined || found.projection === null || !sameThreadProjection(projection, found.projection))) return;
+    // A match inside the folded work of a turn opens that group, and the step it is in, before the conversation goes there.
+    const held = threadViewOf(read).items.get(found.item.id);
+    if (held !== undefined && stands(held)) timelineUi.revealStep(read, held.id);
     timeline.current?.scrollToItem(found.item.id);
   }, [read, threadId, timeline]);
   const find = useViewFind({ root, filters: { scope: threadId, kinds: ITEM_KINDS }, historyThread: read,

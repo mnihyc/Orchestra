@@ -27,8 +27,8 @@ vi.mock('@/features/composer/ModelEffort', () => ({ ModelEffort: () => <button>M
 vi.mock('@/features/composer/ApprovalMode', () => ({ ApprovalModePicker: () => <button>Approval mode</button>, ConfinementPicker: () => <button>Sandbox</button> }));
 vi.mock('@/features/usage/context/ContextRing', () => ({ ContextRing: () => <button>Context breakdown</button> }));
 
-const thread = { id: 'thread-plan', name: 'Plan the fix', archived: false, state: 'idle', side_of: null, lock: null,
-  owner: { display_name: 'Ada' }, binding: { agent: { name: 'Scripted agent' }, plan_mode: true },
+const thread = { id: 'thread-plan', name: 'Plan the fix', archived: false, state: 'idle', side_of: null, lock: null, environment: null, directory: '',
+  owner: { display_name: 'Ada' }, binding: { agent: { id: 'agent', name: 'Scripted agent' }, provider: { id: 'provider', name: 'Team subscription' }, plan_mode: true },
   access: { permissions: ['thread.view', 'thread.manage', 'thread.interact'] },
 } as unknown as Thread;
 
@@ -43,8 +43,9 @@ for (const locale of ['en', 'zh-CN'] as const) {
       plan={<PlanSwitch on={false} onChange={changed} />} />);
     const controls = within(screen.getByRole('group', { name: i18n.t('composer.row.label') }));
     const names = controls.getAllByRole('button').map((button) => button.textContent);
-    expect(names.indexOf(i18n.t('composer.plan.label'))).toBe(names.indexOf('Sandbox') + 1);
-    expect(names.indexOf('Sandbox')).toBe(names.indexOf('Approval mode') + 1);
+    // The sandbox is the second level of the approvals control: Plan stands right after it.
+    expect(names.indexOf(i18n.t('composer.plan.label'))).toBe(names.indexOf('Approval mode') + 1);
+    expect(names).not.toContain('Sandbox');
     const plan = controls.getByRole('button', { name: i18n.t('composer.plan.label') });
     expect(plan).toHaveAttribute('aria-pressed', 'false');
     await userEvent.click(plan);

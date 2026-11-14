@@ -153,7 +153,7 @@ function LoadedPage({ tab, target, definition }: { tab: Tab; target: PageTarget;
     if (next.pathname === target.pathname || options.replace === true) {
       if (useWorkbench.getState().activeContent === tab.id) markPageNavigation(tab.id, href);
       useWorkbench.getState().change((layout) => setTabTarget(layout, tab.id, { href }));
-      if (useWorkbench.getState().activeContent === tab.id) await router.navigate({ href, replace: true });
+      if (useWorkbench.getState().activeContent === tab.id) await router.navigate({ href, replace: options.push !== true });
     } else {
       openPage(href);
       await router.navigate({ href });

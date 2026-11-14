@@ -62,7 +62,7 @@ function Ui({ read: target, name, lane = false }: { read: ThreadReadRef; name: s
 function OwnedUi({ name, lane }: { name: string; lane: boolean }) {
   const ui = useThreadUi(PARENT), view = useThreadView(PARENT);
   const started = [...view.items.values()].find((item) => item.kind === 'marker' && item.payload.marker === 'side_started');
-  const context: TimelineContext = { threadId: PARENT, threadName: parent.name, detail: 'steps', recent: new Set(), layout: 'one',
+  const context: TimelineContext = { threadId: PARENT, threadName: parent.name, detail: 'normal', layout: 'one',
     setLayout: () => undefined, meId: parent.owner.id, canInteract: true, canManage: false, live: true, lit: null, selection: NOT_PICKING };
   return <section data-testid={name} data-open={String(ui.steps.get(sideLaneKey(SIDE)) === true)} data-focus={ui.sideFocus?.id ?? ''}>
     {lane && started?.kind === 'marker' && started.payload.marker === 'side_started'
@@ -218,8 +218,10 @@ it('the real legacy double marker passes one socket to both owned caches and dem
   await waitFor(() => expect(view.accepted).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(calls.feed).toHaveBeenCalledWith(resultThreadRead(SIDE, one.key.owner)));
   expect(calls.feed).not.toHaveBeenCalledWith(resultThreadRead(SIDE, other.key.owner));
-  expect(threadViewOf(one).items.has('accepted-side-marker')).toBe(true); expect(threadViewOf(other).items.has('accepted-side-marker')).toBe(true);
-  expect(screen.getByTestId('one')).toHaveAttribute('data-open', 'true'); expect(screen.getByTestId('other')).toHaveAttribute('data-open', 'false');
+  await waitFor(() => {
+    expect(threadViewOf(one).items.has('accepted-side-marker')).toBe(true); expect(threadViewOf(other).items.has('accepted-side-marker')).toBe(true);
+    expect(screen.getByTestId('one')).toHaveAttribute('data-open', 'true'); expect(screen.getByTestId('other')).toHaveAttribute('data-open', 'false');
+  });
   const acks = frames.filter((frame) => frame.op === 'subscribed'); expect(acks).toHaveLength(2);
   expect(acks.every((frame) => !Object.hasOwn(frame, 'projection'))).toBe(true);
   expect(threadViewOf(one).read?.projection).toBeNull(); expect(threadViewOf(other).read?.projection).toBeNull();

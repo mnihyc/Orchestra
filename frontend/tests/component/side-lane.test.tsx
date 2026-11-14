@@ -51,7 +51,7 @@ const SIDE_READ = defaultThreadRead(SIDE);
 const ADA = userRef(me(1, 'ada', 'Ada'));
 const OTHER = userRef(me(2, 'grace', 'Grace'));
 const reference: NodeRef = { id: SIDE, kind: 'thread', name: 'Login (side)', redacted: false };
-const context: TimelineContext = { threadId: PARENT, threadName: 'Login', detail: 'steps', recent: new Set(['main-turn']), layout: 'one', setLayout: () => undefined,
+const context: TimelineContext = { threadId: PARENT, threadName: 'Login', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: ADA.id, canInteract: true, canManage: false, live: true, lit: null, selection: NOT_PICKING };
 const closed: MarkerSideClosed = { side: reference, by: ADA, turns: 2, why: 'closed', into: null };
 const numbered = (item: Item, seq: number): Item => ({ ...item, thread_id: SIDE, segment_id: 'side-segment', seq_created: seq, seq_updated: seq });

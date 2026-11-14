@@ -3,13 +3,13 @@ import { describe, expect, it } from 'vitest';
 
 import type { Item, Thread, ThreadInput, Turn } from '@/generated/api-types';
 import type { SendingInput } from '@/features/composer/Draft';
-import { buildRows, foldsByDepth, queuedInputs, recentTurns, type Row, type RowOptions, sendingInTray } from '@/features/timeline/rows';
+import { buildRows, queuedInputs, type Row, type RowOptions, sendingInTray } from '@/features/timeline/rows';
 import { defaultThreadRead, newThreadReadScope } from '@/realtime/threadScope';
 import { A, B, projection } from './continuation-fixtures';
 import { applyRows, EMPTY_VIEW, type ThreadView, viewFromRows } from '@/realtime/stores/thread';
 
 import { me, userRef } from '../doubles/fixtures';
-import { approvalItem, harnessApproval, otherTool, agentMessage, command, fileChange, change, marker, plan, reasoning, threadInput, toolCall, turn, userMessage } from '../doubles/thread-rows';
+import { approvalItem, harnessApproval, otherTool, agentMessage, command, fileChange, change, marker, reasoning, threadInput, toolCall, turn, userMessage } from '../doubles/thread-rows';
 
 const ADA = userRef(me(1, 'ada', 'Ada Lovelace'));
 const GRACE = userRef(me(2, 'grace', 'Grace Hopper'));
@@ -29,35 +29,35 @@ function viewOf(items: Item[], turns: Turn[] = [], inputs: ThreadInput[] = [], m
   return base;
 }
 
-const options = (more: Partial<RowOptions> = {}): RowOptions => ({ detail: 'steps', hideHistory: false, foldOpened: new Set(), meId: null, ...more });
+const options = (more: Partial<RowOptions> = {}): RowOptions => ({ detail: 'normal', hideHistory: false, meId: null, ...more });
 
 const kinds = (rows: Row[]): string[] => rows.map((row) => row.kind);
 
-it('folds reasoning-only work in Focused while preserving the native inputs, answers and pending question', () => {
+it('puts reasoning-only work in the group while the input, the answer and the pending question stand outside it', () => {
   const pending = approvalItem('pending-question', 'question', { turn: 'focus-turn' });
   const view = viewOf([userMessage('focus-input', 'Explain this', { author: ADA, turn: 'focus-turn' }), reasoning('only-reasoning', 'Working it out', { turn: 'focus-turn' }),
     pending, agentMessage('focus-answer', 'Here is why.', { turn: 'focus-turn' })], [turn('focus-turn', { ordinal: 1, state: 'completed', inputId: 'focus-input' })]);
-  const rows = buildRows(view, options({ detail: 'summary' }));
+  const rows = buildRows(view, options());
   expect(rows.filter((row) => row.kind === 'item').map((row) => row.id)).toEqual(['focus-input', 'pending-question', 'focus-answer']);
-  expect(rows.find((row) => row.kind === 'fold')).toMatchObject({ turnId: 'focus-turn', ids: ['only-reasoning'], open: false });
+  expect(rows.find((row) => row.kind === 'work')).toMatchObject({ turnId: 'focus-turn', ids: ['only-reasoning'], last: true, live: false });
 });
 
-it('keeps the live recovery row after a failed turn while other blockers remain in their banner', () => {
+it('keeps recovery outside a failed turn’s conversation rows, like other blockers', () => {
   const items = [userMessage('recover-user', 'Keep the work', { author: ADA, turn: 'recover-turn' })];
   const turns = [turn('recover-turn', { ordinal: 1, state: 'failed', inputId: 'recover-input' })];
   const recovering = viewOf(items, turns, [], { state: 'blocked', current_turn_id: null, blocked: { reason: 'error', detail: 'call_recovery' } });
-  expect(buildRows(recovering, options()).at(-1)?.kind).toBe('status');
+  expect(kinds(buildRows(recovering, options()))).toEqual(['item', 'footer']);
   const ordinary = viewOf(items, turns, [], { state: 'blocked', current_turn_id: null, blocked: { reason: 'attachments', detail: null } });
-  expect(buildRows(ordinary, options()).some((row) => row.kind === 'status')).toBe(false);
+  expect(buildRows(recovering, options())).toEqual(buildRows(ordinary, options()));
 });
 
-it('retains service recovery after a paused web call finishes its turn', () => {
+it('keeps a paused web call’s finished work without an extra recovery row in the conversation', () => {
   const paused = toolCall('paused-search', {
     kind: 'orch', tool: 'web_search', arguments: { query: 'Example search' }, result: { state: 'paused' },
   }, { title: 'Search the web', turn: 'paused-turn' });
   const turns = [turn('paused-turn', { ordinal: 1, state: 'completed', inputId: 'paused-input' })];
   const view = viewOf([paused], turns, [], { state: 'idle', current_turn_id: null });
-  expect(buildRows(view, options()).at(-1)?.kind).toBe('status');
+  expect(kinds(buildRows(view, options()))).toEqual(['work', 'footer']);
 });
 
 it('shows the before-Orch band for a failed adoption even when no earlier items exist and history lines are hidden', () => {
@@ -87,84 +87,25 @@ function twoTurns(second: Turn['state'] = 'completed'): ThreadView {
 }
 
 describe('the work of a turn', () => {
-  it('is shown step by step in the last turn and folded to one line in the ones before it, at the depth called Steps', () => {
+  it('is one group for each turn, with its steps in order, in the way of reading called Normal', () => {
     const rows = buildRows(twoTurns(), options());
-    expect(rows.filter((row) => row.kind === 'fold').map((row) => row.turnId)).toEqual(['t1']);
-    // The last turn's steps stand as items.
-    expect(rows.some((row) => row.kind === 'item' && row.id === 'e1')).toBe(true);
-    expect(rows.some((row) => row.kind === 'item' && row.id === 'c2')).toBe(true);
-    expect(rows.some((row) => row.kind === 'item' && row.id === 'c1')).toBe(false);
-    const fold = rows.find((row) => row.kind === 'fold');
-    expect(fold?.kind === 'fold' && fold.ids).toEqual(['c1', 'r1']);
+    expect(rows.filter((row) => row.kind === 'work').map((row) => [row.turnId, row.ids])).toEqual([['t1', ['c1', 'r1']], ['t2', ['e1', 'c2']]]);
+    expect(rows.filter((row) => row.kind === 'item').map((row) => row.id)).toEqual(['u1', 'a1', 'u2', 'a2']);
   });
 
-  it('is folded in every turn at the depth called Summary, and in none at the depth called Everything', () => {
-    const summary = buildRows(twoTurns(), options({ detail: 'summary' }));
-    expect(summary.filter((row) => row.kind === 'fold')).toHaveLength(2);
-    expect(summary.some((row) => row.kind === 'item' && (row.id === 'e1' || row.id === 'c2'))).toBe(false);
-    const everything = buildRows(twoTurns(), options({ detail: 'everything' }));
-    expect(everything.filter((row) => row.kind === 'fold')).toHaveLength(0);
-    expect(everything.some((row) => row.kind === 'item' && row.id === 'c1')).toBe(true);
+  it('is a row for every step in Verbose, and again in Diagnostics, with no group at all', () => {
+    for (const detail of ['verbose', 'diagnostics'] as const) {
+      const rows = buildRows(twoTurns(), options({ detail }));
+      expect(rows.some((row) => row.kind === 'work')).toBe(false);
+      expect(rows.filter((row) => row.kind === 'item').map((row) => row.id)).toEqual(['u1', 'c1', 'r1', 'a1', 'u2', 'e1', 'c2', 'a2']);
+    }
   });
 
-  it('is shown under its line when the reader opened the fold by hand', () => {
-    const rows = buildRows(twoTurns(), options({ foldOpened: new Set(['t1']) }));
-    const ids = rows.filter((row) => row.kind === 'item').map((row) => row.id);
-    expect(ids).toContain('c1');
-    expect(ids).toContain('r1');
-    const fold = rows.find((row) => row.kind === 'fold');
-    expect(fold?.kind === 'fold' && fold.open).toBe(true);
-  });
-
-  it('folds thought and a plan in Focused while keeping the input and answer visible', () => {
-    const view = viewOf(
-      [userMessage('u1', 'Think', { author: ADA, turn: 't1' }), reasoning('r1', 'Hmm', { turn: 't1' }), plan('p1', [{ text: 'x', status: 'pending' }], { turn: 't1' }), agentMessage('a1', 'Ok', { turn: 't1' })],
-      [turn('t1', { ordinal: 1, state: 'completed', inputId: 'i1' }), turn('t2', { ordinal: 2, state: 'completed', inputId: 'i2' })],
-    );
-    const rows = buildRows(view, options({ detail: 'summary' }));
-    expect(rows.filter((row) => row.kind === 'fold')).toHaveLength(1);
-    expect(rows.filter((row) => row.kind === 'item').map((row) => row.id)).toEqual(['u1', 'a1']);
-    const opened = buildRows(view, options({ detail: 'summary', foldOpened: new Set(['t1']) }));
-    expect(opened.filter((row) => row.kind === 'item').map((row) => row.id)).toEqual(['u1', 'r1', 'p1', 'a1']);
-  });
-
-  it('is told by recentTurns and foldsByDepth: the one that runs and the last that is over', () => {
-    const turns = new Map<string, Turn>([
-      ['t1', turn('t1', { ordinal: 1, state: 'completed', inputId: 'a' })],
-      ['t2', turn('t2', { ordinal: 2, state: 'failed', inputId: 'b' })],
-      ['t3', turn('t3', { ordinal: 3, state: 'running', inputId: 'c' })],
-    ]);
-    const recent = recentTurns(turns);
-    expect([...recent].sort()).toEqual(['t2', 't3']);
-    expect(foldsByDepth('steps', 't1', recent)).toBe(true);
-    expect(foldsByDepth('steps', 't3', recent)).toBe(false);
-    expect(foldsByDepth('summary', 't3', recent)).toBe(true);
-    expect(foldsByDepth('everything', 't1', recent)).toBe(false);
-  });
-
-  it('folds older thought and plans in Steps without folding the last answer or current work', () => {
-    const items = ['old', 'last', 'current'].flatMap((id) => [
-      userMessage(`${id}-input`, `Input ${id}`, { author: ADA, turn: id }),
-      reasoning(`${id}-thought`, `Thought ${id}`, { turn: id }),
-      plan(`${id}-plan`, [{ text: 'Check the result', status: 'pending' }], { turn: id }),
-      agentMessage(`${id}-answer`, `Answer ${id}`, { turn: id }),
-    ]);
-    const view = viewOf(items, [
-      turn('old', { ordinal: 1, state: 'completed', inputId: 'old-input' }),
-      turn('last', { ordinal: 2, state: 'completed', inputId: 'last-input' }),
-      turn('current', { ordinal: 3, state: 'running', inputId: 'current-input' }),
-    ]);
-    const steps = buildRows(view, options());
-    expect(steps.filter((row) => row.kind === 'fold')).toEqual([
-      { kind: 'fold', key: 'fold:old', turnId: 'old', ids: ['old-thought', 'old-plan'], open: false },
-    ]);
-    expect(steps.filter((row) => row.kind === 'item').map((row) => row.id)).toEqual([
-      'old-input', 'old-answer', 'last-input', 'last-thought', 'last-plan', 'last-answer',
-      'current-input', 'current-thought', 'current-plan', 'current-answer',
-    ]);
-    const opened = buildRows(view, options({ foldOpened: new Set(['old']) }));
-    expect(opened.filter((row) => row.kind === 'item').map((row) => row.id)).toContain('old-plan');
-    expect(buildRows(view, options({ detail: 'everything' })).some((row) => row.kind === 'fold')).toBe(false);
+  it('is the line of a turn that is over, and the preview of the turn that runs', () => {
+    const over = buildRows(twoTurns(), options()).filter((row) => row.kind === 'work');
+    expect(over.map((row) => row.live)).toEqual([false, false]);
+    const running = buildRows(applyRows(twoTurns('running'), { thread: thread({ state: 'running', current_turn_id: 't2' }) }), options()).filter((row) => row.kind === 'work');
+    expect(running.map((row) => row.live)).toEqual([false, true]);
   });
 });
 
@@ -176,13 +117,12 @@ describe('the end of a turn', () => {
     }
   });
 
-  it.each(['running', 'completed'] as const)('puts context in the turn footer without a separate history row (%s)', (state) => {
+  it('puts context in the turn footer, once the turn is over, without a separate history row', () => {
     const context = marker('context-1', { marker: 'orch_context', data: { model_input_id: 'record-1', purpose: 'input' } }, { turn: 't1' });
-    const view = viewOf([userMessage('u1', 'Fix login', { author: ADA, turn: 't1' }), context],
-      [turn('t1', { ordinal: 1, state, inputId: 'i1' })]);
+    const view = (state: Turn['state']) => viewOf([userMessage('u1', 'Fix login', { author: ADA, turn: 't1' }), context], [turn('t1', { ordinal: 1, state, inputId: 'i1' })]);
     for (const hideHistory of [false, true]) {
-      const rows = buildRows(view, options({ hideHistory }));
-      expect(rows).toEqual([{ kind: 'item', key: 'u1', id: 'u1' }, { kind: 'footer', key: 'footer:t1', turnId: 't1',inputItemId:'u1' }]);
+      expect(buildRows(view('completed'), options({ hideHistory }))).toEqual([{ kind: 'item', key: 'u1', id: 'u1' }, { kind: 'footer', key: 'footer:t1', turnId: 't1', inputItemId: 'u1' }]);
+      expect(buildRows(view('running'), options({ hideHistory }))).toEqual([{ kind: 'item', key: 'u1', id: 'u1' }]);
     }
   });
 
@@ -196,26 +136,11 @@ describe('the end of a turn', () => {
     expect(order.indexOf('footer:t1')).toBeLessThan(order.indexOf('u2'));
   });
 
-  it('is not there while the turn runs; what the thread is doing is the last line instead', () => {
+  it('stays absent while the turn runs and leaves its latest answer at the end', () => {
     const view: ThreadView = applyRows(twoTurns('running'), { thread: thread({ state: 'running', current_turn_id: 't2' }) });
     const rows = buildRows(view, options());
     expect(rows.filter((row) => row.kind === 'footer').map((row) => row.turnId)).toEqual(['t1']);
-    expect(rows.at(-1)?.kind).toBe('status');
-  });
-
-  it('puts the answer of the agent under its mark and name once for each turn', () => {
-    const view = viewOf(
-      [
-        userMessage('u1', 'Go', { author: ADA, turn: 't1' }),
-        agentMessage('a1', 'First thought', { turn: 't1', phase: 'commentary' }),
-        command('c1', { command: 'ls', output: '', exit: 0, turn: 't1' }),
-        agentMessage('a2', 'And the result', { turn: 't1' }),
-      ],
-      [turn('t1', { ordinal: 1, state: 'running', inputId: 'i1' })],
-    );
-    const rows = buildRows(view, options({ detail: 'everything' }));
-    const heads = rows.filter((row) => row.kind === 'item' && row.head === true).map((row) => row.kind === 'item' && row.id);
-    expect(heads).toEqual(['a1']);
+    expect(rows.at(-1)).toMatchObject({ kind: 'item', id: 'a2' });
   });
 });
 
@@ -249,7 +174,7 @@ describe('the history of a thread', () => {
   const aside = (id: string, ordinal: number) => marker(id, { marker: 'side_started', data: { by: ADA, from_turn: ordinal,
     side: { id: `aside-${id}`, kind: 'thread', name: 'Why the redirect?', redacted: false } } });
 
-  it.each(['steps', 'summary', 'everything'] as const)('places an aside under its source turn even when asked later, with history hidden at %s depth', (detail) => {
+  it.each(['normal', 'verbose', 'diagnostics'] as const)('places an aside under its source turn even when asked later, with history hidden in %s reading', (detail) => {
     const view = applyRows(twoTurns(), { items: [{ ...aside('aside-start', 1), seq_created: 30, seq_updated: 30 }] });
     const rows = buildRows(view, options({ detail, hideHistory: true }));
     const source = rows.findIndex((row) => row.kind === 'footer' && row.turnId === 't1');
@@ -354,7 +279,7 @@ describe('the one queue above the conversation’s composer', () => {
     const inputs = [threadInput('i1', 'First', { author: ADA, position: '1' }), threadInput('i2', 'Second', { author: ADA, position: '2' })].map((input) => ({ ...input, seq_updated: 1 }));
     const view = viewOf([userMessage('u0', 'Go', { author: ADA, turn: 't1' })], [turn('t1', { ordinal: 1, state: 'running', inputId: 'i0' })], inputs, { state: 'running', current_turn_id: 't1' });
     const rows = buildRows(view, options());
-    expect(kinds(rows)).toEqual(['item', 'status']);
+    expect(kinds(rows)).toEqual(['item']);
     expect(queuedInputs(view).map((input) => input.id)).toEqual(['i1', 'i2']);
   });
 
@@ -431,7 +356,7 @@ it('keeps unacknowledged sends with their original history through active and re
 });
 
 
-it.each(['steps', 'summary', 'everything'] as const)('shows one explicitly correlated question while retaining its native work (%s)', (detail) => {
+it.each(['normal', 'verbose', 'diagnostics'] as const)('shows one explicitly correlated question while retaining its native work (%s)', (detail) => {
   const source = otherTool('question-native', { name: 'AskUserQuestion', turn: 'question-turn', args: { questions: ['Which target?'] }, result: { answers: ['docs'] } });
   const card = approvalItem('question-card', 'question', { turn: 'question-turn' });
   if (card.kind !== 'approval') throw new Error('The fixture must be an approval item.');
@@ -441,7 +366,7 @@ it.each(['steps', 'summary', 'everything'] as const)('shows one explicitly corre
   const view = viewOf([source, linked], [turn('question-turn', { ordinal: 1, state: 'running', inputId: 'question-input' })]);
   const rows = buildRows(view, options({ detail }));
   expect(rows.filter((row) => row.kind === 'item' && row.id === card.id)).toHaveLength(1);
-  expect(rows.some((row) => row.kind === 'item' && row.id === source.id || row.kind === 'fold' && row.ids.includes(source.id))).toBe(false);
+  expect(rows.some((row) => row.kind === 'item' && row.id === source.id || row.kind === 'work' && row.ids.includes(source.id))).toBe(false);
   expect(view.items.get(source.id)?.payload).toEqual(source.payload);
 });
 
@@ -451,6 +376,6 @@ it('keeps permission tools and unrelated native work visible even when an approv
   if (card.kind !== 'approval') throw new Error('The fixture must be an approval item.');
   const approval = harnessApproval('permission', { threadId: card.thread_id, itemId: card.id, requester: ADA, title: 'Run make?', request: { request_kind: 'command', options: [], detail: { command: 'make', cwd: '/workspace', reason: null } } });
   const linked = { ...card, parent_item_id: source.id, payload: { ...card.payload, approval } };
-  const rows = buildRows(viewOf([source, linked], [turn('permission-turn', { ordinal: 1, state: 'running', inputId: 'permission-input' })]), options({ detail: 'everything' }));
+  const rows = buildRows(viewOf([source, linked], [turn('permission-turn', { ordinal: 1, state: 'running', inputId: 'permission-input' })]), options({ detail: 'verbose' }));
   expect(rows.filter((row) => row.kind === 'item').map((row) => row.id)).toEqual([source.id, card.id]);
 });

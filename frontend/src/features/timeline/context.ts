@@ -46,13 +46,10 @@ export interface TimelineContext {
   threadId: string;
   /** The thread's name, for what is said of other places. */
   threadName: string;
+  /** How the reader reads: Normal, Verbose or Diagnostics. */
   detail: WorkDetail;
-  /** A live reading opens current tool output; stored/child renderers opt in explicitly. */
-  liveTools?: boolean;
   /** This screen mounts each waiting decision once above its composer. */
   pinApprovals?: boolean;
-  /** Turns whose work is shown step by step in Steps. */
-  recent: ReadonlySet<string>;
   layout: DiffLayout;
   setLayout: (layout: DiffLayout) => void;
   meId: string | null;
@@ -71,8 +68,7 @@ export interface TimelineContext {
 const NOWHERE: TimelineContext = {
   threadId: '',
   threadName: '',
-  detail: 'steps',
-  recent: new Set(),
+  detail: 'normal',
   layout: 'one',
   setLayout: () => undefined,
   meId: null,

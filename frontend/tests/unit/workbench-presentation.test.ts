@@ -15,12 +15,12 @@ const state = () => useWorkbench.getState();
 beforeEach(() => { state().leave(); localStorage.clear(); state().enter('reader-a', 'thread'); });
 afterEach(() => { state().leave(); localStorage.clear(); });
 
-it('recovers scroll/folds after close and reload without sharing another instance or another person’s state', () => {
+it('recovers scroll and what was opened after close and reload without sharing another instance or another person’s state', () => {
   const owner = state().openTab('page', { href: '/thread/thread-a?continuation=history-a' });
   const duplicate = state().openTab('page', { href: '/thread/thread-a' }, 'new');
   const read = contentThreadRead('thread-a', owner), other = contentThreadRead('thread-a', duplicate);
   const position = { key: 'item-older', item: 'item-older', offset: 19, atEnd: false };
-  timelineUi.setStep(read, 'tool', true); timelineUi.toggleFold(read, 'turn');
+  timelineUi.setStep(read, 'tool', true); timelineUi.setStep(read, 'work:first-step', false);
   keepTimelinePosition(read, 'history-a', position);
   state().close({ kind: 'tab', tab: owner }); timelineUi.forget(read);
   state().leave(); state().enter('reader-a', 'page'); state().reopen();
@@ -30,7 +30,7 @@ it('recovers scroll/folds after close and reload without sharing another instanc
   expect(readTimelinePosition(other, 'history-a')).toBeNull();
   expect(readTimelinePosition(read, null)).toBeNull();
   const ui = renderHook(() => useThreadUi('thread-a'), { wrapper: ({ children }: { children: ReactNode }) => createElement(ThreadReadProvider, { read, children }) });
-  expect(ui.result.current.steps.get('tool')).toBe(true); expect(ui.result.current.folds.has('turn')).toBe(true); ui.unmount();
+  expect(ui.result.current.steps.get('tool')).toBe(true); expect(ui.result.current.steps.get('work:first-step')).toBe(false); ui.unmount();
   state().leave(); state().enter('reader-b', 'thread');
   expect(readTimelinePosition(read, 'history-a')).toBeNull();
   expect(capturePresentations(new Set([owner]))).toEqual({});
