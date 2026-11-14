@@ -26,6 +26,19 @@ use serde::{Deserialize, Serialize};
 use crate::credentials::CredentialPath;
 use crate::descriptor::{Placement, ProviderKind};
 
+/// Each program supplies its own feature starts; an explicit place choice wins, including false.
+#[must_use]
+pub fn feature_values(
+    defaults: &BTreeMap<String, bool>,
+    settings: &BTreeMap<String, bool>,
+) -> BTreeMap<String, bool> {
+    defaults
+        .iter()
+        .chain(settings)
+        .map(|(key, value)| (key.clone(), *value))
+        .collect()
+}
+
 /// Where on a screen a parameter is put.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

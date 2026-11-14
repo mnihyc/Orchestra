@@ -19,7 +19,7 @@ pub const ASK_TOOL_BYTES: &str = "65536";
 pub const ASK_TURN_TOOL_BYTES: &str = "262144";
 pub const AGENT_EFFORT: &str = r#""high""#;
 pub const AGENT_PARAMS: &str = "{}";
-pub const AGENT_FEATURES: &str = r#"{"vision":true}"#;
+pub const AGENT_FEATURES: &str = r#"{"optional.tools":false}"#;
 pub const AGENT_INSTRUCTIONS: &str =
     r#""Run the relevant tests before describing a change as complete.""#;
 /// Joining text, inherited through the existing organization append setting.

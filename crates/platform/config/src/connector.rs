@@ -55,7 +55,7 @@ section! {
         plugin: Vec<ConnectorPlugin> = Vec::new(),
         /// Named directories for owned data, using the same shape as node storages.
         /// Empty uses the allowed environment roots in their configured order.
-        #[serde(rename="storages",alias="storage")]
+        #[serde(rename="storages")]
         storage: Vec<crate::server::NodeStorage> = Vec::new(),
         /// The node role's unit resource ceilings.
         resources:orch_link_contract::policy::MachineResources=orch_link_contract::policy::MachineResources::default(),
@@ -107,10 +107,6 @@ section! {
         name: String = String::new(),
         /// Local declaration that this machine is dedicated to Orch; never a delegated policy key.
         dedicated:bool = false,
-        /// Whether legacy orch.toml node policy values were imported into this file once.
-        node_policy_imported:bool = false,
-        /// Version of that import; older imports did not include lifecycle hooks.
-        node_policy_import_version:u32 = 0,
         /// The roles it plays: `agent`, `environment`, `provider`, and `node` for the one machine of a
         /// host that makes managed runtimes.
         roles: Vec<String> = vec![s("agent"), s("environment")],
@@ -541,6 +537,46 @@ impl Validate for ConnectorConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn machine_policy_uses_only_current_configuration_names() {
+        for text in [
+            "[[storage]]\nname='data'\npath='/data'\ndefault=true\n",
+            "[connector]\nnode_policy_imported=true\n",
+            "[connector]\nnode_policy_import_version=2\n",
+        ] {
+            assert!(
+                toml::from_str::<super::ConnectorConfig>(text).is_err(),
+                "{text}"
+            );
+        }
+        assert!(
+            toml::from_str::<super::ConnectorConfig>(
+                "[[storages]]\nname='data'\npath='/data'\ndefault=true\n"
+            )
+            .is_ok()
+        );
+        for text in [
+            "[node.hooks]\npre_up='/bin/true'\n",
+            "[[node.storage]]\nname='data'\npath='/data'\ndefault=true\n",
+            "[ports]\nlisten='all'\n",
+            "[node.docker]\nallowed_images=['*']\n",
+            "[node.docker]\nallowed_registries=['*']\n",
+            "[node.docker]\nallowed_capabilities=['*']\n",
+            "[node.docker]\nruntime_classes=['*']\n",
+            "[node.docker]\nallow_privileged=true\n",
+            "[node.docker]\nallow_archives=true\n",
+            "[node.docker]\nbuilds=true\n",
+            "[node.host]\nallowed_templates=['*']\n",
+            "[node.host]\nallowed_accounts=['*']\n",
+            "[node.host]\nallowed_programs=['/bin/task']\n",
+        ] {
+            assert!(
+                toml::from_str::<crate::ServerConfig>(text).is_err(),
+                "{text}"
+            );
+        }
+    }
+
     use super::*;
     use crate::loader::load_text;
 

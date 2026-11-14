@@ -183,3 +183,18 @@ API 提供方的**设置 → 服务**列出其已保存端点声明的服务。�
 目录价格是以原币种记录的估算值。管理员明确保存的 Orch 点数价格决定 Orch 的计数；供应商报告的总费用另行保留以供比较。清除自定义价格会恢复目录估算。编辑会保留其他服务及未来配置字段。提供方版本已变化时，保存会被拒绝，避免覆盖其他管理员的修改。
 
 只有在线程明确选择**服务**模式，并指定已启用的后端后，才会调用付费服务。每次请求都检查原始发起人或原生工作来源的提供方使用权限、服务或模型允许列表，以及按用途设置的额度。模型列表与服务列表相互独立。未设置时保留程序默认行为，不会选择付费回退。
+
+
+## 兼容接口的默认选项
+
+Gemini 的 [OpenAI 兼容 API](https://ai.google.dev/gemini-api/docs/openai) 使用
+**openai-chat**。文档中的 Priority 和 Flex 分别使用 `priority`、`flex` 标识；在
+同一个模型表单中启用该模型提供的层级并选择默认值。推理力度使用 `reasoning_effort`。
+`extra_body.google.cached_content` 等 Gemini 专有字段同样使用嵌套请求选项规则、默认值
+及每次使用的参数表单。
+
+DeepSeek 的 [Chat Completions API](https://api-docs.deepseek.com/api/create-chat-completion/)
+也使用 **openai-chat**。文档中的推理力度及 `thinking.type` 可以设置模型默认值和每次
+使用的覆盖值。该 API 没有声明推理速度层级选择器；模型规则中的 `service_tier: false`
+会省略此字段，无需虚构 Fast 层级。新增字段使用现有请求选项模式及其 `default` 值；
+所有提供商均依次应用端点默认值、模型默认值和本次使用的明确选择。

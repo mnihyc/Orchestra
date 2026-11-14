@@ -98,8 +98,9 @@ test('the export, move, private, delete and share dialogs are accessible in both
 
   await open('Move to…');
   const move = page.getByRole('dialog', { name: 'Move to…', exact: true });
-  await move.getByRole('combobox', { name: 'Destination', exact: true }).fill('Upgrade deps');
-  const destination = page.getByRole('option', { name: 'Acme / Research / Web / Upgrade deps', exact: true });
+  await move.getByRole('combobox', { name: 'Destination', exact: true }).click();
+  await page.getByRole('searchbox', { name: 'Type part of a name…', exact: true }).fill('Upgrade deps');
+  const destination = page.getByRole('treeitem', { name: 'Acme / Research / Web / Upgrade deps', exact: true });
   await expect(destination).not.toHaveAttribute('aria-disabled', 'true');
   await destination.click();
   // The native folder form retains document identity within the org; its old standalone ownership sentence is gone.

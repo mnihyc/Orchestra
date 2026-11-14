@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/settings-drafts.test.tsx

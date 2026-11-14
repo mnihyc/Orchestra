@@ -36,7 +36,7 @@ beforeEach(() => {
 afterEach(async () => { cleanup(); client.session.setState(previous); await setLocale('en'); });
 async function chooseDepartment(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') }));
-  await user.click(await screen.findByRole('option', { name: 'Team / Department' }));
+  await user.click(await screen.findByRole('treeitem', { name: 'Team / Department' }));
 }
 for (const locale of ['en', 'zh-CN'] as const) {
   it(`moves to a department under the same native root in ${locale}`, async () => {
@@ -48,7 +48,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
   it(`keeps other orgs disabled with a cause and cancellation sends nothing in ${locale}`, async () => {
     await setLocale(locale); const user = userEvent.setup(); show(<MoveHomeDialog target={target} onClose={() => undefined} />);
     await user.click(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') }));
-    const other = await screen.findByRole('option', { name: 'Other org' }); expect(other).toHaveAttribute('aria-disabled', 'true');
+    const other = await screen.findByRole('treeitem', { name: 'Other org' }); expect(other).toHaveAttribute('aria-disabled', 'true');
     // The cause follows the destination's own check, which answers after the list is shown.
     await waitFor(() => expect(other).toHaveTextContent(i18n.t('duplicate.causes.owners_only')));
     await user.keyboard('{Escape}'); await user.click(screen.getByRole('button', { name: i18n.t('common.cancel') })); expect(calls.move).not.toHaveBeenCalled();

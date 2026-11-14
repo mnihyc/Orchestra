@@ -158,6 +158,7 @@ fn master_key() -> ApiResult<&'static MasterKey> {
 pub fn mount(registry: &mut Registry) {
     registry
         .on(api::SettingRegistryGet, registry_get)
+        .on(api::SettingParameterFormResolve, parameter_forms::form)
         .on(api::NodeSettingList, setting_list)
         .on(api::NodeSettingReachGet, reach::at_node)
         .on_with_operation(
@@ -1327,6 +1328,9 @@ pub mod editing;
 
 #[path = "settings/reach.rs"]
 pub mod reach;
+
+#[path = "settings/parameter_forms.rs"]
+mod parameter_forms;
 
 #[path = "settings/readers.rs"]
 pub mod readers;
