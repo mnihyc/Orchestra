@@ -78,6 +78,7 @@ members = [
     "extensions/notifiers/webhook",
     "extensions/protocols/anthropic-messages",
     "extensions/protocols/openai-responses",
+    "extensions/protocols/google-interactions",
     "extensions/providers/anthropic",
     "extensions/providers/builtins",
     "extensions/providers/openai",
@@ -160,6 +161,7 @@ orch-plugin-contract = { path = "crates/contracts/plugin" }
 orch-provider-contract = { path = "crates/contracts/provider" }
 orch-protocol-anthropic-messages = { path = "extensions/protocols/anthropic-messages" }
 orch-protocol-openai-responses = { path = "extensions/protocols/openai-responses" }
+orch-protocol-google-interactions = { path = "extensions/protocols/google-interactions" }
 orch-provider-anthropic = { path = "extensions/providers/anthropic" }
 orch-provider-builtins = { path = "extensions/providers/builtins" }
 orch-provider-openai = { path = "extensions/providers/openai" }

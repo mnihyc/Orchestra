@@ -1947,6 +1947,27 @@ impl Engine {
             .provider_use(
                 conn,
                 &ProviderUse {
+                    purpose: match purpose {
+                        Purpose::Agent => orch_access_contract::permissions::ProviderPurpose::Turn,
+                        Purpose::Summary => {
+                            orch_access_contract::permissions::ProviderPurpose::Summary
+                        }
+                        Purpose::Embedding => {
+                            orch_access_contract::permissions::ProviderPurpose::Embeddings
+                        }
+                        Purpose::Review => {
+                            orch_access_contract::permissions::ProviderPurpose::Review
+                        }
+                        Purpose::WebSearch => {
+                            orch_access_contract::permissions::ProviderPurpose::WebSearch
+                        }
+                        Purpose::PageFetch => {
+                            orch_access_contract::permissions::ProviderPurpose::PageFetch
+                        }
+                        Purpose::ImageGeneration => {
+                            orch_access_contract::permissions::ProviderPurpose::ImageGeneration
+                        }
+                    },
                     person: caller.user(),
                     node,
                     provider: candidate.provider_id,

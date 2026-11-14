@@ -4727,6 +4727,7 @@ dependencies = [
  "orch-plugin",
  "orch-plugin-contract",
  "orch-protocol-anthropic-messages",
+ "orch-protocol-google-interactions",
  "orch-protocol-openai-responses",
  "orch-provider-builtins",
  "orch-provider-contract",
@@ -4780,6 +4781,7 @@ dependencies = [
  "orch-plugin",
  "orch-plugin-contract",
  "orch-protocol-anthropic-messages",
+ "orch-protocol-google-interactions",
  "orch-protocol-openai-responses",
  "orch-provider-contract",
  "orch-realtime-contract",
@@ -5464,6 +5466,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -5647,6 +5650,20 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "orch-protocol-google-interactions"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http",
+ "orch-agent-contract",
+ "orch-model-contract",
+ "orch-provider-contract",
+ "orch-types",
+ "serde_json",
  "url",
 ]
 

@@ -1,0 +1,17 @@
+fmt
+clippy
+contracts
+test -p orch-access-contract --lib
+test -p orch-provider-contract --lib -- calls::
+test -p orch-model-contract --lib
+test -p orch-model-contract --test provider_ceiling
+test -p orch-authz --lib --test requests
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test resource_summaries --test summary_options --test summary_sources --test delivery
+test -p orch-engine --test turns -- stop_at_once::
+test -p orch-api-core --lib
+test -p orch-api-core --test thread_access --test ask --test access_requests --test summaries --test resource_summaries --test document_summary_options --test model_entries
+web typecheck
+web lint
+web test -- tests/component/provider-option-editor.test.tsx tests/component/provider-options.test.tsx tests/component/request-options-managed-effort.test.tsx tests/component/thread-option-controls.test.tsx tests/component/model-picker-rows.test.tsx tests/component/provider-option-layers.test.tsx tests/component/provider-source-models.test.tsx tests/component/provider-details.test.tsx tests/component/provider-key-model-read.test.tsx tests/component/provider-sources-host.test.tsx tests/component/model-effort-controlled.test.tsx tests/component/access-where-field.test.tsx tests/component/provider-model-report.test.tsx tests/component/web-search.test.tsx tests/component/access-programs.test.tsx tests/component/binding-lists.test.tsx tests/component/start-flow.test.tsx tests/component/implicit-runs-on.test.tsx tests/component/thread-change-chosen.test.tsx tests/component/shared-draft.test.tsx tests/component/draft-mark.test.tsx tests/component/chat-draft-requests.test.tsx tests/component/finder-loading.test.tsx tests/component/sidebar-preferences-ready.test.tsx tests/component/shell-bootstrap.test.tsx tests/component/ask-stream-lifetime.test.tsx tests/component/side-lane.test.tsx tests/unit/model.test.ts tests/unit/model-selection.test.ts tests/unit/entry-beyond-words.test.ts tests/unit/acts.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts tests/unit/row-kinds.test.ts tests/component/harness-unrecognized-marker.test.tsx tests/component/access-request-review.test.tsx tests/component/access-request-words.test.tsx tests/component/access-request-catalogue.test.tsx tests/component/access-compact.test.tsx tests/component/resource-sharing-summary.test.tsx tests/component/ask-model-choice.test.tsx tests/component/ask-model-availability.test.tsx tests/component/ask-models.test.tsx tests/component/ask-model-params.test.tsx tests/component/summary-options.test.tsx tests/component/thread-summary-inspector.test.tsx tests/component/resource-summary.test.tsx tests/component/personal-read-state.test.tsx tests/component/tabs-keyboard.test.tsx tests/component/view-tab-menu.test.tsx tests/unit/pinned-tabs.test.ts tests/unit/stop-and-queue-order.test.ts --maxWorkers=2 --testTimeout=30000
+web-e2e tests/e2e/resource-picker-access.spec.ts tests/e2e/ask-model-params.spec.ts --project=chromium
