@@ -300,15 +300,15 @@ describe("an org's rules for invitations", () => {
   const setting = (key: string, value: unknown): ResolvedSetting => ({ key, value, source: { scope: 'default', node: null }, parts: [], own: null, locked_by: null, writable: true });
 
   it('are read from its settings, and the system’s own values stand where it says nothing', () => {
-    expect(invitationRules(undefined)).toEqual({ forms: ['link', 'email'], defaultHours: 168, maxHours: 720, maxUses: 100 });
+    expect(invitationRules(undefined)).toEqual({ forms: ['link', 'email'], defaultMinutes: 10080, maxMinutes: 43200, maxUses: 100 });
     expect(
-      invitationRules([setting('invitations.forms', ['email']), setting('invitations.max_hours', 48), setting('invitations.max_uses', 5)]),
-    ).toEqual({ forms: ['email'], defaultHours: 168, maxHours: 48, maxUses: 5 });
+      invitationRules([setting('invitations.forms', ['email']), setting('invitations.max_minutes', 48), setting('invitations.max_uses', 5)]),
+    ).toEqual({ forms: ['email'], defaultMinutes: 10080, maxMinutes: 48, maxUses: 5 });
   });
 
   it('offer a length of time up to the most and never beyond it', () => {
-    expect(durationsFor({ defaultHours: 168, maxHours: 720 })).toEqual([24, 72, 168, 336, 720]);
-    expect(durationsFor({ defaultHours: 48, maxHours: 100 })).toEqual([24, 48, 72, 100]);
+    expect(durationsFor({ defaultMinutes: 10080, maxMinutes: 43200 })).toEqual([1440, 4320, 10080, 20160, 43200]);
+    expect(durationsFor({ defaultMinutes: 48, maxMinutes: 100 })).toEqual([48, 100]);
   });
 
   it('count an invitation as still good until it is taken back, used up or past its time', () => {

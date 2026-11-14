@@ -111,7 +111,7 @@ can make in its full form. A document offers View, Edit and Manage.
 
 For example, choose **Everyone in Fix login can view** to let its topic's
 role holders watch while owners and people added keep the higher lines.
-**Let them into the environment** gives read-only looking at files, terminal
+**Viewers can open the environment** gives read-only looking at files, terminal
 and screens up to the selected level; it never gives Use. Its provider,
 environment, documents and chats keep their own permission pages.
 
@@ -166,22 +166,28 @@ whole environment, so use separate environments for work that must stay apart.
 
 ## Limit where a provider's work runs
 
+To share a provider for **Ask** alone, add the people, group or role to its Use row, open that entry's options,
+and leave only **Ask** checked under **Purposes**. People from another organization follow the same outside-sharing
+policy. The organization's Ask list and the existing model and service allowlists still apply. This entry cannot
+start ordinary agent turns or pay for other purposes. With every purpose selected, the entry permits all purposes;
+selecting Threads alone does not also select paid search, page fetch, images, reviews, summaries or embeddings.
+
 A provider's Use entry can narrow more than models and efforts: open the entry's options and set **Where**. Left out, it
 reads **Anywhere**. Name environments, hosts or machines to limit the work to them; a host or machine covers every
 environment on it, those made there later included. **Where** only narrows and never gives Use. An entry that names no
 **Agent setup** allows only the forms in which the sign-in stays where it is kept; a copy or a handover is allowed by
 naming it. An entry is one grant: when several entries let one person in, one of them has to allow the model, the effort,
-the agent setup and the environment together, and what a dialog offers is what the entries that allow the rest give. An
+the purpose, the agent setup and the environment together, and what a dialog offers is what the entries that allow the rest give. An
 entry that names no places allows everywhere, with its own models and agent setup only. A thread that is started,
 switched, forked or adopted into an environment outside the list is refused with the entry and the environment named, and
 so is a thread that moves to another environment, or whose entry is narrowed, at its next turn; it is never moved quietly
 to another environment or provider. A tool call an agent makes from a thread is work of that thread's environment. Work
 that belongs to no thread's environment (Ask, summaries, embeddings and the semantic index) is not narrowed by **Where**
-and stays governed by services.
+and still needs its purpose and model or service to be allowed.
 
 You can give or change an entry only up to what one entry of yours allows. When it would allow more, the refusal names
-the member that goes beyond: models, efforts, agent setups or places. A request for the use of a provider goes to the
-people who could write the entry it asks for, which names the models and efforts asked for, no agent setup and no place.
+the member that goes beyond: purposes, models, efforts, agent setups or places. A request for the use of a provider goes to the
+people who could write the entry it asks for, keeping its requested purposes, models and efforts.
 Before a model is chosen, a dialog offers the agent setups that every model chosen afterwards will find allowed.
 
 ## Understand an override

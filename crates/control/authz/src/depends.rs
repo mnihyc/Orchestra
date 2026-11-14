@@ -76,7 +76,8 @@ fn lets_run(
     let granted: ProviderUse = options::read(permission, entry)
         .map(|read| options::of_provider(&read))
         .unwrap_or_default();
-    model.is_none_or(|model| options::allows_model(&granted, model, groups))
+    granted.allows_purpose(orch_access_contract::permissions::ProviderPurpose::Turn)
+        && model.is_none_or(|model| options::allows_model(&granted, model, groups))
         && effort.is_none_or(|effort| granted.allows_effort(effort))
 }
 
@@ -303,6 +304,9 @@ pub async fn of_thread(
         owner: resource.first_owner,
         permission: Permission::ProviderUse,
         options: Some(MissingOptions {
+            purposes: Some(vec![
+                orch_access_contract::permissions::ProviderPurpose::Turn,
+            ]),
             services: None,
             models: Some(vec![model.to_owned()]),
             efforts: effort.map(|effort| vec![effort.to_owned()]),
@@ -485,6 +489,9 @@ async fn of_place_resolved(
                 permission: *permission,
                 options: (*permission == Permission::ProviderUse && model.is_some()).then(|| {
                     MissingOptions {
+                        purposes: Some(vec![
+                            orch_access_contract::permissions::ProviderPurpose::Turn,
+                        ]),
                         services: None,
                         models: model.map(|model| vec![model.to_owned()]),
                         efforts: effort.map(|effort| vec![effort.to_owned()]),

@@ -81,10 +81,10 @@ test('a missing real target continues with an example, and a setting entry keeps
   await player.getByRole('button', { name: 'Continue with example', exact: true }).click();
   await expect(player.getByText('Step 2 of 3', { exact: true })).toBeVisible();
   await player.getByRole('button', { name: 'Leave tutorial', exact: true }).click();
-  await page.goto('/help/setting%3Arequests.expiry_hours');
+  await page.goto('/help/setting%3Arequests.expiry_minutes');
   await expect(page.getByRole('heading', { name: 'Example value', exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Shipped value', exact: true })).toBeVisible();
-  await expectSettingKey(page, 'requests.expiry_hours');
+  await expectSettingKey(page, 'requests.expiry_minutes');
 });
 
 test('an exact thread source link reads its existing setting editor under current authority', async ({ page }) => {

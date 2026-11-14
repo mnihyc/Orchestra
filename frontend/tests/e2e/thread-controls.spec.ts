@@ -84,14 +84,15 @@ for (const width of [1280, 1440, 390, 400]) {
     }
     expect(Math.max(...actionCenters) - Math.min(...actionCenters)).toBeLessThanOrEqual(2);
     await expect(header.getByText('Add a description')).toHaveCount(0);
-    await expect(header.getByRole('button', { name: /Model and effort|Approval mode|Show what fills the context|Edit links/ })).toHaveCount(0);
+    await expect(header.getByRole('button', { name: /^Model:|^Effort:|Approval mode|Show what fills the context|Edit links/ })).toHaveCount(0);
     const row = controls(page);
     const order = await row.locator('[data-composer-control]').evaluateAll((items) => items.map((item) => item.getAttribute('data-composer-control')));
-    expect(order.slice(0, 5)).toEqual(['attach', 'agent', 'model', 'mode', 'sandbox']);
+    // The sandbox is the second level of the approvals control, not a control of the row.
+    expect(order.slice(0, 4)).toEqual(['attach', 'agent', 'model', 'mode']);
+    expect(order).not.toContain('sandbox');
     expect(order.slice(-2)).toEqual(['context', 'send']);
     await expect(row.getByRole('button', { name: /^Agent:/ })).toBeVisible();
-    await expect(row.locator('[data-composer-control="model"]').getByRole('button', { name: /^Model and effort:/ })).toBeVisible();
-    await expect(row.locator('[data-composer-control="sandbox"]').getByRole('button')).toBeVisible();
+    await expect(row.locator('[data-composer-control="model"]').getByRole('button', { name: /^Model:/ })).toBeVisible();
     expect(await row.locator('[data-composer-control="send"]').getByRole('button').allTextContents()).toEqual(['Send', '']);
     await expect(row.getByRole('button', { name: 'More ways to send' })).toBeVisible();
     const add = await bounds(row.getByRole('button', { name: 'Add to message' }));
@@ -198,7 +199,7 @@ test('at 400 px full agent and long model names stay available without enlarging
   const model = 'Mock Large reasoning model for release work';
   await emit(MAIN, { thread: { binding: { ...thread.binding, agent: { ...thread.binding.agent, name: agent } }, model_display: model, effort: 'high' } });
   const row = controls(page);
-  const agentButton = row.getByRole('button', { name: `Agent: ${agent}. Change binding`, exact: true });
+  const agentButton = row.getByRole('button', { name: `Agent: ${agent}`, exact: true });
   await expect(agentButton.locator('span').first()).toHaveText(agent);
   await expect(agentButton.locator('span').first()).not.toHaveClass(/\bhidden\b/);
   await agentButton.hover();
@@ -207,7 +208,7 @@ test('at 400 px full agent and long model names stay available without enlarging
   await expect(page.getByRole('tooltip')).toContainText(agent);
   await page.keyboard.press('Escape');
   await expect(page.getByRole('tooltip')).toHaveCount(0);
-  const modelButton = row.getByRole('button', { name: /^Model and effort: Mock Large reasoning model for release work/ });
+  const modelButton = row.getByRole('button', { name: /^Model: Mock Large reasoning model for release work/ });
   await expect(modelButton).toContainText(model);
   await modelButton.scrollIntoViewIfNeeded();
   await modelButton.hover();

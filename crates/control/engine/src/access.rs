@@ -166,6 +166,8 @@ impl Answer {
 /// May a person run a provider, as a thread is set to use it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderUse<'a> {
+    /// The work this particular request is admitted for.
+    pub purpose: orch_access_contract::permissions::ProviderPurpose,
     /// The person: the author of an input, the thread's first owner for an
     /// input that has none, or whoever puts a thread on the provider.
     pub person: Id,
@@ -182,6 +184,24 @@ pub struct ProviderUse<'a> {
     /// run there. None for work that runs in no environment (Ask, summaries, the semantic index),
     /// which no entry holds to a place.
     pub runs_in: Option<RunsIn>,
+}
+
+/// Recovery and provider grants name the same actual work even when their wire words differ.
+#[must_use]
+pub fn provider_purpose(
+    purpose: orch_provider_contract::calls::Purpose,
+) -> orch_access_contract::permissions::ProviderPurpose {
+    use orch_access_contract::permissions::ProviderPurpose as P;
+    use orch_provider_contract::calls::Purpose;
+    match purpose {
+        Purpose::Agent => P::Turn,
+        Purpose::Summary => P::Summary,
+        Purpose::Embedding => P::Embeddings,
+        Purpose::Review => P::Review,
+        Purpose::WebSearch => P::WebSearch,
+        Purpose::PageFetch => P::PageFetch,
+        Purpose::ImageGeneration => P::ImageGeneration,
+    }
 }
 
 /// The environment that work runs in, as far as the entries of a Use row are concerned.

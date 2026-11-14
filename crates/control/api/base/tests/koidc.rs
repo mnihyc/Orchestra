@@ -995,7 +995,7 @@ async fn oidc_keeps_system_admission_and_explicit_team_acceptance_separate_from_
                 permissions: None,
                 email: None,
                 max_uses: Some(1),
-                expires_in_hours: None,
+                expires_in_minutes: None,
                 note: None,
             })
             .send()
@@ -1070,7 +1070,7 @@ async fn an_oidc_registration_withdrawn_by_its_issuer_makes_no_account_or_home()
             permissions: None,
             email: None,
             max_uses: Some(2),
-            expires_in_hours: None,
+            expires_in_minutes: None,
             note: None,
         })
         .send()

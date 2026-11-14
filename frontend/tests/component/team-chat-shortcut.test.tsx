@@ -17,7 +17,7 @@ function Composer({ ready }: { ready: boolean }) {
   const input = useRef<HTMLInputElement>(null);
   const onReady = useComposerFocus('team-chat', world.takeQuotes);
   useEffect(() => {
-    if (ready) onReady({ quote: () => undefined, focus: () => input.current?.focus() });
+    if (ready) onReady({ quote: () => undefined, mention: () => false, focus: () => input.current?.focus() });
   }, [onReady, ready]);
   return ready ? <input ref={input} aria-label="Chat draft" /> : <p>Loading chat</p>;
 }

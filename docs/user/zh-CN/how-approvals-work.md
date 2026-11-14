@@ -1,7 +1,7 @@
 ---
 title: 审批如何工作
 screens: /thread/$threadId, /approvals, /resources/environments/$id, /topic/$topicId, /project/$projectId
-keywords: 审批, 请求, 权限, 按需, 自动, 绕过, 审核器, 能力, 端口, 计划, 待运行, approval.mode, approval.allowed_modes, requests.expiry_hours, 询问, 审阅器, capability.policy, 规则
+keywords: 审批, 请求, 权限, 按需, 自动, 绕过, 审核器, 能力, 端口, 计划, 待运行, approval.mode, approval.allowed_modes, requests.expiry_minutes, 询问, 审阅器, capability.policy, 规则
 heading_id.环境内的工作: work-inside-the-environment
 heading_id.改变边界: changes-to-the-boundary
 heading_id.谁能审批: who-can-decide
@@ -84,8 +84,8 @@ KVM、端口和访问请求需要对将开放对象的实际权限。管理线�
 继续工作；继续规划会把你的意见交给代理程序修改计划。答案确认后，计划开关才会更新。
 答案被拒绝时，原因直接显示在选项旁；如果选项已失效，请先重新加载请求。
 
-程序动作请求在程序等待期间有效。代理边界请求由 `requests.expiry_hours` 控制，初始
-24 小时，可取 1–168，上级最短值生效；链接可更早过期。个人访问请求初始保留 14 天。
+程序动作请求在程序等待期间有效。代理边界请求由 `requests.expiry_minutes` 控制，初始
+1,440 分钟（一天），没有固定上限，上级最短值生效；链接可更早过期。个人访问请求初始保留 14 天。
 一小时内重复同一已拒绝的代理边界请求，会返回原拒绝与附注；内容改变才是新请求。
 
 ## 再次允许例行动作

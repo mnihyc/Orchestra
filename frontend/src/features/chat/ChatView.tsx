@@ -27,6 +27,7 @@ import { Bell } from '@/features/chat/Bell';
 import { ChatContext, type ChatContextValue, type MessageActions, usePeople } from '@/features/chat/context';
 import { Composer } from '@/features/chat/Composer';
 import { type Quote, partsOfDraft, useDraft } from '@/features/chat/draft';
+import type { NamedMention } from '@/features/people/pending';
 import { GroupHeading } from '@/features/chat/GroupHeading';
 import { GroupMenu } from '@/features/chat/GroupMenu';
 import { ChatMenu } from '@/features/export/ChatMenu';
@@ -76,7 +77,7 @@ export interface ChatViewProps {
    */
   heading?: 'name' | 'kind' | 'none';
   /** Told which quotes to put in the composer; the view hands over a function that adds them. */
-  onReady?: (api: { quote: (quotes: readonly Quote[]) => void; focus: () => void }) => void;
+  onReady?: (api: { quote: (quotes: readonly Quote[]) => void; mention: (mention: NamedMention) => boolean; focus: () => void }) => void;
 }
 
 /** Whether the page is in front of its reader: a tab behind another counts nothing as read. */
@@ -162,6 +163,7 @@ function OpenChat({
   const selection = useSelection(entry.order);
   const draft = useDraft(chat.id, chat.can.send, shown);
   const addQuotes = draft.addQuotes;
+  const appendMention = draft.appendMention;
   const input = useRef<HTMLTextAreaElement>(null);
   const root = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState<string | null>(null);
@@ -285,9 +287,14 @@ function OpenChat({
   useEffect(() => {
     onReady?.({
       quote: (quotes) => addQuotes(quotes),
+      mention: (mention) => {
+        if (!chat.can.send || draft.ready !== true || appendMention === undefined) return false;
+        appendMention(mention);
+        return true;
+      },
       focus: () => { if (input.current !== null) input.current.focus(); else root.current?.focus(); },
     });
-  }, [onReady, addQuotes]);
+  }, [onReady, addQuotes, appendMention, chat.can.send, draft.ready]);
 
   // Leaving with a message that was not sent asks first.
   useEffect(() => {

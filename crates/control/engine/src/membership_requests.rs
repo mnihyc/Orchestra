@@ -231,6 +231,7 @@ impl Engine {
         label: Option<&str>,
         requested_expires_at: Option<Time>,
     ) -> Result<PreparedJoinRequest, RaiseError> {
+        let requested_expires_at = requested_expires_at.map(Time::to_minute);
         let current =
             Principal::load(conn, principal.caller().clone(), self.inner.clock.time()).await?;
         let current = match principal.second_step_hold() {
@@ -239,6 +240,15 @@ impl Engine {
         };
         let principal = &current;
         let now = principal.now();
+        if requested_expires_at.is_some_and(|end| end <= now) {
+            return Err(RaiseError::Item {
+                index: 0,
+                error: orch_authz::requests::AskError::Invalid {
+                    path: "expires_at",
+                    message: "must be in a future minute".to_owned(),
+                },
+            });
+        }
         let row = rows::chat(&mut *conn, chat)
             .await?
             .filter(|row| row.kind == rows::KIND_GROUP)
@@ -310,12 +320,17 @@ impl Engine {
             )
             .await?;
         }
-        let days = get::<i64>(&mut *conn, Place::System, keys::ACCESS_REQUEST_EXPIRY_DAYS)
-            .await
-            .map_err(EngineError::from)?
-            .unwrap_or(crate::approvals::access::EXPIRY_DAYS);
-        let end = chrono::Duration::try_days(days)
+        let minutes = get::<i64>(
+            &mut *conn,
+            Place::System,
+            keys::ACCESS_REQUEST_EXPIRY_MINUTES,
+        )
+        .await
+        .map_err(EngineError::from)?
+        .unwrap_or(crate::approvals::access::EXPIRY_MINUTES);
+        let end = chrono::Duration::try_minutes(minutes)
             .and_then(|span| now.get().checked_add_signed(span))
+            .map(|end| Time::new(end).to_minute().get())
             .ok_or_else(|| EngineError::unreadable("the request expiry does not fit a date"))?;
         let batch = new_id();
         let request = json!({"membership":true,"label":label,"permissions":[],"holder":{"kind":"user","user":crate::views::user_ref_json(&mut *conn,principal.user()).await?},"reason":reason,"for_thread":null});

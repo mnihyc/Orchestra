@@ -317,6 +317,59 @@ async fn somebody_who_is_refused_asks_for_what_is_missing_and_it_is_sent_to_the_
 }
 
 #[tokio::test]
+async fn five_minutes_of_approved_access_end_on_the_displayed_minute_without_waiting_for_cleanup() {
+    let f = firm().await;
+    f.desk.world.advance(Duration::milliseconds(45_678));
+    let requested = Time::new(f.desk.world.now() + Duration::minutes(5));
+    let end = requested.to_minute();
+    let made = f
+        .desk
+        .world
+        .app
+        .call(AccessRequestCreate, &[])
+        .token(&f.rae.token)
+        .body(&AccessRequestCreateBody {
+            items: vec![item("project", f.project, &["project.interact"])],
+            reason: "A short review".to_owned(),
+            for_thread: None,
+            expires_at: Some(requested),
+        })
+        .send()
+        .await
+        .full_request()
+        .ok();
+    let ApprovalRequest::Access(request) = &made.approvals[0].request else {
+        panic!("access approval")
+    };
+    assert_eq!(request.expires_at, Some(end));
+    decide(
+        &f,
+        &f.pam,
+        made.approvals[0].id,
+        AccessDecision {
+            expires_at: Some(requested),
+            ..approve()
+        },
+    )
+    .await
+    .ok();
+    f.desk
+        .world
+        .advance(end.get() - f.desk.world.now() - Duration::milliseconds(1));
+    assert!(
+        holds(&f, "nodes", f.project, &f.rae)
+            .await
+            .contains(&"project.interact".to_owned())
+    );
+    f.desk.world.advance(Duration::milliseconds(1));
+    assert!(
+        !holds(&f, "nodes", f.project, &f.rae)
+            .await
+            .contains(&"project.interact".to_owned())
+    );
+}
+
+#[tokio::test]
 async fn a_requested_end_is_visible_and_each_approver_can_keep_change_or_clear_it() {
     let f = firm().await;
     let end = Time::new(f.desk.world.now() + Duration::days(7));
@@ -729,6 +782,7 @@ async fn an_approver_may_give_fewer_permissions_narrower_options_and_an_end() {
         .id;
     let mut wanted = item("provider", provider, &["provider.use"]);
     wanted.options = Some(AccessOptions {
+        purposes: None,
         models: Some(vec!["gpt-a".to_owned(), "gpt-b".to_owned()]),
         services: None,
         efforts: Some(vec!["high".to_owned()]),

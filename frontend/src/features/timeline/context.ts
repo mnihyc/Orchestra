@@ -47,6 +47,11 @@ export interface TimelineContext {
   /** The thread's name, for what is said of other places. */
   threadName: string;
   detail: WorkDetail;
+  /** Native program state follows the same reading choice in the main stream and child lanes. */
+  diagnostics?: boolean;
+  hideHistory?: boolean;
+  /** Explicit navigation reveals these rows without changing the saved reading preference. */
+  revealed?: ReadonlySet<string>;
   /** A live reading opens current tool output; stored/child renderers opt in explicitly. */
   liveTools?: boolean;
   /** This screen mounts each waiting decision once above its composer. */

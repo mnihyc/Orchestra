@@ -114,6 +114,9 @@ async fn allowed(
             // One entry has to allow the model and the effort together, and an entry that names
             // efforts needs one to be asked for.
             let wanted = orch_authz::options::Wanted {
+                purpose: orch_access_contract::permissions::ProviderPurpose::for_capability(
+                    capability.0,
+                ),
                 model: Some((&reference.offering, groups)),
                 effort,
                 at: at.as_ref(),
@@ -128,6 +131,9 @@ async fn allowed(
             }
         } else {
             let wanted = orch_authz::options::Wanted {
+                purpose: orch_access_contract::permissions::ProviderPurpose::for_capability(
+                    capability.0,
+                ),
                 service: Some((&reference.offering, groups)),
                 at: at.as_ref(),
                 ..orch_authz::options::Wanted::default()

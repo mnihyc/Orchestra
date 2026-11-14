@@ -305,6 +305,7 @@ impl Host {
             .background_provider_use(
                 &mut tx,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Summary,
                     person: writer,
                     node,
                     provider: provider.id,

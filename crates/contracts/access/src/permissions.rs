@@ -1490,9 +1490,49 @@ impl Arrangement {
     }
 }
 
+words! {
+    /// The work a provider entry may pay for, independent of its models and services.
+    #[derive(Default)]
+    pub enum ProviderPurpose ("provider purpose") {
+        /// Ordinary agent turns.
+        #[default]
+        Turn = "turn",
+        /// Personal Ask questions.
+        Ask = "ask",
+        /// Summaries, including handoffs.
+        Summary = "summary",
+        /// Semantic indexing and search embeddings.
+        Embeddings = "embeddings",
+        /// Native permission reviews.
+        Review = "review",
+        /// Web search calls.
+        WebSearch = "web_search",
+        /// Page fetch calls.
+        PageFetch = "page_fetch",
+        /// Image generation calls.
+        ImageGeneration = "image_generation",
+    }
+}
+
+impl ProviderPurpose {
+    /// A capability call uses its own purpose; other declared agent tools remain turns.
+    #[must_use]
+    pub fn for_capability(capability: &str) -> Self {
+        match capability {
+            "summary" => Self::Summary,
+            "web_search" => Self::WebSearch,
+            "page_fetch" => Self::PageFetch,
+            "image_generation" => Self::ImageGeneration,
+            _ => Self::Turn,
+        }
+    }
+}
+
 /// A member of the options of an entry in the Use row of a provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryMember {
+    /// The purposes.
+    Purposes,
     /// The models.
     Models,
     /// The service offerings.
@@ -1512,6 +1552,10 @@ pub enum EntryMember {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderUse {
+    /// What work this entry allows. Left out, every purpose; one entry must allow
+    /// the purpose, model, effort, arrangement and place together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purposes: Option<Vec<ProviderPurpose>>,
     /// The models the holder may run, by name; left out, every enabled model
     /// of the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1638,6 +1682,7 @@ impl Options {
         };
         let parsed = match permission {
             Permission::ProviderUse => Self::ProviderUse(ProviderUse {
+                purposes: reader.words::<ProviderPurpose>("purposes"),
                 models: reader.texts("models"),
                 services: reader.texts("services"),
                 efforts: reader.texts("efforts"),
@@ -1863,6 +1908,7 @@ impl ProviderUse {
     #[must_use]
     pub fn or(&self, other: &Self) -> Self {
         Self {
+            purposes: either(self.purposes.as_ref(), other.purposes.as_ref()),
             models: either(self.models.as_ref(), other.models.as_ref()),
             services: either(self.services.as_ref(), other.services.as_ref()),
             efforts: either(self.efforts.as_ref(), other.efforts.as_ref()),
@@ -1884,6 +1930,12 @@ impl ProviderUse {
     #[must_use]
     pub fn allows_effort(&self, effort: &str) -> bool {
         allowed(self.efforts.as_ref(), effort)
+    }
+
+    /// Whether this one grant allows the current purpose.
+    #[must_use]
+    pub fn allows_purpose(&self, purpose: ProviderPurpose) -> bool {
+        allowed(self.purposes.as_ref(), &purpose)
     }
 
     /// The use of a provider that is held as its owner, as a manager or as a system admin, and not
@@ -1944,6 +1996,9 @@ impl ProviderUse {
             }
         }
         let mut beyond = Vec::new();
+        if !names_within(self.purposes.as_ref(), other.purposes.as_ref()) {
+            beyond.push(EntryMember::Purposes);
+        }
         if !names_within(self.models.as_ref(), other.models.as_ref()) {
             beyond.push(EntryMember::Models);
         }
@@ -3000,6 +3055,7 @@ mod tests {
     #[test]
     fn several_entries_combine_permissively() {
         let one = ProviderUse {
+            purposes: None,
             models: Some(vec!["a".into()]),
             services: Some(vec!["search".into()]),
             efforts: Some(vec!["low".into()]),
@@ -3007,6 +3063,7 @@ mod tests {
             r#where: None,
         };
         let other = ProviderUse {
+            purposes: None,
             models: Some(vec!["b".into(), "a".into()]),
             services: Some(vec!["fetch".into()]),
             efforts: None,

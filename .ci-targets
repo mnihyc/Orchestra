@@ -1,0 +1,12 @@
+fmt
+clippy
+contracts
+test -p orch-access-contract --lib
+test -p orch-authz --lib
+test -p orch-authz --test requests --test kfix_entry_narrowing --test use_where --test depends
+test -p orch-api-core --test ask --test thread_access --test page_dependencies --test access_requests
+test -p orch-engine --test approval_review --test resource_summaries --test summary_options --test orch_tools
+test -p orch-engine --lib -- tools::source::tests::
+web typecheck
+web lint
+web test -- tests/component/access-where-field.test.tsx tests/component/access-request-duration.test.tsx tests/component/access-request-review.test.tsx tests/component/access-request-words.test.tsx tests/component/access-compact.test.tsx tests/component/resource-sharing-summary.test.tsx tests/component/chat-draft-requests.test.tsx tests/component/viewer-composer.test.tsx tests/component/team-chat-shortcut.test.tsx tests/unit/discuss-session.test.ts tests/unit/access-model.test.ts tests/unit/general-access.test.ts tests/unit/node-paging.test.ts
