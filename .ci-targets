@@ -1,0 +1,9 @@
+# n41-models: separate compact controls for model, effort, speed, access program and agent; a thread's parameters say which choice is withheld and why; models.add_switches_on; first compile of the lane's server commits.
+fmt
+clippy
+test -p orch-agent-contract --lib
+test -p orch-settings-contract --lib
+test -p orch-api-core --test threads_settings --test model_entries --test provider_models
+web typecheck
+web lint
+web test -- tests/component/withheld-choices.test.tsx tests/component/thread-change-chosen.test.tsx tests/component/binding-lists.test.tsx tests/component/implicit-runs-on.test.tsx tests/component/composer-controls.test.tsx tests/component/plan-mode.test.tsx tests/component/goal-mode.test.tsx tests/component/model-effort-controlled.test.tsx tests/component/start-flow.test.tsx tests/component/ask-models.test.tsx tests/component/ask-model-params.test.tsx tests/component/access-programs.test.tsx tests/component/change-labels.test.tsx
