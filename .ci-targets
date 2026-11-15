@@ -1,0 +1,9 @@
+fmt
+clippy
+contracts
+test -p orch-db --lib -- queries::notifications::subscribers::tests::
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test notifications
+test -p orch-api-core --test notifications_feed --test notifications_told --test personal_notification_scope
+test -p orch-api-core --test sign_in -- asking_for_a_code_is_answered_the_same_to_every_name_after_the_same_work
