@@ -4,6 +4,7 @@
  * lost, a danger where it cannot go on. Contextual help has one home in the rail. Under the lists, a
  * table of the history says what is kept, converted and dropped, item kind by item kind.
  */
+import { FilePolicyDisclosure } from '@/features/files/FileFacts';
 import { OctagonAlert, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useId } from 'react';
@@ -38,6 +39,7 @@ function List({ title, lines, id, titleId }: { title: string; lines: readonly Li
               <ResourceSentence text={line.text} resources={line.resources} people={line.people} />
               {line.size !== undefined && <>{' · '}<MeasurementSize size={line.size} /></>}
               {line.suffix !== undefined && <span className="text-sm text-text-muted">{' · '}{line.suffix}</span>}
+              {line.sourcePolicy !== undefined && <FilePolicyDisclosure policy={line.sourcePolicy} />}
               {line.technical !== undefined && <RuntimeChangeDetails change={line.technical} />}
             </div>
           </li>

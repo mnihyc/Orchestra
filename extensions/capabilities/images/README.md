@@ -60,7 +60,7 @@ fields consume their request-local names. No local path or source URL reaches th
 
 The pure `materialize_inline_inputs` codec handles an extension-declared `x_input_images`
 JSON parameter. It renders data URLs from verified bytes through the common template engine;
-it opens no URL and creates no client, permission or ledger. Its allocation/output bound is
-supplied by the consumer's existing request frame budget. The keeper receives complete JSON,
+it opens no URL and creates no client, permission or ledger. Source reads enforce the configured
+blob allowance, and the link carries the complete request through its ordinary framing. The keeper receives complete JSON,
 with no unresolved image part. The reference-array mapping follows the
 [provider's documented input shape](https://openrouter.ai/blog/tutorials/image-generation/).
