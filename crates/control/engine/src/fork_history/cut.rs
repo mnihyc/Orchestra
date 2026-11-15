@@ -457,6 +457,25 @@ pub(crate) async fn recent(
     budget: Option<usize>,
     last: Option<usize>,
 ) -> Result<Option<crate::summaries::Carried>, EngineError> {
+    Ok(recent_with_coverage(conn, cut, detail, budget, last)
+        .await?
+        .map(|result| result.carried))
+}
+
+/// The same bounded rendering, with the ordinals and partial turn recorded while bytes are read.
+pub(crate) struct RecentCarry {
+    pub carried: crate::summaries::Carried,
+    pub actual_ranges: Vec<orch_api_contract::forks::HistoryTurnRange>,
+    pub partial_turn: Option<i64>,
+}
+
+pub(crate) async fn recent_with_coverage(
+    conn: &mut Conn,
+    cut: &rows::Cut,
+    detail: written::Detail,
+    budget: Option<usize>,
+    last: Option<usize>,
+) -> Result<Option<RecentCarry>, EngineError> {
     let mut reader = Backward::between(
         Source::Cut(cut),
         conn,
@@ -494,6 +513,8 @@ pub(crate) async fn recent(
     let (from, to) = (first.ordinal, latest.ordinal);
     let mut text = String::new();
     let mut clipped = false;
+    let mut represented = Vec::new();
+    let mut partial_turn = None;
     for each in &taken {
         let room = budget.map(|budget| budget.saturating_sub(text.len()));
         if !text.is_empty() {
@@ -505,6 +526,12 @@ pub(crate) async fn recent(
         }
         let room = budget.map(|budget| budget.saturating_sub(text.len()));
         let part = each.text.read(room)?;
+        if !part.is_empty() {
+            represented.push(each.ordinal);
+        }
+        if part.len() < each.text.len() {
+            partial_turn = Some(each.ordinal);
+        }
         clipped |= part.len() < each.text.len();
         text.push_str(&part);
         if clipped {
@@ -514,11 +541,15 @@ pub(crate) async fn recent(
     if clipped {
         text.push_str("\n\n(This turn is cut here; the rest of it is in the transcript file.)");
     }
-    Ok(Some(crate::summaries::Carried {
-        from,
-        to,
-        brief: detail == written::Detail::Brief,
-        text: masked(conn, cut, text).await?,
+    Ok(Some(RecentCarry {
+        carried: crate::summaries::Carried {
+            from,
+            to,
+            brief: detail == written::Detail::Brief,
+            text: masked(conn, cut, text).await?,
+        },
+        actual_ranges: super::turn_ranges(represented),
+        partial_turn,
     }))
 }
 
@@ -714,6 +745,22 @@ impl From<&AgentReadSessionResult> for NativeRecordEvidence {
 mod native;
 pub(crate) use native::{native_boundary, verify_native_record};
 
+/// Metadata uses the same bounded publication batches as turns and payloads.
+/// All callers pass fixed SQL fragments; cut is always parameter two and the
+/// cursor follows that statement's existing values. The primary key supplies
+/// both its membership lookup and row-id order without sorting the whole cut.
+fn metadata_page_sql(kind: &str, cursor: usize, statement: &str) -> String {
+    let limit = cursor + 1;
+    let statement = statement.replacen("FROM thread_history_cut_rows r", "FROM page r", 1);
+    format!(
+        "WITH page AS MATERIALIZED (
+      SELECT r.* FROM thread_history_cut_rows r WHERE r.cut_id=$2 AND r.kind='{kind}'
+        AND r.row_id>=COALESCE(${cursor}::uuid,'00000000-0000-0000-0000-000000000000'::uuid)
+        AND (${cursor}::uuid IS NULL OR r.row_id>${cursor}) ORDER BY r.row_id LIMIT ${limit}
+    ),copied AS ({statement}) SELECT row_id FROM page ORDER BY row_id DESC LIMIT 1"
+    )
+}
+
 /// Copy readable history, not another execution lane or pending queue. Every
 /// copied row is owned by the target root. The whole publication is one TX.
 pub(crate) async fn copy(
@@ -723,6 +770,7 @@ pub(crate) async fn copy(
     segment: Id,
     replay_segment: Option<Id>,
 ) -> Result<(), EngineError> {
+    let started = std::time::Instant::now();
     let replay_segment = match (replay_segment, cut.artifacts.get("native_boundary")) {
         (Some(source), Some(boundary))
             if serde_json::from_value::<NativeBoundary>(boundary.clone())?.source_segment
@@ -787,39 +835,100 @@ pub(crate) async fn copy(
     .execute(&mut *unit.conn)
     .await
     .map_err(orch_db::DbError::from)?;
-    sqlx::query("INSERT INTO segments SELECT p.* FROM thread_history_cut_rows r
+    let sql = metadata_page_sql("segment", 6, "INSERT INTO segments SELECT p.* FROM thread_history_cut_rows r
       CROSS JOIN LATERAL jsonb_populate_record(NULL::segments,r.body||jsonb_build_object(
       'id',md5($1::text||r.row_id::text)::uuid,'thread_id',$1::uuid,'continuation_id',$3::uuid,'ordinal',r.ordinal,
       'native_session_ref',NULL,'raw_last_n',0,'ended_at',COALESCE((r.body->>'ended_at')::timestamptz,$4::timestamptz),'seq_updated',$5::bigint)) p
-      WHERE r.cut_id=$2 AND r.kind='segment'")
-        .bind(target).bind(cut.id).bind(owner).bind(unit.now()).bind(first)
-        .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
-    sqlx::query("INSERT INTO thread_inputs SELECT p.* FROM thread_history_cut_rows r
+      WHERE r.cut_id=$2 AND r.kind='segment'");
+    let mut metadata_after: Option<Id> = None;
+    loop {
+        let next: Option<Id> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(target)
+            .bind(cut.id)
+            .bind(owner)
+            .bind(unit.now())
+            .bind(first)
+            .bind(metadata_after)
+            .bind(rows::PAGE)
+            .fetch_optional(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+        let Some(next) = next else { break };
+        metadata_after = Some(next);
+    }
+    tracing::debug!(phase = "segments", elapsed = ?started.elapsed(), "Published history phase");
+    let sql = metadata_page_sql("input", 5, "INSERT INTO thread_inputs SELECT p.* FROM thread_history_cut_rows r
       CROSS JOIN LATERAL jsonb_populate_record(NULL::thread_inputs,r.body||jsonb_build_object(
       'id',md5($1::text||r.row_id::text)::uuid,'thread_id',$1::uuid,'continuation_id',$3::uuid,'turn_id',NULL,'client_id',NULL,
       'state',CASE WHEN r.body->>'state'='delivered' THEN 'delivered' ELSE 'cancelled' END,
       'queue_held',false,'state_detail',NULL,'limit_bypass',NULL,'attachment_issues','[]'::jsonb,
       'seq_created',$4::bigint,'seq_updated',$4::bigint)) p
-      WHERE r.cut_id=$2 AND r.kind='input'")
-        .bind(target).bind(cut.id).bind(owner).bind(first)
-        .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+      WHERE r.cut_id=$2 AND r.kind='input'");
+    let mut metadata_after: Option<Id> = None;
+    loop {
+        let next: Option<Id> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(target)
+            .bind(cut.id)
+            .bind(owner)
+            .bind(first)
+            .bind(metadata_after)
+            .bind(rows::PAGE)
+            .fetch_optional(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+        let Some(next) = next else { break };
+        metadata_after = Some(next);
+    }
+    tracing::debug!(phase = "inputs", elapsed = ?started.elapsed(), "Published history phase");
     let mut turn_after = None;
     while let Some(last) =
         rows::copy_turns_page(unit.conn, cut.id, target, owner, first, turn_after).await?
     {
         turn_after = Some(last);
     }
-    sqlx::query("UPDATE thread_inputs i SET turn_id=CASE WHEN EXISTS(SELECT 1 FROM thread_history_cut_rows t
-        WHERE t.cut_id=$1 AND t.kind='turn' AND t.row_id=(r.body->>'turn_id')::uuid)
-        THEN md5($2::text||(r.body->>'turn_id'))::uuid END
-      FROM thread_history_cut_rows r WHERE r.cut_id=$1 AND r.kind='input' AND i.id=md5($2::text||r.row_id::text)::uuid")
-        .bind(cut.id).bind(target).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
-    sqlx::query("WITH added AS(INSERT INTO thread_input_blob_refs(input_id,blob)
-      SELECT md5($2::text||r.row_id::text)::uuid,decode(b.value,'hex') FROM thread_history_cut_rows r
-        CROSS JOIN LATERAL jsonb_array_elements_text(r.body->'captured_blobs') b(value)
-      WHERE r.cut_id=$1 AND r.kind='input' ON CONFLICT DO NOTHING RETURNING blob),counts AS(
-        SELECT blob,count(*) AS n FROM added GROUP BY blob) UPDATE blobs b SET pin_count=b.pin_count+c.n FROM counts c WHERE b.hash=c.blob")
-        .bind(cut.id).bind(target).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+    tracing::debug!(phase = "turns", elapsed = ?started.elapsed(), "Published history phase");
+    let sql = metadata_page_sql("input", 3, "UPDATE thread_inputs i SET turn_id=CASE WHEN EXISTS(SELECT 1 FROM thread_history_cut_rows t
+        WHERE t.cut_id=$2 AND t.kind='turn' AND t.row_id=(r.body->>'turn_id')::uuid)
+        THEN md5($1::text||(r.body->>'turn_id'))::uuid END
+      FROM thread_history_cut_rows r WHERE r.cut_id=$2 AND r.kind='input' AND i.id=md5($1::text||r.row_id::text)::uuid");
+    let mut metadata_after: Option<Id> = None;
+    loop {
+        let next: Option<Id> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(target)
+            .bind(cut.id)
+            .bind(metadata_after)
+            .bind(rows::PAGE)
+            .fetch_optional(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+        let Some(next) = next else { break };
+        metadata_after = Some(next);
+    }
+    let mut metadata_after: Option<Id> = None;
+    loop {
+        let next: Option<Id> = sqlx::query_scalar(
+            "WITH page AS MATERIALIZED (
+          SELECT r.* FROM thread_history_cut_rows r WHERE r.cut_id=$2 AND r.kind='input'
+            AND r.row_id>=COALESCE($3::uuid,'00000000-0000-0000-0000-000000000000'::uuid) AND ($3::uuid IS NULL OR r.row_id>$3) ORDER BY r.row_id LIMIT $4
+        ),added AS(INSERT INTO thread_input_blob_refs(input_id,blob)
+          SELECT md5($1::text||r.row_id::text)::uuid,decode(b.value,'hex') FROM page r
+            CROSS JOIN LATERAL jsonb_array_elements_text(r.body->'captured_blobs') b(value)
+          ON CONFLICT DO NOTHING RETURNING blob),counts AS(
+          SELECT blob,count(*) AS n FROM added GROUP BY blob),pinned AS(
+          UPDATE blobs b SET pin_count=b.pin_count+c.n FROM counts c WHERE b.hash=c.blob)
+          SELECT row_id FROM page ORDER BY row_id DESC LIMIT 1",
+        )
+        .bind(target)
+        .bind(cut.id)
+        .bind(metadata_after)
+        .bind(rows::PAGE)
+        .fetch_optional(&mut *unit.conn)
+        .await
+        .map_err(orch_db::DbError::from)?;
+        let Some(next) = next else { break };
+        metadata_after = Some(next);
+    }
+    tracing::debug!(phase = "links-and-pins", elapsed = ?started.elapsed(), "Published history phase");
     // Copied payloads receive new positions in frozen order within the same raw reservation.
     // Source markers remain readable at the source and consume no copy payload pages.
     let mut after = 0;
@@ -857,6 +966,7 @@ pub(crate) async fn copy(
             .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
         offset += count;
     }
+    tracing::debug!(phase = "items", elapsed = ?started.elapsed(), "Published history phase");
     if replay_segment.is_some() {
         sqlx::query("INSERT INTO thread_native_item_aliases(item_id,native_ref)
           SELECT md5($2::text||c.item_id::text)::uuid,c.native_alias FROM thread_history_cut_members($1) c
@@ -870,7 +980,8 @@ pub(crate) async fn copy(
     {
         after = last;
     }
-    sqlx::query("INSERT INTO approvals SELECT a.* FROM thread_history_cut_rows r
+    tracing::debug!(phase = "parents", elapsed = ?started.elapsed(), "Published history phase");
+    let sql = metadata_page_sql("approval", 5, "INSERT INTO approvals SELECT a.* FROM thread_history_cut_rows r
       CROSS JOIN LATERAL jsonb_populate_record(NULL::approvals,r.body||jsonb_build_object(
       'id',md5($1::text||r.row_id::text)::uuid,'thread_id',$1::uuid,
       'node_id',CASE WHEN r.body->>'node_id'=$4::uuid::text THEN $1::uuid ELSE (r.body->>'node_id')::uuid END,
@@ -885,9 +996,23 @@ pub(crate) async fn copy(
       'native_ref',NULL,
       'state',CASE WHEN r.body->>'state'='pending' THEN 'cancelled' ELSE r.body->>'state' END,
       'expires_at',NULL,'updated_at',$3::timestamptz)) a
-      WHERE r.cut_id=$2 AND r.kind='approval'")
-        .bind(target).bind(cut.id).bind(unit.now()).bind(cut.thread_id)
-        .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+      WHERE r.cut_id=$2 AND r.kind='approval'");
+    let mut metadata_after: Option<Id> = None;
+    loop {
+        let next: Option<Id> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(target)
+            .bind(cut.id)
+            .bind(unit.now())
+            .bind(cut.thread_id)
+            .bind(metadata_after)
+            .bind(rows::PAGE)
+            .fetch_optional(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+        let Some(next) = next else { break };
+        metadata_after = Some(next);
+    }
+    tracing::debug!(phase = "approvals", elapsed = ?started.elapsed(), "Published history phase");
     unit.stamp(target).await?;
     Ok(())
 }

@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-engine --test agent_history -- the_idle_setting_removes_at_seven_days_and_zero_keeps_the_native_history
+test -p orch-engine --test lifecycle -- a_background_task_keeps_its_environment_up_after_the_foreground_turn_ends

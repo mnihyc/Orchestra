@@ -1,6 +1,7 @@
 /** Personal events have no replay. Join first; only then take the HTTP baseline. */
-import type { DurableFeed, FeedFollower } from '@/realtime/sync';
+import { isCancellation, type DurableFeed, type FeedFollower } from '@/realtime/sync';
 import type { RealtimeSocket } from '@/realtime/socket';
+import { retryPause } from '@/lib/requests';
 
 let baseline: (() => Promise<void>) | undefined;
 export function personalBaselineReader(read: () => Promise<void>): void { baseline = read; }
@@ -62,8 +63,10 @@ export function followPersonalSource<T>(socket: RealtimeSocket, feed: DurableFee
   };
   waiting();
   let repairing: { generation: number; promise: Promise<void> } | undefined;
+  let cancelled = 0, retry: ReturnType<typeof setTimeout> | undefined;
   function repair(rejoin = false): Promise<void> {
     if (repairing?.generation === generation) return repairing.promise;
+    clearTimeout(retry); retry = undefined;
     const version = generation;
     const promise = (async () => {
       try {
@@ -71,10 +74,17 @@ export function followPersonalSource<T>(socket: RealtimeSocket, feed: DurableFee
         let loaded = await feed.load(seq, abort.signal);
         if (!loaded.complete) { whole = true; loaded = await feed.load(null, abort.signal); }
         if (closed || generation !== version) return;
+        cancelled = 0;
         if (whole) feed.reset(loaded.data, loaded.seq); else feed.apply(loaded.data, loaded.seq);
         seq = loaded.seq;
         if (rejoin) join();
-      } catch (error) { if (!closed && generation === version) { refuse(error); feed.failed?.(error); } }
+      } catch (error) {
+        if (closed || generation !== version) return;
+        if (isCancellation(error)) {
+          const pause = retryPause(cancelled++);
+          retry = setTimeout(() => { if (!closed && generation === version) void repair(rejoin); }, pause);
+        } else { refuse(error); feed.failed?.(error); }
+      }
     })();
     const flight = { generation: version, promise }; repairing = flight;
     void promise.finally(() => { if (repairing === flight) repairing = undefined; });
@@ -85,6 +95,7 @@ export function followPersonalSource<T>(socket: RealtimeSocket, feed: DurableFee
     subscription = socket.subscribe(feed.feed, {
       since: () => seq,
       onSubscribe: () => {
+        clearTimeout(retry); retry = undefined;
         generation += 1; abort.abort(); abort = new AbortController();
         if (completed) waiting();
         changed();
@@ -117,6 +128,6 @@ export function followPersonalSource<T>(socket: RealtimeSocket, feed: DurableFee
     lastSeq: () => seq,
     refresh: () => { void repair(); },
     reload: () => { seq = null; void repair(true); },
-    stop: () => { closed = true; generation += 1; abort.abort(); subscription?.unsubscribe(); refuse(new Error('The personal live source was replaced')); },
+    stop: () => { closed = true; generation += 1; clearTimeout(retry); abort.abort(); subscription?.unsubscribe(); refuse(new Error('The personal live source was replaced')); },
   };
 }

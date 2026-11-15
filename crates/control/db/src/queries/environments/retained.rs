@@ -107,8 +107,16 @@ pub async fn references(conn: &mut Conn, environment: Id) -> Result<Vec<Volume>,
 
 /// A failed fork records its unpublished destination before rollback schedules cleanup.
 pub async fn is_scratch(conn: &mut Conn, environment: Id) -> Result<bool, DbError> {
-    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs WHERE kind='thread_fork' AND plan->>'scratch_cleanup'=$1::text AND NOT (plan ? 'committed'))")
-        .bind(environment).fetch_one(conn).await?)
+    Ok(!scratch_among(conn, &[environment]).await?.is_empty())
+}
+
+/// Unpublished rollback destinations among a bounded set of environment rows.
+pub async fn scratch_among(conn: &mut Conn, environments: &[Id]) -> Result<Vec<Id>, DbError> {
+    if environments.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_scalar::<_, Id>("SELECT DISTINCT e.id FROM environments e JOIN jobs j ON j.plan->>'scratch_cleanup'=e.id::text WHERE e.id=ANY($1::uuid[]) AND j.kind='thread_fork' AND j.plan ? 'scratch_cleanup' AND NOT (j.plan ? 'committed')")
+        .bind(environments).fetch_all(conn).await?)
 }
 
 /// Forgets unpublished scratch only after the old rollback removed its unit and files.
