@@ -1,0 +1,2 @@
+fmt
+test -p orch-connector-core --lib -- orch_tools::tests::a_rate_refusal_carries_the_same_recorded_facts_in_native_text_and_structured_output

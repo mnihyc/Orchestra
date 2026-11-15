@@ -76,8 +76,14 @@ fn lets_run(
     let granted: ProviderUse = options::read(permission, entry)
         .map(|read| options::of_provider(&read))
         .unwrap_or_default();
-    model.is_none_or(|model| options::allows_model(&granted, model, groups))
-        && effort.is_none_or(|effort| granted.allows_effort(effort))
+    options::entry_allows(
+        &granted,
+        &options::Wanted {
+            model: model.map(|model| (model, groups)),
+            effort,
+            ..Default::default()
+        },
+    )
 }
 
 /// Whether the holder `entry` covers every person the holder `held` stands for: the same holder,
@@ -303,6 +309,9 @@ pub async fn of_thread(
         owner: resource.first_owner,
         permission: Permission::ProviderUse,
         options: Some(MissingOptions {
+            purposes: Some(vec![
+                orch_access_contract::permissions::ProviderUsePurpose::Work,
+            ]),
             services: None,
             models: Some(vec![model.to_owned()]),
             efforts: effort.map(|effort| vec![effort.to_owned()]),
@@ -368,11 +377,13 @@ fn can_give(
     // The people have it when one single entry of theirs has the model and the effort together.
     grant.each.iter().any(|allowance| {
         let options = &allowance.provider;
-        model.map_or(options.models.is_none(), |model| {
-            options::allows_model(options, model, groups)
-        }) && effort.map_or(options.efforts.is_none(), |effort| {
-            options.allows_effort(effort)
-        })
+        options.allows_purpose(orch_access_contract::permissions::ProviderUsePurpose::Work)
+            && model.map_or(options.models.is_none(), |model| {
+                options::allows_model(options, model, groups)
+            })
+            && effort.map_or(options.efforts.is_none(), |effort| {
+                options.allows_effort(effort)
+            })
     })
 }
 
@@ -483,13 +494,14 @@ async fn of_place_resolved(
                 name: resource.name.clone(),
                 owner: resource.first_owner,
                 permission: *permission,
-                options: (*permission == Permission::ProviderUse && model.is_some()).then(|| {
-                    MissingOptions {
-                        services: None,
-                        models: model.map(|model| vec![model.to_owned()]),
-                        efforts: effort.map(|effort| vec![effort.to_owned()]),
-                        r#where: None,
-                    }
+                options: (*permission == Permission::ProviderUse).then(|| MissingOptions {
+                    purposes: Some(vec![
+                        orch_access_contract::permissions::ProviderUsePurpose::Work,
+                    ]),
+                    services: None,
+                    models: model.map(|model| vec![model.to_owned()]),
+                    efforts: effort.map(|effort| vec![effort.to_owned()]),
+                    r#where: None,
                 }),
                 open,
                 through,
@@ -610,9 +622,10 @@ pub async fn offer(
             locked: None,
             add: Some(vec![orch_access_contract::pages::EntryAdd {
                 holder,
-                options: dependency.options.as_ref().map(|wanted| {
-                    serde_json::json!({ "models": wanted.models, "efforts": wanted.efforts })
-                }),
+                options: dependency
+                    .options
+                    .as_ref()
+                    .map(|wanted| serde_json::json!(wanted)),
                 expires_at: None,
                 note: None,
             }]),

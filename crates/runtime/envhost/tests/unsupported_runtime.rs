@@ -33,6 +33,8 @@ async fn an_unverified_platform_refuses_attachment_without_workspace_or_environm
     let result = host
         .env_attach(
             &EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: None,
                 storage: None,
