@@ -6,6 +6,7 @@ import { Button } from '@/ui/Button';
 import { ByteSize } from '@/ui/ByteSize';
 import { copyText } from '@/ui/clipboard';
 import { AuthorChip } from '@/ui/AuthorChip';
+import { StatusDot } from '@/ui/StatusDot';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { useFormatContext } from '@/lib/appearance';
 import { formatNumber } from '@/lib/format';
@@ -14,6 +15,7 @@ import { previewQuery, sourceDownload, sourceLink, sourceHasReference, sourceRef
 import { FileGlyph, FilePreview, FileState, fileFailure, useFileVisible } from './FilePreview';
 import { defaultViewer } from './viewers';
 import { sourceFacts } from './source';
+import { FileFactBody } from './FileFacts';
 import { FileGuideHint } from './FileGuideHint';
 
 export function FileDetails({ source, onOpen, onDone, title = true, showPreview = true, showMetadata = true }: { source: FileSource; onOpen: () => void; onDone?: (() => void) | undefined; title?: boolean; showPreview?: boolean; showMetadata?: boolean }) {
@@ -42,9 +44,14 @@ export function FileDetails({ source, onOpen, onDone, title = true, showPreview 
     {showMetadata && <span className="flex flex-wrap gap-x-2 text-sm text-text-muted">
       {(data?.size ?? source.size) !== undefined && <ByteSize bytes={data?.size ?? source.size ?? 0} />}
       {data?.media_type && <span>{data.media_type}</span>}
+      {source.observation !== undefined && <>
+        <StatusDot tone={source.observation.cached ? 'info' : 'idle'} label={t(source.observation.cached ? 'files.tree.cached' : 'files.tree.needsMachine')} showLabel />
+        {source.observation.at !== null && <span>{t('files.panel.observed')} <RelativeTime at={source.observation.at} /></span>}
+      </>}
       {kind === 'media' && <span>{t('fileMedia.duration', { value: data?.duration_seconds === null || data?.duration_seconds === undefined ? '–' : formatSpan(data.duration_seconds * 1000, format) })}</span>}
       {kind === 'archive' && <span>{t('fileMedia.entries', { number: data?.entry_count === null || data?.entry_count === undefined ? '–' : formatNumber(data.entry_count, locale) })}</span>}
     </span>}
+    <FileFactBody facts={data === undefined ? source.facts : data.facts} showSource={source.workspace !== undefined || source.facts != null} allowance={data?.allowance} imageDelivery={source.imageDelivery} />
     {gone && !showPreview && <FileState state="gone" />}
     {downloadError !== null && <FileState state={fileFailure(downloadError)} />}
     <span className="flex flex-wrap gap-2">

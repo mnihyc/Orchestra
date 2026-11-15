@@ -935,6 +935,7 @@ impl native::Selected for Preview {
     type Query = EnvironmentDuplicateBody;
     type Value = Ready;
     type Reply = MoveOutDeletePlan;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &declarations::MOVE_MANAGED_PREVIEW;
     const WATCH_ORDINARY: bool = true;
     fn declaration(_: &EnvironmentDuplicateBody, value: &Ready) -> &'static Declaration<Source> {
