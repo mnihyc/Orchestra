@@ -86,6 +86,8 @@ pub struct ReadScope {
 /// One reader's row cut; it is never reused across credentials or snapshots.
 #[derive(Debug)]
 struct Snapshot {
+    retained_inputs: Vec<orch_api_contract::threads::RetainedInput>,
+    retained_inputs_next: Vec<orch_api_contract::threads::RetainedInputContinuation>,
     projection: Option<ThreadContinuationProjection>,
     inputs_next_after: Option<Id>,
     inputs_queue_revision: Option<i64>,
@@ -106,6 +108,8 @@ struct Snapshot {
 impl Snapshot {
     fn empty() -> Self {
         Self {
+            retained_inputs: Vec::new(),
+            retained_inputs_next: Vec::new(),
             projection: None,
             inputs_next_after: None,
             inputs_queue_revision: None,
@@ -303,6 +307,8 @@ async fn load(
         })
         .collect();
     Ok(Snapshot {
+        retained_inputs: synced.retained_inputs,
+        retained_inputs_next: synced.retained_inputs_next,
         projection: Some(synced.projection),
         inputs_next_after: synced.inputs_next_after,
         inputs_queue_revision: Some(synced.inputs_queue_revision),
@@ -437,6 +443,10 @@ pub(crate) async fn read_scoped(
     if snapshot.state_stamp > after
         && let Some(mut found) = thread_view(inner, &mut tx, &principal, thread).await?
     {
+        if projection.viewed_continuation_id != projection.active_continuation_id {
+            found.queue.eligibility =
+                Some(orch_api_contract::threads::QueueEligibility::Unreported);
+        }
         found.my_last_read_seq = continuation_rows::reading::last_read(
             &mut tx,
             person,
@@ -472,6 +482,8 @@ pub(crate) async fn read_scoped(
     tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(Rows::Frame(Box::new(Frame {
         data: SyncData::Thread(ThreadData {
+            retained_inputs: some(snapshot.retained_inputs),
+            retained_inputs_next: some(snapshot.retained_inputs_next),
             projection: snapshot.projection,
             prompt_summaries: metadata.summaries,
             viewed_prompt: metadata.viewed_prompt,
