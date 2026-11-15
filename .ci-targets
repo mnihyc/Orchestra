@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-db --lib -- queries::raw_events::
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-collaboration --lib -- source_facts::tests::
+test -p orch-api-core --test document_history --test document_version_reader_scopes --test semantic_index --test search_meaning --test search_native_scopes --test search_projection --test realtime_diagnostics
+test -p orch-worker-core --test upkeep
+test -p orch-connector --test raw_restart
