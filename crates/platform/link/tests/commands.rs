@@ -222,7 +222,7 @@ async fn commands_with_one_key_run_one_at_a_time_in_the_order_they_came_and_othe
 }
 
 #[tokio::test]
-async fn a_command_whose_deadline_passed_before_its_turn_is_not_started() {
+async fn a_short_command_that_waited_in_line_behind_a_long_one_still_runs_when_its_turn_comes() {
     let rig = rig();
     rig.machine.link.connected().await;
     rig.machine.handler.hold(CommandKind::SessionClose);
@@ -232,21 +232,23 @@ async fn a_command_whose_deadline_passed_before_its_turn_is_not_started() {
         deadline(&rig.clock, 600),
         &SessionClose { thread_id: thread },
     );
-    let late = rig.controller.issue(
+    // Thirty seconds of work, asked while the line is held by a long one.
+    let short = rig.controller.issue(
         &SerialKey::Thread(thread),
         deadline(&rig.clock, 30),
         &SessionClose { thread_id: thread },
     );
     within(10, rig.machine.handler.started(blocker)).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // The line stays held for far longer than the short command's thirty seconds.
     rig.clock.advance(chrono::Duration::seconds(60));
     rig.machine.handler.release();
-    let ended = within(10, rig.controller.wait_command(late)).await;
-    let Progress::Failed(error) = ended else {
-        panic!("{ended:?}")
-    };
-    assert_eq!(error.code, ErrorCode::Timeout.as_str());
-    assert_eq!(rig.machine.handler.runs_of(late), 0);
+    let ended = within(10, rig.controller.wait_command(short)).await;
+    assert!(
+        matches!(ended, Progress::Succeeded(_)),
+        "the time spent waiting is not the command's own: {ended:?}"
+    );
+    assert_eq!(rig.machine.handler.runs_of(short), 1);
 }
 
 #[tokio::test]
@@ -525,6 +527,10 @@ async fn cancellation_received_before_command_admission_prevents_any_handler_wor
     server.serve(handler.clone());
     let id = new_id();
     let command = Cmd {
+        native_members: None,
+        native_revision: None,
+
+        native_target: None,
         id,
         kind: CommandKind::SessionClose.as_str().into(),
         key: None,
@@ -583,6 +589,10 @@ async fn a_stop_after_restart_waits_for_interrupted_external_work_to_be_cleaned_
     let directory = tempfile::tempdir().unwrap();
     let id = new_id();
     let command = Cmd {
+        native_members: None,
+        native_revision: None,
+
+        native_target: None,
         id,
         kind: CommandKind::SessionClose.as_str().into(),
         key: None,
@@ -748,4 +758,196 @@ async fn a_locally_suppressed_acknowledged_resend_retires_its_ack_timer() {
         assert_eq!(handle.progress(), Progress::Succeeded(result));
         assert!(issuer.answered(original.id));
     }
+}
+
+#[tokio::test]
+async fn a_deferred_native_act_recovers_only_its_own_successful_journal_answer_after_restart() {
+    let mut rig = rig();
+    rig.machine.link.connected().await;
+    let thread = new_id();
+    let id = rig.controller.issue(
+        &SerialKey::Thread(thread),
+        deadline(&rig.clock, 300),
+        &SessionClose { thread_id: thread },
+    );
+    assert!(
+        !rig.machine
+            .link
+            .command_succeeded(new_id(), CommandKind::SessionClose)
+    );
+    assert!(matches!(
+        within(10, rig.controller.wait_command(id)).await,
+        Progress::Succeeded(_)
+    ));
+    assert!(
+        rig.machine
+            .link
+            .command_succeeded(id, CommandKind::SessionClose)
+    );
+    assert!(
+        !rig.machine
+            .link
+            .command_succeeded(id, CommandKind::SessionOpen)
+    );
+    let _kept = rig.machine.keep_dir();
+    let directory = rig.machine.data_dir().to_owned();
+    rig.machine.link.shutdown().await;
+    let identity = rig.pki.machine(rig.machine.machine_id);
+    let returned = ScriptedMachine::start_in(
+        &rig.hub,
+        &rig.shared,
+        &identity,
+        &MachineSpec::default(),
+        &directory,
+    );
+    assert!(
+        returned
+            .link
+            .command_succeeded(id, CommandKind::SessionClose)
+    );
+    assert!(
+        !returned
+            .link
+            .command_succeeded(new_id(), CommandKind::SessionClose)
+    );
+    returned.link.shutdown().await;
+}
+
+#[test]
+fn a_closed_native_opening_cannot_reappear_after_restart_or_retire_its_successor() {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::native_target::{SessionAction, SessionTarget};
+    let directory = tempfile::tempdir().unwrap();
+    let first = SessionTarget {
+        thread_id: orch_types::new_id(),
+        segment_id: Some(orch_types::new_id()),
+        opening_id: Some(orch_types::new_id()),
+        opening_epoch: Some(1),
+    };
+    let fences = NativeFences::new(directory.path().to_owned());
+    assert!(fences.observe_session(&first, SessionAction::Open).unwrap());
+    assert!(
+        fences
+            .observe_session(&first, SessionAction::Close)
+            .unwrap()
+    );
+    drop(fences);
+    let restarted = NativeFences::new(directory.path().to_owned());
+    assert!(
+        !restarted
+            .observe_session(&first, SessionAction::Open)
+            .unwrap(),
+        "an empty native slot does not forget its retirement"
+    );
+    let successor = SessionTarget {
+        opening_id: Some(orch_types::new_id()),
+        opening_epoch: Some(2),
+        ..first.clone()
+    };
+    assert!(
+        restarted
+            .observe_session(&successor, SessionAction::Open)
+            .unwrap()
+    );
+    assert!(
+        !restarted
+            .observe_session(&first, SessionAction::Close)
+            .unwrap()
+    );
+    assert!(
+        restarted
+            .observe_session(&successor, SessionAction::Use)
+            .unwrap()
+    );
+    assert!(
+        !restarted
+            .observe_session(&first, SessionAction::Use)
+            .unwrap()
+    );
+}
+
+#[test]
+fn a_committed_tool_withdrawal_before_native_delivery_survives_restart_and_cannot_retire_a_successor()
+ {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::native_target::{SessionAction, SessionTarget};
+    use orch_link_contract::tool_sessions::ToolSessionUpdate;
+    let directory = tempfile::tempdir().unwrap();
+    let first = SessionTarget {
+        thread_id: new_id(),
+        segment_id: Some(new_id()),
+        opening_id: Some(new_id()),
+        opening_epoch: Some(1),
+    };
+    let withdrawal = ToolSessionUpdate {
+        machine_id: new_id(),
+        thread_id: first.thread_id,
+        segment_id: first.segment_id.unwrap(),
+        opening_id: first.opening_id,
+        opening_epoch: 1,
+        revision: 3,
+        live: false,
+        members: vec![],
+    };
+    NativeFences::new(directory.path().into())
+        .observe_tools(&withdrawal)
+        .unwrap();
+    let restarted = NativeFences::new(directory.path().into());
+    assert!(
+        !restarted
+            .observe_session(&first, SessionAction::Open)
+            .unwrap()
+    );
+    let next = SessionTarget {
+        opening_id: Some(new_id()),
+        opening_epoch: Some(2),
+        ..first.clone()
+    };
+    assert!(
+        restarted
+            .observe_session(&next, SessionAction::Open)
+            .unwrap()
+    );
+    restarted.observe_tools(&withdrawal).unwrap();
+    assert!(
+        restarted
+            .observe_session(&next, SessionAction::Use)
+            .unwrap()
+    );
+    assert!(
+        restarted.tools(first.thread_id).unwrap().is_none(),
+        "the old snapshot cannot be stamped onto the successor"
+    );
+}
+
+#[test]
+fn a_saved_positive_scope_cannot_revalidate_a_new_control_connection_without_a_fresh_notice() {
+    use orch_link::native_fences::NativeFences;
+    use orch_link_contract::tool_sessions::ToolSessionUpdate;
+    let directory = tempfile::tempdir().unwrap();
+    let fences = NativeFences::new(directory.path().into());
+    let update = ToolSessionUpdate {
+        machine_id: new_id(),
+        thread_id: new_id(),
+        segment_id: new_id(),
+        opening_id: Some(new_id()),
+        opening_epoch: 1,
+        revision: 1,
+        live: true,
+        members: vec![],
+    };
+    assert!(fences.observe_tools(&update).unwrap());
+    assert!(fences.current_tools(update.thread_id).unwrap().is_some());
+    fences.set_tool_control(false);
+    fences.set_tool_control(true);
+    assert!(fences.current_tools(update.thread_id).unwrap().is_none());
+    assert!(
+        fences.tools(update.thread_id).unwrap().is_some(),
+        "old facts still restrict queued commands"
+    );
+    assert!(
+        fences.observe_tools(&update).unwrap(),
+        "the current API may confirm an unchanged revision after restart"
+    );
+    assert!(fences.current_tools(update.thread_id).unwrap().is_some());
 }

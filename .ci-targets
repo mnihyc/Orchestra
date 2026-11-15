@@ -1,0 +1,4 @@
+test -p orch-api-core --test kmounts_files --test mount_duplicates --test hosts --test resource_facts
+test -p orch-api-core --test registration_moves --test resource_groups --test page_transfer_operation_scopes
+test -p orch-settings-contract --lib
+test -p orch-db --test loss_resources

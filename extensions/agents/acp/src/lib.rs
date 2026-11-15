@@ -1021,6 +1021,7 @@ impl AgentAdapter for AcpAdapter {
             while launched.incoming.try_recv().is_ok() {}
         }
         let session = Session::new(Parts {
+            opening_id: spec.opening_id,
             env: Arc::clone(&shared.env),
             thread_id: settings.thread_id,
             segment_id: settings.segment_id,
@@ -1074,6 +1075,7 @@ impl AgentAdapter for AcpAdapter {
                 settings.thread_id,
                 settings.segment_id,
                 SessionEvent::SessionOpened(SessionOpenedEvent {
+                    opening_id: spec.opening_id,
                     native_session_ref: acp_id.clone(),
                     resumed,
                 }),

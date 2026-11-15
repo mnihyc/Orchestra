@@ -1,6 +1,6 @@
 import { useFrameReady } from '@/shell/FrameReadiness';
 import { MessageCircleQuestionMark } from 'lucide-react';
-import { openAsk } from '@/features/ask/open';
+import { toggleAsk } from '@/features/ask/open';
 import { useShownViewOpening } from '@/features/workbench/viewOpening';
 /** Org avatars, the person's own first, the finder, inbox, approvals, resources, help and the user's menu.
  *
@@ -461,7 +461,7 @@ export function Rail({ onShortcuts }: { onShortcuts: () => void }) {
         const active = left.open && left.active === container.name;
         return <ActivityDrop key={container.id} name={container.name} label={name}><Tooltip content={t(active ? 'workbench.bars.hideView' : 'workbench.bars.showView', { name })} side="right"><button type="button" aria-label={name} aria-description={choice.description} aria-pressed={active} data-active-left-view={active ? container.name : undefined} className={cx(STOP, 'aria-pressed:bg-accent-subtle aria-pressed:text-accent-text')} onClick={() => bringToFront(container.name, true)}><Icon size={NAVIGATION_ICON} aria-hidden /></button></Tooltip></ActivityDrop>;
       })}
-      <Tooltip content={t('ask.open')} shortcut={askKeys ?? undefined} side="right"><button type="button" aria-label={t('ask.open')} aria-pressed={askOpen} className={cx(STOP, 'aria-pressed:bg-accent-subtle aria-pressed:text-accent-text')} onClick={openAsk}><MessageCircleQuestionMark size={NAVIGATION_ICON} aria-hidden /></button></Tooltip>
+      <Tooltip content={t('ask.open')} shortcut={askKeys ?? undefined} side="right"><button type="button" aria-label={t('ask.open')} aria-pressed={askOpen} data-ask-opener className={cx(STOP, 'aria-pressed:bg-accent-subtle aria-pressed:text-accent-text')} onClick={toggleAsk}><MessageCircleQuestionMark size={NAVIGATION_ICON} aria-hidden /></button></Tooltip>
       <RailLink to="/help" label={t('screens.help.title')}>
         <CircleQuestionMark size={NAVIGATION_ICON} aria-hidden />
       </RailLink>
