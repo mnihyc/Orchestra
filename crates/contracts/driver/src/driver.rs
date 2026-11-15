@@ -100,6 +100,14 @@ impl DriverError {
 /// so its methods take `&self`.
 #[async_trait]
 pub trait EnvironmentDriver: Send + Sync + 'static {
+    /// Makes an idempotent bare capability unit with provider-only egress and disposable scratch.
+    /// The ordinary unit lifecycle inspects, stops and removes it; it has no connector enrollment.
+    async fn create_work(&self, _spec: &crate::work::WorkUnitSpec) -> Result<UnitRef, DriverError> {
+        Err(DriverError::Unsupported(
+            "this placement cannot run a confined capability program".into(),
+        ))
+    }
+
     /// Lists only this installation's owned objects, their sizes and their complete dependencies.
     async fn resources(
         &self,

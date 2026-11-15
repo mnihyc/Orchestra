@@ -1,0 +1,5 @@
+fmt
+contracts
+test -p orch-driver-contract --lib
+test -p orch-driver-docker --lib
+test -p orch-driver-docker --test networks

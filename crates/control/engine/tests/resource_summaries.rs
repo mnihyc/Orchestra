@@ -77,7 +77,7 @@ async fn accept_as(world: &World, target: SummaryTarget, issuer: Id) -> Id {
         range: None,
     })
     .unwrap();
-    let source = json!({"target":target,"range":selected.material.range,"snapshot":selected.material.snapshot,"policy":selected.policy.fingerprint});
+    let source = json!({"target":target,"range":selected.material.range,"snapshot":selected.material.snapshot,"policy":selected.policy.fingerprint,"selection":selected.backend_selection().unwrap()});
     let accepted = rows::enqueue(
         &mut tx,
         cache.id,
@@ -125,7 +125,7 @@ async fn chosen(world: &World) {
         .set(
             world.topic,
             "auto.summarizer",
-            json!({"kind":"model","provider_id":world.provider,"model_name":MODEL}),
+            json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":world.provider,"offering":MODEL}}}),
         )
         .await;
 }

@@ -586,3 +586,281 @@ async fn a_network_of_the_name_that_is_not_the_drivers_is_never_used() {
     );
     assert!(!lab.has_container(&spec.name).await);
 }
+
+#[tokio::test]
+async fn a_capability_unit_has_only_frozen_files_and_its_exact_provider_transport() {
+    confined_provider_work("provider", "/var/lib/orch/person-file").await;
+}
+
+#[tokio::test]
+async fn a_provider_using_an_environment_keeps_that_environments_workspace_out_of_its_capability_unit()
+ {
+    confined_provider_work("environment", "/workspace/private-source").await;
+}
+
+async fn confined_provider_work(kind: &str, private_file: &str) {
+    use orch_driver_contract::{
+        network::{NetworkTransport, TransportPurpose},
+        work::{WorkFile, WorkUnitSpec},
+    };
+    use orch_types::{Time, new_id};
+    let lab = capability_proxy_lab().await;
+    let bridge = bridge_address(&lab.docker)
+        .await
+        .expect("the confinement runner needs a bridge address");
+    let provider = Gateway::listen(&bridge);
+    let unrelated = Gateway::listen(&bridge);
+    let source = lab.request(kind, "capability-source", |request| {
+        request["env"] = json!({"ORCH_PRIVATE_TEST_KEY":"synthetic-orch-credential",
+            "LAB_RUN":format!("echo private-workspace-material > {private_file}")});
+        request["resources"] = json!({"cpu_millis":500,"memory_mb":128,"pids":64});
+    });
+    let source_unit = lab.run(&source).await;
+    assert_eq!(
+        lab.read(&source_unit, private_file).await.as_deref(),
+        Some("private-workspace-material\n")
+    );
+    let spec = WorkUnitSpec {
+        work: new_id(),
+        provider: source_unit,
+        template: source.spec.clone(),
+        tools: source.tools.clone(),
+        endpoints: vec![NetworkTransport {
+            authority: bridge.clone(),
+            protocol: "https".into(),
+            port: provider.port,
+            purpose: TransportPurpose::Model,
+        }],
+        deadline: Time::new(chrono::Utc::now() + chrono::Duration::minutes(5)),
+        files: vec![
+            WorkFile {
+                path: "inputs/request.txt".into(),
+                bytes: b"frozen request".to_vec(),
+            },
+            WorkFile {
+                path: "home/provider-sign-in".into(),
+                bytes: b"synthetic-provider-sign-in".to_vec(),
+            },
+        ],
+    };
+    lab.track_work(spec.work);
+    let unit = lab.driver.create_work(&spec).await.unwrap();
+    let repeated = lab.driver.create_work(&spec).await.unwrap();
+    assert_eq!(
+        unit, repeated,
+        "a work identity never creates a second scratch unit"
+    );
+    let inspected = lab.inspect(&unit).await;
+    let host = inspected.host_config.as_ref().unwrap();
+    assert_eq!(host.nano_cpus, Some(500_000_000));
+    assert_eq!(host.memory, Some(128 * 1024 * 1024));
+    assert_eq!(host.pids_limit, Some(64));
+    assert_eq!(host.readonly_rootfs, Some(true));
+    assert!(
+        host.mounts
+            .as_ref()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .all(|mount| {
+                mount.read_only == Some(true)
+                    && mount
+                        .target
+                        .as_ref()
+                        .is_some_and(|path| path.starts_with("/opt/orch/tools/"))
+            }),
+        "only installed program code is mounted"
+    );
+    let probe = format!(
+        r#"! cat {private_file} > /work/workspace-read 2>/work/workspace-error \
+         && ! cat /run/orch/enroll > /work/orch-key-read 2>/work/orch-key-error \
+         && test -z "$ORCH_PRIVATE_TEST_KEY" \
+         && test "$(cat /work/inputs/request.txt)" = 'frozen request' \
+         && test "$(cat /work/home/provider-sign-in)" = 'synthetic-provider-sign-in' \
+         && p=${{HTTPS_PROXY#http://}} && ph=${{p%:*}} && pp=${{p##*:}} \
+         && printf 'CONNECT {bridge}:{provider_port} HTTP/1.1\r\n\r\n' | nc -w 2 "$ph" "$pp" > /work/provider-answer \
+         && grep -q '200 Connection established' /work/provider-answer && grep -q 'gateway-hello' /work/provider-answer \
+         && printf 'CONNECT {bridge}:{other_port} HTTP/1.1\r\n\r\n' | nc -w 2 "$ph" "$pp" > /work/other-answer \
+         && grep -q '403' /work/other-answer \
+         && ! nc -w 2 {bridge} {provider_port} > /work/direct-answer \
+         && printf 'confined result' > /work/result.txt"#,
+        provider_port = provider.port,
+        other_port = unrelated.port,
+    );
+    let ran = run_capability_probe(&lab, &unit, &probe).await;
+    assert_eq!(
+        ran, 0,
+        "the allowed request completes while unrelated effects are refused"
+    );
+    assert_eq!(
+        lab.read(&unit, "/work/result.txt").await.as_deref(),
+        Some("confined result")
+    );
+    lab.driver.stop(&unit, Duration::ZERO).await.unwrap();
+    assert!(
+        lab.read(&unit, "/work/home/provider-sign-in")
+            .await
+            .is_none()
+    );
+    assert!(
+        lab.driver.create_work(&spec).await.is_err(),
+        "a closed work unit is never silently started again"
+    );
+    lab.driver.remove(&unit).await.unwrap();
+    assert!(!lab.has_container(&unit.name).await);
+}
+
+async fn run_capability_probe(lab: &Lab, unit: &UnitRef, script: &str) -> i64 {
+    use bollard::{exec::StartExecResults, models::ExecConfig};
+    use futures::StreamExt;
+    let created = lab
+        .docker
+        .create_exec(
+            &unit.reference,
+            ExecConfig {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                user: Some("65534:65534".to_owned()),
+                cmd: Some(vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    script.to_owned(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    if let StartExecResults::Attached { mut output, .. } =
+        lab.docker.start_exec(&created.id, None).await.unwrap()
+    {
+        while let Some(chunk) = output.next().await {
+            chunk.unwrap();
+        }
+    }
+    lab.docker
+        .inspect_exec(&created.id)
+        .await
+        .unwrap()
+        .exit_code
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_placement_without_its_trusted_proxy_starts_no_capability_unit() {
+    use orch_driver_contract::work::WorkUnitSpec;
+    use orch_types::{Time, new_id};
+    let Some(lab) = Lab::with(|config, _| {
+        config.egress.proxy_image = None;
+    })
+    .await
+    else {
+        return;
+    };
+    let source = lab.request("provider", "unconfined-placement", |_| {});
+    let provider = lab.run(&source).await;
+    let spec = WorkUnitSpec {
+        work: new_id(),
+        provider,
+        template: source.spec.clone(),
+        tools: source.tools.clone(),
+        endpoints: vec![],
+        deadline: Time::new(chrono::Utc::now() + chrono::Duration::minutes(5)),
+        files: vec![],
+    };
+    let error = lab.driver.create_work(&spec).await.unwrap_err();
+    assert!(
+        error.to_string().contains("restricted"),
+        "the placement names its missing enforcement: {error}"
+    );
+    assert!(
+        !lab.has_container(&format!("orch-work-{}", spec.work.simple()))
+            .await
+    );
+}
+
+/// This fixture runs the product's real proxy inside the trusted sidecar image.
+/// The ordinary Docker lab's simulated gateway-only proxy cannot prove provider confinement.
+async fn capability_proxy_lab() -> Lab {
+    let executable = std::env::current_exe().unwrap();
+    let lab = Lab::with(move |config, dir| {
+        config.egress.dir = Some(dir.join("egress"));
+        config.egress.proxy_image = Some("ubuntu:24.04".into());
+        std::fs::copy(&executable, dir.join("connector/work-proxy-fixture")).unwrap();
+        let script = format!(
+            "{}\n{}",
+            r#"#!/bin/sh
+if [ "$1" = proxy ]; then
+  export ORCH_WORK_PROXY_DIR="$3"
+  export ORCH_WORK_PROXY_LISTEN="$5"
+  exec /opt/orch/bin/work-proxy-fixture --ignored --exact capability_unit_proxy_fixture --nocapture
+fi
+"#,
+            common::CONNECTOR_SCRIPT
+        );
+        std::fs::write(dir.join("connector/orch-connector"), script).unwrap();
+    })
+    .await
+    .expect("the confinement case needs a real Docker daemon");
+    assert!(
+        lab.driver.facts().restricted_egress,
+        "this runner must prove its restricted network instead of skipping confinement"
+    );
+    lab.have("ubuntu:24.04").await;
+    lab
+}
+
+#[tokio::test]
+#[ignore = "the real proxy entrypoint is invoked only inside the sidecar of its confinement case"]
+async fn capability_unit_proxy_fixture() {
+    let dir =
+        std::env::var("ORCH_WORK_PROXY_DIR").expect("this entrypoint needs its sidecar directory");
+    let listen = std::env::var("ORCH_WORK_PROXY_LISTEN")
+        .unwrap()
+        .parse()
+        .unwrap();
+    orch_driver_docker::egress::program::run(
+        orch_driver_docker::egress::program::Options {
+            host_inventory: true,
+            dir: dir.into(),
+            listen,
+        },
+        std::sync::Arc::new(orch_types::SystemClock),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_refused_proxy_leaves_no_private_networks_or_unit_for_its_work() {
+    use orch_driver_contract::work::WorkUnitSpec;
+    use orch_types::{Time, new_id};
+    let lab = Lab::with(|config, dir| {
+        config.egress.dir = Some(dir.join("egress"));
+        config.egress.proxy_image = Some("orch-no-such-work-proxy:unavailable".into());
+    })
+    .await
+    .expect("the rollback case needs a real Docker daemon");
+    assert!(lab.driver.facts().restricted_egress);
+    let source = lab.request("provider", "proxy-preparation-source", |_| {});
+    let provider = lab.run(&source).await;
+    let spec = WorkUnitSpec {
+        work: new_id(),
+        provider,
+        template: source.spec.clone(),
+        tools: source.tools.clone(),
+        endpoints: vec![],
+        files: vec![],
+        deadline: Time::new(chrono::Utc::now() + chrono::Duration::minutes(5)),
+    };
+    lab.track_work(spec.work);
+    assert!(lab.driver.create_work(&spec).await.is_err());
+    let name = format!("orch-work-{}", spec.work.simple());
+    assert!(!lab.has_container(&name).await);
+    assert!(!lab.has_container(&format!("{name}-proxy")).await);
+    assert!(!lab.has_network(&format!("{name}-net")).await);
+    assert!(!lab.has_network(&format!("{name}-out")).await);
+    assert!(
+        lab.has_container(&spec.provider.name).await,
+        "refusing a helper never removes its provider"
+    );
+}

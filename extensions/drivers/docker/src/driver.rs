@@ -404,6 +404,13 @@ impl EnvironmentDriver for DockerDriver {
         Ok(())
     }
 
+    async fn create_work(
+        &self,
+        spec: &orch_driver_contract::work::WorkUnitSpec,
+    ) -> Result<UnitRef, DriverError> {
+        self.create_work_unit(spec).await
+    }
+
     async fn create(&self, spec: &RuntimeSpec) -> Result<UnitRef, DriverError> {
         self.create_unit(spec).await
     }
