@@ -515,6 +515,8 @@ async fn image_delivery(
             .await;
     }
     let thread = world.thread("Image by path").await;
+    world.machine.handler.hold(CommandKind::TurnStart);
+    world.machine.handler.hold(CommandKind::TurnStartFenced);
     let submitted = world
         .engine()
         .submit_input(
@@ -536,10 +538,70 @@ async fn image_delivery(
         .await
         .unwrap();
     let start = world.turn_start(thread, 0).await;
+    let pending = orch_db::queries::threads::input(
+        &mut world.pool.acquire().await.unwrap(),
+        submitted.input.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        pending.native_image_delivery.is_some(),
+        "the admitted policy is retained privately"
+    );
+    assert!(
+        pending.delivered_at.is_none(),
+        "the held native command has not confirmed delivery"
+    );
+    let projected =
+        orch_engine::views::input_view(&pending, &orch_engine::views::People::default()).unwrap();
+    assert!(
+        projected.native_image_delivery.is_none(),
+        "an admitted queued command does not claim to have sent the image"
+    );
+    world.machine.handler.release();
+
     assert_eq!(
         start.images.len(),
         native_count,
         "native images need both program and model support and the effective byte budget"
+    );
+    let before: serde_json::Value = world
+        .scalar(
+            "SELECT to_jsonb(i) FROM thread_inputs i WHERE id=$1",
+            submitted.input.id,
+        )
+        .await;
+    assert_eq!(
+        before["native_image_delivery"][0]["applied_delivery"],
+        if native_count == 1 { "native" } else { "path" }
+    );
+    if let Some(limit) = limit {
+        assert_eq!(
+            before["native_image_delivery"][0]["native_image_bytes"],
+            limit
+        );
+        assert_eq!(
+            before["native_image_delivery"][0]["allowance_exceeded"],
+            program_native && model_native && limit > 0 && limit < 15
+        );
+    }
+    world
+        .set(
+            world.topic,
+            "files.native_image_bytes",
+            serde_json::json!(0),
+        )
+        .await;
+    let after: serde_json::Value = world
+        .scalar(
+            "SELECT to_jsonb(i) FROM thread_inputs i WHERE id=$1",
+            submitted.input.id,
+        )
+        .await;
+    assert_eq!(
+        before["native_image_delivery"], after["native_image_delivery"],
+        "a later image default does not rewrite an admitted command's image delivery"
     );
     for image in &start.images {
         assert!(
@@ -562,6 +624,84 @@ async fn image_delivery(
     assert_eq!(writes.all().len(), 1);
     let list = files.list(&writes.all()[0].manifest_blob).await;
     assert_eq!(list.get("attachments/shot.png").unwrap().hash, Some(png));
+    let recorded = orch_db::queries::threads::input(
+        &mut world.pool.acquire().await.unwrap(),
+        submitted.input.id,
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .native_image_delivery
+    .unwrap();
+    assert_eq!(
+        recorded[0]["applied_delivery"],
+        if native_count == 1 { "native" } else { "path" }
+    );
+    if let Some(limit) = limit {
+        world
+            .set(
+                world.topic,
+                "files.native_image_bytes",
+                serde_json::json!(limit + 1000),
+            )
+            .await;
+        let later = orch_db::queries::threads::input(
+            &mut world.pool.acquire().await.unwrap(),
+            submitted.input.id,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .native_image_delivery
+        .unwrap();
+        assert_eq!(
+            later, recorded,
+            "a later allowance edit cannot rewrite the admitted command's delivery receipt"
+        );
+        assert_eq!(later[0]["native_image_bytes"], limit);
+        assert_eq!(later[0]["source_record"]["scope"], "topic");
+        assert_eq!(
+            later[0]["source_record"]["node"],
+            serde_json::json!(world.topic)
+        );
+        assert_eq!(
+            later[0]["allowance_exceeded"],
+            program_native && model_native && limit > 0 && limit < 15
+        );
+    }
+
+    world.say(thread, common::turn_began(start.turn_id)).await;
+    eventually("the confirmed image route", || async {
+        orch_db::queries::threads::input(
+            &mut world.pool.acquire().await.unwrap(),
+            submitted.input.id,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .delivered_at
+        .is_some()
+    })
+    .await;
+    let delivered = orch_db::queries::threads::input(
+        &mut world.pool.acquire().await.unwrap(),
+        submitted.input.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let projected =
+        orch_engine::views::input_view(&delivered, &orch_engine::views::People::default()).unwrap();
+    assert_eq!(
+        serde_json::to_value(projected.native_image_delivery.unwrap()).unwrap(),
+        serde_json::to_value(
+            serde_json::from_value::<Vec<orch_api_contract::threads::NativeImageReceipt>>(
+                recorded.clone()
+            )
+            .unwrap()
+        )
+        .unwrap()
+    );
     assert_eq!(world.count("SELECT jsonb_array_length(attachment_issues)::bigint FROM thread_inputs WHERE id=$1", submitted.input.id).await, 0);
 }
 

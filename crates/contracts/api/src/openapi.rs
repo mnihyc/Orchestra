@@ -107,6 +107,8 @@ fn render(
     let problem = generator.subschema_for::<Problem>();
     // A job's generic result carries these cleanup receipts outside a route reply schema.
     let _cleanup_outcome = generator.subschema_for::<crate::storage::CleanupOutcome>();
+    // Raw preview replies carry the same typed refusal facts as other file surfaces.
+    let _preview_allowance = generator.subschema_for::<crate::workspace::PreviewAllowance>();
     let mut operations: Vec<(Route, Value)> = Vec::new();
     for route in routes {
         let declared = crate::operations::for_route(route).unwrap_or_else(|error| {

@@ -482,6 +482,7 @@ async fn a_setting_that_is_locked_decides_for_every_org_below_until_the_lock_is_
         .call(NodeSettingSet, &[&c.acme, &"retention.archive_idle_days"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(48),
             locked: None,
             expected_revision: None,
@@ -505,6 +506,7 @@ async fn a_setting_that_is_locked_decides_for_every_org_below_until_the_lock_is_
         .call(NodeSettingSet, &[&c.acme, &"retention.archive_idle_days"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(48),
             locked: None,
             expected_revision: None,

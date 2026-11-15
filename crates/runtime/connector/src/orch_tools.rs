@@ -124,11 +124,6 @@ const REQUEST_MAX_BYTES: usize = 1024 * 1024;
 
 /// Complete default answers fit the ordinary native result budgets, including their metadata.
 const ANSWER_BYTES_DEFAULT: usize = 20_000;
-/// A complete answer stays below the native saved-file threshold even in ASCII.
-const ANSWER_BYTES_MAX: usize = 40_000;
-/// Leave room for a header, one useful part and a continuation instruction.
-const ANSWER_BYTES_MIN: usize = 1_000;
-
 /// The versions of the protocol the server speaks, newest first. A client asks for one; the server answers with
 /// it if it knows it and with the newest otherwise, and the client goes on or goes away.
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
@@ -295,7 +290,7 @@ impl OrchCalls {
         if let Some(ledger) = &self.ledger {
             ledger.try_keep_retained_calls(retained).map_err(|error| {
                 tracing::error!(%error,"the own-tool replay identity could not be retained");
-                ToolError {code:"unavailable".into(),message:"The connector could not retain this call's identity. Nothing new was submitted. Check free space and write access in its data directory, then retry.".into()}
+                ToolError { rate_limit: None,code:"unavailable".into(),message:"The connector could not retain this call's identity. Nothing new was submitted. Check free space and write access in its data directory, then retry.".into()}
             })?;
         }
         Ok(())
@@ -344,7 +339,7 @@ impl OrchCalls {
                     && call.tool == key.tool
                     && call.arguments_hash == key.arguments_hash
             }) {
-                return (key,Begun::Answered(Err(ToolError {code:"source_unconfirmed".into(),
+                return (key,Begun::Answered(Err(ToolError { rate_limit: None,code:"source_unconfirmed".into(),
                     message:"A retained call has no recorded native source. Its result or effect cannot be assigned to this turn. Nothing new was submitted. Inspect the target before repeating the operation after that record expires.".into()})),None);
             }
             let call_ref = format!("{CALL_PREFIX}{}", new_id());
@@ -379,6 +374,7 @@ impl OrchCalls {
             return (
                 key,
                 Begun::Answered(Err(ToolError {
+                    rate_limit: None,
                     code: "unavailable".into(),
                     message: "The connector did not admit this call. Nothing new was submitted."
                         .into(),
@@ -515,6 +511,18 @@ impl OrchCalls {
 pub struct OrchEndpoint {
     hosting: Arc<Hosting>,
     wait: Duration,
+}
+
+fn apply_answer_default(arguments: &mut Json, schema: Option<&Json>) {
+    if let Some(arguments) = arguments.as_object_mut()
+        && !arguments.contains_key("max_bytes")
+        && let Some(bytes) = schema
+            .and_then(|schema| schema.pointer("/properties/max_bytes/default"))
+            .and_then(Json::as_u64)
+            .filter(|bytes| *bytes > 0)
+    {
+        arguments.insert("max_bytes".to_owned(), json!(bytes));
+    }
 }
 
 impl OrchEndpoint {
@@ -1056,6 +1064,7 @@ fn result_of_at(tool: &str, arguments: &Json, outcome: Result<Json, ToolError>, 
                         tool,
                         arguments,
                         Err(ToolError {
+                            rate_limit: None,
                             code: "too_large".into(),
                             message: message.into(),
                         }),
@@ -1067,8 +1076,7 @@ fn result_of_at(tool: &str, arguments: &Json, outcome: Result<Json, ToolError>, 
                 let budget = arguments["max_bytes"]
                     .as_u64()
                     .and_then(|bytes| usize::try_from(bytes).ok())
-                    .unwrap_or(ANSWER_BYTES_DEFAULT)
-                    .min(ANSWER_BYTES_MAX);
+                    .unwrap_or(ANSWER_BYTES_DEFAULT);
                 let ids = arguments["ids"].as_bool().unwrap_or(false);
                 let text = match tool {
                     "list_shared" => listing_text(&value, arguments, ids, now, budget),
@@ -1086,6 +1094,7 @@ fn result_of_at(tool: &str, arguments: &Json, outcome: Result<Json, ToolError>, 
                         tool,
                         arguments,
                         Err(ToolError {
+                            rate_limit: None,
                             code: "too_large".to_owned(),
                             message: message.to_owned(),
                         }),
@@ -1093,6 +1102,10 @@ fn result_of_at(tool: &str, arguments: &Json, outcome: Result<Json, ToolError>, 
                     ),
                 }
             }
+        }
+        Err(refusal) if refusal.rate_limit.is_some() => {
+            let shown = json!({"error":refusal});
+            json!({"content":[{"type":"text","text":shown.to_string()}],"structuredContent":shown,"isError":true})
         }
         Err(refusal) => json!({
             "content": [{ "type": "text", "text": bounded_error(&refusal.code, &refusal.message, orch_agent_contract::tool_answers::max_bytes(arguments)) }],
@@ -1216,22 +1229,23 @@ impl OrchEndpoint {
         else {
             return failure(id, INVALID_PARAMS, &format!("unknown tool: {name}"));
         };
-        let arguments = params
+        let mut arguments = params
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        apply_answer_default(&mut arguments, self.listed_of(session).2.get(name));
         if arguments.get("max_bytes").is_some_and(|bytes| {
             !bytes
                 .as_u64()
                 .and_then(|bytes| usize::try_from(bytes).ok())
-                .is_some_and(|bytes| (ANSWER_BYTES_MIN..=ANSWER_BYTES_MAX).contains(&bytes))
+                .is_some_and(|bytes| bytes > 0)
         }) {
-            return json!({"jsonrpc":"2.0","id":id,"result":self.result_of(name,&arguments,Err(ToolError {code:"invalid".to_owned(),message:"max_bytes is an integer from 1000 to 40000; no call was made.".to_owned()}))});
+            return json!({"jsonrpc":"2.0","id":id,"result":self.result_of(name,&arguments,Err(ToolError { rate_limit: None,code:"invalid".to_owned(),message:"max_bytes is a positive integer; no call was made.".to_owned()}))});
         }
         let thread = session.thread_id;
         let current = self.native_source(session);
         let Some(source) = received.filter(|source| current == Some(*source)) else {
-            return json!({ "jsonrpc": "2.0", "id": id, "result": self.result_of(name, &arguments, Err(ToolError {
+            return json!({ "jsonrpc": "2.0", "id": id, "result": self.result_of(name, &arguments, Err(ToolError { rate_limit: None,
                 code: if received.is_some() {"changed"} else {"invalid"}.to_owned(),
                 message: if received.is_some() {
                     "The native turn that admitted this request changed or ended before it could be submitted. Nothing new was submitted."
@@ -1254,7 +1268,7 @@ impl OrchEndpoint {
         };
         let Some(answer) = answer else {
             return json!({ "jsonrpc": "2.0", "id": id, "result": self.result_of(name, &arguments,
-                Err(ToolError {code:"unavailable".into(),message:"The connector could not register this call's answer. Nothing new was submitted.".into()})) });
+                Err(ToolError { rate_limit: None,code:"unavailable".into(),message:"The connector could not register this call's answer. Nothing new was submitted.".into()})) });
         };
         // begin registers the exact-source waiter before exposing the reference to any answer.
         if !carry {
@@ -1306,6 +1320,7 @@ impl OrchEndpoint {
 
 fn unreachable_error(tool: &str) -> ToolError {
     ToolError {
+        rate_limit: None,
         code: "unavailable".to_owned(),
         message: if matches!(
             tool,
@@ -1398,6 +1413,17 @@ mod tests {
             outcome,
             "2026-10-15T12:00:00Z".parse().unwrap(),
         )
+    }
+
+    #[test]
+    fn the_advertised_answer_default_is_used_when_omitted_and_an_explicit_window_wins() {
+        let schema = json!({"properties":{"max_bytes":{"default":80000}}});
+        let mut omitted = json!({"path":"code"});
+        apply_answer_default(&mut omitted, Some(&schema));
+        assert_eq!(omitted["max_bytes"], 80000);
+        let mut explicit = json!({"max_bytes":120000});
+        apply_answer_default(&mut explicit, Some(&schema));
+        assert_eq!(explicit["max_bytes"], 120000);
     }
 
     #[test]
@@ -1688,23 +1714,16 @@ mod tests {
     #[test]
     fn tools_answer_budget_keeps_whole_utf8_lines_and_useful_continuation() {
         let text = "中文🦀\n".repeat(10_000);
-        for budget in [ANSWER_BYTES_MIN, ANSWER_BYTES_DEFAULT, ANSWER_BYTES_MAX] {
+        for budget in [1_000, ANSWER_BYTES_DEFAULT, 80_000] {
             let result = result_of("read_shared", &json!({"max_bytes":budget}), Ok(json!(text)));
             let shown = result["content"][0]["text"].as_str().unwrap();
             assert!(shown.len() <= budget);
             assert!(shown.starts_with("中文🦀\n"));
             assert!(shown.ends_with("or use download_shared for the whole entry."));
         }
-        let text = "x".repeat(ANSWER_BYTES_MAX);
-        let result = result_of(
-            "read_shared",
-            &json!({"max_bytes":ANSWER_BYTES_MAX}),
-            Ok(json!(text)),
-        );
-        assert_eq!(
-            result["content"][0]["text"].as_str().unwrap().len(),
-            ANSWER_BYTES_MAX
-        );
+        let text = "x".repeat(80_000);
+        let result = result_of("read_shared", &json!({"max_bytes":80_000}), Ok(json!(text)));
+        assert_eq!(result["content"][0]["text"].as_str().unwrap().len(), 80_000);
     }
 
     #[test]
@@ -1741,6 +1760,7 @@ mod tests {
             "edit_document",
             &json!({"max_bytes":1000}),
             Err(ToolError {
+                rate_limit: None,
                 code: "changed".to_owned(),
                 message,
             }),
@@ -1871,11 +1891,30 @@ mod tests {
     }
 
     #[test]
+    fn a_rate_refusal_carries_the_same_recorded_facts_in_native_text_and_structured_output() {
+        let refusal = json!({"code":"rate_limited","message":"Wait before retrying","rate_limit":{
+            "allowed_calls":2,"period_secs":60,"retry_at":"2026-11-15T00:01:00Z","observed_at":"2026-11-15T00:00:00Z",
+            "source":{"scope":"default","node":null}
+        }});
+        let answer = result_of(
+            "announce",
+            &json!({}),
+            Err(serde_json::from_value(refusal.clone()).unwrap()),
+        );
+        assert_eq!(answer["isError"], true);
+        assert_eq!(answer["structuredContent"]["error"], refusal);
+        let text: Json =
+            serde_json::from_str(answer["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text, answer["structuredContent"]);
+    }
+
+    #[test]
     fn a_refusal_is_a_result_marked_as_an_error_whose_text_begins_with_its_code() {
         let refusal = result_of(
             "edit_document",
             &json!({}),
             Err(ToolError {
+                rate_limit: None,
                 code: "rate_limited".to_owned(),
                 message: "Wait 12 seconds.".to_owned(),
             }),

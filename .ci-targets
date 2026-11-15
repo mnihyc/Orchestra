@@ -1,0 +1,8 @@
+fmt
+clippy
+test -p orch-engine --test orch_tools --test delivery
+test -p orch-api-core --test threads_settings
+test -p orch-api-core --test binding_options
+test -p orch-api-core --test provider_recovery
+test -p orch-api-core --test provider_harness
+test -p orch-api-core --test call_recovery
