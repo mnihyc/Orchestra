@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-engine --lib -- views::
+test -p orch-engine --test background_wake --test background_stop --test background_wake_native
+test -p orch-api-core --test background_wake_reads --test threads_read --test threads_settings

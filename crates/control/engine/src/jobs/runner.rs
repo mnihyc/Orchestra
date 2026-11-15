@@ -254,7 +254,6 @@ fn persistence_column(value: &str) -> Option<&'static str> {
         "error",
         "execution_revision",
         "executor",
-        "files_end_manifest",
         "id",
         "import_fidelity",
         "import_report",
@@ -1353,7 +1352,27 @@ impl Job {
                 continue;
             }
             return match ended {
-                Ended::Succeeded(result) => Ok(result),
+                Ended::Succeeded(result) => {
+                    if matches!(
+                        command.kind,
+                        CommandKind::NodeRuntimeCreate | CommandKind::NodeMountsApply
+                    ) {
+                        let mut conn = self
+                            .engine
+                            .db()
+                            .acquire()
+                            .await
+                            .map_err(EngineError::from)?;
+                        crate::resource_facts::applications::inputs::record_command(
+                            &mut conn,
+                            &command,
+                            &result,
+                            self.now(),
+                        )
+                        .await?;
+                    }
+                    Ok(result)
+                }
                 Ended::Failed(error) => Err(Stop::Failed(
                     Failure::new(error.code, error.detail).answered(),
                 )),

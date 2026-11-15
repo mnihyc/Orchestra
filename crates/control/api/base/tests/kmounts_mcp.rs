@@ -816,6 +816,7 @@ async fn imports_and_reimports_store_only_safe_origin_and_forgetting_removes_the
     .await
     .unwrap();
     let body = EnvironmentMcpImportCreateBody {
+        origin: None,
         source: "codex".into(),
         scope: McpScope::User,
         name: "search".into(),
@@ -915,6 +916,7 @@ async fn imports_and_reimports_store_only_safe_origin_and_forgetting_removes_the
     assert_eq!(overridden, Some(world.now()));
     assert!(reimported.revision > imported.revision);
     let project = EnvironmentMcpImportCreateBody {
+        origin: None,
         source: "codex".into(),
         scope: McpScope::Project,
         name: "folder-tool".into(),
@@ -977,7 +979,11 @@ async fn imports_and_reimports_store_only_safe_origin_and_forgetting_removes_the
         .send()
         .await
         .ok();
-    assert!(hidden.found.is_empty());
+    assert_eq!(
+        hidden.found.len(),
+        found.as_array().unwrap().len(),
+        "import restrictions do not hide the program's own native definitions"
+    );
     assert!(!hidden.import.allowed);
     assert_eq!(
         world
@@ -1057,6 +1063,7 @@ async fn selecting_a_different_found_definition_needs_both_server_management_and
         .call(EnvironmentMcpImportCreate, &[&first])
         .token(&c.admin.token)
         .body(&EnvironmentMcpImportCreateBody {
+            origin: None,
             source: "codex".into(),
             scope: McpScope::User,
             name: "same-name".into(),
@@ -1215,4 +1222,193 @@ async fn selecting_a_different_found_definition_needs_both_server_management_and
     );
     let audit:Json=sqlx::query_scalar("SELECT details FROM audit_log WHERE action='mcp.imported' AND object_id=$1 ORDER BY at DESC,id DESC LIMIT 1").bind(selected.id).fetch_one(&world.db.pool).await.unwrap();
     assert_eq!(audit["definition_after"], json!(different));
+}
+
+#[tokio::test]
+async fn a_threads_native_connections_are_visible_before_import_without_borrowing_another_lane() {
+    let world = World::new().await;
+    let c = company(&world).await;
+    let (env, _) = environment(&world, &c, true).await;
+    let project = places::make_project(&world, &c.admin, c.acme, "Native tools").await;
+    let topic = places::make_topic(&world, &c.admin, project.base.id, "Tool work").await;
+    let thread = orch_types::new_id();
+    let segment = orch_types::new_id();
+    let old_segment = orch_types::new_id();
+    let mut conn = world.conn().await;
+    assert!(
+        orch_db::queries::threads::insert_thread(
+            &mut conn,
+            thread,
+            topic.base.id,
+            "Own native tools",
+            c.admin.id(),
+            world.now()
+        )
+        .await
+        .unwrap()
+    );
+    let provider = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut conn,
+        "provider",
+        Some(c.admin.id()),
+        Some(c.acme),
+        "Native tools provider",
+    )
+    .await
+    .unwrap();
+    let agent = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut conn,
+        "agent",
+        Some(c.admin.id()),
+        Some(c.acme),
+        "Native tools program",
+    )
+    .await
+    .unwrap();
+    let other_agent = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut conn,
+        "agent",
+        Some(c.admin.id()),
+        Some(c.acme),
+        "Another native home",
+    )
+    .await
+    .unwrap();
+    for id in [agent, other_agent] {
+        orch_authz::ownership::start_resource(
+            &mut conn,
+            orch_access_contract::decisions::ObjectRef {
+                kind: orch_access_contract::permissions::ObjectKind::Agent,
+                id,
+            },
+            c.admin.id(),
+            orch_authz::ownership::NewAccess::OnlyMe,
+            orch_types::Time::new(world.now()),
+        )
+        .await
+        .unwrap();
+    }
+    sqlx::query("UPDATE agents SET harness_kind='codex' WHERE id=$1")
+        .bind(agent)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    for (id, ordinal) in [(old_segment, 1), (segment, 2)] {
+        sqlx::query("INSERT INTO segments(id,thread_id,ordinal,agent_id,provider_id,environment_id,env_generation,arrangement,credential_path,seq_updated,continuation_id) SELECT $1,$2,$3,$4,$5,$6,1,'together','native',1,active_continuation_id FROM threads WHERE node_id=$2")
+            .bind(id).bind(thread).bind(ordinal).bind(agent).bind(provider).bind(env).execute(&mut *conn).await.unwrap();
+    }
+    sqlx::query("UPDATE threads SET environment_id=$2,current_segment_id=$3,agent_id=$4,provider_id=$5,arrangement='together' WHERE node_id=$1").bind(thread).bind(env).bind(segment).bind(agent).bind(provider).execute(&mut *conn).await.unwrap();
+    let native = json!([
+        {"source":"codex","scope":"user","name":"docs","directory":null,"transport":"stdio","digest":"another-native-home","profile":{"provider_id":provider,"agent_id":other_agent}},
+        {"source":"codex","scope":"user","name":"docs","directory":null,"transport":"stdio","digest":"unchanged-native-definition","profile":{"provider_id":provider,"agent_id":agent}},
+        {"source":"codex","scope":"directory","name":"docs","directory":"sibling","transport":"stdio","digest":"another-directories-definition","profile":{"provider_id":provider,"agent_id":agent}},
+        {"source":"claude-code","scope":"user","name":"other-program","directory":null,"transport":"stdio","digest":"another-programs-definition"}
+    ]);
+    sqlx::query(
+        "UPDATE environments SET facts=jsonb_set(facts,'{mcp_found}',$2::jsonb) WHERE id=$1",
+    )
+    .bind(env)
+    .bind(&native)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    let epoch = orch_types::new_id();
+    let configured = json!({"marker":"harness_changed","data":{"program":"Codex","change":"mcp_configuration","value":{"epoch":epoch,"servers":[{"name":"docs","definition_source":"native"}]}}});
+    sqlx::query("INSERT INTO items(id,thread_id,segment_id,kind,status,payload,native_ref,seq_created,seq_updated,continuation_id) SELECT $1,$2,$3,'marker','completed',$4,$1::text,1,1,active_continuation_id FROM threads WHERE node_id=$2")
+        .bind(orch_types::new_id()).bind(thread).bind(segment).bind(configured).execute(&mut *conn).await.unwrap();
+    for (owner, stream, seq, status) in [
+        (segment, "main", 2_i64, "ready"),
+        (old_segment, "main", 3, "failed"),
+        (segment, "child", 4, "failed"),
+    ] {
+        let payload = json!({"marker":"harness_changed","data":{"program":"Codex","change":"mcp_startup","subject":"docs","value":{"epoch":epoch,"status":status,"definition_source":"native"}}});
+        sqlx::query("INSERT INTO items(id,thread_id,segment_id,stream,kind,status,payload,native_ref,seq_created,seq_updated,continuation_id) SELECT $1,$2,$3,$4,'marker','completed',$5,$1::text,$6,$6,active_continuation_id FROM threads WHERE node_id=$2")
+            .bind(orch_types::new_id()).bind(thread).bind(owner).bind(stream).bind(payload).bind(seq).execute(&mut *conn).await.unwrap();
+    }
+    drop(conn);
+    let query = EnvironmentMcpGetQuery {
+        thread_id: Some(thread),
+    };
+    let connections = world
+        .app
+        .call(EnvironmentMcpGet, &[&env])
+        .token(&c.admin.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert!(connections.servers.is_empty());
+    assert_eq!(connections.found.len(), 1);
+    assert_eq!(connections.found[0].imported, None);
+    assert_eq!(
+        connections.found[0]
+            .profile
+            .as_ref()
+            .map(|profile| profile.id),
+        Some(agent)
+    );
+    assert!(connections.found[0].origin.is_some());
+    assert_eq!(connections.found[0].state, Some(McpState::Running));
+    assert_eq!(
+        connections.found[0].using,
+        Some(McpDefinitionSource::Native)
+    );
+    let unscoped = world
+        .app
+        .call(EnvironmentMcpGet, &[&env])
+        .token(&c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        unscoped.found[0].state, None,
+        "machine Tools does not borrow a thread's runtime state"
+    );
+    assert_ne!(
+        connections.found[0].origin, unscoped.found[0].origin,
+        "same names in different native homes keep separate import identities"
+    );
+    let next_epoch = orch_types::new_id();
+    let configured = json!({"marker":"harness_changed","data":{"program":"Codex","change":"mcp_configuration","value":{"epoch":next_epoch,"servers":[{"name":"docs","definition_source":"native"}]}}});
+    sqlx::query("INSERT INTO items(id,thread_id,segment_id,kind,status,payload,native_ref,seq_created,seq_updated,continuation_id) SELECT $1,$2,$3,'marker','completed',$4,$1::text,5,5,active_continuation_id FROM threads WHERE node_id=$2")
+        .bind(orch_types::new_id()).bind(thread).bind(segment).bind(configured).execute(&world.db.pool).await.unwrap();
+    let restarted = world
+        .app
+        .call(EnvironmentMcpGet, &[&env])
+        .token(&c.admin.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        restarted.found[0].state, None,
+        "a new opening never reuses an older process's ready report"
+    );
+    let unchanged: Json =
+        sqlx::query_scalar("SELECT facts->'mcp_found' FROM environments WHERE id=$1")
+            .bind(env)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(unchanged, native);
+    name_person(
+        &world,
+        "environment",
+        env,
+        "environment.view",
+        c.stranger.id(),
+    )
+    .await;
+    assert_eq!(
+        world
+            .app
+            .call(EnvironmentMcpGet, &[&env])
+            .token(&c.stranger.token)
+            .query(&query)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::AuthzDenied
+    );
 }

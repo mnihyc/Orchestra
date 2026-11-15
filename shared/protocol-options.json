@@ -1064,6 +1064,137 @@
         "tools": false,
         "stream": false
       }
+    },
+    "google-interactions": {
+      "title": "Google Gemini Interactions",
+      "kind": "generation",
+      "generation": {
+        "tools": true,
+        "stream": true
+      },
+      "owned_fields": [
+        "system_instruction",
+        "previous_interaction_id",
+        "continuation_token",
+        "agent",
+        "agent_config",
+        "environment",
+        "environment_id"
+      ],
+      "owned_paths": [
+        "/generation_config/max_output_tokens",
+        "/generation_config/tool_choice"
+      ],
+      "web_search": {
+        "paths": [
+          "/interactions"
+        ],
+        "tool": {
+          "type": "google_search"
+        },
+        "identities": [
+          {
+            "type": "google_search"
+          }
+        ],
+        "modes": {
+          "disabled": {},
+          "live": {}
+        },
+        "options_schema": {
+          "type": "object",
+          "properties": {
+            "search_types": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "web_search",
+                  "image_search"
+                ]
+              },
+              "uniqueItems": true
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "native_tools": {
+        "web_search": {
+          "input_schema": {
+            "type": "object",
+            "required": [
+              "query"
+            ],
+            "properties": {
+              "query": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          },
+          "auxiliary": {
+            "prompt": {
+              "from_input": "/query"
+            },
+            "options": {
+              "web_search": {
+                "mode": "live",
+                "search_types": [
+                  "web_search"
+                ]
+              }
+            }
+          },
+          "result": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "steps"
+              ],
+              "properties": {
+                "steps": {
+                  "type": "array"
+                }
+              }
+            },
+            "unique_by": "/url",
+            "collections": [
+              {
+                "pointer": "/steps/*/result/*",
+                "optional": true,
+                "when": {
+                  "type": "object",
+                  "required": [
+                    "url"
+                  ],
+                  "properties": {
+                    "url": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "item": {
+                  "title": {
+                    "from_result": [
+                      "/title",
+                      "/url"
+                    ]
+                  },
+                  "url": {
+                    "from_result": "/url"
+                  },
+                  "snippet": {
+                    "from_result": "/snippet",
+                    "optional": true
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
     }
   },
   "harnesses": {
