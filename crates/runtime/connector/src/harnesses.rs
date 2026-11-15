@@ -291,6 +291,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 // A process
 
 struct OpenSession {
+    opening_id: Id,
+    opening_epoch: i64,
     segment_id: Id,
     native_session_ref: String,
     continuation_fenced: bool,
@@ -376,7 +378,7 @@ struct State {
 struct Context {
     services: Arc<Services>,
     ledger: Arc<Ledger>,
-    threads: Mutex<HashMap<ThreadId, Key>>,
+    threads: Mutex<HashMap<ThreadId, (Key, Id)>>,
     restarts: u32,
     window: Duration,
 }
@@ -574,17 +576,37 @@ impl Process {
             .map(|session| session.native_session_ref.clone())
     }
 
-    /// Runs one call of the adapter. Calls are one at a time: the adapter is `&mut`.
+    /// Runs one call of the actual process, without borrowing its replacement after waiting for the adapter.
     pub async fn call<R>(
         &self,
         work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
     ) -> Result<R, CommandError> {
-        if self.state().status != HarnessState::Online {
+        self.call_at(self.generation(), work).await
+    }
+
+    fn serves_generation(&self, generation: u64) -> bool {
+        self.generation() == generation
+            && !self.stopping.load(Ordering::SeqCst)
+            && self.state().status == HarnessState::Online
+    }
+
+    /// Executes only on the captured process generation, including after the adapter's queue wait.
+    pub async fn call_at<R>(
+        &self,
+        generation: u64,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<R, CommandError> {
+        if !self.serves_generation(generation) {
             return Err(unavailable(
-                "the harness process is not running; it is being started again, or gave up",
+                "the native process changed before this call could begin",
             ));
         }
         let mut adapter = self.adapter.lock().await;
+        if !self.serves_generation(generation) {
+            return Err(unavailable(
+                "the native process changed while this call was waiting",
+            ));
+        }
         work(adapter.as_mut())
             .await
             .map_err(|error| command_error(&error))
@@ -714,11 +736,35 @@ impl Process {
         }
     }
 
+    /// The actual process generation a native call is about to use.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
     /// A session opened in the adapter: it is kept, in the process and on disk.
-    pub fn session_opened(&self, binding: &SessionBinding, native_session_ref: &str) {
-        self.state().sessions.insert(
+    pub fn session_opened(
+        &self,
+        binding: &SessionBinding,
+        opening_id: Id,
+        opening_epoch: i64,
+        generation: u64,
+        native_session_ref: &str,
+    ) -> Result<(), CommandError> {
+        let mut state = self.state();
+        if generation != self.generation()
+            || self.stopping.load(Ordering::SeqCst)
+            || state.status != HarnessState::Online
+        {
+            return Err(unavailable(
+                "the process that opened this session has already ended",
+            ));
+        }
+        state.sessions.insert(
             binding.thread_id,
             OpenSession {
+                opening_id,
+                opening_epoch,
                 segment_id: binding.segment_id,
                 native_session_ref: native_session_ref.to_owned(),
                 continuation_fenced: false,
@@ -728,27 +774,184 @@ impl Process {
                 awaiting_native: false,
             },
         );
-        lock(&self.ctx.threads).insert(binding.thread_id, self.key());
+        lock(&self.ctx.threads).insert(binding.thread_id, (self.key(), opening_id));
         self.ctx.ledger.session_opened(
             self.provider_id,
             self.agent_id,
             HostedSession {
+                opening_id,
                 thread_id: binding.thread_id,
                 segment_id: binding.segment_id,
                 native_session_ref: native_session_ref.to_owned(),
                 running_turn: None,
             },
         );
+        Ok(())
+    }
+
+    /// The exact physical slot, captured before an operation waits elsewhere.
+    #[must_use]
+    pub fn session_target(
+        &self,
+        thread: ThreadId,
+    ) -> Option<orch_link_contract::commands::SessionTarget> {
+        self.state().sessions.get(&thread).map(|session| {
+            orch_link_contract::commands::SessionTarget {
+                thread_id: thread,
+                segment_id: Some(session.segment_id),
+                opening_id: Some(session.opening_id),
+                opening_epoch: Some(session.opening_epoch),
+            }
+        })
+    }
+
+    /// Rechecks a physical pin after the adapter queue; an absent or superseded close is a no-op.
+    pub async fn call_session<R>(
+        &self,
+        target: &orch_link_contract::commands::SessionTarget,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<Option<R>, CommandError> {
+        if target.opening_id.is_none() {
+            return Ok(None);
+        }
+        let generation = self.generation();
+        let mut adapter = self.adapter.lock().await;
+        if !self.serves_generation(generation)
+            || self.session_target(target.thread_id).as_ref() != Some(target)
+        {
+            return Ok(None);
+        }
+        work(adapter.as_mut())
+            .await
+            .map(Some)
+            .map_err(|error| command_error(&error))
+    }
+
+    /// Applies a session operation only to its accepted physical slot after the adapter queue.
+    pub async fn call_target<R>(
+        &self,
+        context: &orch_link::commands::CommandContext,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<R, CommandError> {
+        let Some(orch_link_contract::commands::NativeTarget::Session(target)) =
+            context.native_target.as_ref()
+        else {
+            return Err(unavailable("the command has no captured native session"));
+        };
+        let generation = self.generation();
+        let mut adapter = self.adapter.lock().await;
+        if !self.serves_generation(generation)
+            || self.session_target(target.thread_id).as_ref() != Some(target)
+        {
+            return Err(CommandError::new(
+                ErrorCode::SessionNotFound,
+                "the captured physical session ended while this call was waiting",
+            ));
+        }
+        let fences = context
+            .native_fences
+            .clone()
+            .ok_or_else(|| unavailable("the native ordering store is unavailable"))?;
+        let target = target.clone();
+        let captured = target.clone();
+        let live = tokio::task::spawn_blocking(move || {
+            fences.observe_session(
+                &target,
+                orch_link_contract::native_target::SessionAction::Use,
+            )
+        })
+        .await
+        .map_err(|_| unavailable("the native ordering check failed"))?
+        .map_err(|_| unavailable("the native ordering marker cannot be read"))?;
+        if !live
+            || !self.serves_generation(generation)
+            || self.session_target(captured.thread_id).as_ref() != Some(&captured)
+            || context.cancel.is_cancelled()
+        {
+            return Err(CommandError::new(
+                ErrorCode::SessionNotFound,
+                "the captured physical session was retired while this call was waiting",
+            ));
+        }
+        work(adapter.as_mut())
+            .await
+            .map_err(|error| command_error(&error))
+    }
+
+    /// Checks an opening's persistent order after queued preparation and before native creation.
+    pub async fn call_opening<R>(
+        &self,
+        context: &orch_link::commands::CommandContext,
+        generation: u64,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<R, CommandError> {
+        let mut adapter = self.adapter.lock().await;
+        if !self.serves_generation(generation) {
+            return Err(unavailable(
+                "the native process changed while this opening was waiting",
+            ));
+        }
+        let Some(orch_link_contract::commands::NativeTarget::Session(target)) =
+            context.native_target.as_ref()
+        else {
+            return Err(unavailable("the command has no captured native opening"));
+        };
+        let fences = context
+            .native_fences
+            .clone()
+            .ok_or_else(|| unavailable("the native ordering store is unavailable"))?;
+        let target = target.clone();
+        let live = tokio::task::spawn_blocking(move || {
+            fences.observe_session(
+                &target,
+                orch_link_contract::native_target::SessionAction::Open,
+            )
+        })
+        .await
+        .map_err(|_| unavailable("the native ordering check failed"))?
+        .map_err(|_| unavailable("the native ordering marker cannot be read"))?;
+        if !live || !self.serves_generation(generation) || context.cancel.is_cancelled() {
+            return Err(CommandError::new(
+                ErrorCode::SessionNotFound,
+                "the captured physical opening was retired while waiting",
+            ));
+        }
+        work(adapter.as_mut())
+            .await
+            .map_err(|error| command_error(&error))
     }
 
     /// A session ended: everything kept of it goes.
     pub fn session_closed(&self, thread: ThreadId) {
-        let removed = self.state().sessions.remove(&thread);
-        lock(&self.ctx.threads).remove(&thread);
-        self.ctx.ledger.session_closed(thread);
-        if let Some(session) = removed {
-            self.ctx.services.loopback.unbind(&session.session_key);
+        let opening = self
+            .state()
+            .sessions
+            .get(&thread)
+            .map(|session| session.opening_id);
+        if let Some(opening) = opening {
+            self.session_closed_if(thread, opening);
         }
+    }
+
+    /// Removes only this physical opening, keeping a replacement's slot, ledger and local key intact.
+    pub fn session_closed_if(&self, thread: ThreadId, opening_id: Id) {
+        let mut state = self.state();
+        if !state
+            .sessions
+            .get(&thread)
+            .is_some_and(|session| session.opening_id == opening_id)
+        {
+            return;
+        }
+        let Some(session) = state.sessions.remove(&thread) else {
+            return;
+        };
+        let mut threads = lock(&self.ctx.threads);
+        if threads.get(&thread) == Some(&(self.key(), opening_id)) {
+            threads.remove(&thread);
+        }
+        self.ctx.ledger.session_closed_if(thread, opening_id);
+        self.ctx.services.loopback.unbind(&session.session_key);
     }
 
     /// Removes only the matching native history's local slot, preserving a successor or another home.
@@ -764,17 +967,19 @@ impl Process {
         {
             return;
         }
-        let removed = state.sessions.remove(&source.thread_id);
+        let Some(session) = state.sessions.remove(&source.thread_id) else {
+            return;
+        };
         let mut threads = lock(&self.ctx.threads);
-        if threads.get(&source.thread_id) == Some(&self.key()) {
+        if threads.get(&source.thread_id) == Some(&(self.key(), session.opening_id)) {
             threads.remove(&source.thread_id);
-            self.ctx.ledger.session_closed(source.thread_id);
+            self.ctx
+                .ledger
+                .session_closed_if(source.thread_id, session.opening_id);
         }
         drop(threads);
         drop(state);
-        if let Some(session) = removed {
-            self.ctx.services.loopback.unbind(&session.session_key);
-        }
+        self.ctx.services.loopback.unbind(&session.session_key);
     }
 
     /// Reserves a just-admitted turn before the adapter can return ahead of its TurnStarted event.
@@ -984,7 +1189,7 @@ impl Process {
                     });
                 }
             }
-            SessionEvent::SessionLost(_) => self.session_closed(*thread_id),
+            SessionEvent::SessionLost(lost) => self.session_closed_if(*thread_id, lost.opening_id),
             _ => {}
         }
     }
@@ -1007,16 +1212,30 @@ impl Process {
             return;
         }
         tracing::warn!(provider = %self.provider_id, agent = %self.agent_id, %reason, "a harness process died");
-        let lost: Vec<(ThreadId, OpenSession)> = self.state().sessions.drain().collect();
+        let lost: Vec<(ThreadId, OpenSession)> = {
+            let mut state = self.state();
+            state.status = HarnessState::Error;
+            state.detail = Some(reason.clone());
+            state.sessions.drain().collect()
+        };
         for (thread, session) in lost {
-            lock(&self.ctx.threads).remove(&thread);
-            self.ctx.ledger.session_closed(thread);
+            {
+                let mut threads = lock(&self.ctx.threads);
+                if threads.get(&thread) == Some(&(self.key(), session.opening_id)) {
+                    threads.remove(&thread);
+                }
+            }
+            self.ctx
+                .ledger
+                .session_closed_if(thread, session.opening_id);
             self.ctx.services.loopback.unbind(&session.session_key);
             let stream = Stream::Session {
                 thread_id: thread,
                 segment_id: session.segment_id,
             };
             let event = SessionEvent::SessionLost(orch_agent_contract::events::SessionLost {
+                expected: false,
+                opening_id: session.opening_id,
                 reason: format!("the harness process died: {reason}"),
             });
             if let Ok(body) = serde_json::to_value(&event)
@@ -1116,8 +1335,11 @@ impl Process {
         self.stopping.store(true, Ordering::SeqCst);
         self.generation.fetch_add(1, Ordering::SeqCst);
         let sessions: Vec<(ThreadId, OpenSession)> = self.state().sessions.drain().collect();
-        for (thread, _) in &sessions {
-            lock(&self.ctx.threads).remove(thread);
+        for (thread, session) in &sessions {
+            let mut threads = lock(&self.ctx.threads);
+            if threads.get(thread) == Some(&(self.key(), session.opening_id)) {
+                threads.remove(thread);
+            }
         }
         self.ctx.services.loopback.revoke(self.grant.id);
         {
@@ -1218,11 +1440,38 @@ impl Hosting {
     pub fn process_of(&self, thread: ThreadId) -> Result<Arc<Process>, CommandError> {
         let key = lock(&self.ctx.threads).get(&thread).copied();
         match key {
-            Some((provider, agent)) => self.process(provider, agent),
+            Some(((provider, agent), _)) => self.process(provider, agent),
             None => Err(CommandError::new(
                 ErrorCode::SessionNotFound,
                 "no session of that thread is open on this machine",
             )),
+        }
+    }
+
+    /// Finds only the captured physical owner, including an older process awaiting its actual close.
+    pub fn process_for_target(
+        &self,
+        target: &orch_link_contract::commands::SessionTarget,
+    ) -> Option<Arc<Process>> {
+        lock(&self.processes)
+            .values()
+            .find(|process| process.session_target(target.thread_id).as_ref() == Some(target))
+            .cloned()
+    }
+
+    /// A newer admitted opening retires older local keys before its preparation can wait.
+    pub fn retire_older_session_keys(&self, target: &orch_link_contract::commands::SessionTarget) {
+        let Some(epoch) = target.opening_epoch else {
+            return;
+        };
+        let processes = lock(&self.processes).values().cloned().collect::<Vec<_>>();
+        for process in processes {
+            let state = process.state();
+            if let Some(session) = state.sessions.get(&target.thread_id)
+                && session.opening_epoch < epoch
+            {
+                self.ctx.services.loopback.unbind(&session.session_key);
+            }
         }
     }
 
@@ -1714,12 +1963,13 @@ impl Hosting {
     /// The segment a thread's session serves, if it is open here.
     #[must_use]
     pub fn segment_of(&self, thread: ThreadId) -> Option<Id> {
-        let key = lock(&self.ctx.threads).get(&thread).copied()?;
+        let (key, opening) = lock(&self.ctx.threads).get(&thread).copied()?;
         let process = lock(&self.processes).get(&key).cloned()?;
         let state = process.state();
         state
             .sessions
             .get(&thread)
+            .filter(|session| session.opening_id == opening)
             .map(|session| session.segment_id)
     }
 
@@ -1862,8 +2112,10 @@ impl Process {
     }
 
     /// Reports a session of this process as lost, to the stream of its session.
-    pub async fn report_lost(&self, thread: ThreadId, segment: Id, reason: &str) {
+    pub async fn report_lost(&self, thread: ThreadId, segment: Id, opening_id: Id, reason: &str) {
         let event = SessionEvent::SessionLost(orch_agent_contract::events::SessionLost {
+            expected: false,
+            opening_id,
             reason: reason.to_owned(),
         });
         if let Ok(body) = serde_json::to_value(&event)
@@ -1917,6 +2169,8 @@ mod tests {
 
     fn idle_lane() -> OpenSession {
         OpenSession {
+            opening_id: orch_types::new_id(),
+            opening_epoch: 1,
             segment_id: orch_types::new_id(),
             native_session_ref: "synthetic-native-source".into(),
             continuation_fenced: true,

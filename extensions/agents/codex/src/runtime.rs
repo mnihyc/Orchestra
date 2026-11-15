@@ -1247,6 +1247,11 @@ impl Shared {
                     "this native build does not offer exact background command control",
                 ));
             }
+            Err(RpcError::Shape { .. }) => {
+                return Ok(NativeBackground::unsupported(
+                    crate::native_schema::FORM_UNKNOWN,
+                ));
+            }
             Err(error) => return Err(crate::map_rpc(error)),
         };
         let mut items = Vec::new();
@@ -1314,10 +1319,17 @@ impl Shared {
                 reason: None,
             });
         }
-        let (terminals, _) = self
-            .background_terminals(&native)
-            .await
-            .map_err(crate::map_rpc)?;
+        let terminals = match self.background_terminals(&native).await {
+            Ok((terminals, _)) => terminals,
+            Err(RpcError::Shape { .. }) => {
+                return Ok(NativeBackgroundEnd {
+                    id: id.to_owned(),
+                    state: BackgroundEndState::Unknown,
+                    reason: Some(crate::native_schema::FORM_UNKNOWN.into()),
+                });
+            }
+            Err(error) => return Err(crate::map_rpc(error)),
+        };
         let Some(terminal) = terminals.into_iter().find(|terminal| {
             command_identity(&native, &terminal.item_id, &terminal.process_id) == id
         }) else {

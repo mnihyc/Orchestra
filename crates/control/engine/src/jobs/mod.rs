@@ -32,6 +32,7 @@ pub mod restart;
 pub mod restore;
 pub mod retained;
 pub mod runner;
+pub mod server_update;
 pub mod snapshot;
 pub mod source;
 pub(crate) mod upload_watch;

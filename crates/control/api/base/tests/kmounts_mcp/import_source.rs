@@ -784,6 +784,7 @@ async fn recorded_deletion_custody_requires_its_actual_journal_and_never_admits_
     let access = AuthzAccess::new(world.app.app.clock.clone());
     let lane = command.key.wire();
     let proposed = link::NewCommand {
+        native_target: None,
         id: command.id,
         machine_id: machine,
         kind: "mcp.forget",

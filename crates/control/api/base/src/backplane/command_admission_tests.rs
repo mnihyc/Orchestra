@@ -922,6 +922,7 @@ impl Fixture {
             rows::insert_command(
                 &mut conn,
                 &rows::NewCommand {
+                    native_target: None,
                     id,
                     machine_id: self.machine,
                     kind: CommandKind::FsWrite.as_str(),
@@ -1063,6 +1064,7 @@ async fn an_already_connected_dispatcher_adopts_a_retained_turn_start_only_when_
         rows::insert_command(
             &mut conn,
             &rows::NewCommand {
+                native_target: None,
                 id,
                 machine_id: original.machine,
                 kind: &original.kind,

@@ -15,11 +15,13 @@ pub const ASK_MAX_STEPS: &str = "16";
 pub const ASK_MAX_OUTPUT_TOKENS: &str = "4096";
 pub const ASK_CONTEXT_TOKENS: &str = "120000";
 pub const ASK_MAX_TOOLS: &str = "32";
-pub const ASK_TOOL_BYTES: &str = "65536";
-pub const ASK_TURN_TOOL_BYTES: &str = "262144";
+pub const ASK_DOCS_HITS: &str = "8";
+pub const ASK_DOCS_EXCERPT_TOKENS: &str = "2000";
+pub const ASK_MAX_OPERATIONS: &str = "40";
+pub const ASK_MAX_LINKS: &str = "100";
 pub const AGENT_EFFORT: &str = r#""high""#;
 pub const AGENT_PARAMS: &str = "{}";
-pub const AGENT_FEATURES: &str = r#"{"vision":true}"#;
+pub const AGENT_FEATURES: &str = r#"{"codex.cyber_access":false}"#;
 pub const AGENT_INSTRUCTIONS: &str =
     r#""Run the relevant tests before describing a change as complete.""#;
 /// Joining text, inherited through the existing organization append setting.
@@ -102,6 +104,7 @@ pub const SUMMARY_TARGETS: &str = r#"{"thread":{"automatic":true,"on":["turn_com
 pub const SUMMARY_FOLLOW_INTERVAL_SECS: &str = "5";
 pub const SUMMARY_READ_BATCH_SIZE: &str = "100";
 pub const PROVIDERS_ALLOWED: &str = r#"["acme.*"]"#;
+pub const MODELS_ADD_SWITCHES_ON: &str = r#""basic""#;
 pub const COLLAB_ATTRIBUTION: &str = r#""always""#;
 pub const COLLAB_DEFAULT_DELIVERY: &str = r#""queue""#;
 pub const COMPOSER_PASTE_INLINE_CONTEXT_SHARE: &str = "25";
@@ -159,6 +162,7 @@ pub const SOURCE_BRANCH: &str = r#""release""#;
 pub const SOURCE_SECRET_NAME: &str = r#""REPOSITORY_TOKEN""#;
 pub const WORKSPACE_RECORD_DAYS: &str = "7";
 pub const WORKSPACE_RECORD_MAX_BYTES: &str = "1073741824";
+pub const WORKSPACE_RECORD_WAIT_SECS: &str = "30";
 pub const BROADCAST_DELIVERY: &str = r#""steer""#;
 pub const BROADCAST_FALLBACK: &str = r#""next_turn""#;
 pub const BROADCAST_WAKE_IDLE: &str = "false";
@@ -295,6 +299,8 @@ pub const RELEASE_CHECK_DAYS: &str = "0";
 pub const CLEANUP_RELEASE_KEEP_COUNT: &str = "5";
 /// A host that needs a longer cache window can retain unused tools for two weeks.
 pub const CLEANUP_UNUSED_KEEP_DAYS: &str = "14";
+pub const MOUNT_DELETE_DATA_FATE: &str = "\"purge\"";
+pub const TUNNELS_CONTROL_TIMEOUT_MS: &str = "15000";
 /// Tolerate one delayed daily backup, then show the missing second night.
 pub const BACKUP_WARN_DAYS: &str = "2";
 pub const DOCS_ENABLED: &str = "true";
@@ -361,3 +367,12 @@ pub const STORAGE_ENV_CACHE_QUOTA_BYTES: &str = "21474836480";
 
 /// A place may pin new tunnel plans to its executor primary.
 pub const GATEWAYS_TUNNEL_STRATEGY: &str = r#""executor""#;
+/// A slower entrance may need a longer durable change acknowledgement.
+pub const GATEWAYS_PRIMARY_CHANGE_TIMEOUT_SECS: &str = "90";
+/// More time can accommodate a slower edge reload or several alternate origins.
+pub const PUBLIC_ADDRESS_PREPARE_TIMEOUT_SECS: &str = "120";
+/// A slower probe pace is a choice, not a fixed bound on the operation.
+pub const PUBLIC_ADDRESS_PROBE_INTERVAL_MS: &str = "500";
+
+/// A busy local daemon may need more time to prepare the updater.
+pub const SERVER_UPDATE_PREPARE_TIMEOUT_SECS: &str = "120";

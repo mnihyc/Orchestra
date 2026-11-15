@@ -422,6 +422,7 @@ impl Commands for ScriptedCommands {
         }
         // Use the real scripted link without retaining the volatile roster in issued rows.
         let cmd = Cmd {
+            native_target: None,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
@@ -469,6 +470,7 @@ impl Commands for ScriptedCommands {
             Time::new(now + Span::seconds(i64::from(command.kind.deadline_secs())))
         });
         let cmd = Cmd {
+            native_target: None,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
