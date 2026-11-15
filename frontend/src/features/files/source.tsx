@@ -1,4 +1,5 @@
 /** Authorized file sources adapt attachments to the workspace's existing viewers without copying their rendering. */
+import { READ_NOW } from '@/api/freshness';
 import { linkTo, referenceTo, type LinkPart } from '@/lib/links';
 import { queryOptions } from '@tanstack/react-query';
 import { createContext, useContext } from 'react';
@@ -9,11 +10,14 @@ import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
 import { traceRequest } from '@/api/trace';
 import { bringFile, headQuery, type FileHead } from './content';
 import { type Door, readFileBytes, type FileBytes } from '@/api/workspace';
-import type { ArchiveListing, Author, ChatPart, ContentPart, DocumentFile, ReferencePreview } from '@/generated/api-types';
+import type { ArchiveListing, Author, ChatPart, ContentPart, DocumentFile, ReferencePreview, FileSourceFacts, PreviewAllowance, NativeImageReceipt } from '@/generated/api-types';
 import { attachmentFileReference, environmentFileReference } from '@/features/people/references';
 import { extensionOf, languageOf } from './languages';
 
 export interface FileSource {
+  facts?: FileSourceFacts | null | undefined;
+  /** Null denotes an older thread image without an applied receipt; omitted is not a thread delivery. */
+  imageDelivery?: NativeImageReceipt | null | undefined;
   /** An owner-specific API path, without the /api prefix. */
   url: string;
   /** A custody opening requires current system administration, including its cached preview. */
@@ -23,7 +27,7 @@ export interface FileSource {
   mediaType?: string | undefined;
   hash?: string | undefined;
   /** The path and door are available only for workspace files. */
-  workspace?: { door: Door; path: string } | undefined;
+  workspace?: { door: Door; path: string; mount?: string } | undefined;
   /** An attachment identifier has stable reference grammar. */
   fileId?: string | undefined;
   /** The materialized path as the receiving thread knows it. */
@@ -35,6 +39,8 @@ export interface FileSource {
   owner?: Author | undefined;
   updatedAt?: string | undefined;
   description?: string | undefined;
+  /** The cached listing observation is metadata; only cached says its original bytes were retained. */
+  observation?: { cached: boolean; at: string | null };
   href?: string | undefined;
   /** Immutable blob identity or the owner's current file revision. */
   version?: string | undefined;
@@ -42,6 +48,9 @@ export interface FileSource {
 
 /** A single bounded reply carries the PNG or inert excerpt; no original is fetched for a thumbnail. */
 export interface FilePreview {
+  facts?: FileSourceFacts | null | undefined;
+  allowance?: PreviewAllowance | null | undefined;
+  viewer_allowance?: PreviewAllowance | null | undefined;
   file_id?: string;
   path?: string;
   state: 'ready' | 'unavailable' | 'too_large';
@@ -64,7 +73,7 @@ export const useFileSource = () => useContext(FileSourceContext);
 
 /** Every derived cache of administrative bytes has the same retirement policy as its preview. */
 export const sourceReaderKey = (source: FileSource | null | undefined) => source?.adminOnly === true ? [libraryReader()] : [];
-export const sourceQueryAuthority = (source: FileSource | null | undefined) => source?.adminOnly === true ? { ...ADMIN_QUERY, staleTime: 0, gcTime: 0 } : {};
+export const sourceQueryAuthority = (source: FileSource | null | undefined) => source?.adminOnly === true ? { ...ADMIN_QUERY, gcTime: 0 } : {};
 function currentSource(source: FileSource, reader: ReturnType<typeof libraryReader>, signal?: AbortSignal): void {
   signal?.throwIfAborted();
   if (source.adminOnly === true && (!sameLibraryReader(reader) || !queryAuthorityAllows(queryClient, ADMIN_QUERY.meta))) throw new DOMException('The administrative file reader changed', 'AbortError');
@@ -80,8 +89,8 @@ export function documentSource(id: string, file: DocumentFile, inspect = false):
   return { href: linkTo({ kind: 'document', id }, { file: file.id }), url, name: file.name, size: file.size, mediaType: file.media_type, fileId: file.id, version: file.added_at, updatedAt: file.added_at, owner: file.added_by ?? undefined, archiveUrl: documentFileArchivePath(id, file.id, inspect) };
 }
 
-export function workspaceSource(door: Door, path: string, name = path.split('/').at(-1) ?? path, size?: number): FileSource {
-  return { url: `/environments/${door.environmentId}/files/preview?${new URLSearchParams({ path, ...(door.threadId === null ? {} : { thread: door.threadId }) })}`, name, size, workspace: { door, path } };
+export function workspaceSource(door: Door, path: string, name = path.split('/').at(-1) ?? path, size?: number, mount?: string): FileSource {
+  return { url: `/environments/${door.environmentId}/files/preview?${new URLSearchParams({ path, ...(mount === undefined ? {} : { mount }), ...(door.threadId === null ? {} : { thread: door.threadId }) })}`, name, size, workspace: { door, path, ...(mount === undefined ? {} : { mount }) } };
 }
 
 /** A reference already checked by its card reaches the same owner-specific source as an attachment. */
@@ -117,7 +126,7 @@ export const previewQuery = (source: FileSource) => queryOptions({
 export async function sourceBytes(source: FileSource, hash: string, limit?: number, signal?: AbortSignal): Promise<FileBytes> {
   const reader = libraryReader();
   if (source.adminOnly === true && !queryAuthorityAllows(queryClient, ADMIN_QUERY.meta)) throw new DOMException('The administrative file reader changed', 'AbortError');
-  if (source.workspace !== undefined) return readFileBytes(source.workspace.door, source.workspace.path, hash, limit, signal);
+  if (source.workspace !== undefined) return readFileBytes(source.workspace.door, source.workspace.path, hash, limit, signal, source.workspace.mount);
   const response = await traceRequest(source.url, { ...(signal === undefined ? {} : { signal }), ...(limit === undefined ? {} : { headers: { Range: `bytes=0-${limit - 1}` } }) });
   const bytes = new Uint8Array(await response.arrayBuffer());
   signal?.throwIfAborted();
@@ -131,10 +140,10 @@ export async function sourceDownload(source: FileSource): Promise<void> {
   const reader = libraryReader(); currentSource(source, reader);
   let url = `${source.url}${source.url.includes('?') ? '&' : '?'}download=true`;
   if (source.workspace !== undefined) {
-    const { door, path } = source.workspace;
-    const brought = await bringFile(door, path, new AbortController().signal);
+    const { door, path, mount } = source.workspace;
+    const brought = await bringFile(door, path, new AbortController().signal, mount);
     if (brought.state !== 'ready') throw new Error(brought.reason);
-    url = `/environments/${door.environmentId}/files/content?${new URLSearchParams({ path, hash: brought.hash, download: 'true', ...(door.threadId === null ? {} : { thread: door.threadId }) })}`;
+    url = `/environments/${door.environmentId}/files/content?${new URLSearchParams({ path, hash: brought.hash, download: 'true', ...(mount === undefined ? {} : { mount }), ...(door.threadId === null ? {} : { thread: door.threadId }) })}`;
   }
   const response = await traceRequest(url);
   const blob = await response.blob();
@@ -146,7 +155,7 @@ export async function sourceDownload(source: FileSource): Promise<void> {
 }
 
 export function sourceHasReference(source: FileSource): boolean {
-  return source.fileId !== undefined || source.workspace !== undefined || source.reference !== undefined || source.deliveredPath !== undefined;
+  return source.fileId !== undefined || source.workspace !== undefined && source.workspace.mount === undefined || source.reference !== undefined || source.deliveredPath !== undefined;
 }
 
 /** The common viewer receives its normal head even when the file belongs to a chat or document. */
@@ -154,21 +163,21 @@ export const sourceHeadQuery = (source: FileSource) => queryOptions({
   ...sourceQueryAuthority(source),
   queryKey: ['file-source-head', source.url, source.version ?? null, ...sourceReaderKey(source)] as const,
   queryFn: async ({ client }): Promise<FileHead> => {
-    if (source.workspace !== undefined) return client.query({ ...headQuery(source.workspace.door, source.workspace.path), staleTime: 0 });
+    if (source.workspace !== undefined) return client.query({ ...headQuery(source.workspace.door, source.workspace.path, source.workspace.mount), ...READ_NOW });
     // Opening rechecks authority; a cached thumbnail alone never authorizes a new original view.
-    const preview = await client.query({ ...previewQuery(source), staleTime: 0 });
+    const preview = await client.query({ ...previewQuery(source), ...READ_NOW });
     return {
-      stat: { name: source.name, path: source.url, type: 'file', size: preview.size, mtime: '', mode: 0, link_target: null, cached: true,
+      stat: { ...(preview.facts === undefined ? {} : { facts: preview.facts }), name: source.name, path: source.url, type: 'file', size: preview.size, mtime: '', mode: 0, link_target: null, cached: true,
         hash: preview.hash, media_type: preview.media_type, is_text: preview.is_text },
       brought: { state: 'ready', hash: preview.hash ?? source.hash ?? source.url, size: preview.size },
     };
-  }, retry: false, staleTime: 0, gcTime: 0,
+  }, retry: false, gcTime: 0,
 });
 
 export function sourceReference(source: FileSource, line?: number): string {
   if (source.reference !== undefined && line === undefined) return source.reference;
   const at = line ?? source.line;
-  if (source.workspace !== undefined) return environmentFileReference(source.workspace.door.environmentId, source.workspace.path, at);
+  if (source.workspace !== undefined && source.workspace.mount === undefined) return environmentFileReference(source.workspace.door.environmentId, source.workspace.path, at);
   if (source.fileId !== undefined) return attachmentFileReference(source.fileId, source.name, at);
   if (source.deliveredPath !== undefined) return referenceTo({ href: source.deliveredPath, name: source.name }, at === undefined ? {} : { line: at });
   // A transient draft has no saved reference yet; its attachment link still names the exact original.
@@ -186,24 +195,24 @@ export function sourceFacts(source: FileSource, preview?: Pick<FilePreview, 'med
 }
 
 /** Messages, forwards, search results and notification projections use the same attachment order. */
-export function sourcesOfParts(kind: 'chat' | 'thread', owner: string, parts: readonly (ChatPart | ContentPart)[]): FileSource[] {
-  return parts.flatMap((part) => {
+export function sourcesOfParts(kind: 'chat' | 'thread', owner: string, parts: readonly (ChatPart | ContentPart)[], imageDeliveries?: readonly NativeImageReceipt[] | null): FileSource[] {
+  return parts.flatMap((part, index) => {
     if (part.type === 'forwarded') return [
-      ...part.images.map((file) => blobSource(kind, owner, file.blob, file.name, undefined, file.media_type)),
+      ...part.images.map((file, forwarded) => ({ ...blobSource(kind, owner, file.blob, file.name, undefined, file.media_type), ...(kind === 'thread' ? { imageDelivery: imageDeliveries?.find((receipt) => receipt.part === index && receipt.forwarded_image === forwarded) ?? null } : {}) })),
       ...part.attachments.map((file) => blobSource(kind, owner, file.blob, file.name, file.size, file.media_type)),
     ];
-    if (part.type === 'image') return [blobSource(kind, owner, part.blob, part.name, undefined, part.media_type)];
+    if (part.type === 'image') return [{ ...blobSource(kind, owner, part.blob, part.name, undefined, part.media_type), ...(kind === 'thread' ? { imageDelivery: imageDeliveries?.find((receipt) => receipt.part === index && receipt.forwarded_image === null) ?? null } : {}) }];
     if (part.type === 'attachment') return [blobSource(kind, owner, part.blob, part.name, part.size, part.media_type)];
     if (part.type === 'file' && part.blob !== null) return [{ ...blobSource(kind, owner, part.blob, part.name, part.size), deliveredPath: part.path }];
     return [];
   });
 }
 
-export async function sourceArchive(source: FileSource, inside: string, signal?: AbortSignal): Promise<ArchiveListing> {
+export async function sourceArchive(source: FileSource, inside: string, signal?: AbortSignal, options: { cursor?: string; q?: string; limit?: number } = {}): Promise<ArchiveListing> {
   const reader = libraryReader(); currentSource(source, reader, signal);
   const url = source.archiveUrl;
   if (url === undefined) throw new Error('No archive source');
-  const listing = await (await traceRequest(append(url, { inside }), { ...(signal === undefined ? {} : { signal }) })).json() as ArchiveListing;
+  const listing = await (await traceRequest(append(url, { inside, ...(options.cursor === undefined ? {} : { cursor: options.cursor }), ...(options.q === undefined ? {} : { q: options.q }), ...(options.limit === undefined ? {} : { limit: String(options.limit) }) }), { ...(signal === undefined ? {} : { signal }) })).json() as ArchiveListing;
   currentSource(source, reader, signal); return listing;
 }
 
@@ -225,7 +234,7 @@ export async function sourceArchiveEntry(source: FileSource, entry: string, sign
 /** Only an owner-backed page or a workspace source can provide a public web link. */
 export function sourceLink(source: FileSource, part: LinkPart = {}): string | null {
   const at = { ...(source.line === undefined ? {} : { line: source.line }), ...(source.endLine === undefined ? {} : { endLine: source.endLine }), ...part };
-  if (source.workspace !== undefined) return linkTo({ kind: 'environment_file', id: source.workspace.door.environmentId,
+  if (source.workspace !== undefined && source.workspace.mount === undefined) return linkTo({ kind: 'environment_file', id: source.workspace.door.environmentId,
     threadId: source.workspace.door.threadId, path: source.workspace.path }, at);
   if (source.href === undefined) return null;
   if (new URL(source.href, location.origin).pathname.startsWith('/chat/') && source.fileId === undefined) return null;

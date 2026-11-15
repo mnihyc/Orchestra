@@ -894,6 +894,8 @@ async fn environment_move_uses_the_same_native_busy_refusal_and_rejects_a_change
         .query(&EnvironmentDeleteQuery {
             confirm: "Source workspace".into(),
             at: None,
+            expected_keep_days: None,
+            expected_revision: None,
         })
         .send_bytes()
         .await;
