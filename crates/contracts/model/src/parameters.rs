@@ -966,7 +966,9 @@ pub fn outgoing_at(
     let model = applicable.as_ref();
     let format = parameter_format(protocol);
     let compact = path.ends_with("/responses/compact") && format.program.is_some();
-    let count_tokens = path.ends_with("/messages/count_tokens") && format.tier.is_some();
+    let count_tokens = (path.ends_with("/messages/count_tokens")
+        || path.ends_with("/responses/input_tokens"))
+        && format.tier.is_some();
     if compact || count_tokens {
         let mut parameters = model.clone();
         parameters.default_effort = None;

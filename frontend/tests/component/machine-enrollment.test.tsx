@@ -205,3 +205,17 @@ it('changes the gateway flag of the displayed installer without minting another 
   expect(createMachineToken).toHaveBeenLastCalledWith(expect.any(String), { roles: ['environment', 'agent'], delegate: [], dedicated: false });
   expect(createHostToken).not.toHaveBeenCalled();
 });
+
+for(const locale of ['en','zh-CN'] as const) it(`shows the installed-sign-in enrollment preset before issuing its command (${locale})`,async()=>{
+  await setLocale(locale);
+  try {
+    const user=userEvent.setup();show(<AddMachineDialog onClose={vi.fn()}/>);
+    await user.click(screen.getByRole('combobox',{name:i18n.t('machineSignup.purpose')}));
+    await user.click(screen.getByRole('option',{name:i18n.t('machineSignup.useInstalled')}));
+    for(const role of ['environment','agent','provider'] as const)expect(screen.getByRole('checkbox',{name:i18n.t(`machines.add.roleChoices.${role}.name`)})).toBeChecked();
+    expect(createMachineToken).not.toHaveBeenCalled();
+    await showCommand();
+    await waitFor(()=>expect(createMachineToken).toHaveBeenCalledWith(expect.any(String),expect.objectContaining({roles:['environment','agent','provider'],delegate:['agent']})));
+    expect(await screen.findByText("install.sh --roles 'environment,agent,provider' --delegate 'agent' --gateway automatic")).toBeVisible();
+  } finally {await setLocale('en');}
+});

@@ -56,6 +56,7 @@ pub(super) async fn journal(
             )
         });
     let proposed = link_queries::NewCommand {
+        content_transit: false,
         id: command.id,
         machine_id: command.machine,
         kind: command.kind.as_str(),

@@ -12,8 +12,7 @@
 //! and is replaced by the value sealed to the machine the command goes to at
 //! the moment the frame is written; a ticket is a request, and is replaced by
 //! a ticket signed at that moment. A command's serial key has a protected
-//! column. Older retained bodies can still read `$key`, which is removed
-//! before the machine request is sent.
+//! column. Command data is carried as given and never selects its queue.
 
 use crate::backplane::Link;
 
@@ -82,9 +81,6 @@ use orch_types::new_id;
 use std::collections::HashMap;
 
 use std::time::Duration;
-/// The older stored member read only when no protected serial key was supplied.
-pub const KEY_MEMBER: &str = "$key";
-
 fn issuing_deadlines_allow(
     callers: &[(Option<orch_authz::Caller>, Option<Time>)],
     clock: &dyn orch_types::Clock,
@@ -236,16 +232,15 @@ pub struct StoredCommand {
     pub body: Json,
     /// Private typed evidence, redacted by its Debug implementation and never copied to Cmd.
     pub authority: Option<orch_engine::commands::CommandAuthority>,
+    /// Storage custody stays private to the durable command and is never native request data.
+    pub content_transit: bool,
 }
 
-/// The command a row holds, with its authoritative key and no legacy storage member in the body.
+/// The command a row holds, with its protected queue identity and unchanged body.
 #[must_use]
 pub fn cmd_of(row: &CommandRow) -> Cmd {
-    let mut body = row.body.clone();
+    let body = row.body.clone();
     let key = row.serial_key().map(str::to_owned);
-    if let Some(members) = body.as_object_mut() {
-        members.remove(KEY_MEMBER);
-    }
     Cmd {
         id: row.id,
         kind: row.kind.clone(),
@@ -253,14 +248,6 @@ pub fn cmd_of(row: &CommandRow) -> Cmd {
         deadline: Time::new(row.deadline_at),
         body,
     }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-fn stored_body(mut body: Json, key: Option<&str>) -> Json {
-    if let (Some(key), Some(members)) = (key, body.as_object_mut()) {
-        members.insert(KEY_MEMBER.to_owned(), Json::String(key.to_owned()));
-    }
-    body
 }
 
 /// A mutable accepted HTTP minimum never replaces immutable native provenance.
@@ -370,6 +357,7 @@ impl Dispatcher {
         body: &B,
     ) -> Result<Issued, DispatchError> {
         self.issue_stored(StoredCommand {
+            content_transit: false,
             authority: None,
             id: None,
             machine,
@@ -392,6 +380,7 @@ impl Dispatcher {
         body: &B,
     ) -> Result<Issued, DispatchError> {
         self.issue_stored(StoredCommand {
+            content_transit: false,
             authority: None,
             id: Some(id),
             machine,
@@ -545,6 +534,7 @@ impl Dispatcher {
                     .current_issue_callers(
                         &mut tx,
                         &NewCommand {
+                            content_transit: command.content_transit,
                             id,
                             machine_id: command.machine,
                             kind: kind.as_str(),
@@ -573,6 +563,7 @@ impl Dispatcher {
             let inserted = queries::insert_command_with_authority(
                 &mut tx,
                 &NewCommand {
+                    content_transit: command.content_transit,
                     id,
                     machine_id: command.machine,
                     kind: kind.as_str(),
@@ -1681,14 +1672,13 @@ pub mod tests {
 
     #[cfg(any(test, feature = "test-support"))]
     fn a_stored_command_carries_its_key_and_gives_it_back() {
-        let body = stored_body(json!({ "thread_id": "t" }), Some("machine"));
-        assert_eq!(body["$key"], "machine");
         let mut row = CommandRow {
+            content_transit: false,
             id: new_id(),
             machine_id: new_id(),
             kind: "machine.probe".into(),
-            body,
-            serial_key: None,
+            body: json!({"thread_id":"t","$key":"payload"}),
+            serial_key: Some("protected".into()),
             state: "queued".into(),
             result: None,
             error: None,
@@ -1698,17 +1688,13 @@ pub mod tests {
             updated_at: orch_testkit::clock::start(),
         };
         let cmd = cmd_of(&row);
-        assert_eq!(cmd.key.as_deref(), Some("machine"));
-        assert_eq!(
-            cmd.body,
-            json!({ "thread_id": "t" }),
-            "the key is not sent in the body"
-        );
-        row.serial_key = Some("protected".to_owned());
-        row.body[KEY_MEMBER] = json!("stale");
-        let cmd = cmd_of(&row);
         assert_eq!(cmd.key.as_deref(), Some("protected"));
-        assert_eq!(cmd.body, json!({ "thread_id":"t" }));
+        assert_eq!(
+            cmd.body, row.body,
+            "the body is neither storage nor a source of queue authority"
+        );
+        row.serial_key = None;
+        assert_eq!(cmd_of(&row).key, None);
     }
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
@@ -1718,7 +1704,7 @@ pub mod tests {
 
     #[cfg(any(test, feature = "test-support"))]
     fn a_command_without_a_key_has_none() {
-        let body = stored_body(json!({}), None);
+        let body = json!({});
         assert_eq!(body, json!({}));
     }
     #[cfg(any(test, feature = "test-support"))]

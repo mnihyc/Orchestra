@@ -88,6 +88,8 @@ use orch_api_contract::binding::BindingAgent;
 
 use orch_api_contract::binding::BindingCanCreate;
 
+use orch_api_contract::binding::BindingDefaultEnvironment;
+
 use orch_api_contract::binding::BindingDefaults;
 
 use orch_api_contract::binding::BindingEnvironment;
@@ -535,6 +537,7 @@ fn arrangement_view(
         tool_set: isolation.tool_set.clone(),
         executor_ref: executor_ref.clone(),
         isolation: Isolation {
+            translation: isolation.translation,
             kind,
             harness_runs_in: if isolation.harness_with_provider {
                 HarnessPlace::Provider
@@ -662,6 +665,7 @@ struct Ground<'a> {
     offers: Option<&'a EnvironmentOffers>,
     orch_tools: &'a OrchToolsOf,
     scope: Option<&'a NodeRef>,
+    translation_scope: Option<&'a NodeRef>,
 }
 
 /// The providers the caller can see, each with whether they may use it, its models, and the
@@ -1149,7 +1153,17 @@ async fn providers_from(
                                 agent,
                                 descriptor,
                                 &orch_tools,
-                                ground.scope,
+                                if !ground.settings.translation_allowed
+                                    && option
+                                        .arrangement
+                                        .as_ref()
+                                        .and_then(|chosen| chosen.protocol.as_ref())
+                                        .is_some_and(|protocol| !row.protocols.contains(protocol))
+                                {
+                                    ground.translation_scope
+                                } else {
+                                    ground.scope
+                                },
                             )
                         })
                         .collect::<ApiResult<Vec<_>>>()?
@@ -1317,6 +1331,51 @@ fn environment_reason(
     }
 }
 
+/// The environment the nearest setting of `env.default_id` names for the threads started at `topic`, and the node
+/// whose setting it is: the topic itself, else its project, else its org.
+async fn named_default(conn: &mut Conn, topic: Id) -> ApiResult<Option<(Id, Option<Id>)>> {
+    let resolved = orch_settings::resolve(conn, Place::Node(topic), keys::ENV_DEFAULT_ID)
+        .await
+        .map_err(ApiError::internal)?
+        .resolved;
+    let Some(value) = resolved.value else {
+        return Ok(None);
+    };
+    let environment = serde_json::from_value::<Id>(value).map_err(ApiError::internal)?;
+    Ok(Some((environment, resolved.source.node)))
+}
+
+/// Why a thread cannot be started in the environment that is named the default, when it cannot: the reason its row
+/// carries, or that the caller may not see it at all.
+const ENVIRONMENT_NOT_SEEN: &str = "environment_not_seen";
+
+/// The environment that is named the default at `topic`, where its setting is when that is above the topic, and why
+/// the caller cannot use it when they cannot, so that a default that is passed over is said and not dropped in silence.
+async fn default_environment_of(
+    conn: &mut Conn,
+    principal: &Principal,
+    topic: Id,
+    listed: &[BindingEnvironment],
+    names: &crate::routes::access::page::NameBounds,
+) -> ApiResult<Option<BindingDefaultEnvironment>> {
+    let Some((environment, source)) = named_default(conn, topic).await? else {
+        return Ok(None);
+    };
+    let from = match source.filter(|node| *node != topic) {
+        Some(node) => names.refs(conn, principal, &[node]).await?.remove(&node),
+        None => None,
+    };
+    let reason = match listed.iter().find(|row| row.environment.id == environment) {
+        Some(row) => row.reason.clone(),
+        None => Some(ENVIRONMENT_NOT_SEEN.to_owned()),
+    };
+    Ok(Some(BindingDefaultEnvironment {
+        environment,
+        from,
+        reason,
+    }))
+}
+
 async fn environments_from(
     conn: &mut Conn,
     principal: &Principal,
@@ -1336,10 +1395,8 @@ async fn environments_from(
     let grouped = grouping::metadata(app, conn, principal, &subjects, projection).await?;
     let uses = history::environment_uses(conn, &ids, topic).await?;
     let hosts = environment_choice::hosts_of(conn, &ids).await?;
-    let default = environment_queries::default_for(conn, &ids)
+    let default = named_default(conn, topic)
         .await?
-        .into_iter()
-        .find(|(_, of)| *of == topic)
         .map(|(environment, _)| environment);
     let topic_name = thread_rows::node_name(conn, topic)
         .await?
@@ -1794,6 +1851,12 @@ async fn options(ctx: Ctx, (): (), (): ()) -> ApiResult<BindingOptions> {
             .remove(&node),
         None => None,
     };
+    let translation_scope = match settings.translation_scope {
+        Some(node) => node_view::refs(&mut conn, &principal, &[node], Policy::default())
+            .await?
+            .remove(&node),
+        None => None,
+    };
     let defaults = defaults_of(&mut conn, &principal, topic).await?;
     timing.phase("settings_and_environment");
     let providers = providers_of(
@@ -1807,6 +1870,7 @@ async fn options(ctx: Ctx, (): (), (): ()) -> ApiResult<BindingOptions> {
             offers: offers.as_ref(),
             orch_tools: &orch_tools,
             scope: scope.as_ref(),
+            translation_scope: translation_scope.as_ref(),
         },
     )
     .await?;
@@ -1844,6 +1908,7 @@ async fn options(ctx: Ctx, (): (), (): ()) -> ApiResult<BindingOptions> {
         providers,
         environments,
         environment_default,
+        default_environment: None,
         source,
         access,
         agent_access: None,

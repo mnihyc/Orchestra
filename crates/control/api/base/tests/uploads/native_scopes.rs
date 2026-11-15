@@ -5,7 +5,7 @@ use super::*;
 use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::threads::{UploadBlobDelete, UploadBlobDeleteQuery};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{identity, uploads};
 use orch_types::Json;
 
@@ -17,11 +17,12 @@ fn rule(operation: &str, kind: &str, id: Id, action: &str) -> Json {
 async fn key(world: &World, actor: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: actor,
             name: "Native upload custody fixture",
             token_hash: &token_hash(&secret),
@@ -258,6 +259,7 @@ async fn unfinished(world: &World, actor: &Who) -> Id {
         .call(UploadSessionCreate, &[])
         .token(&actor.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             name: "private-session-name.txt".into(),
             size: 20,
             media_type: Some("text/plain".into()),
@@ -525,7 +527,9 @@ async fn upload_session_completion_is_its_own_write_and_returns_the_native_new_b
         .token(&secret)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_file()
+        .expect("the retained upload completed verification");
     assert_eq!(reply.blob, Hash::of(COMPLETE_BYTES));
     assert_eq!(reply.size, 20);
     assert_eq!(reply.name, "private-session-name.txt");
@@ -562,6 +566,7 @@ async fn upload_session_completion_keeps_the_native_empty_file_and_owner_rules()
         .call(UploadSessionCreate, &[])
         .token(&owner.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size: 0,
             name: "empty.txt".into(),
             media_type: None,
@@ -595,7 +600,9 @@ async fn upload_session_completion_keeps_the_native_empty_file_and_owner_rules()
         .token(&secret)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_file()
+        .expect("the retained upload completed verification");
     assert_eq!(reply.size, 0);
     assert_eq!(reply.blob, Hash::of(b""));
     assert!(owns(&world, owner.id(), &reply.blob).await);
@@ -620,13 +627,19 @@ struct PutGate {
 
 #[async_trait::async_trait]
 impl BlobStore for PutGate {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.inner.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         body: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
-        let stored = self.inner.put(hash, size, body).await?;
+        publication.check(self.lifetimes(), hash)?;
+        let stored = self.inner.put_held(hash, size, body, publication).await?;
         if *hash == self.hash {
             assert_eq!(stored.meta.hash, self.hash);
             assert_eq!(stored.meta.size, 20);
@@ -645,8 +658,13 @@ impl BlobStore for PutGate {
     async fn size(&self, hash: &Hash) -> Result<Option<i64>, BlobError> {
         self.inner.size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.inner.delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.inner.delete_held(hash, retirement).await
     }
 }
 
@@ -1354,13 +1372,19 @@ struct AttachmentSizeGate {
 }
 #[async_trait::async_trait]
 impl BlobStore for AttachmentSizeGate {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.inner.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         body: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
-        self.inner.put(hash, size, body).await
+        publication.check(self.lifetimes(), hash)?;
+        self.inner.put_held(hash, size, body, publication).await
     }
     async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
         self.inner.get(hash, range).await
@@ -1375,8 +1399,13 @@ impl BlobStore for AttachmentSizeGate {
         }
         self.inner.size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.inner.delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.inner.delete_held(hash, retirement).await
     }
 }
 fn gate_attachment_size(world: &mut World, hash: Hash) -> Arc<AttachmentSizeGate> {

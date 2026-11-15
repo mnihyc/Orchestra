@@ -1610,6 +1610,7 @@ async fn a_retained_native_answer_recovers_its_unfinished_receipt_after_the_answ
         link::insert_command(
             &mut conn,
             &link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: machine,
                 kind: &command.kind,

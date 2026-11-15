@@ -84,6 +84,7 @@ members = [
     "extensions/providers/deepseek",
     "extensions/providers/openrouter",
     "extensions/summarizers/model",
+    "extensions/translators/responses-messages",
 ]
 
 [workspace.package]
@@ -172,6 +173,7 @@ orch-summarizer-contract = { path = "crates/contracts/summarizer" }
 orch-summarizer-model = { path = "extensions/summarizers/model" }
 orch-telemetry = { path = "crates/platform/telemetry" }
 orch-testkit = { path = "crates/tooling/testkit" }
+orch-translator-responses-messages = { path = "extensions/translators/responses-messages" }
 orch-types = { path = "crates/foundation/types" }
 orch-worker = { path = "apps/worker" }
 orch-worker-core = { path = "crates/control/worker" }

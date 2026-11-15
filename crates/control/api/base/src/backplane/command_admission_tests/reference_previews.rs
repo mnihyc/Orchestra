@@ -180,10 +180,8 @@ async fn reference_live_stat_fetch_and_delivery_keep_raw_identity_physical_sourc
         .await?;
         let policy: KeyScope = serde_json::from_value(rules(transport.environment))?;
         assert!(policy.validate().is_empty());
-        let token = crate::middleware::authentication::new_token(
-            crate::middleware::authentication::API_TOKEN_PREFIX,
-        );
         let id = new_id();
+        let token = crate::middleware::authentication::new_api_token(id);
         identity::create_api_token_scoped(
             &mut conn,
             &identity::NewApiToken {
