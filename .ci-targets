@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-db --lib -- queries::agent_history::tests::
+test -p orch-api-core --test threads_drive -- control_scopes::plan_http_session_expiry_after_actual_
+test -p orch-engine --test agent_history -- the_idle_setting_removes_at_seven_days_and_zero_keeps_the_native_history
