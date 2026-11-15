@@ -2147,7 +2147,8 @@ impl Registry {
                                     capture.as_ref(), creation.as_ref().and_then(|binding| binding.command));
                                 let mut outcome = orch_db::idempotency::creation::scope_unassigned(unassigned,
                                     orch_db::idempotency::creation::scope(capture,
-                                        idempotency::commands::scope(command_capture,Box::pin(execution)))).await;
+                                        idempotency::commands::scope(command_capture,
+                                            idempotency::with_claims(creation_claims.clone(),Box::pin(execution))))).await;
                                 let mut race_replayed = false;
                                 if outcome.is_err() && let Some((query,bytes))=resume_input
                                     && let Some(pending)=pending.as_ref()

@@ -206,11 +206,7 @@ pub async fn turns_between(
     low: i64,
     high: i64,
 ) -> Result<Vec<TurnRow>, DbError> {
-    let sql = format!(
-        "{OWNERS} {TURN_SELECT} WHERE thread_id=$1 AND ordinal::bigint BETWEEN $3 AND $4
-      AND EXISTS(SELECT 1 FROM owners o WHERE o.owner=turns.continuation_id
-        AND turns.ordinal BETWEEN o.first_turn AND o.last_turn) ORDER BY ordinal"
-    );
+    let sql = turns_between_sql(TURN_SELECT);
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(thread)
         .bind(view)
@@ -218,6 +214,15 @@ pub async fn turns_between(
         .bind(high)
         .fetch_all(conn)
         .await?)
+}
+
+/// Fixed projections share the same window selector in the reader and its plan proof.
+pub(super) fn turns_between_sql(select: &'static str) -> String {
+    format!(
+        "{OWNERS} {select} WHERE thread_id=$1 AND ordinal BETWEEN $3 AND $4
+      AND EXISTS(SELECT 1 FROM owners o WHERE o.owner=turns.continuation_id
+        AND turns.ordinal BETWEEN o.first_turn AND o.last_turn) ORDER BY ordinal"
+    )
 }
 
 /// A forward export page bounds segment identities before loading their records.
@@ -272,16 +277,43 @@ pub async fn turn_high(
     view: Id,
     ordinal: i64,
 ) -> Result<Option<Seq>, DbError> {
-    let sql=format!("{OWNERS} SELECT max(i.seq_created) FROM owners o JOIN turns t
-      ON t.thread_id=$1 AND t.continuation_id=o.owner AND t.ordinal BETWEEN o.first_turn AND o.last_turn
-      JOIN items i ON i.turn_id=t.id AND i.continuation_id=o.owner WHERE t.ordinal::bigint<=$3
-        AND i.seq_created BETWEEN o.first_seq AND o.last_seq AND i.stream='main' AND i.kind<>'reasoning'");
-    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(turn_high_sql()))
         .bind(thread)
         .bind(view)
         .bind(ordinal)
         .fetch_one(conn)
         .await?)
+}
+
+/// Find the closest indexed boundary first, then resolve its floating-distance
+/// ties with exact integers. Adding that tie order to the nearest-neighbour
+/// search itself lets PostgreSQL sort the whole prefix instead of using KNN.
+pub(super) fn turn_high_sql() -> String {
+    let bounds = format!(
+        "i.thread_id=$1 AND i.continuation_id=o.owner
+          AND i.ordinal BETWEEN o.first_turn AND LEAST(o.last_turn,
+            GREATEST({minimum}::bigint,LEAST({maximum}::bigint,$3))::integer)
+          AND i.seq_created BETWEEN o.first_seq AND LEAST(o.last_seq,newest.ceiling)
+          AND i.seq_created::double precision BETWEEN o.first_seq::double precision
+            AND LEAST(o.last_seq,newest.ceiling)::double precision",
+        minimum = i32::MIN,
+        maximum = i32::MAX
+    );
+    format!("{OWNERS} SELECT max(edge.seq_created) FROM owners o
+      CROSS JOIN LATERAL (
+        SELECT i.seq_created AS ceiling FROM items i WHERE i.thread_id=$1 AND i.continuation_id=o.owner
+          ORDER BY i.seq_created DESC LIMIT 1
+      ) newest
+      CROSS JOIN LATERAL (
+        SELECT i.seq_created FROM thread_history_item_edges i WHERE {bounds}
+          ORDER BY i.seq_created::double precision <-> LEAST(o.last_seq,newest.ceiling)::double precision LIMIT 1
+      ) nearest
+      CROSS JOIN LATERAL (
+        SELECT i.seq_created FROM thread_history_item_edges i WHERE {bounds}
+          AND i.seq_created>=nearest.seq_created
+          AND i.seq_created::double precision>=nearest.seq_created::double precision
+          ORDER BY i.seq_created DESC LIMIT 1
+      ) edge")
 }
 
 /// Read through the common bounded decoder, stopping before the next written window.
