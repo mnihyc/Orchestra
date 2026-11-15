@@ -10,13 +10,13 @@ describe('the complete shipped help', () => {
   const content = readHelpContent();
   it('ships cleanup and zero guidance with the real headings used in both languages', () => {
     const cleanup = content.guide.articles.find((article) => article.id === 'storage-cleanup');
-    expect(cleanup?.headings.map((heading) => heading.id)).toEqual(['unused-caches','kept-data','unused-releases','uninstall','storage-report','clean-up-kept-items','server-files']);
-    expect(cleanup?.translations?.['zh-CN']?.headings.map((heading) => heading.id)).toEqual(['unused-caches','kept-data','unused-releases','uninstall','storage-report','clean-up-kept-items','server-files']);
+    expect(cleanup?.headings.map((heading) => heading.id)).toEqual(['unused-caches','kept-data','unused-releases','uninstall','storage-report','clean-up-kept-items','delete-a-mount','server-files']);
+    expect(cleanup?.translations?.['zh-CN']?.headings.map((heading) => heading.id)).toEqual(['unused-caches','kept-data','unused-releases','uninstall','storage-report','clean-up-kept-items','delete-a-mount','server-files']);
     const numbers = content.guide.articles.find((article) => article.id === 'numeric-settings');
     expect(numbers?.headings[0]?.id).toBe('zero-values');
     expect(numbers?.translations?.['zh-CN']?.headings[0]?.id).toBe('zero-values');
     expect(numbers?.translations?.['zh-CN']?.headings[0]?.text).toBe('零值');
-    expect(cleanup?.translations?.['zh-CN']?.headings.map((heading)=>heading.text)).toEqual(['未使用缓存','保留的数据','未使用发布','卸载','存储报告','清理保留内容','服务器文件']);
+    expect(cleanup?.translations?.['zh-CN']?.headings.map((heading)=>heading.text)).toEqual(['未使用缓存','保留的数据','未使用发布','卸载','存储报告','清理保留内容','删除挂载','服务器文件']);
   });
   it('has all targets, links, screen routes, both languages and control-linked decision guides', () => {
     const failures=checkHelpContent(content);

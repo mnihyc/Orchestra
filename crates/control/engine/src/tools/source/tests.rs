@@ -1602,24 +1602,20 @@ async fn a_retained_native_answer_recovers_its_unfinished_receipt_after_the_answ
             )
             .await
     );
-    // The common controller supplier retains commands in its owned journal, not SQL.
-    // Reconstruct only the production dispatcher's storage half from that actual issued
-    // command, preserving every field; no synthetic answer or successful effect is invented.
+    // The production-shaped supplier already retained this exact issued answer before its owner was lost.
     let mut conn = scene.world.pool.acquire().await?;
-    assert!(
-        link::insert_command(
-            &mut conn,
-            &link::NewCommand {
-                id: command.id,
-                machine_id: machine,
-                kind: &command.kind,
-                body: &command.body,
-                serial_key: command.key.as_deref(),
-                deadline_at: command.deadline.get()
-            },
-            scene.world.clock.now()
-        )
+    let saved = link::command(&mut conn, command.id)
         .await?
+        .ok_or("the canonical issued answer was not retained")?;
+    assert_eq!(saved.machine_id, machine);
+    assert_eq!(saved.kind, command.kind);
+    assert_eq!(saved.body, command.body);
+    assert_eq!(saved.serial_key(), command.key.as_deref());
+    assert_eq!(saved.deadline_at, command.deadline.get());
+    assert_eq!(
+        orch_db::queries::session_dependencies::command_native_target(&mut conn, command.id)
+            .await?,
+        command.native_target
     );
     drop(conn);
     let before = scene.snapshot().await?;

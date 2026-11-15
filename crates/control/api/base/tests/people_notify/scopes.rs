@@ -196,7 +196,10 @@ impl Scene {
             master: MasterKey::new([7; 32]),
             surroundings: Surroundings {
                 system_name: "System fallback".into(),
-                public_url: "https://orch.test".into(),
+                address_seed: orch_api_contract::public_addresses::PublicAddresses {
+                    public_url: "https://orch.test".into(),
+                    alternate_urls: Vec::new(),
+                },
             },
             retry: orch_notifier_contract::delivery::DEFAULT_RETRY_SCHEDULE.to_vec(),
             metrics: Arc::new(Metrics::new()),

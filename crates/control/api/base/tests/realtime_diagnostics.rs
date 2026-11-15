@@ -5,6 +5,8 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "container_units/fixture.rs"]
+mod container_units;
 mod realtime_support;
 
 use orch_api_core::realtime::raw_traffic;
@@ -174,7 +176,7 @@ async fn enrollment_case(node: bool) {
                     arch: Arch::X86_64,
                 },
                 connector_version: "1.0.0".to_owned(),
-                protocol_versions: vec![1],
+                protocol_versions: vec![2],
                 roles: vec![if node { Role::Node } else { Role::Agent }],
             },
             &orch_db::audit::Origin::default(),
@@ -694,6 +696,7 @@ async fn every_sign_in_step_reaches_managers_and_no_step_reaches_a_viewer() {
     let mut receiver = StreamReceiver::new(BTreeMap::new(), vec![Role::Provider]);
     let steps = ["starting", "awaiting_user", "completed"];
     let events = steps.iter().enumerate().map(|(n, state)| EvbEntry {
+        native_opening_id: None,
         seq: i64::try_from(n).unwrap() + 1, at: rig.clock.time(), kind: "provider.login".to_owned(),
         body: json!({"state": state, "method": "login", "shows": [], "asks": null, "expires_at": null, "error": null}),
     }).collect();
@@ -1020,6 +1023,7 @@ async fn report_how_many_raw_events_one_api_process_passes_on_in_a_second() {
     };
     let events = (1..=count)
         .map(|seq| EvbEntry {
+            native_opening_id: None,
             seq,
             at: rig.clock.time(),
             kind: "raw.frame".to_owned(),
@@ -1055,5 +1059,50 @@ async fn report_how_many_raw_events_one_api_process_passes_on_in_a_second() {
         count as f64 / began.elapsed().as_secs_f64()
     );
     drop(client);
+    rig.server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_feed_of_a_unit_that_a_host_runs_is_followed_by_whoever_sees_the_host_and_refused_to_the_rest()
+ {
+    let rig = Rig::new().await;
+    let outsider = orch_types::new_id();
+    let (host, unit) = {
+        let mut conn = rig.pool.acquire().await.unwrap();
+        orch_db::queries::identity::testing::insert_user(&mut conn, outsider, "unit-outsider")
+            .await
+            .unwrap();
+        let (host, template) = container_units::host_and_template(
+            &mut conn,
+            rig.ada,
+            rig.root,
+            "Feed",
+            rig.clock.now(),
+        )
+        .await;
+        let unit = container_units::provider_unit(
+            &mut conn,
+            host,
+            template,
+            rig.provider,
+            rig.clock.now(),
+        )
+        .await;
+        (host, unit)
+    };
+    let outsider_token = rig.token_for(outsider, chrono::Duration::days(1)).await;
+    let feed = Feed::Resource {
+        kind: ResourceKind::Machine,
+        id: unit,
+    };
+    let mut keeper = Client::signed_in(rig.server.addr, &rig.token).await;
+    keeper.sub(1, &feed.to_string(), None).await;
+    keeper.expect("subscribed").await;
+    let mut stranger = Client::signed_in(rig.server.addr, &outsider_token).await;
+    stranger.sub(1, &feed.to_string(), None).await;
+    assert_eq!(stranger.expect("error").await["code"], "forbidden");
+    let _ = host;
+    drop(keeper);
+    drop(stranger);
     rig.server.stop().await;
 }
