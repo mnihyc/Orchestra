@@ -31,6 +31,7 @@ use orch_api_contract::personal::{
     MeReadStateListQuery, MeRecentCreate, MeRecentCreateBody, MeStateGet, MeStateSet,
     MeSubscriptionList, MeSubscriptionListQuery, MeVisitCreate, PersonalTarget, SubscriptionSource,
 };
+use orch_api_contract::personal::{MeModelRecentCreate, MeModelRecentList, ModelRecent};
 use orch_api_contract::search::{NameKind, NameSearchList, NameSearchListQuery, NameSearchPage};
 use orch_db::queries::hierarchy;
 use orch_types::Id;
@@ -61,6 +62,196 @@ async fn favor(world: &World, who: &Who, node: Id, after: Option<Option<Id>>) ->
         .await
         .status
         .as_u16()
+}
+
+#[tokio::test]
+async fn model_choices_from_two_devices_stay_private_and_replayed_old_use_never_displaces_the_newest()
+ {
+    let world = World::new().await;
+    let ada = person(&world, "ada").await;
+    let bea = person(&world, "bea").await;
+    let first = ModelRecent {
+        provider_id: orch_types::new_id(),
+        model_name: "local-chat".into(),
+    };
+    let second = ModelRecent {
+        provider_id: first.provider_id,
+        model_name: "other-chat".into(),
+    };
+    let other_provider = ModelRecent {
+        provider_id: orch_types::new_id(),
+        model_name: first.model_name.clone(),
+    };
+    let first_key = orch_types::new_id().to_string();
+    world
+        .app
+        .call(MeModelRecentCreate, &[])
+        .token(&ada.token)
+        .header("Idempotency-Key", &first_key)
+        .body(&first)
+        .send()
+        .await
+        .ok();
+    let one = world
+        .app
+        .call(MeModelRecentCreate, &[])
+        .token(&ada.token)
+        .body(&second);
+    let two = world
+        .app
+        .call(MeModelRecentCreate, &[])
+        .token(&ada.token)
+        .body(&other_provider);
+    let (one, two) = tokio::join!(one.send(), two.send());
+    one.ok();
+    two.ok();
+    let held = world
+        .app
+        .call(MeModelRecentList, &[])
+        .token(&ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        held.recent.len(),
+        3,
+        "both concurrent selections survive and providers distinguish the same model name"
+    );
+    assert!(
+        held.recent_count > 0,
+        "the Recent group uses the registry default"
+    );
+    assert!(
+        held.recent.contains(&first)
+            && held.recent.contains(&second)
+            && held.recent.contains(&other_provider)
+    );
+    let latest = world
+        .app
+        .call(MeModelRecentList, &[])
+        .token(&ada.token)
+        .send()
+        .await
+        .ok()
+        .recent;
+    world
+        .app
+        .call(MeModelRecentCreate, &[])
+        .token(&ada.token)
+        .header("Idempotency-Key", &first_key)
+        .body(&first)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        world
+            .app
+            .call(MeModelRecentList, &[])
+            .token(&ada.token)
+            .send()
+            .await
+            .ok()
+            .recent,
+        latest
+    );
+    world
+        .app
+        .call(MeModelRecentCreate, &[])
+        .token(&ada.token)
+        .body(&first)
+        .send()
+        .await
+        .ok();
+    let updated = world
+        .app
+        .call(MeModelRecentList, &[])
+        .token(&ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(updated.recent.first(), Some(&first));
+    assert_eq!(updated.recent.len(), 3);
+    world
+        .set_at(
+            orch_settings::Target::System,
+            orch_settings_contract::registry::keys::INTERFACE_RECENT_MODELS,
+            json!(0),
+        )
+        .await;
+    let hidden = world
+        .app
+        .call(MeModelRecentList, &[])
+        .token(&ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(hidden.recent_count, 0);
+    assert_eq!(
+        hidden.recent.len(),
+        3,
+        "hiding Recent does not erase private history"
+    );
+    world
+        .set_at(
+            orch_settings::Target::System,
+            orch_settings_contract::registry::keys::INTERFACE_RECENT_MODELS,
+            json!(10000),
+        )
+        .await;
+    assert_eq!(
+        world
+            .app
+            .call(MeModelRecentList, &[])
+            .token(&ada.token)
+            .send()
+            .await
+            .ok()
+            .recent_count,
+        10000
+    );
+    assert!(
+        world
+            .app
+            .call(MeModelRecentList, &[])
+            .token(&bea.token)
+            .send()
+            .await
+            .ok()
+            .recent
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn the_successful_thread_setup_is_a_persons_server_preference_and_never_another_persons() {
+    let world = World::new().await;
+    let ada = person(&world, "ada").await;
+    let bea = person(&world, "bea").await;
+    let setup = json!({"place":"topic", "picks":{"provider":"source", "model":"chat", "effort":"high", "agent":"agent", "environment":"workspace", "arrangement":"separated"}});
+    world
+        .app
+        .call(MeStateSet, &[&"thread_setup"])
+        .token(&ada.token)
+        .raw_body(&setup)
+        .send()
+        .await
+        .ok();
+    let held = world
+        .app
+        .call(MeStateGet, &[])
+        .token(&ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(held.get("thread_setup"), Some(&setup));
+    let other = world
+        .app
+        .call(MeStateGet, &[])
+        .token(&bea.token)
+        .send()
+        .await
+        .ok();
+    assert!(!other.contains_key("thread_setup"));
 }
 
 #[tokio::test]
@@ -731,7 +922,7 @@ async fn the_read_positions_of_the_callers_threads_are_listed_by_org() {
 }
 
 #[tokio::test]
-async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_person() {
+async fn the_personal_interface_keeps_declared_values_whole_and_follows_the_person() {
     let world = World::new().await;
     let ada = person(&world, "ada").await;
     let bob = person(&world, "bob").await;
@@ -757,6 +948,13 @@ async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_perso
     );
     // The whole value is replaced.
     assert_eq!(set(&ada, "help", json!({ "closed": [] })).await.status, 204);
+    let reading = json!({
+        "kept_closed_tabs": 25,
+        "progress_delay_ms": 333,
+        "read_freshness_ms": { "lookup": 2000 },
+        "other_choice": "kept"
+    });
+    assert_eq!(set(&ada, "interface", reading.clone()).await.status, 204);
     let state = world
         .app
         .call(MeStateGet, &[])
@@ -766,7 +964,8 @@ async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_perso
         .ok();
     assert_eq!(state["help"], json!({ "closed": [] }));
     assert_eq!(state["layouts"]["wide"]["panes"], 3);
-    assert_eq!(state.len(), 2);
+    assert_eq!(state["interface"], reading);
+    assert_eq!(state.len(), 3);
     // Nobody else's.
     let other = world
         .app
@@ -776,6 +975,15 @@ async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_perso
         .await
         .ok();
     assert!(other.is_empty());
+    for invalid_reading in [
+        json!({ "kept_closed_tabs": -1 }),
+        json!({ "progress_delay_ms": "soon" }),
+        json!({ "read_freshness_ms": { "lookups": 2000 } }),
+        json!([]),
+    ] {
+        let refused = set(&ada, "interface", invalid_reading).await.problem();
+        assert_eq!(refused.code, ErrorCode::RequestInvalid);
+    }
     // No other key, and no value over 64 KiB.
     let unknown = set(&ada, "theme", json!(1)).await.problem();
     assert_eq!(unknown.code, ErrorCode::RequestInvalid);

@@ -33,7 +33,7 @@ import { repairResource, type ResourceRepair } from '@/api/resourceRepair';
 import { queryClient } from '@/api/query';
 import { devicesKey, outsideStatusKey, routesKey } from '@/api/away';
 import { capturePeopleHint, readAuthority, repairPeople } from '@/api/peopleChanges';
-import type { BindingOptions, TreeNode } from '@/generated/api-types';
+import type { TreeNode } from '@/generated/api-types';
 import { queryFeed } from '@/realtime/queryFeeds';
 import { queryAuthorityAllows } from '@/api/queryAuthority';
 import { reachKeys, refreshReach } from '@/api/adminReach';
@@ -136,23 +136,24 @@ const placeContents = (): Change[] => [shown(every('children'), every('topics'),
 /** Who may do what with what lies in a place changed: its page, its defaults or its roles, which reach everything inside it. */
 const placeAccess = (): Change[] => [
   { relatedViews: true },
+  shown(every('provider-trial'), every('accepted-orch-tools')),
   ...kinds('page', 'page-people', 'page-effective', 'page-history', 'defaults', 'roles', 'preview', 'agent-shares'),
   ...kinds('thread-shared', 'thread-shared-tree', 'environment-reach', AGENT_REACH, 'access-requests', 'holder-search', 'node', 'members'),
-  ...kinds('copy-destinations', 'holdings', 'first-steps', 'usage', 'start-options', 'shared-with-me', 'outside-port-openings'),
+  ...kinds('copy-destinations', 'holdings', 'first-steps', 'usage', 'start-options', 'thread-binding-options', 'shared-with-me', 'outside-port-openings'),
   ...kinds('thread-instructions', 'model-inputs', 'model-input-block', 'user-shares'),
   TREES,
 ];
 
 /** A place moved, or one with what is in it was deleted or brought back: its rows, and what follows from where it lies. */
-const placeMoved = (): Change[] => [...placeLists(), ...placeAccess(), ...kinds('settings', 'secrets', 'documents', 'environments', 'usage')];
+const placeMoved = (): Change[] => [...placeLists(), ...placeAccess(), ...kinds('settings', 'thread-screen-facts', 'secrets', 'documents', 'environments', 'usage')];
 
 /** What the page of each kind of thing that is no place is read by, beside the page itself. */
 const THING_VIEWS: Readonly<Record<string, readonly string[]>> = {
   documents: ['document', 'documents', 'readme'],
   chats: ['chat', 'chats', 'chat-states'],
-  providers: ['provider', 'providers', 'provider-setup', 'provider-threads', 'start-options', 'usage'],
-  agents: ['agent', 'agents', 'start-options'],
-  environments: ['environment', 'environments', 'environment-reach', AGENT_REACH, 'environment-ports', 'start-options', 'mounts', 'machine-environment-data'],
+  providers: ['provider', 'providers', 'provider-model-defaults', 'provider-setup', 'provider-threads', 'start-options', 'thread-binding-options', 'usage'],
+  agents: ['agent', 'agents', 'start-options', 'thread-binding-options'],
+  environments: ['environment', 'environments', 'environment-reach', AGENT_REACH, 'environment-ports', 'start-options', 'thread-binding-options', 'mounts', 'machine-environment-data'],
   hosts: ['host', 'host-settings', 'hosts', 'host-runtimes', 'mounts', 'machine-environment-data'],
   machines: ['machine', 'machines'],
   templates: ['template', 'templates'],
@@ -182,7 +183,7 @@ const access = (object: string, id: string, homed = true): Change[] => {
 
 /** Settings resolve down the tree: what a place sets is what every place, thread and resource inside it reads. */
 const settings = (): Change[] =>
-  kinds('copy-destinations', 'settings', 'secrets', 'thread-parameters', 'thread-limits', 'start-options', 'usage', 'usage-caps', 'first-steps', 'page', 'defaults', 'preview', 'provider-settings', 'environment-settings', 'host-settings', AGENT_REACH, 'environment-ports', 'notifiers', 'channels');
+  kinds('copy-destinations', 'settings', 'secrets', 'thread-screen-facts', 'thread-parameters', 'thread-limits', 'start-options', 'thread-binding-options', 'usage', 'usage-caps', 'first-steps', 'page', 'defaults', 'preview', 'provider-model-defaults', 'provider-settings', 'environment-settings', 'host-settings', AGENT_REACH, 'environment-ports', 'notifiers', 'channels');
 
 const relatedSettings = (key: string): Change[] => key.startsWith('related.') || key.startsWith('search.semantic.') ? [{ relatedViews: true }] : [];
 /** A saved identity list omits each viewer/root's resolved model eligibility and default. Repair shown Ask reads only. */
@@ -202,7 +203,7 @@ export const people = (authority = false, always = false): Change[] => [{ people
 const roleViews = (): Change[] => [{ relatedViews: true }, shown(every('members'), every('outsiders'), every('document-readers'), every('activity'))];
 
 /** Whether a role may be the reader's own: a person's rights are carried by the rows they read, so a role that is theirs or a group's changes those rows. */
-const READER_ACCESS = ['node', 'org', 'orgs', 'children', 'shared-with-me', 'names'] as const;
+const READER_ACCESS = ['node', 'org', 'orgs', 'children', 'shared-with-me', 'names', 'provider-trial', 'accepted-orch-tools'] as const;
 
 /** A group, which is a holder on pages and a set of people behind it. */
 const groups = (): Change[] => kinds('groups', 'org-groups', 'group-members', 'group-holders', 'holder-search', 'page', 'page-people', 'page-effective', 'roles', 'defaults', 'usage', 'preview');
@@ -221,7 +222,7 @@ const thread = (id: string): Change[] => [
   conversation(id),
   every('environment-reach'),
   every(AGENT_REACH),
-  ...ones(id, 'node', 'thread', 'thread-parameters', 'thread-limits', 'thread-outline', 'thread-catchup', 'thread-sides', 'thread-instructions', 'model-inputs', 'thread-items'),
+  ...ones(id, 'node', 'thread', 'thread-parameters', 'accepted-orch-tools', 'thread-limits', 'thread-outline', 'thread-catchup', 'thread-sides', 'thread-instructions', 'model-inputs', 'thread-items'),
   ...ones(id, 'thread-context', 'thread-turn-usage', 'turn-cost'),
 ];
 
@@ -234,7 +235,7 @@ export function threadRowChanges(id: string): Change[] {
 }
 
 /** Threads were made, moved or changed where they run: the threads, their places and the trees. */
-const threads = (): Change[] => [...kinds('node', 'topics', 'thread-sides', 'provider-threads', 'environments', 'environment', 'environment-reach', AGENT_REACH, 'start-options', 'thread-parameters', 'job', 'fork-batch'), TREES];
+const threads = (): Change[] => [...kinds('node', 'topics', 'thread-sides', 'provider-threads', 'environments', 'environment', 'environment-reach', AGENT_REACH, 'start-options', 'thread-binding-options', 'thread-parameters', 'job', 'fork-batch'), TREES];
 
 /** A document's own views: its blocks by its feed, and what is read of it beside. */
 const doc = (id: string): Change[] => [blocks(id), ...ones(id, 'document', 'document-versions', 'document-changes', 'document-readers'), ...kinds('documents', 'readme')];
@@ -244,7 +245,7 @@ const environment = (id: string): Change[] => [
   every('machine-environment-data'),
   every('mounts'),
   ...ones(id, 'environment', 'environment-settings', 'environment-reach', AGENT_REACH, 'environment-ports', 'terminals', 'processes', 'resources'),
-  ...kinds('environments', 'start-options', 'host', 'host-runtimes', 'hosts', 'trace-deleted', 'deleted-inspection'),
+  ...kinds('environments', 'start-options', 'thread-binding-options', 'host', 'host-runtimes', 'hosts', 'trace-deleted', 'deleted-inspection'),
 ];
 
 /** The files of an environment's workspace, by every view of them. The bytes of a file are keyed by its hash and never change. */
@@ -252,14 +253,15 @@ const files = (id: string): Change[] => [...ones(id, 'workspace-stat', 'workspac
 
 /** One provider, with what its pages and every chooser of a provider read. */
 const provider = (id: string): Change[] => [
-  ...ones(id, 'provider', 'provider-settings', 'provider-models', 'provider-suggestions', 'provider-threads', 'provider-caps', 'provider-login', 'settings'),
-  ...kinds('providers', 'provider-setup', 'start-options', 'usage', 'thread-parameters', AGENT_REACH),
+  shown(one(id, 'provider-trial')),
+  ...ones(id, 'provider', 'provider-settings', 'provider-model-defaults', 'provider-models', 'provider-facts-models', 'provider-threads', 'provider-caps', 'provider-login', 'settings'),
+  ...kinds('providers', 'provider-setup', 'start-options', 'thread-binding-options', 'usage', 'thread-parameters', AGENT_REACH),
 ];
 
-const agent = (id: string): Change[] => [one(id, 'agent'), ...kinds('agents', 'start-options', 'harness-kinds')];
+const agent = (id: string): Change[] => [one(id, 'agent'), ...kinds('agents', 'start-options', 'thread-binding-options', 'harness-kinds')];
 const host = (id: string): Change[] => [...ones(id, 'host', 'host-settings', 'host-runtimes'), ...kinds('hosts', 'environments', 'admin', 'mounts')];
-const template = (id: string): Change[] => [one(id, 'template'), ...kinds('templates', 'start-options', 'provider-setup')];
-const machine = (id: string): Change[] => [...ones(id, 'machine', 'machine-policy'), ...kinds('machines', 'providers', 'agents', 'environments', 'start-options', 'provider-setup', 'mounts', 'machine-environment-data')];
+const template = (id: string): Change[] => [one(id, 'template'), ...kinds('templates', 'start-options', 'thread-binding-options', 'provider-setup')];
+const machine = (id: string): Change[] => [...ones(id, 'machine', 'machine-policy'), ...kinds('machines', 'providers', 'agents', 'environments', 'start-options', 'thread-binding-options', 'provider-setup', 'mounts', 'machine-environment-data')];
 const mcp = (id: string): Change[] => [one(id, 'mcp-server'), every('mcp-servers')];
 const mount = (id: string): Change[] => [...ones(id, 'mount', 'mount-uses'), ...kinds('mounts', AGENT_REACH)];
 const skill = (id: string): Change[] => [...ones(id, 'skill', 'skill-versions', 'skill-draft'), ...kinds('skills', 'skill-version', 'skill-version-file', 'skill-draft-file')];
@@ -288,7 +290,7 @@ const usage = (): Change[] => kinds('usage', 'usage-caps', 'provider-caps', 'thr
 /** What a job that changes where work runs reaches: environments, providers, hosts, the threads bound to them. */
 const placement = (): Change[] => [
   ...kinds('environment', 'environments', 'environment-reach', AGENT_REACH, 'host', 'hosts', 'host-runtimes', 'provider', 'providers', 'job', 'fork-batch'),
-  ...kinds('thread-parameters', 'start-options', 'node', 'thread-sides', 'change-plan', 'change-env-plan', 'change-batch-plan', 'recycle-dry-run'),
+  ...kinds('thread-parameters', 'start-options', 'thread-binding-options', 'node', 'thread-sides', 'change-plan', 'change-env-plan', 'change-batch-plan', 'recycle-dry-run'),
   TREES,
 ];
 
@@ -341,6 +343,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'DELETE /me/favorites/{kind}/{id}': favoriteViews,
   'POST /me/visits': () => NOTHING,
   'POST /me/recents': () => NOTHING,
+  'POST /me/model-recents': () => NOTHING,
   // What the interface keeps is shown as it is set; reading it back while more is being sent could bring back an older
   // value. Other devices hear of it by the person's news (`state`).
   'PUT /me/state/{key}': () => NOTHING,
@@ -354,7 +357,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /ask/conversations/{id}/stop': (p) => askConversation(p('id')),
   'POST /ask/conversations/{id}/keep': (p) => askConversation(p('id')),
 
-  'PUT /{object}/{id}/home': (p) => [...access(p('object'), p('id')), ...kinds('everything', 'names', 'start-options'), TREES],
+  'PUT /{object}/{id}/home': (p) => [...access(p('object'), p('id')), ...kinds('everything', 'names', 'start-options', 'thread-binding-options'), TREES],
 
   'POST /hosts/{id}/move-out/preview': () => NOTHING,
   'POST /hosts/{id}/move-out': (p) => [...access('hosts', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
@@ -380,14 +383,14 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /copy-destinations/judge': () => NOTHING,
 
   // -- native duplicates create fresh identities; their sources are not updated
-  'POST /providers/{id}/duplicate': () => kinds('providers', 'provider-setup', 'start-options', 'everything', 'names', 'trace'),
-  'POST /agents/{id}/duplicate': () => kinds('agents', 'start-options', 'everything', 'names', 'trace'),
+  'POST /providers/{id}/duplicate': () => kinds('providers', 'provider-setup', 'start-options', 'thread-binding-options', 'everything', 'names', 'trace'),
+  'POST /agents/{id}/duplicate': () => kinds('agents', 'start-options', 'thread-binding-options', 'everything', 'names', 'trace'),
   'POST /templates/{id}/duplicate': () => kinds('templates', 'everything', 'names', 'trace'),
   'POST /mounts/{id}/duplicate': () => kinds('mounts', 'everything', 'names', 'trace'),
   'POST /mcp-servers/{id}/duplicate': () => kinds('mcp-servers', 'environment-mcp', 'everything', 'names', 'trace'),
   'POST /skills/{id}/duplicate': () => kinds('skills', 'everything', 'names', 'trace'),
   'POST /skills/{id}/draft/duplicate': () => kinds('skills', 'everything', 'names', 'trace'),
-  'POST /environments/{id}/duplicate': () => [...kinds('environments', 'start-options', 'job', 'everything', 'names', 'trace'), TREES],
+  'POST /environments/{id}/duplicate': () => [...kinds('environments', 'start-options', 'thread-binding-options', 'job', 'everything', 'names', 'trace'), TREES],
   'POST /chats/{id}/duplicate': () => [...kinds('chats', 'everything', 'names', 'trace'), TREES],
   'POST /chats/{id}/duplicate/preview': () => NOTHING,
 
@@ -456,7 +459,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /admin/messages': () => [{ missing: [only('admin-messages', 'system')] }, { missing: [only('admin', 'settings')] }, { meta: true }],
   'PATCH /tags/{id}': () => tagged(),
   'DELETE /tags/{id}': () => tagged(),
-  'PUT /topics/{id}/default-environment': (p) => [...place(p('id')), ...kinds('start-options', 'environments')],
+  'PUT /topics/{id}/default-environment': (p) => [...place(p('id')), ...kinds('start-options', 'thread-binding-options', 'environments')],
   'POST /nodes/{id}/transfer': (p) => [...place(p('id')), ...placeAccess(), every('admin')],
 
   // -- access: pages, defaults, roles, requests, agents' shares
@@ -504,6 +507,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /orgs/{id}/tokens/{token_id}/refuse': (p) => [one(p('id'), 'org-tokens'), ...kinds('tokens', 'service-tokens')],
 
   // -- settings and secrets, at a place, of a resource, of the system
+  'POST /settings/parameters/form': () => NOTHING,
   'PUT /nodes/{id}/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...personalSkillsSetting(p('key')), ...thread(p('id')), one(p('id'), 'node')],
   'DELETE /nodes/{id}/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...personalSkillsSetting(p('key')), ...thread(p('id')), one(p('id'), 'node')],
   'PUT /nodes/{id}/secrets/{name}': () => kinds('secrets', 'settings'),
@@ -563,6 +567,8 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /threads/{id}/side': (p) => [...thread(p('id')), ...threads()],
   'POST /threads/{id}/adopt/retry-history': (p) => [...thread(p('id')), one(p('id'), 'adopt-history')],
   'POST /threads/{id}/forks/preflight': () => NOTHING,
+  'POST /threads/{id}/move-out/preview': () => NOTHING,
+  'POST /threads/{id}/move-out': (p) => [...thread(p('id')), ...threads(), ...placement(), ...kinds('everything', 'names', 'trace')],
   'POST /threads/{id}/forks': (p) => [...thread(p('id')), ...threads(), ...placement()],
   'POST /threads/{id}/forks/now': (p) => [...thread(p('id')), ...threads()],
   'POST /forks/preflight': () => NOTHING,
@@ -656,8 +662,8 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /imports/{id}/undo': (p) => [...ones(p('id'), 'imports'), ...kinds('job')],
 
   // -- environments and what is in them
-  'POST /environments': () => [...kinds('environments', 'start-options', 'hosts', 'host', 'host-runtimes', 'job', 'first-steps'), TREES],
-  'POST /machines/{id}/environments': (p) => [...machine(p('id')), ...kinds('environments', 'start-options', 'first-steps')],
+  'POST /environments': () => [...kinds('environments', 'start-options', 'thread-binding-options', 'hosts', 'host', 'host-runtimes', 'job', 'first-steps'), TREES],
+  'POST /machines/{id}/environments': (p) => [...machine(p('id')), ...kinds('environments', 'start-options', 'thread-binding-options', 'first-steps')],
   'PATCH /environments/{id}': (p) => [...environment(p('id')), ...settings()],
   'DELETE /environments/{id}': (p) => [...ended(environment(p('id')), p('id')), ...kinds('trace-deleted', 'trace'), TREES],
   'POST /environments/{id}/restore': (p) => [...environment(p('id')), ...kinds('trace-deleted', 'trace', 'job')],
@@ -732,8 +738,8 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'DELETE /environments/{id}/capabilities/{key}': (p) => [...environment(p('id')), every('port-requests')],
 
   // -- providers and how agents run on them
-  'POST /providers': () => [...kinds('providers', 'provider-setup', 'start-options', 'first-steps'), TREES],
-  'POST /machines/{id}/providers': (p) => [...machine(p('id')), ...kinds('providers', 'provider-setup', 'start-options', 'first-steps')],
+  'POST /providers': () => [...kinds('providers', 'provider-setup', 'start-options', 'thread-binding-options', 'first-steps'), TREES],
+  'POST /machines/{id}/providers': (p) => [...machine(p('id')), ...kinds('providers', 'provider-setup', 'start-options', 'thread-binding-options', 'first-steps')],
   'PATCH /providers/{id}': (p) => [...provider(p('id')), ...settings()],
   'DELETE /providers/{id}': (p) => [...ended(provider(p('id')), p('id')), every('thread-parameters')],
   'POST /providers/{id}/enable': (p) => provider(p('id')),
@@ -760,10 +766,10 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /providers/runtime/updates': () => placement(),
 
   // -- agent profiles
-  'POST /orgs/{id}/agents': () => [...kinds('agents', 'start-options', 'first-steps'), TREES],
-  'POST /machines/{id}/agents': (p) => [...machine(p('id')), ...kinds('agents', 'start-options', 'first-steps')],
+  'POST /orgs/{id}/agents': () => [...kinds('agents', 'start-options', 'thread-binding-options', 'first-steps'), TREES],
+  'POST /machines/{id}/agents': (p) => [...machine(p('id')), ...kinds('agents', 'start-options', 'thread-binding-options', 'first-steps')],
   'PATCH /agents/{id}': (p) => agent(p('id')),
-  'DELETE /agents/{id}': (p) => [gone(p('id'), 'agent'), ...kinds('agents', 'start-options', 'thread-parameters')],
+  'DELETE /agents/{id}': (p) => [gone(p('id'), 'agent'), ...kinds('agents', 'start-options', 'thread-binding-options', 'thread-parameters')],
 
   // -- machines a person connected
   'POST /machines/enrollment-tokens': () => kinds('machines'),
@@ -782,13 +788,13 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'PATCH /hosts/{id}': (p) => host(p('id')),
   'PUT /hosts/{id}/settings/{key}': (p) => host(p('id')),
   'DELETE /hosts/{id}/settings/{key}': (p) => host(p('id')),
-  'DELETE /hosts/{id}': (p) => [gone(p('id'), 'host'), gone(p('id'), 'host-runtimes'), ...kinds('hosts', 'machines', 'environments', 'admin', 'start-options')],
+  'DELETE /hosts/{id}': (p) => [gone(p('id'), 'host'), gone(p('id'), 'host-runtimes'), ...kinds('hosts', 'machines', 'environments', 'admin', 'start-options', 'thread-binding-options')],
   'POST /hosts/{id}/runtimes/{runtime_id}/stop': (p) => [...host(p('id')), ...kinds('provider', 'environment', 'job')],
   'DELETE /hosts/{id}/runtimes/{runtime_id}': (p) => [...host(p('id')), ...kinds('provider', 'environment', 'environments', 'providers')],
-  'POST /templates': () => kinds('templates', 'start-options', 'provider-setup'),
+  'POST /templates': () => kinds('templates', 'start-options', 'thread-binding-options', 'provider-setup'),
   'POST /templates/check': () => NOTHING,
   'PATCH /templates/{id}': (p) => template(p('id')),
-  'DELETE /templates/{id}': (p) => [gone(p('id'), 'template'), ...kinds('templates', 'start-options', 'provider-setup')],
+  'DELETE /templates/{id}': (p) => [gone(p('id'), 'template'), ...kinds('templates', 'start-options', 'thread-binding-options', 'provider-setup')],
 
   // -- tools: MCP servers and mounts
   'POST /mcp-servers': () => kinds('mcp-servers'),
@@ -845,7 +851,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /harnesses/{kind}/{version}/fetch': () => [only('program-builds'), ...kinds('admin', 'harness-kinds')],
   'POST /admin/harnesses/channels': () => kinds('admin', 'harness-kinds'),
   'POST /admin/harnesses/{kind}/{version}/check': () => kinds('admin', 'harness-kinds'),
-  'POST /admin/agents': () => kinds('admin', 'agents', 'start-options'),
+  'POST /admin/agents': () => kinds('admin', 'agents', 'start-options', 'thread-binding-options'),
   'POST /admin/identity-providers': () => kinds('admin', 'meta'),
   'PATCH /admin/identity-providers/{id}': () => kinds('admin', 'meta'),
   'DELETE /admin/identity-providers/{id}': () => kinds('admin', 'meta'),
@@ -1014,7 +1020,8 @@ function follow(change: Followed): void {
   }
 }
 
-const startRepairs = new WeakMap<Query, Promise<void>>();
+const startRepairs = new WeakMap<Query, { again: boolean; promise: Promise<void>; reports: Map<string, string>; reader: string }>();
+const repairedAgentReports = new WeakMap<Query, Map<string, string>>();
 const approvalRepairs = new WeakMap<Query, Promise<void>>();
 const outsideRepairs = new WeakMap<Query, Promise<void>>();
 const relatedRepairs = new WeakMap<Query, Promise<void>>();
@@ -1125,6 +1132,37 @@ async function repairCapViews(cache: QueryClient, change: { id: string; value?: 
   }));
 }
 
+/** A sharing summary travels with its list, so a changed home retires that exact projection too. */
+async function repairInventorySharing(cache: QueryClient, changes: readonly Change[], current: () => boolean): Promise<void> {
+  const broad = changes.some((change) => 'people' in change || 'row' in change && change.row.kind === 'role');
+  const defaults = changes.flatMap((change) => 'key' in change && change.key[0] === 'defaults' ? [change]
+    : 'missing' in change ? change.missing.filter((part) => part.key[0] === 'defaults') : []);
+  if (!broad && defaults.length === 0) return;
+  const affected = cache.getQueryCache().getAll().filter((query) => {
+    const filter = query.queryKey[3], data = query.state.data;
+    if (query.queryKey[2] !== 'resources' || !record(filter) || !record(filter.resource) || filter.resource.rows !== true
+      || !record(data) || !Array.isArray(data.pages)) return false;
+    return data.pages.some((page: unknown) => record(page) && Array.isArray(page.items) && page.items.some((row: unknown) => {
+      if (!record(row) || !record(row.sharing) || typeof row.sharing.home_id !== 'string') return false;
+      const home = row.sharing.home_id, path = row.home_path;
+      return broad || defaults.some((change) => {
+        const changed = change.id ?? change.key[1];
+        return typeof changed !== 'string' || changed === 'system' || changed === home
+          || Array.isArray(path) && path.some((node: unknown) => record(node) && node.id === changed);
+      });
+    }));
+  });
+  await Promise.all(affected.map(async (query) => {
+    if (!current() || cache.getQueryCache().find({ queryKey: query.queryKey, exact: true }) !== query) return;
+    if (!query.isActive()) { cache.removeQueries({ queryKey: query.queryKey, exact: true }); return; }
+    // A later defaults hint supersedes a page that started before that change.
+    await cache.cancelQueries({ queryKey: query.queryKey, exact: true });
+    if (!current() || cache.getQueryCache().find({ queryKey: query.queryKey, exact: true }) !== query
+      || !query.isActive() || !queryAuthorityAllows(cache, query.meta)) return;
+    await cache.refetchQueries({ queryKey: query.queryKey, exact: true });
+  }));
+}
+
 /** Approval news carries counters, without the request or its membership in the reader's lists. */
 async function repairApprovalViews(cache: QueryClient, current: () => boolean): Promise<void> {
   await Promise.all(cache.getQueryCache().getAll().filter((query) => query.queryKey[0] === 'approvals' || query.queryKey[0] === 'approval' || query.queryKey[0] === 'reference-preview' || query.queryKey[0] === 'access-request').map(async (query) => {
@@ -1142,28 +1180,60 @@ async function repairApprovalViews(cache: QueryClient, current: () => boolean): 
   }));
 }
 
-/** A newly reported agent changes computed arrangements, which its native row cannot supply. */
-async function repairAgentChoices(cache: QueryClient, row: RowChange['row'], current: () => boolean): Promise<void> {
-  if (row.kind !== 'agent' || row.value === null || !record(row.value.descriptor)) return;
-  const reported = Object.keys(row.value.descriptor).length > 0;
-  const waiting = cache.getQueryCache().getAll().filter((query) => {
-    if (query.queryKey[0] !== 'start-options') return false;
-    const choices = query.state.data as BindingOptions | undefined;
-    return choices?.providers.some((provider) => provider.agents.some((agent) => agent.agent.id === row.id
-      && (reported ? agent.reason === 'harness_unreported' : agent.reason !== 'harness_unreported' && agent.reason !== 'disabled'))) === true;
-  });
+/** Capture affected readers before resource deletion changes their current choices. */
+function bindingChoicesFor(cache: QueryClient, kind: string, id: string): Query[] {
+  if (kind !== 'provider' && kind !== 'agent') return [];
+  const choices = cache.getQueryCache().getAll().filter((query) =>
+    query.queryKey[0] === 'start-options' || query.queryKey[0] === 'thread-binding-options');
+  if (kind === 'provider') return choices;
+  const contains = (query: Query): boolean | undefined => {
+    const data = query.state.data;
+    if (!record(data) || !Array.isArray(data.providers)) return undefined;
+    return data.providers.some((provider: unknown) => record(provider) && Array.isArray(provider.agents)
+      && provider.agents.some((entry: unknown) => record(entry) && record(entry.agent) && entry.agent.id === id));
+  };
+  // A newly reported agent may enter a list that has never offered it.
+  return choices.some((query) => contains(query) === true) ? choices.filter((query) => contains(query) !== false) : choices;
+}
+
+/** Computed choices keep exact concurrent repairs and retire work from an earlier reader. */
+async function repairBindingChoices(cache: QueryClient, kind: string, current: () => boolean, report?: { id: string; value?: Record<string, unknown> | null }, waiting = bindingChoicesFor(cache, kind, report?.id ?? '')): Promise<void> {
+  if (kind !== 'provider' && kind !== 'agent') return;
+  const identity = () => { const state = client.session.getState(); return JSON.stringify([state.status, state.userId, state.readerVersion]); };
+  const reader = identity();
+  const admitted = () => current() && identity() === reader;
+  const reportKey = kind === 'agent' && report?.value !== undefined ? report.id : undefined;
+  const signature = reportKey === undefined ? undefined : JSON.stringify([reader, report?.value]);
   await Promise.all(waiting.map(async (query) => {
     if (!query.isActive()) { cache.removeQueries({ queryKey: query.queryKey, exact: true }); return; }
+    if (query.state.status === 'success' && reportKey !== undefined && repairedAgentReports.get(query)?.get(reportKey) === signature) return;
     const pending = startRepairs.get(query);
-    if (pending !== undefined) return pending;
-    const repair = (async () => {
-      await cache.cancelQueries({ queryKey: query.queryKey, exact: true });
-      if (!current() || cache.getQueryCache().find({ queryKey: query.queryKey, exact: true }) !== query
-        || !query.isActive() || !queryAuthorityAllows(cache, query.meta)) return;
-      await cache.refetchQueries({ queryKey: query.queryKey, exact: true });
-    })();
+    if (pending !== undefined) {
+      if (pending.reader !== reader) return pending.promise.then(() => repairBindingChoices(cache, kind, current, report, waiting));
+      if (reportKey !== undefined && signature !== undefined) {
+        if (pending.reports.get(reportKey) === signature) return pending.promise;
+        pending.reports.set(reportKey, signature);
+      }
+      pending.again = true; return pending.promise;
+    }
+    const repair = { again: true, promise: Promise.resolve(), reports: new Map<string, string>(), reader };
+    if (reportKey !== undefined && signature !== undefined) repair.reports.set(reportKey, signature);
     startRepairs.set(query, repair);
-    return repair.finally(() => { if (startRepairs.get(query) === repair) startRepairs.delete(query); });
+    repair.promise = Promise.resolve().then(async () => {
+      while (repair.again) {
+        repair.again = false;
+        await cache.cancelQueries({ queryKey: query.queryKey, exact: true });
+        if (!admitted() || cache.getQueryCache().find({ queryKey: query.queryKey, exact: true }) !== query
+          || !query.isActive() || !queryAuthorityAllows(cache, query.meta)) return;
+        await cache.refetchQueries({ queryKey: query.queryKey, exact: true });
+      }
+      if (query.state.status === 'success' && admitted()) {
+        const seen = repairedAgentReports.get(query) ?? new Map<string, string>();
+        for (const [id, signature] of repair.reports) seen.set(id, signature);
+        repairedAgentReports.set(query, seen);
+      }
+    }).finally(() => { if (startRepairs.get(query) === repair) startRepairs.delete(query); });
+    return repair.promise;
   }));
 }
 
@@ -1202,6 +1272,8 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
   const directoryHints = changes.filter((change): change is Extract<Change, { people: true }> => 'people' in change);
   const directoryCut = directoryHints.length === 0 ? undefined : Math.max(...directoryHints.map((change) => change.cut ?? capturePeopleHint(cache)));
   const readerVersion = client.session.getState().readerVersion;
+  const repairsBindings = changes.some((change) => 'missing' in change && change.missing.some((hint) => hint.key[0] === 'thread-binding-options')
+    || 'key' in change && change.key[0] === 'thread-binding-options');
   const left: Stale[] = [];
   // Each change is taken once, however many entries or frames name it: a moved subtree names the same kinds for every row.
   const seen = new Set<string>();
@@ -1242,6 +1314,8 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
       }
       const projection=missingInventoryProjection(cache,change.row);
       const touched = change.row.kind === 'role' ? roleTouched(cache, change.row) : undefined;
+      const bindings = repairsBindings ? [] : bindingChoicesFor(cache, kind, id);
+      const previousResource = bindings.length === 0 ? undefined : cache.getQueryData([kind, id]);
       applyRow(cache, change.row);
       // A role that is the reader's own, or a group's, changes what the reader may do in every row they hold: those rows are read again where shown.
       const holder = touched?.holder;
@@ -1255,7 +1329,10 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
       }
       if(projection!==null) await cache.refetchQueries({queryKey:projection,exact:true});
       if (client.session.getState().readerVersion !== readerVersion) return;
-      await repairAgentChoices(cache, change.row, () => client.session.getState().readerVersion === readerVersion);
+      // Repeated publication is no new dependency change; readers were captured before deletion.
+      if (!repairsBindings && (kind !== 'agent' || change.row.value === null || previousResource === undefined || previousResource !== cache.getQueryData([kind, id]))) {
+        await repairBindingChoices(cache, kind, () => client.session.getState().readerVersion === readerVersion, { id: change.row.id, value: change.row.value }, bindings);
+      }
     }
     else if ('adminCredentials' in change) {
       await refreshReach(cache, change.adminCredentials.kind === 'tokens' ? reachKeys.tokens : reachKeys.sessions(change.adminCredentials.person));
@@ -1308,7 +1385,11 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
         else cache.removeQueries({queryKey:query.queryKey,exact:true});
       }
     }
-    else if ('repair' in change) await repairResource(cache, change.repair);
+    else if ('repair' in change) {
+      const bindings = repairsBindings ? [] : bindingChoicesFor(cache, change.repair.kind, change.repair.id);
+      await repairResource(cache, change.repair);
+      if (!repairsBindings) await repairBindingChoices(cache, change.repair.kind, () => client.session.getState().readerVersion === readerVersion, { id: change.repair.id }, bindings);
+    }
     else if ('enrollment' in change) {
       await cache.cancelQueries({ queryKey: enrollmentProgressKey(change.enrollment.receipt), exact: true });
       if (client.session.getState().readerVersion !== readerVersion) return;
@@ -1348,12 +1429,17 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
     else if (change.gone === true) left.push(change);
     else stale.push(change);
   }
+  await repairInventorySharing(cache, changes, () => client.session.getState().readerVersion === readerVersion);
+  if (client.session.getState().readerVersion !== readerVersion) return;
   const isGone = (query: Query): boolean => left.some((change) => covers(change, query.queryKey));
   if (left.length > 0) cache.removeQueries({ predicate: (query) => query.getObserversCount() === 0 && isGone(query) });
   if (stale.length === 0) return;
+  // Binding choices are derived without a native feed; a live dependency hint repairs each displayed owner.
+  const bindings = stale.filter((change) => change.key[0] === 'start-options' || change.key[0] === 'thread-binding-options');
+  if (bindings.length > 0) await applyChanges([{ missing: bindings, allObserved: true, cancelPending: true }], cache);
   // Legacy invalidations received without a row never refresh a whole kind or a list. Exact
   // missing projections are the only reads allowed; inactive entries wait until they are shown.
-  const exact = stale.filter((change) => change.exact === true || change.id !== undefined);
+  const exact = stale.filter((change) => !bindings.includes(change) && (change.exact === true || change.id !== undefined));
   const missing = cache.getQueryCache().getAll().filter((query) => !isGone(query) && query.isActive() && exact.some((change) => covers(change, query.queryKey)));
   await Promise.all(missing.map((query) => cache.invalidateQueries({ queryKey: query.queryKey, exact: true, refetchType: 'active' })));
 }
@@ -1421,6 +1507,8 @@ export function userEventChanges(what: string, data: Readonly<Record<string, unk
   }
   if (snapshots.length > 0) return what === 'route' || what === 'notification_prefs' ? [...snapshots, { outsideViews: true }] : snapshots;
   switch (what) {
+    case 'model_recents':
+      return [{ missing: [{ key: ['model-recents'] }], cancelPending: true }];
     case 'admin_mode':
       return [{ session: true, ...(typeof data.as_admin==='boolean'?{asAdmin:data.as_admin}:{}) }];
     case 'approvals':
@@ -1463,14 +1551,14 @@ export function userEventChanges(what: string, data: Readonly<Record<string, unk
 
 /** The lists of each kind of resource, as the person's news names the kind. */
 const RESOURCE_LISTS: Readonly<Record<string, readonly string[]>> = {
-  provider: ['providers', 'provider-setup', 'start-options'],
-  agent: ['agents', 'start-options'],
+  provider: ['providers', 'provider-setup', 'start-options', 'thread-binding-options'],
+  agent: ['agents', 'start-options', 'thread-binding-options'],
   host: ['hosts'],
-  template: ['templates', 'start-options'],
+  template: ['templates', 'start-options', 'thread-binding-options'],
   mcp_server: ['mcp-servers'],
   mount: ['mounts'],
   skill: ['skills'],
-  environment: ['environments', 'start-options'],
+  environment: ['environments', 'start-options', 'thread-binding-options'],
   machine: ['machines'],
 };
 

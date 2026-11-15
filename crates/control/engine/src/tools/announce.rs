@@ -35,7 +35,7 @@ use crate::error::EngineError;
 use crate::ids;
 use crate::inputs::Arrival;
 use crate::tools::definitions::{BODY_MAX_CHARS, Code, Refusal};
-use crate::tools::{Answer, CallContext, ToolSettings, definition_of, setting};
+use crate::tools::{Answer, CallContext, ToolSettings, definition_of, setting, setting_source};
 use crate::unit::Unit;
 use chrono::{DateTime, Duration, Utc};
 use orch_access_contract::audit::AuditAction;
@@ -84,6 +84,7 @@ pub struct Broadcast {
     pub delivery: AnnouncementDelivery,
     /// Used instead of `steer` when the receiving agent cannot be steered.
     pub fallback: AnnouncementFallback,
+    pub fallback_source: orch_api_contract::settings::SettingSource,
     /// Whether a send may explicitly choose to start an idle thread.
     pub wake_idle: bool,
     /// Which of `interrupt`, `steer`, `next_turn` an agent may choose itself.
@@ -123,6 +124,7 @@ impl Broadcast {
         Ok(Self {
             delivery,
             fallback,
+            fallback_source: setting_source(&snapshot, keys::BROADCAST_FALLBACK)?,
             wake_idle: setting(&snapshot, keys::BROADCAST_WAKE_IDLE)?.unwrap_or(true),
             agent_options: setting(&snapshot, keys::BROADCAST_AGENT_OPTIONS)?.unwrap_or_default(),
             rate_per_hour: setting(&snapshot, keys::BROADCAST_RATE_PER_HOUR)?.unwrap_or_default(),
@@ -245,6 +247,7 @@ pub struct Plan {
     pub delivery: AnnouncementDelivery,
     /// What it does where it may not steer.
     pub fallback: AnnouncementFallback,
+    pub fallback_source: Option<orch_api_contract::settings::SettingSource>,
     /// Whether it starts an idle thread.
     pub wake_idle: bool,
     /// Which threads.
@@ -667,22 +670,44 @@ impl Engine {
                     (Treatment::Steer, Some(turn)) => Arrival::Steer { turn: turn.id },
                     _ => Arrival::Front,
                 };
-                self.queue_announcement_input(
-                    unit,
-                    thread_id,
-                    ids::derived(
-                        "announcement.input",
-                        &[
-                            row.id.as_bytes().as_slice(),
-                            thread_id.as_bytes().as_slice(),
-                        ],
-                    ),
-                    text,
-                    &crate::tools::thread_message::file_parts(&row.files),
-                    arrival,
-                    operation.map(|(caller, place)| (caller, place, row)),
-                )
-                .await?;
+                let input_id = ids::derived(
+                    "announcement.input",
+                    &[
+                        row.id.as_bytes().as_slice(),
+                        thread_id.as_bytes().as_slice(),
+                    ],
+                );
+                let made = self
+                    .queue_announcement_input(
+                        unit,
+                        thread_id,
+                        input_id,
+                        text,
+                        &crate::tools::thread_message::file_parts(&row.files),
+                        arrival,
+                        operation.map(|(caller, place)| (caller, place, row)),
+                    )
+                    .await?;
+                if made
+                    && active
+                    && plan.delivery == AnnouncementDelivery::Steer
+                    && !steerable
+                    && may_reach
+                {
+                    let resolution = orch_api_contract::threads::InputDeliveryResolution {
+                        requested: plan.delivery,
+                        applied: match doing {
+                            Treatment::Interrupt => orch_api_contract::threads::Delivery::Interrupt,
+                            Treatment::Steer => orch_api_contract::threads::Delivery::Steer,
+                            _ => orch_api_contract::threads::Delivery::Queue,
+                        },
+                        reason: orch_api_contract::threads::InputDeliveryReason::SteerUnavailable,
+                        source: plan.fallback_source.clone(),
+                        resolved_at: Time::new(now),
+                    };
+                    sqlx::query("UPDATE thread_inputs SET delivery_resolution=$2 WHERE id=$1 AND delivery_resolution IS NULL")
+                        .bind(input_id).bind(serde_json::to_value(resolution)?).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+                }
                 Ok(Some(match doing {
                     Treatment::Interrupt => INTERRUPTED,
                     Treatment::Steer => STEERED,
@@ -774,6 +799,18 @@ impl Engine {
         });
         if let Some(how) = delivered_as {
             payload["delivered_as"] = json!(how);
+            let input_id = ids::derived(
+                "announcement.input",
+                &[
+                    row.id.as_bytes().as_slice(),
+                    thread_id.as_bytes().as_slice(),
+                ],
+            );
+            if let Some(input) = threads::input(unit.conn, input_id).await?
+                && let Some(resolution) = input.delivery_resolution
+            {
+                payload["delivery_resolution"] = resolution;
+            }
         }
         crate::ingest::add_item(
             unit,
@@ -1002,6 +1039,7 @@ impl Engine {
             severity: arguments.severity.unwrap_or(AnnouncementSeverity::Info),
             delivery,
             fallback: broadcast.fallback,
+            fallback_source: Some(broadcast.fallback_source.clone()),
             wake_idle,
             reach: if audience == Audience::Followers {
                 Reach::Nobody
@@ -1141,6 +1179,7 @@ impl Engine {
                     .filter(|_| plan.delivery != broadcast.delivery)
                     .map_or(broadcast.delivery, |_| plan.delivery);
                 here.fallback = broadcast.fallback;
+                here.fallback_source = Some(broadcast.fallback_source.clone());
                 here.wake_idle = match broadcast.wake_for(arguments.wake_idle) {
                     Ok(wake) => wake,
                     Err(refusal) => return Ok(Err(refusal)),
@@ -1413,6 +1452,10 @@ impl Engine {
             severity: request.severity.unwrap_or(AnnouncementSeverity::Info),
             delivery: request.delivery.unwrap_or(broadcast.delivery),
             fallback: request.fallback.unwrap_or(broadcast.fallback),
+            fallback_source: request
+                .fallback
+                .is_none()
+                .then(|| broadcast.fallback_source.clone()),
             wake_idle: broadcast
                 .wake_for(request.wake_idle)
                 .map_err(|_| AnnounceError::WakeUnavailable)?,

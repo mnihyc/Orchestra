@@ -141,6 +141,16 @@ impl Commands for DispatchCommands {
             .map_err(commands_error)?
             .map(|row| row.body))
     }
+    async fn retained_session_offer(
+        &self,
+        id: Id,
+    ) -> Result<Option<orch_engine::tools::catalogue::AcceptedOrchTools>, CommandsError> {
+        self.dispatcher
+            .retained_session_offer(id)
+            .await
+            .map_err(commands_error)
+    }
+
     async fn retained_command(
         &self,
         id: Id,
@@ -220,12 +230,16 @@ impl Commands for DispatchCommands {
             deadline: command.deadline,
             body: command.body,
         };
-        match before {
-            Some(before) => self.dispatcher.issue_stored_before(stored, before).await,
-            None => self.dispatcher.issue_stored(stored).await,
-        }
-        .map(|_| ())
-        .map_err(commands_error)
+        self.dispatcher
+            .issue_stored_with_input_facts(
+                stored,
+                command.input_facts,
+                command.session_offer,
+                before,
+            )
+            .await
+            .map(|_| ())
+            .map_err(commands_error)
     }
 
     async fn status(&self, id: Id) -> Result<Option<Info>, CommandsError> {

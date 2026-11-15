@@ -27,6 +27,7 @@ import { TrustAnswers, TrustQuestion } from '@/features/resources/environments/H
 import type { AttachmentIssue, ContentPart, Delivery, ThreadInput, RequestDecisionStatus } from '@/generated/api-types';
 import { discard, noteSteerRefusal, resend, steerRefusedFor, useComposerStore, type SendingInput } from '@/features/composer/Draft';
 import { heldInputWords } from '@/features/composer/heldInputWords';
+import { InputDeliveryFacts } from '@/features/composer/InputDeliveryFacts';
 import { afterDropping, afterMoving, editableWords, nowDelivery, queuePreview, withEditedWords } from '@/features/composer/queue';
 import { holds } from '@/lib/permissions';
 import { isComposing } from '@/lib/shortcuts';
@@ -355,6 +356,7 @@ function QueueRow({ threadId, input, index, orderIndex, count, busy, fallback, c
           </div>
         )}
       {!mayExecute && <span className="text-xs text-text-muted">{t(`composer.queue.delivery.${input.delivery}`)}</span>}
+      {input.delivery_resolution !== undefined && input.delivery_resolution !== null && <InputDeliveryFacts resolution={input.delivery_resolution} actual={input.delivery} thread={threadId} />}
       {held !== null && <div className="flex items-center gap-1"><p className="min-w-0 text-xs text-text-muted">{held}</p>{input.state_detail === 'model_use_required' && <Hint id="held-model" popover />}</div>}
       {decision!==null?<DecisionStatus source={decision}/>:runsOn !== null && <p className="flex items-center gap-1 text-sm text-text-muted">{t('agentIdentity.runsAs')}<UserChip user={runsOn} size={24}/></p>}
       {runnable && (

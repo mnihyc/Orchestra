@@ -563,7 +563,7 @@ impl Engine {
             let Some(credential_epoch) = orch_db::queries::provider_facts::credential_epoch(
                 &mut observing,
                 provider,
-                Some(row.revision),
+                Some(row.revision - row.observation_revision),
             )
             .await?
             else {
@@ -949,7 +949,47 @@ impl Engine {
         self.discover_provider_models_for_read(provider, false)
     }
 
+    /// How long a request for a refresh waits for the read before it answers with the provider as it is stored: a
+    /// third of the wait for a start, which is twenty seconds of sixty, so that it answers inside the thirty seconds
+    /// of silence after which a page gives up. The read goes on by itself and stores what it finds.
+    #[must_use]
+    pub fn refresh_wait(&self) -> std::time::Duration {
+        self.inner.config.start_timeout / 3
+    }
+
     fn discover_provider_models_for_read(
+        &self,
+        provider: Id,
+        scheduled: bool,
+    ) -> BoxFuture<
+        '_,
+        Result<Option<Vec<orch_agent_contract::discovery::ModelSuggestion>>, EngineError>,
+    > {
+        Box::pin(async move {
+            // One model read of a provider at a time, held by a lease row as its facts read is: a read asked for while
+            // one is in flight has nothing to add and stores nothing, and the one in flight stores its list when it ends.
+            let name = format!("provider.models:{provider}");
+            let holder = new_id().to_string();
+            let length =
+                chrono::Duration::from_std(self.inner.config.start_timeout.saturating_mul(3))
+                    .unwrap_or_else(|_| chrono::Duration::minutes(5));
+            let taken = {
+                let now = self.inner.clock.now();
+                let mut conn = self.inner.db.acquire().await?;
+                orch_db::queries::job_leases::take(&mut conn, &name, &holder, now, now + length)
+                    .await?
+            };
+            if !taken {
+                return Ok(None);
+            }
+            let read = self.read_provider_models(provider, scheduled).await;
+            let mut conn = self.inner.db.acquire().await?;
+            orch_db::queries::job_leases::release(&mut conn, &name, &holder).await?;
+            read
+        })
+    }
+
+    fn read_provider_models(
         &self,
         provider: Id,
         scheduled: bool,
@@ -1000,7 +1040,7 @@ impl Engine {
             let epoch = orch_db::queries::provider_facts::credential_epoch(
                 &mut conn,
                 provider,
-                Some(row.revision),
+                Some(row.revision - row.observation_revision),
             )
             .await?;
             let models_source = crate::provider_sources::spec(
