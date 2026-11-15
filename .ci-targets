@@ -1,0 +1,3 @@
+# the history-pages cases of the engine unit run and the forks program on two earlier assembly commits, to place seven cases green on d938c52a3 and red on af4c7c29d
+test -p orch-engine --lib -- history_pages::
+test -p orch-engine --test forks

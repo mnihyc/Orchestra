@@ -252,6 +252,14 @@ export interface SessionState {
   accessEndsAt: number | null;
   /** A refused renewal ended a session this device had previously held. No credential is stored. */
   sessionEnded?: boolean;
+  /** The actual browser renewal attempt and its next admitted timer, without credentials. */
+  renewal?: RenewalObservation | null;
+}
+
+export interface RenewalObservation {
+  phase: 'scheduled' | 'in_progress' | 'completed' | 'failed';
+  scheduled_at: number | null;
+  renewed_at: number | null;
 }
 
 export type SessionEvent =
@@ -339,7 +347,9 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
   let token: string | null = null;
   const clock = options.clock ?? createServerClock();
   let renewTimer: ReturnType<typeof setTimeout> | undefined;
-  let renewing: Promise<boolean> | null = null;
+  let renewalDueAt: number | null = null, sessionGeneration = 0;
+  let renewalPlan = Symbol('renewal');
+  let renewing: { reader: number | undefined; generation: number; pending: Promise<boolean> } | null = null;
   let restoring: Promise<boolean> | null = null;
   const listeners = new Set<(event: SessionEvent) => void>();
   const actListeners = new Set<(act: Act) => void | Promise<void>>();
@@ -350,7 +360,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     hadSession = present;
     try { localStorage.setItem(sessionMarker, present ? '1' : '0'); } catch { /* Keep the fact in this page only. */ }
   }
-  const session = createStore<SessionState>(() => ({ status: 'unknown', userId: null, accessEndsAt: null, readerVersion: 0, sessionEnded: false }));
+  const session = createStore<SessionState>(() => ({ status: 'unknown', userId: null, accessEndsAt: null, readerVersion: 0, sessionEnded: false, renewal: null }));
 
   const emit = (event: SessionEvent) => {
     for (const listener of listeners) listener(event);
@@ -358,15 +368,22 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
 
   function forget(reason: 'ended' | 'refused' | 'deliberate'): void {
     clearTimeout(renewTimer);
+    renewalDueAt = null; renewalPlan = Symbol('renewal'); sessionGeneration += 1;
     const wasSignedIn = session.getState().status === 'signed_in';
     const sessionEnded = reason === 'ended' && (wasSignedIn || hadSession);
     if (reason === 'deliberate') rememberSession(false);
     token = null;
-    session.setState({ status: 'signed_out', userId: null, accessEndsAt: null, readerVersion: (session.getState().readerVersion ?? 0) + 1, sessionEnded });
+    session.setState({ status: 'signed_out', userId: null, accessEndsAt: null, readerVersion: (session.getState().readerVersion ?? 0) + 1, sessionEnded,
+      renewal: reason === 'deliberate' ? null : { phase: 'failed', scheduled_at: null, renewed_at: session.getState().renewal?.renewed_at ?? null } });
     if (wasSignedIn) emit({ type: 'signed_out' });
   }
 
   function adopt(result: AuthResult): void {
+    sessionGeneration += 1;
+    accept(result, false);
+  }
+
+  function accept(result: AuthResult, renewed: boolean): void {
     const before = session.getState();
     // The life of the token is counted on the server's clock, so that a device whose own clock is
     // wrong still renews in time.
@@ -375,16 +392,22 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     token = result.access_token;
     rememberSession(true);
     const sameReader = before.status === 'signed_in' && before.userId === result.user.id;
-    session.setState({ status: 'signed_in', userId: result.user.id, accessEndsAt, readerVersion: (before.readerVersion ?? 0) + (sameReader ? 0 : 1), sessionEnded: false });
-
+    const delay = Math.max(0, life - RENEW_BEFORE_END_MS);
     clearTimeout(renewTimer);
-    renewTimer = setTimeout(
-      () => {
-        // A renewal that could not be made is made by the next request, or by the answer that says so.
-        renew().catch(() => undefined);
-      },
-      Math.max(0, life - RENEW_BEFORE_END_MS),
-    );
+    const due = Date.now() + delay, plan = Symbol('renewal'); renewalPlan = plan;
+    renewalDueAt = Number.isFinite(new Date(due).getTime()) ? due : null;
+    const wait = () => {
+      if (renewalPlan !== plan) return;
+      const left = due - Date.now();
+      if (left > 0) { renewTimer = setTimeout(wait, Math.min(left, 2_147_483_647)); return; }
+      renewTimer = undefined; renewalDueAt = null;
+      // A renewal that could not be made is made by the next request, or by the answer that says so.
+      renew().catch(() => undefined);
+    };
+    renewTimer = setTimeout(wait, Math.min(delay, 2_147_483_647));
+    session.setState({ status: 'signed_in', userId: result.user.id, accessEndsAt, readerVersion: (before.readerVersion ?? 0) + (sameReader ? 0 : 1), sessionEnded: false,
+      renewal: { phase: renewed && sameReader ? 'completed' : 'scheduled', scheduled_at: renewalDueAt,
+        renewed_at: renewed && sameReader ? Date.now() : null } });
 
     const same = before.status === 'signed_in' && before.userId === result.user.id;
     emit({ type: same ? 'renewed' : 'signed_in', result });
@@ -460,6 +483,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
   async function authorized(request: Request): Promise<Response> {
     if (isCookieRequest(request)) return dispatch(carry(request, null));
     const readerVersion = session.getState().readerVersion ?? 0;
+    const generation = sessionGeneration;
 
     const endsAt = session.getState().accessEndsAt;
     if (token !== null && endsAt !== null && Date.now() >= endsAt - RENEW_BEFORE_END_MS) {
@@ -473,6 +497,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     const response = await dispatch(carry(request, used));
     if (again === null || response.status !== 401) return response;
     const code = await codeOf(response);
+    if (readerVersion !== (session.getState().readerVersion ?? 0) || generation !== sessionGeneration) return response;
     if (code === 'auth.suspended') {
       // The person was suspended: nothing of theirs answers any more, and the page says so by signing out.
       forget('refused');
@@ -491,14 +516,17 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
 
   async function renewOnce(discover = false): Promise<boolean> {
     const reader = session.getState().readerVersion;
+    const generation = sessionGeneration;
+    session.setState({ renewal: { phase: 'in_progress', scheduled_at: renewalDueAt, renewed_at: session.getState().renewal?.renewed_at ?? null } });
+    try {
     const answer = discover ? await api.POST('/auth/session') : await api.POST('/auth/refresh');
-    if (reader !== session.getState().readerVersion) return session.getState().status === 'signed_in';
+    if (reader !== session.getState().readerVersion || generation !== sessionGeneration) return session.getState().status === 'signed_in';
     if (answer.data === null) {
       forget('ended');
       return false;
     }
     if (answer.data !== undefined) {
-      adopt(answer.data);
+      accept(answer.data, true);
       return true;
     }
     const error = toError(answer.error, answer.response);
@@ -508,13 +536,21 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       return false;
     }
     throw error;
+    } catch (error) {
+      if (reader !== session.getState().readerVersion || generation !== sessionGeneration) return session.getState().status === 'signed_in';
+      session.setState({ renewal: { phase: 'failed', scheduled_at: renewalDueAt, renewed_at: session.getState().renewal?.renewed_at ?? null } });
+      throw error;
+    }
   }
 
   function renew(discover = false): Promise<boolean> {
-    renewing ??= renewOnce(discover).finally(() => {
-      renewing = null;
-    });
-    return renewing;
+    const reader = session.getState().readerVersion;
+    if (renewing !== null && renewing.reader === reader && renewing.generation === sessionGeneration) return renewing.pending;
+    let accept!: (result: boolean) => void, refuse!: (error: unknown) => void;
+    const pending = new Promise<boolean>((resolve, reject) => { accept = resolve; refuse = reject; });
+    const owned = { reader, generation: sessionGeneration, pending }; renewing = owned;
+    void renewOnce(discover).then(accept, refuse).finally(() => { if (renewing === owned) renewing = null; });
+    return pending;
   }
 
   function restore(): Promise<boolean> {

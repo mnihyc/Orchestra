@@ -148,6 +148,7 @@ impl native::Selected for Batch {
     type Query = ();
     type Value = Selected;
     type Reply = ForkBatch;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::BATCH_GET;
 
     fn select<'a>(
