@@ -1,0 +1,10 @@
+fmt
+contracts
+clippy
+test -p orch-config --lib
+test -p orch-config --test shipped
+test -p orch-settings-contract --lib
+test -p orch-api-core --lib
+test -p orch-api-core --test personal --test admin_system
+test -p orch-db --lib -- pool::tests::
+test -p orch-xtask

@@ -218,7 +218,15 @@ fn native_candidates(row: &JobRow) -> ApiResult<Vec<Candidate>> {
             gate: Gate::Retained(id),
         });
     }
-    let mut found = Vec::new();
+    let moved = row.kind == "thread_fork"
+        && row.plan["confirmed_history_source"]["operation"]["origin"]["operation"].as_str()
+            == Some("ThreadMoveOut");
+    let mut found = if moved {
+        // A native move can delete its source; its maker keeps the accepted job within its real namespace.
+        maker_candidates(row, Gate::WorkspaceMaker)
+    } else {
+        Vec::new()
+    };
     if let Some(id) = row.environment_id {
         found.push(Candidate {
             choice: Choice::object(ObjectKind::Environment, id),

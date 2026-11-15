@@ -52,6 +52,8 @@ pub enum ConfigError {
 pub trait Validate {
     /// Checks what the types cannot.
     fn validate(&self) -> Result<(), ConfigError>;
+    /// Retain only the type's explicit public allowlist after validation.
+    fn capture_origins(&mut self, _origins: crate::observed::Origins) {}
 }
 
 /// Loads the configuration at `path`, with the environment's overrides.
@@ -87,11 +89,13 @@ where
         .map_err(|error: toml::de::Error| parse(error.to_string()))?;
     // The defaults say which keys exist and of what type each is.
     let shape = toml::Table::try_from(T::default()).map_err(|error| parse(error.to_string()))?;
-    overlay(&shape, &mut given, "ORCH", &variable)?;
-    let config: T = given
+    let mut origins = crate::observed::Origins::new();
+    overlay(&shape, &mut given, "ORCH", "", &variable, &mut origins)?;
+    let mut config: T = given
         .try_into()
         .map_err(|error: toml::de::Error| parse(error.to_string()))?;
     config.validate()?;
+    config.capture_origins(origins);
     Ok(config)
 }
 
@@ -99,19 +103,34 @@ fn overlay(
     shape: &toml::Table,
     given: &mut toml::Table,
     prefix: &str,
+    path: &str,
     variable: &impl Fn(&str) -> Option<String>,
+    origins: &mut crate::observed::Origins,
 ) -> Result<(), ConfigError> {
     for (key, example) in shape {
         let name = format!("{prefix}_{}", key.to_uppercase());
+        let public_key = if path.is_empty() {
+            key.clone()
+        } else {
+            format!("{path}.{key}")
+        };
         if let toml::Value::Table(inner) = example {
             let slot = given
                 .entry(key.clone())
                 .or_insert_with(|| toml::Value::Table(toml::Table::new()));
             if let toml::Value::Table(slot) = slot {
-                overlay(inner, slot, &name, variable)?;
+                overlay(inner, slot, &name, &public_key, variable, origins)?;
             }
             continue;
         }
+        origins.insert(
+            public_key.clone(),
+            if given.contains_key(key) {
+                crate::observed::Origin::File
+            } else {
+                crate::observed::Origin::Compiled
+            },
+        );
         let Some(text) = variable(&name) else {
             continue;
         };
@@ -150,6 +169,7 @@ fn overlay(
             }
         };
         given.insert(key.clone(), value);
+        origins.insert(public_key, crate::observed::Origin::Environment);
     }
     Ok(())
 }
@@ -166,7 +186,19 @@ mod tests {
     #[test]
     fn an_empty_file_is_the_defaults() {
         let config: ServerConfig = load_text("", "test", none).unwrap();
-        assert_eq!(config, ServerConfig::default());
+        assert_eq!(
+            toml::to_string(&config).unwrap(),
+            toml::to_string(&ServerConfig::default()).unwrap()
+        );
+        assert!(
+            config
+                .startup_facts
+                .as_ref()
+                .unwrap()
+                .values
+                .iter()
+                .all(|fact| fact.origin == Some(crate::observed::Origin::Compiled))
+        );
         assert_eq!(config.auth.login_failure_limit, 8);
         assert_eq!(config.database.slow_statement_ms, 1_000);
         assert_eq!(config.database.slow_acquire_ms, 1_000);
@@ -253,6 +285,113 @@ mod tests {
     }
 
     #[test]
+    fn startup_facts_keep_the_source_even_when_the_value_equals_the_compiled_default() {
+        let config: ServerConfig = load_text(
+            "[database]\nacquire_timeout_ms=10000\n",
+            "orch.toml",
+            |name| (name == "ORCH_DATABASE_REQUEST_STATEMENT_TIMEOUT_MS").then(|| "15000".into()),
+        )
+        .unwrap();
+        let facts = config.startup_facts.as_ref().unwrap();
+        let fact = |key| facts.values.iter().find(|fact| fact.key == key).unwrap();
+        assert_eq!(
+            fact("database.acquire_timeout_ms").origin,
+            Some(crate::observed::Origin::File)
+        );
+        assert_eq!(
+            fact("database.request_statement_timeout_ms").origin,
+            Some(crate::observed::Origin::Environment)
+        );
+        assert_eq!(
+            fact("database.idle_transaction_timeout_ms").origin,
+            Some(crate::observed::Origin::Compiled)
+        );
+        assert_eq!(facts.values.len(), 4);
+        assert!(
+            facts
+                .values
+                .iter()
+                .all(|value| !value.key.contains("url") && !value.key.contains("secret"))
+        );
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(!serialized.contains("startup_facts"));
+    }
+
+    #[test]
+    fn startup_facts_are_frozen_before_later_configuration_edits() {
+        let mut config: ServerConfig =
+            load_text("[database]\nacquire_timeout_ms=30000\n", "orch.toml", none).unwrap();
+        let original = config.startup_facts.clone().unwrap();
+        config.database.acquire_timeout_ms = 90000;
+        assert_eq!(config.startup_facts.as_ref().unwrap(), &original);
+        assert_eq!(
+            original
+                .values
+                .iter()
+                .find(|fact| fact.key == "database.acquire_timeout_ms")
+                .unwrap()
+                .milliseconds,
+            30000
+        );
+        assert!(ServerConfig::default().startup_facts.is_none());
+    }
+
+    #[test]
+    fn database_deadlines_are_startup_defaults_replaced_by_file_and_environment() {
+        let text = "[database]\nacquire_timeout_ms=30000\nrequest_statement_timeout_ms=60000\nbackground_statement_timeout_ms=90000\nidle_transaction_timeout_ms=45000\n";
+        let file: ServerConfig = load_text(text, "orch.toml", none).unwrap();
+        let written = toml::Value::try_from(file).unwrap();
+        assert_eq!(
+            written["database"]["acquire_timeout_ms"].as_integer(),
+            Some(30000)
+        );
+        assert_eq!(
+            written["database"]["request_statement_timeout_ms"].as_integer(),
+            Some(60000)
+        );
+        let environment: ServerConfig = load_text(text, "orch.toml", |name| match name {
+            "ORCH_DATABASE_ACQUIRE_TIMEOUT_MS" => Some("70000".into()),
+            "ORCH_DATABASE_REQUEST_STATEMENT_TIMEOUT_MS" => Some("0".into()),
+            "ORCH_DATABASE_IDLE_TRANSACTION_TIMEOUT_MS" => Some("0".into()),
+            _ => None,
+        })
+        .unwrap();
+        let written = toml::Value::try_from(environment).unwrap();
+        assert_eq!(
+            written["database"]["acquire_timeout_ms"].as_integer(),
+            Some(70000)
+        );
+        assert_eq!(
+            written["database"]["request_statement_timeout_ms"].as_integer(),
+            Some(0)
+        );
+        assert_eq!(
+            written["database"]["idle_transaction_timeout_ms"].as_integer(),
+            Some(0)
+        );
+        assert_eq!(
+            written["database"]["background_statement_timeout_ms"].as_integer(),
+            Some(90000)
+        );
+    }
+
+    #[test]
+    fn database_deadlines_reject_only_an_unusable_wait_or_the_native_integer_overflow() {
+        for text in [
+            "[database]\nacquire_timeout_ms=0\n",
+            "[database]\nrequest_statement_timeout_ms=2147483648\n",
+            "[database]\nbackground_statement_timeout_ms=2147483648\n",
+            "[database]\nidle_transaction_timeout_ms=2147483648\n",
+        ] {
+            assert!(
+                load_text::<ServerConfig>(text, "orch.toml", none).is_err(),
+                "{text}"
+            );
+        }
+        assert!(load_text::<ServerConfig>("[database]\nacquire_timeout_ms=1000000\nrequest_statement_timeout_ms=2147483647\nbackground_statement_timeout_ms=0\nidle_transaction_timeout_ms=0\n", "orch.toml", none).is_ok());
+    }
+
+    #[test]
     fn a_key_nobody_defined_stops_the_start() {
         let error =
             load_text::<ServerConfig>("[auth]\nlogin_failure_limt = 3\n", "orch.toml", none)
@@ -291,6 +430,23 @@ mod tests {
         assert!(
             error.to_string().contains("link.dead_after_secs"),
             "{error}"
+        );
+        let error = load_text::<ServerConfig>("[link]\nmax_message_bytes = 1000\n", "test", none)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("link.max_message_bytes"),
+            "{error}"
+        );
+        let config =
+            load_text::<ServerConfig>("[link]\nmax_message_bytes = 1048576\n", "test", none)
+                .unwrap();
+        assert_eq!(config.link.max_message_bytes, 1_048_576);
+        assert_eq!(
+            load_text::<ServerConfig>("", "test", none)
+                .unwrap()
+                .link
+                .max_message_bytes,
+            16 * 1024 * 1024
         );
     }
 }
