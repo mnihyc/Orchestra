@@ -33,7 +33,7 @@ vi.mock('@/api/nodes', async (load) => {
   } };
 });
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useThreadFeed: live.feed }));
-vi.mock('@/features/navigation/placeLabels', () => ({ useNodeLabel: (_id: string | undefined, title: string) => title }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodeLabel: (_id: string | undefined, title: string) => title }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), useParams: () => ({ threadId: ACME.mainThread }), useRouterState: () => ({ pathname: `/thread/${ACME.mainThread}`, search: {} }) }));
 function Caption() { return <output aria-label="Frame title">{useCurrentHeading()?.title}</output>; }
 afterEach(() => { cleanup(); clearScreenHeading(); threadWriter.evict(ACME.mainThread); useWorkbench.getState().leave(); vi.clearAllMocks(); });

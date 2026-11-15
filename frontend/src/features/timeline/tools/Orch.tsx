@@ -17,13 +17,19 @@ type OrchItem = Extract<Item, { kind: 'tool_call' }>;
 /** The tools whose answer names something a view shows: a browser, a display. */
 const SHOWS_A_VIEW: readonly string[] = ['use_browser', 'use_display'];
 
+const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
 export function OrchDisplay({ item }: { item: OrchItem }) {
   const { t } = useTranslation();
   const tool = item.payload.tool;
   if (tool.kind !== 'orch') return null;
+  const args = record(tool.arguments) ? tool.arguments : {};
+  const threadMessage = tool.tool === 'send_message' && record(args.target) && args.target.kind === 'thread';
+  const applied = tool.tool === 'announce' && record(tool.result) && record(tool.result.applied) ? tool.result.applied : null;
+  const wake = threadMessage ? args.wake_idle === true : applied !== null ? applied.wake_idle === true : null;
   return (
     <div className="flex flex-col gap-2">
-      <p className="font-mono text-sm text-text-muted">{tool.tool}</p>
+      <p className="font-mono text-sm text-text-muted">{tool.tool}{wake !== null && <> · <span className="font-sans">{t(wake ? 'composer.wake.requested' : 'composer.wake.notRequested')}</span></>}</p>
       {tool.tool === 'image_generation' && <CapabilityHelper result={tool.result} />}
       <CapabilityFailure result={tool.result} />
       <JsonTree value={tool.arguments} label={t('timeline.mcp.arguments')} />

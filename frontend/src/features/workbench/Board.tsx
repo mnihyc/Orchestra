@@ -1,3 +1,5 @@
+import { mark as perfMark } from '@/lib/marks';
+import { shapeOfTab, TabSkeleton } from '@/features/workbench/TabSkeleton';
 import { selectContentTab } from '@/features/workbench/contentNavigation';
 import { LiveThreadStateIcon } from '@/ui/ThreadState';
 /** The workbench drawn from its layout tree: every group of tabs in its area, each view kept alive while its tab moves, and a tab carried from one place to another by pointer or by keyboard.
@@ -17,7 +19,9 @@ import { Button } from '@/ui/Button';
 import { ViewInstanceContext } from '@/features/workbench/instance';
 import { ViewWindowLease } from '@/features/workbench/ViewWindow';
 import { FocusedContentMetadata } from '@/features/workbench/PageView';
-import { contentLocation, contentTarget } from './contentAddress';
+import { contentAddress, contentLocation, contentTarget } from './contentAddress';
+import { usePageContent } from './pageContent';
+import { pageCanReadBeforeShell } from './pageReads';
 import { WorkspaceContext } from './WorkspaceContext';
 import { ThreadReadProvider } from '@/realtime/threadReadContext';
 import { InspectorContext } from '@/shell/RouteContext';
@@ -85,6 +89,9 @@ import { useWorkbench } from '@/features/workbench/store';
 import { useFrameReadiness } from '@/shell/FrameReadiness';
 import { isClosable, tabEntries } from '@/features/workbench/Tabs';
 import { SlideOutBar } from './SlideOutBar';
+import { usePeek } from './peek';
+import { useInterfaceReading } from '@/lib/interfaceReading';
+import { useSidebarPreferences } from '@/features/navigation/preferences';
 import { useViews, type ViewDefinition, viewOf } from '@/features/workbench/views';
 import { useVisibleLayout } from '@/features/workbench/availability';
 import { AddViewButton } from '@/features/workbench/OpenViews';
@@ -120,8 +127,12 @@ function homeOf(key: string): HTMLElement {
 export function ViewHost({ layout }: { layout: Layout }) {
   useThreadWindowLifetime();
   const unsaved = useWorkbench((state) => state.unsaved);
+  const closed = useWorkbench((state) => state.closedTabs);
+  const { kept_closed_tabs: recent } = useInterfaceReading();
   const placed = allGroups(layout).flatMap(({ area, group }) => group.tabs.map((tab) => ({ tab, area })));
-  const keys = placed.map(({ tab }) => viewKey(tab)).join('\n');
+  const open = new Set(placed.map(({ tab }) => tab.id));
+  const retained = [...placed, ...(recent === 0 ? [] : closed.slice(-recent)).filter(({ tab }) => !open.has(tab.id)).map(({ tab }) => ({ tab, area: 'main' as const }))];
+  const keys = retained.map(({ tab }) => viewKey(tab)).join('\n');
 
   // A view whose tab is gone has no home any more.
   useEffect(() => {
@@ -137,12 +148,14 @@ export function ViewHost({ layout }: { layout: Layout }) {
     }
   }, [keys]);
 
-  return <><CachedTabNames layout={layout} /><FocusedContentMetadata />{placed.filter(({ tab }) => viewOf(tab.view)?.window === true).map(({ tab }) => <ViewWindowLease key={tab.id} tab={tab} />)}{placed.map(({ tab, area }) => createPortal(<ContentBoundary resetKey={viewKey(tab)} className="h-full"><ViewOpening view={viewKey(tab)} route={openingForView(tab.id)} hold={unsaved.has(tab.id)}><ViewBody tab={tab} area={area} /></ViewOpening></ContentBoundary>, homeOf(viewKey(tab)), viewKey(tab)))}</>;
+  return <><CachedTabNames layout={layout} /><FocusedContentMetadata />{placed.filter(({ tab }) => viewOf(tab.view)?.window === true).map(({ tab }) => <ViewWindowLease key={tab.id} tab={tab} />)}{retained.map(({ tab, area }) => createPortal(<ContentBoundary resetKey={viewKey(tab)} className="h-full"><ViewOpening view={viewKey(tab)} route={openingForView(tab.id)} hold={unsaved.has(tab.id)}><ViewBody tab={tab} area={area} /></ViewOpening></ContentBoundary>, homeOf(viewKey(tab)), viewKey(tab)))}</>;
 }
 
 /** Shows a view in the group that holds its tab, by taking in the element the view is drawn into. */
 export function ViewSlot({ tab, primary = false }: { tab: Tab; primary?: boolean }) {
-  const { ready, pending } = useFrameReadiness();
+  const frame = useFrameReadiness();
+  const ready = frame.ready || frame.pageReady === true && pageCanReadBeforeShell(tab);
+  const pending = frame.pending;
   const slot = useRef<HTMLDivElement>(null);
   const key = viewKey(tab);
   useLayoutEffect(() => {
@@ -156,7 +169,10 @@ export function ViewSlot({ tab, primary = false }: { tab: Tab; primary?: boolean
     parent.addEventListener('focusin', focus, true);
     parent.addEventListener('pointerdown', focus, true);
     const closeOpening = ready ? showViewOpening(key, openingForView(tab.id)) : () => undefined;
+    perfMark('switch/shown', { tab: tab.id });
+    const painted = requestAnimationFrame(() => perfMark('switch/painted', { tab: tab.id }));
     return () => {
+      cancelAnimationFrame(painted);
       closeOpening();
       parent.removeEventListener('focusin', focus, true);
       parent.removeEventListener('pointerdown', focus, true);
@@ -165,7 +181,7 @@ export function ViewSlot({ tab, primary = false }: { tab: Tab; primary?: boolean
     };
   }, [key, ready, tab.id]);
   return <div className="h-full min-h-0">
-    {!ready && (primary && pending !== null ? pending : <SkeletonRows rows={4} className="p-3" />)}
+    {!ready && (primary && pending !== null ? pending : <TabSkeleton shape={shapeOfTab(tab)} />)}
     <div ref={slot} hidden={!ready} className="h-full min-h-0" />
   </div>;
 }
@@ -177,6 +193,7 @@ function ViewBody({ tab, area }: { tab: Tab; area: AreaId }) {
   const layout = useWorkbench((state) => state.layout);
   const content = isContentTab(tab);
   const root = useRef<HTMLDivElement>(null);
+  usePageContent(content && activeContent === tab.id ? contentAddress(tab) : null, tab.id, root);
   const [shape, setShape] = useState<Shape>('wide');
   const [compact, setCompact] = useState(false);
   const activeHeading = useCurrentHeading();
@@ -207,7 +224,7 @@ function ViewBody({ tab, area }: { tab: Tab; area: AreaId }) {
   const contentBody = <ViewInstanceContext.Provider value={instance}><ViewShapeContext.Provider value={shape}><ViewCompactContext.Provider value={compact}>
     {target?.workspace !== undefined ? <WorkspaceContext source={target.workspace} location={content ? location : null} />
       : fixed && target !== null ? <InspectorContext target={target} continuation={panelContinuation(tab)} /> : null}
-    <InstanceName id={tab.id} content={content} fixed={fixed} target={target} location={content ? location : null} title={definition === undefined ? tab.view : t(definition.title)} />
+    {definition !== undefined && <InstanceName id={tab.id} content={content} fixed={fixed} target={target} location={content ? location : null} title={t(definition.title)} />}
     <Suspense fallback={<SkeletonRows rows={5} />}>
       {Body === undefined ? <EmptyState compact icon={<SquareDashedMousePointer aria-hidden />} title={t('workbench.view.unknown')} /> : <Body tab={tab} area={area} />}
     </Suspense>
@@ -555,6 +572,14 @@ export function Board({ rail, top, status, pending }: BoardProps) {
   const spotOf = (data: unknown): DropSpot | null => (data as DropSpot | undefined) ?? null;
   const focusMode = useWorkbench((state) => state.focusMode);
   const beside = shape === 'wide' || focusMode;
+  // A hidden bar peeks only for a person who chose that, and only after the pointer has rested at its edge.
+  // The choice is read once the frame's one bootstrap has answered; until then the cache or this device's last copy stands, and no request of its own is made.
+  const { peek } = useSidebarPreferences();
+  usePeek({
+    enabled: peek === true && !focusMode && pending === undefined,
+    bars: SLIDING_BARS.filter((id) => (id !== 'right' || beside) && barHasViews(layout, id) && !layout[id].open),
+    onPeek: setOverlay,
+  });
 
   return (
     <DndContext
@@ -613,7 +638,6 @@ export function Board({ rail, top, status, pending }: BoardProps) {
         if (id === 'right' && !beside) return null;
         const usable = barHasViews(layout, id);
         return <Fragment key={id}>
-          {!layout[id].open && usable && <div data-bar-edge={id} aria-hidden className="fixed top-0 bottom-(--status-bar-height) z-(--layer-sticky) w-(--bar-reveal-width)" style={id === 'left' ? { left: 'var(--rail-width)' } : { right: 0 }} onPointerEnter={(event) => { if (event.pointerType !== 'touch') setOverlay(id); }} />}
           <SlideOutBar bar={id} size={layout[id].size} open={usable && overlay === id && !layout[id].open} docked={layout[id].open} onClose={() => setOverlay(null)}>{bar(id).content}</SlideOutBar>
         </Fragment>;
       })}
