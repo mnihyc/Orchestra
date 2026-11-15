@@ -973,6 +973,7 @@ pub(crate) fn parameters_ready(
     opening: bool,
 ) -> bool {
     use orch_agent_contract::parameters::{ParameterApply, Resolution};
+    let features = descriptor.feature_values(&settings.features);
     params.as_object().is_some_and(|params| {
         params.iter().all(|(key, value)| {
             if key == "effort" {
@@ -992,7 +993,7 @@ pub(crate) fn parameters_ready(
                 .is_some_and(|parameter| {
                     (parameter.apply == ParameterApply::NextTurn
                         || (opening && parameter.apply == ParameterApply::NewSession))
-                        && match parameter.resolve(context, &settings.features, Some(value)) {
+                        && match parameter.resolve(context, &features, Some(value)) {
                             Resolution::Send(sent) => sent == *value,
                             Resolution::SendNothing => value.is_null(),
                             _ => false,
@@ -1947,6 +1948,27 @@ impl Engine {
             .provider_use(
                 conn,
                 &ProviderUse {
+                    purpose: match purpose {
+                        Purpose::Agent => orch_access_contract::permissions::ProviderPurpose::Turn,
+                        Purpose::Summary => {
+                            orch_access_contract::permissions::ProviderPurpose::Summary
+                        }
+                        Purpose::Embedding => {
+                            orch_access_contract::permissions::ProviderPurpose::Embeddings
+                        }
+                        Purpose::Review => {
+                            orch_access_contract::permissions::ProviderPurpose::Review
+                        }
+                        Purpose::WebSearch => {
+                            orch_access_contract::permissions::ProviderPurpose::WebSearch
+                        }
+                        Purpose::PageFetch => {
+                            orch_access_contract::permissions::ProviderPurpose::PageFetch
+                        }
+                        Purpose::ImageGeneration => {
+                            orch_access_contract::permissions::ProviderPurpose::ImageGeneration
+                        }
+                    },
                     person: caller.user(),
                     node,
                     provider: candidate.provider_id,
