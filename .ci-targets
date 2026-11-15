@@ -1,0 +1,4 @@
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test source --test source_uniform
+test -p orch-api-core --lib
+test -p orch-api-core --test workspace_source --test workspace_source_scopes
