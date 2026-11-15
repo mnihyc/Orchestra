@@ -113,7 +113,7 @@ async fn a_preflight_answers_before_a_count_finishes_and_other_plans_reuse_the_c
         .hold(CommandKind::NodeRuntimeVolumesMeasure);
     let request = serde_json::from_value(json!({"result":"new","history":{"mode":"none"},
         "environment":{"new":{"name":"Counted destination","template_id":template,
-            "host_id":target.id,"files":{"mode":"none"},"home":true,"private_views":false}}}))
+            "host_id":orch_provider_contract::pools::Target::host(target.id),"files":{"mode":"none"},"home":true,"private_views":false}}}))
     .unwrap();
     let caller = Caller::session(world.ada);
     let first = world
@@ -247,7 +247,7 @@ async fn an_incomplete_machine_answer_fails_the_count_and_a_retry_does_not_reuse
         )
     });
     let request = serde_json::from_value(json!({"result":"new","history":{"mode":"none"},
-        "environment":{"new":{"name":"Retry count","template_id":template,"host_id":target.id,
+        "environment":{"new":{"name":"Retry count","template_id":template,"host_id":orch_provider_contract::pools::Target::host(target.id),
             "files":{"mode":"none"},"home":true,"private_views":false}}}))
     .unwrap();
     let caller = Caller::session(world.ada);

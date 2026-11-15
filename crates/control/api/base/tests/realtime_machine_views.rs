@@ -616,7 +616,7 @@ async fn terminal_host(rig: &Rig) {
     .unwrap();
     // A unit uses its physical host's ceiling, not the unit connector's harness facts.
     // Establish it before any terminal exists, so even the first keeper pass sees a valid shell.
-    sqlx::query("UPDATE environments SET config=config || jsonb_build_object('env.host_id',$2::text) WHERE id=$1")
+    sqlx::query("UPDATE environments SET config=config || jsonb_build_object('env.host_id',jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$2::text))) WHERE id=$1")
         .bind(rig.environment).bind(host.to_string()).execute(&mut *conn).await.unwrap();
     let facts = environment_facts::of(&mut conn, rig.environment)
         .await

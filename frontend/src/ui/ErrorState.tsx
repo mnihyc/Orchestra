@@ -9,6 +9,7 @@ import { type ReactNode, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 
 import { ApiError, invitationIssuerAuthorityLost } from '@/api/client';
+import { isReadCancelled } from '@/api/reads';
 import { WhereNames } from '@/features/access/WhereField';
 import { SecondStepGate, waitsForSecondStep } from '@/features/auth/SecondStepGate';
 import type { MissingAccess } from '@/generated/api-types';
@@ -22,6 +23,8 @@ import { Dialog } from '@/ui/Dialog';
 import { useErrorText } from '@/ui/errorText';
 import { PlanHostBlockers, planHostBlockers } from '@/ui/PlanHostBlockers';
 import { StateLine } from '@/ui/StateLine';
+import { FactDisclosureBody } from '@/ui/FactDisclosure';
+import { ReadAttemptDetails, useReadAttempt, useReadAttemptGroups } from '@/ui/ReadAttemptDetails';
 
 export interface ErrorStateProps {
   error: unknown;
@@ -59,6 +62,7 @@ export function ErrorState({
   recovery,
   className,
 }: ErrorStateProps) {
+  if (isReadCancelled(error)) return null;
   // Verification is a workflow, not a generic retry or a second status paragraph.
   if (waitsForSecondStep(error)) return <SecondStepGate error={error} onDone={onRetry} className={className} />;
   return <FailureLine error={error} title={title} titleAs={titleAs} message={message} onRetry={onRetry} onReadback={onReadback} retrying={retrying} compact={compact} action={action} recovery={recovery} className={className} />;
@@ -68,6 +72,7 @@ function FailureLine({ error, title, titleAs, message, onRetry, onReadback, retr
   const { t } = useTranslation();
   const [reviewing, setReviewing] = useState(false);
   const text = useErrorText()(error);
+  const attempt = useReadAttempt(error), attemptGroups = useReadAttemptGroups(attempt);
   if (text.acknowledged === true) return <StateLine role="status" tone="neutral" icon={<Check aria-hidden />}
     title={t('ui.receipt.title')} titleAs={titleAs} message={text.message} compact={compact} className={className}
     action={onReadback === undefined ? undefined : <Button size="sm" icon={<RefreshCw aria-hidden />} onClick={onReadback}>{t('ui.receipt.readback')}</Button>} />;
@@ -86,9 +91,12 @@ function FailureLine({ error, title, titleAs, message, onRetry, onReadback, retr
     ? action ?? (onRetry !== undefined && text.retryable ? <Button size="sm" icon={<RefreshCw aria-hidden />} pending={retrying} onClick={onRetry}>{t('common.tryAgain')}</Button> : undefined)
     : <Button size="sm" onClick={() => setReviewing(true)}>{review.label}</Button>;
   return <>
-    <StateLine role="alert" tone="danger" icon={<Icon aria-hidden />} title={title} titleAs={titleAs} message={text.diagnostic===undefined ? message ?? text.message : <div className="flex min-w-0 flex-col gap-1"><div>{message ?? text.message}</div><p className="wrap-anywhere whitespace-pre-line">{text.diagnostic}</p></div>} action={next} compact={compact} className={className} />
+    <StateLine role="alert" tone="danger" icon={<Icon aria-hidden />} title={title} titleAs={titleAs} message={<div className="flex min-w-0 flex-wrap items-center gap-1">
+      {text.diagnostic===undefined ? message ?? text.message : <div className="flex min-w-0 flex-col gap-1"><div>{message ?? text.message}</div><p className="wrap-anywhere whitespace-pre-line">{text.diagnostic}</p></div>}
+      {review === undefined && <ReadAttemptDetails error={error} />}
+    </div>} action={next} compact={compact} className={className} />
     {review !== undefined && reviewing && <Dialog open onOpenChange={setReviewing} title={review.label}>
-      <div className="flex flex-col gap-3">{review.content}</div>
+      <div className="flex flex-col gap-3">{review.content}{attemptGroups.length > 0 && <FactDisclosureBody groups={attemptGroups} />}</div>
     </Dialog>}
   </>;
 }
@@ -140,5 +148,6 @@ export interface ErrorAlertProps {
 
 /** A request that was refused, said beside the form that made it. */
 export function ErrorAlert({ error, message, action, onReadback, className }: ErrorAlertProps) {
+  if (isReadCancelled(error)) return null;
   return <FailureLine error={error} message={message} action={action} onReadback={onReadback} compact className={className} />;
 }

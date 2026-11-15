@@ -6,6 +6,8 @@
 )]
 
 mod places;
+#[path = "call_recovery/pools.rs"]
+mod pools;
 mod rig;
 mod support;
 

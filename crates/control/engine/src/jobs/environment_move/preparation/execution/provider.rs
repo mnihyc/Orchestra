@@ -342,8 +342,10 @@ impl ProviderParentSource {
         if current
             .runtime_config
             .get("runtime.host_id")
-            .and_then(Json::as_str)
-            .and_then(|value| value.parse::<Id>().ok())
+            .cloned()
+            .map(serde_json::from_value::<orch_provider_contract::pools::Target>)
+            .transpose()?
+            .and_then(|target| target.single_host())
             != Some(self.action.host())
         {
             return Err(closed());

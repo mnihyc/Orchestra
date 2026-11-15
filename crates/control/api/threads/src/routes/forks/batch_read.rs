@@ -148,6 +148,8 @@ impl native::Selected for Batch {
     type Query = ();
     type Value = Selected;
     type Reply = ForkBatch;
+    // This comparison includes each Job's immutable governor, not only displayed progress.
+    const MOVES: native::Moves = native::Moves::Refuse;
     const DECLARATION: &'static Declaration<Source> = &sources::BATCH_GET;
 
     fn select<'a>(

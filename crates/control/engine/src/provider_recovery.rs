@@ -20,6 +20,9 @@ use orch_types::{Id, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+mod source;
+pub use source::Source;
+
 /// Frozen desired runtime, not a promise to recover credentials that existed only on the lost source.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recipe {
@@ -124,9 +127,19 @@ impl Engine {
         {
             grants.push(grant);
         }
-        let named = get::<Id>(conn, Place::Provider(provider), keys::RUNTIME_HOST_ID)
-            .await
-            .map_err(EngineError::from)?;
+        let named = get::<orch_provider_contract::pools::Target>(
+            conn,
+            Place::Provider(provider),
+            keys::RUNTIME_HOST_ID,
+        )
+        .await
+        .map_err(EngineError::from)?
+        .map(|target| {
+            target.single_host().ok_or_else(|| {
+                EngineError::unreadable("the provider host pool has no reviewed native selection")
+            })
+        })
+        .transpose()?;
         let candidates = crate::jobs::provider_provision::candidates(
             conn,
             &state,
@@ -216,7 +229,7 @@ pub async fn queue(
         jobs::provider_jobs::Queued::Running(row) => return Err(UpdateError::Held(row.id)),
         jobs::provider_jobs::Queued::NoProvider => return Err(UpdateError::NotFound),
     };
-    sqlx::query("UPDATE providers SET runtime_unavailable='Its runtime is being re-created',machine_id=NULL,key_machine_id=CASE WHEN key_machine_id=machine_id THEN NULL ELSE key_machine_id END,status='offline',status_detail='Its runtime is being re-created',runtime_config=runtime_config||jsonb_build_object('runtime.host_id',$2::uuid::text),updated_at=$3 WHERE id=$1").bind(recipe.provider).bind(recipe.host).bind(now).execute(&mut *conn).await.map_err(DbError::from)?;
+    sqlx::query("UPDATE providers SET runtime_unavailable='Its runtime is being re-created',machine_id=NULL,key_machine_id=CASE WHEN key_machine_id=machine_id THEN NULL ELSE key_machine_id END,status='offline',status_detail='Its runtime is being re-created',runtime_config=runtime_config||jsonb_build_object('runtime.host_id',jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$2::uuid::text))),updated_at=$3 WHERE id=$1").bind(recipe.provider).bind(recipe.host).bind(now).execute(&mut *conn).await.map_err(DbError::from)?;
     jobs::merge_plan(conn, row.id, &json!({"provider_recovery":recipe}), now).await?;
     let _ = engine;
     Ok(row)

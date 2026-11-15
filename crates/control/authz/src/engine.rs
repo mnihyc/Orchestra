@@ -2204,6 +2204,7 @@ pub const fn view_permission(kind: ObjectKind) -> Permission {
         ObjectKind::McpServer => Permission::McpView,
         ObjectKind::Mount => Permission::MountView,
         ObjectKind::Skill => Permission::SkillView,
+        ObjectKind::Pool => Permission::PoolView,
     }
 }
 

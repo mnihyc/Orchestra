@@ -98,6 +98,7 @@ CREATE TABLE commands (
     body jsonb NOT NULL,
     serial_key text,
     state text DEFAULT 'queued'::text NOT NULL,
+    key_phase smallint DEFAULT 0 NOT NULL CHECK (key_phase IN (0, 1, 2)),
     result jsonb,
     error jsonb,
     attempts integer DEFAULT 0 NOT NULL,
@@ -778,7 +779,7 @@ CREATE TABLE resource_tags (
     resource_id uuid NOT NULL,
     tag_id uuid NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
     PRIMARY KEY (resource_kind,resource_id,tag_id),
-    CHECK (resource_kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill'))
+    CHECK (resource_kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill','pool'))
 );
 CREATE INDEX resource_tags_tag_idx ON resource_tags(tag_id,resource_kind,resource_id);
 

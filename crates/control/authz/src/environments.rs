@@ -188,6 +188,8 @@ pub struct NewEnvironment {
 /// What a limit of an entry held an environment to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Limit {
+    /// The selected host no longer has a current complete pool and lending path.
+    PoolUnavailable,
     /// The host's entry allows so many environments at one time, and that many exist.
     TooManyEnvironments {
         /// What the entry allows.
@@ -240,6 +242,10 @@ pub struct Created {
     pub ceiling: ResourceLimits,
     /// The bounded physical-use audience whose capacity creation must reserve.
     pub capacity: Option<CreationCapacity>,
+    /// Independently bounded pool and lending audiences used by this creation.
+    pub pool_capacity: Vec<CreationCapacity>,
+    /// Actual pool and lending entries, retained even when they currently have no count limit.
+    pub pool_entries: Vec<Id>,
 }
 
 /// The exact physical-Use entries whose combined limit admitted this creation.
@@ -257,14 +263,29 @@ pub struct CreationCapacity {
 /// Preview checks remain lock-free. Call only in the creation transaction, and
 /// retain it through insertion of the environment and its entry provenance.
 pub async fn reserve_capacity(conn: &mut Conn, created: &Created) -> Result<bool, Error> {
-    let Some(capacity) = &created.capacity else {
+    let capacities: Vec<_> = created
+        .capacity
+        .iter()
+        .chain(created.pool_capacity.iter())
+        .collect();
+    let mut entries: Vec<_> = capacities
+        .iter()
+        .flat_map(|capacity| capacity.entries.iter().copied())
+        .collect();
+    entries.sort_unstable();
+    entries.dedup();
+    if entries.is_empty() {
         return Ok(true);
-    };
-    rows::lock_environment_entries(conn, &capacity.entries).await?;
-    Ok(
-        rows::other_environments_made_through(conn, &capacity.entries, capacity.existing).await?
-            < i64::from(capacity.maximum),
-    )
+    }
+    rows::lock_environment_entries(conn, &entries).await?;
+    for capacity in capacities {
+        if rows::other_environments_made_through(conn, &capacity.entries, capacity.existing).await?
+            >= i64::from(capacity.maximum)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Whether an environment may be created.
@@ -310,7 +331,45 @@ pub async fn check_creation(
     ask: &NewEnvironment,
     policies: &Policies,
 ) -> Result<Creating, Error> {
-    check_placement_inner(conn, principal, ask, policies, None).await
+    check_placement_inner(conn, principal, ask, policies, None, None, None).await
+}
+
+/// The same native creation check for an actual selected host and its current pool membership.
+pub async fn check_creation_at_pool(
+    conn: &mut Conn,
+    principal: &Principal,
+    ask: &NewEnvironment,
+    policies: &Policies,
+    selection: crate::pools::Selection<'_>,
+) -> Result<Creating, Error> {
+    check_placement_inner(conn, principal, ask, policies, None, Some(selection), None).await
+}
+
+/// An owned pending registration retains its already reserved slot during the first native provision.
+/// It still needs current home, host, template, mount and both pool/lending authorities.
+pub async fn check_registered_creation_at_pool(
+    conn: &mut Conn,
+    principal: &Principal,
+    ask: &NewEnvironment,
+    policies: &Policies,
+    selection: crate::pools::Selection<'_>,
+    environment: Id,
+) -> Result<Creating, Error> {
+    let Some(row)=rows::hosting::environment(conn,environment).await?.filter(|row|
+        row.owner_id==principal.user() && row.home_node_id==ask.home && row.generation==0
+        && row.deleted_at.is_none() && row.status=="provisioning"
+        && matches!(&ask.place,Place::Host { template,.. } if row.template_id==Some(*template)))
+        else { return Ok(Creating::Exceeds(vec![Limit::PoolUnavailable])); };
+    check_placement_inner(
+        conn,
+        principal,
+        ask,
+        policies,
+        None,
+        Some(selection),
+        Some(row.id),
+    )
+    .await
 }
 
 /// An existing environment retains its identity and home. Its current Manage
@@ -322,7 +381,7 @@ pub async fn check_existing_placement(
     policies: &Policies,
     existing: Id,
 ) -> Result<Creating, Error> {
-    check_placement_inner(conn, principal, ask, policies, Some(existing)).await
+    check_placement_inner(conn, principal, ask, policies, Some(existing), None, None).await
 }
 
 async fn check_placement_inner(
@@ -331,7 +390,10 @@ async fn check_placement_inner(
     ask: &NewEnvironment,
     policies: &Policies,
     existing: Option<Id>,
+    pool: Option<crate::pools::Selection<'_>>,
+    registered: Option<Id>,
 ) -> Result<Creating, Error> {
+    let capacity_existing = existing.or(registered);
     let mut graph = Graph::load(conn, &[ask.home]).await?;
     let home = graph
         .get(ask.home)
@@ -423,8 +485,50 @@ async fn check_placement_inner(
             closed: None,
         });
     }
+    let contribution = if let (
+        Some(selection),
+        Place::Host {
+            host,
+            template,
+            wants,
+        },
+    ) = (pool, &ask.place)
+    {
+        crate::pools::member_choice(
+            conn,
+            principal,
+            selection.path,
+            selection.leaf,
+            ObjectRef {
+                kind: ObjectKind::Host,
+                id: *host,
+            },
+            Some(ask.home),
+            policies,
+            &HostDemand {
+                template: *template,
+                wants,
+                birth: None,
+            },
+        )
+        .await?
+    } else {
+        None
+    };
     let mut held: HashMap<Id, Use> = HashMap::new();
     for (resource, site) in &sites {
+        if pool.is_some() && resource.kind == ResourceKind::Host {
+            if let Some(usage) = contribution
+                .as_ref()
+                .and_then(|contribution| contribution.member_use.as_ref())
+            {
+                held.insert(resource.id, usage.clone());
+            } else {
+                // The caller chose a pool; a lost pool path must not fall back to direct Use.
+                return Ok(Creating::Exceeds(vec![Limit::PoolUnavailable]));
+            }
+            continue;
+        }
         let kept = policies.at(resource.home).keeps_to_its_owner(resource);
         match access(&frame, resource, site, Some(&path), kept)? {
             Ok(granted) => {
@@ -466,7 +570,8 @@ async fn check_placement_inner(
         };
         if let Some(allowed) = options.max_environments {
             let made =
-                rows::other_environments_made_through(conn, &granted.entries, existing).await?;
+                rows::other_environments_made_through(conn, &granted.entries, capacity_existing)
+                    .await?;
             if made >= i64::from(allowed) {
                 return Ok(Creating::Exceeds(vec![Limit::TooManyEnvironments {
                     allowed,
@@ -479,12 +584,24 @@ async fn check_placement_inner(
             capacity: options.max_environments.map(|maximum| CreationCapacity {
                 entries: granted.entries.clone(),
                 maximum,
-                existing,
+                existing: capacity_existing,
             }),
             host: Some((granted.entry, options)),
             template: None,
+            pool_capacity: vec![],
+            pool_entries: vec![],
         })));
     }
+    creation_limits(conn, ask, &held, capacity_existing, contribution).await
+}
+
+async fn creation_limits(
+    conn: &mut Conn,
+    ask: &NewEnvironment,
+    held: &HashMap<Id, Use>,
+    capacity_existing: Option<Id>,
+    contribution: Option<crate::pools::Contribution>,
+) -> Result<Creating, Error> {
     // Within the options of the entries they hold it by.
     let Place::Host {
         host: host_id,
@@ -497,6 +614,8 @@ async fn check_placement_inner(
             template: None,
             ceiling: ResourceLimits::default(),
             capacity: None,
+            pool_capacity: vec![],
+            pool_entries: vec![],
         })));
     };
     let host_use = held.get(host_id).ok_or(Error::NotFound(*host_id))?;
@@ -511,14 +630,58 @@ async fn check_placement_inner(
     };
     let mut exceeded: Vec<Limit> = Vec::new();
     if let Some(allowed) = host_options.max_environments {
-        let made = rows::other_environments_made_through(conn, &host_use.entries, existing).await?;
+        let made =
+            rows::other_environments_made_through(conn, &host_use.entries, capacity_existing)
+                .await?;
         if made >= i64::from(allowed) {
             exceeded.push(Limit::TooManyEnvironments { allowed, made });
         }
     }
     let host_limits = host_options.resources_max.unwrap_or_default();
     let template_limits = template_options.resources_max.unwrap_or_default();
-    let ceiling = host_limits.and(&template_limits);
+    let mut ceiling = host_limits.and(&template_limits);
+    let mut pool_capacity = Vec::new();
+    let mut pool_entries = Vec::new();
+    if let Some(contribution) = contribution {
+        for (entry, options) in contribution.bounds {
+            let (host, template) = match options {
+                Options::PoolUse(options) => (options.host, Some(options.template)),
+                Options::HostUse(options) => (options, None),
+                _ => {
+                    return Err(Error::Stored(
+                        "the host contribution has different resource bounds".into(),
+                    ));
+                }
+            };
+            ceiling = ceiling.and(&host.resources_max.unwrap_or_default());
+            if let Some(template) = template {
+                ceiling = ceiling.and(&template.resources_max.unwrap_or_default());
+            }
+            if let Some(entry) = entry {
+                pool_entries.push(entry);
+                if let Some(maximum) = host.max_environments {
+                    let capacity = CreationCapacity {
+                        entries: vec![entry],
+                        maximum,
+                        existing: capacity_existing,
+                    };
+                    let made = rows::other_environments_made_through(
+                        conn,
+                        &capacity.entries,
+                        capacity_existing,
+                    )
+                    .await?;
+                    if made >= i64::from(maximum) {
+                        exceeded.push(Limit::TooManyEnvironments {
+                            allowed: maximum,
+                            made,
+                        });
+                    }
+                    pool_capacity.push(capacity);
+                }
+            }
+        }
+    }
     check_limit(
         "cpu_millis",
         ceiling.cpu_millis,
@@ -573,12 +736,143 @@ async fn check_placement_inner(
             .map(|maximum| CreationCapacity {
                 entries: host_use.entries.clone(),
                 maximum,
-                existing,
+                existing: capacity_existing,
             }),
         host: Some((host_use.entry, host_options)),
         template: Some((template_use.entry, template_options)),
         ceiling,
+        pool_capacity,
+        pool_entries,
     })))
+}
+
+/// Native provider-unit placement retains its admitted provider source and the same bounded
+/// host/template options. It does not invent the environment creator's Node Interact gate.
+pub async fn provider_host_creation(
+    conn: &mut Conn,
+    principal: &Principal,
+    provider: Id,
+    ask: &NewEnvironment,
+    policies: &Policies,
+    selection: Option<crate::pools::Selection<'_>>,
+) -> Result<Creating, Error> {
+    let Place::Host {
+        host,
+        template,
+        wants,
+    } = &ask.place
+    else {
+        return Ok(Creating::Exceeds(vec![Limit::PoolUnavailable]));
+    };
+    let birth = crate::resources::ProviderBirth::current(conn, principal, provider).await?;
+    let contribution = if let Some(selection) = selection {
+        crate::pools::member_choice(
+            conn,
+            principal,
+            selection.path,
+            selection.leaf,
+            ObjectRef {
+                kind: ObjectKind::Host,
+                id: *host,
+            },
+            Some(ask.home),
+            policies,
+            &HostDemand {
+                template: *template,
+                wants,
+                birth: birth.as_ref(),
+            },
+        )
+        .await?
+    } else {
+        None
+    };
+    let mut held = HashMap::new();
+    for (kind, id) in [(ObjectKind::Host, *host), (ObjectKind::Template, *template)] {
+        let usage = if kind == ObjectKind::Host && selection.is_some() {
+            contribution
+                .as_ref()
+                .and_then(|contribution| contribution.member_use.clone())
+                .map(Box::new)
+        } else if let Some(birth) = &birth {
+            birth
+                .usage(
+                    conn,
+                    principal,
+                    ObjectRef { kind, id },
+                    Some(ask.home),
+                    policies,
+                )
+                .await?
+        } else {
+            match crate::usable::usable(conn, principal, id, Some(ask.home), policies).await? {
+                crate::usable::Usable::Yes(usage) => Some(usage),
+                _ => None,
+            }
+        };
+        let Some(usage) = usage else {
+            return Ok(Creating::Exceeds(vec![Limit::PoolUnavailable]));
+        };
+        held.insert(id, *usage);
+    }
+    creation_limits(conn, ask, &held, Some(provider), contribution).await
+}
+
+fn resources_allow(allowed: Option<&ResourceLimits>, wanted: &ResourceLimits) -> bool {
+    allowed.is_none_or(|allowed| {
+        let fits = |allowed: Option<i64>, wanted: Option<i64>| match (allowed, wanted) {
+            (Some(allowed), Some(wanted)) => wanted <= allowed,
+            _ => true,
+        };
+        fits(allowed.cpu_millis, wanted.cpu_millis)
+            && fits(allowed.memory_mb, wanted.memory_mb)
+            && fits(allowed.pids, wanted.pids)
+            && fits(allowed.disk_gb, wanted.disk_gb)
+    })
+}
+fn host_allows(options: &HostUse, template: Id, wants: &Wants) -> bool {
+    options.max_environments != Some(0)
+        && options.allows_template(template)
+        && wants
+            .source
+            .as_ref()
+            .is_none_or(|source| options.allows_source(source))
+        && wants
+            .storage
+            .as_ref()
+            .is_none_or(|storage| options.allows_storage(storage))
+        && resources_allow(options.resources_max.as_ref(), &wants.resources)
+}
+fn template_allows(options: &TemplateUse, wants: &Wants) -> bool {
+    wants
+        .capabilities
+        .iter()
+        .all(|capability| options.allows_capability(capability))
+        && resources_allow(options.resources_max.as_ref(), &wants.resources)
+}
+struct HostDemand<'a> {
+    template: Id,
+    wants: &'a Wants,
+    birth: Option<&'a crate::resources::ProviderBirth>,
+}
+impl crate::pools::Demand for HostDemand<'_> {
+    fn provider_birth(&self) -> Option<&crate::resources::ProviderBirth> {
+        self.birth
+    }
+    fn pool(&self, options: &orch_access_contract::pools::PoolUse) -> bool {
+        host_allows(&options.host, self.template, self.wants)
+            && template_allows(&options.template, self.wants)
+    }
+    fn lent(&self, options: &Options) -> bool {
+        match options {
+            Options::HostUse(options) => host_allows(options, self.template, self.wants),
+            Options::PoolUse(options) => self.pool(options),
+            _ => false,
+        }
+    }
+    fn direct(&self, usage: &Use) -> bool {
+        self.lent(&usage.options)
+    }
 }
 
 // ---- Who reaches into one ------------------------------------------------------------------------

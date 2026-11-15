@@ -70,6 +70,7 @@ impl Engine {
         lease.release(&self.inner.db).await?;
         let result = retained?;
         self.keep_file_states().await?;
+        self.keep_pool_choice_details().await?;
         self.schedule_agent_history(true);
         if result != Retained::default() {
             self.kick();

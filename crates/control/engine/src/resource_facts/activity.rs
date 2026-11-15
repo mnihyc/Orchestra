@@ -80,6 +80,25 @@ pub async fn requests(conn: &mut Conn, target: &FactTarget) -> Result<Vec<Id>, E
         .map_err(DbError::from)?)
 }
 
+/// Native pending placement identities, not all jobs that happen to use the same host.
+pub async fn pool_placements(conn: &mut Conn, pool: Id) -> Result<Vec<Id>, EngineError> {
+    pool_placements_among(conn, pool, None).await
+}
+
+/// A retained negative stop rechecks only its captured jobs against their actual current association.
+pub(crate) async fn pool_placements_among(
+    conn: &mut Conn,
+    pool: Id,
+    jobs: Option<&[Id]>,
+) -> Result<Vec<Id>, EngineError> {
+    Ok(sqlx::query_scalar(include_str!("pool_placements.sql"))
+        .bind(pool)
+        .bind(jobs)
+        .fetch_all(conn)
+        .await
+        .map_err(DbError::from)?)
+}
+
 /// The resource transaction freezes the first stop reason before any native cancellation is sent.
 pub async fn stop_requests(conn: &mut Conn, ids: &[Id], reason: &str) -> Result<(), EngineError> {
     sqlx::query(
@@ -144,6 +163,13 @@ pub struct Work {
 
 /// One resource's exact work at the caller's observation instant.
 pub async fn read(conn: &mut Conn, target: &FactTarget) -> Result<Vec<Work>, EngineError> {
+    if target.object.kind == ObjectKind::Pool && target.model_id.is_none() {
+        return Ok(sqlx::query_as(include_str!("pool_activity.sql"))
+            .bind(target.object.id)
+            .fetch_all(conn)
+            .await
+            .map_err(DbError::from)?);
+    }
     let kind = match target.object.kind {
         ObjectKind::Provider => "provider",
         ObjectKind::Agent => "agent",

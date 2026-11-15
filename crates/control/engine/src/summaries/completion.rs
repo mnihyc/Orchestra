@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use orch_db::queries::{resources::thread_engine as resources, threads};
 use orch_db::{Conn, DbError};
 use orch_link_contract::commands::{ProviderComplete, ProviderCompleteResult, SerialKey};
-use orch_summarizer_contract::summarizer::SummarizeError;
-use orch_summarizer_model::Complete;
+use orch_summarizer_contract::summarizer::{OUTPUT_CUT, SummarizeError};
+use orch_summarizer_model::{Complete, Reasoning};
 use orch_types::{Id, Json};
 use serde_json::json;
 
@@ -39,6 +39,24 @@ pub(super) fn stable_pause(reason: &str) -> bool {
             | "Environment removed"
             | "Resource switched off"
     )
+}
+
+/// A model's efforts from the lowest up: the names the vendors use, in their order, and any other after them in
+/// the order the model lists them.
+fn lowest_first(efforts: &[String]) -> Vec<&str> {
+    const KNOWN: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    let mut ranked: Vec<(usize, &str)> = efforts
+        .iter()
+        .map(|effort| {
+            let rank = KNOWN
+                .iter()
+                .position(|known| known == effort)
+                .unwrap_or(KNOWN.len());
+            (rank, effort.as_str())
+        })
+        .collect();
+    ranked.sort_by_key(|(rank, _)| *rank);
+    ranked.into_iter().map(|(_, effort)| effort).collect()
 }
 
 fn effort_is_offered(params: &Json, model: &Json) -> bool {
@@ -133,22 +151,57 @@ pub(super) struct Host {
 }
 
 impl Host {
-    fn recovery_context(
+    async fn recovery_context(
         &self,
+        conn: &mut Conn,
         call: &Call,
         root: Id,
         configured: &(Id, String),
         request: &ProviderComplete,
         writer: Id,
-    ) -> orch_types::Json {
+    ) -> Result<orch_types::Json, EngineError> {
         let mut context = json!({"root_input":root,"root_call":root,"configured_provider":configured.0,"configured_model":configured.1,"provider_id":call.provider_id,"model":call.model_name,"author_id":writer,"workflow_id":self.workflow,"task":self.task});
+        let retained = crate::calls::read_root(
+            conn,
+            call.node_id,
+            orch_provider_contract::calls::Purpose::Summary,
+            root,
+        )
+        .await?
+        .filter(|row| row.state == "running" && row.context["next_call"] == json!(call.id))
+        .and_then(|row| row.context.get("candidate").cloned())
+        .map(serde_json::from_value::<crate::calls::SelectedCandidate>)
+        .transpose()?
+        .filter(|candidate| {
+            candidate.provider_id == request.provider_id && candidate.model == request.model_name
+        });
         if request.provider_id != configured.0
             || request.model_name != configured.1
             || request.params.is_some()
+            || retained.is_some()
         {
-            context["candidate"] = json!({"provider_id":request.provider_id,"model":request.model_name,"params":request.params.clone().unwrap_or_else(||json!({}))});
+            let params = request.params.clone().unwrap_or_else(|| json!({}));
+            let mut selected = retained.unwrap_or_else(|| {
+                let mut intent = orch_provider_contract::calls::Candidate::model(
+                    request.provider_id,
+                    request.model_name.clone(),
+                );
+                intent.params = params.clone();
+                crate::calls::SelectedCandidate {
+                    intent,
+                    choice_id: None,
+                    provider_id: request.provider_id,
+                    model: request.model_name.clone(),
+                    route: None,
+                    agent_id: None,
+                    params: params.clone(),
+                    dimensions: None,
+                }
+            });
+            selected.params = params;
+            context["candidate"] = json!(selected);
         }
-        context
+        Ok(context)
     }
 
     async fn skip_candidate(
@@ -305,6 +358,8 @@ impl Host {
             .background_provider_use(
                 &mut tx,
                 &ProviderUse {
+                    pool: None,
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Summary,
                     person: writer,
                     node,
                     provider: provider.id,
@@ -456,10 +511,15 @@ impl Host {
         // Admission uses the final redacted bytes and current allowance. A masking replacement or a changed model
         // window cannot make a previously fitted handoff or goal check exceed the place's input share.
         if matches!(self.task, "handoff" | "goal_check") {
-            let budget =
-                super::budget::input_budget(&mut tx, node, provider.id, &request.model_name)
-                    .await
-                    .map_err(internal)?;
+            let budget = super::budget::input_budget(
+                &mut tx,
+                node,
+                provider.id,
+                &request.model_name,
+                request.max_output_tokens,
+            )
+            .await
+            .map_err(internal)?;
             if request.system.len().saturating_add(request.input.len()) > budget.bytes {
                 return Err(SummarizeError::Skipped(
                     "the summary model's input allowance cannot hold the rendered material"
@@ -497,8 +557,10 @@ impl Host {
                 .check(self.engine.inner.clock.as_ref())
                 .map_err(internal)?;
         }
-        sqlx::query("INSERT INTO summary_calls (id,node_id,topic_id,thread_id,provider_id,person_id,model_name,created_at,agent_id,environment_id,issued_by,entry_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id) DO NOTHING")
-            .bind(call.id).bind(node).bind(call.topic_id).bind(call.thread_id).bind(call.provider_id).bind(call.person_id).bind(&call.model_name).bind(call.created_at).bind(agent).bind(environment).bind(call.issued_by).bind(call.entry_id).execute(&mut *tx).await.map_err(DbError::from).map_err(internal)?;
+        sqlx::query("INSERT INTO summary_calls (id,node_id,topic_id,thread_id,provider_id,person_id,model_name,created_at,agent_id,environment_id,issued_by,entry_id,resource_request_id,resource_call_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(id) DO NOTHING")
+            .bind(call.id).bind(node).bind(call.topic_id).bind(call.thread_id).bind(call.provider_id).bind(call.person_id).bind(&call.model_name).bind(call.created_at).bind(agent).bind(environment).bind(call.issued_by).bind(call.entry_id)
+            .bind(resource.as_ref().map(super::resource::Work::request)).bind(resource.as_ref().map(super::resource::Work::call))
+            .execute(&mut *tx).await.map_err(DbError::from).map_err(internal)?;
         let admitted: Call = sqlx::query_as("SELECT id,node_id,topic_id,thread_id,provider_id,person_id,issued_by,entry_id,model_name,created_at FROM summary_calls WHERE id=$1 AND purpose='summary' AND cancel_reason IS NULL")
             .bind(call.id).fetch_one(&mut *tx).await.map_err(DbError::from).map_err(internal)?;
         let mut expected = call;
@@ -759,7 +821,17 @@ impl Host {
                     .and_then(|raw| raw.pointer("/model_request/outcome/said"))
                     .cloned()
                     .unwrap_or(orch_types::Json::Null);
-                let context = self.recovery_context(&call, root_call, configured, &request, writer);
+                // The answer ran into its output allowance: a retry with the same allowance runs into it
+                // again, so this is told as what it is, whatever the call rules then do.
+                let cut = failure
+                    .as_object_mut()
+                    .and_then(|failure| failure.remove("output_limit"))
+                    .and_then(|limit| limit.as_bool())
+                    .unwrap_or(false);
+                let context = self
+                    .recovery_context(&mut tx, &call, root_call, configured, &request, writer)
+                    .await
+                    .map_err(internal)?;
                 let recovery = crate::calls::reserve(
                     &mut tx,
                     node,
@@ -775,6 +847,12 @@ impl Host {
                 self.engine
                     .settle_node_model_input(node, model_input, crate::model_inputs::Sent::Refused)
                     .await;
+                if cut {
+                    return Err(SummarizeError::Failed {
+                        message: OUTPUT_CUT.to_owned(),
+                        retryable: recovery.is_some(),
+                    });
+                }
                 if recovery.is_none() {
                     return Err(SummarizeError::Skipped(NO_RULE.to_owned()));
                 }
@@ -798,9 +876,13 @@ impl Host {
                 {
                     return Err(SummarizeError::Skipped(reason.to_owned()));
                 }
+                let context = self
+                    .recovery_context(&mut tx, &call, root_call, configured, &request, writer)
+                    .await
+                    .map_err(internal)?;
                 let recovery=crate::calls::reserve(&mut tx,node,orch_provider_contract::calls::Purpose::Summary,self.call,
                     &json!({"code":"provider_unreachable","message":"The model request did not finish","retryable":true}),
-                    self.recovery_context(&call,root_call,configured,&request,writer),self.engine.inner.clock.now()).await.map_err(internal)?;
+                    context,self.engine.inner.clock.now()).await.map_err(internal)?;
                 tx.commit().await.map_err(DbError::from).map_err(internal)?;
                 if recovery.is_none() {
                     return Err(SummarizeError::Skipped(NO_RULE.to_owned()));
@@ -853,6 +935,75 @@ impl Host {
 
 #[async_trait]
 impl Complete for Host {
+    /// Whether the model reasons (its parameters take efforts, or a reasoning mode is on) and the lowest effort
+    /// it offers that the setting writer may use here. Nothing is written.
+    async fn reasoning(
+        &self,
+        node: Id,
+        provider_id: Id,
+        model_name: &str,
+    ) -> Result<Reasoning, SummarizeError> {
+        let mut tx = self.engine.db().begin().await.map_err(internal)?;
+        let Some(provider) = resources::provider(&mut tx, provider_id)
+            .await
+            .map_err(internal)?
+        else {
+            return Ok(Reasoning::default());
+        };
+        let Some(protocol) =
+            super::resource::completion_protocol(&provider.protocols).map_err(internal)?
+        else {
+            return Ok(Reasoning::default());
+        };
+        let Some(model) = resources::model(&mut tx, provider_id, model_name)
+            .await
+            .map_err(internal)?
+        else {
+            return Ok(Reasoning::default());
+        };
+        let parameters = orch_provider_contract::models::composed_model_parameters(
+            &model.parameters,
+            &model.groups,
+            &model.option_layers,
+            Some(&protocol),
+        )
+        .map_err(internal)?;
+        let mut reasoning = Reasoning {
+            reasons: parameters.needs_reasoning_room(),
+            lowest_effort: None,
+        };
+        if reasoning.reasons
+            && let Some(writer) = self.writer
+        {
+            for effort in lowest_first(parameters.efforts()) {
+                let allowed = self
+                    .engine
+                    .inner
+                    .access
+                    .background_provider_use(
+                        &mut tx,
+                        &ProviderUse {
+                            pool: None,
+                            purpose: orch_access_contract::permissions::ProviderPurpose::Summary,
+                            person: writer,
+                            node,
+                            provider: provider_id,
+                            model: Some(model_name),
+                            effort: Some(effort),
+                            // A summary runs in no environment.
+                            runs_in: None,
+                        },
+                    )
+                    .await;
+                if allowed.is_ok_and(|allowed| allowed.is_allowed()) {
+                    reasoning.lowest_effort = Some(effort.to_owned());
+                    break;
+                }
+            }
+        }
+        Ok(reasoning)
+    }
+
     async fn complete(
         &self,
         node: Id,
@@ -878,12 +1029,56 @@ impl Complete for Host {
         .await
         .map_err(internal)?;
         let crate::calls::ServicePlan::Ready { call, candidate } = plan else {
-            return Err(SummarizeError::Skipped(
-                "Call recovery needs attention or its scheduled time".to_owned(),
-            ));
+            let reason = crate::calls::read_root(&mut tx, node, Purpose::Summary, self.call)
+                .await
+                .map_err(internal)?
+                .as_ref()
+                .and_then(crate::calls::administrative_pause_reason)
+                .unwrap_or("Call recovery needs attention or its scheduled time");
+            tx.commit().await.map_err(DbError::from).map_err(internal)?;
+            return Err(SummarizeError::Skipped(reason.to_owned()));
         };
-        if let Some(candidate) = candidate {
-            let candidate = *candidate;
+        if let Some(intent) = candidate {
+            let Some(writer) = self.writer else {
+                return Err(SummarizeError::Skipped(
+                    "The setting writer is unavailable".to_owned(),
+                ));
+            };
+            let original;
+            let caller = if let Some(work) = self.resource.as_ref() {
+                original = work
+                    .caller(&mut tx, self.engine.inner.clock.as_ref())
+                    .await
+                    .map_err(internal)?;
+                &original
+            } else {
+                original = orch_authz::Caller::session(writer).with_admin_mode(false);
+                &original
+            };
+            let resolved = self
+                .engine
+                .resolve_recovery_candidate(
+                    &mut tx,
+                    &crate::calls::DestinationRequest {
+                        node,
+                        purpose: Purpose::Summary,
+                        root: self.call,
+                        attempt: call,
+                        retained_route: None,
+                    },
+                    std::slice::from_ref(caller),
+                    &intent,
+                    &request.model_name,
+                )
+                .await
+                .map_err(internal)?;
+            let Some(candidate) = resolved.selected else {
+                self.skip_candidate(&mut tx, node, &resolved.reason).await?;
+                tx.commit().await.map_err(DbError::from).map_err(internal)?;
+                return Err(SummarizeError::Skipped(
+                    "The configured recovery pool has no eligible member".into(),
+                ));
+            };
             if let Some(reason) =
                 crate::calls::switched_off_reason(&mut tx, candidate.provider_id, &candidate.model)
                     .await
@@ -895,11 +1090,6 @@ impl Complete for Host {
                 tx.commit().await.map_err(DbError::from).map_err(internal)?;
                 return Err(SummarizeError::Skipped(reason.to_owned()));
             }
-            let Some(writer) = self.writer else {
-                return Err(SummarizeError::Skipped(
-                    "The setting writer is unavailable".to_owned(),
-                ));
-            };
             let target = resources::provider(&mut tx, candidate.provider_id)
                 .await
                 .map_err(internal)?;
@@ -912,17 +1102,6 @@ impl Complete for Host {
                     .map_err(internal)?
                     .is_some(),
                 None => false,
-            };
-            let original;
-            let caller = if let Some(work) = self.resource.as_ref() {
-                original = work
-                    .caller(&mut tx, self.engine.inner.clock.as_ref())
-                    .await
-                    .map_err(internal)?;
-                &original
-            } else {
-                original = orch_authz::Caller::session(writer).with_admin_mode(false);
-                &original
             };
             let reason = if !self
                 .engine
