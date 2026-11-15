@@ -1,8 +1,6 @@
 //! Native connector builds verified before inclusion in server downloads.
 
-use crate::release::manifest::{
-    self, Asset, CONNECTOR_MINIMUM, LinkProtocol, Manifest, PROJECT, SCHEMA_VERSION,
-};
+use crate::release::manifest::{self, Asset, LinkProtocol, Manifest, PROJECT, SCHEMA_VERSION};
 use crate::release::{ReleaseError, capture, run};
 use orch_link_contract::version::{OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION};
 use std::collections::BTreeSet;
@@ -268,6 +266,7 @@ pub fn build(root: &Path, out: &Path, target: &str) -> Result<(), ReleaseError> 
             sha256: Some(manifest::sha256_of(&path)?),
         });
     }
+    let connector_minimum = manifest::connector_minimum(&release.version);
     Manifest {
         schema_version: SCHEMA_VERSION,
         project: PROJECT.to_owned(),
@@ -278,7 +277,7 @@ pub fn build(root: &Path, out: &Path, target: &str) -> Result<(), ReleaseError> 
             current: PROTOCOL_VERSION,
             minimum: OLDEST_PROTOCOL_VERSION,
         },
-        connector_minimum: CONNECTOR_MINIMUM.to_owned(),
+        connector_minimum,
         assets,
         images: Vec::new(),
         harness_builds: Vec::new(),
@@ -452,7 +451,7 @@ mod tests {
                 current: PROTOCOL_VERSION,
                 minimum: OLDEST_PROTOCOL_VERSION,
             },
-            connector_minimum: CONNECTOR_MINIMUM.to_owned(),
+            connector_minimum: manifest::connector_minimum("1.2.3"),
             assets: vec![Asset {
                 name: name.to_owned(),
                 download_url: name.to_owned(),

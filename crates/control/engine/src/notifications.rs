@@ -48,6 +48,7 @@ use orch_types::{Id, Json, Seq, Time};
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
 
+pub mod decisions;
 pub mod person_notices;
 pub use person_notices::ThreadMoveNotice;
 
@@ -67,6 +68,10 @@ pub fn operation_scope<T>(
     // Keep one operation's state out of every enclosing task-local wrapper.
     let work = Box::pin(work);
     async move { NOTIFICATION_OPERATION.scope(id, work).await }
+}
+
+pub(crate) fn current_operation() -> Option<Id> {
+    NOTIFICATION_OPERATION.try_with(|id| *id).ok().flatten()
 }
 
 /// The kind of notification, as the contract names it.
@@ -776,6 +781,27 @@ async fn tell_followers_except(
         return Ok(Told::default());
     };
     let mut people = subscribers_of(conn, node, reach, event.actor, event.at).await?;
+    if let Some(user) = except.filter(|user| people.contains(user))
+        && let Some(turn) = event
+            .data
+            .get("turn_id")
+            .and_then(Json::as_str)
+            .and_then(|id| id.parse::<Id>().ok())
+        && orch_db::queries::notifications::operations::receivers(conn, &[user], word(event.kind))
+            .await?
+            .contains(&user)
+    {
+        orch_db::queries::notifications::decisions::record(
+            conn,
+            "turn",
+            turn,
+            node,
+            Some(user),
+            "already_watching",
+            event.at,
+        )
+        .await?;
+    }
     people.retain(|person| Some(*person) != except);
     let told = tell(conn, event, &people, Some(place_org)).await?;
     let destinations = tell_destinations(conn, event, important).await?;
@@ -886,6 +912,17 @@ pub(crate) async fn subagent_ended(
     .await?
     .unwrap_or(false);
     if !wanted {
+        let at = unit.now();
+        orch_db::queries::notifications::decisions::record(
+            unit.conn,
+            "item",
+            item,
+            thread.node_id,
+            None,
+            "subagent_notices_off",
+            at,
+        )
+        .await?;
         return Ok(());
     }
     let tool = payload.get("tool").unwrap_or(&Json::Null);
@@ -934,6 +971,34 @@ pub(crate) async fn turn_ended(
     end: &TurnEnd,
     watching_author: Option<Id>,
 ) -> Result<(), EngineError> {
+    let suppressed = if end
+        .error
+        .as_ref()
+        .and_then(|error| error.pointer("/recovery/automatic"))
+        .and_then(Json::as_bool)
+        == Some(true)
+    {
+        Some("automatic_recovery")
+    } else if end.state == turn_state::INTERRUPTED {
+        Some("interrupted")
+    } else if end.state == turn_state::FAILED && turn.state == turn_state::STARTING {
+        Some("did_not_start")
+    } else {
+        None
+    };
+    if let Some(reason) = suppressed {
+        let at = unit.now();
+        orch_db::queries::notifications::decisions::record(
+            unit.conn,
+            "turn",
+            turn.id,
+            thread.node_id,
+            None,
+            reason,
+            at,
+        )
+        .await?;
+    }
     if end
         .error
         .as_ref()
@@ -1022,6 +1087,12 @@ pub(crate) async fn set_state(
         )
     {
         return Ok(threads::set_state(&mut *unit.conn, thread, from, to, seq).await?);
+    }
+    if to.reason == Some("provider_unavailable") {
+        let grouped: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM threads t JOIN providers p ON p.id=t.provider_id AND (p.status='disabled' OR p.deleted_at IS NOT NULL) JOIN jobs j ON j.kind='resource_quiesce' AND j.plan#>>'{quiesce,target,object,kind}'='provider' AND j.plan#>>'{quiesce,target,object,id}'=t.provider_id::text JOIN notification_operations o ON o.id=(j.plan->>'notification_operation')::uuid WHERE t.node_id=$1 AND j.plan->'notification_threads' ? $1::text)").bind(thread).fetch_one(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+        if grouped {
+            return Ok(threads::set_state(&mut *unit.conn, thread, from, to, seq).await?);
+        }
     }
     let before = threads::thread(&mut *unit.conn, thread).await?;
     let changed = threads::set_state(&mut *unit.conn, thread, from, to, seq).await?;
