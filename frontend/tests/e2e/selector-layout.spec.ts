@@ -1,7 +1,7 @@
 /** Actual selector geometry and computed colours on the screen that exposed the long All description. */
 import { expect, test } from '@playwright/test';
 import { contrast } from '../accessibility/contrast.ts';
-import { inspectLayout } from '../../e2e/layout-rules-dom.ts';
+import { inspectSettled, settleMotion } from '../../e2e/layout-rules-helpers.ts';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 import { scenario, signIn } from './support.ts';
@@ -56,6 +56,8 @@ for (const locale of ['en', 'zh-CN'] as const) test(`selector geometry, selected
         expect(size.width, size.name).toBeLessThanOrEqual(size.expected + 2);
         expect(size.width, size.name).toBeGreaterThanOrEqual(size.expected - 2);
       }
+      // The raised choice is a colour in a transition for a moment: it is read when it has stopped.
+      await settleMotion(page);
       await expect.poll(async () => {
         const frame = await group.evaluate((element) => {
           const style = getComputedStyle(element);
@@ -83,7 +85,7 @@ for (const locale of ['en', 'zh-CN'] as const) test(`selector geometry, selected
       await expect(chosen).toBeChecked();
       await expect(chosen.locator('svg.lucide-check')).toHaveCount(1);
       await expect.poll(() => chosen.evaluate((element) => getComputedStyle(element).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
-      const menuAudit = await page.evaluate(inspectLayout, { duplicateAllowList: [], rawValues: [] });
+      const menuAudit = await inspectSettled(page, { duplicateAllowList: [], rawValues: [] });
       expect(menuAudit.faults.filter((fault) => fault.rule === 'choice-text-contrast' || fault.rule === 'choice-word-width')).toEqual([]);
       await page.keyboard.press('Escape');
       await page.keyboard.press('Control+k');
@@ -92,7 +94,7 @@ for (const locale of ['en', 'zh-CN'] as const) test(`selector geometry, selected
       const input = palette.getByRole('combobox');
       await input.fill('Acme');
       await expect(palette.locator('[role="option"][aria-selected="true"]')).toHaveCount(1);
-      const paletteAudit = await page.evaluate(inspectLayout, { duplicateAllowList: [], rawValues: [] });
+      const paletteAudit = await inspectSettled(page, { duplicateAllowList: [], rawValues: [] });
       expect(paletteAudit.faults.filter((fault) => fault.rule === 'choice-text-contrast' || fault.rule === 'choice-word-width')).toEqual([]);
       await page.keyboard.press('Escape');
     }

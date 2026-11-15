@@ -1252,6 +1252,7 @@ fn body_matches(
                     environment_id: plan.environment,
                     snapshot_id: expected.undo_snapshot_id,
                     directory: directory.clone(),
+                    wait_for_indexing: true,
                     kind: RecordKind::Restore,
                     record_days: *record_days,
                     max_bytes: *max_bytes,

@@ -3,7 +3,7 @@ import { isCompleteThread } from '@/api/cache';
 import { client } from '@/api/client';
 import { fetchThreadSync } from '@/api/threads';
 import { captureThreadRead, isCurrentThreadRead, stampThreadRows, threadReadSelector } from '@/api/threadRead';
-import { type DurableFeed, type FeedRegistry, loadWithRetries } from '@/realtime/sync';
+import { type DurableFeed, type FeedRegistry, isCancellation, loadWithRetries } from '@/realtime/sync';
 import { setThreadReadChangeHandler, setThreadReadHolder, setThreadReadRetainer,
   threadViewOf, threadWriter, type ThreadRows, type ThreadView } from '@/realtime/stores/thread';
 import { matchesThreadProjection, projectionFitsSelection, readThreadProjection, sameThreadProjection, threadReceipt, type ThreadReadCapture, type ThreadReadRef, type ThreadReadTarget, sameThreadRead, threadReadRegistryKey, threadReadTarget } from '@/realtime/threadScope';
@@ -37,6 +37,12 @@ export function createThreadReadFeed(threadId: ThreadReadTarget, hooks: ThreadRe
   let rejected: ThreadReadCapture | null = null;
   return {
     feed: `thread:${threadReadTarget(threadId).threadId}`,
+    initial: () => {
+      const captured = captureThreadRead(threadId), view = threadViewOf(threadId);
+      if (view.loaded === 'none' || view.closed !== null || view.read?.ready !== true || view.lastSeq === null
+        || !isCurrentThreadRead(captured) || !matchesThreadProjection(view.read, captured)) return null;
+      return { seq: view.lastSeq, complete: true, data: stampThreadRows({ seq: view.lastSeq }, captured), alreadyApplied: true };
+    },
     scope: () => {
       const captured = captureThreadRead(threadId);
       const selector = threadReadSelector(captured);
@@ -47,7 +53,7 @@ export function createThreadReadFeed(threadId: ThreadReadTarget, hooks: ThreadRe
           if (!isCurrentThreadRead(captured)) return frame.op === 'subscribed' ? 'reload' : 'ignore';
           const held = threadViewOf(threadId).read;
           if (held === null || !matchesThreadProjection(held, captured)) return 'ignore';
-          if (frame.op === 'resync' && (held.projection !== null || held.switched)) {
+          if (frame.op === 'resync' && frame.reload === true && (held.projection !== null || held.switched)) {
             threadWriter.invalidate(threadId, false);
             return 'reload';
           }
@@ -89,7 +95,7 @@ export function createThreadReadFeed(threadId: ThreadReadTarget, hooks: ThreadRe
     failed: (error) => threadWriter.failed(threadId, error),
     refused: (error) => { if (rejected !== null) threadWriter.refused(threadId, error, rejected); },
     closed: (reason) => threadWriter.closed(threadId, reason),
-    subscribed: () => hooks.subscribed?.(),
+    subscribed: (frame) => { if (frame.mode !== 'reload') threadWriter.failed(threadId, null); hooks.subscribed?.(); },
     other: (frame) => {
       if (delivered === null || !isCurrentThreadRead(delivered)) return;
       if (frame.op === 'delta') {
@@ -103,27 +109,40 @@ export function createThreadReadFeed(threadId: ThreadReadTarget, hooks: ThreadRe
 
 
 export interface ThreadReadCoordinator {
-  (target: ThreadReadTarget): void;
+  (target: ThreadReadTarget, fresh?: boolean): void;
   rebase: (target: ThreadReadTarget) => void;
 }
 
 /** The same cache owns streaming and explicitly demanded HTTP-only history recovery. */
 export function coordinateThreadReads(registry: FeedRegistry, hooks: (threadId: string, ref: ThreadReadRef) => ThreadReadHooks): ThreadReadCoordinator {
   const key = (threadId: ThreadReadTarget) => threadReadRegistryKey(threadId);
-  const reload = (threadId: ThreadReadTarget): void => {
+  const reload = (threadId: ThreadReadTarget, fresh = false): void => {
     const ref = threadReadTarget(threadId);
     const feed = createThreadReadFeed(ref,hooks(ref.threadId,ref));
+    const view = threadViewOf(ref);
+    const since = !fresh && view.read?.ready === true && view.closed === null ? view.lastSeq : null;
     let captured: ThreadReadCapture | null = null;
     registry.reload(key(threadId), {
       load: async (signal) => {
-        const pending = feed.load(null,signal);
+        const pending = feed.load(since,signal);
         captured = captureThreadRead(threadId);
         const loaded = await pending;
         captured = threadReceipt(loaded.data) ?? captureThreadRead(threadId);
-        if (!signal.aborted) feed.reset(loaded.data,loaded.seq);
+        if (!signal.aborted) {
+          if (since !== null && loaded.complete) feed.apply(loaded.data,loaded.seq);
+          else if (since === null) feed.reset(loaded.data,loaded.seq);
+          else {
+            const pending = feed.load(null,signal);
+            captured = captureThreadRead(threadId);
+            const whole = await pending;
+            captured = threadReceipt(whole.data) ?? captureThreadRead(threadId);
+            signal.throwIfAborted(); feed.reset(whole.data,whole.seq);
+          }
+        }
       },
-      failed: (error) => { if (captured !== null && isCurrentThreadRead(captured)) feed.failed?.(error); },
-    });
+      // A read that was cancelled or overtaken by a newer one is no failure of the thread.
+      failed: (error) => { if (captured !== null && isCurrentThreadRead(captured) && !isCancellation(error)) feed.failed?.(error); },
+    }, since !== null);
   };
   const rebase = (target: ThreadReadTarget): void => {
     const ref = threadReadTarget(target);

@@ -295,6 +295,11 @@ pub fn mount(registry: &mut Registry) {
             machine_provider_create,
         )
         .on(api::ProviderRefresh, provider_refresh)
+        .on_with_operation(
+            api::ProviderTrialGet,
+            super::provider_trials::prepare,
+            super::provider_trials::get,
+        )
         .on_snapshot_read_with_operation(
             api::ProviderPlanGet,
             crate::key_operations::direct::declared,
@@ -651,8 +656,17 @@ pub async fn refused_making(conn: &mut Conn, home: Id, why: Why) -> ApiError {
 
 /// The facts a provider keeps, with what the built-in readers told in their own members (a plan's credits, a
 /// key's usage and its account's credits) turned into `balances` and `spend`, as every reader's are; members the
-/// facts of a source do not have (the models found) are kept as they are.
+/// facts of a source do not have are kept, except the separately read model catalogue.
 fn normalized(facts: &Json) -> Json {
+    let facts = Json::Object(
+        facts
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(name, _)| name.as_str() != "models")
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+    );
     let Ok(mut typed) =
         serde_json::from_value::<orch_agent_contract::facts::ProviderFacts>(facts.clone())
     else {
@@ -781,6 +795,17 @@ pub(super) fn facts_shown(
     for name in ["plan", "limit_reached", "identity", "credential"] {
         shown.entry(name).or_insert(Json::Null);
     }
+    // The upstream's list of models is no part of a provider's view: the view says how many it holds, and the
+    // list is read apart (`GET /providers/{id}/facts/models`).
+    let listed = facts.get("models");
+    shown.insert(
+        "models_count".to_owned(),
+        listed
+            .and_then(Json::as_array)
+            .map_or(Json::Null, |models| {
+                json!(i64::try_from(models.len()).unwrap_or(i64::MAX))
+            }),
+    );
     let parsed = serde_json::from_value(Json::Object(shown)).map_err(|error| {
         ApiError::internal(format!("the facts of a provider do not read: {error}"))
     })?;
@@ -1046,6 +1071,463 @@ pub(crate) async fn show_prepared(
 }
 orch_api_base::__api_bind_4494adecd2!();
 
+/// Thread chips keep the native authority and cap sources without the table's machine or runtime work.
+pub(crate) async fn show_thread_prepared(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &PreparedProjection,
+) -> ApiResult<orch_api_contract::settings::ThreadProvider> {
+    if !prepared.standing.views() {
+        return Err(ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the provider facts are not readable",
+        ));
+    }
+    let row = &prepared.row;
+    let ids = [row.id];
+    let pages = queries::provider_page_facts(conn, &ids, principal.now().get()).await?;
+    let page = pages
+        .first()
+        .ok_or_else(|| ApiError::internal("the provider display facts are missing"))?;
+    let models: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM provider_models WHERE provider_id=$1")
+            .bind(row.id)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(DbError::from)?;
+    let addresses = addresses(conn, &ids).await?;
+    let (mut facts, overridden) = facts_shown(&row.facts, &row.facts_overrides)?;
+    let sources =
+        super::provider_sources::SourceViews::read(conn, std::slice::from_ref(row)).await?;
+    let (_, facts_state) = super::provider_sources::view(
+        row,
+        &facts,
+        &overridden,
+        true,
+        prepared.standing.manages(),
+        &ctx.app.builtin_sources,
+        &sources,
+    )?;
+    facts.spend.clear();
+    facts.available_resets = None;
+    facts.extra_usage = None;
+    let each = &prepared.standing;
+    let holdings = [Holding {
+        id: row.id,
+        admin_place: each.admin_place,
+        admin_only: &each.admin_only,
+        admin_access: each.admin_access,
+        participating: each.participating,
+        owner: each.owner,
+        administers: each.administers,
+        held: &each.held,
+    }];
+    let mut access = super::view::accesses_prepared(
+        conn,
+        principal,
+        &holdings,
+        &prepared.projection.access,
+        Some(&prepared.projection.bounds),
+    )
+    .await?;
+    let mut caps = crate::routes::usage::caps::project_provider_choices(
+        ctx,
+        conn,
+        principal,
+        prepared.projection.caps.clone(),
+        Some(&prepared.projection.bounds),
+    )
+    .await?;
+    Ok(orch_api_contract::settings::ThreadProvider {
+        base: ProviderRef {
+            id: row.id,
+            name: row.name.clone(),
+            address: addresses.get(&row.id).cloned().unwrap_or_default(),
+            kind: parse(&row.kind)?,
+            harness_kind: row.harness_kind.clone(),
+            harness: row
+                .harness_kind
+                .as_deref()
+                .map(|kind| crate::programs::shipped_name(kind, None)),
+            placement: parse(&row.placement)?,
+            status: parse(&row.status)?,
+        },
+        facts,
+        facts_state,
+        models_count: models,
+        running_threads: page.running_threads,
+        access: access
+            .remove(&row.id)
+            .ok_or_else(|| ApiError::internal("the provider access is missing"))?,
+        choice_usage: Some(api::ProviderChoiceUsage {
+            caps: caps.remove(&row.id).unwrap_or_default(),
+            performance: Vec::new(),
+            observed_at: principal.now(),
+        }),
+    })
+}
+orch_api_base::__api_bind_provider_thread!();
+
+pub(crate) async fn show_list_rows_prepared(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &PreparedListProjection,
+) -> ApiResult<Vec<orch_api_contract::resource_rows::ProviderListRow>> {
+    provider_rows_with(
+        ctx,
+        conn,
+        principal,
+        &prepared.rows,
+        &prepared.standing,
+        &prepared.projection,
+    )
+    .await
+}
+orch_api_base::__api_bind_provider_list_rows!();
+
+pub(crate) async fn inventory_rows(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    seen: &[resources::Seen],
+) -> ApiResult<Vec<orch_api_contract::resource_rows::ProviderListRow>> {
+    let prepared = prepare_list_projection(ctx, conn, principal, seen).await?;
+    show_list_rows_prepared(ctx, conn, principal, &prepared).await
+}
+orch_api_base::__api_bind_provider_inventory_rows!();
+
+async fn provider_rows_with(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    rows: &[ProviderRow],
+    standing: &HashMap<Id, Standing>,
+    prepared: &PreparedProviderViews,
+) -> ApiResult<Vec<orch_api_contract::resource_rows::ProviderListRow>> {
+    use orch_api_contract::resource_rows::{ProviderListRow, ProviderRuntimeRow};
+    let ids: Vec<_> = rows.iter().map(|row| row.id).collect();
+    let pages: HashMap<_, _> = queries::provider_page_facts(conn, &ids, principal.now().get())
+        .await?
+        .into_iter()
+        .map(|row| (row.id, row))
+        .collect();
+    let counts: Vec<(Id, i64, i64)> = sqlx::query_as("SELECT provider_id,COUNT(*),COUNT(*) FILTER(WHERE enabled) FROM provider_models WHERE provider_id=ANY($1) GROUP BY provider_id")
+        .bind(&ids).fetch_all(&mut *conn).await.map_err(DbError::from)?;
+    let counts: HashMap<_, _> = counts
+        .into_iter()
+        .map(|(id, total, enabled)| (id, (total, enabled)))
+        .collect();
+    let managed: Vec<_> = rows
+        .iter()
+        .filter(|row| standing.get(&row.id).is_some_and(Standing::manages))
+        .collect();
+    let managed_ids: Vec<_> = managed.iter().map(|row| row.id).collect();
+    let live = runtime_rows::live_runtimes(conn, &managed_ids).await?;
+    let address_ids: Vec<_> = ids
+        .iter()
+        .copied()
+        .chain(live.iter().map(|runtime| runtime.host_id))
+        .collect();
+    let addresses = addresses(conn, &address_ids).await?;
+    let people = refusals::user_refs(
+        conn,
+        &rows.iter().map(|row| row.owner_id).collect::<Vec<_>>(),
+    )
+    .await?;
+    let homes = prepared
+        .bounds
+        .refs(
+            conn,
+            principal,
+            &rows.iter().map(|row| row.home_id).collect::<Vec<_>>(),
+        )
+        .await?;
+    let machines = machine_refs(
+        &ctx.app,
+        conn,
+        &rows
+            .iter()
+            .flat_map(|row| [row.machine_id, row.key_machine_id])
+            .flatten()
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+    let holdings: Vec<_> = rows
+        .iter()
+        .filter_map(|row| {
+            standing.get(&row.id).map(|each| Holding {
+                id: row.id,
+                admin_place: each.admin_place,
+                admin_only: &each.admin_only,
+                admin_access: each.admin_access,
+                participating: each.participating,
+                owner: each.owner,
+                administers: each.administers,
+                held: &each.held,
+            })
+        })
+        .collect();
+    let access = super::view::accesses_prepared(
+        conn,
+        principal,
+        &holdings,
+        &prepared.access,
+        Some(&prepared.bounds),
+    )
+    .await?;
+    let mut runtimes =
+        provider_runtime::runtime_views(ctx, conn, &managed, &live, &addresses).await?;
+    let sources = super::provider_sources::SourceViews::read(conn, rows).await?;
+    let profile_homes = sources.profile_homes()?;
+    let places: Vec<_> = rows
+        .iter()
+        .map(|row| orch_settings::ProviderAt {
+            id: row.id,
+            home_id: row.home_id,
+            runtime_config: &row.runtime_config,
+            revision: row.revision,
+        })
+        .collect();
+    let chosen_homes: HashMap<Id, Option<EnvironmentDataSource>> =
+        orch_settings::get_at_providers(conn, &places, keys::RUNTIME_HOME)
+            .await
+            .map_err(ApiError::internal)?;
+    let policies: HashMap<_, _> =
+        orch_db::queries::environment_facts::credential_policies(conn, &ids)
+            .await?
+            .into_iter()
+            .collect();
+    let runtime_facts: BTreeMap<_, _> = orch_db::queries::environment_facts::providers(conn, &ids)
+        .await?
+        .into_iter()
+        .map(|row| (row.provider_id, row.machine))
+        .collect();
+    let sign_in_ids: Vec<_> = rows
+        .iter()
+        .filter(|row| row.kind == "subscription")
+        .filter_map(|row| row.key_machine_id.or(row.machine_id))
+        .collect();
+    let machine_facts: Vec<(Id, Option<Id>, Json)> =
+        sqlx::query_as("SELECT id,runtime_id,facts FROM machines WHERE id=ANY($1)")
+            .bind(&sign_in_ids)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(DbError::from)?;
+    let machine_facts: HashMap<_, _> = machine_facts
+        .into_iter()
+        .map(|(id, runtime, facts)| (id, (runtime, facts)))
+        .collect();
+    let mut caps = crate::routes::usage::caps::project_provider_choices(
+        ctx,
+        conn,
+        principal,
+        prepared.caps.clone(),
+        Some(&prepared.bounds),
+    )
+    .await?;
+    let mut result = Vec::with_capacity(rows.len());
+    for row in rows {
+        let page = pages
+            .get(&row.id)
+            .ok_or_else(|| ApiError::internal("the provider display facts are missing"))?;
+        let visible = standing.get(&row.id).is_some_and(Standing::views);
+        if !visible {
+            continue;
+        }
+        let manages = standing.get(&row.id).is_some_and(Standing::manages);
+        let (mut facts, overridden) = facts_shown(&row.facts, &row.facts_overrides)?;
+        let (source, facts_state) = super::provider_sources::view(
+            row,
+            &facts,
+            &overridden,
+            visible,
+            manages,
+            &ctx.app.builtin_sources,
+            &sources,
+        )?;
+        facts.spend.clear();
+        facts.available_resets = None;
+        facts.extra_usage = None;
+        let profile_home = row
+            .agent_id
+            .and_then(|agent| profile_homes.get(&agent).cloned().flatten());
+        let provider_home = chosen_homes
+            .get(&row.id)
+            .cloned()
+            .flatten()
+            .or_else(|| {
+                (row.key_machine_id.is_some() && row.key_machine_id != row.machine_id)
+                    .then_some(EnvironmentDataSource::MadeByOrch)
+            })
+            .or_else(|| profile_home.clone());
+        let sign_in = if visible && row.kind == "subscription" {
+            let credential_home =
+                if row.key_machine_id.is_none() || row.key_machine_id == row.machine_id {
+                    provider_home.clone()
+                } else {
+                    profile_home
+                };
+            let home_owned = match credential_home {
+                Some(EnvironmentDataSource::MadeByOrch) => true,
+                Some(EnvironmentDataSource::ExistingDirectory { .. }) => false,
+                None => row.key_machine_id.or(row.machine_id).is_none_or(|machine| {
+                    machine_facts.get(&machine).is_some_and(|(runtime, facts)| {
+                        orch_settings::machine_home_owned(
+                            *runtime,
+                            facts,
+                            row.harness_kind.as_deref().unwrap_or(""),
+                        )
+                    })
+                }),
+            };
+            let policy_allowed = policies
+                .get(&row.id)
+                .and_then(|policy| policy.get("provider.signin"))
+                .and_then(Json::as_bool);
+            Some(api::ProviderSignInSupport {
+                home_owned,
+                policy_allowed,
+                allowed: home_owned || policy_allowed == Some(true),
+            })
+        } else {
+            None
+        };
+        let harness_home =
+            manages.then(|| provider_home.unwrap_or(EnvironmentDataSource::MadeByOrch));
+        let runtime_support = runtime_facts.get(&row.id).map(|facts| {
+            let descriptor = facts.descriptor.as_ref().and_then(|raw| {
+                serde_json::from_value::<orch_driver_contract::descriptor::DriverDescriptor>(
+                    raw.clone(),
+                )
+                .ok()
+            });
+            api::ProviderRuntimeSupport {
+                resource_limits: descriptor
+                    .as_ref()
+                    .map(|descriptor| descriptor.resource_limits.clone()),
+                data_storage: descriptor
+                    .as_ref()
+                    .map(|descriptor| descriptor.data_storage.clone()),
+                machine_id: facts.machine_id,
+                driver: descriptor
+                    .as_ref()
+                    .filter(|descriptor| {
+                        descriptor.lifecycle == orch_driver_contract::descriptor::Lifecycle::Unit
+                    })
+                    .map(|descriptor| descriptor.name.clone()),
+                lifecycle: descriptor.as_ref().map(|descriptor| descriptor.lifecycle),
+                commands_after_start: descriptor.map(|descriptor| descriptor.commands_after_start),
+                home: harness_home,
+                sign_in,
+                after_up: facts
+                    .policy
+                    .as_ref()
+                    .and_then(|policy| policy.get("environment.after_up"))
+                    .and_then(Json::as_bool),
+            }
+        });
+        let endpoints = row.upstreams.as_array();
+        let keyless = endpoints.is_some_and(|endpoints| {
+            endpoints.iter().all(|endpoint| {
+                endpoint.pointer("/options/auth").and_then(Json::as_str) == Some("none")
+            })
+        });
+        let plan_label = facts.plan.as_ref().map(|plan| {
+            source
+                .facts
+                .descriptor
+                .as_ref()
+                .and_then(|descriptor| descriptor.facts.as_ref())
+                .and_then(|facts| facts.plans.get(plan))
+                .cloned()
+                .unwrap_or_else(|| plan.clone())
+        });
+        let source_consent = [
+            Some(&source.facts),
+            Some(&source.models),
+            source.presenter.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|source| source.address.is_some());
+        let (total, enabled) = counts.get(&row.id).copied().unwrap_or_default();
+        result.push(ProviderListRow {
+            list_row: true,
+            org_id: row.org_id,
+            base: ProviderRef {
+                id: row.id,
+                name: row.name.clone(),
+                address: addresses.get(&row.id).cloned().unwrap_or_default(),
+                kind: parse(&row.kind)?,
+                harness_kind: row.harness_kind.clone(),
+                harness: row
+                    .harness_kind
+                    .as_deref()
+                    .map(|kind| crate::programs::shipped_name(kind, None)),
+                placement: parse(&row.placement)?,
+                status: parse(&row.status)?,
+            },
+            owner: people
+                .get(&row.owner_id)
+                .cloned()
+                .ok_or_else(|| ApiError::internal("the provider owner is missing"))?,
+            home: homes
+                .get(&row.home_id)
+                .cloned()
+                .ok_or_else(|| ApiError::internal("the provider home is missing"))?,
+            key_set: page.secret_names.iter().any(|name| name == API_KEY),
+            key_machine: row
+                .key_machine_id
+                .filter(|_| {
+                    manages
+                        && row.kind == "api"
+                        && !page.secret_names.iter().any(|name| name == API_KEY)
+                        && !keyless
+                })
+                .and_then(|id| machines.get(&id).cloned()),
+            machine: row
+                .machine_id
+                .filter(|_| manages)
+                .and_then(|id| machines.get(&id).cloned()),
+            status_detail: row.status_detail.clone().filter(|_| visible),
+            status_at: Time::new(page.status_at),
+            facts,
+            facts_state,
+            models_count: total,
+            enabled_models_count: enabled,
+            running_threads: page.running_threads,
+            runtime: runtimes
+                .remove(&row.id)
+                .as_ref()
+                .map(ProviderRuntimeRow::from),
+            runtime_support,
+            revision: row.revision,
+            access: access
+                .get(&row.id)
+                .cloned()
+                .ok_or_else(|| ApiError::internal("the provider access is missing"))?,
+            choice_usage: visible.then(|| api::ProviderChoiceUsage {
+                caps: caps.remove(&row.id).unwrap_or_default(),
+                performance: Vec::new(),
+                observed_at: principal.now(),
+            }),
+            upstreams_count: if manages {
+                i64::try_from(endpoints.map_or(0, Vec::len)).unwrap_or(i64::MAX)
+            } else {
+                0
+            },
+            no_key_needed: manages
+                && endpoints.is_some_and(|endpoints| !endpoints.is_empty())
+                && keyless,
+            plan_label,
+            source_consent,
+        });
+    }
+    Ok(result)
+}
+
 /// Providers as the API shows them, for any number of them in the same few statements. What the
 /// caller does not manage is left out of what is shown: the addresses of the endpoints, the
 /// machines, the options, the runtime and the processes of a provider belong to its managers.
@@ -1292,7 +1774,7 @@ async fn provider_views_with(
                     spend: Vec::new(),
                     ordinary_usage_allowed: None,
                     credential_verified: None,
-                    models: None,
+                    models_count: None,
                     field_times: std::collections::BTreeMap::new(),
                 },
                 Vec::new(),
@@ -1372,6 +1854,11 @@ async fn provider_views_with(
         } else {
             None
         };
+        let listed = models
+            .iter()
+            .filter(|model| model.provider_id == row.id)
+            .map(model_view)
+            .collect::<ApiResult<Vec<ProviderModel>>>()?;
         views.push(Provider {
             service_catalogue: if can_view {
                 Some(super::provider_services::views(
@@ -1560,11 +2047,8 @@ async fn provider_views_with(
             facts_at: row.facts_at.filter(|_| can_view).map(Time::new),
             facts_requested_at: page.facts_requested_at.filter(|_| can_view).map(Time::new),
             last_reset: last_resets.remove(&row.id).filter(|_| can_view),
-            models: models
-                .iter()
-                .filter(|model| model.provider_id == row.id)
-                .map(model_view)
-                .collect::<ApiResult<_>>()?,
+            models_count: i64::try_from(listed.len()).unwrap_or(i64::MAX),
+            models: listed,
             running_threads: page.running_threads,
             runtime: runtimes.remove(&row.id),
             harnesses: if manages {
@@ -1624,6 +2108,7 @@ pub fn model_view(row: &ModelRow) -> ApiResult<ProviderModel> {
         model_name: row.model_name.clone(),
         display_name: row.display_name.clone(),
         option_constraints: orch_model_contract::parameters::constraint_catalogue(&effective),
+        parameter_forms: orch_model_contract::parameters::thread::forms(&effective),
         parameters,
         groups: row.groups.clone(),
         enabled: row.enabled,
@@ -2588,22 +3073,48 @@ async fn update(
 
 /// Deletes a provider while its threads keep their binding and history; its
 /// key and secret headers are deleted.
-async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
+async fn delete(
+    ctx: Ctx,
+    query: orch_api_contract::resource_facts::ResourceNotificationQuery,
+    (): (),
+) -> ApiResult<()> {
     let id = ctx.id("id")?;
     let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
     let row = queries::providers(&mut tx, &[id])
         .await?
         .pop()
         .ok_or_else(ApiError::not_found)?;
-    let (stop, finished) = orch_engine::providers::deleting::apply(
-        &ctx.app.engine,
+    let operation = super::lifecycle_notifications::accept(
+        &ctx,
         &mut tx,
-        &row,
-        principal.user(),
-        ctx.now,
+        &principal,
+        orch_access_contract::decisions::ObjectRef {
+            kind: ResourceKind::Provider.into(),
+            id,
+        },
+        &row.name,
+        "provider_delete",
+        &query,
+    )
+    .await?;
+    let (stop, finished) = orch_engine::notifications::operation_scope(
+        Some(operation.id),
+        orch_engine::providers::deleting::apply(
+            &ctx.app.engine,
+            &mut tx,
+            &row,
+            principal.user(),
+            ctx.now,
+        ),
     )
     .await
     .map_err(ApiError::internal)?;
+    orch_engine::notifications::attach_operation(&mut tx, &[stop.id], &operation, ctx.now)
+        .await
+        .map_err(ApiError::engine)?;
+    orch_engine::notifications::notify_operation(&mut tx, &operation, "running", ctx.now)
+        .await
+        .map_err(ApiError::engine)?;
     // The admitted stop retires its runtime after the turns stop; the reaper then erases
     // its state volume and the sign-in kept there without waiting on a missing machine.
     let who = actor_name(&ctx)?;
@@ -2632,11 +3143,23 @@ async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
 /// Switches a provider off.
 async fn disable(
     ctx: Ctx,
-    query: orch_api_contract::resource_facts::ResourcePauseQuery,
+    query: orch_api_contract::resource_facts::ResourceStopQuery,
     (): (),
 ) -> ApiResult<Provider> {
     let note = super::impact::note(query.note.as_deref())?;
-    switch(&ctx, true, note, false).await
+    switch(
+        &ctx,
+        true,
+        note,
+        false,
+        Some(
+            orch_api_contract::resource_facts::ResourceNotificationQuery {
+                notify: query.notify,
+                notification_review: query.notification_review,
+            },
+        ),
+    )
+    .await
 }
 
 /// Switches a provider on again: it stands where what it has puts it.
@@ -2645,7 +3168,7 @@ async fn enable(
     query: orch_api_contract::resource_facts::ResourceResumeQuery,
     (): (),
 ) -> ApiResult<Provider> {
-    switch(&ctx, false, None, query.run_waiting.unwrap_or(false)).await
+    switch(&ctx, false, None, query.run_waiting.unwrap_or(false), None).await
 }
 
 async fn switch(
@@ -2653,6 +3176,7 @@ async fn switch(
     off: bool,
     note: Option<&str>,
     run_waiting: bool,
+    notification: Option<orch_api_contract::resource_facts::ResourceNotificationQuery>,
 ) -> ApiResult<Provider> {
     let id = ctx.id("id")?;
     let (current, mut tx, principal) = begin_mutation(ctx).await?;
@@ -2674,10 +3198,19 @@ async fn switch(
             model_id: None,
         };
         if off {
-            let (job, finished) = ctx
-                .app
-                .engine
-                .stop_resource_in(
+            let operation = super::lifecycle_notifications::accept(
+                ctx,
+                &mut tx,
+                &principal,
+                target.object,
+                &row.name,
+                "provider_disable",
+                &notification.unwrap_or_default(),
+            )
+            .await?;
+            let (job, finished) = orch_engine::notifications::operation_scope(
+                Some(operation.id),
+                ctx.app.engine.stop_resource_in(
                     &mut tx,
                     orch_engine::resource_pause::ResourceStop {
                         target,
@@ -2687,9 +3220,16 @@ async fn switch(
                         deleted: false,
                     },
                     ctx.now,
-                )
+                ),
+            )
+            .await
+            .map_err(ApiError::internal)?;
+            orch_engine::notifications::attach_operation(&mut tx, &[job.id], &operation, ctx.now)
                 .await
-                .map_err(ApiError::internal)?;
+                .map_err(ApiError::engine)?;
+            orch_engine::notifications::notify_operation(&mut tx, &operation, "running", ctx.now)
+                .await
+                .map_err(ApiError::engine)?;
             stopping = Some((job.id, finished));
         } else {
             if orch_engine::resource_facts::activity::stopping(&mut tx, &target)
@@ -2982,7 +3522,11 @@ fn unreachable_provider(error: &Refreshed) -> Option<ApiError> {
 
 /// Has the machine that keeps a provider look at its credential and report: the state it is in, and
 /// the plan and the limits its harness reports.
-async fn provider_refresh(ctx: Ctx, (): (), body: api::ProviderRefreshBody) -> ApiResult<Provider> {
+async fn provider_refresh(
+    ctx: Ctx,
+    (): (),
+    body: api::ProviderRefreshBody,
+) -> ApiResult<api::ProviderRefreshReply> {
     let id = ctx.id("id")?;
     let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
     let row = provider_for(&mut tx, &principal, id, Permission::ProviderView).await?;
@@ -2998,26 +3542,55 @@ async fn provider_refresh(ctx: Ctx, (): (), body: api::ProviderRefreshBody) -> A
     }
     let retry = body.retry == Some(true) && row.status == "error";
     let origin = crate::sign_in::origin(&ctx);
-    let refreshed = if retry {
-        ctx.app
-            .engine
-            .refresh_provider_for_retry_in(tx, &principal, &origin, id)
-            .await
-    } else {
-        ctx.app
-            .engine
-            .refresh_provider_in(tx, &principal, &origin, id)
-            .await
-    }
-    .map_err(ApiError::internal)?;
+    // The read is the engine's and goes on whether or not this connection stays: a page that gives up after thirty
+    // seconds of silence closes it, and a read that was dropped with it would store nothing and leave its lease standing.
+    // The request waits only for the facts: it answers as soon as they are read, with the provider as it now stands, and
+    // not at all longer than the engine's refresh wait where the facts read is itself slow. The model list is another
+    // source, read on by the same task under its own lease; it stores when it ends and keeps its own time limit.
+    let engine = ctx.app.engine.clone();
+    let reader = principal.clone();
+    let (facts_read, facts) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let refreshed = match if retry {
+            engine
+                .refresh_provider_for_retry_in(tx, &reader, &origin, id)
+                .await
+        } else {
+            engine.refresh_provider_in(tx, &reader, &origin, id).await
+        } {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                let _ = facts_read.send(Err(error));
+                return;
+            }
+        };
+        // Discovery is another independent source: its refusal must not erase freshly read plan or key facts, and
+        // nobody waits for it. It stores by itself when it ends, one read at a time.
+        let discover = unreachable_provider(&refreshed).is_none()
+            || (retry && matches!(refreshed, Refreshed::Failed(_)));
+        let _ = facts_read.send(Ok(refreshed));
+        if discover && let Err(error) = engine.discover_provider_models(id).await {
+            tracing::debug!(%id,%error,"the provider's model list could not be refreshed");
+        }
+    });
+    let refreshed = match tokio::time::timeout(ctx.app.engine.refresh_wait(), facts).await {
+        Ok(Ok(read)) => read.map_err(ApiError::internal)?,
+        Ok(Err(gone)) => return Err(ApiError::internal(gone)),
+        Err(_still_reading) => {
+            let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
+            provider_for(&mut tx, &principal, id, Permission::ProviderView).await?;
+            let shown = show(&ctx, &mut tx, &principal, id).await?;
+            tx.commit().await.map_err(DbError::from)?;
+            return Ok(api::ProviderRefreshReply {
+                provider: shown,
+                trial: None,
+            });
+        }
+    };
     if let Some(refusal) = unreachable_provider(&refreshed)
         && (!retry || !matches!(refreshed, Refreshed::Failed(_)))
     {
         return Err(refusal);
-    }
-    // Discovery is another independent source: its refusal must not erase freshly read plan or key facts.
-    if let Err(error) = ctx.app.engine.discover_provider_models(id).await {
-        tracing::debug!(%id,%error,"the provider's model list could not be refreshed");
     }
     let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
     provider_for(&mut tx, &principal, id, Permission::ProviderView).await?;
@@ -3070,11 +3643,25 @@ async fn provider_refresh(ctx: Ctx, (): (), body: api::ProviderRefreshBody) -> A
     }
     refresh_standing(&ctx, &mut tx, id).await?;
     let shown = show(&ctx, &mut tx, &principal, id).await?;
+    if body.retry == Some(true)
+        && trial.is_none()
+        && !orch_db::queries::provider_facts::trial_pending(&mut tx, id).await?
+    {
+        orch_db::queries::provider_facts::note_no_trial(&mut tx, id, ctx.now).await?;
+    }
+    let observed_trial = if body.retry == Some(true) {
+        super::provider_trials::for_reply(&mut tx, &principal, id, Time::new(ctx.now)).await?
+    } else {
+        None
+    };
     tx.commit().await.map_err(DbError::from)?;
     if let Some((_, thread)) = trial {
         ctx.app.engine.wake(thread);
     }
-    Ok(shown)
+    Ok(api::ProviderRefreshReply {
+        provider: shown,
+        trial: observed_trial,
+    })
 }
 
 /// Writes the facts of a provider by hand: the members given win over what its harness or endpoint
