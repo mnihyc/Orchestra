@@ -719,8 +719,11 @@ impl Inner {
             );
             // The state lock orders projection after the reset, even when the epoch
             // watcher arrived first. Keep only this unprojected notice across a cut change.
-            let projected =
-                super::personal_changes::project(self, sub.connection(), event.clone()).await?;
+            let Some(projected) =
+                super::personal_changes::project(self, sub.connection(), event.clone()).await?
+            else {
+                return Ok(());
+            };
             #[cfg(any(test, feature = "test-support"))]
             super::epoch_handoff_tests::after_projection(super::epoch_handoff_tests::Cut::Personal)
                 .await;

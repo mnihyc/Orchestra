@@ -1,0 +1,8 @@
+fmt
+clippy
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test notifications --test call_recovery
+test -p orch-api-core --test notifications_feed --test notifications_routes --test notifications_told --test thread_history_pages
+test -p orch-worker-core --test deliveries_and_inbox --test outbox --test routes
+test -p orch-api-core --test sign_in -- asking_for_a_code_is_answered_the_same_to_every_name_after_the_same_work

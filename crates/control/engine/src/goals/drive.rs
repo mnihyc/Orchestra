@@ -7,12 +7,12 @@
 //! the figures move only past turns not yet counted, a report is decided once, and the continuation's identity is
 //! derived from the goal and the turns it has used, so a look made twice queues one input.
 
-use super::{Budgets, budgets, is_zero, met_in, pause_in, stop_in, text};
+use super::{Budgets, budgets, is_zero, pause_in, stop_in, text, unchecked_in};
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::inputs::{InputError, InputRequest, Made};
 use crate::unit::Unit;
-use orch_api_contract::goals::{GoalCheckedBy, GoalInputFacts, GoalReason};
+use orch_api_contract::goals::{GoalInputFacts, GoalReason};
 use orch_api_contract::threads::{ContentPart, Delivery};
 use orch_db::queries::goals::{self as rows, GoalRow, status};
 use orch_db::queries::threads::{self, ThreadRow, thread_state};
@@ -145,7 +145,14 @@ impl Engine {
                         }
                         return Ok(None);
                     }
-                    met_in(unit, thread, &goal, &report, GoalCheckedBy::Agent, None).await?;
+                    unchecked_in(
+                        unit,
+                        thread,
+                        &goal,
+                        &report,
+                        "No independent checker is available.",
+                    )
+                    .await?;
                     return Ok(None);
                 }
                 "blocked" => {

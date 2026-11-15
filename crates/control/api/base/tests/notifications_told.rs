@@ -440,3 +440,102 @@ async fn a_thread_made_over_http_is_followed_by_its_maker() {
     .unwrap();
     assert_eq!(level, Some(("all".to_owned(), "auto".to_owned())));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recorded_notice_facts_keep_the_decision_after_settings_change_and_require_current_view() {
+    use orch_api_contract::threads::{ThreadHistoryListQuery, ThreadTurnList};
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    s.say(&s.ada, thread, "Work", Delivery::Queue, "decision-input")
+        .await
+        .ok();
+    let start = s.rig.turn_start(thread, 0).await;
+    s.rig.say(thread, turn_began(start.turn_id)).await;
+    s.rig
+        .engine
+        .interrupt(
+            &orch_authz::Caller::session(s.ada.id()),
+            thread,
+            start.turn_id,
+        )
+        .await
+        .unwrap();
+    s.rig
+        .say(thread, turn_ended(start.turn_id, TurnOutcome::Interrupted))
+        .await;
+    s.rig.wait_turn(start.turn_id, "interrupted").await;
+    rig::eventually(
+        "terminal effects have recorded their notice decision",
+        || async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM notification_decisions WHERE subject_id=$1)",
+            )
+            .bind(start.turn_id)
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap()
+        },
+    )
+    .await;
+    let first = s
+        .rig
+        .world
+        .app
+        .call(ThreadTurnList, &[&thread])
+        .token(&s.cai.token)
+        .query(&ThreadHistoryListQuery::default())
+        .send()
+        .await
+        .ok();
+    let value = serde_json::to_value(&first).unwrap();
+    assert_eq!(
+        value["turns"][0]["notice_decision"]["reason"],
+        "interrupted"
+    );
+    s.rig.world.set("calls.notify_on_stop", json!(true)).await;
+    let later = s
+        .rig
+        .world
+        .app
+        .call(ThreadTurnList, &[&thread])
+        .token(&s.cai.token)
+        .query(&ThreadHistoryListQuery::default())
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        serde_json::to_value(later).unwrap()["turns"][0]["notice_decision"],
+        value["turns"][0]["notice_decision"]
+    );
+    let mut conn = s.rig.world.conn().await;
+    let role: Id = sqlx::query_scalar(
+        "SELECT id FROM node_roles WHERE node_id=$1 AND subject_id=$2 AND role='viewer'",
+    )
+    .bind(s.tree.org.base.id)
+    .bind(s.cai.id())
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    orch_db::queries::access::testing::take_role_away(
+        &mut conn,
+        role,
+        s.ada.id(),
+        s.rig.world.now(),
+    )
+    .await
+    .unwrap();
+    orch_db::queries::access::bump_epoch(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let denied = s
+        .rig
+        .world
+        .app
+        .call(ThreadTurnList, &[&thread])
+        .token(&s.cai.token)
+        .query(&ThreadHistoryListQuery::default())
+        .send()
+        .await;
+    assert!(denied.status.as_u16() >= 400);
+}
