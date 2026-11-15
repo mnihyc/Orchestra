@@ -54,6 +54,7 @@ export type NavItem =
   /** A document written beside a place. */
   | { type: 'doc'; doc: DocumentRef; nodeId: string }
   /** The line under a place's documents: that they are on their way, could not be read, or are more than were read. */
+  | { type:'children'; nodeId:string; state:'loading'|'failed'|'more'|'loadingMore' }
   | { type: 'docs'; nodeId: string; state: 'loading' | 'failed' | 'more' | 'loadingMore' }
   /** The chat of a place or a thread, as a row of its own. `quiet`: the reader does not follow it. */
   | { type: 'chat'; node: TreeNode; unread: boolean; mentions: number; quiet: boolean }
@@ -337,6 +338,8 @@ function showsTheSame(held: NavItem, made: NavItem): boolean {
       );
     case 'doc':
       return held.type === 'doc' && held.doc === made.doc && held.nodeId === made.nodeId;
+    case 'children':
+      return held.type==='children' && held.nodeId===made.nodeId && held.state===made.state;
     case 'docs':
       return held.type === 'docs' && held.nodeId === made.nodeId && held.state === made.state;
     case 'chat':
@@ -380,6 +383,10 @@ function insideOf(order: Shape['order'], nodes: ReadonlyMap<string, TreeNode>, a
   const inside = (node: TreeNode): Inside => {
     const held = known.get(node.id);
     if (held !== undefined) return held;
+    if(node.folded!==undefined && node.folded!==null) {
+      const at=node.folded.urgency!==null&&isThreadUrgency(node.folded.urgency)?URGENCY.indexOf(node.folded.urgency):-1;
+      return {waiting:node.folded.waiting,unread:node.folded.unread,mentions:node.folded.mentions,urgency:at<0?URGENCY.length:at};
+    }
     const sum: Inside = { waiting: 0, unread: false, mentions: 0, urgency: URGENCY.length };
     for (const group of groups.get(node.id) ?? []) {
       const held = chatStanding({ id: group.id, seq: group.last_message_seq, my: group.my }, chats);
@@ -568,7 +575,7 @@ export function buildRows(
       const holdsDocs = docs !== null && node.docs > 0;
       const holdsChat = chatRows && chat.has;
       // Without threads a topic holds no row of its own kind of thing: it opens only for what stands beside it.
-      const holdsRows = threads || node.kind !== 'topic' ? below.length > 0 : false;
+      const holdsRows = threads || node.kind !== 'topic' ? below.length > 0 || (node.folded?.children ?? 0)>0 : false;
       const expandable = holdsRows || holdsDocs || holdsChat || (chatRows && (byHome.get(id)?.length ?? 0) > 0);
       const isThread = node.kind === 'thread';
       const held = isThread ? null : inside(node);
@@ -610,6 +617,11 @@ export function buildRows(
       if (open) {
         const within = found === null || whole || hit?.match === true;
         walk(id, depth + 1, below, node.kind === 'project', within);
+        if(tree.branches!==undefined && (node.folded?.children ?? 0)>0) {
+          const branch=tree.branches.get(id);
+          const state=branch?.error ? 'failed' : branch===undefined || branch.pending===true ? (below.length===0?'loading':'loadingMore') : branch.cursor!==null?'more':null;
+          if(state!==null)leaf(`children:${id}`,depth+1,id,{type:'children',nodeId:id,state});
+        }
         // What stands beside a place is part of what lies in it: on a mere way to something found it is left out.
         if (within) besideOf(node, id, depth + 1);
         else groupsBeside(node.id, id, depth + 1, true);
@@ -780,9 +792,13 @@ export function needsOf(
   const seen = new Set<string>();
   const needs: Needs = { unread: false, waiting: 0, mentions: 0 };
   const pending: TreeNode[] = [];
+  const wanted=new Set(ids);
   for (const id of ids) {
     const row = tree.nodes.get(id);
-    if (row !== undefined && !row.deleted) pending.push(row);
+    if(row===undefined||row.deleted)continue;
+    let at=row.parent_id,covered=false;const ancestors=new Set<string>();
+    while(at!==null&&!ancestors.has(at)){if(wanted.has(at)){covered=true;break;}ancestors.add(at);at=tree.nodes.get(at)?.parent_id??null;}
+    if(!covered)pending.push(row);
   }
   for (let row = pending.pop(); row !== undefined; row = pending.pop()) {
     if (seen.has(row.id) || (row.archived && !showArchived)) continue;
@@ -794,7 +810,8 @@ export function needsOf(
     const chat = chatStanding(row.chat, chats);
     if (chat.unread) needs.unread = true;
     needs.mentions += chat.mentions;
-    pending.push(...(below.get(row.id) ?? []));
+    if(row.folded!==undefined&&row.folded!==null){needs.unread ||= row.folded.unread;needs.waiting+=row.folded.waiting;needs.mentions+=row.folded.mentions;}
+    else pending.push(...(below.get(row.id) ?? []));
   }
   return needs;
 }

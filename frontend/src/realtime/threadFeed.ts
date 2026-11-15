@@ -3,7 +3,7 @@ import { isCompleteThread } from '@/api/cache';
 import { client } from '@/api/client';
 import { fetchThreadSync } from '@/api/threads';
 import { captureThreadRead, isCurrentThreadRead, stampThreadRows, threadReadSelector } from '@/api/threadRead';
-import { type DurableFeed, type FeedRegistry, loadWithRetries } from '@/realtime/sync';
+import { type DurableFeed, type FeedRegistry, isCancellation, loadWithRetries } from '@/realtime/sync';
 import { setThreadReadChangeHandler, setThreadReadHolder, setThreadReadRetainer,
   threadViewOf, threadWriter, type ThreadRows, type ThreadView } from '@/realtime/stores/thread';
 import { matchesThreadProjection, projectionFitsSelection, readThreadProjection, sameThreadProjection, threadReceipt, type ThreadReadCapture, type ThreadReadRef, type ThreadReadTarget, sameThreadRead, threadReadRegistryKey, threadReadTarget } from '@/realtime/threadScope';
@@ -122,7 +122,8 @@ export function coordinateThreadReads(registry: FeedRegistry, hooks: (threadId: 
         captured = threadReceipt(loaded.data) ?? captureThreadRead(threadId);
         if (!signal.aborted) feed.reset(loaded.data,loaded.seq);
       },
-      failed: (error) => { if (captured !== null && isCurrentThreadRead(captured)) feed.failed?.(error); },
+      // A read that was cancelled or overtaken by a newer one is no failure of the thread.
+      failed: (error) => { if (captured !== null && isCurrentThreadRead(captured) && !isCancellation(error)) feed.failed?.(error); },
     });
   };
   const rebase = (target: ThreadReadTarget): void => {

@@ -121,6 +121,7 @@ pub(super) struct PreparedTree {
     pub visible: BTreeSet<Id>,
     pub hidden: BTreeSet<Id>,
     pub docs: BTreeSet<Id>,
+    pub groups: BTreeSet<Id>,
 }
 
 impl native::Selected for Tree {
@@ -164,6 +165,7 @@ impl native::Selected for Tree {
             if !old.ids.is_subset(&fresh.ids)
                 || !old.visible.is_subset(&fresh.visible)
                 || !old.docs.is_subset(&fresh.docs)
+                || !old.groups.is_subset(&fresh.groups)
             {
                 return Ok(false);
             }

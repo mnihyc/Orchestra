@@ -190,6 +190,18 @@ impl Use {
             .any(|allowance| options::entry_allows(&allowance.provider, wanted))
     }
 
+    /// Whether one complete allowance permits the specified use without borrowing limits from another.
+    #[must_use]
+    pub fn allows_for(
+        &self,
+        wanted: &options::Wanted<'_>,
+        purpose: orch_access_contract::permissions::ProviderUsePurpose,
+    ) -> bool {
+        self.each
+            .iter()
+            .any(|allowance| options::entry_allows_for(&allowance.provider, wanted, purpose))
+    }
+
     /// The entry a turn that `allowing` allow is put down to: the nearest of them, and for a use
     /// that no entry narrows the entry that `entry` names.
     #[must_use]
@@ -874,7 +886,8 @@ async fn judge_provider(
         state_matters,
         at,
     } = *judging;
-    let wanted_options = MissingOptions {
+    let mut wanted_options = MissingOptions {
+        purposes: None,
         services: None,
         models: Some(vec![chosen.model.to_owned()]),
         efforts: chosen.effort.map(|effort| vec![effort.to_owned()]),
@@ -904,6 +917,11 @@ async fn judge_provider(
             return Ok(verdict);
         }
     };
+    wanted_options.purposes = granted
+        .each
+        .iter()
+        .any(|allowance| allowance.provider.purposes.is_some())
+        .then(|| vec![orch_access_contract::permissions::ProviderUsePurpose::Work]);
     if !state_matters {
         return Ok(verdict);
     }
@@ -1107,6 +1125,11 @@ pub async fn judge_alone(
         site: site.clone(),
         permissions: vec![Permission::ProviderUse],
         options: Some(MissingOptions {
+            purposes: granted
+                .each
+                .iter()
+                .any(|allowance| allowance.provider.purposes.is_some())
+                .then(|| vec![orch_access_contract::permissions::ProviderUsePurpose::Work]),
             r#where: at.and_then(Whereabouts::name).map(|name| vec![name]),
             ..MissingOptions::default()
         }),
