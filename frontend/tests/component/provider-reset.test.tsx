@@ -11,8 +11,8 @@ import { show } from './support';
 import { i18n } from '@/i18n';
 
 vi.mock('@/api/provider-plan', () => ({ consumeReset:vi.fn() }));
-vi.mock('@tanstack/react-router', () => ({ Link:({ children }: {children:React.ReactNode}) => <span>{children}</span> }));
-vi.mock('@/features/help/open', () => ({useHelpOpener:() => vi.fn()}));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link:({ children }: {children:React.ReactNode}) => <span>{children}</span> }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:() => vi.fn()}));
 afterEach(() => { client.session.setState({ status:'signed_out',userId:null }); vi.clearAllMocks(); });
 
 it('focuses Cancel and only an explicit reset button can consume, reusing the same request when unknown', async () => {
