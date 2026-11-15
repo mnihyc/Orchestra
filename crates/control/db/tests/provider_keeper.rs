@@ -561,6 +561,11 @@ async fn facts_are_written_when_they_differ_and_not_otherwise() {
     let now = now();
     let facts = json!({ "models": ["mock-large"], "protocols": ["openai-responses"] });
     let before = standing(&mut conn, provider).await.2;
+    let accepted =
+        orch_db::queries::provider_facts::credential_epoch(&mut conn, provider, Some(before))
+            .await
+            .unwrap()
+            .unwrap();
 
     assert!(set_facts(&mut conn, provider, &facts, now).await.unwrap());
     assert!(!set_facts(&mut conn, provider, &facts, now).await.unwrap());
@@ -573,12 +578,46 @@ async fn facts_are_written_when_they_differ_and_not_otherwise() {
     assert_eq!(stored.0, facts);
     assert_eq!(stored.1, Some(now));
     assert_eq!(stored.2, before + 1, "the second report was not a change");
+    assert_eq!(
+        orch_db::queries::provider_facts::credential_epoch(&mut conn, provider, None)
+            .await
+            .unwrap(),
+        Some(accepted.clone()),
+        "a model or facts observation does not revoke another accepted observation"
+    );
+    assert_eq!(
+        orch_db::queries::provider_facts::credential_epoch(&mut conn, provider, Some(before))
+            .await
+            .unwrap(),
+        Some(accepted.clone()),
+        "the same configuration snapshot remains current after an observation"
+    );
     assert!(
         set_facts(&mut conn, provider, &json!({ "models": [] }), now)
             .await
             .unwrap()
     );
 
+    sqlx::query(
+        "UPDATE providers SET name='A changed configuration',revision=revision+1 WHERE id=$1",
+    )
+    .bind(provider)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    assert_ne!(
+        orch_db::queries::provider_facts::credential_epoch(&mut conn, provider, None)
+            .await
+            .unwrap(),
+        Some(accepted),
+        "a configuration change still revokes the accepted observation"
+    );
+    assert!(
+        orch_db::queries::provider_facts::credential_epoch(&mut conn, provider, Some(before))
+            .await
+            .unwrap()
+            .is_none()
+    );
     // A deleted provider takes no more reports.
     delete_provider(&mut conn, provider, now).await.unwrap();
     assert!(!set_facts(&mut conn, provider, &facts, now).await.unwrap());

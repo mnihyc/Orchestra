@@ -95,6 +95,7 @@ impl FileDocument {
                 let directory = body.path == "web";
                 assert!(directory || body.path == "web/out/result.bin");
                 Ok(CommandResult::FsStat(FileStat {
+                    facts: None,
                     entry: DirEntry {
                         name: if directory { "web" } else { "result.bin" }.to_owned(),
                         path: body.path.clone(),
