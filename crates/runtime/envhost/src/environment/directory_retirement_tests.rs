@@ -37,6 +37,8 @@ impl Rig {
             Vec::new(),
         );
         let attach = EnvAttach {
+            workspace: Default::default(),
+
             resources: None,
             data_generation: None,
             storage: None,
