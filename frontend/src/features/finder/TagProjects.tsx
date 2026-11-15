@@ -1,8 +1,7 @@
 /** A tag opens its defining project or a readable project below the place that defines it. */
-import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { fetchTree } from '@/api/nodes';
+import { usePlacePages,PlacePageFoot } from '@/features/navigation/usePlacePages';
 import type { HiddenItem, Tag, TreeNode } from '@/generated/api-types';
 import type { Destination } from '@/features/finder/destinations';
 import { placedOfRow, usePlaceLabels } from '@/features/navigation/placeLabels';
@@ -41,19 +40,22 @@ export function projectsForTag(tag: FinderTag, nodes: readonly TreeNode[], hidde
 export function TagProjects({ tag, rootOrgId, onChoose, onClose }: { tag: FinderTag; rootOrgId: string; onChoose: (destination: Destination) => void; onClose: () => void }) {
   const { t } = useTranslation();
   const [text, setText] = useState('');
-  const query = useQuery({ queryKey: ['finder-tag-projects', rootOrgId], queryFn: ({ signal }) => fetchTree(rootOrgId, null, signal), retry: false });
-  const needle = text.trim().toLocaleLowerCase();
-  const eligible = useMemo(() => query.data === undefined ? [] : projectsForTag(tag, query.data.nodes, query.data.hidden), [query.data, tag]);
+  const roots=useMemo(()=>[{id:rootOrgId,name:tag.node.name??''}],[rootOrgId,tag.node.name]);
+  const selection=useMemo(()=>({q:text.trim(),kind:'project' as const,below_id:tag.node.id}),[text,tag.node.id]);
+  const pages=usePlacePages(roots,selection,true);
+  const query={data:pages.pages[0]?.result.data,error:pages.error,isPending:pages.pending};
+  const eligible = useMemo(() => query.data === undefined ? [] : projectsForTag(tag,[...query.data.ancestors??[],...query.data.nodes],[...query.data.hidden,...query.data.ancestorHidden??[]]).filter((node)=>query.data?.nodes.some((result)=>result.id===node.id)), [query.data, tag]);
   const placed = useMemo(() => {
     const data = query.data;
     if (data === undefined) return [];
-    const tree: OrgTree = { nodes: new Map(data.nodes.map((node) => [node.id, node])), hidden: new Map(data.hidden.map((node) => [node.id, node])), lastSeq: data.seq, loaded: data.complete, error: null };
+    const tree: OrgTree = { nodes: new Map([...data.ancestors??[],...data.nodes].map((node) => [node.id, node])), hidden: new Map(data.hidden.map((node) => [node.id, node])), lastSeq: data.seq, loaded: data.complete, error: null };
     return eligible.map((node) => placedOfRow(tree, node));
   }, [query.data, eligible]);
   const labels = usePlaceLabels(placed);
-  const choices = eligible.filter((node) => (labels.get(node.id) ?? node.name).toLocaleLowerCase().includes(needle));
+  const choices=eligible;
   return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }} title={t('finderTags.choose', { name: tag.name })} description={t('finderTags.about')} footer={<Button onClick={onClose}>{t('common.cancel')}</Button>}>
     <Input type="search" label={t('finderTags.search')} value={text} onChange={(event) => setText(event.target.value)} />
-    {query.error !== null ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : query.data === undefined ? <SkeletonRows read={query} rows={4} /> : choices.length === 0 ? <EmptyState compact icon={<TagIcon aria-hidden />} title={t('finderTags.none')} /> : <ul aria-label={t('finderTags.projects')} className="flex flex-col divide-y divide-border">{choices.map((node) => <li key={node.id}><button type="button" className="focus-inset flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-bg-muted" onClick={() => onChoose(tagProjectDestination(tag, node.id))}><NodeIcon kind="project" color={node.color} own={node.custom_color} /><span className="truncate" title={labels.get(node.id) ?? node.name}>{labels.get(node.id) ?? node.name}</span></button></li>)}</ul>}
+    {query.error !== null ? <ErrorState compact error={query.error} onRetry={pages.retry} /> : query.data === undefined ? <SkeletonRows read={query} rows={4} /> : choices.length === 0 ? <EmptyState compact icon={<TagIcon aria-hidden />} title={t('finderTags.none')} /> : <ul aria-label={t('finderTags.projects')} className="flex flex-col divide-y divide-border">{choices.map((node) => <li key={node.id}><button type="button" className="focus-inset flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-bg-muted" onClick={() => onChoose(tagProjectDestination(tag, node.id))}><NodeIcon kind="project" color={node.color} own={node.custom_color} /><span className="truncate" title={labels.get(node.id) ?? node.name}>{labels.get(node.id) ?? node.name}</span></button></li>)}</ul>}
+    <PlacePageFoot pages={pages.pages} />
   </Dialog>;
 }

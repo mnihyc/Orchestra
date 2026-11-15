@@ -93,6 +93,24 @@ async fn tree_scope_filters_before_the_native_window_without_borrowing_another_s
     assert_eq!(result["nodes"][0]["name"], "Selected leaf");
     assert!(result["next_cursor"].is_null());
     assert!(result["settings"].is_null());
+    let branch = value(
+        world
+            .app
+            .call(OrgTreeGet, &[&org])
+            .token(&scoped)
+            .query(&OrgTreeGetQuery {
+                parent_id: Some(org),
+                ..Default::default()
+            })
+            .send_bytes()
+            .await,
+    );
+    assert_eq!(branch["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(branch["nodes"][0]["id"], json!(selected));
+    assert!(
+        branch["settings"].is_null(),
+        "a branch default grants no settings read"
+    );
     let whole = key(
         &world,
         owner.id(),
@@ -142,6 +160,7 @@ async fn incremental_tree_scope_keeps_native_gone_markers_and_never_names_unsele
     )
     .await;
     let query = OrgTreeGetQuery {
+        parent_id: None,
         since: Some(0),
         ..Default::default()
     };

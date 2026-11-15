@@ -73,6 +73,7 @@ CREATE INDEX nodes_everything_parent_idx ON nodes USING btree (((parent_id)::tex
 CREATE INDEX nodes_name_trgm_idx ON nodes USING gin (name gin_trgm_ops) WHERE (deleted_at IS NULL);
 
 CREATE INDEX nodes_org_id_idx ON nodes USING btree (org_id, id);
+CREATE INDEX nodes_org_parent_id_idx ON nodes USING btree (org_id, parent_id, id);
 
 CREATE INDEX nodes_org_tree_idx ON nodes USING btree (org_id, tree_seq);
 

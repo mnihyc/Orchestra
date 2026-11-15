@@ -437,6 +437,9 @@ fn metric_kind(feed: &Feed) -> &'static str {
         Feed::Org(_) => "org",
         Feed::User => "user",
         Feed::Chat(_) => "chat",
+        Feed::DocumentTree(
+            orch_realtime_contract::document_tree::DocumentTreeView::Hierarchy { .. },
+        ) => "org",
         Feed::Doc(_) | Feed::DocumentTree(_) => "document",
         Feed::Env(_)
         | Feed::EnvStats(_)
