@@ -6,6 +6,7 @@
  * webhook of their own. The Inbox itself is kept current by the person's live feed; these are the
  * requests that load it, change it and answer for it.
  */
+import { RELEASE_READ } from '@/api/freshness';
 import { queryOptions } from '@tanstack/react-query';
 
 import { api, done, ok, repeatable } from '@/api/client';
@@ -78,6 +79,7 @@ export const notifiersKey = ['notifiers'] as const;
 export const notifiersQuery = queryOptions({
   queryKey: notifiersKey,
   queryFn: ({ signal }): Promise<Notifier[]> => ok(api.GET('/notifiers', { signal })),
+  ...RELEASE_READ,
 });
 
 export const notificationChannelsKey = ['notification-channels'] as const;

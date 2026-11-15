@@ -1583,7 +1583,7 @@ mod tests {
         let config_before = std::fs::read(original.join(".git/config")).unwrap();
         let index = Index::new(
             orch_link_contract::commands::IndexMode::Full,
-            Limits::default().index_max_entries,
+            orch_link_contract::commands::WorkspaceLimits::default().index_entries,
         );
         states.request(
             &files.parse("repo").unwrap(),
@@ -1600,6 +1600,7 @@ mod tests {
                     environment_id: environment,
                     snapshot_id: snapshot,
                     directory: "repo".to_owned(),
+                    wait_for_indexing: true,
                     kind: RecordKind::Turn,
                     record_days: 7,
                     max_bytes: crate::file_states::DEFAULT_RECORD_MAX_BYTES,
