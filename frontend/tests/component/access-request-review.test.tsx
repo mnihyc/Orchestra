@@ -36,8 +36,9 @@ it('shows a refused review as a recoverable read rather than no pending decision
   show(<RequestReview nodeId="topic" />);
   await user.click(screen.getByRole('button',{name:i18n.t('access.waiting.review')}));
   await waitFor(()=>expect(reads.read).toHaveBeenCalledOnce());
+  const retry=await screen.findByRole('button',{name:i18n.t('common.tryAgain')});
   expect(screen.queryByText(i18n.t('access.waiting.empty'))).not.toBeInTheDocument();
-  await user.click(await screen.findByRole('button',{name:i18n.t('common.tryAgain')}));
+  await user.click(retry);
   expect(await screen.findByText(i18n.t('access.waiting.empty'))).toBeVisible();
   expect(reads.read).toHaveBeenCalledTimes(2);
 });

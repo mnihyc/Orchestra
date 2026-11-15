@@ -23,8 +23,25 @@ use orch_types::Json;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use orch_api_contract::settings::{
+    ParameterRequirement, WithheldChoice, WithheldParameter, WithheldReason,
+};
+
 use crate::credentials::CredentialPath;
 use crate::descriptor::{Placement, ProviderKind};
+
+/// Each program supplies its own feature starts; an explicit place choice wins, including false.
+#[must_use]
+pub fn feature_values(
+    defaults: &BTreeMap<String, bool>,
+    settings: &BTreeMap<String, bool>,
+) -> BTreeMap<String, bool> {
+    defaults
+        .iter()
+        .chain(settings)
+        .map(|(key, value)| (key.clone(), *value))
+        .collect()
+}
 
 /// Where on a screen a parameter is put.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -273,6 +290,117 @@ pub struct Eligibility {
 }
 
 impl Condition {
+    /// Safe declaration facts, apart from the private values used to evaluate them.
+    fn requirement(&self, ctx: &Eligibility) -> ParameterRequirement {
+        use orch_api_contract::settings::{
+            ParameterModelFeature as Feature, ParameterModelList as List, ParameterPlacement,
+        };
+        match self {
+            Self::All(parts) => ParameterRequirement::All {
+                requirements: parts.iter().map(|part| part.requirement(ctx)).collect(),
+            },
+            Self::Any(parts) => ParameterRequirement::Any {
+                alternatives: parts.iter().map(|part| part.requirement(ctx)).collect(),
+            },
+            Self::Not(part) => ParameterRequirement::Not {
+                requirement: Box::new(part.requirement(ctx)),
+            },
+            Self::CredentialPath(path) => ParameterRequirement::CredentialPath {
+                actual: Some(match ctx.credential_path {
+                    CredentialPath::Native => orch_api_contract::binding::CredentialPath::Native,
+                    CredentialPath::Forwarded => {
+                        orch_api_contract::binding::CredentialPath::Forwarded
+                    }
+                    CredentialPath::Shared => orch_api_contract::binding::CredentialPath::Shared,
+                    CredentialPath::Handover => {
+                        orch_api_contract::binding::CredentialPath::Handover
+                    }
+                }),
+                path: match path {
+                    CredentialPath::Native => orch_api_contract::binding::CredentialPath::Native,
+                    CredentialPath::Forwarded => {
+                        orch_api_contract::binding::CredentialPath::Forwarded
+                    }
+                    CredentialPath::Shared => orch_api_contract::binding::CredentialPath::Shared,
+                    CredentialPath::Handover => {
+                        orch_api_contract::binding::CredentialPath::Handover
+                    }
+                },
+            },
+            Self::ProviderKind(kind) => ParameterRequirement::ProviderKind {
+                actual: Some(match ctx.provider_kind {
+                    ProviderKind::Api => orch_api_contract::resources::ProviderKind::Api,
+                    ProviderKind::Subscription => {
+                        orch_api_contract::resources::ProviderKind::Subscription
+                    }
+                }),
+                provider_kind: match kind {
+                    ProviderKind::Api => orch_api_contract::resources::ProviderKind::Api,
+                    ProviderKind::Subscription => {
+                        orch_api_contract::resources::ProviderKind::Subscription
+                    }
+                },
+            },
+            Self::EnvironmentPlacement(placement) => ParameterRequirement::Placement {
+                actual: Some(match ctx.environment_placement {
+                    Placement::Managed => ParameterPlacement::Managed,
+                    Placement::Connected => ParameterPlacement::Connected,
+                }),
+                placement: match placement {
+                    Placement::Managed => ParameterPlacement::Managed,
+                    Placement::Connected => ParameterPlacement::Connected,
+                },
+            },
+            Self::ModelHas(feature) => ParameterRequirement::ModelFeature {
+                feature: match feature {
+                    ModelFeature::WebSearch => Feature::WebSearch,
+                    ModelFeature::Efforts => Feature::Efforts,
+                    ModelFeature::ServiceTiers => Feature::ServiceTiers,
+                    ModelFeature::AccessPrograms => Feature::AccessPrograms,
+                    ModelFeature::InputImages => Feature::InputImages,
+                    ModelFeature::ContextMax => Feature::ContextMax,
+                },
+            },
+            Self::ModelIncludes(includes) => ParameterRequirement::ModelValue {
+                list: match includes.field {
+                    ModelField::Efforts => List::Efforts,
+                    ModelField::ServiceTiers => List::ServiceTiers,
+                    ModelField::AccessPrograms => List::AccessPrograms,
+                },
+                value: includes.value.clone(),
+            },
+            Self::HarnessVersion(range) => ParameterRequirement::ProgramVersion {
+                actual: ctx.harness_version.clone(),
+                range: range.clone(),
+            },
+        }
+    }
+
+    fn missing_requirement(&self, ctx: &Eligibility) -> ParameterRequirement {
+        match self {
+            Self::All(parts) => {
+                let missing: Vec<_> = parts
+                    .iter()
+                    .filter(|part| !part.holds(ctx))
+                    .map(|part| part.missing_requirement(ctx))
+                    .collect();
+                match missing.as_slice() {
+                    [one] => one.clone(),
+                    _ => ParameterRequirement::All {
+                        requirements: missing,
+                    },
+                }
+            }
+            Self::Any(parts) => ParameterRequirement::Any {
+                alternatives: parts
+                    .iter()
+                    .map(|part| part.missing_requirement(ctx))
+                    .collect(),
+            },
+            _ => self.requirement(ctx),
+        }
+    }
+
     /// Whether the condition holds for `ctx`. An empty `all` holds, an empty `any` does not; a range that
     /// is no semver range, or a harness whose version is not known, does not hold.
     #[must_use]
@@ -472,6 +600,95 @@ impl ParameterDef {
                 || ctx.model.option_rule("native", &self.key) != Some(&Json::Bool(false)))
     }
 
+    /// Why it is not shown for `ctx`, or `None` where it is. What the thread's way of reaching the model
+    /// and its place decide is said before a feature that is off, since switching the feature on would
+    /// not make the parameter appear.
+    #[must_use]
+    pub fn withheld_reason(
+        &self,
+        ctx: &Eligibility,
+        features: &BTreeMap<String, bool>,
+    ) -> Option<WithheldReason> {
+        if !self.is_eligible(ctx) {
+            return Some(self.ineligible_because(ctx));
+        }
+        if !self.is_enabled(features) {
+            return Some(WithheldReason::Feature {
+                feature: self.feature.clone().unwrap_or_default(),
+            });
+        }
+        (!self.is_shown(ctx, features)).then_some(WithheldReason::Provider)
+    }
+
+    fn withheld_requirement(
+        &self,
+        ctx: &Eligibility,
+        features: &BTreeMap<String, bool>,
+    ) -> Option<ParameterRequirement> {
+        if !self.is_eligible(ctx) {
+            return self
+                .eligible_when
+                .as_ref()
+                .map(|condition| condition.missing_requirement(ctx));
+        }
+        if !self.is_enabled(features) {
+            return Some(ParameterRequirement::Feature);
+        }
+        (!self.is_shown(ctx, features)).then_some(ParameterRequirement::Provider)
+    }
+
+    /// What it is in the thread's place that makes its condition fail: the first of the credential path,
+    /// the kind of environment and the kind of provider whose other value would have satisfied it; any
+    /// other part of the condition is named as such.
+    fn ineligible_because(&self, ctx: &Eligibility) -> WithheldReason {
+        let Some(condition) = &self.eligible_when else {
+            return WithheldReason::Condition;
+        };
+        let holds_with = |other: Eligibility| condition.holds(&other);
+        let other_path = [
+            CredentialPath::Native,
+            CredentialPath::Forwarded,
+            CredentialPath::Shared,
+            CredentialPath::Handover,
+        ]
+        .into_iter()
+        .filter(|path| *path != ctx.credential_path)
+        .any(|credential_path| {
+            holds_with(Eligibility {
+                credential_path,
+                ..ctx.clone()
+            })
+        });
+        if other_path {
+            return WithheldReason::Access;
+        }
+        let other_placement = [Placement::Managed, Placement::Connected]
+            .into_iter()
+            .filter(|placement| *placement != ctx.environment_placement)
+            .any(|environment_placement| {
+                holds_with(Eligibility {
+                    environment_placement,
+                    ..ctx.clone()
+                })
+            });
+        if other_placement {
+            return WithheldReason::Placement;
+        }
+        let other_kind = [ProviderKind::Subscription, ProviderKind::Api]
+            .into_iter()
+            .filter(|kind| *kind != ctx.provider_kind)
+            .any(|provider_kind| {
+                holds_with(Eligibility {
+                    provider_kind,
+                    ..ctx.clone()
+                })
+            });
+        if other_kind {
+            return WithheldReason::ProviderKind;
+        }
+        WithheldReason::Condition
+    }
+
     /// The choices it has for `model`: its fixed list, or the model's own.
     #[must_use]
     pub fn options_for(&self, model: &ModelParameters) -> Vec<ParameterOption> {
@@ -558,7 +775,55 @@ impl ParameterDef {
     /// Resolved metadata used by the same dropdowns and frozen controls as native dispatch.
     #[must_use]
     pub fn projection(&self, model: &ModelParameters) -> Json {
-        let mut value = serde_json::to_value(self).unwrap_or(Json::Null);
+        self.projected(
+            model,
+            serde_json::to_value(self).unwrap_or(Json::Null),
+            true,
+        )
+    }
+
+    /// Meaning needed by a recorded turn even after this parameter stops being eligible.
+    #[must_use]
+    pub fn recorded_projection(&self) -> Option<Json> {
+        let options = match &self.options {
+            Some(ParameterOptions::FromModel { from_model })
+                if matches!(
+                    from_model,
+                    ModelList::ServiceTiers | ModelList::AccessPrograms
+                ) =>
+            {
+                Some(from_model)
+            }
+            _ => None,
+        };
+        let range = self.range.filter(|range| {
+            matches!(
+                range.max,
+                RangeMax::FromModel {
+                    from_model: ModelLimit::ContextMax
+                }
+            )
+        });
+        if options.is_none() && range.is_none() {
+            return None;
+        }
+        let mut value = serde_json::json!({ "key": self.key });
+        if let Some(from_model) = options {
+            value["options"] = serde_json::json!({ "from_model": from_model });
+        }
+        if let Some(range) = range {
+            value["range"] = serde_json::json!(range);
+        }
+        Some(value)
+    }
+
+    /// A first-paint control resolves the same values and native restrictions without copying its help or form.
+    #[must_use]
+    pub fn compact_projection(&self, model: &ModelParameters) -> Option<Json> {
+        Some(self.projected(model, self.recorded_projection()?, false))
+    }
+
+    fn projected(&self, model: &ModelParameters, mut value: Json, detailed: bool) -> Json {
         let capability = self.capability_definition();
         if let Some((id, _)) = capability {
             value["capability"] = Json::String(id.to_owned());
@@ -584,7 +849,18 @@ impl ParameterDef {
             value["resolved_range"] = serde_json::json!({"min":min,"max":max});
         }
         if let Some(rule) = model.option_rule("native", &self.key) {
-            let mut constraint = rule.clone();
+            let mut constraint = if detailed {
+                rule.clone()
+            } else {
+                Json::Object(
+                    ["type", "const", "enum", "minimum", "maximum"]
+                        .into_iter()
+                        .filter_map(|key| {
+                            rule.get(key).map(|value| (key.to_owned(), value.clone()))
+                        })
+                        .collect(),
+                )
+            };
             if let Some(object) = constraint.as_object_mut() {
                 object.entry("type").or_insert_with(|| {
                     Json::String(
@@ -596,9 +872,11 @@ impl ParameterDef {
                         .to_owned(),
                     )
                 });
-                object
-                    .entry("title")
-                    .or_insert_with(|| Json::String(self.title.clone()));
+                if detailed {
+                    object
+                        .entry("title")
+                        .or_insert_with(|| Json::String(self.title.clone()));
+                }
                 object.insert(
                     "x-orch-source".to_owned(),
                     Json::String("provider".to_owned()),
@@ -842,6 +1120,84 @@ pub fn sendable(
     result
 }
 
+/// Whether `def` is the parameter that stands for one of the three choices a model's entry opens.
+fn stands_for(choice: WithheldChoice, def: &ParameterDef) -> bool {
+    match choice {
+        WithheldChoice::Speed => def.kind_of_thread() == Some(ThreadKind::ServiceTier),
+        WithheldChoice::Access => matches!(
+            def.options,
+            Some(ParameterOptions::FromModel {
+                from_model: ModelList::AccessPrograms
+            })
+        ),
+        WithheldChoice::Context => def.kind_of_thread() == Some(ThreadKind::Context),
+    }
+}
+
+/// The choices that the model's entry opened and that the thread cannot make, each with why.
+///
+/// Of the three a thread has (a speed beside the ordinary one, an access program, a context larger than
+/// the model's own window) each is listed that the entry has open and that none of `defs` shows. Where
+/// the adapter declares no parameter for it, the agent is the reason; where it declares one that is
+/// not shown, the first such parameter says why. A choice that is only offered, and not opened by a
+/// manager of the provider, is not listed: it is not the person's to ask for here.
+#[must_use]
+pub fn withheld(
+    defs: &[ParameterDef],
+    ctx: &Eligibility,
+    features: &BTreeMap<String, bool>,
+) -> Vec<WithheldParameter> {
+    let model = &ctx.model;
+    let mut withheld = Vec::new();
+    for choice in [
+        WithheldChoice::Speed,
+        WithheldChoice::Access,
+        WithheldChoice::Context,
+    ] {
+        let opened = match choice {
+            WithheldChoice::Speed => !model.service_tiers().is_empty(),
+            WithheldChoice::Access => !model.access_programs().is_empty(),
+            WithheldChoice::Context => model.context_open().is_some(),
+        };
+        if !opened {
+            continue;
+        }
+        let declared: Vec<&ParameterDef> =
+            defs.iter().filter(|def| stands_for(choice, def)).collect();
+        let Some(first) = declared.first() else {
+            withheld.push(WithheldParameter {
+                choice,
+                key: None,
+                reason: WithheldReason::Agent,
+                requirement: Some(ParameterRequirement::Agent),
+                inapplicable_selected_value: None,
+            });
+            continue;
+        };
+        if declared.iter().any(|def| def.is_shown(ctx, features)) {
+            continue;
+        }
+        if let Some(reason) = first.withheld_reason(ctx, features) {
+            let alternatives: Vec<_> = declared
+                .iter()
+                .filter_map(|def| def.withheld_requirement(ctx, features))
+                .collect();
+            withheld.push(WithheldParameter {
+                choice,
+                key: Some(first.key.clone()),
+                reason,
+                requirement: match alternatives.as_slice() {
+                    [] => None,
+                    [one] => Some(one.clone()),
+                    _ => Some(ParameterRequirement::Any { alternatives }),
+                },
+                inapplicable_selected_value: None,
+            });
+        }
+    }
+    withheld
+}
+
 /// What is wrong with a list of parameters.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParameterFault {
@@ -991,6 +1347,23 @@ mod tests {
     }
 
     #[test]
+    fn compact_controls_keep_native_fixed_values_without_carrying_help() {
+        let ctx = context(json!({"service_tiers":[{"id":"fast","label":"Fast lane"}],
+            "request_options":{"native":{"type":"object","properties":{"service_tier":{
+                "const":"fast","description":"Unopened provider form help"}}}}}));
+        let mut tier = service_tier();
+        tier.description = "Unopened adapter help ".repeat(20_000);
+        let full = tier.projection(&ctx.model);
+        let compact = tier.compact_projection(&ctx.model).unwrap();
+        assert_eq!(compact["key"], "service_tier");
+        assert_eq!(compact["provider_constraint"]["const"], "fast");
+        assert_eq!(compact["resolved_options"][0]["label"], "Fast lane");
+        assert!(compact.get("description").is_none() && compact.get("title").is_none());
+        assert!(compact["provider_constraint"].get("description").is_none());
+        assert!(full["description"].as_str().unwrap().len() > 200_000);
+    }
+
+    #[test]
     fn provider_native_constraints_drive_both_resolution_and_projection() {
         let ctx = context(
             json!({"service_tiers":[{"id":"fast","label":"Fast"},{"id":"flex","label":"Flex"}],
@@ -1075,6 +1448,129 @@ mod tests {
         assert!(
             !cyber().is_shown(&without, &features),
             "an access program that is only offered is not usable until a manager enables it"
+        );
+    }
+
+    #[test]
+    fn a_choice_the_managers_opened_and_the_thread_cannot_make_is_listed_with_its_reason() {
+        let on = BTreeMap::from([("codex.cyber_access".to_owned(), true)]);
+        let opened = context(json!({
+            "access_programs": ["daybreakBlue"], "service_tiers": [{ "id": "fast", "label": "Fast" }],
+            "context_window": 272_000, "context_max": 1_000_000
+        }));
+        let defs = [service_tier(), cyber(), context_def()];
+        assert!(
+            withheld(&defs, &opened, &on).is_empty(),
+            "all three are shown"
+        );
+
+        let program = |reason| WithheldParameter {
+            choice: WithheldChoice::Access,
+            key: Some("cyber_access_program".to_owned()),
+            requirement: Some(match &reason {
+                WithheldReason::Feature { .. } => ParameterRequirement::Feature,
+                WithheldReason::Access => ParameterRequirement::CredentialPath {
+                    path: orch_api_contract::binding::CredentialPath::Native,
+                    actual: Some(orch_api_contract::binding::CredentialPath::Shared),
+                },
+                _ => ParameterRequirement::Provider,
+            }),
+            inapplicable_selected_value: None,
+            reason,
+        };
+        // The switch of the feature is off.
+        assert_eq!(
+            withheld(&defs, &opened, &BTreeMap::new()),
+            [program(WithheldReason::Feature {
+                feature: "codex.cyber_access".to_owned()
+            })]
+        );
+        // The credential is not with the provider: that is said before the switch, which would not help.
+        let mut shared = opened.clone();
+        shared.credential_path = CredentialPath::Shared;
+        assert_eq!(
+            withheld(&defs, &shared, &BTreeMap::new()),
+            [program(WithheldReason::Access)]
+        );
+        // The agent declares no access program at all.
+        assert_eq!(
+            withheld(&[service_tier(), context_def()], &opened, &on),
+            [WithheldParameter {
+                choice: WithheldChoice::Access,
+                key: None,
+                reason: WithheldReason::Agent,
+                requirement: Some(ParameterRequirement::Agent),
+                inapplicable_selected_value: None,
+            }]
+        );
+        // A program that is only on offer is not opened, so there is nothing to say of it.
+        let offered = context(json!({ "offered": { "access_programs": ["daybreakBlue"] } }));
+        assert!(withheld(&defs, &offered, &BTreeMap::new()).is_empty());
+        // A speed and a context the agent does not declare are listed in the order of the controls.
+        assert_eq!(
+            withheld(&[cyber()], &opened, &on)
+                .iter()
+                .map(|one| one.choice)
+                .collect::<Vec<_>>(),
+            [WithheldChoice::Speed, WithheldChoice::Context]
+        );
+    }
+
+    #[test]
+    fn a_withheld_choice_keeps_the_real_alternatives_instead_of_guessing_from_its_reason() {
+        let mut speed = service_tier();
+        speed.eligible_when = Some(Condition::Any(vec![
+            Condition::EnvironmentPlacement(Placement::Connected),
+            Condition::ProviderKind(ProviderKind::Api),
+        ]));
+        let ctx = context(json!({ "service_tiers": [{ "id": "fast", "label": "Fast" }] }));
+        let missing = withheld(std::slice::from_ref(&speed), &ctx, &BTreeMap::new());
+        assert_eq!(
+            serde_json::to_value(&missing).unwrap()[0]["requirement"],
+            json!({"kind":"any","alternatives":[
+                {"kind":"placement","placement":"connected","actual":"managed"},
+                {"kind":"provider_kind","provider_kind":"api","actual":"subscription"}
+            ]})
+        );
+        let mut connected = ctx.clone();
+        connected.environment_placement = Placement::Connected;
+        assert!(withheld(std::slice::from_ref(&speed), &connected, &BTreeMap::new()).is_empty());
+        speed.eligible_when = Some(Condition::CredentialPath(CredentialPath::Shared));
+        assert_eq!(
+            serde_json::to_value(withheld(&[speed], &ctx, &BTreeMap::new())).unwrap()[0]["requirement"],
+            json!({"kind":"credential_path","path":"shared","actual":"native"})
+        );
+    }
+
+    #[test]
+    fn a_condition_that_fails_on_the_environment_or_the_provider_names_it() {
+        let mut speed = service_tier();
+        speed.eligible_when = Some(Condition::All(vec![
+            Condition::ModelHas(ModelFeature::ServiceTiers),
+            Condition::EnvironmentPlacement(Placement::Connected),
+        ]));
+        let ctx = context(json!({ "service_tiers": [{ "id": "fast", "label": "Fast" }] }));
+        let reason = |def: &ParameterDef, ctx: &Eligibility| {
+            withheld(std::slice::from_ref(def), ctx, &BTreeMap::new())
+                .first()
+                .map(|one| one.reason.clone())
+        };
+        assert_eq!(reason(&speed, &ctx), Some(WithheldReason::Placement));
+        speed.eligible_when = Some(Condition::All(vec![
+            Condition::ModelHas(ModelFeature::ServiceTiers),
+            Condition::ProviderKind(ProviderKind::Api),
+        ]));
+        assert_eq!(reason(&speed, &ctx), Some(WithheldReason::ProviderKind));
+        speed.eligible_when = Some(Condition::HarnessVersion(">=99".to_owned()));
+        assert_eq!(reason(&speed, &ctx), Some(WithheldReason::Condition));
+        // The provider's own rule for the model leaves the parameter out.
+        let ruled_out = context(json!({
+            "service_tiers": [{ "id": "fast", "label": "Fast" }],
+            "request_options": { "native": { "type": "object", "properties": { "service_tier": false } } }
+        }));
+        assert_eq!(
+            reason(&service_tier(), &ruled_out),
+            Some(WithheldReason::Provider)
         );
     }
 

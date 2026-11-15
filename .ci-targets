@@ -1,0 +1,9 @@
+fmt
+clippy
+test -p orch-engine --test delivery
+test -p orch-engine --test orch_tools
+test -p orch-api-core --test threads_settings
+test -p orch-api-core --test provider_recovery
+test -p orch-api-core --test call_recovery
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::

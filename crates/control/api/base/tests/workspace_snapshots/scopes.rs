@@ -762,6 +762,7 @@ async fn unavailable_original(site: &Site, id: Id) -> Hash {
         environment_id: site.environment,
         snapshot_id: id,
         directory: "web".into(),
+        wait_for_indexing: true,
         kind: RecordKind::Turn,
         record_days: 7,
         max_bytes: CONTENT.len() as i64,
@@ -783,6 +784,8 @@ async fn unavailable_original(site: &Site, id: Id) -> Hash {
     .await
     .unwrap();
     let result = serde_json::to_value(FsRecordResult {
+        indexing: None,
+
         state: RecordState::Complete,
         tree_ref: Some("original-captured-root".into()),
         repository_head: None,
