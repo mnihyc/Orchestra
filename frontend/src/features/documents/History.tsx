@@ -169,7 +169,7 @@ function Detail({ doc, entry, onShow }: { doc: Document; entry: DocumentVersion;
   const [error, setError] = useState<unknown>(null);
   const from = entry.version === null ? doc.version : entry.version - 1;
   const [reviewCurrent, setReviewCurrent] = useState(false);
-  const changes = useQuery({ ...changesQuery(doc.id, String(from), reviewCurrent ? null : entry.version), staleTime: 0 });
+  const changes = useQuery({ ...changesQuery(doc.id, String(from), reviewCurrent ? null : entry.version) });
   const canManage = holds(doc.access, 'doc.manage') && !doc.archived;
   const files = entry.changed.files ?? [];
   const hasBlocks = changes.data !== undefined && changes.data.blocks.length > 0;
@@ -237,7 +237,7 @@ export function HistoryDrawer({ doc, open, onOpenChange, onShow }: { doc: Docume
   const [chosen, setChosen] = useState<number | 'open' | null>(null);
   const say = (key: 'changed' | 'added' | 'removed', count: number): string => t(`documents.history.${key}` as 'documents.history.changed', { count });
   const sayFile = (kind: FileChange['kind'], count: number): string => t(FILE_COUNTS[kind], { count });
-  const list = useInfiniteQuery({ ...versionsQuery(doc.id, author === 'all' ? null : author), enabled: open, staleTime: 0, refetchOnMount: 'always' });
+  const list = useInfiniteQuery({ ...versionsQuery(doc.id, author === 'all' ? null : author), enabled: open, refetchOnMount: 'always' });
   const entries = useMemo(() => list.data?.pages.flatMap((page) => page.items) ?? [], [list.data]);
   const authors = useMemo(() => {
     const seen = new Map<string, Author>();
