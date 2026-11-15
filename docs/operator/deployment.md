@@ -8,8 +8,8 @@ process that issued the ticket; a deployment with multiple API processes must ro
 
 For the node's lifecycle programs and per-unit Docker pool, read [Node hooks and unit networks](node-hooks.md).
 Hooks are set with `orch-node policy set hooks`; the initial network pool accepts `[node.docker.networks]`.
-Existing node configuration is imported once without interrupting an upgrade. The worked routing recipe keeps a
-unit's outbound traffic closed while its host VPN is down.
+The node's machine policy is configured directly; no previous node configuration is imported.
+The worked routing recipe keeps a unit's outbound traffic closed while its host VPN is down.
 
 ## What the host needs
 
@@ -175,6 +175,23 @@ enrolls on a start after that, which takes up to a minute or two, and `orchctl d
 ```sh
 docker compose exec api /opt/orchctl/orchctl doctor
 ```
+
+## Email
+
+In Management → Email and channels, choose **New channel… → Email** to enter the SMTP server,
+user name, password and sender. A root org can set its own server in **Settings → Email and channels**.
+Port **587** normally uses **STARTTLS**; port **465** uses **TLS** from the first byte. Save the channel,
+then use **Test** with a recipient address to check delivery and see the server's answer.
+
+The same fields can be supplied as a JSON object, with the password in `password`, from a file readable
+only by its owner. From the deployment directory:
+
+```sh
+docker compose exec -T api /opt/orchctl/orchctl channel put email --file /dev/stdin < email.json
+docker compose exec api /opt/orchctl/orchctl channel test email --to you@example.org
+```
+
+Secrets are sealed when saved and are never read back by the form or command.
 
 ## What is on disk
 
