@@ -300,6 +300,7 @@ pub(crate) async fn execute(
             .map_err(EngineError::unreadable)?;
         tokio::select! {
             ()=engine.inner.signal.notified()=>{},
+            ()=engine.inner.stopped.cancelled()=>return Err(EngineError::StaleToolSource),
             ()=tokio::time::sleep(remaining.min(engine.inner.config.sweep_every))=>{},
         }
     }

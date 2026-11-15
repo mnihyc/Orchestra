@@ -1,0 +1,6 @@
+clippy
+test -p orch-api-core --lib
+test -p orch-api-core --test threads_raw --test realtime_diagnostics --test realtime_raw_sources --test approvals --test thread_instructions --test thread_read_tools
+test -p orch-adapter-codex --lib
+test -p orch-adapter-claude-code --lib
+test -p orch-adapter-acp --lib
