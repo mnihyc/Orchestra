@@ -227,7 +227,7 @@ async fn a_provider_home_copy_is_reviewed_and_imported_before_the_destination_un
     let target = ScriptedHost::on(&world, "Destination", 16384).await;
     sqlx::query("UPDATE providers SET runtime_config=runtime_config || $2 WHERE id=$1")
         .bind(provider)
-        .bind(json!({"runtime.host_id":target.id}))
+        .bind(json!({"runtime.host_id":orch_provider_contract::pools::Target::host(target.id)}))
         .execute(world.pool.pool())
         .await
         .unwrap();

@@ -1239,11 +1239,12 @@ async fn native_hosted_creation_prepares_without_writes_and_checks_its_actual_fi
             world.clock.now(),
             &principal,
             &Request {
+                identity: None,
                 owner: world.ada,
                 name: Some("Prepared creation"),
                 home: world.root,
                 template: Some(template),
-                host: Some(Some(host.id)),
+                host: Some(Some(orch_provider_contract::pools::Target::host(host.id))),
                 config: &config,
             },
         )
@@ -1290,4 +1291,90 @@ async fn native_hosted_creation_prepares_without_writes_and_checks_its_actual_fi
         tx.rollback().await.unwrap();
     }
     assert_eq!(checks.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn one_native_request_can_create_distinct_environment_slots_and_repreparing_a_slot_keeps_one_pool_choice()
+ {
+    use orch_authz::{Caller, Principal};
+    use orch_engine::environments;
+    use orch_provider_contract::pools::{Kind, Target};
+    use serde_json::json;
+    let world = common::World::new().await;
+    hosting::serve(&world);
+    let host = hosting::ScriptedHost::on(&world, "Multiple creation slots", 32768).await;
+    let template = hosting::template(&world).await;
+    let mut tx = world.pool.begin().await.unwrap();
+    let pool = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut tx,
+        "pool",
+        Some(world.ada),
+        Some(world.root),
+        "Creation slots",
+    )
+    .await
+    .unwrap();
+    orch_authz::ownership::start_resource(
+        &mut tx,
+        orch_access_contract::decisions::ObjectRef {
+            kind: orch_access_contract::permissions::ObjectKind::Pool,
+            id: pool,
+        },
+        world.ada,
+        orch_authz::ownership::NewAccess::OnlyMe,
+        world.clock.time(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE pools SET kind='host',definition=$2 WHERE id=$1").bind(pool).bind(json!({"kind":"host","enabled":true,"policy":{"type":"round_robin"},"lend_members":false,"members":[],"config":{}})).execute(&mut *tx).await.unwrap();
+    sqlx::query(
+        "INSERT INTO pool_members(pool_id,id,position,rule,enabled) VALUES($1,$2,0,$3,true)",
+    )
+    .bind(pool)
+    .bind(orch_types::new_id())
+    .bind(json!({"type":"single","resource":{"kind":"host","id":host.id}}))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let actor = Principal::load(&mut tx, Caller::session(world.ada), world.clock.time())
+        .await
+        .unwrap();
+    let input = orch_types::new_id();
+    let config = json!({});
+    let mut made = Vec::new();
+    for name in ["First creation slot", "Second creation slot"] {
+        let request = environments::Request {
+            identity: Some(input),
+            owner: world.ada,
+            name: Some(name),
+            home: world.root,
+            template: Some(template),
+            host: Some(Some(Target::Pool {
+                kind: Kind::Host,
+                id: pool,
+            })),
+            config: &config,
+        };
+        let _first = environments::prepare_creation(&mut tx, world.clock.now(), &actor, &request)
+            .await
+            .unwrap();
+        let prepared = environments::prepare_creation(&mut tx, world.clock.now(), &actor, &request)
+            .await
+            .unwrap();
+        made.push(
+            environments::apply_creation(&mut tx, world.clock.now(), &prepared, || Ok(()))
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    assert_ne!(made[0], made[1]);
+    let choices:i64=sqlx::query_scalar("SELECT count(*) FROM pool_choices WHERE source->>'kind'='environment_creation' AND source->>'node'=$1::uuid::text")
+        .bind(world.root).fetch_one(&mut *tx).await.unwrap();
+    assert_eq!(
+        choices, 2,
+        "each accepted slot owns one choice across repeated preparation"
+    );
+    tx.commit().await.unwrap();
+    world.shutdown().await;
 }

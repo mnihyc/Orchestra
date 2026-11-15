@@ -11,13 +11,14 @@ import { ResourceName } from '@/features/resource-facts/ResourceFacts';
 import { ProviderDefaultChoice } from '@/features/settings/ProviderChoice';
 import type { ValueControlProps } from '@/features/settings/ValueControl';
 import { backendCapabilities, changeBackend, selectedBackend } from './capabilityBackendValue';
+import { resourceTargetIdentity } from '@/lib/resourceTargets';
 import { useDebounced } from '@/lib/debounce';
 import { ErrorState } from '@/ui/ErrorState';
 import { Pagination } from '@/ui/Pagination';
 import { ResourcePickerLookup } from '@/ui/ResourcePicker';
 
 const hidden = (error: unknown) => error instanceof ApiError && [401, 403, 404].includes(error.status);
-const identity = (backend: BackendRef) => JSON.stringify([backend.route, backend.offering?.provider, backend.offering?.offering]);
+const identity = (backend: BackendRef) => resourceTargetIdentity({ type: 'single', resource: { kind: 'model', backend } });
 
 function useWords() {
   const { t, i18n } = useTranslation();
@@ -133,4 +134,11 @@ function BackendName({ reader, provider, place, capability, backend }: { reader:
     <ResourceName subject={{ kind: 'provider', provider: account.data }} />
     {chosen !== undefined && <><span>· {route(chosen)} · {chosen.offering_name}</span>{!chosen.eligible && <span className="text-text-muted">· {reason(chosen)}</span>}</>}
   </span>;
+}
+
+/** An explicit model member uses the same exact installed backend control as delegated work. */
+export function ExactBackendChoice({ place, value, onChange, label }: { place: string; value: BackendRef | null; onChange: (value: BackendRef) => void; label: string }) {
+  const reader = useStore(client.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
+  return <BackendChoice reader={reader} place={place} capability="summary" title={label} multi={false} selected={value} onSelected={onChange}
+    shape={{ type: 'text', maxLength: null, pattern: null }} value={value} onChange={() => undefined} label={label} />;
 }

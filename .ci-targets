@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-api-core --lib
+test -p orch-engine --lib -- instructions::tests::turn_cut_says_each_recorded_cause_in_its_own_words_and_names_only_a_person
+test -p orch-api-core --test hosted_environments --test standalone_creation --test call_recovery --test resource_groups --test forks
+test -p orch-engine --test turns --test cache_cleanup --test call_recovery --test provider_runtime --test environments

@@ -1139,13 +1139,15 @@ impl Forking {
             now,
             &principal,
             &crate::environments::Request {
+                identity: None,
                 owner: self.recipe.by,
                 name: Some(&name),
                 home: new.home_node_id.unwrap_or(topic),
                 template: new.template_id,
-                host: match new.host_id {
-                    Some(choice) => Some(choice),
-                    None => planned_host.map(Some),
+                host: match &new.host_id {
+                    Some(choice) => Some(choice.clone()),
+                    None => planned_host
+                        .map(|host| Some(orch_provider_contract::pools::Target::host(host))),
                 },
                 config: &config,
             },
@@ -2879,7 +2881,10 @@ impl Engine {
             state: threads::turn_state::STARTING.to_owned(),
             input_id: Id::nil(),
             before_snapshot_id: None,
-            files_end_manifest: None,
+            files_changed: None,
+            files_changed_paths: None,
+            recording_notice: None,
+            recording_indexing: None,
             end_manifest_blob: None,
             model: plan.to.model.clone(),
             effort: plan.to.effort.clone(),
@@ -2897,6 +2902,7 @@ impl Engine {
             waiting_since: None,
             waited_ms: 0,
             interrupted_by: None,
+            interrupted_at: None,
             command_cleanup: None,
             started_at: None,
             completed_at: None,
@@ -2984,6 +2990,7 @@ impl Engine {
             tools,
             capabilities,
             isolation,
+            mounts: crate::mounts::views(conn, environment.id, now).await?,
             browser_line: crate::tools::browser::preamble(conn, environment.id).await?,
             workspace_configuration: crate::trust::answer_for(
                 conn,
@@ -3003,6 +3010,8 @@ impl Engine {
             .capability_use_preview(
                 conn,
                 &crate::access::ProviderUse {
+                    pool: None,
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person: recipe.by,
                     node: thread_id,
                     provider: provider.id,
