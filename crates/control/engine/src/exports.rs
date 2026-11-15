@@ -1660,9 +1660,9 @@ impl PreparedExportRemoval {
     }
 }
 
-/// Exact physical cleanup accepted by the committed native archive removal.
+/// Exact content released by the committed native archive removal.
 pub struct ExportRemoval {
-    forgotten: Option<orch_types::Hash>,
+    released: Option<orch_types::Hash>,
 }
 
 /// Native archive-open operands, held on their caller's real transaction.
@@ -1795,24 +1795,25 @@ impl Engine {
             .blob
             .as_ref()
             .and_then(|text| text.parse::<orch_types::Hash>().ok());
-        let mut forgotten = None;
         if let Some(hash) = hash {
             orch_db::queries::storage::unpin_blobs(conn, &[hash], now).await?;
-            if orch_db::queries::storage::forget_blob(conn, &hash, now + chrono::Duration::days(1))
-                .await?
-            {
-                forgotten = Some(hash);
-            }
         }
-        Ok(ExportRemoval { forgotten })
+        Ok(ExportRemoval { released: hash })
     }
 
-    /// Finish only this committed removal's exact native file cleanup and wakeup.
+    /// Rechecks all owners after the committed removal before retiring its released content.
     pub async fn finish_export_removal(&self, removed: ExportRemoval) {
-        if let (Some(hash), Some(store)) = (removed.forgotten, self.blobs())
-            && let Err(error) = store.delete(&hash).await
-        {
-            tracing::warn!(%error, "an archive that was removed could not be taken out of the store");
+        if let (Some(hash), Some(store)) = (removed.released, self.blobs()) {
+            if let Err(error) = crate::transfers::retire_blobs(
+                self.db(),
+                store.as_ref(),
+                &[hash],
+                crate::transfers::RetirementWhen::TransferEnded(self.inner.clock.now()),
+            )
+            .await
+            {
+                tracing::warn!(%error, "released archive content waits for collection");
+            }
         }
         self.kick();
     }

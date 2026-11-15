@@ -176,6 +176,7 @@ async fn begin(site: &Site, by: &Who, size: i64, name: &str) -> Id {
         .call(UploadSessionCreate, &[])
         .token(&by.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size,
             name: name.to_owned(),
             media_type: None,
@@ -202,7 +203,11 @@ async fn put(
         .await
 }
 
-async fn end(site: &Site, by: &Who, upload: Id) -> orch_api_core::testing::Reply<UploadedBlob> {
+async fn end(
+    site: &Site,
+    by: &Who,
+    upload: Id,
+) -> orch_api_core::testing::Reply<orch_api_contract::threads::UploadSessionCompletion> {
     site.app()
         .call(UploadSessionComplete, &[&upload])
         .token(&by.token)
@@ -254,7 +259,15 @@ async fn another_person_cannot_cancel_an_upload() {
         .problem();
     assert_eq!(refused.code, ErrorCode::NotFound);
     put(&site, &site.ada, upload, 0, b"all").await.ok();
-    assert_eq!(end(&site, &site.ada, upload).await.ok().size, 3);
+    assert_eq!(
+        end(&site, &site.ada, upload)
+            .await
+            .ok()
+            .into_file()
+            .expect("the retained upload completed verification")
+            .size,
+        3
+    );
 }
 
 #[tokio::test]
@@ -418,6 +431,7 @@ async fn uploading_needs_a_person_who_is_signed_in() {
         .app()
         .call(UploadSessionCreate, &[])
         .body(&UploadSessionCreateBody {
+            to: None,
             size: 10,
             name: "a".to_owned(),
             media_type: None,
@@ -447,7 +461,11 @@ async fn a_file_goes_up_in_pieces_and_ends_as_one_blob_with_its_name_and_type() 
         .ok();
         assert_eq!(sent.received, i64::try_from(end_at).unwrap());
     }
-    let done = end(&site, &site.ada, upload).await.ok();
+    let done = end(&site, &site.ada, upload)
+        .await
+        .ok()
+        .into_file()
+        .expect("the retained upload completed verification");
     assert_eq!(done.blob, Hash::of(&bytes));
     assert_eq!(done.size, 10_000);
     assert_eq!(done.name, "report.pdf");
@@ -478,6 +496,7 @@ async fn the_size_of_a_piece_is_the_one_the_contract_states() {
         .call(UploadSessionCreate, &[])
         .token(&site.ada.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size: 5,
             name: "a.txt".to_owned(),
             media_type: Some("text/plain".to_owned()),
@@ -519,7 +538,11 @@ async fn an_upload_that_was_cut_goes_on_from_the_bytes_that_arrived() {
     put(&site, &site.ada, upload, 4_000, &bytes[4_000..])
         .await
         .ok();
-    let done = end(&site, &site.ada, upload).await.ok();
+    let done = end(&site, &site.ada, upload)
+        .await
+        .ok()
+        .into_file()
+        .expect("the retained upload completed verification");
     assert_eq!(
         done.blob,
         Hash::of(&bytes),
@@ -562,7 +585,11 @@ async fn a_piece_carries_at_most_the_size_of_a_piece() {
 async fn an_empty_file_is_a_file() {
     let site = Site::new().await;
     let upload = begin(&site, &site.ada, 0, "empty.txt").await;
-    let done = end(&site, &site.ada, upload).await.ok();
+    let done = end(&site, &site.ada, upload)
+        .await
+        .ok()
+        .into_file()
+        .expect("the retained upload completed verification");
     assert_eq!((done.size, done.blob), (0, Hash::of(b"")));
 }
 
@@ -609,6 +636,7 @@ async fn an_upload_needs_a_name_a_size_and_a_type_that_make_sense() {
             .call(UploadSessionCreate, &[])
             .token(&site.ada.token)
             .body(&UploadSessionCreateBody {
+                to: None,
                 size,
                 name: name.to_owned(),
                 media_type: media_type.map(str::to_owned),
@@ -642,6 +670,7 @@ async fn a_file_larger_than_the_system_stores_is_refused_when_the_upload_begins(
         .call(UploadSessionCreate, &[])
         .token(&site.ada.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size: 1_001,
             name: "big.bin".to_owned(),
             media_type: None,
@@ -768,7 +797,11 @@ async fn a_private_pasted_draft_can_be_read_and_edited_without_writing_the_works
 
     let upload = begin(&site, &site.ada, 6, "pasted-private.txt").await;
     put(&site, &site.ada, upload, 0, b"edited").await.ok();
-    let edited = end(&site, &site.ada, upload).await.ok();
+    let edited = end(&site, &site.ada, upload)
+        .await
+        .ok()
+        .into_file()
+        .expect("the retained upload completed verification");
     let replaced = site
         .app()
         .call(ThreadAttachmentCreate, &[&site.thread])
@@ -988,7 +1021,11 @@ async fn a_file_that_was_uploaded_in_pieces_is_attached_by_its_hash() {
     let bytes = bytes_of(7_000);
     let upload = begin(&site, &site.ada, 7_000, "data.csv").await;
     put(&site, &site.ada, upload, 0, &bytes).await.ok();
-    let done = end(&site, &site.ada, upload).await.ok();
+    let done = end(&site, &site.ada, upload)
+        .await
+        .ok()
+        .into_file()
+        .expect("the retained upload completed verification");
 
     let attached = site
         .app()
@@ -1350,5 +1387,30 @@ async fn a_file_forwarded_into_a_thread_is_carried_by_it_too() {
             .to_str()
             .unwrap()
             .contains("notes.txt")
+    );
+}
+
+#[tokio::test]
+async fn upload_idle_retention_follows_its_default_and_accepted_progress_renews_the_same_session() {
+    let site = Site::new().await;
+    site.world
+        .set("storage.upload_session_hours", json!(1))
+        .await;
+    let upload = begin(&site, &site.ada, 6, "progress.txt").await;
+    site.world.advance(chrono::Duration::minutes(50));
+    assert_eq!(
+        put(&site, &site.ada, upload, 0, b"one").await.ok().received,
+        3
+    );
+    site.world.advance(chrono::Duration::minutes(50));
+    assert_eq!(
+        put(&site, &site.ada, upload, 3, b"two").await.ok().received,
+        6,
+        "progress keeps the original session resumable beyond its first idle cutoff"
+    );
+    site.world.advance(chrono::Duration::minutes(61));
+    assert_eq!(
+        end(&site, &site.ada, upload).await.problem().code,
+        ErrorCode::Gone
     );
 }

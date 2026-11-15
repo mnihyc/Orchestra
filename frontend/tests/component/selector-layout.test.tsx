@@ -1,5 +1,5 @@
 /** Form choices retain visible consequences; compact toolbar choices keep hover/focus help. */
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -211,6 +211,27 @@ it('keeps form switch and checkbox consequences visible and independently offers
   expect(container.querySelector('[data-choice-help]')).not.toBeNull();
 });
 
+it('moves focus with each quick arrow selection before the next key press', () => {
+  const changed = vi.fn();
+  function View() {
+    const [value, setValue] = useState('all');
+    return <SegmentedControl label="View" value={value} onValueChange={(next) => { setValue(next); changed(next); }} segments={[
+      { value: 'all', name: 'All' }, { value: 'closed', name: 'Closed', disabled: true }, { value: 'mine', name: 'Mine' },
+    ]} />;
+  }
+  show(<View />);
+  act(() => { screen.getByRole('radio', { name: 'All' }).focus(); });
+  for (const [key, name] of [['ArrowRight', 'Mine'], ['ArrowDown', 'All'], ['ArrowLeft', 'Mine']]) {
+    const current = document.activeElement!;
+    fireEvent.keyDown(current, { key });
+    fireEvent.keyUp(current, { key });
+    const selected = screen.getByRole('radio', { name });
+    expect(selected).toBeChecked();
+    expect(selected).toHaveFocus();
+  }
+  expect(changed.mock.calls).toEqual([['mine'], ['all'], ['mine']]);
+});
+
 it('selects segments with arrows, skips disabled options, wraps and keeps a selected option selected', async () => {
   const user = userEvent.setup();
   const changed = vi.fn();
@@ -223,8 +244,7 @@ it('selects segments with arrows, skips disabled options, wraps and keeps a sele
   show(<View />);
   await user.tab();
   expect(screen.getByRole('radio', { name: 'All' })).toHaveFocus();
-  // Radix defers roving focus to a task and selects on focus while the arrow is held.
-  // Wait for that native focus event before releasing the key, as the browser does.
+  // Each arrow selects and focuses its next available option during the key press.
   await user.keyboard('{ArrowRight>}');
   await waitFor(() => {
     expect(screen.getByRole('radio', { name: 'Mine' })).toHaveFocus();

@@ -403,6 +403,7 @@ async fn an_explicit_access_program_is_sent_only_when_the_profile_feature_and_mo
                     return Err(CommandError::new(ErrorCode::Internal, "not an agent start"));
                 }
                 Ok(CommandResult::AgentStart(AgentStartResult {
+                    home: None,
                     reused: false,
                     harness_version: "1.0.0".to_owned(),
                     descriptor: serde_json::from_value(descriptor.clone()).unwrap(),

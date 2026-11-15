@@ -8,7 +8,7 @@ use http::StatusCode;
 use orch_access_contract::{key_scope::KeyScope, permissions::Permission};
 use orch_api_contract::threads::{ThreadInputRun, ThreadPlanDecide, ThreadPlanDecideBody};
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_authz::{Act, Caller, Policy, Principal};
@@ -38,7 +38,7 @@ async fn key(s: &Scene, actor: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &identity::NewApiToken {
@@ -195,16 +195,30 @@ async fn plan(s: &Scene, name: &str) -> Plan {
     // A terminal row precedes its retained follow-up and workspace invalidations.
     // Finish that authored work before a refusal's exact no-effect baseline.
     rig::eventually(
-        "the plan's terminal and workspace work have committed",
+        "the plan's terminal work and workspace observation have committed",
         || async {
             sqlx::query_scalar::<_, bool>(
-                "SELECT end_work IS NULL AND NOT files_end_due AND NOT files_work_pending
+                "SELECT end_work IS NULL AND NOT files_end_due
              FROM turns WHERE id=$1",
             )
             .bind(start.turn_id)
             .fetch_one(s.rig.db.pool())
             .await
             .unwrap()
+        },
+    )
+    .await;
+    // Invalidations run on the retention schedule. Drain them deliberately rather than
+    // depend on the startup sweep happening to follow this turn's observation.
+    rig::eventually(
+        "the plan's workspace invalidations have committed",
+        || async {
+            s.rig.engine.run_retention().await.unwrap();
+            sqlx::query_scalar::<_, bool>("SELECT NOT files_work_pending FROM turns WHERE id=$1")
+                .bind(start.turn_id)
+                .fetch_one(s.rig.db.pool())
+                .await
+                .unwrap()
         },
     )
     .await;
@@ -766,7 +780,7 @@ async fn blocked_http(
 }
 async fn legacy(s: &Scene, actor: Id) -> Key {
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token(
         &mut *s.rig.world.conn().await,
         &identity::NewApiToken {

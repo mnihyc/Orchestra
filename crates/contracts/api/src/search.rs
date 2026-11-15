@@ -356,6 +356,9 @@ pub struct SearchListQuery {
     /// A node: only what lies in it and below it. Everything the caller can read when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<Id>,
+    /// Only items of this conversation stream, applied before matching and paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<String>,
     /// A comma list of item kinds, `chat_message` and `document`; empty selects none, absence all.
     #[serde(
         default,
@@ -417,6 +420,9 @@ pub struct SearchListQuery {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NameSearchListQuery {
+    /// One exact identity, independent of recent visits; the same current visibility checks still apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<Id>,
     /// Only this caller's starred kind/id identities; empty words list them in saved order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub starred: Option<bool>,
@@ -471,6 +477,13 @@ pub struct SearchOrderEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SearchStreamEvent {
+    /// The indexed field scope, including the current allowance for newly projected conversation text.
+    /// Word matches never imply full transcript coverage: raw calls, output, hidden reasoning,
+    /// side threads and text whose masking inputs cannot be opened are excluded.
+    Coverage {
+        /// Characters retained per masked conversation item. Existing projections change on rebuild.
+        conversation_chars: u64,
+    },
     /// The settings that govern this opening, resolved at the selected scope.
     Options {
         /// The initial number of visible rows.

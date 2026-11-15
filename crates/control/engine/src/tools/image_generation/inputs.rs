@@ -321,6 +321,7 @@ impl Read {
         self.current_issue_callers(
             conn,
             &link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,
@@ -430,7 +431,10 @@ impl Engine {
             .map_err(|refusal| EngineError::unreadable(refusal.message))?;
         let mut images = Vec::with_capacity(files.len());
         let mut raw_blobs = Vec::new();
-        let raw_input = self.image_raw_text(&call.arguments, &mut raw_blobs).await?;
+        let mut publications = Vec::new();
+        let raw_input = self
+            .image_raw_text(&call.arguments, &mut raw_blobs, &mut publications)
+            .await?;
         for (index, file) in files.iter().enumerate() {
             let name = if index < args.images.len() {
                 format!("source-{}", index + 1)
@@ -539,6 +543,7 @@ impl Engine {
         sqlx::query("UPDATE thread_tool_calls SET plan=jsonb_set(plan,ARRAY[$2::text],$3) WHERE answer_id=$1 AND NOT(plan ? $2)").bind(crate::ids::tool_result(call.thread,&call.call_ref)).bind(SLOT).bind(serde_json::to_value(frozen)?).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
         let finished = unit.finish().await?;
         self.commit(tx, finished).await?;
+        drop(publications);
         Ok(images)
     }
 }
