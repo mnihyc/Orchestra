@@ -71,3 +71,18 @@ it.each(['replaced', 'cancelled'])('a %s tree reader cannot seed settings from a
   await expect(opened).rejects.toMatchObject({ name: 'AbortError' });
   expect(queryClient.getQueryData(settingsKey('org'))).toBeUndefined();
 });
+
+for (const kind of ['replaced', 'cancelled'] as const) for (const last of [false, true]) {
+  it(`discards a late ${last ? 'final' : 'continuing'} tree page when its reader is ${kind}`, async () => {
+    let finish!: (reply: Reply) => void;
+    calls.get.mockResolvedValueOnce({ data: { seq: 1, since: null, complete: false, next_cursor: 'one', nodes: [] }, response: new Response(null, { status: 200 }) });
+    calls.get.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const controller = new AbortController();
+    const opened = fetchTree('org', null, controller.signal);
+    await vi.waitFor(() => expect(calls.get).toHaveBeenCalledTimes(2));
+    if (kind === 'replaced') client.session.setState({ readerVersion: 8 }); else controller.abort();
+    finish({ data: { seq: 1, since: null, complete: last, next_cursor: last ? null : 'two', nodes: acmeTree().map((node) => ({ ...node, content_hidden: false as const })) }, response: new Response(null, { status: 200 }) });
+    await expect(opened).rejects.toMatchObject({ name: 'AbortError' });
+    expect(calls.get).toHaveBeenCalledTimes(2);
+  });
+}

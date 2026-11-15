@@ -1217,18 +1217,39 @@ pub async fn tree(
     since: Option<i64>,
     limit: i64,
 ) -> Result<Vec<TreeRow>, DbError> {
-    tree_rows(conn, root, since, since.map(|_| limit), None).await
+    tree_rows(conn, root, since, since.map(|_| limit), None, None, None).await
 }
 
-/// One id-keyset page of a full tree. Callers continue until there is no next
-/// row, independently of how many rows the reader may view in this page.
+/// One id-keyset page of a root tree or a parent's direct children. Metadata and document
+/// counts are read only for the candidate page, independently of how large the tree is.
 pub async fn tree_page(
     conn: &mut Conn,
     root: Id,
+    parent: Option<Id>,
     after: Option<Id>,
     limit: i64,
 ) -> Result<Vec<TreeRow>, DbError> {
-    tree_rows(conn, root, None, Some(limit), after).await
+    tree_rows(conn, root, None, Some(limit), after, parent, None).await
+}
+
+/// A bounded hierarchy selector; names are data, never SQL or client-side filtering.
+#[derive(Debug, Default)]
+pub struct TreeSelector<'a> {
+    pub text: Option<&'a str>,
+    pub kind: Option<&'a str>,
+    pub below: Option<Id>,
+    pub ids: Option<&'a [Id]>,
+}
+
+pub async fn tree_window(
+    conn: &mut Conn,
+    root: Id,
+    parent: Option<Id>,
+    after: Option<Id>,
+    limit: i64,
+    selector: &TreeSelector<'_>,
+) -> Result<Vec<TreeRow>, DbError> {
+    tree_rows(conn, root, None, Some(limit), after, parent, Some(selector)).await
 }
 
 async fn tree_rows(
@@ -1237,10 +1258,26 @@ async fn tree_rows(
     since: Option<i64>,
     limit: Option<i64>,
     after: Option<Id>,
+    parent: Option<Id>,
+    selector: Option<&TreeSelector<'_>>,
 ) -> Result<Vec<TreeRow>, DbError> {
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(
-        "WITH document_counts AS (
+        "WITH candidate_nodes AS MATERIALIZED (
+            SELECT n.* FROM nodes n
+             WHERE n.org_id = $1
+               AND (($2::bigint IS NULL AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL))
+                    OR n.tree_seq > $2)
+               AND ($4::uuid IS NULL OR n.id > $4)
+               AND ($5::uuid IS NULL OR n.parent_id = $5)
+               AND ($6::text IS NULL OR $6='' OR position(lower($6) in lower(n.name)) > 0
+                    OR position(lower($6) in lower(array_to_string(ARRAY(SELECT a.name FROM unnest(n.path) WITH ORDINALITY p(id,ord) JOIN nodes a ON a.id=p.id ORDER BY p.ord),' / '))) > 0)
+               AND ($7::text IS NULL OR n.kind = $7)
+               AND ($8::uuid IS NULL OR $8 = ANY(n.path))
+               AND ($9::uuid[] IS NULL OR n.id = ANY($9))
+             ORDER BY n.id LIMIT $3
+         ), document_counts AS (
             SELECT d.node_id, count(*) AS docs FROM documents d
+             JOIN candidate_nodes selected ON selected.id = d.node_id
              WHERE d.org_id = $1 AND d.deleted_at IS NULL
                AND NOT EXISTS (SELECT 1 FROM permission_rows r
                                 WHERE r.object_kind = 'document' AND r.object_id = d.id
@@ -1261,23 +1298,23 @@ async fn tree_rows(
                 (SELECT count(*) FROM approvals a WHERE a.thread_id = n.id AND a.state = 'pending') AS pending_approvals,
                 th.activity_seq, th.last_activity_at,
                 c.id AS chat_id, COALESCE(c.last_message_seq, 0) AS chat_seq
-           FROM nodes n
+           FROM candidate_nodes n
            LEFT JOIN topics t ON t.node_id = n.id
            LEFT JOIN threads th ON th.node_id = n.id
            LEFT JOIN chats c ON c.node_id = n.id
            LEFT JOIN document_counts dc ON dc.node_id = n.id
            LEFT JOIN document_tree_scopes ds ON ds.node_id = n.id
-          WHERE n.org_id = $1
-            AND (($2::bigint IS NULL AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL))
-                 OR n.tree_seq > $2)
-            AND ($4::uuid IS NULL OR n.id > $4)
-          ORDER BY n.id
-          LIMIT $3".replace("__WORK_ATTENTION__", super::source::ATTENTION_SQL),
+          ORDER BY n.id".replace("__WORK_ATTENTION__", super::source::ATTENTION_SQL),
     ))
     .bind(root)
     .bind(since)
     .bind(limit)
     .bind(after)
+    .bind(parent)
+    .bind(selector.and_then(|s|s.text))
+    .bind(selector.and_then(|s|s.kind))
+    .bind(selector.and_then(|s|s.below))
+    .bind(selector.and_then(|s|s.ids))
     .fetch_all(conn)
     .await?)
 }
@@ -3237,3 +3274,67 @@ mod tests {
 
 // Node presentation and child-kind selection.
 pub mod presentation;
+
+/// Minimal descendant facts for server-side folding. No names, document counts or content are read.
+#[derive(Debug, sqlx::FromRow)]
+pub struct TreeFoldCandidate {
+    pub id: Id,
+    pub parent_id: Option<Id>,
+    pub path: Vec<Id>,
+    pub kind: String,
+    pub unread: bool,
+    pub mentions: i64,
+    pub waiting: i64,
+}
+
+pub async fn tree_fold_candidates(
+    conn: &mut Conn,
+    user: Id,
+    parents: &[Id],
+) -> Result<Vec<TreeFoldCandidate>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT n.id,n.parent_id,n.path,n.kind,
+            (NOT EXISTS(SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND a.archived_at IS NOT NULL) AND (
+              (t.node_id IS NOT NULL AND t.activity_seq > COALESCE(r.last_read_seq,0)
+                 AND (r.last_read_seq IS NOT NULL OR COALESCE((SELECT level FROM subscriptions s WHERE s.user_id=$1
+                     AND s.node_id=ANY(n.path) ORDER BY array_position(n.path,s.node_id) DESC LIMIT 1),'off') <> 'off'))
+              OR (c.last_message_seq > COALESCE(cs.last_read_seq,0)
+                  AND COALESCE(cs.level,CASE WHEN cs.engaged THEN COALESCE(np.chat_node_level,'all') ELSE 'off' END) <> 'off'))) AS unread,
+            COALESCE(cs.mentions_unread,0)::bigint AS mentions,
+            CASE WHEN EXISTS(SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND a.archived_at IS NOT NULL) THEN 0
+                 ELSE (SELECT count(*) FROM approvals a WHERE a.thread_id=n.id AND a.state='pending') END AS waiting
+         FROM nodes n LEFT JOIN threads t ON t.node_id=n.id
+         LEFT JOIN thread_reads r ON r.thread_id=n.id AND r.user_id=$1 AND r.continuation_id=t.active_continuation_id
+         LEFT JOIN chats c ON c.node_id=n.id
+         LEFT JOIN chat_states cs ON cs.chat_id=c.id AND cs.user_id=$1
+         LEFT JOIN notification_prefs np ON np.user_id=$1
+         WHERE n.path && $2::uuid[] AND NOT EXISTS(SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND a.deleted_at IS NOT NULL)")
+        .bind(user).bind(parents).fetch_all(conn).await?)
+}
+
+/// Personal group-chat signals at their real homes, independently authorized by the native chat reader.
+#[derive(Debug, sqlx::FromRow)]
+pub struct TreeGroupSignal {
+    pub chat_id: Id,
+    pub path: Vec<Id>,
+    pub unread: bool,
+    pub mentions: i64,
+}
+
+pub async fn tree_group_signals(
+    conn: &mut Conn,
+    user: Id,
+    parents: &[Id],
+    now: DateTime<Utc>,
+) -> Result<Vec<TreeGroupSignal>, DbError> {
+    Ok(sqlx::query_as("SELECT c.id AS chat_id,n.path,
+        c.last_message_seq > COALESCE(s.last_read_seq,0) AND COALESCE(s.level,p.chat_direct_level,'all') <> 'off' AS unread,
+        COALESCE(s.mentions_unread,0)::bigint AS mentions
+        FROM chats c JOIN nodes n ON n.id=COALESCE(c.home_id,c.org_id)
+        JOIN chat_members m ON m.chat_id=c.id AND m.user_id=$1 AND m.left_at IS NULL AND (m.expires_at IS NULL OR m.expires_at>$3)
+        LEFT JOIN chat_states s ON s.chat_id=c.id AND s.user_id=$1
+        LEFT JOIN notification_prefs p ON p.user_id=$1
+        WHERE c.kind='group' AND n.path && $2::uuid[] AND NOT COALESCE(s.hidden,false)
+        AND NOT EXISTS(SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND (a.deleted_at IS NOT NULL OR a.archived_at IS NOT NULL))")
+        .bind(user).bind(parents).bind(now).fetch_all(conn).await?)
+}

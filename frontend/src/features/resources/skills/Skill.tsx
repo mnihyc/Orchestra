@@ -13,6 +13,7 @@ import { ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/feat
 import { Facts } from '@/features/resources/Facts';
 import { ResourceAccess } from '@/features/resources/ResourceAccess';
 import { useResourceHeading } from '@/features/resources/trail';
+import type { SkillTab } from '@/features/resources/tabs';
 import { languageOf } from '@/features/files/languages';
 import type { Skill, SkillOrigin, SkillVersionInfo } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
@@ -36,8 +37,6 @@ import { LibraryCounts, libraryQuery } from '@/features/resources/Library';
 import { SkillRefusal } from './Refusal';
 import { AddVersion } from './SkillDialog';
 
-export type SkillTab = 'overview' | 'versions' | 'draft' | 'access';
-export const SKILL_TABS: readonly SkillTab[] = ['overview', 'versions', 'draft', 'access'];
 
 /** Where a version came from, in a few words. */
 export function OriginWords({ origin }: { origin: SkillOrigin }) {

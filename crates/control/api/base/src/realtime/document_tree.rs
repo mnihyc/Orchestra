@@ -54,11 +54,12 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct State {
     root: Id,
-    fingerprint: Hash,
+    fingerprints: std::collections::HashMap<String, Hash>,
 }
 
 fn identity(view: &DocumentTreeView) -> Id {
     match view {
+        DocumentTreeView::Hierarchy { root, .. } => *root,
         DocumentTreeView::Directory {
             at: DocumentDirectory::NodeDocs(id) | DocumentDirectory::Container(id),
             ..
@@ -80,6 +81,7 @@ async fn context(
         return Ok(None);
     };
     let route = match view {
+        DocumentTreeView::Hierarchy { .. } => orch_api_contract::nodes::OrgTreeGet::ROUTE,
         DocumentTreeView::Directory { .. } => {
             orch_api_contract::document_tree::DocumentTreeList::ROUTE
         }
@@ -117,6 +119,9 @@ pub(crate) async fn decide(
         return Ok(Access::NotFound);
     };
     let result = match view {
+        DocumentTreeView::Hierarchy { root, .. } => {
+            return super::tree::decide(inner, user, *root).await;
+        }
         DocumentTreeView::Directory {
             at: DocumentDirectory::NodeDocs(node),
             ..
@@ -221,6 +226,45 @@ async fn read(
     view: &DocumentTreeView,
 ) -> Result<Current, ApiError> {
     match view {
+        DocumentTreeView::Hierarchy { root, queries } => {
+            let query = queries
+                .first()
+                .ok_or_else(|| ApiError::internal("a hierarchy view needs its page"))?;
+            let cut = metadata::cut(conn, principal, *root, ctx.now.into()).await?;
+            let (hierarchy, problem) =
+                match crate::routes::nodes::tree::hierarchy_metadata(ctx, conn, principal, query)
+                    .await
+                {
+                    Ok(value) => (value, None),
+                    Err(error) => {
+                        let seq = orch_db::queries::hierarchy::tree_seq(conn, *root).await?;
+                        (
+                            orch_api_contract::nodes::OrgTreeGetReply {
+                                page_size: None,
+                                feed: None,
+                                ancestors: Vec::new(),
+                                settings: None,
+                                seq,
+                                since: None,
+                                complete: true,
+                                next_cursor: None,
+                                nodes: Vec::new(),
+                            },
+                            Some(error.code()),
+                        )
+                    }
+                };
+            Ok(Current {
+                data: DocumentTreeData::Hierarchy {
+                    query: Box::new(query.clone()),
+                    problem,
+                    hierarchy: Box::new(hierarchy),
+                },
+                cut,
+                inspections: Vec::new(),
+            })
+        }
+
         DocumentTreeView::Directory {
             at,
             deleted,
@@ -287,6 +331,19 @@ async fn read(
 
 fn fingerprint(data: &Json) -> Result<Hash, Fail> {
     let mut semantic = data.clone();
+    if let Some(hierarchy) = semantic.get_mut("hierarchy").and_then(Json::as_object_mut) {
+        hierarchy.remove("feed");
+        hierarchy.remove("seq");
+        if let Some(cursor) = hierarchy.get_mut("next_cursor")
+            && let Some(text) = cursor.as_str()
+        {
+            let mut parts = text.split('|').map(str::to_owned).collect::<Vec<_>>();
+            if parts.len() == 5 {
+                parts[2] = "current".to_owned();
+                *cursor = Json::String(parts.join("|"));
+            }
+        }
+    }
     if let Some(directory) = semantic.get_mut("directory") {
         // AEAD nonces rotate even when candidate progress is identical. Their bytes are not a change.
         if let Some(cursor) = directory.get_mut("next_cursor")
@@ -319,6 +376,37 @@ pub(crate) async fn current(
     }
     let Feed::DocumentTree(view) = sub.feed() else {
         return Ok(());
+    };
+    let views = match view {
+        DocumentTreeView::Hierarchy { root, queries } => queries
+            .iter()
+            .map(|query| DocumentTreeView::Hierarchy {
+                root: *root,
+                queries: vec![query.clone()],
+            })
+            .collect::<Vec<_>>(),
+        other => vec![other.clone()],
+    };
+    for view in views {
+        if !st.open {
+            break;
+        }
+        current_view(inner, sub, st, &view).await?;
+    }
+    Ok(())
+}
+
+async fn current_view(
+    inner: &Arc<Inner>,
+    sub: &Arc<Subscription>,
+    st: &mut SubState,
+    view: &DocumentTreeView,
+) -> Result<(), Fail> {
+    let key = match view {
+        DocumentTreeView::Hierarchy { queries, .. } => {
+            serde_json::to_string(queries).map_err(Fail::other)?
+        }
+        _ => String::new(),
     };
     let Some(_identity) = super::watches::delivery_guard(inner, sub.connection()).await? else {
         return Ok(());
@@ -378,11 +466,9 @@ pub(crate) async fn current(
     }
     let data = serde_json::to_value(&loaded.data).map_err(Fail::other)?;
     let hash = fingerprint(&data)?;
-    if st
-        .document_tree
-        .as_ref()
-        .is_some_and(|state| state.root == loaded.cut.root && state.fingerprint == hash)
-    {
+    if st.document_tree.as_ref().is_some_and(|state| {
+        state.root == loaded.cut.root && state.fingerprints.get(&key) == Some(&hash)
+    }) {
         return Ok(());
     }
     if !loaded.inspections.is_empty() {
@@ -413,10 +499,16 @@ pub(crate) async fn current(
         return Ok(());
     }
     super::ephemeral::send(sub, &data)?;
-    st.document_tree = Some(State {
-        root: loaded.cut.root,
-        fingerprint: hash,
-    });
+    let mut state = st
+        .document_tree
+        .take()
+        .filter(|state| state.root == loaded.cut.root)
+        .unwrap_or_else(|| State {
+            root: loaded.cut.root,
+            fingerprints: std::collections::HashMap::new(),
+        });
+    state.fingerprints.insert(key, hash);
+    st.document_tree = Some(state);
     Ok(())
 }
 
@@ -432,6 +524,23 @@ pub(crate) async fn refresh(inner: &Arc<Inner>, root: Option<Id>) -> Result<(), 
             continue;
         }
         current(inner, &sub, &mut st).await?;
+    }
+    Ok(())
+}
+
+/// Personal state wakes are coalesced and never poll idle document directories or other people's trees.
+pub(crate) async fn refresh_reader(inner: &Arc<Inner>, user: Id) -> Result<(), Fail> {
+    for sub in inner.ephemeral.document_tree_subscribers() {
+        if sub.connection().user != user
+            || !matches!(
+                sub.feed(),
+                Feed::DocumentTree(DocumentTreeView::Hierarchy { .. })
+            )
+        {
+            continue;
+        }
+        let mut state = sub.state.lock().await;
+        current(inner, &sub, &mut state).await?;
     }
     Ok(())
 }

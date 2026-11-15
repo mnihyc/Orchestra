@@ -18,6 +18,7 @@ import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
+import { Select } from '@/ui/Select';
 import { DateField } from '@/ui/DateField';
 import type { WhereName } from '@/generated/api-types';
 
@@ -25,13 +26,14 @@ import type { Changes } from './changes';
 import { editFollowedHolderChange, holderKey, updateEntryChange } from './model';
 import { permissionNameOf } from './names';
 import { WhereField, whereNames } from './WhereField';
+import { purposeName } from './purposes';
 
 type Json = Record<string, unknown>;
 
 /** One option an entry may carry, as a field. */
 export type OptionField =
   | { key: string; kind: 'strings' }
-  | { key: string; kind: 'choices'; choices: readonly { value: string; hint: string; leaves: boolean }[] }
+  | { key: string; kind: 'choices'; choices: readonly { value: string; hint: string; leaves: boolean; defaultSelected?: boolean }[] }
   | { key: string; kind: 'integer' }
   | { key: string; kind: 'places' }
   | { key: string; kind: 'limits'; fields: readonly OptionField[] };
@@ -61,8 +63,10 @@ export function optionFields(schema: unknown, root: Json | null = isRecord(schem
       const items = follow(root, member.items);
       if (items !== null && isRecord(items.properties) && 'kind' in items.properties && 'id' in items.properties) fields.push({ key, kind: 'places' });
       else if (items !== null && Array.isArray(items.oneOf)) {
-        const choices = items.oneOf.flatMap((entry) => (isRecord(entry) && typeof entry.const === 'string' ? [{ value: entry.const, hint: typeof entry.description === 'string' ? entry.description : '', leaves: entry['x-credential-leaves'] === true }] : []));
+        const choices = items.oneOf.flatMap((entry) => (isRecord(entry) && typeof entry.const === 'string' ? [{ value: entry.const, hint: typeof entry.description === 'string' ? entry.description : '', leaves: entry['x-credential-leaves'] === true, defaultSelected: entry['x-default-selected'] === true }] : []));
         fields.push({ key, kind: 'choices', choices });
+      } else if (items !== null && Array.isArray(items.enum)) {
+        fields.push({ key, kind: 'choices', choices: items.enum.flatMap((value) => typeof value === 'string' ? [{ value, hint: '', leaves: false }] : []) });
       } else fields.push({ key, kind: 'strings' });
     } else if (Array.isArray(member.anyOf)) {
       const inner = member.anyOf.map((entry) => follow(root, entry)).find((entry) => entry !== null && typesOf(entry).includes('object'));
@@ -74,10 +78,12 @@ export function optionFields(schema: unknown, root: Json | null = isRecord(schem
 
 /**
  * What an entry that leaves a choices member out has: where some choices let the credential leave the place it is kept in, only the
- * others, which are then the default; otherwise nothing, and so no narrowing. `null` for a member without such choices.
+ * others, which are then the default. Other choices can declare their default selection in the schema.
+ * `null` for a member without a declared default.
  */
 export function stayingChoices(field: Extract<OptionField, { kind: 'choices' }>): string[] | null {
-  return field.choices.some((choice) => choice.leaves) ? field.choices.filter((choice) => !choice.leaves).map((choice) => choice.value) : null;
+  if (field.choices.some((choice) => choice.leaves)) return field.choices.filter((choice) => !choice.leaves).map((choice) => choice.value);
+  return field.choices.some((choice) => choice.defaultSelected) ? field.choices.filter((choice) => choice.defaultSelected).map((choice) => choice.value) : null;
 }
 
 /** What is typed, read back as the options: a member left empty is left out. */
@@ -92,7 +98,7 @@ export function readOptions(fields: readonly OptionField[], values: Json): Json 
       const staying = stayingChoices(field);
       const chosen = Array.isArray(value) ? field.choices.map((choice) => choice.value).filter((entry) => value.includes(entry)) : [];
       // Naming a type makes the list exclusive, so the default is written only when something else was chosen.
-      if (staying === null ? chosen.length > 0 : chosen.length !== staying.length || chosen.some((entry) => !staying.includes(entry))) out[field.key] = chosen;
+      if (field.key === 'purposes' ? chosen.length !== field.choices.length : staying === null ? chosen.length > 0 : chosen.length !== staying.length || chosen.some((entry) => !staying.includes(entry))) out[field.key] = chosen;
     } else if (field.kind === 'places') {
       const names = whereNames(value);
       if (names.length > 0) out[field.key] = names;
@@ -114,7 +120,7 @@ function valuesOf(fields: readonly OptionField[], options: unknown): Json {
   for (const field of fields) {
     const value = given[field.key];
     if (field.kind === 'strings') out[field.key] = Array.isArray(value) ? value.join(', ') : '';
-    else if (field.kind === 'choices') out[field.key] = Array.isArray(value) ? value : stayingChoices(field) ?? [];
+    else if (field.kind === 'choices') out[field.key] = Array.isArray(value) ? value : field.key === 'purposes' ? field.choices.map((choice) => choice.value) : stayingChoices(field) ?? [];
     else if (field.kind === 'places') out[field.key] = whereNames(value);
     else if (field.kind === 'integer') out[field.key] = typeof value === 'number' ? String(value) : '';
     else out[field.key] = valuesOf(field.fields, value);
@@ -123,10 +129,38 @@ function valuesOf(fields: readonly OptionField[], options: unknown): Json {
 }
 
 export const optionLabel = (t: TFunction, key: string): string => {
-  const known = ['models', 'services', 'efforts', 'arrangements', 'max_environments', 'storages', 'resources_max', 'sources', 'templates', 'capabilities', 'where', 'cpu_millis', 'memory_mb', 'memory_swap_mb', 'blkio_weight', 'pids', 'disk_gb'];
+  const known = ['purposes', 'models', 'services', 'efforts', 'arrangements', 'max_environments', 'storages', 'resources_max', 'sources', 'templates', 'capabilities', 'where', 'cpu_millis', 'memory_mb', 'memory_swap_mb', 'blkio_weight', 'pids', 'disk_gb'];
   return known.includes(key) ? t(`access.options.${key}`, { defaultValue: key }) : key.replaceAll('_', ' ').replaceAll('.', ' ');
 };
 const optionChoice=(t:TFunction,value:string)=>offeredChoice(t,'arrangement',value)??offeredChoice(t,'effort',value);
+
+function PurposeChoices({ field, value, onChange }: { field: Extract<OptionField, { kind: 'choices' }>; value: readonly string[]; onChange: (value: string[]) => void }) {
+  const { t } = useTranslation();
+  const all = field.choices.map((choice) => choice.value);
+  const allChosen = value.length === all.length && all.every((purpose) => value.includes(purpose));
+  const [custom, setCustom] = useState(!allChosen && value.length !== 1);
+  const preset = custom ? 'custom' : allChosen ? 'all' : value[0] ?? 'custom';
+  return <div className="flex min-w-0 flex-col gap-2">
+    <Select label={t('access.options.purposes')} value={preset} fieldClassName="max-w-(--field-wide)"
+      options={[{ value: 'all', label: t('access.options.allPurposes') }, ...field.choices.map((choice) => ({ value: choice.value, label: purposeName(t, choice.value) })), { value: 'custom', label: t('access.options.customPurposes') }]}
+      onValueChange={(next) => { setCustom(next === 'custom'); if (next !== 'custom') onChange(next === 'all' ? all : [next]); }} />
+    {preset === 'custom' && <fieldset className="flex flex-col gap-2">
+      <legend className="text-sm font-medium text-text">{t('access.options.purposes')}</legend>
+      {field.choices.map((choice) => <Checkbox key={choice.value} presentation="compact" label={purposeName(t, choice.value)}
+        checked={value.includes(choice.value)} onCheckedChange={(on) => onChange(on ? [...value, choice.value] : value.filter((purpose) => purpose !== choice.value))} />)}
+    </fieldset>}
+  </div>;
+}
+
+/** New and existing grants use the same served purpose choices and unrestricted default. */
+export function ProviderPurposeField({ schema, value, onChange }: { schema: unknown; value: readonly string[] | null; onChange: (value: string[] | null) => void }) {
+  const field = optionFields(schema).find((field): field is Extract<OptionField, { kind: 'choices' }> => field.key === 'purposes' && field.kind === 'choices');
+  if (field === undefined) return null;
+  const all = field.choices.map((choice) => choice.value);
+  return <PurposeChoices field={field} value={value ?? all} onChange={(next) => onChange(next.length === all.length && all.every((purpose) => next.includes(purpose)) ? null : next)} />;
+}
+
+export const providerUsePurposeName = (t: TFunction, value: string): string | undefined => value === 'ask' ? t('access.options.purposeNames.ask') : value === 'work' ? t('access.options.purposeNames.work') : undefined;
 
 function Fields({ fields, values, onChange }: { fields: readonly OptionField[]; values: Json; onChange: (next: Json) => void }) {
   const { t } = useTranslation();
@@ -156,8 +190,8 @@ function Fields({ fields, values, onChange }: { fields: readonly OptionField[]; 
                 <Checkbox
                   key={choice.value}
                   presentation="compact"
-                  label={optionChoice(t,choice.value)?.name ?? choice.value}
-                  description={optionChoice(t,choice.value)?.description ?? (choice.hint === '' ? undefined : choice.hint)}
+                  label={(field.key === 'purposes' ? providerUsePurposeName(t, choice.value) : optionChoice(t,choice.value)?.name) ?? choice.value}
+                  description={field.key === 'purposes' ? undefined : optionChoice(t,choice.value)?.description ?? (choice.hint === '' ? undefined : choice.hint)}
                   checked={chosen.includes(choice.value)}
                   onCheckedChange={(on) => onChange({ ...values, [field.key]: on ? [...chosen, choice.value] : chosen.filter((entry) => entry !== choice.value) })}
                 />
@@ -203,8 +237,10 @@ export function EntryOptions({ open, onClose, def, row, entryId, holder, changes
   const entry = followedHolder === undefined ? row.entries.find((candidate) => candidate.id === entryId) : row.inherited?.entries?.find((candidate) => holderKey(candidate.holder) === holderKey(followedHolder));
   const fields = optionFields(def.options_schema);
   const [values, setValues] = useState<Json>(() => valuesOf(fields, entry?.options));
-  const [until, setUntil] = useState(entry?.expires_at?.slice(0, 10) ?? '');
-  const expiresAt = until === (entry?.expires_at?.slice(0, 10) ?? '') ? entry?.expires_at ?? null : until === '' ? null : new Date(`${until}T23:59:59`).toISOString();
+  const end = entry?.expires_at === null || entry?.expires_at === undefined ? null : new Date(entry.expires_at);
+  const original = end === null ? '' : new Date(end.getTime() - end.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+  const [until, setUntil] = useState(original);
+  const expiresAt = until === original ? entry?.expires_at ?? null : until === '' ? null : new Date(until).toISOString();
   const permission = permissionNameOf(def);
 
   return (
@@ -245,7 +281,7 @@ export function EntryOptions({ open, onClose, def, row, entryId, holder, changes
       }
     >
       <div className="flex flex-col gap-4 py-2">
-        <DateField label={t('access.cell.until')} value={until} onValueChange={setUntil} hint={t('access.options.untilHint')} />
+        <DateField type="datetime-local" label={t('access.cell.until')} value={until} onValueChange={setUntil} hint={t('access.options.untilHint')} />
         <Fields fields={fields} values={values} onChange={setValues} />
         {changes.error !== null && changes.error !== undefined && <ErrorAlert error={changes.error} />}
       </div>
