@@ -29,6 +29,33 @@ pub struct ResourcePauseQuery {
     pub run_waiting: Option<bool>,
 }
 
+/// Explicit choice for this deletion, off unless the person selects its reviewed audience.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceNotificationQuery {
+    /// Tell the reviewed affected people once for this operation. Absent or false tells nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
+    /// The caller-bound audience from the current impact review; required when notify is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_review: Option<Id>,
+}
+
+/// Provider stop choices, with notification separately selected for this act.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceStopQuery {
+    /// A short one-line note shown to people whose threads wait on the resource.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Tell the reviewed affected people once for this operation. Absent or false tells nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
+    /// The caller-bound audience from the current impact review; required when notify is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_review: Option<Id>,
+}
+
 /// Enable keeps waiting messages held unless the person explicitly asks to run them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -64,9 +91,41 @@ pub struct ActivityFacts {
     pub stopped: ActivityGroup,
 }
 
+/// The boundary at which a resource change reaches an existing native dependent.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceApplicationWhen {
+    /// Existing calls through a switched-off MCP resource are refused immediately.
+    Now,
+    /// The next turn reads the changed tool or skill configuration.
+    BeforeNextTurn,
+    /// A running unit keeps its current attachment or recipe until it starts again.
+    NextStart,
+}
+
+/// Current native dependents affected at one boundary, counted before their names are projected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResourceApplicationGroup {
+    /// When this change reaches these existing dependents.
+    pub when: ResourceApplicationWhen,
+    /// The unit of the count: threads, environments or providers, never their sum.
+    pub object_kind: orch_access_contract::permissions::ObjectKind,
+    /// Distinct native dependents, including those whose names remain private.
+    pub count: i64,
+    /// Authorized names, each present only once within this boundary.
+    pub visible: Vec<VisibleDependent>,
+    /// Other dependents whose identities and names remain private.
+    pub hidden: i64,
+}
+
 /// A pause, resumption or deletion reads the same current facts before its one confirmation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ResourceImpact {
+    /// The current affected audience for an explicit lifecycle notification, initially off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification: Option<crate::loss::OperationNotificationPlan>,
     /// The exact resource or provider model being affected.
     pub target: FactTarget,
     /// Its current authorized name.
@@ -75,6 +134,10 @@ pub struct ResourceImpact {
     pub facts: ResourceFacts,
     /// The exact work that stops or waits.
     pub activity: ActivityFacts,
+    /// Current tool/skill delivery and running-unit consequences, with empty groups omitted.
+    pub applications: Vec<ResourceApplicationGroup>,
+    /// False when a native source cannot account for every delivery or attachment.
+    pub application_complete: bool,
     /// A previously accepted stop still has native work to finish.
     pub stopping: bool,
     /// Current reader-specific status for visible bound threads with content access.
