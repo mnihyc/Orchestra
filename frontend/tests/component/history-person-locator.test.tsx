@@ -25,7 +25,7 @@ import { TooltipProvider } from '@/ui/Tooltip';
 import { me, userRef } from '../doubles/fixtures';
 import { deferred, snapshot } from '../unit/continuation-fixtures';
 
-interface Params { path?: { object: string; id: string }; query: { actor?: string; depth?: string; cursor?: string; q?: string; org_id?: string; limit?: number } }
+interface Params { path?: { object: string; id: string }; query: { actor?: string; depth?: string; cursor?: string; q?: string; org_id?: string; limit?: number; picker?: boolean } }
 interface ReadOptions { params: Params; signal: AbortSignal }
 const calls = vi.hoisted(() => ({ read: vi.fn<(path: string, options: ReadOptions) => Promise<{ data: unknown; response: Response }>>(), writes: vi.fn(), follows: vi.fn() }));
 vi.mock('@/api/client', async (load) => {
@@ -42,12 +42,13 @@ const owner = 'owned-history-inspector';
 let threadId: string, orgId: string, cache: QueryClient, user: ReturnType<typeof userEvent.setup>;
 let history: (params: Params, signal: AbortSignal) => Promise<HistoryLinePage>;
 let people: (q: string, org: string | undefined, signal: AbortSignal) => Promise<UserRef[]>;
+let peoplePage:(q:string,org:string|undefined,signal:AbortSignal,cursor?:string)=>Promise<{items:UserRef[];next_cursor:string|null}>;
 const row = (text: string, actor: HistoryLine['actor'] = null): HistoryLine => ({ id: text, text, actor, about: null, action: 'thread.created', at: '2026-10-18T00:00:00Z' });
 const page = (text: string, next_cursor: string | null = null, actor: HistoryLine['actor'] = null): HistoryLinePage => ({ items: [row(text, actor)], next_cursor });
 const failure = (code: 'internal' | 'authz.denied' = 'internal') => new ApiError({ type: `orch:error:${code}`, code,
   title: 'Private native diagnostic', detail: 'Private native diagnostic', status: code === 'internal' ? 500 : 403, request_id: 'private-request' }, null);
 const historyCalls = () => calls.read.mock.calls.filter(([path]) => path === '/{object}/{id}/history');
-const peopleCalls = () => calls.read.mock.calls.filter(([path]) => path === '/users/search');
+const peopleCalls = () => calls.read.mock.calls.filter(([path,options]) => path === '/users/search' && options.params.query.q !== '');
 const personInput = (label = i18n.t('threadViews.history.person')) => screen.getByRole('combobox', { name: label });
 
 function Frame({ id = threadId }: { id?: string }) {
@@ -77,9 +78,10 @@ beforeEach(() => {
   for (const id of [threadId, otherThread]) threadWriter.reset(resultThreadRead(id, owner), { ...cut, thread: { ...cut.thread, id, environment: null } }, false);
   history = () => Promise.resolve(page('Only the loaded first-page actor', 'unfiltered-next', loadedActor));
   people = () => Promise.resolve([picked]);
+  peoplePage=async(q,org,signal)=>({items:q===''?[]:await people(q,org,signal),next_cursor:null});
   calls.read.mockImplementation(async (path, { params, signal }) => {
     const data = path === '/{object}/{id}/history' ? await history(params, signal)
-      : path === '/users/search' ? await people(params.query.q ?? '', params.query.org_id, signal)
+      : path === '/users/search' ? await peoplePage(params.query.q ?? '', params.query.org_id, signal,params.query.cursor)
         : (() => { throw new Error(`Unexpected native read ${path}`); })();
     return { data, response: new Response(null, { status: 200 }) };
   });
@@ -99,7 +101,7 @@ it('locates an actor absent from loaded history and sends that UUID before pagin
   await user.keyboard('{Enter}');
   await screen.findByText('Selected actor first page');
   expect(personInput()).toHaveValue(picked.display_name); expect(screen.queryByText('Only the loaded first-page actor')).toBeNull();
-  expect(peopleCalls()[0]?.[1].params.query).toEqual({ q: picked.username });
+  expect(peopleCalls()[0]?.[1].params.query).toEqual({ q: picked.username,picker:true });
   expect(historyCalls().at(-1)?.[1].params).toMatchObject({ path: { object: 'nodes', id: threadId }, query: { depth: 'summary', actor: picked.id } });
   await user.click(screen.getByRole('button', { name: i18n.t('ui.pagination.more') }));
   await screen.findByText('Selected actor second page');
@@ -155,21 +157,22 @@ it('keeps a committed person while search hits change or fail, and retries only 
   await user.click(personInput('Person locator'));
   await user.click(await screen.findByRole('option', { name: replacement.display_name }));
   expect(selected).toHaveBeenCalledTimes(1); expect(selected).toHaveBeenCalledWith(replacement); expect(personInput('Person locator')).toHaveValue(replacement.display_name);
-  expect(peopleCalls().map(([, value]) => value.params.query)).toEqual([{ q: 'other', org_id: orgId }, { q: 'other', org_id: orgId }]);
+  expect(peopleCalls().map(([, value]) => value.params.query)).toEqual([{ q: 'other', org_id: orgId,picker:true }, { q: 'other', org_id: orgId,picker:true }]);
   expect(calls.writes).not.toHaveBeenCalled();
 });
 
-it('does not fetch an empty or one-code-point directory search, including one surrogate-pair character', async () => {
+it('opens one native person page and filters from one Unicode character', async () => {
   vi.useFakeTimers(); draw(<PersonLocator label="Person locator" value={null} person={null} onChoose={vi.fn()} />);
   const input = personInput('Person locator');
   fireEvent.focus(input);
   await act(async () => { await vi.advanceTimersByTimeAsync(TYPING_PAUSE_MS); });
   fireEvent.change(input, { target: { value: '😀' } });
   await act(async () => { await vi.advanceTimersByTimeAsync(TYPING_PAUSE_MS); });
-  expect(peopleCalls()).toHaveLength(0);
+  expect(peopleCalls()).toHaveLength(1);expect(peopleCalls()[0]?.[1].params.query).toEqual({q:'😀',picker:true});
+  expect(calls.read.mock.calls.filter(([path,options])=>path==='/users/search'&&options.params.query.q==='')).toHaveLength(1);
   fireEvent.change(input, { target: { value: '😀a' } });
   await act(async () => { await vi.advanceTimersByTimeAsync(TYPING_PAUSE_MS); });
-  expect(peopleCalls()).toHaveLength(1); expect(peopleCalls()[0]?.[1].params.query).toEqual({ q: '😀a' });
+  expect(peopleCalls()).toHaveLength(2); expect(peopleCalls()[1]?.[1].params.query).toEqual({ q: '😀a',picker:true });
   expect(calls.writes).not.toHaveBeenCalled();
 });
 
@@ -216,7 +219,7 @@ it('shares the locator with Trace while preserving its org restriction, include_
   await choose(replacement, i18n.t('trace.person'));
   const latest = changes.at(-1); if (latest === undefined) throw new Error('Selecting a person must update Trace filters.');
   expect(latest).toEqual({ ...initial, actor: replacement.id });
-  expect(peopleCalls()[0]?.[1].params.query).toEqual({ q: replacement.username, org_id: orgId });
+  expect(peopleCalls()[0]?.[1].params.query).toEqual({ q: replacement.username, org_id: orgId,picker:true });
   expect(wireFilters(latest)).toMatchObject({ actor: replacement.id, include_agents: 'true', kind: 'work', action: 'thread.started' });
   const url = new URL(traceHref(scope, latest.actor, latest), 'http://example.test');
   expect(url.pathname).toBe(`/trace/${threadId}`); expect(url.searchParams.get('actor')).toBe(replacement.id); expect(url.searchParams.get('include_agents')).toBe('true');
@@ -229,7 +232,7 @@ it('can locate an exact actor for a directly shared thread without asking to vie
   people = (q, org) => org !== undefined ? Promise.reject(failure('authz.denied')) : Promise.resolve(q === picked.username ? [picked] : []);
   draw(<Frame />); await screen.findByText('Direct-share history'); await choose();
   await screen.findByText('Direct-share actor history');
-  expect(peopleCalls()[0]?.[1].params.query).toEqual({ q: picked.username });
+  expect(peopleCalls()[0]?.[1].params.query).toEqual({ q: picked.username,picker:true });
   expect(historyCalls().at(-1)?.[1].params).toMatchObject({ path: { object: 'nodes', id: threadId }, query: { actor: picked.id } });
   expect(calls.writes).not.toHaveBeenCalled();
 });
@@ -251,4 +254,16 @@ it('keeps composing, empty and dismissed Enter inside the person locator without
   await user.click(input); await user.keyboard('{Enter}');
   expect(choosePerson).toHaveBeenCalledExactlyOnceWith(picked); expect(submit).not.toHaveBeenCalled();
   expect(calls.writes).not.toHaveBeenCalled();
+});
+
+
+it('continues a one-letter person search without changing the committed filter or reading history again',async()=>{
+ peoplePage=(q,_org,_signal,cursor)=>Promise.resolve(q===''?{items:[],next_cursor:null}:cursor===undefined?{items:[picked],next_cursor:'people-next'}:{items:[replacement],next_cursor:null});
+ const selected=vi.fn();draw(<PersonLocator label="Person locator" value={null} person={null} orgId={orgId} onChoose={selected}/>);
+ await search('o','Person locator');expect(await screen.findByRole('option',{name:picked.display_name})).toBeVisible();
+ await user.click(screen.getByRole('button',{name:i18n.t('ui.pagination.more')}));
+ await user.click(await screen.findByRole('option',{name:replacement.display_name}));
+ expect(selected).toHaveBeenCalledExactlyOnceWith(replacement);
+ expect(peopleCalls().map(([,options])=>options.params.query)).toEqual([{q:'o',org_id:orgId,picker:true},{q:'o',org_id:orgId,picker:true,cursor:'people-next'}]);
+ expect(historyCalls()).toHaveLength(0);expect(calls.writes).not.toHaveBeenCalled();
 });

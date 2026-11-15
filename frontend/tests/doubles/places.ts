@@ -643,7 +643,8 @@ export class Places {
    */
   private searchPeople(person: Person, query: URLSearchParams): UserRef[] {
     const q = (query.get('q') ?? '').trim().toLowerCase();
-    if (Array.from(q).length < 2) throw new Refusal(400, 'request.invalid', 'the request is not valid', { errors: [{ path: 'q', message: 'must be at least 2 characters' }] });
+    if (query.get('picker')!=='true' && Array.from(q).length < 2) throw new Refusal(400, 'request.invalid', 'the request is not valid', { errors: [{ path: 'q', message: 'must be at least 2 characters' }] });
+    const picked=query.get('picker')==='true'&&q===''?this.world.settings.pickerRecentsOf(person).choices.user??[]:[];
     const orgId = query.get('org_id');
     const inOrg = orgId === null ? null : new Set(this.roles.get(this.rootOf(orgId) ?? orgId)?.keys() ?? []);
     const shared = new Set<string>();
@@ -654,9 +655,12 @@ export class Places {
         const exact = other.me.username.toLowerCase() === q || (other.me.email ?? '').toLowerCase() === q;
         const near = other.me.username.toLowerCase().startsWith(q) || other.me.display_name.toLowerCase().includes(q);
         if (inOrg !== null) return near && inOrg.has(other.me.username);
-        return exact || (near && shared.has(other.me.username));
+        return exact || (near && shared.has(other.me.username)) || picked.includes(other.me.id);
       })
-      .slice(0, 20)
+      .sort((one,other)=>{
+        const rank=(id:string)=>{const at=picked.indexOf(id);return at<0?Infinity:at;};
+        return rank(one.me.id)-rank(other.me.id)||Number(other.me.username.toLowerCase()===q)-Number(one.me.username.toLowerCase()===q)||one.me.username.localeCompare(other.me.username)||one.me.id.localeCompare(other.me.id);
+      })
       .map((other) => userRef(other.me));
   }
 
@@ -665,7 +669,10 @@ export class Places {
     const text = (member: string): string | null => (typeof body[member] === 'string' ? body[member] : null);
     let found: RegExpExecArray | null;
 
-    if (route === 'GET /users/search') return { status: 200, body: this.searchPeople(person, query) };
+    if (route === 'GET /users/search') {
+      const rows=this.searchPeople(person,query),from=Number(query.get('cursor')??0),limit=Number(query.get('limit')??20);
+      return {status:200,body:{items:rows.slice(from,from+limit),next_cursor:from+limit<rows.length?String(from+limit):null}};
+    }
     // Native UserGet is an authenticated exact-ID public reference, independent of name search scope.
     if ((found = /^GET \/users\/([^/]+)$/.exec(route))) {
       const selected = [...this.world.people.values()].find((candidate) => candidate.me.id === found?.[1]);

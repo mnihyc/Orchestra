@@ -187,6 +187,7 @@ async fn access_management_alone_reads_pages_people_effective_access_and_history
                 .call(PermissionPeopleList, &[&object, &id])
                 .token(&who.token)
                 .query(&PermissionPeopleListQuery {
+                    q: None,
                     holder: "admins".to_owned(),
                     limit: None,
                     cursor: None,

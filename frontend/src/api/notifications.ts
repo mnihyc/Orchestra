@@ -6,6 +6,7 @@
  * webhook of their own. The Inbox itself is kept current by the person's live feed; these are the
  * requests that load it, change it and answer for it.
  */
+import { collectionQuery, readAllPages } from '@/api/collection';
 import { queryOptions } from '@tanstack/react-query';
 
 import { api, done, ok, repeatable } from '@/api/client';
@@ -78,6 +79,7 @@ export const notifiersKey = ['notifiers'] as const;
 export const notifiersQuery = queryOptions({
   queryKey: notifiersKey,
   queryFn: ({ signal }): Promise<Notifier[]> => ok(api.GET('/notifiers', { signal })),
+  staleTime: Number.POSITIVE_INFINITY,
 });
 
 export const notificationChannelsKey = ['notification-channels'] as const;
@@ -85,7 +87,7 @@ export const notificationChannelsKey = ['notification-channels'] as const;
 /** The channels that can reach the caller, each with their own route through it. */
 export const notificationChannelsQuery = queryOptions({
   queryKey: notificationChannelsKey,
-  queryFn: ({ signal }): Promise<NotificationChannel[]> => ok(api.GET('/notification-channels', { params: { query: {} }, signal })),
+  queryFn: ({ signal }): Promise<NotificationChannel[]> => readAllPages((cursor) => ok(api.GET('/notification-channels', { params: { query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
 });
 
 /** The caller's own switch for a channel: on or off, what it carries, how long a notification waits unread, how often a message goes. */
@@ -137,3 +139,5 @@ export function addPushSubscription(body: MePushSubscriptionCreateBody): Promise
 export function removePushSubscription(endpoint: string): Promise<void> {
   return done(api.DELETE('/me/push-subscriptions', { body: { endpoint } }));
 }
+
+export const notificationChannelsPageQuery = (q: string) => collectionQuery(notificationChannelsKey, q, (query, signal) => ok(api.GET('/notification-channels', { params: { query }, signal })));

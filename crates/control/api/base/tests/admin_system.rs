@@ -641,7 +641,8 @@ async fn every_host_of_the_system_is_listed_to_a_system_admin_those_of_orgs_and_
         .token(&c.root.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
 
     let names: Vec<_> = hosts.iter().map(|host| host.base.name.as_str()).collect();
     assert_eq!(
@@ -761,6 +762,7 @@ async fn runtimes(world: &World, by: &Who, query: &AdminRuntimeListQuery) -> Vec
         .send()
         .await
         .ok()
+        .items
 }
 
 #[tokio::test]
@@ -776,6 +778,7 @@ async fn the_runtimes_of_both_pools_are_listed_whoever_s_they_are_and_those_remo
         &AdminRuntimeListQuery {
             host_id: Some(on.first),
             kind: None,
+            ..AdminRuntimeListQuery::default()
         },
     )
     .await;
@@ -785,6 +788,7 @@ async fn the_runtimes_of_both_pools_are_listed_whoever_s_they_are_and_those_remo
         &AdminRuntimeListQuery {
             host_id: None,
             kind: Some(UnitKind::Provider),
+            ..AdminRuntimeListQuery::default()
         },
     )
     .await;
@@ -1135,7 +1139,8 @@ async fn the_plugins_the_configuration_names_and_those_machines_report_are_liste
         .token(&c.root.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
 
     assert_eq!(listed.len(), 3);
     let configured = listed

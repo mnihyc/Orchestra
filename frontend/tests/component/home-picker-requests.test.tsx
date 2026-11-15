@@ -1,10 +1,13 @@
 /** Creation loads only the chosen home, reusing live rows instead of fanning out over every org. */
-import { act, cleanup, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Nodes from '@/api/nodes';
 import { fetchTree } from '@/api/nodes';
+import { client } from '@/api/client';
+import { useAppearance } from '@/lib/appearance';
+import type * as Recents from '@/api/pickerRecents';
 import type * as Help from '@/help';
 import { hintOf } from '@/features/help/hints';
 import { HomePicker, type HomePickerProps } from '@/features/resources/HomePicker';
@@ -17,6 +20,12 @@ import { useSelectedOrg } from '@/shell/org';
 import { ACME, acmeTree, me, org, userRef } from '../doubles/fixtures';
 import { show } from './support';
 
+const recent=vi.hoisted(()=>({homes:[] as string[],read:vi.fn()}));
+vi.mock('@/api/pickerRecents',async(load)=>{const actual=await load<typeof Recents>();return {...actual,
+ pickerRecentsQuery:(person:string)=>({...actual.pickerRecentsQuery(person),queryFn:()=>{recent.read(person);return Promise.resolve({count:5,choices:{org:recent.homes}});}}),
+ recordPickerChoice:()=>Promise.resolve({count:5,choices:{}}),
+};});
+const sessionBefore=client.session.getState();const appearanceBefore=useAppearance.getState();
 const rootsOf=(length:number)=>Array.from({length},(_,n)=>org(`org-${n}`,`team-${n}`,`Team ${n}`,userRef(me(1,'ada','Ada'))));
 let roots=rootsOf(10);
 let preloaded=true;
@@ -33,12 +42,13 @@ vi.mock('@/api/nodes',async(load)=>({...await load<typeof Nodes>(),
 }));
 const selectedBefore=useSelectedOrg.getState();
 beforeEach(async()=>{
+  recent.homes=[];recent.read.mockClear();
   await setLocale('en');preloaded=true;roots=rootsOf(10);readRoots.mockReset();readRoots.mockImplementation(()=>Promise.resolve(roots));
   readNode.mockReset();readNode.mockRejectedValue(new NetworkError('failed'));
   vi.mocked(fetchTree).mockReset();vi.mocked(fetchTree).mockResolvedValue(treeReply());
   useTreeStore.setState({byOrg:new Map()});useSelectedOrg.setState({orgId:'org-0'});
 });
-afterEach(async()=>{cleanup();useTreeStore.setState({byOrg:new Map()});useSelectedOrg.setState(selectedBefore);await setLocale('en');});
+afterEach(async()=>{cleanup();client.session.setState(sessionBefore);useAppearance.setState(appearanceBefore);useTreeStore.setState({byOrg:new Map()});useSelectedOrg.setState(selectedBefore);await setLocale('en');});
 function Form({initial='org-0',chosen,...props}:Omit<HomePickerProps,'value'|'onChange'>&{initial?:string;chosen?:(id:string)=>void}){
   const [home,setHome]=useState(initial);return <HomePicker {...props} value={home} onChange={(next)=>{setHome(next);chosen?.(next);}}/>;
 }
@@ -192,3 +202,19 @@ it('resolves an uncached selected department once and reads only its owning tree
   await waitFor(()=>expect(vi.mocked(fetchTree).mock.calls.map(([id])=>id)).toEqual(['org-7']));expect(readNode).toHaveBeenCalledExactlyOnceWith('remote-department');
   await user.type(picker,'Team 23');await user.keyboard('{Escape}');expect(chosen).not.toHaveBeenCalled();expect(readRoots).not.toHaveBeenCalled();expect(readNode).toHaveBeenCalledTimes(1);expect(fetchTree).toHaveBeenCalledTimes(1);
 });
+
+
+for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'] as const)for(const width of [400,1440]) {
+ it(`puts a recently chosen late home first without reading other trees (${locale}/${theme}/${width})`,async()=>{
+  await setLocale(locale);useAppearance.setState({theme,resolvedTheme:theme});client.session.setState({userId:'home-reader'});
+  roots=rootsOf(24);recent.homes=['org-23'];const chosen=vi.fn();const user=userEvent.setup();
+  show(<div style={{width}}><Form chosen={chosen}/></div>);
+  await waitFor(()=>expect(fetchTree).toHaveBeenCalledTimes(1));
+  const input=screen.getByRole('combobox',{name:i18n.t('resources.home.label')});await user.click(input);
+  const group=await screen.findByRole('group',{name:i18n.t('ui.picker.recent')});
+  expect(within(group).getAllByRole('option')).toHaveLength(1);expect(within(group).getByRole('option',{name:'Team 23'})).toBeVisible();
+  expect(fetchTree).toHaveBeenCalledTimes(1);expect(recent.read).toHaveBeenCalledTimes(1);
+  await user.keyboard('{Home}{Enter}');expect(chosen).toHaveBeenCalledExactlyOnceWith('org-23');
+  await waitFor(()=>expect(vi.mocked(fetchTree).mock.calls.map(([id])=>id)).toEqual(['org-0','org-23']));
+ });
+}
