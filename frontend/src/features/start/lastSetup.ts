@@ -1,5 +1,8 @@
-/** A successful setup on this device; native binding options revalidate it before reuse. */
-import { useViewChoice, writeViewChoice } from '@/lib/viewChoices';
+/** A successful setup kept by the server; native binding options revalidate it before reuse. */
+import { useQuery } from '@tanstack/react-query';
+import { useStore } from 'zustand';
+import { client } from '@/api/client';
+import { meStateQuery } from '@/api/personal';
 import type { Picks } from './choices';
 
 export interface LastSetup { place: string; picks: Picks }
@@ -21,10 +24,8 @@ export function readLastSetup(raw: string): LastSetup | null {
 }
 
 export function useLastSetup(): LastSetup | null {
-  const [raw] = useViewChoice<string>('thread', 'setup', '');
-  return readLastSetup(raw);
-}
-
-export function rememberSetup(user: string | null, setup: LastSetup): void {
-  writeViewChoice(user, 'thread', 'setup', JSON.stringify(setup));
+  const person = useStore(client.session, (state) => state.status === 'signed_in' ? state.userId : null);
+  const state = useQuery({ ...meStateQuery, enabled: person !== null, staleTime: Infinity });
+  const saved = person === null ? undefined : state.data?.thread_setup;
+  return saved === undefined ? null : readLastSetup(JSON.stringify(saved));
 }

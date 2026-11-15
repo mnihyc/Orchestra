@@ -274,6 +274,8 @@ async fn actual_outgoing_work_report_is_retained_before_issue_and_old_results_st
         body: actual.body.clone(),
         deadline: Some(actual.deadline),
         authority: None,
+        input_facts: None,
+        session_offer: None,
     };
     assert!(s.allows(&canonical).await?);
     let mut conn = s.world.pool.acquire().await?;

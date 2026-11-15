@@ -9,8 +9,8 @@ import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ open: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.open }));
-vi.mock('@/features/workbench/Narrow', () => ({ useShape: () => 'wide' }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => calls.open }));
+vi.mock('@/features/workbench/Narrow', async (loadOriginal) => ({ ...await loadOriginal<object>(), useShape: () => 'wide' }));
 afterEach(async () => { document.documentElement.removeAttribute('data-theme'); calls.open.mockClear(); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const article of ['let-agents-open-ports', 'change-a-running-environment'] as const) {
