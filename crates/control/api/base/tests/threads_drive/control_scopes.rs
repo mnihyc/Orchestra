@@ -8,7 +8,7 @@ use http::StatusCode;
 use orch_access_contract::{key_scope::KeyScope, permissions::Permission};
 use orch_api_contract::threads::{ThreadInputRun, ThreadPlanDecide, ThreadPlanDecideBody};
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_authz::{Act, Caller, Policy, Principal};
@@ -38,7 +38,7 @@ async fn key(s: &Scene, actor: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &identity::NewApiToken {
@@ -766,7 +766,7 @@ async fn blocked_http(
 }
 async fn legacy(s: &Scene, actor: Id) -> Key {
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token(
         &mut *s.rig.world.conn().await,
         &identity::NewApiToken {

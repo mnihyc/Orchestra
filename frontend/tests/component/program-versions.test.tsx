@@ -129,6 +129,9 @@ for (const locale of ['en', 'zh-CN'] as const) it(`names a running program even 
   show(<ProgramBuild program={program} />);
   expect(screen.getByText(`${name} 1.2.3`, { exact: true })).toBeVisible();
   expect(screen.getByText(i18n.t('programVersions.unknownCheck'))).toBeVisible();
+  expect(screen.queryByText(i18n.t('programVersions.unknownCheckWhy'))).toBeNull();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('help.hint.label', { term: i18n.t('programVersions.unknownCheck') }) }));
+  expect(screen.getByText(locale === 'en' ? 'The origin of this installed program is unknown, so its build check cannot be identified.' : '此已安装程序的来源未知，因此无法确定对应的构建检查。')).toBeVisible();
   expect(document.body).not.toHaveTextContent(i18n.t('resources.harnessNameUnknown'));
   expect(document.body).not.toHaveTextContent('named-external');
 });

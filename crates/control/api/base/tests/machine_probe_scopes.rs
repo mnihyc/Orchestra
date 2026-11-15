@@ -12,9 +12,7 @@ use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::resources::MachineProbe;
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
-    testing::RawReply,
-    thread_access::AuthzAccess,
+    middleware::authentication::token_hash, testing::RawReply, thread_access::AuthzAccess,
 };
 use orch_db::queries::{
     identity::{self, NewApiToken},
@@ -36,9 +34,10 @@ fn rule(operation: &str, kind: &str, id: Id, actions: &[&str]) -> Json {
 async fn key(world: &World, user: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
+    let issued_key_id = new_id();
     let key = Key {
-        id: new_id(),
-        secret: new_token(API_TOKEN_PREFIX),
+        id: issued_key_id,
+        secret: orch_api_core::middleware::authentication::new_api_token(issued_key_id),
     };
     identity::create_api_token_scoped(
         &mut *world.conn().await,

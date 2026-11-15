@@ -759,7 +759,8 @@ pub(crate) async fn history(
 
     // One environment job owns several thread suppliers. Its private plan and blob pins
     // freeze them independently; a single-thread history cut keeps its original owner rule.
-    let (blob, size) = crate::fork_history::cut::put_file(engine, scratch.path()).await?;
+    let publication = crate::fork_history::cut::put_file(engine, scratch.path()).await?;
+    let (blob, size) = (publication.hash, publication.size);
     let artifact = HistoryArtifact { blob, size, notice };
     let mut tx = engine.db().begin().await?;
     let current = job

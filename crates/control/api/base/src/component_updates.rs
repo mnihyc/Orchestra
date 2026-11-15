@@ -484,6 +484,7 @@ impl Link {
             self.dispatcher()
                 .issue_stored_before(
                     crate::dispatch::StoredCommand {
+                        content_transit: false,
                         id: Some(outgoing.id),
                         machine: outgoing.machine,
                         kind: outgoing.kind.as_str().into(),

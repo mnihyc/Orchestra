@@ -207,7 +207,18 @@ async fn a_sign_in_is_given_to_the_harness_in_the_runtime_by_reference_and_nothi
     let heard = listen(&unit, "ready", json!({}));
     let secret = wait_for_runtime(&world, provider, "setup_token", SECRET).await;
     let delivered = world.engine().deliver_sign_in(provider).await.unwrap();
-    assert!(matches!(delivered, Delivered::Sent), "{delivered:?}");
+    assert!(
+        matches!(delivered, Delivered::Sent | Delivered::Nothing),
+        "{delivered:?}"
+    );
+    eventually(
+        "the sign-in's one delivery and cleanup to finish",
+        || async {
+            asked(&heard, K::ProviderLoginStart).len() == 1
+                && kept(&world, provider).await == (false, 0)
+        },
+    )
+    .await;
     let told = asked(&heard, K::ProviderLoginStart);
     assert_eq!(told.len(), 1);
     assert_eq!(told[0]["method"], "setup_token");
@@ -285,10 +296,21 @@ async fn a_sign_in_the_harness_has_no_way_for_is_refused_whole_and_forgotten_wit
     let heard = listen(&unit, "ready", json!({}));
     wait_for_runtime(&world, provider, "carrier_pigeon", SECRET).await;
     let delivered = world.engine().deliver_sign_in(provider).await.unwrap();
-    let Delivered::Refused(why) = delivered else {
-        panic!("a method the harness lacks is refused: {delivered:?}");
-    };
-    assert!(why.contains("carrier_pigeon"), "{why}");
+    // The supervisor may finish the same pending attempt before this direct call reads it.
+    match &delivered {
+        Delivered::Refused(why) => assert!(why.contains("carrier_pigeon"), "{why}"),
+        Delivered::Nothing => {}
+        other => panic!("a method the harness lacks is refused: {other:?}"),
+    }
+    eventually("the unsupported sign-in's refusal and cleanup", || async {
+        login_state(&world, provider).await.is_some_and(|state| {
+            state["state"] == "failed"
+                && state["error"]
+                    .as_str()
+                    .is_some_and(|why| why.contains("carrier_pigeon"))
+        }) && kept(&world, provider).await == (false, 0)
+    })
+    .await;
     assert!(asked(&heard, K::ProviderLoginStart).is_empty());
     assert_eq!(kept(&world, provider).await, (false, 0));
     let state = login_state(&world, provider).await.unwrap();
@@ -305,13 +327,28 @@ async fn a_sign_in_the_harness_has_no_way_for_is_refused_whole_and_forgotten_wit
             ))
         });
     wait_for_runtime(&world, provider, "setup_token", SECRET).await;
-    let Delivered::Refused(words) = world.engine().deliver_sign_in(provider).await.unwrap() else {
-        panic!("the harness refused it");
-    };
-    assert!(
-        words.contains("the token is not one this vendor issued"),
-        "{words}"
-    );
+    let delivered = world.engine().deliver_sign_in(provider).await.unwrap();
+    match &delivered {
+        Delivered::Refused(words) => assert!(
+            words.contains("the token is not one this vendor issued"),
+            "{words}"
+        ),
+        Delivered::Nothing => {}
+        other => panic!("the harness refused it: {other:?}"),
+    }
+    eventually(
+        "the harness's refusal to be kept whole and its input forgotten",
+        || async {
+            login_state(&world, provider).await.is_some_and(|state| {
+                state["state"] == "failed"
+                    && state["method"] == "setup_token"
+                    && state["error"]
+                        .as_str()
+                        .is_some_and(|why| why.contains("the token is not one this vendor issued"))
+            }) && kept(&world, provider).await == (false, 0)
+        },
+    )
+    .await;
     assert_eq!(kept(&world, provider).await, (false, 0));
     let tables = world.tables_holding(SECRET).await;
     assert!(tables.is_empty(), "{tables:?}");
@@ -625,6 +662,84 @@ async fn a_look_at_a_sign_in_that_still_works_tells_nobody() {
             .await
             .unwrap();
     assert_eq!(told, 0);
+}
+
+#[tokio::test]
+async fn a_provider_can_choose_its_expiry_notice_and_unset_it_to_follow_its_home() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-with-a-provider-notice", 16_384).await;
+    let _template = provider_template(&world).await;
+    let provider = managed_subscription(&world, "A notice chosen for this provider").await;
+    let (_runtime, _unit) = made(&world, &host, provider).await;
+    world
+        .set(world.root, "providers.expiry_notice_days", json!(0))
+        .await;
+    sqlx::query(
+        "UPDATE providers SET status = 'ready', runtime_config = runtime_config || $3,
+                facts = jsonb_build_object('credential', jsonb_build_object(
+                    'method', 'setup_token', 'yields', 'token', 'expires_at', $2::text,
+                    'issued_at', $4::text))
+          WHERE id = $1",
+    )
+    .bind(provider)
+    .bind((Utc::now() + Duration::days(10)).to_rfc3339())
+    .bind(json!({"providers.expiry_notice_days":14}))
+    .bind((Utc::now() - Duration::days(2)).to_rfc3339())
+    .execute(world.pool.pool())
+    .await
+    .unwrap();
+    let told = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM notifications WHERE user_id = $1 AND kind = 'provider.attention'",
+        )
+        .bind(world.ada)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap()
+    };
+    eventually(
+        "this provider's notice to override the home's disabled notice",
+        || async { told().await == 1 },
+    )
+    .await;
+    world
+        .set(world.root, "providers.expiry_notice_days", json!(14))
+        .await;
+    // A different expiry has its own notice. Removing the override makes this one follow home.
+    sqlx::query(
+        "UPDATE providers SET runtime_config = runtime_config - 'providers.expiry_notice_days',
+                facts = jsonb_set(facts, '{credential,expires_at}', to_jsonb($2::text))
+          WHERE id = $1",
+    )
+    .bind(provider)
+    .bind((Utc::now() + Duration::days(11)).to_rfc3339())
+    .execute(world.pool.pool())
+    .await
+    .unwrap();
+    eventually(
+        "the provider with no override to follow the home's notice",
+        || async { told().await == 2 },
+    )
+    .await;
+
+    // Every interval the setting admits remains usable, even beyond a duration's representation.
+    sqlx::query(
+        "UPDATE providers SET runtime_config = runtime_config || $3,
+                facts = jsonb_set(facts, '{credential,expires_at}', to_jsonb($2::text))
+          WHERE id = $1",
+    )
+    .bind(provider)
+    .bind((Utc::now() + Duration::days(12)).to_rfc3339())
+    .bind(json!({"providers.expiry_notice_days":i64::MAX}))
+    .execute(world.pool.pool())
+    .await
+    .unwrap();
+    eventually(
+        "a very large valid notice interval to cover this token without stopping the watcher",
+        || async { told().await == 3 },
+    )
+    .await;
 }
 
 #[tokio::test]

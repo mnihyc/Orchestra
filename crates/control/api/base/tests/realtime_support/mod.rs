@@ -36,6 +36,7 @@ use orch_api_core::backplane::Link;
 
 use orch_api_core::middleware::authentication::ACCESS_TOKEN_PREFIX;
 
+use orch_api_core::middleware::authentication::new_api_token;
 use orch_api_core::middleware::authentication::new_token;
 
 use orch_api_core::middleware::authentication::token_hash;
@@ -1619,10 +1620,15 @@ impl Rig {
     /// An API token of a person, which is no key to the socket.
     pub async fn api_token(&self, user: Id) -> String {
         let mut conn = self.pool.acquire().await.unwrap();
-        let token = new_token(orch_api_core::middleware::authentication::API_TOKEN_PREFIX);
-        orch_db::queries::identity::testing::insert_api_token(&mut conn, user, &token_hash(&token))
-            .await
-            .unwrap();
+        let token = new_api_token(orch_types::new_id());
+        orch_db::queries::identity::testing::insert_api_token(
+            &mut conn,
+            orch_api_contract::api_keys::key_id(&token).unwrap(),
+            user,
+            &token_hash(&token),
+        )
+        .await
+        .unwrap();
         token
     }
 

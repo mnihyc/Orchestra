@@ -1151,6 +1151,58 @@ pub async fn read_for(
 }
 orch_api_base::__api_bind_223f89e0d4!();
 
+/// A response whose body, once sent or dropped, removes from the server the content it was made of,
+/// unless something else holds that content.
+pub(super) fn forget_when_sent(ctx: &Ctx, hash: orch_types::Hash, response: Response) -> Response {
+    use futures::StreamExt as _;
+    struct Forget {
+        blobs: crate::blobs::Blobs,
+        db: orch_db::Db,
+        clock: std::sync::Arc<dyn orch_types::Clock>,
+        hash: orch_types::Hash,
+    }
+    impl Drop for Forget {
+        fn drop(&mut self) {
+            let (blobs, db, hash, at) = (
+                self.blobs.clone(),
+                self.db.clone(),
+                self.hash,
+                self.clock.now(),
+            );
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move { blobs.forget_after_transfer(&db, &[hash], at).await });
+            }
+        }
+    }
+    let held = Forget {
+        blobs: ctx.app.blobs.clone(),
+        db: ctx.app.db.clone(),
+        clock: std::sync::Arc::clone(&ctx.app.clock),
+        hash,
+    };
+    let (parts, body) = response.into_parts();
+    let sent = body.into_data_stream().map(move |piece| {
+        let _held = &held;
+        piece
+    });
+    Response::from_parts(parts, Body::from_stream(sent))
+}
+
+/// Whether the environment's place relays file content through the server without keeping it
+/// (`storage.relay_transfers`).
+pub(super) async fn relays(ctx: &Ctx, environment: Id) -> bool {
+    match ctx.app.db.acquire().await {
+        Ok(mut conn) => {
+            orch_engine::transfers::relay_on(
+                &mut conn,
+                orch_settings::Place::Environment(environment),
+            )
+            .await
+        }
+        Err(_) => true,
+    }
+}
+
 /// The bytes of one version of a file, found by their hash.
 async fn content_get(
     ctx: Ctx,
@@ -1274,23 +1326,21 @@ async fn content_put(
     let path = paths::clean("path", &query.path, false)?;
     let expected = expected_of(query.expected_hash.as_deref())?;
     drop(conn);
+    let relayed = relays(&ctx, door.env.id).await;
     if let Some(hash) = query.blob {
         let (mut tx, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
         crate::attachments::require(&mut tx, guard.principal(), &hash).await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
     }
     let meta = match query.blob {
-        Some(hash) => {
-            let size = ctx
-                .app
-                .blobs
-                .store()
-                .size(&hash)
-                .await
-                .map_err(ApiError::internal)?
-                .ok_or_else(ApiError::not_found)?;
-            BlobMeta { hash, size }
-        }
+        Some(hash) => ctx
+            .app
+            .blobs
+            .store()
+            .existing(&hash)
+            .await
+            .map_err(ApiError::internal)?
+            .ok_or_else(ApiError::not_found)?,
         None => ctx
             .app
             .blobs
@@ -1305,7 +1355,14 @@ async fn content_put(
     if query.blob.is_some() {
         crate::attachments::require(&mut tx, guard.principal(), &meta.hash).await?;
     }
-    ctx.app.blobs.register(&mut tx, meta, ctx.now).await?;
+    if relayed && query.blob.is_none() {
+        ctx.app
+            .blobs
+            .register_transit(&mut tx, &meta, ctx.now)
+            .await?;
+    } else {
+        ctx.app.blobs.register(&mut tx, &meta, ctx.now).await?;
+    }
     tx.commit().await.map_err(orch_db::DbError::from)?;
     let written = live::run(
         &ctx,
@@ -1321,6 +1378,15 @@ async fn content_put(
         },
     )
     .await;
+    // A place that relays keeps no copy of what an editor saved: the file is on the machine, and the
+    // bytes the request brought go from the server once the write has come to an end, whichever it was.
+    let meta = meta.into_meta();
+    if relayed && query.blob.is_none() {
+        ctx.app
+            .blobs
+            .forget_after_transfer(&ctx.app.db, &[meta.hash], ctx.app.clock.now())
+            .await;
+    }
     let stat = match written {
         Ok(found) => found,
         Err(Failure::Machine(error)) if error.code == "conflict" => {
@@ -1341,23 +1407,25 @@ async fn content_put(
     };
     let mut tx = ctx.app.db.begin().await?;
     let hash = stat.hash.unwrap_or(meta.hash);
-    storage::record_cached(
-        &mut tx,
-        door.env.id,
-        &CachedFile {
-            path: path.clone(),
-            size: stat.entry.size,
-            mtime_ns: stat
-                .entry
-                .mtime
-                .get()
-                .timestamp_millis()
-                .saturating_mul(NANOS_PER_MILLI),
-            hash,
-            cached_at: ctx.now,
-        },
-    )
-    .await?;
+    if !relayed {
+        storage::record_cached(
+            &mut tx,
+            door.env.id,
+            &CachedFile {
+                path: path.clone(),
+                size: stat.entry.size,
+                mtime_ns: stat
+                    .entry
+                    .mtime
+                    .get()
+                    .timestamp_millis()
+                    .saturating_mul(NANOS_PER_MILLI),
+                hash,
+                cached_at: ctx.now,
+            },
+        )
+        .await?;
+    }
     audited(
         &ctx,
         &mut tx,
@@ -1780,7 +1848,7 @@ async fn rename(
     ctx: Ctx,
     query: orch_api_contract::environment::ThroughThreadQuery,
     body: FileFromToBody,
-) -> ApiResult<FileStat> {
+) -> ApiResult<orch_api_contract::workspace::FileRenameResult> {
     let (from, to) = two_paths(&body)?;
     let mut conn = ctx.app.db.acquire().await?;
     let (door, machine) = writer(&ctx, &mut conn, query.thread).await?;
@@ -1797,7 +1865,7 @@ async fn rename(
     )
     .await
     .map_err(|failure| failure.problem(Doing::Renaming))?;
-    let stat = moved;
+    let stat = &moved.stat;
     let mut tx = ctx.app.db.begin().await?;
     storage::forget_cached_under(&mut tx, door.env.id, &from).await?;
     audited(
@@ -1806,13 +1874,13 @@ async fn rename(
         &door,
         orch_db::audit::action!(AuditAction::WorkspaceFileRenamed),
         &said(&ctx, &format!("renamed {from} to {to}"))?,
-        serde_json::json!({ "from": from, "to": to, "size": stat.entry.size, "hash": stat.hash }),
+        serde_json::json!({ "from": from, "to": to, "size": stat.entry.size, "hash": stat.hash, "kept_entries": moved.kept_entries }),
     )
     .await?;
     orch_db::queries::environments::thread_engine::touch_activity(&mut tx, door.env.id, ctx.now)
         .await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(stat)
+    Ok(moved)
 }
 
 /// Deletes a file, or a directory with what is in it.

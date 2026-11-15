@@ -710,7 +710,7 @@ impl Engine {
             .ok_or_else(|| EngineError::unreadable("no store of content is attached"))?;
         let hash = Hash::of(&bytes);
         let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-        store
+        let _publication = store
             .put(
                 &hash,
                 Some(size),
@@ -718,7 +718,7 @@ impl Engine {
             )
             .await
             .map_err(EngineError::unreadable)?;
-        storage::register_blob(conn, &hash, size, self.inner.clock.now()).await?;
+        storage::register_owned_blob(conn, &hash, size, self.inner.clock.now()).await?;
         Ok(BlobMeta { hash, size })
     }
 }

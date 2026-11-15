@@ -166,21 +166,21 @@ impl Engine {
         for file in &files.files {
             let hash = Hash::of(&file.bytes);
             let size = i64::try_from(file.bytes.len()).unwrap_or(i64::MAX);
-            if store
-                .size(&hash)
+            let _publication = match store
+                .existing(&hash)
                 .await
                 .map_err(EngineError::unreadable)?
-                .is_none()
             {
-                store
+                Some(existing) => existing,
+                None => store
                     .put(
                         &hash,
                         Some(size),
                         stream_of(vec![Bytes::from(file.bytes.clone())]),
                     )
                     .await
-                    .map_err(EngineError::unreadable)?;
-            }
+                    .map_err(EngineError::unreadable)?,
+            };
             storage::register_blob(conn, &hash, size, now).await?;
             entries.push(Entry {
                 path: file.path.clone(),
@@ -577,21 +577,21 @@ impl Engine {
             .ok_or_else(|| EngineError::unreadable("this system has no store for files"))?;
         let hash = Hash::of(bytes);
         let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-        if store
-            .size(&hash)
+        let _publication = match store
+            .existing(&hash)
             .await
             .map_err(EngineError::unreadable)?
-            .is_none()
         {
-            store
+            Some(existing) => existing,
+            None => store
                 .put(
                     &hash,
                     Some(size),
                     stream_of(vec![Bytes::copy_from_slice(bytes)]),
                 )
                 .await
-                .map_err(EngineError::unreadable)?;
-        }
+                .map_err(EngineError::unreadable)?,
+        };
         storage::register_blob(conn, &hash, size, self.inner.clock.now()).await?;
         let target = within(&row.workspace_dir, path);
         // Same-call retries keep one native command; another source/ref checks the actual target again.

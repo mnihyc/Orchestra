@@ -253,6 +253,7 @@ pub async fn issue(app: &App, machine: Id, kind: CommandKind, body: &Json) -> Id
     command_rows::insert_command(
         &mut conn,
         &command_rows::NewCommand {
+            content_transit: false,
             id,
             machine_id: machine,
             kind: kind.as_str(),
@@ -348,7 +349,7 @@ impl Depot {
         let mut conn = self.world.conn().await;
         self.app()
             .blobs
-            .register(&mut conn, meta, self.app().clock.now())
+            .register(&mut conn, &meta, self.app().clock.now())
             .await
             .unwrap();
         meta.hash
@@ -926,11 +927,12 @@ impl Machine for Disk {
                 }
                 lock(&self.dirs).remove(&rename.from);
                 lock(&self.dirs).insert(rename.to.clone());
-                Self::json(
-                    &self
+                Self::json(&orch_api_contract::workspace::FileRenameResult {
+                    stat: self
                         .stat_of(&rename.to)
                         .unwrap_or_else(|| self.stat_of("").unwrap()),
-                )
+                    kept_entries: 0,
+                })
             }
             CommandKind::FsCopy => {
                 let copy: FsCopy = serde_json::from_value(body).map_err(bad)?;
@@ -1793,7 +1795,12 @@ pub mod ask {
     }
 
     /// A path renamed.
-    pub async fn rename(site: &Site, by: &Who, from: &str, to: &str) -> Reply<FileStat> {
+    pub async fn rename(
+        site: &Site,
+        by: &Who,
+        from: &str,
+        to: &str,
+    ) -> Reply<orch_api_contract::workspace::FileRenameResult> {
         site.app()
             .call(EnvironmentFileRename, &[&site.environment])
             .token(&by.token)

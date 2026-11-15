@@ -1979,7 +1979,7 @@ BEGIN
     END IF;
     IF TG_OP <> 'DELETE' THEN
         IF NEW.blob IS NOT NULL AND NEW.expires_at IS NOT NULL THEN
-            UPDATE blobs SET pin_count = pin_count + 1 WHERE hash = NEW.blob;
+            UPDATE blobs SET pin_count = pin_count + 1, relay_only=false WHERE hash = NEW.blob;
         END IF;
         RETURN NEW;
     END IF;
@@ -2099,7 +2099,7 @@ BEGIN
     removed := CASE WHEN TG_OP IN ('DELETE','UPDATE') THEN OLD.blob END;
   END IF;
   IF added IS NOT NULL THEN
-    UPDATE blobs SET pin_count = pin_count + 1 WHERE hash = added;
+    UPDATE blobs SET pin_count = pin_count + 1, relay_only=false WHERE hash = added;
   END IF;
   IF removed IS NOT NULL THEN
     UPDATE blobs SET pin_count = pin_count - 1, last_access_at = GREATEST(last_access_at, now())
@@ -2232,7 +2232,7 @@ CREATE FUNCTION public.thread_history_blob_pin() RETURNS trigger
     AS $$
 BEGIN
   IF TG_OP='INSERT' THEN
-    UPDATE blobs SET pin_count=pin_count+1 WHERE hash=NEW.blob;
+    UPDATE blobs SET pin_count=pin_count+1,relay_only=false WHERE hash=NEW.blob;
     RETURN NEW;
   END IF;
   UPDATE blobs SET pin_count=pin_count-1,last_access_at=GREATEST(last_access_at,now())
