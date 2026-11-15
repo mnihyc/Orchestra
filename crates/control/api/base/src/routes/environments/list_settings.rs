@@ -19,6 +19,8 @@ pub use std::collections::HashSet;
 pub struct DisplaySettings {
     pub mounts: HashSet<Id>,
     pub idle_minutes: HashMap<Id, i64>,
+    pub background_work: HashSet<Id>,
+    pub removed_keep_days: HashMap<Id, Option<i64>>,
 }
 
 impl DisplaySettings {
@@ -27,10 +29,23 @@ impl DisplaySettings {
         self.mounts.contains(&id)
     }
 
-    /// The same static idle deadline as the environment lifecycle uses, from the already read descriptor and row.
-    pub fn idle_stop(&self, row: &EnvironmentFull, unit: bool) -> ApiResult<Option<DateTime<Utc>>> {
+    /// An enabled idle stop waits for active turns and retained native work to finish.
+    pub fn idle_deferred(&self, row: &EnvironmentFull, unit: bool, active: bool) -> bool {
+        unit && row.status == "running"
+            && self.idle_minutes.get(&row.id).copied().unwrap_or_default() > 0
+            && (active || self.background_work.contains(&row.id))
+    }
+
+    /// The lifecycle deadline, withheld while the same native-work guard holds the stop.
+    pub fn idle_stop(
+        &self,
+        row: &EnvironmentFull,
+        unit: bool,
+        active: bool,
+    ) -> ApiResult<Option<DateTime<Utc>>> {
         let minutes = self.idle_minutes.get(&row.id).copied().unwrap_or_default();
-        if !unit || row.status != "running" || minutes <= 0 {
+        if !unit || row.status != "running" || minutes <= 0 || self.idle_deferred(row, unit, active)
+        {
             return Ok(None);
         }
         let span = chrono::Duration::try_minutes(minutes).ok_or_else(|| {

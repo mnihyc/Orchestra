@@ -1,0 +1,9 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test hosted_environments -- running_native_work_defers_the_reported_idle_deadline_until_the_work_ends
+test -p orch-api-core --test hosted_environments -- a_removal_uses_the_previewed_recovery_window_and_refuses_a_changed_policy_before_effects
+test -p orch-engine --test background_wake -- native_work_state_changes_refresh_the_environment_once_without_a_page_action
+test -p orch-engine --test trace_retention

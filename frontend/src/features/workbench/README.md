@@ -4,7 +4,7 @@ Hidden desktop side bars can open temporarily from their edge, rail or shortcut 
 `SlideOutBar.tsx`, using the shared drawer for focus and Escape. A pin docks the bar; choosing a row or
 leaving it dismisses the temporary view without changing Main's size. Tab pins live in layout format
 4, remain first in their group, and survive bulk close, Reset and layout changes. Both drag sensors
-use the same boundary-aware layout operation. Older layout formats migrate with their valid targets.
+use the same boundary-aware layout operation. Only the current layout format is read.
 
 Each feature registers its working views. `shippedViews.tsx` registers independently targeted full
 content pages and Navigation. One shell, router, query client and websocket serve the persistent
@@ -57,7 +57,7 @@ Page-local section navigation stays available independently of the global Naviga
 Layout toggles use short area names. Keyboard shortcuts open the existing wide searchable table,
 with binding edits kept in its rows and the same refusal/retry behavior.
 
-The layout format is version 3, migrating versions 1 and 2. One per-user workspace retains
+The layout format is version 4. One per-user workspace retains
 main groups, sidebar and bottom panels, sizes, targets, inspector scope, focus and closed views.
 Normal navigation activates a matching content tab or appends to the focused main group. Explicit
 Open in new tab creates another instance; Open beside creates a full view in a right-hand group.
@@ -114,7 +114,7 @@ An empty terminal shows one state: the native refusal, an opening failure, or th
 The Environment container uses short native rows, with network, credential and MCP explanations on demand.
 
 - `layout.ts`: Values and immutable changes for containers, sections, main groups, splits and bottom tabs; the versioned reader.
-- `placement.ts`: Built-in starting containers and section order, also used for old layouts.
+- `placement.ts`: Built-in starting containers and section order.
 - `views.ts`, `containers.ts`: Named registrations, contextual offers, body, summary, actions, icon, title and help text.
 - `choiceWords.ts`, `choiceHelp.ts`: Familiar names and popup descriptions, retaining extension contributions; layout menus have no separate guide entry.
 - `Arrangements.tsx`: Shipped layouts, frame dimensions and the arrangement menu.
@@ -144,6 +144,6 @@ Component cases check compact live target labels, visible navigation/options, ke
 preserved drafts, route nonces, bootstrap hydration, Find during admission/bootstrap, persistent loading chrome, visible focus areas and travelling terminal actions. Browser coverage
 includes pointer/keyboard access at 1280, 1440 and 1920 pixels and the minimum right-bar width, phone
 sheets, wrapped page/tab strips at 400 and 768 pixels, a single phone icon row at 400/360 pixels,
-focus/hold naming and medium-width visible names, org-home navigation/toggling, all-tab lists, saved version-1
+focus/hold naming and medium-width visible names, org-home navigation/toggling, all-tab lists, current-format saved
 choices, and the all-screen scrolling rule. These sources live
 under `tests/unit` and `tests/e2e`. Named saved arrangements and general unsaved-text persistence are not implemented here.
