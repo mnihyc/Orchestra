@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-api-core --lib
+test -p orch-api-core --test ask -- sources::
+test -p orch-api-core --test copy_out_ask

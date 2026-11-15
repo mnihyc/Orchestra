@@ -127,6 +127,7 @@ pub(crate) fn requested(
             | "ThreadSyncGet"
             | "ThreadItemList"
             | "ThreadItemGet"
+            | "ThreadItemRawGet"
             | "ThreadItemOutputGet"
             | "ThreadOutlineGet"
             | "ThreadSegmentList"

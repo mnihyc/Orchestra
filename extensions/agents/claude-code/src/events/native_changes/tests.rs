@@ -274,3 +274,52 @@ fn a_real_process_restart_needs_its_own_observations_and_has_a_new_reference_nam
     };
     assert_ne!(reference(&first), reference(&second));
 }
+
+#[test]
+fn initial_native_connections_keep_their_state_and_definition_source_for_the_environment_rows() {
+    let mut mapper = mapper();
+    mapper.set_mcp_definitions(
+        ["catalog".to_owned()].into_iter().collect(),
+        &["extra".to_owned()],
+    );
+    mapper.begin_turn(new_id());
+    let events = mapper.on_frame(&system("init", "initial-tools", json!({"mcp_servers":[{"name":"catalog","status":"connected"},{"name":"extra","status":"failed"}]})));
+    let seen = markers(&events);
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0]["data"]["subject"], "catalog");
+    assert_eq!(seen[0]["data"]["value"]["status"], "ready");
+    assert_eq!(seen[0]["data"]["value"]["definition_source"], "native");
+    assert_eq!(seen[1]["data"]["value"]["definition_source"], "orch");
+}
+
+#[test]
+fn a_restarted_program_replaces_connection_evidence_before_any_new_server_reports() {
+    let mut mapper = mapper();
+    mapper.begin_turn(new_id());
+    mapper.process_started(true);
+    let first = mapper.configure_mcp(
+        [
+            ("catalog".to_owned(), "native"),
+            ("extra".to_owned(), "orch"),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let first_epoch = markers(&first)[0]["data"]["value"]["epoch"].clone();
+    let ready = mapper.on_frame(&system("init", "first-ready", json!({"mcp_servers":[{"name":"catalog","status":"connected"},{"name":"extra","status":"connected"}]})));
+    assert_eq!(markers(&ready)[0]["data"]["value"]["epoch"], first_epoch);
+    assert_eq!(
+        markers(&ready)[1]["data"]["value"]["definition_source"],
+        "orch"
+    );
+    mapper.process_started(false);
+    let restarted = mapper.configure_mcp([("catalog".to_owned(), "native")].into_iter().collect());
+    assert_ne!(
+        markers(&restarted)[0]["data"]["value"]["epoch"],
+        first_epoch
+    );
+    assert_eq!(
+        markers(&restarted)[0]["data"]["change"],
+        "mcp_configuration"
+    );
+}

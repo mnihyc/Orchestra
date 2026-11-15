@@ -187,15 +187,31 @@ async fn prepared_choices_keep_the_original_provider_source_and_current_read_thr
 -> Proof {
     for mode in ["unchanged", "scope", "expire", "association"] {
         let s = Scene::new().await;
+        let machine = s.rig.machine_id;
+        sqlx::query("UPDATE machines SET owner_id=$2,home_id=$3,org_id=$3 WHERE id=$1")
+            .bind(machine)
+            .bind(s.ada.id())
+            .bind(s.tree.org.base.id)
+            .execute(s.rig.db.pool())
+            .await?;
+        s.rig
+            .lets_use("machine", machine, "machine.view", &s.ada, json!({}))
+            .await;
         let (_, provider) = another_provider(&s, "Retained scoped choice", &["separated"]).await;
         let mut grants = rules(&s);
         grants.push(rule(OP, "provider", provider, "self", "read"));
+        grants.push(rule(OP, "machine", machine, "self", "read"));
         let selected = key(&s.rig.world, s.ada.id(), grants).await?;
+        let before = shown(&get(&s, &selected.secret, &query(&s)).await)?;
+        assert_eq!(before.providers.len(), 1);
         assert_eq!(
-            shown(&get(&s, &selected.secret, &query(&s)).await)?
-                .providers
-                .len(),
-            1
+            provider_of(&before, provider)
+                .grouping
+                .origin_machine
+                .as_ref()
+                .map(|row| row.id),
+            Some(machine),
+            "the original machine must be observable before the association moves"
         );
         let mut blocker = s.rig.db.begin().await?;
         sqlx::query("LOCK TABLE api_token_activity IN SHARE MODE")
@@ -239,6 +255,15 @@ async fn prepared_choices_keep_the_original_provider_source_and_current_read_thr
         let reply = tokio::time::timeout(rig::PATIENCE, pending).await??;
         if mode == "unchanged" {
             assert_eq!(shown(&reply)?.providers.len(), 1);
+        } else if mode == "association" {
+            // Readable choices are rebuilt when their association moves. The
+            // returned provider must carry the current origin and current body.
+            let actual = shown(&reply)?;
+            let current = provider_of(&actual, provider);
+            assert!(current.grouping.origin_machine.is_none());
+            assert_ne!(current, provider_of(&before, provider));
+            let fresh = shown(&get(&s, &selected.secret, &query(&s)).await)?;
+            assert_eq!(current, provider_of(&fresh, provider));
         } else {
             assert!(
                 !reply.status.is_success(),

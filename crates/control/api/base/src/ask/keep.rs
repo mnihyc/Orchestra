@@ -283,12 +283,18 @@ pub(super) async fn keep(ctx: Ctx, (): (), body: api::AskKeepBody) -> ApiResult<
         return Err(ApiError::not_found());
     }
     start_private(&mut tx, thread, person, guard.principal(), ctx.now).await?;
+    // A copy is a new conversation: its future knowledge and governance come from its actual destination.
+    let root = hierarchy::node(&mut tx, thread)
+        .await?
+        .ok_or_else(ApiError::not_found)?
+        .org_id;
+    let same_root = root == row.root_org_id;
     rows::bind_kept(
         &mut tx,
         thread,
-        row.root_org_id,
-        row.model.as_ref(),
-        row.payer_id,
+        root,
+        if same_root { row.model.as_ref() } else { None },
+        if same_root { row.payer_id } else { None },
         ctx.now,
     )
     .await?;
