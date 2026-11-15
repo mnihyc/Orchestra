@@ -176,6 +176,8 @@ impl<K: Input> effects::Effect for Editor<K> {
             let request = K::request(query, body);
             if let Request::Set(body) = &request {
                 super::super::resources::validation::setting(&ctx.app.engine, &key, &body.value)?;
+                super::super::resources::validation::named_things_exist(conn, &key, &body.value)
+                    .await?;
             }
             lock_footprint(conn, node, kind, &key).await?;
             let needs = setting_needs(conn, node, &key).await?;

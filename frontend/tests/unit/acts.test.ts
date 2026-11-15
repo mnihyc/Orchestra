@@ -675,6 +675,12 @@ describe('the registry of acts', () => {
       .toEqual([{ missing: [{ key: ['ask-history'] }], cancelPending: true }]);
   });
 
+  it('reads a parameter form without changing or invalidating any view', () => {
+    const form = findAct('POST', '/settings/parameters/form');
+    expect(form).not.toBeNull();
+    expect(form?.changes).toEqual([]);
+  });
+
   it('has an entry for every request of the application that changes something', () => {
     const requests = writeRequests();
     // The two requests of the session are the client's own and change nothing a screen reads by themselves.
