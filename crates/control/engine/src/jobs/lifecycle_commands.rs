@@ -155,6 +155,7 @@ impl Evidence {
                 // It still requires the real job, current recipe and exact journaled proposal.
                 let serial = command.key.wire();
                 let proposed = NewCommand {
+                    native_target: None,
                     id: command.id,
                     machine_id: command.machine,
                     kind: command.kind.as_str(),

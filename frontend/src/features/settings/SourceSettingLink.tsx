@@ -1,4 +1,5 @@
 /** A short setting-source link uses the served identity and the existing exact-setting destination. */
+import { PathLink } from '@/shell/TrailLink';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { useEffect, useRef } from 'react';
@@ -50,7 +51,7 @@ export function SourceSettingLink({ source, def, target, fallback, locked = fals
   const place = node?.name ?? (source.scope === 'system' ? t('settings.editor.from.system') : source.scope === 'default' ? t('settings.editor.from.default') : fallback);
   const href = sourceSettingHref(source, def, target, address);
   const label = text ?? t(locked ? 'settings.compact.lockedOn' : inherited ? 'settings.compact.inheritedFrom' : 'settings.compact.setOn', { place });
-  if (href !== null) return <a href={href} className="focus-inset min-w-0 rounded-md wrap-anywhere text-accent-text underline underline-offset-2">{label}</a>;
+  if (href !== null) return <PathLink href={href} className="focus-inset min-w-0 rounded-md wrap-anywhere text-accent-text underline underline-offset-2">{label}</PathLink>;
   return visibleOrg ? <Button role="link" variant="ghost" size="sm" pending={resolve.isPending} className="h-auto min-h-6 min-w-0 max-w-full px-0 text-xs text-accent-text underline underline-offset-2"
     onClick={() => resolve.mutate({ version: version.current, at: location.href, source, def, target })}><span className="min-w-0 text-left wrap-anywhere whitespace-normal">{label}</span></Button> : <span>{label}</span>;
 }

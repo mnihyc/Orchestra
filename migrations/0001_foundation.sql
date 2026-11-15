@@ -952,6 +952,20 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION public.orch_mount_location_membership() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF (NEW.mount_id,NEW.machine_id,NEW.kind,NEW.source,NEW.storage)
+      IS DISTINCT FROM (OLD.mount_id,OLD.machine_id,OLD.kind,OLD.source,OLD.storage) THEN
+    NEW.membership_id := gen_random_uuid();
+  ELSE
+    NEW.membership_id := OLD.membership_id;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
 CREATE FUNCTION public.orch_machine_resources_unavailable() RETURNS trigger
     LANGUAGE plpgsql
     AS $$

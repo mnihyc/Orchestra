@@ -1,0 +1,7 @@
+test -p orch-agent-contract --lib
+test -p orch-connector-core --test agent_role --test harness_tools --test tool_servers --test tunnel --test direct_machine_programs
+test -p orch-engine --test mcp_resolution --test cache_cleanup --test call_recovery --test forks
+test -p orch-link --test commands --test resume_authority
+test -p orch-api-core --test real_connector --test executor_ticket_build --test terminals_connector
+test -p orch-testkit --test harness_corpus
+test -p orch-gateway-core --test tunnels --test tunnel_attachments
