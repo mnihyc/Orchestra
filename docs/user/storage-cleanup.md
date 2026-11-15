@@ -87,6 +87,15 @@ The job keeps running after you close the dialog. **Cancel remaining** waits for
 
 A kept environment's row keeps the accepted job's progress after **Hide**. Kept-data views refresh from the server's confirmed result.
 
+
+## Delete a mount
+
+**Delete** on a mount opens the same plan. Places stop enabling that mount now. Environments keep an existing attachment until their next start; use the environment's **Restart** when ready. The count opens the visible names, with other uses kept as a count.
+
+Owned data starts at **Keep**. **Mount data on deletion** changes the proposed default. **Purge now** appears only where you may manage the data and it is not held by an environment; type the mount's exact name. Existing folders stay. Missing access or a lost machine never prevents deleting the definition and keeping its data.
+
+**Notify** is your choice for this operation. Each eligible person receives at most one item, however many environments they have. After confirming, the shared job retains progress and each data outcome. Kept volumes remain in **Storage** under their original mount and machine permissions. Close the result to return to Mounts. If the data location changed after the preview, read the plan again before confirming.
+
 ## Server files
 
 System Storage also lists the updater's releases and dump pairs. Their size and

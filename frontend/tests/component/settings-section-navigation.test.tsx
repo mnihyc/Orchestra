@@ -69,8 +69,8 @@ it.each(modes)('keeps complete section links and the compact picker on the same 
     if (frame.current === '/settings/profile') expect(within(nav).getByRole('link', { name: i18n.t('screens.uploads.title') })).toHaveAttribute('href', '/storage?view=uploads');
     const current = within(nav).getAllByRole('link').filter((link) => link.getAttribute('aria-current') === 'page');
     expect(current).toHaveLength(1); expect(current[0]).toHaveAttribute('href', frame.current);
-    // jsdom has no container-query layout; the browser proof checks which presentation is visible.
-    expect(within(nav).getByRole('combobox', { name: frame.label })).toHaveValue(current[0]?.textContent ?? '');
+    // The same links are a list beside the content or a strip above it; there is no dropdown to choose from.
+    expect(within(nav).queryByRole('combobox')).not.toBeInTheDocument();
     expect(within(nav).queryByRole('button', { name: /More|更多/ })).not.toBeInTheDocument();
     expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
     expect(screen.queryByRole('link', { name: /Back to|返回/ })).not.toBeInTheDocument();

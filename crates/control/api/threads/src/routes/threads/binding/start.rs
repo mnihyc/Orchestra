@@ -82,7 +82,6 @@ async fn render_selected(
     .await?;
     if context.node.kind == "project" {
         for entry in &mut environments {
-            entry.is_default = false;
             let used_here =
                 orch_db::queries::binding_start::used_in_project(conn, entry.environment.id, id)
                     .await?;
@@ -95,6 +94,8 @@ async fn render_selected(
             };
         }
     }
+    let default_environment =
+        default_environment_of(conn, principal, id, &environments, &value.projection.names).await?;
     let (mut access, mut new_environment) = access_of(conn, principal, id).await?;
     bound_summary(&mut access.managed, &value.projection.names);
     bound_summary(&mut access.connected, &value.projection.names);
@@ -227,6 +228,7 @@ async fn render_selected(
         providers,
         environments,
         environment_default: context.environment_default,
+        default_environment,
         source,
         access,
         agent_access: Some(

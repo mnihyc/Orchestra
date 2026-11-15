@@ -72,6 +72,15 @@ struct StoreInner {
     violations: Vec<String>,
     resets: Vec<ResetRecord>,
     commands: HashMap<Id, Cmd>,
+    native_sessions: HashMap<Id, orch_link_contract::commands::SessionTarget>,
+    native_epoch: i64,
+    native_tools: HashMap<
+        Id,
+        (
+            i64,
+            Vec<orch_link_contract::tool_sessions::ToolSessionMember>,
+        ),
+    >,
     handles: HashMap<Id, CommandHandle>,
     reports: Vec<String>,
     online: Vec<Id>,
@@ -281,8 +290,99 @@ impl ScriptedController {
 
     /// Issues a command under a given identifier.
     pub fn issue_with_id<B: CommandBody>(&self, id: Id, key: &SerialKey, deadline: Time, body: &B) {
-        let cmd = Cmd::new(id, key, deadline, body)
+        let mut cmd = Cmd::new(id, key, deadline, body)
             .unwrap_or_else(|error| panic!("a command could not be made: {error}"));
+        {
+            use orch_link_contract::native_target::{
+                NativeTarget, SessionAction, SessionTarget, session_action, session_address,
+            };
+            let mut inner = lock(&self.store.inner);
+            if let Some(action) = session_action(&cmd.kind, &cmd.body) {
+                let (thread, segment) = session_address(&cmd.kind, &cmd.body)
+                    .expect("a native fixture command has its thread");
+                let target = if action == SessionAction::Open {
+                    inner.native_epoch += 1;
+                    let target = SessionTarget {
+                        thread_id: thread,
+                        segment_id: segment,
+                        opening_id: Some(id),
+                        opening_epoch: Some(inner.native_epoch),
+                    };
+                    inner.native_sessions.insert(thread, target.clone());
+                    target
+                } else {
+                    let mut target = inner
+                        .native_sessions
+                        .get(&thread)
+                        .cloned()
+                        .unwrap_or_else(|| SessionTarget::absent(thread));
+                    if target.opening_id.is_none() {
+                        target.segment_id = segment;
+                    }
+                    if action == SessionAction::Close {
+                        inner.native_sessions.remove(&thread);
+                    }
+                    target
+                };
+                cmd.native_target = Some(NativeTarget::Session(target));
+                if matches!(
+                    action,
+                    SessionAction::Open | SessionAction::Mcp | SessionAction::Model
+                ) {
+                    let (revision, mut members) =
+                        inner.native_tools.get(&thread).cloned().unwrap_or_default();
+                    let revision = revision + 1;
+                    let body = if matches!(
+                        cmd.kind.as_str(),
+                        "session.open.fenced"
+                            | "session.prefix.open"
+                            | "session.continuation.resume"
+                    ) {
+                        &cmd.body["session"]
+                    } else {
+                        &cmd.body
+                    };
+                    if action == SessionAction::Open {
+                        members.clear();
+                    }
+                    if matches!(action, SessionAction::Open | SessionAction::Model) {
+                        members.retain(|member| member.member != "llm");
+                        if let Some(provider) = body.get("provider") {
+                            members.push(crate::doubles::link::native_member(
+                                provider,
+                                "llm".into(),
+                                id,
+                            ));
+                        }
+                    }
+                    if action == SessionAction::Open
+                        && let Some(exec) = body.get("exec")
+                    {
+                        members.push(crate::doubles::link::native_member(exec, "exec".into(), id));
+                    }
+                    if matches!(action, SessionAction::Open | SessionAction::Mcp) {
+                        members.retain(|member| !member.member.starts_with("mcp:"));
+                        for binding in body
+                            .get("mcp")
+                            .and_then(Json::as_array)
+                            .into_iter()
+                            .flatten()
+                        {
+                            if let Some(server) = binding.get("server_id").and_then(Json::as_str) {
+                                members.push(crate::doubles::link::native_member(
+                                    binding,
+                                    format!("mcp:{server}"),
+                                    id,
+                                ));
+                            }
+                        }
+                    }
+                    cmd.native_members = Some(members.clone());
+                    cmd.native_revision = Some(revision);
+                    inner.native_tools.insert(thread, (revision, members));
+                }
+            }
+        }
         let handle = self.link().commands().issue(cmd.clone());
         let mut inner = lock(&self.store.inner);
         inner.commands.insert(id, cmd);

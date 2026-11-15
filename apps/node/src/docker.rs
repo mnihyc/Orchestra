@@ -231,7 +231,14 @@ pub async fn connect(config: DockerConfig, desk: Arc<BlobDesk>) -> Result<HostDr
             .map_err(|error| DriverError::Unavailable(error.to_string()))?;
     let driver = Arc::new(driver);
     let contract: Arc<dyn EnvironmentDriver> = driver.clone();
-    Ok(HostDriver::new(contract).with_extras(Arc::new(DockerExtras { driver, docker })))
+    let server_update = crate::server_update::Runner::new(docker.clone(), &socket);
+    Ok(
+        HostDriver::new(contract).with_extras(Arc::new(DockerExtras {
+            driver,
+            docker,
+            server_update,
+        })),
+    )
 }
 
 /// The registration of the driver for a program: it reads the settings `adjust` is given the chance to change
@@ -273,6 +280,7 @@ pub fn registration(adjust: impl Fn(&mut DockerConfig) + Send + Sync + 'static) 
 
 /// What the Docker driver has beyond the contract, as the node asks for it.
 pub struct DockerExtras {
+    server_update: crate::server_update::Runner,
     driver: Arc<DockerDriver>,
     docker: Docker,
 }
@@ -295,6 +303,27 @@ impl ProgressSink for Reporting<'_> {
 
 #[async_trait]
 impl DriverExtras for DockerExtras {
+    fn server_update_support(&self) -> Option<orch_driver_contract::descriptor::OperationSupport> {
+        self.server_update.support()
+    }
+    async fn server_update(
+        &self,
+        command: orch_types::Id,
+        body: &orch_link_contract::commands::NodeServerUpdate,
+    ) -> Result<orch_api_contract::admin::ServerUpdateObservation, DriverError> {
+        self.server_update.prepare(command, body).await
+    }
+    fn pending_server_update(&self) -> Option<orch_types::Id> {
+        self.server_update.pending()
+    }
+    fn server_update_answered(&self, command: orch_types::Id) {
+        self.server_update.answered(command);
+    }
+    async fn server_update_observation(
+        &self,
+    ) -> Result<Option<orch_link_contract::events::NodeServerUpdate>, DriverError> {
+        self.server_update.observe().await
+    }
     async fn stop_volume_work(&self, command: orch_types::Id) -> Result<(), DriverError> {
         self.driver.stop_volume_work(command).await
     }

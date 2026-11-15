@@ -771,6 +771,7 @@ async fn unavailable_original(site: &Site, id: Id) -> Hash {
     commands::insert_command(
         &mut conn,
         &commands::NewCommand {
+            native_target: None,
             id: command,
             machine_id: site.machine,
             kind: CommandKind::FsRecord.as_str(),

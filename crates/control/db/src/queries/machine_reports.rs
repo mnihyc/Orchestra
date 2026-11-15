@@ -13,10 +13,12 @@ pub async fn owns(conn: &mut Conn, machine: Id, stream: &Stream) -> Result<bool,
 }
 
 async fn active(conn: &mut Conn, machine: Id) -> Result<bool, DbError> {
-    // The batch holds the machine's row until it commits, without a shared barrier: a revocation
-    // waits for the batch, or the batch waits for the revocation and then sees it, and is refused.
+    // Admit one report writer per machine before it takes any other rows. Shared locks let
+    // two streams enter together, then deadlock when each upgrades to write the machine's facts.
+    // A revocation still waits for the batch, or completes first and refuses it. Key-share locks
+    // for commands and sessions remain compatible, so a report never holds their references back.
     Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT status = 'active' AND deleted_at IS NULL FROM machines WHERE id = $1 FOR SHARE",
+        "SELECT status = 'active' AND deleted_at IS NULL FROM machines WHERE id = $1 FOR NO KEY UPDATE",
     )
     .bind(machine)
     .fetch_optional(&mut *conn)
@@ -199,6 +201,25 @@ fn id(body: &Json, key: &str) -> Option<Id> {
     body.get(key)?.as_str()?.parse().ok()
 }
 
+/// Whether `machine` is the unit that enrolled for the environment's current runtime while the
+/// environment's own row does not name it yet. What such a unit reports is held until the row names
+/// it: it is not another machine's report, and nothing is refused or counted for it.
+pub async fn awaits_attachment(
+    conn: &mut Conn,
+    machine: Id,
+    environment: Id,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM runtimes r JOIN environments e ON e.id = r.environment_id
+         WHERE r.environment_id = $1 AND r.machine_id = $2 AND r.successor_of IS NULL
+         AND r.state IN ('creating','running') AND e.machine_id IS DISTINCT FROM $2)",
+    )
+    .bind(environment)
+    .bind(machine)
+    .fetch_one(conn)
+    .await?)
+}
+
 /// Whether the machine is the registered node of this runtime's host.
 pub async fn owns_runtime(conn: &mut Conn, machine: Id, runtime: Id) -> Result<bool, DbError> {
     Ok(sqlx::query_scalar(
@@ -283,6 +304,136 @@ mod tests {
     use orch_testkit::{clock, database::TestDb};
     use orch_types::new_id;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn concurrent_streams_finish_their_reports_without_upgrading_shared_machine_locks() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let machine = resources::testing::insert_machine(&mut conn, "host", "connected")
+            .await
+            .unwrap();
+        let host = new_id();
+        sqlx::query("INSERT INTO hosts(id,machine_id,name) VALUES($1,$2,'Host')")
+            .bind(host)
+            .bind(machine)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let mut first = test.pool.begin().await.unwrap();
+        let mut second = test.pool.begin().await.unwrap();
+        let first_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *first)
+            .await
+            .unwrap();
+        let second_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *second)
+            .await
+            .unwrap();
+        let facts = json!({"hostname":"Host"});
+        let reports = [("machine.facts", &facts)];
+        assert!(
+            accepts(&mut first, machine, &Stream::Machine, &reports)
+                .await
+                .unwrap()
+        );
+        // Commands and sessions only need a key-share lock for their machine reference.
+        let referenced: Id =
+            sqlx::query_scalar("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE NOWAIT")
+                .bind(machine)
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+        assert_eq!(referenced, machine);
+        let mut admission = Box::pin(accepts(&mut second, machine, &Stream::Node, &[]));
+        // The existing database concurrency cases allow ten seconds for scheduling, and poll at
+        // ten milliseconds. The exact blocker proves serialization; elapsed time proves nothing.
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let blocked: bool =
+                    sqlx::query_scalar("SELECT pg_blocking_pids($1) @> ARRAY[$2]::integer[]")
+                        .bind(second_pid)
+                        .bind(first_pid)
+                        .fetch_one(&mut *conn)
+                        .await
+                        .unwrap();
+                if blocked {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+        tokio::select! {
+            result = &mut admission => panic!("a second writer was admitted before the first report committed: {result:?}"),
+            result = observed => result.expect("the second report must wait on the first machine writer"),
+        }
+        resources::set_machine_facts(
+            &mut first,
+            machine,
+            &facts,
+            (None, None),
+            0.25,
+            clock::start(),
+        )
+        .await
+        .unwrap();
+        first.commit().await.unwrap();
+        assert!(admission.await.unwrap());
+        resources::mounts::record_sizes(&mut second, host, &json!([]))
+            .await
+            .unwrap();
+        second.commit().await.unwrap();
+        assert_eq!(
+            resources::machine(&mut conn, machine)
+                .await
+                .unwrap()
+                .unwrap()
+                .facts["hostname"],
+            "Host"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_machine_report_keeps_the_mount_sizes_reported_by_its_host() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let machine = resources::testing::insert_machine(&mut conn, "host", "connected")
+            .await
+            .unwrap();
+        let host = new_id();
+        sqlx::query("INSERT INTO hosts(id,machine_id,name) VALUES($1,$2,'Host')")
+            .bind(host)
+            .bind(machine)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let sizes = json!([{"mount_id":new_id(),"kind":"path","source":"/srv/work","bytes":123}]);
+        resources::mounts::record_sizes(&mut conn, host, &sizes)
+            .await
+            .unwrap();
+        resources::set_machine_facts(
+            &mut conn,
+            machine,
+            &json!({"hostname":"Host"}),
+            (None, None),
+            0.25,
+            clock::start(),
+        )
+        .await
+        .unwrap();
+        let snapshot = resources::mounts::on_machine(&mut conn, machine)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.sizes, sizes);
+        assert_eq!(
+            resources::machine(&mut conn, machine)
+                .await
+                .unwrap()
+                .unwrap()
+                .facts,
+            json!({"hostname":"Host"})
+        );
+    }
 
     #[tokio::test]
     async fn an_active_source_can_report_while_offline_but_revocation_and_deletion_end_its_admission()

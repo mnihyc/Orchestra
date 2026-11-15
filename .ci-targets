@@ -1,0 +1,10 @@
+test -p orch-api-core --test accounts --test certificates --test gateways --test machines --test koidc --test reset_links
+test -p orch-worker-core --lib
+test -p orch-worker-core --test outbox --test mail --test channel_setup
+test -p orchctl --test admin --test doctor --test kfix_deploy
+test -p orch-gateway-core --test tunnels --test tunnel_attachments --test presence --test commands --test access
+test -p orch-api-core --test real_connector --test executor_ticket_build --test terminals_connector
+test -p orch-api-core --test kmounts_files --test mount_duplicates --test hosts --test resource_facts
+test -p orch-api-core --test registration_moves --test resource_groups --test page_transfer_operation_scopes
+test -p orch-settings-contract --lib
+test -p orch-db --test loss_resources

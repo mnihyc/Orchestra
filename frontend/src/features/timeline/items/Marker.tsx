@@ -2,7 +2,7 @@
  *
  * The lines of a thread's history between its items, each one sentence that names who did what, in
  * the reader's language: "Chen created this thread", "Bo changed the model to gpt-6 at high", "Dana
- * moved Main to host-3". A line is centred with a small icon and has its time under the pointer. A
+ * moved Main to host-3". A line is centred with a small icon and opens its exact time on demand. A
  * line is one sentence: what it stands for (a plan, a difference, an output) is never in it.
  */
 import type { TFunction } from 'i18next';
@@ -46,9 +46,10 @@ import { resourceSubjectOf } from '@/features/resource-facts/facts';
 import type { EnvironmentRef, Item, UserRef } from '@/generated/api-types';
 import type { MarkerPayload } from '../markerTypes';
 import { useFormatContext } from '@/lib/appearance';
-import { formatSpan } from '@/lib/time';
+import { formatExact, formatSpan } from '@/lib/time';
 import { formatBytes, formatNumber } from '@/lib/format';
 import { TimeOfDay } from '@/ui/TimeOfDay';
+import { MarkerTime } from './MarkerTime';
 import { Button } from '@/ui/Button';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { openGiven } from '@/features/inspector/givenFocus';
@@ -418,9 +419,9 @@ function RateLimitMarker({item,threadId}:{item:MarkerItem;threadId:string}) {
   const context=useFormatContext();
   // The historical segment's already bounded provider name; a later switch cannot rename this notice.
   const providerName=useThreadPart(threadId,view=>view.segments.find(segment=>segment.id===item.segment_id)?.provider?.name);
-  return <div className="flex items-center justify-center gap-2 py-1 text-center text-sm text-text-subtle">
+  return <div title={formatExact(item.created_at,context)} className="flex items-center justify-center gap-2 py-1 text-center text-sm text-text-subtle">
     <Settings2 aria-hidden/><span className="wrap-anywhere">{markerSentence(item.payload,t,{...context,providerName})}</span>
-    <TimeOfDay at={item.created_at} className="text-xs"/>
+    <MarkerTime at={item.created_at}/>
   </div>;
 }
 
@@ -486,8 +487,9 @@ export function MarkerLine({ item, count = 1 }: { item: MarkerItem; count?: numb
       <TimeOfDay at={item.created_at} className="text-xs" />
     </div>;
   }
+  // Keep the line compact while making its exact moment available by keyboard and touch too.
   return (
-      <div className="flex items-center justify-center gap-2 py-1 text-center text-sm text-text-subtle">
+      <div title={formatExact(item.created_at, context)} className="flex items-center justify-center gap-2 py-1 text-center text-sm text-text-subtle">
         <Icon aria-hidden />
         <span className="wrap-anywhere">
           {item.payload.marker === 'call_recovery' && typeof item.payload.data.provider_id === 'string' && typeof item.payload.data.model === 'string' && ['skip', 'return', 'failover'].includes(item.payload.data.action)
@@ -497,7 +499,7 @@ export function MarkerLine({ item, count = 1 }: { item: MarkerItem; count?: numb
             : markerSentence(item.payload, t, context)}
           {count > 1 && <span className="ml-1">· {t('timeline.marker.more', { count: count - 1 })}</span>}
         </span>
-        <TimeOfDay at={item.created_at} className="text-xs" />
+        <MarkerTime at={item.created_at} />
       </div>
   );
 }

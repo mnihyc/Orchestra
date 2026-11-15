@@ -53,6 +53,7 @@ pub mod profiles;
 pub mod provider_credits;
 pub mod provider_facts;
 pub mod provider_plan;
+pub mod public_addresses;
 pub mod raw_events;
 pub mod reconciliation;
 pub mod recovery_codes;

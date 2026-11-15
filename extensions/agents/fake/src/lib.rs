@@ -510,7 +510,7 @@ impl AgentAdapter for FakeAdapter {
             &shared.sink,
             live.thread_id,
             live.segment_id,
-            events::session_opened(&native_session_ref, resumed),
+            events::session_opened(live.spec.opening_id, &native_session_ref, resumed),
         )
         .await;
         Ok(SessionOpened {
