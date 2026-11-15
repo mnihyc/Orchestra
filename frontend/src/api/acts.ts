@@ -33,9 +33,10 @@ import { repairResource, type ResourceRepair } from '@/api/resourceRepair';
 import { queryClient } from '@/api/query';
 import { devicesKey, outsideStatusKey, routesKey } from '@/api/away';
 import { capturePeopleHint, readAuthority, repairPeople } from '@/api/peopleChanges';
-import type { BindingOptions, TreeNode } from '@/generated/api-types';
+import type { BindingOptions, Item, Thread, TreeNode } from '@/generated/api-types';
 import { queryFeed } from '@/realtime/queryFeeds';
 import { queryAuthorityAllows } from '@/api/queryAuthority';
+import { repairEnvironmentMcp, type EnvironmentMcpChange } from '@/api/mcpChanges';
 import { reachKeys, refreshReach } from '@/api/adminReach';
 
 // ---------------------------------------------------------------- what a change is
@@ -79,7 +80,7 @@ export interface MissingProjection {
 }
 /** Bodyless administrative revocations repair their existing credential inventory suppliers. */
 export interface AdminCredentialsChanged { adminCredentials: { kind: 'tokens' } | { kind: 'sessions'; person: string } }
-export type Change = AgentSharesChange | AdminCredentialsChanged | AdminOrgRestoreChange | AdminUserChange | MetaChange | Stale | Followed | SessionAuthorityChanged | RowChange | ThreadChange | ValueChange | CollectionChange | StateChange | ResourceRepair | MissingProjection | AgentReachChange | EnrollmentChange | DocumentTreeChange | DocumentDirectoryChange | { people: true; authority?: true; cut?: number; always?: true } | { approvalViews: true } | { relatedViews: true } | { outsideViews: true } | { capViews: { id: string; value?: Record<string, unknown> } } | { rateViews: { nodeId: string | null } };
+export type Change = EnvironmentMcpChange | AgentSharesChange | AdminCredentialsChanged | AdminOrgRestoreChange | AdminUserChange | MetaChange | Stale | Followed | SessionAuthorityChanged | RowChange | ThreadChange | ValueChange | CollectionChange | StateChange | ResourceRepair | MissingProjection | AgentReachChange | EnrollmentChange | DocumentTreeChange | DocumentDirectoryChange | { people: true; authority?: true; cut?: number; always?: true } | { approvalViews: true } | { relatedViews: true } | { outsideViews: true } | { capViews: { id: string; value?: Record<string, unknown> } } | { rateViews: { nodeId: string | null } };
 
 /** The value of a parameter of the request's path, by its name in the template: `p('id')`. */
 export type PathParam = (name: string) => string;
@@ -233,6 +234,17 @@ export function threadRowChanges(id: string): Change[] {
   }));
 }
 
+/** A native connection report repairs only the visible current thread's omitted MCP projection. */
+export function threadMcpChanges(current: Thread, before: Thread | null, rows: readonly Item[]): Change[] {
+  if (current.environment === null) return [];
+  const changed = before !== null && (before.current_segment_id !== current.current_segment_id
+    || before.execution_revision !== current.execution_revision || before.environment?.id !== current.environment.id);
+  const reported = rows.some((item) => item.thread_id === current.id && item.segment_id === current.current_segment_id
+    && item.stream === 'main' && !item.before_orch && item.kind === 'marker'
+    && item.payload.marker === 'harness_changed' && (item.payload.data.change === 'mcp_startup' || item.payload.data.change === 'mcp_configuration'));
+  return !changed && !reported ? [] : [{ missing: [{ key: ['environment-mcp', current.environment.id, current.id], exact: true }], cancelPending: true }];
+}
+
 /** Threads were made, moved or changed where they run: the threads, their places and the trees. */
 const threads = (): Change[] => [...kinds('node', 'topics', 'thread-sides', 'provider-threads', 'environments', 'environment', 'environment-reach', AGENT_REACH, 'start-options', 'thread-parameters', 'job', 'fork-batch'), TREES];
 
@@ -252,7 +264,7 @@ const files = (id: string): Change[] => [...ones(id, 'workspace-stat', 'workspac
 
 /** One provider, with what its pages and every chooser of a provider read. */
 const provider = (id: string): Change[] => [
-  ...ones(id, 'provider', 'provider-settings', 'provider-models', 'provider-suggestions', 'provider-threads', 'provider-caps', 'provider-login', 'settings'),
+  ...ones(id, 'provider', 'provider-settings', 'provider-models', 'provider-facts-models', 'provider-threads', 'provider-caps', 'provider-login', 'settings'),
   ...kinds('providers', 'provider-setup', 'start-options', 'usage', 'thread-parameters', AGENT_REACH),
 ];
 
@@ -288,7 +300,7 @@ const usage = (): Change[] => kinds('usage', 'usage-caps', 'provider-caps', 'thr
 /** What a job that changes where work runs reaches: environments, providers, hosts, the threads bound to them. */
 const placement = (): Change[] => [
   ...kinds('environment', 'environments', 'environment-reach', AGENT_REACH, 'host', 'hosts', 'host-runtimes', 'provider', 'providers', 'job', 'fork-batch'),
-  ...kinds('thread-parameters', 'start-options', 'node', 'thread-sides', 'change-plan', 'change-env-plan', 'change-batch-plan', 'recycle-dry-run'),
+  ...kinds('thread-parameters', 'start-options', 'node', 'thread-sides', 'change-plan', 'thread-move-out-plan', 'change-env-plan', 'change-batch-plan', 'recycle-dry-run'),
   TREES,
 ];
 
@@ -563,6 +575,8 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /threads/{id}/side': (p) => [...thread(p('id')), ...threads()],
   'POST /threads/{id}/adopt/retry-history': (p) => [...thread(p('id')), one(p('id'), 'adopt-history')],
   'POST /threads/{id}/forks/preflight': () => NOTHING,
+  'POST /threads/{id}/move-out/preview': () => NOTHING,
+  'POST /threads/{id}/move-out': (p) => [...thread(p('id')), ...threads(), ...placement(), ...kinds('everything', 'names', 'trace')],
   'POST /threads/{id}/forks': (p) => [...thread(p('id')), ...threads(), ...placement()],
   'POST /threads/{id}/forks/now': (p) => [...thread(p('id')), ...threads()],
   'POST /forks/preflight': () => NOTHING,
@@ -672,7 +686,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /environments/{id}/files/export': () => kinds('job'),
   'POST /environments/{id}/mcp/imports': (p) => [one(p('id'), 'environment-mcp')],
   'POST /environments/{id}/mcp/servers': (p) => [one(p('id'), 'environment-mcp')],
-  'POST /environments/{id}/mcp/servers/{name}/restart': (p) => [one(p('id'), 'environment-mcp'), ...kinds('job', 'trace')],
+  'POST /environments/{id}/mcp/servers/{name}/restart': (p) => [{ environmentMcp: p('id') }, ...kinds('job', 'trace')],
   'PUT /environments/{id}/config-trust/{harness}': (p) => [...environment(p('id')), every('thread-parameters')],
   'POST /environments/updates/preflight': () => NOTHING,
   'POST /environments/updates': () => placement(),
@@ -1125,6 +1139,37 @@ async function repairCapViews(cache: QueryClient, change: { id: string; value?: 
   }));
 }
 
+/** A sharing summary travels with its list, so a changed home retires that exact projection too. */
+async function repairInventorySharing(cache: QueryClient, changes: readonly Change[], current: () => boolean): Promise<void> {
+  const broad = changes.some((change) => 'people' in change || 'row' in change && change.row.kind === 'role');
+  const defaults = changes.flatMap((change) => 'key' in change && change.key[0] === 'defaults' ? [change]
+    : 'missing' in change ? change.missing.filter((part) => part.key[0] === 'defaults') : []);
+  if (!broad && defaults.length === 0) return;
+  const affected = cache.getQueryCache().getAll().filter((query) => {
+    const filter = query.queryKey[3], data = query.state.data;
+    if (query.queryKey[2] !== 'resources' || !record(filter) || !record(filter.resource) || filter.resource.rows !== true
+      || !record(data) || !Array.isArray(data.pages)) return false;
+    return data.pages.some((page: unknown) => record(page) && Array.isArray(page.items) && page.items.some((row: unknown) => {
+      if (!record(row) || !record(row.sharing) || typeof row.sharing.home_id !== 'string') return false;
+      const home = row.sharing.home_id, path = row.home_path;
+      return broad || defaults.some((change) => {
+        const changed = change.id ?? change.key[1];
+        return typeof changed !== 'string' || changed === 'system' || changed === home
+          || Array.isArray(path) && path.some((node: unknown) => record(node) && node.id === changed);
+      });
+    }));
+  });
+  await Promise.all(affected.map(async (query) => {
+    if (!current() || cache.getQueryCache().find({ queryKey: query.queryKey, exact: true }) !== query) return;
+    if (!query.isActive()) { cache.removeQueries({ queryKey: query.queryKey, exact: true }); return; }
+    // A later defaults hint supersedes a page that started before that change.
+    await cache.cancelQueries({ queryKey: query.queryKey, exact: true });
+    if (!current() || cache.getQueryCache().find({ queryKey: query.queryKey, exact: true }) !== query
+      || !query.isActive() || !queryAuthorityAllows(cache, query.meta)) return;
+    await cache.refetchQueries({ queryKey: query.queryKey, exact: true });
+  }));
+}
+
 /** Approval news carries counters, without the request or its membership in the reader's lists. */
 async function repairApprovalViews(cache: QueryClient, current: () => boolean): Promise<void> {
   await Promise.all(cache.getQueryCache().getAll().filter((query) => query.queryKey[0] === 'approvals' || query.queryKey[0] === 'approval' || query.queryKey[0] === 'reference-preview' || query.queryKey[0] === 'access-request').map(async (query) => {
@@ -1278,6 +1323,7 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
       // An act's answer that says reach changed: the person's access to an org is read afresh behind a pause (see repairPeople).
       await repairPeople(cache, supplied, directoryCut, true);
     }
+    else if ('environmentMcp' in change) await repairEnvironmentMcp(cache, change.environmentMcp, () => client.session.getState().readerVersion === readerVersion);
     else if ('relatedViews' in change) await repairRelatedViews(cache, () => client.session.getState().readerVersion === readerVersion);
     else if ('outsideViews' in change) await repairOutsideViews(cache, () => client.session.getState().readerVersion === readerVersion);
     else if ('documentTree' in change) await applyDocumentTreeChange(cache, change.documentTree);
@@ -1348,6 +1394,8 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
     else if (change.gone === true) left.push(change);
     else stale.push(change);
   }
+  await repairInventorySharing(cache, changes, () => client.session.getState().readerVersion === readerVersion);
+  if (client.session.getState().readerVersion !== readerVersion) return;
   const isGone = (query: Query): boolean => left.some((change) => covers(change, query.queryKey));
   if (left.length > 0) cache.removeQueries({ predicate: (query) => query.getObserversCount() === 0 && isGone(query) });
   if (stale.length === 0) return;

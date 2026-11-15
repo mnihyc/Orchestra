@@ -543,6 +543,7 @@ async fn an_environment_outside_what_the_owner_offers_is_refused_and_so_is_what_
     );
     assert_eq!(
         rig.fail(&McpImport {
+            profile: None,
             expected_fingerprint: None,
             stored: None,
             transfer: None,

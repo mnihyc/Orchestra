@@ -180,7 +180,7 @@ function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Chan
     // The nested writer returns a server, never its parent Environment. Restricted receipts
     // contain no stored server view; only an already loaded parent MCP page may be retaken.
     if (record(answer) && record(answer.access) && record(answer.spec)) put('mcp_server', answer, true);
-    changes.push({ missing: [{ key: ['environment-mcp', parts[1]], exact: true }], cancelPending: true });
+    changes.push({ environmentMcp: parts[1] });
     return changes;
   }
   if (act.method==='POST' && parts[0]==='threads' && parts[2]==='calls' && parts[3]==='recovery' && record(answer) && 'recovery' in answer) {
