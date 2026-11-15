@@ -338,6 +338,7 @@ async fn disabled_sending_does_not_invent_a_gate_for_state_or_the_existing_draft
         .call(NodeSettingSet, &[&room.topic, &"chat.enabled"])
         .token(&room.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(false),
             locked: None,
             expected_revision: None,
