@@ -292,5 +292,22 @@ mod tests {
             error.to_string().contains("link.dead_after_secs"),
             "{error}"
         );
+        let error = load_text::<ServerConfig>("[link]\nmax_message_bytes = 1000\n", "test", none)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("link.max_message_bytes"),
+            "{error}"
+        );
+        let config =
+            load_text::<ServerConfig>("[link]\nmax_message_bytes = 1048576\n", "test", none)
+                .unwrap();
+        assert_eq!(config.link.max_message_bytes, 1_048_576);
+        assert_eq!(
+            load_text::<ServerConfig>("", "test", none)
+                .unwrap()
+                .link
+                .max_message_bytes,
+            16 * 1024 * 1024
+        );
     }
 }
