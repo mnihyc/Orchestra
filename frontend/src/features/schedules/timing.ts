@@ -1,5 +1,5 @@
 /** An explicit authored time previews the native once/daily/weekly calendar, never a guessed minute. */
-import type { InputTiming } from '@/generated/api-types';
+import type { InputTiming, InputTimingPolicy } from '@/generated/api-types';
 import { wallInstants } from '@/features/settings/personal/away/time';
 
 const MINUTE_MS = 60_000;
@@ -7,14 +7,15 @@ const DAY_MS = 24 * 60 * 60_000;
 /** The native scheduler considers today through the next full weekly cycle. */
 const WEEK_DAYS = 7;
 export interface TimingFields { mode: 'once' | 'repeat'; frequency: 'daily' | 'weekly'; date: string; time: string; zone: string; weekdays: number[]; fold: '' | 'first' | 'second' }
-export interface TimingPreview { timing: InputTiming | null; at: string | null; skipped: string | null; error: 'missing' | 'invalid' | 'future' | 'ambiguous' | 'weekdays' | null; ambiguous: boolean }
-const empty = (error: TimingPreview['error'], ambiguous = false): TimingPreview => ({ timing: null, at: null, skipped: null, error, ambiguous });
+export interface TimingPreview { timing: InputTiming | null; at: string | null; skipped: string | null; error: 'missing' | 'invalid' | 'future' | 'ambiguous' | 'weekdays' | null; ambiguous: boolean; timing_policy: InputTimingPolicy }
+type CalendarPreview = Omit<TimingPreview, 'timing_policy'>;
+const empty = (error: TimingPreview['error'], ambiguous = false): CalendarPreview => ({ timing: null, at: null, skipped: null, error, ambiguous });
 function civilNow(zone: string, now: number): string {
   const parts = new Intl.DateTimeFormat('en-GB', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', calendar: 'iso8601', numberingSystem: 'latn' }).formatToParts(now);
   const part = (name: string) => parts.find((row) => row.type === name)?.value ?? '';
   return `${part('year')}-${part('month')}-${part('day')}T${part('hour')}:${part('minute')}`;
 }
-export function timingPreview(fields: TimingFields, now: number): TimingPreview {
+function calendarPreview(fields: TimingFields, now: number): CalendarPreview {
   if (fields.time === '' || fields.zone === '' || fields.mode === 'once' && fields.date === '') return empty('missing');
   if (fields.mode === 'once') {
     const found = wallInstants(fields.date, fields.time, fields.zone);
@@ -45,6 +46,11 @@ export function timingPreview(fields: TimingFields, now: number): TimingPreview 
     }
     return empty('invalid');
   } catch { return empty('invalid'); }
+}
+export function timingPreview(fields: TimingFields, now: number): TimingPreview {
+  return { ...calendarPreview(fields, now), timing_policy: fields.mode === 'once'
+    ? { clock: 'fixed_instant', repeated_time: 'explicit_instant', missing_time: 'refused', overdue: 'single_occurrence', paused_dates: 'not_replayed' }
+    : { clock: 'civil', repeated_time: 'earlier_instant', missing_time: 'skipped', overdue: 'latest_occurrence', paused_dates: 'not_replayed' } };
 }
 export function fieldsForTiming(timing?: InputTiming): TimingFields {
   const base: TimingFields = { mode: 'once', frequency: 'daily', date: '', time: '', zone: timing?.zone ?? '', weekdays: [], fold: '' };

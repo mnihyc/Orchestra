@@ -29,7 +29,7 @@ vi.mock('@/api/auth', async (load) => {
 });
 vi.mock('@/api/nodes', async (load) => ({ ...await load<typeof Nodes>(), updateNode: calls.writeNode, readNode: calls.readNode }));
 vi.mock('@/features/settings/PersonalFrame', () => ({ PersonalFrame: ({ children }: { children: ReactNode }) => <>{children}</> }));
-vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: vi.fn() }));
+vi.mock('@/features/navigation/NodeDialogs', async (loadOriginal) => ({ ...await loadOriginal<object>(), openNodeDialog: vi.fn() }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useNavigate: () => vi.fn() }));
 beforeEach(() => { vi.clearAllMocks(); calls.writeMe.mockReset(); calls.writeNode.mockReset(); });
 afterEach(async () => { cleanup(); useAppearance.setState(appearance); await setLocale('en'); });

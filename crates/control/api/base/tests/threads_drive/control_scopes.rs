@@ -195,16 +195,30 @@ async fn plan(s: &Scene, name: &str) -> Plan {
     // A terminal row precedes its retained follow-up and workspace invalidations.
     // Finish that authored work before a refusal's exact no-effect baseline.
     rig::eventually(
-        "the plan's terminal and workspace work have committed",
+        "the plan's terminal work and workspace observation have committed",
         || async {
             sqlx::query_scalar::<_, bool>(
-                "SELECT end_work IS NULL AND NOT files_end_due AND NOT files_work_pending
+                "SELECT end_work IS NULL AND NOT files_end_due
              FROM turns WHERE id=$1",
             )
             .bind(start.turn_id)
             .fetch_one(s.rig.db.pool())
             .await
             .unwrap()
+        },
+    )
+    .await;
+    // Invalidations run on the retention schedule. Drain them deliberately rather than
+    // depend on the startup sweep happening to follow this turn's observation.
+    rig::eventually(
+        "the plan's workspace invalidations have committed",
+        || async {
+            s.rig.engine.run_retention().await.unwrap();
+            sqlx::query_scalar::<_, bool>("SELECT NOT files_work_pending FROM turns WHERE id=$1")
+                .bind(start.turn_id)
+                .fetch_one(s.rig.db.pool())
+                .await
+                .unwrap()
         },
     )
     .await;
@@ -656,6 +670,79 @@ async fn plan_scope_does_not_grant_an_ordinary_stranger_decision_authority() {
     );
     assert_eq!(snapshot(&s, p.thread).await, before);
 }
+#[tokio::test]
+async fn accepting_a_held_input_includes_its_queue_check_and_rechecking_adds_no_thread_effect() {
+    let s = Scene::without_supervisor().await;
+    let i = bypass_input(&s, "The accepted held queue is already checked", false).await;
+    let accepted = snapshot(&s, i.thread).await;
+    let checked = s
+        .rig
+        .engine
+        .sync(i.thread, Some(s.ada.id()), None, 1)
+        .await
+        .unwrap()
+        .thread
+        .queue
+        .eligibility;
+    s.rig.engine.preflight(i.thread).await.unwrap();
+    assert_eq!(
+        snapshot(&s, i.thread).await,
+        accepted,
+        "the first later reconciliation cannot add a second effect to an already accepted held input"
+    );
+    assert!(matches!(
+        checked.as_ref(),
+        Some(orch_api_contract::threads::QueueEligibility::None { .. })
+    ));
+    assert_eq!(
+        s.rig
+            .engine
+            .sync(i.thread, Some(s.ada.id()), None, 1)
+            .await
+            .unwrap()
+            .thread
+            .queue
+            .eligibility,
+        checked
+    );
+}
+
+#[tokio::test]
+async fn an_unused_key_does_not_retire_a_held_inputs_checked_queue_state() {
+    let s = Scene::without_supervisor().await;
+    let i = bypass_input(&s, "An unrelated credential leaves the queue alone", false).await;
+    s.rig.engine.preflight(i.thread).await.unwrap();
+    let observed = s
+        .rig
+        .engine
+        .sync(i.thread, Some(s.ada.id()), None, 1)
+        .await
+        .unwrap()
+        .thread
+        .queue
+        .eligibility;
+    assert!(matches!(
+        observed,
+        Some(orch_api_contract::threads::QueueEligibility::None { .. })
+    ));
+    let before = snapshot(&s, i.thread).await;
+    let _unused = key(&s, s.eve.id(), bypass_rules(&i, true, true)).await;
+    let after = s
+        .rig
+        .engine
+        .sync(i.thread, Some(s.ada.id()), None, 1)
+        .await
+        .unwrap()
+        .thread
+        .queue
+        .eligibility;
+    assert_eq!(
+        after, observed,
+        "only credentials retained by queued work can invalidate its check"
+    );
+    assert_eq!(snapshot(&s, i.thread).await, before);
+}
+
 #[tokio::test]
 async fn bypass_scope_does_not_grant_an_ordinary_provider_manager_right() {
     let s = Scene::new().await;
