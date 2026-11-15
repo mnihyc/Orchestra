@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-xtask --bin orch-xtask -- names::tests::
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test orch_tools --test delivery
+test -p orch-engine --test forks -- a_fork_is_its_makers_and_takes_the_history_and_the_source_goes_on_untouched
+test -p orch-api-core --test threads_settings --test binding_options --test provider_recovery --test provider_harness --test call_recovery
+test -p orch-model-contract --lib

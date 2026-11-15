@@ -1250,6 +1250,46 @@ async fn a_running_turn_is_waited_for_and_the_switch_goes_on_when_it_ends() {
     assert_eq!(provider, rig.other_provider);
 }
 
+#[tokio::test]
+async fn a_switch_keeps_the_requested_wait_and_health_check_times_above_the_old_limits() {
+    let can = Can {
+        export_native: true,
+        import_native: true,
+        ..Can::default()
+    };
+    let rig = Rig::new(can, "fake", can).await;
+    let thread = rig.world.thread("Long check").await;
+    let request = ForkRequest {
+        options: Some(ChangeOptions {
+            wait_minutes: Some(1_441),
+            verify_timeout_secs: Some(3_601),
+            ..ChangeOptions::default()
+        }),
+        ..rig.to_other()
+    };
+    let plan = rig.plan(thread, &request).await;
+    assert_eq!(plan.options.wait_minutes, 1_441);
+    assert_eq!(plan.options.verify_timeout_secs, 3_601);
+    let mut shortest = request.clone();
+    shortest.options.as_mut().unwrap().verify_timeout_secs = Some(1);
+    assert_eq!(
+        rig.plan(thread, &shortest)
+            .await
+            .options
+            .verify_timeout_secs,
+        1
+    );
+    let mut outside_clock = request;
+    outside_clock.options.as_mut().unwrap().wait_minutes = Some(i64::MAX);
+    assert!(matches!(
+        rig.world
+            .engine()
+            .draft_fork(&rig.caller(), thread, &outside_clock)
+            .await,
+        Err(PlanError::Invalid { .. })
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_running_turn_is_interrupted_at_once_when_the_options_say_so_and_a_wait_that_runs_out_changes_nothing()
  {
@@ -1455,12 +1495,12 @@ async fn a_fork_is_its_makers_and_takes_the_history_and_the_source_goes_on_untou
                 title: format!("Sub-agent {name}"),
                 started_at: orch_types::Time::new(rig.world.clock.now()),
                 duration_ms: Some(10),
-                raw: RawCall {
+                raw: Some(RawCall {
                     name: "Task".to_owned(),
                     input: OutputRef::of("Check the redirect"),
                     output: Some(OutputRef::of("Checked")),
                     is_error: false,
-                },
+                }),
             })
             .unwrap();
             let parent_ref = format!("native-{source_segment}-task-{name}");
@@ -1560,6 +1600,23 @@ async fn a_fork_is_its_makers_and_takes_the_history_and_the_source_goes_on_untou
         .into_iter()
         .find(|open| open.mode == SessionMode::Fork)
         .expect("the harness forked the session");
+    let accepted: Option<Json> = rig
+        .world
+        .scalar("SELECT orch_tools_offer FROM segments WHERE id=$1", segment)
+        .await;
+    let accepted =
+        accepted.expect("the fork publishes its accepted tool offer with its new segment");
+    assert_eq!(accepted["offered_count"], json!(fork_open.orch_tools.len()));
+    rig.world.set(thread, "orch_tools.enabled", json!([])).await;
+    let after: Option<Json> = rig
+        .world
+        .scalar("SELECT orch_tools_offer FROM segments WHERE id=$1", segment)
+        .await;
+    assert_eq!(
+        after,
+        Some(accepted),
+        "a later setting edit never becomes the fork's original offer"
+    );
     assert_eq!(fork_open.thread_id, thread);
     assert_eq!(
         fork_open.segment_id, segment,

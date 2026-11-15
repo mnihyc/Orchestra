@@ -15,7 +15,7 @@ import { useEffect } from 'react';
 import { create } from 'zustand';
 
 import { api, client, ok } from '@/api/client';
-import type { SubscriptionLevel, TreeNode } from '@/generated/api-types';
+import type { MeSubscription, SubscriptionLevel, TreeNode } from '@/generated/api-types';
 import { ensurePersonalSource } from '@/realtime/live';
 import { onUserEvent } from '@/realtime/stores/user';
 import { queryClient } from '@/api/query';
@@ -53,27 +53,31 @@ export function isUnread(thread: TreeNode, nodes: ReadonlyMap<string, Pick<TreeN
 // ---------------------------------------------------------------- the store
 
 interface AttentionStore extends Attention {
+  /** Only an admitted baseline or native choice supplies subscription provenance. */
+  sources: ReadonlyMap<string, MeSubscription['source']>;
   complete: boolean;
   /** The root org the lists were read for. */
   orgId: string | null;
 }
 
-export const useAttentionStore = create<AttentionStore>(() => ({ ...NO_ATTENTION, orgId: null, complete: false }));
+export const useAttentionStore = create<AttentionStore>(() => ({ ...NO_ATTENTION, sources: new Map(), orgId: null, complete: false }));
 
 /** The writers. Only the reading below and the person's feed call them. */
 export const attentionWriter = {
-  loadedAll(read: readonly { thread_id: string; last_read_seq: number }[], levels: readonly { node_id: string; level: SubscriptionLevel }[]): void {
+  loadedAll(read: readonly { thread_id: string; last_read_seq: number }[], levels: readonly { node_id: string; level: SubscriptionLevel; source?: MeSubscription['source'] }[]): void {
     useAttentionStore.setState({ orgId: null, complete: true,
       read: new Map(read.map((state) => [state.thread_id, state.last_read_seq])),
       levels: new Map(levels.map((entry) => [entry.node_id, entry.level])),
+      sources: new Map(levels.flatMap((entry) => entry.source === undefined ? [] : [[entry.node_id, entry.source] as const])),
     });
   },
-  loaded(orgId: string, read: readonly { thread_id: string; last_read_seq: number }[], levels: readonly { node_id: string; level: SubscriptionLevel }[]): void {
+  loaded(orgId: string, read: readonly { thread_id: string; last_read_seq: number }[], levels: readonly { node_id: string; level: SubscriptionLevel; source?: MeSubscription['source'] }[]): void {
     useAttentionStore.setState({
       orgId,
       complete: false,
       read: new Map(read.map((state) => [state.thread_id, state.last_read_seq])),
       levels: new Map(levels.map((entry) => [entry.node_id, entry.level])),
+      sources: new Map(levels.flatMap((entry) => entry.source === undefined ? [] : [[entry.node_id, entry.source] as const])),
     });
   },
 
@@ -86,18 +90,21 @@ export const attentionWriter = {
   },
 
   /** The person set a level on a node, or took their choice back (`null`). */
-  level(nodeId: string, level: SubscriptionLevel | null): void {
+  level(nodeId: string, level: SubscriptionLevel | null, source?: MeSubscription['source']): void {
     useAttentionStore.setState((state) => {
-      if ((state.levels.get(nodeId) ?? null) === level) return state;
+      if ((state.levels.get(nodeId) ?? null) === level && state.sources.get(nodeId) === source) return state;
       const levels = new Map(state.levels);
       if (level === null) levels.delete(nodeId);
       else levels.set(nodeId, level);
-      return { levels };
+      const sources = new Map(state.sources);
+      if (level === null || source === undefined) sources.delete(nodeId);
+      else sources.set(nodeId, source);
+      return { levels, sources };
     });
   },
 
   clear(): void {
-    useAttentionStore.setState({ ...NO_ATTENTION, orgId: null, complete: false });
+    useAttentionStore.setState({ ...NO_ATTENTION, sources: new Map(), orgId: null, complete: false });
   },
 };
 
@@ -137,7 +144,7 @@ function onEvent(data: Record<string, unknown>): void {
       if (typeof data.thread_id === 'string' && typeof data.last_read_seq === 'number') attentionWriter.read(data.thread_id, data.last_read_seq);
       return;
     case 'subscription':
-      if (typeof data.node_id === 'string') attentionWriter.level(data.node_id, typeof data.level === 'string' ? (data.level as SubscriptionLevel) : null);
+      if (typeof data.node_id === 'string') attentionWriter.level(data.node_id, typeof data.level === 'string' ? (data.level as SubscriptionLevel) : null, data.source === 'auto' || data.source === 'manual' ? data.source : undefined);
       return;
     default:
   }
