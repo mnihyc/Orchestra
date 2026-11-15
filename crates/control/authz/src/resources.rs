@@ -335,8 +335,7 @@ pub async fn check(
     check_all(conn, principal, object, &[permission], policy).await
 }
 
-/// Uses the physical machine's resource page, or its host facade when that role is offered.
-/// View, Use and Manage have the same supplier for registration, moves and policy editing.
+/// Uses the physical machine's resource page, or the host that governs its node or unit.
 pub async fn check_machine(
     conn: &mut Conn,
     principal: &Principal,
@@ -349,13 +348,18 @@ pub async fn check_machine(
 }
 
 /// Resolves the page and permission that govern a physical machine, including a host facade.
-/// Audience expansion uses this same supplier as the permission check.
+/// Audience expansion uses this same supplier as the permission check. A unit that a host runs
+/// has no page of its own: the host that runs it governs it, as it governs its own node.
 pub async fn machine_permission(
     conn: &mut Conn,
     machine: Id,
     permission: Permission,
 ) -> Result<(ObjectRef, Permission), Error> {
-    Ok(match rows::hosting::host_of_machine(conn, machine).await? {
+    // HostUse makes new work on a shared host. It does not let a person register credentials or
+    // change programs inside another person's existing unit; the host manager administers those.
+    let unit = permission == Permission::MachineUse
+        && rows::hosting::host_running(conn, machine).await?.is_some();
+    Ok(match rows::hosting::host_naming(conn, machine).await? {
         Some(host) => (
             ObjectRef {
                 kind: ObjectKind::Host,
@@ -363,6 +367,7 @@ pub async fn machine_permission(
             },
             match permission {
                 Permission::MachineView => Permission::HostView,
+                Permission::MachineUse if unit => Permission::HostManage,
                 Permission::MachineUse => Permission::HostUse,
                 Permission::MachineManage => Permission::HostManage,
                 other => other,
@@ -1147,7 +1152,7 @@ pub async fn may_change_policy_key(
     let Some(_) = orch_db::queries::environments::location_machine(conn, machine).await? else {
         return Ok(Keying::NoSuchMachine);
     };
-    if let Some(host) = rows::hosting::host_of_machine(conn, machine).await? {
+    if let Some(host) = rows::hosting::host_naming(conn, machine).await? {
         let decision = check(
             conn,
             principal,

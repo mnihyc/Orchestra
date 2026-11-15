@@ -50,7 +50,10 @@ interface Shown {
   version: string;
 }
 
-export default function CodeViewer({ door, path, head, line, endLine, lineRequest, tabId, whyReadOnly, thread, onText }: ViewerProps) {
+/** Setup can edit the same workspace file without owning or marking a workbench tab. */
+type CodeViewerProps = Omit<ViewerProps, 'tabId'> & { tabId?: string };
+
+export default function CodeViewer({ door, path, head, line, endLine, lineRequest, tabId, whyReadOnly, thread, onText }: CodeViewerProps) {
   const source = useFileSource();
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -122,7 +125,7 @@ export default function CodeViewer({ door, path, head, line, endLine, lineReques
     (now: boolean) => {
       dirtyNow.current = now;
       setDirty(now);
-      if (now) keepFileTab(tabId);
+      if (now && tabId !== undefined) keepFileTab(tabId);
     },
     [tabId],
   );
@@ -290,6 +293,7 @@ export default function CodeViewer({ door, path, head, line, endLine, lineReques
             lineRequest={lineRequest}
             onDirtyChange={onDirtyChange}
             onSettled={onSettled}
+            flushOnUnmount={tabId === undefined}
             onSave={() => void save()}
             onCursor={setCursor}
           /></div></ContextMenu>

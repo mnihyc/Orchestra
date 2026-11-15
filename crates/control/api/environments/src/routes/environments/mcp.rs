@@ -126,7 +126,50 @@ pub(super) fn found_view(found: &Json) -> Option<api::McpFound> {
     }
     // An imported resource identity comes from the selected database rows, never native facts.
     found["imported"] = Json::Null;
+    // Runtime observations belong to the selected readable thread, never to discovery facts.
+    found["state"] = Json::Null;
+    found["using"] = Json::Null;
+    found["origin"] = Json::Null;
+    found["profile"] = Json::Null;
     serde_json::from_value(found).ok()
+}
+
+fn connection_state(value: &Json) -> Option<McpState> {
+    match value.get("status").and_then(Json::as_str) {
+        Some("ready" | "connected" | "running") => Some(McpState::Running),
+        Some("starting" | "pending") => Some(McpState::Starting),
+        Some("stopped" | "disconnected") => Some(McpState::Stopped),
+        Some("failed" | "needs-auth") => Some(McpState::Failed),
+        Some("unavailable" | "disabled") => Some(McpState::Unavailable),
+        _ => None,
+    }
+}
+
+/// Native path comparison is lexical metadata; it does not open a path on the API host.
+fn configuration_applies(root: &str, directory: &str, cwd: &str, case_sensitive: bool) -> bool {
+    let path = |value: &str| {
+        let value = value.replace('\\', "/");
+        let value = value.trim_end_matches('/').to_owned();
+        if case_sensitive {
+            value
+        } else {
+            value.to_lowercase()
+        }
+    };
+    let root = path(root);
+    let directory = path(directory);
+    let directory = if directory.starts_with('/') || directory.as_bytes().get(1) == Some(&b':') {
+        directory
+    } else if directory.is_empty() {
+        root
+    } else {
+        format!("{root}/{directory}")
+    };
+    let cwd = path(cwd);
+    cwd == directory
+        || cwd
+            .strip_prefix(&directory)
+            .is_some_and(|tail| tail.starts_with('/'))
 }
 
 fn policy_error(error: orch_engine::environment_mcp::Error) -> ApiError {
@@ -184,6 +227,10 @@ async fn require_get(conn: &mut Conn, principal: &Principal, id: Id) -> ApiResul
 /// Selected native definitions and observations, before public references are constructed.
 pub(super) struct PreparedGet {
     environment: Id,
+    native_thread: Option<(Id, Option<Id>)>,
+    connections: Vec<api::McpConnection>,
+    origin_profiles: HashMap<String, (Id, Id)>,
+    profiles: HashMap<Id, api::McpProfileRef>,
     execution_machine: Option<Id>,
     resolved: Vec<orch_engine::mcp::ResolvedServer>,
     imports: Vec<McpRow>,
@@ -211,6 +258,7 @@ async fn prepare_get(
     environment: Id,
     resolved: Vec<orch_engine::mcp::ResolvedServer>,
     imports: Vec<McpRow>,
+    thread: Option<Id>,
 ) -> ApiResult<PreparedGet> {
     let server_ids: Vec<Id> = resolved
         .iter()
@@ -297,17 +345,168 @@ async fn prepare_get(
     .await
     .map_err(ApiError::internal)?;
     let import_allowed = may_import(conn, principal, environment).await?;
-    let found = policy
-        .mcp_import
-        .then_some(&env.facts)
-        .and_then(|facts| facts.get("mcp_found"))
+    let mut origin_profiles = HashMap::new();
+    let mut found: Vec<_> = env
+        .facts
+        .get("mcp_found")
         .and_then(Json::as_array)
         .into_iter()
         .flatten()
-        .filter_map(found_view)
+        .filter_map(|raw| {
+            let mut found = found_view(raw)?;
+            let origin = orch_engine::environment_mcp::discovery_origin(environment, raw);
+            if let (Some(agent), Some(provider)) = (
+                raw.pointer("/profile/agent_id")
+                    .and_then(Json::as_str)
+                    .and_then(|id| id.parse::<Id>().ok()),
+                raw.pointer("/profile/provider_id")
+                    .and_then(Json::as_str)
+                    .and_then(|id| id.parse::<Id>().ok()),
+            ) {
+                origin_profiles.insert(origin.clone(), (agent, provider));
+            }
+            found.origin = Some(origin);
+            Some(found)
+        })
+        .collect();
+    let mut connections = Vec::new();
+    let native_thread = if let Some(thread) = thread {
+        require(
+            conn,
+            principal,
+            ResourceKind::Thread,
+            thread,
+            Permission::ThreadView,
+        )
+        .await?;
+        let row = orch_db::queries::threads::thread(conn, thread)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        if row.environment_id != Some(environment) {
+            return Err(ApiError::not_found());
+        }
+        let current: Option<(Id, String, Option<String>, Id, Id)> = sqlx::query_as("SELECT s.id,a.harness_kind,s.session_configuration->>'cwd',s.agent_id,s.provider_id FROM segments s JOIN agents a ON a.id=s.agent_id WHERE s.id=$1 AND s.thread_id=$2 AND s.continuation_id=$3")
+            .bind(row.current_segment_id).bind(thread).bind(row.active_continuation_id).fetch_optional(&mut *conn).await.map_err(DbError::from)?;
+        if let Some((segment, program, cwd, agent, provider)) = &current {
+            let cwd = cwd.clone().unwrap_or_else(|| {
+                if row.workspace_dir.is_empty() {
+                    env.workspace_root.clone()
+                } else {
+                    format!(
+                        "{}/{}",
+                        env.workspace_root.trim_end_matches(['/', '\\']),
+                        row.workspace_dir
+                    )
+                }
+            });
+            let case_sensitive = env
+                .facts
+                .get("case_sensitive")
+                .and_then(Json::as_bool)
+                .unwrap_or(true);
+            found.retain(|offering| {
+                &offering.source == program
+                    && offering
+                        .origin
+                        .as_ref()
+                        .and_then(|origin| origin_profiles.get(origin))
+                        == Some(&(*agent, *provider))
+                    && offering.directory.as_deref().is_none_or(|directory| {
+                        configuration_applies(&env.workspace_root, directory, &cwd, case_sensitive)
+                    })
+            });
+            let configuration: Option<Json> = sqlx::query_scalar("SELECT payload #> '{data,value}' FROM items WHERE segment_id=$1 AND thread_id=$2 AND continuation_id=$3 AND kind='marker' AND stream='main' AND NOT before_orch AND payload->>'marker'='harness_changed' AND payload #>> '{data,change}'='mcp_configuration' ORDER BY seq_updated DESC,id DESC LIMIT 1")
+                .bind(*segment).bind(thread).bind(row.active_continuation_id).fetch_optional(&mut *conn).await.map_err(DbError::from)?;
+            if let Some(configuration) = configuration {
+                let epoch = configuration
+                    .get("epoch")
+                    .and_then(Json::as_str)
+                    .map(str::to_owned);
+                let observations: Vec<(String, Json)> = sqlx::query_as("SELECT DISTINCT ON (payload #>> '{data,subject}') payload #>> '{data,subject}',payload #> '{data,value}' FROM items WHERE segment_id=$1 AND thread_id=$2 AND continuation_id=$3 AND kind='marker' AND stream='main' AND NOT before_orch AND payload->>'marker'='harness_changed' AND payload #>> '{data,change}'='mcp_startup' AND COALESCE(payload #>> '{data,next_turn}','false')='false' AND payload #>> '{data,subject}' IS NOT NULL AND payload #>> '{data,value,epoch}'=$4 ORDER BY payload #>> '{data,subject}',seq_updated DESC,id DESC")
+                    .bind(*segment).bind(thread).bind(row.active_continuation_id).bind(epoch).fetch_all(&mut *conn).await.map_err(DbError::from)?;
+                let mut observed: BTreeMap<String, Json> = configuration
+                    .get("servers")
+                    .and_then(Json::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|server| {
+                        server
+                            .get("name")
+                            .and_then(Json::as_str)
+                            .map(|name| (name.to_owned(), server.clone()))
+                    })
+                    .collect();
+                observed.extend(observations);
+                connections = observed
+                    .into_iter()
+                    .map(|(name, value)| api::McpConnection {
+                        name,
+                        source: program.clone(),
+                        state: connection_state(&value),
+                        using: value
+                            .get("definition_source")
+                            .cloned()
+                            .and_then(|value| serde_json::from_value(value).ok()),
+                    })
+                    .collect();
+                for offering in &mut found {
+                    if let Some(connection) = connections
+                        .iter()
+                        .find(|connection| connection.name == offering.name)
+                    {
+                        offering.state = connection.state;
+                        offering.using = connection.using;
+                    }
+                }
+            }
+        }
+        Some((thread, current.map(|(segment, _, _, _, _)| segment)))
+    } else {
+        None
+    };
+    let profile_ids: Vec<_> = found
+        .iter()
+        .filter_map(|found| {
+            found
+                .origin
+                .as_ref()
+                .and_then(|origin| origin_profiles.get(origin))
+                .map(|(agent, _)| *agent)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let objects: Vec<_> = profile_ids
+        .iter()
+        .map(|id| ObjectRef {
+            kind: orch_access_contract::permissions::ObjectKind::Agent,
+            id: *id,
+        })
+        .collect();
+    let readable_profiles =
+        crate::routes::resources::library::readable(conn, principal, &objects).await?;
+    let names: Vec<(Id, String)> =
+        sqlx::query_as("SELECT id,name FROM agents WHERE id=ANY($1) AND deleted_at IS NULL")
+            .bind(&profile_ids)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(DbError::from)?;
+    let profiles = names
+        .into_iter()
+        .filter(|(id, _)| {
+            readable_profiles.contains(&ObjectRef {
+                kind: orch_access_contract::permissions::ObjectKind::Agent,
+                id: *id,
+            })
+        })
+        .map(|(id, name)| (id, api::McpProfileRef { id, name }))
         .collect();
     Ok(PreparedGet {
         environment,
+        native_thread,
+        connections,
+        origin_profiles,
+        profiles,
         execution_machine: env.machine_id,
         resolved,
         imports,
@@ -470,6 +669,12 @@ impl PreparedGet {
         }
         let mut found = self.found.clone();
         for offering in &mut found {
+            offering.profile = offering
+                .origin
+                .as_ref()
+                .and_then(|origin| self.origin_profiles.get(origin))
+                .and_then(|(agent, _)| self.profiles.get(agent))
+                .cloned();
             let scope = match offering.scope {
                 api::McpScope::User => "user",
                 api::McpScope::Project => "project",
@@ -483,10 +688,15 @@ impl PreparedGet {
                         && origin["name"].as_str() == Some(offering.name.as_str())
                         && origin["scope"].as_str() == Some(scope)
                         && origin["directory"].as_str() == offering.directory.as_deref()
+                        && offering
+                            .origin
+                            .as_deref()
+                            .is_some_and(|wanted| origin["origin"].as_str() == Some(wanted))
                 })
                 .map(|row| row.id);
         }
         Ok(EnvironmentMcp {
+            connections: self.connections.clone(),
             servers,
             applies: self.applies,
             found,
@@ -535,6 +745,7 @@ struct ImportOrigin<'a> {
     scope: Json,
     directory: Option<String>,
     name: &'a str,
+    origin: Option<&'a str>,
 }
 
 async fn imported(
@@ -549,14 +760,16 @@ async fn imported(
         scope,
         directory,
         name,
+        origin,
     } = origin;
-    let selected = orch_engine::environment_mcp::select_import(
+    let selected = orch_engine::environment_mcp::select_import_from(
         conn,
         environment,
         source,
         scope,
         directory,
         name,
+        origin,
     )
     .await
     .map_err(policy_error)?;
@@ -642,6 +855,7 @@ pub(crate) async fn import_in(
         environment,
         id,
         ImportOrigin {
+            origin: body.origin.as_deref(),
             source: &body.source,
             scope: serde_json::to_value(body.scope).map_err(ApiError::internal)?,
             directory: body.directory,

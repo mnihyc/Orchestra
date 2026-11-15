@@ -25,7 +25,7 @@ import { deferred } from './deferred';
 const calls = vi.hoisted(() => ({ update: vi.fn<typeof ThreadsApi.updateInput>(), remove: vi.fn<typeof ThreadsApi.cancelInput>(), resume: vi.fn<typeof ThreadsApi.resumeQueue>() }));
 vi.mock('@/api/threads', async (original) => ({ ...await original<typeof ThreadsApi>(), updateInput: calls.update, cancelInput: calls.remove, resumeQueue: calls.resume }));
 const queueHelp = vi.hoisted(() => vi.fn());
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => queueHelp }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => queueHelp }));
 const THREAD = 'queue-thread';
 const READ = defaultThreadRead(THREAD);
 const ADA = userRef(me(1, 'ada', 'Ada Lovelace'));
