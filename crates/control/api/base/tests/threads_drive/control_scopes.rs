@@ -195,13 +195,44 @@ async fn plan(s: &Scene, name: &str) -> Plan {
     // A terminal row precedes its retained follow-up and workspace invalidations.
     // Finish that authored work before a refusal's exact no-effect baseline.
     rig::eventually(
-        "the plan's terminal and workspace work have committed",
+        "the plan's terminal work and workspace observation have committed",
         || async {
             sqlx::query_scalar::<_, bool>(
-                "SELECT end_work IS NULL AND NOT files_end_due AND NOT files_work_pending
+                "SELECT end_work IS NULL AND NOT files_end_due
              FROM turns WHERE id=$1",
             )
             .bind(start.turn_id)
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap()
+        },
+    )
+    .await;
+    // Invalidations run on the retention schedule. Drain them deliberately rather than
+    // depend on the startup sweep happening to follow this turn's observation.
+    rig::eventually(
+        "the plan's workspace invalidations have committed",
+        || async {
+            s.rig.engine.run_retention().await.unwrap();
+            sqlx::query_scalar::<_, bool>("SELECT NOT files_work_pending FROM turns WHERE id=$1")
+                .bind(start.turn_id)
+                .fetch_one(s.rig.db.pool())
+                .await
+                .unwrap()
+        },
+    )
+    .await;
+    // The retention call also schedules native-history assessment. Its first committed
+    // receipt belongs before the exact no-effect baseline, just like workspace follow-up.
+    rig::eventually(
+        "the plan's native history assessment has committed",
+        || async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT NOT EXISTS(SELECT 1 FROM segments WHERE thread_id=$1
+             AND agent_history_owned AND agent_history_policy IS NULL
+             AND agent_history_removed_at IS NULL)",
+            )
+            .bind(thread)
             .fetch_one(s.rig.db.pool())
             .await
             .unwrap()

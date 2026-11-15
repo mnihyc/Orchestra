@@ -1,0 +1,10 @@
+clippy
+test -p orch-api-contract --lib
+test -p orch-envhost --lib -- environment::directory_watch_tests::admitted_loss_and_rule_changes_fence_current_cursors_without_any_stat_change
+test -p orch-engine --lib -- history_pages::tests::copy_pages_skip_markers_but_keep_order_identity_and_the_reserved_sequence
+test -p orch-engine --lib -- history_pages::tests::native_statement_measurements_stay_positive_under_another_task_subscriber
+test -p orch-engine --lib -- jobs::runner::tests::
+test -p orch-db --lib -- queries::agent_history::tests::
+test -p orch-api-core --test threads_drive -- control_scopes::plan_http_session_expiry_after_actual_
+test -p orch-engine --test background -- end_all_keeps_only_the_two_hundred_fifty_reviewed_identities_and_reload_reads_new_native_facts
+test -p orch-xtask --lib -- names::tests::the_tree_of_the_product_names_no_program_in_shared_code
