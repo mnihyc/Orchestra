@@ -85,7 +85,11 @@ fn machine_request(machine: Id, home: Id, body: MachineProviderCreateBody) -> Cr
             home_id: home,
             agent_id,
             sources,
-            runtime_machine_id: Some(machine),
+            runtime_location: Some(
+                orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                    machine_id: machine,
+                },
+            ),
             key_machine_id: Some(machine),
             access: None,
             arrangements: None,
@@ -103,7 +107,11 @@ fn machine_request(machine: Id, home: Id, body: MachineProviderCreateBody) -> Cr
             home_id: home,
             upstreams,
             sources,
-            runtime_machine_id: Some(machine),
+            runtime_location: Some(
+                orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                    machine_id: machine,
+                },
+            ),
             key_machine_id: Some(machine),
             access: None,
             arrangements: None,

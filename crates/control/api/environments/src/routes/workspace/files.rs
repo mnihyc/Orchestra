@@ -12,6 +12,8 @@
 //! own switch and the machine to be there. Each write, rename, copy and deletion is one audit row that
 //! names the path and never the content.
 
+pub(super) mod relay;
+
 use super::door;
 
 use super::door::Door;
@@ -198,6 +200,10 @@ pub fn mount(registry: &mut Registry) {
         .creation(EnvironmentFileCopy, copy::binding())
         .creation(EnvironmentFileMkdir, mkdir::binding())
         .creation(EnvironmentUploadWrite, upload_creation::binding())
+        .on(
+            orch_api_contract::workspace::EnvironmentFileTransferGet,
+            transfer_get,
+        )
         .on(EnvironmentFileList, list)
         .on(EnvironmentFileStat, stat)
         .on_raw(EnvironmentFilePreviewGet, preview_get)
@@ -225,19 +231,45 @@ pub fn mount(registry: &mut Registry) {
         .on(EnvironmentFileDelete, delete);
 }
 
+/// One bounded on-intent read; no native probe, publication or cleanup is started here.
+async fn transfer_get(
+    ctx: Ctx,
+    query: orch_api_contract::environment::ThroughThreadQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::workspace::FileTransferReply> {
+    let (mut tx, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    let door = door::open_with_principal(
+        &ctx,
+        &mut tx,
+        ctx.id("id")?,
+        query.thread,
+        guard.principal().clone(),
+    )
+    .await?;
+    let transfer = storage::source_transfer(&mut tx, door.env.id).await?.map(|mut value| {
+        let source = value.get("retention_default").and_then(serde_json::Value::as_bool).map(|default| serde_json::json!({"scope":if default { "default" } else { "system" },"node":null}));
+        value["retention_source"] = source.unwrap_or(serde_json::Value::Null);
+        serde_json::from_value(value).map_err(ApiError::internal)
+    }).transpose()?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(orch_api_contract::workspace::FileTransferReply { transfer })
+}
+
 // ---------------------------------------------------------------- listing
 
 /// A directory, live when its machine is there and from the last list of the tree otherwise.
 async fn list(ctx: Ctx, query: EnvironmentFileListQuery, (): ()) -> ApiResult<DirListing> {
+    let mut conn = ctx.app.db.acquire().await?;
+    let door = door::open(&ctx, &mut conn, query.thread).await?;
+    let policy = orch_engine::environments::workspace_limits(&mut conn, door.env.id)
+        .await
+        .map_err(ApiError::internal)?;
     let limit = query
         .limit
-        .unwrap_or(orch_link_contract::commands::FS_LIST_MAX_ENTRIES)
-        .min(orch_link_contract::commands::FS_LIST_MAX_ENTRIES);
+        .unwrap_or(u32::try_from(policy.directory_entries).unwrap_or(u32::MAX));
     if limit == 0 {
         return Err(ApiError::invalid("limit", "must be at least 1"));
     }
-    let mut conn = ctx.app.db.acquire().await?;
-    let door = door::open(&ctx, &mut conn, query.thread).await?;
     let path = paths::clean("path", &query.path, true)?;
     let mount = paths::mount("mount", query.mount.as_deref())?;
     let machine = live::machine_of(&ctx, &mut conn, &door.env).await?;
@@ -264,7 +296,7 @@ async fn list(ctx: Ctx, query: EnvironmentFileListQuery, (): ()) -> ApiResult<Di
     let cursor = binding.cursor(query.cursor.as_deref(), ctx.app.clock.time())?;
     // Native reads and blob loads hold neither a transaction nor this pooled connection.
     drop(conn);
-    let (entries, truncated, metadata) = match source {
+    let (entries, truncated, metadata, facts) = match source {
         pages::Source::Live => {
             let native_cursor = cursor
                 .as_ref()
@@ -303,15 +335,14 @@ async fn list(ctx: Ctx, query: EnvironmentFileListQuery, (): ()) -> ApiResult<Di
                     failure.problem(Doing::Reading)
                 }
             })?;
-            if listed.entries.len() > orch_link_contract::commands::FS_LIST_MAX_ENTRIES as usize
-                || serde_json::to_vec(&listed)
-                    .map_err(ApiError::internal)?
-                    .len()
-                    > 2 * 1024 * 1024
+            if serde_json::to_vec(&listed)
+                .map_err(ApiError::internal)?
+                .len()
+                > 2 * 1024 * 1024
             {
                 return Err(ApiError::new(
                     ErrorCode::RequestTooLarge,
-                    "The connector's directory page exceeds its row or byte bound.",
+                    "The connector's directory page exceeds its byte allowance.",
                 ));
             }
             if listed.page.is_some()
@@ -344,12 +375,13 @@ async fn list(ctx: Ctx, query: EnvironmentFileListQuery, (): ()) -> ApiResult<Di
             };
             if let (Some(cursor), Some(metadata)) = (&cursor, &metadata)
                 && (cursor.revision != metadata.revision
-                    || cursor.as_of != metadata.as_of
+                    || (cursor.observed_from.is_some() && metadata.as_of < cursor.as_of)
+                    || (cursor.observed_from.is_none() && cursor.as_of != metadata.as_of)
                     || cursor.observed_from != metadata.observed_from)
             {
                 return Err(pages::stale());
             }
-            (listed.entries, listed.truncated, metadata)
+            (listed.entries, listed.truncated, metadata, listed.facts)
         }
         pages::Source::Manifest { blob } => {
             let tree = ctx
@@ -370,14 +402,25 @@ async fn list(ctx: Ctx, query: EnvironmentFileListQuery, (): ()) -> ApiResult<Di
             let (entries, next) = window.finish();
             let as_of = Time::new(door.env.manifest_at.ok_or_else(pages::stale)?);
             let metadata = binding.metadata(revision, next, as_of, ctx.app.clock.time())?;
-            (entries, metadata.next_cursor.is_some(), Some(metadata))
+            (
+                entries,
+                metadata.next_cursor.is_some(),
+                Some(metadata),
+                retained_facts(&ctx, &door, &path).await?,
+            )
         }
         pages::Source::Opened => {
             let (entries, metadata) = opened_page(&ctx, &binding, cursor.as_ref(), limit).await?;
-            (entries, metadata.next_cursor.is_some(), Some(metadata))
+            (
+                entries,
+                metadata.next_cursor.is_some(),
+                Some(metadata),
+                None,
+            )
         }
     };
     let mut reply = DirListing {
+        facts,
         path,
         mount,
         source: if binding.source == pages::Source::Live {
@@ -544,17 +587,24 @@ async fn stat(ctx: Ctx, query: EnvironmentFileStatQuery, (): ()) -> ApiResult<Fi
     let path = paths::clean("path", &query.path, true)?;
     let mount = paths::mount("mount", query.mount.as_deref())?;
     let machine = live::machine_of(&ctx, &mut conn, &door.env).await?;
+    let relayed =
+        orch_engine::transfers::relay_on(&mut conn, orch_settings::Place::Environment(door.env.id))
+            .await;
+    drop(conn);
     if let Some(machine) = machine {
         let mut found = live_stat(&ctx, &door, machine, &path, mount.as_deref())
             .await
             .map_err(|failure| failure.problem(Doing::Reading))?;
-        listing::mark_cached(
-            &mut conn,
-            door.env.id,
-            mount.as_deref(),
-            std::slice::from_mut(&mut found.entry),
-        )
-        .await?;
+        if !relayed {
+            let mut conn = ctx.app.db.acquire().await?;
+            listing::mark_cached(
+                &mut conn,
+                door.env.id,
+                mount.as_deref(),
+                std::slice::from_mut(&mut found.entry),
+            )
+            .await?;
+        }
         return Ok(found);
     }
     if mount.is_some() {
@@ -590,7 +640,8 @@ async fn preview_get(ctx: Ctx, query: EnvironmentFileStatQuery, _: Body) -> ApiR
     if found.entry.kind != DirEntryKind::File {
         return Err(ApiError::not_found());
     }
-    let limit = crate::previews::source_limit(&ctx).await?;
+    let policy = crate::previews::policy(&ctx).await?;
+    let limit = policy.source_bytes();
     if found.entry.size > limit {
         return crate::previews::unavailable(
             &ctx,
@@ -598,6 +649,8 @@ async fn preview_get(ctx: Ctx, query: EnvironmentFileStatQuery, _: Body) -> ApiR
             &found.media_type,
             found.is_text,
             true,
+            policy,
+            found.facts,
         )
         .await;
     }
@@ -606,6 +659,45 @@ async fn preview_get(ctx: Ctx, query: EnvironmentFileStatQuery, _: Body) -> ApiR
     let key = paths::cache_key(mount.as_deref(), &path);
     let mut conn = ctx.app.db.acquire().await?;
     let door = door::open(&ctx, &mut conn, query.thread).await?;
+    if orch_engine::transfers::relay_on(&mut conn, orch_settings::Place::Environment(door.env.id))
+        .await
+    {
+        let machine = live::machine_of(&ctx, &mut conn, &door.env).await?;
+        drop(conn);
+        let Some(machine) = machine else {
+            return crate::previews::unavailable(
+                &ctx,
+                found.entry.size,
+                &found.media_type,
+                found.is_text,
+                false,
+            )
+            .await;
+        };
+        let hash = match found.hash {
+            Some(hash) => hash,
+            None => {
+                relay::describe(&ctx, &door, machine, &path, mount.clone())
+                    .await?
+                    .hash
+            }
+        };
+        return relay::preview(
+            &ctx,
+            door,
+            machine,
+            relay::File {
+                path,
+                mount,
+                version: BlobMeta {
+                    hash,
+                    size: found.entry.size,
+                },
+                media: found.media_type,
+            },
+        )
+        .await;
+    }
     let cached = storage::cached_version(
         &mut conn,
         door.env.id,
@@ -652,6 +744,8 @@ async fn preview_get(ctx: Ctx, query: EnvironmentFileStatQuery, _: Body) -> ApiR
                 &found.media_type,
                 found.is_text,
                 false,
+                policy,
+                found.facts,
             )
             .await;
         }
@@ -660,7 +754,7 @@ async fn preview_get(ctx: Ctx, query: EnvironmentFileStatQuery, _: Body) -> ApiR
             .blobs
             .register(
                 &mut conn,
-                BlobMeta {
+                &BlobMeta {
                     hash: fetched.hash,
                     size: fetched.size,
                 },
@@ -688,10 +782,49 @@ async fn preview_get(ctx: Ctx, query: EnvironmentFileStatQuery, _: Body) -> ApiR
             &found.media_type,
             found.is_text,
             false,
+            policy,
+            found.facts,
         )
         .await;
     };
-    crate::previews::serve(&ctx, &hash, &found.entry.name, &found.media_type).await
+    crate::previews::serve_source(
+        &ctx,
+        &hash,
+        &found.entry.name,
+        &found.media_type,
+        policy,
+        found.facts,
+    )
+    .await
+}
+
+/// Only root exclusion provenance was captured with a whole manifest; child-local rules stay unreported.
+async fn retained_facts(
+    ctx: &Ctx,
+    door: &Door,
+    path: &str,
+) -> ApiResult<Option<orch_api_contract::workspace::FileSourceFacts>> {
+    let Some(blob) = door.env.manifest_blob else {
+        return Ok(None);
+    };
+    let mut conn = ctx.app.db.acquire().await?;
+    let facts = orch_db::queries::environments::workspace::manifest_source_facts(
+        &mut conn,
+        door.env.id,
+        &blob,
+    )
+    .await?;
+    facts
+        .map(|facts| {
+            let mut facts: orch_api_contract::workspace::FileSourceFacts =
+                serde_json::from_value(facts).map_err(ApiError::internal)?;
+            facts.watch = None;
+            if !path.is_empty() {
+                facts.inclusion = None;
+            }
+            Ok(facts)
+        })
+        .transpose()
 }
 
 /// What the last list of the tree says of a path.
@@ -720,9 +853,11 @@ async fn offline_stat(ctx: &Ctx, door: &Door, path: &str) -> ApiResult<FileStat>
             link_target: None,
             cached: false,
         };
-        return Ok(listing::file_stat(root, None));
+        let mut stat = listing::file_stat(root, None);
+        stat.facts = retained_facts(ctx, door, path).await?;
+        return Ok(stat);
     }
-    match tree.get(path) {
+    let mut stat = match tree.get(path) {
         Some(entry) => Ok(listing::file_stat(listing::dir_entry(entry), entry.hash)),
         None if tree.has_below(path) => {
             let made = listing::from_manifest(&tree, paths::parent_of(path))
@@ -731,7 +866,9 @@ async fn offline_stat(ctx: &Ctx, door: &Door, path: &str) -> ApiResult<FileStat>
             Ok(listing::file_stat(made, None))
         }
         None => Err(ApiError::not_found()),
-    }
+    }?;
+    stat.facts = retained_facts(ctx, door, path).await?;
+    Ok(stat)
 }
 
 // ---------------------------------------------------------------- bringing a file to the store
@@ -805,8 +942,15 @@ async fn fetch(
         query.wait.unwrap_or(0).min(FETCH_WAIT_MAX_SECONDS),
     ));
     let env = door.env.clone();
+    let relayed =
+        orch_engine::transfers::relay_on(&mut conn, orch_settings::Place::Environment(env.id))
+            .await;
     let machine = live::machine_of(&ctx, &mut conn, &env).await?;
     let key = paths::cache_key(mount.as_deref(), &path);
+    drop(conn);
+    if relayed && machine.is_none() {
+        return Ok(unavailable(FetchUnavailable::Offline));
+    }
 
     // 1. The version there is now: the machine's word, or the last list's.
     let seen = match machine {
@@ -839,19 +983,22 @@ async fn fetch(
     };
     let store = ctx.app.blobs.store();
 
-    // 2. The content of that very version is in the store.
-    if let Some(hash) = storage::cached_version(&mut conn, env.id, &key, size, mtime_ms).await?
-        && store.exists(&hash).await.map_err(ApiError::internal)?
-    {
-        storage::touch_blob(&mut conn, &hash, ctx.now).await?;
-        return Ok(ready(hash, size));
-    }
-    // The list of the tree knew the hash, and the store has that content.
-    if machine.is_none()
-        && let Some(hash) = listed_hash
-        && store.exists(&hash).await.map_err(ApiError::internal)?
-    {
-        return Ok(ready(hash, size));
+    if !relayed {
+        let mut conn = ctx.app.db.acquire().await?;
+        // 2. The content of that very version is in the store.
+        if let Some(hash) = storage::cached_version(&mut conn, env.id, &key, size, mtime_ms).await?
+            && store.exists(&hash).await.map_err(ApiError::internal)?
+        {
+            storage::touch_blob(&mut conn, &hash, ctx.now).await?;
+            return Ok(ready(hash, size));
+        }
+        // The list of the tree knew the hash, and the store has that content.
+        if machine.is_none()
+            && let Some(hash) = listed_hash
+            && store.exists(&hash).await.map_err(ApiError::internal)?
+        {
+            return Ok(ready(hash, size));
+        }
     }
 
     // 3. Offline, nothing more can be had.
@@ -859,15 +1006,38 @@ async fn fetch(
         return Ok(unavailable(FetchUnavailable::OfflineNotCached));
     };
     // 4. A file larger than a blob may be is listed and cannot be read.
-    let max_bytes = crate::uploads::max_blob_bytes(&ctx.app).await?;
-    if size > max_bytes {
+    let max_bytes = if relayed {
+        0
+    } else {
+        crate::uploads::max_blob_bytes(&ctx.app).await?
+    };
+    if !relayed && size > max_bytes {
         return Ok(unavailable(FetchUnavailable::TooLarge));
     }
 
-    // 5. The machine is asked to upload it, once for each version.
+    if relayed && let Some(hash) = listed_hash {
+        return Ok(ready(hash, size));
+    }
+
+    // A relayed description computes the version on its source; cached mode uploads it.
     let dispatcher = ctx.app.link.dispatcher();
+    let allowance = if relayed {
+        let mut conn = ctx.app.db.acquire().await?;
+        orch_settings::get::<i64>(
+            &mut conn,
+            orch_settings::Place::System,
+            orch_settings_contract::registry::keys::JOB_IO_TIMEOUT_SECS,
+        )
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::internal("the file-work allowance is missing"))?
+    } else {
+        i64::from(CommandKind::FsFetch.deadline_secs())
+    };
     let deadline = Time::new(
-        ctx.now + ChronoDuration::seconds(i64::from(CommandKind::FsFetch.deadline_secs())),
+        ChronoDuration::try_seconds(allowance)
+            .and_then(|wait| ctx.app.clock.now().checked_add_signed(wait))
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC),
     );
     let mut last = FetchState {
         state: FetchStatus::Fetching,
@@ -877,34 +1047,67 @@ async fn fetch(
         reason: None,
     };
     for _ in 0..FETCH_ATTEMPTS {
-        let id = live::id_to_ask(&dispatcher, |attempt| {
-            fetch_id(env.id, &key, size, mtime_ms, attempt)
+        let description_key = if relayed {
+            format!("relay:{key}")
+        } else {
+            key.clone()
+        };
+        let mut id = live::id_to_ask(&dispatcher, |attempt| {
+            fetch_id(env.id, &description_key, size, mtime_ms, attempt)
         })
         .await?;
+        if relayed
+            && dispatcher
+                .status(id)
+                .await
+                .map_err(ApiError::internal)?
+                .is_some_and(|row| row.is_over())
+        {
+            // Millisecond metadata cannot prove an unchanged file. Completed descriptions are
+            // reused only by the native stat's exact-identity hash cache, never by this weak key.
+            id = orch_types::new_id();
+        }
         if dispatcher
             .status(id)
             .await
             .map_err(ApiError::internal)?
             .is_none()
         {
-            dispatcher
-                .issue_as(
-                    id,
-                    machine,
-                    &SerialKey::None,
-                    deadline,
-                    &FsFetch {
-                        environment_id: env.id,
-                        mount: mount.clone(),
-                        path: path.clone(),
-                        // The time of last change is told to the millisecond, which is not what the
-                        // machine compares; it uploads the version it finds and says which.
-                        expect: None,
-                        max_bytes: Some(max_bytes),
-                    },
-                )
-                .await
-                .map_err(ApiError::internal)?;
+            if relayed {
+                dispatcher
+                    .issue_as(
+                        id,
+                        machine,
+                        &SerialKey::None,
+                        deadline,
+                        &orch_link_contract::commands::FsRelayDescribe {
+                            environment_id: env.id,
+                            mount: mount.clone(),
+                            path: path.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(ApiError::internal)?;
+            } else {
+                dispatcher
+                    .issue_as(
+                        id,
+                        machine,
+                        &SerialKey::None,
+                        deadline,
+                        &FsFetch {
+                            environment_id: env.id,
+                            mount: mount.clone(),
+                            path: path.clone(),
+                            // The time of last change is told to the millisecond, which is not what the
+                            // machine compares; it uploads the version it finds and says which.
+                            expect: None,
+                            max_bytes: Some(max_bytes),
+                        },
+                    )
+                    .await
+                    .map_err(ApiError::internal)?;
+            }
         }
         let outcome = if wait.is_zero() {
             let over = dispatcher
@@ -923,20 +1126,27 @@ async fn fetch(
                 Err(_) => None,
             }
         };
-        let received = storage::received_of_machine(
-            &mut conn,
-            machine,
-            size,
-            ctx.now - ChronoDuration::minutes(5),
-        )
-        .await?;
-        last.received = received;
+        last.received = if relayed {
+            None
+        } else {
+            let mut conn = ctx.app.db.acquire().await?;
+            storage::received_of_machine(
+                &mut conn,
+                machine,
+                size,
+                ctx.now - ChronoDuration::minutes(5),
+            )
+            .await?
+        };
         match outcome {
             None => return Ok(last),
             Some(CommandOutcome::Succeeded(result)) => {
                 let result: FsFetchResult =
                     serde_json::from_value(result).map_err(ApiError::internal)?;
-                record_fetched(&ctx, &mut conn, env.id, &key, &result).await?;
+                if !relayed {
+                    let mut conn = ctx.app.db.acquire().await?;
+                    record_fetched(&ctx, &mut conn, env.id, &key, &result).await?;
+                }
                 return Ok(ready(result.hash, result.size));
             }
             Some(CommandOutcome::Failed(error)) => match error.code.as_str() {
@@ -1151,6 +1361,58 @@ pub async fn read_for(
 }
 orch_api_base::__api_bind_223f89e0d4!();
 
+/// A response whose body, once sent or dropped, removes from the server the content it was made of,
+/// unless something else holds that content.
+pub(super) fn forget_when_sent(ctx: &Ctx, hash: orch_types::Hash, response: Response) -> Response {
+    use futures::StreamExt as _;
+    struct Forget {
+        blobs: crate::blobs::Blobs,
+        db: orch_db::Db,
+        clock: std::sync::Arc<dyn orch_types::Clock>,
+        hash: orch_types::Hash,
+    }
+    impl Drop for Forget {
+        fn drop(&mut self) {
+            let (blobs, db, hash, at) = (
+                self.blobs.clone(),
+                self.db.clone(),
+                self.hash,
+                self.clock.now(),
+            );
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move { blobs.forget_after_transfer(&db, &[hash], at).await });
+            }
+        }
+    }
+    let held = Forget {
+        blobs: ctx.app.blobs.clone(),
+        db: ctx.app.db.clone(),
+        clock: std::sync::Arc::clone(&ctx.app.clock),
+        hash,
+    };
+    let (parts, body) = response.into_parts();
+    let sent = body.into_data_stream().map(move |piece| {
+        let _held = &held;
+        piece
+    });
+    Response::from_parts(parts, Body::from_stream(sent))
+}
+
+/// Whether the environment's place relays file content through the server without keeping it
+/// (`storage.relay_transfers`).
+pub(super) async fn relays(ctx: &Ctx, environment: Id) -> bool {
+    match ctx.app.db.acquire().await {
+        Ok(mut conn) => {
+            orch_engine::transfers::relay_on(
+                &mut conn,
+                orch_settings::Place::Environment(environment),
+            )
+            .await
+        }
+        Err(_) => true,
+    }
+}
+
 /// The bytes of one version of a file, found by their hash.
 async fn content_get(
     ctx: Ctx,
@@ -1161,6 +1423,51 @@ async fn content_get(
     let door = door::open(&ctx, &mut conn, query.thread).await?;
     let path = paths::clean("path", &query.path, false)?;
     let mount = paths::mount("mount", query.mount.as_deref())?;
+    if orch_engine::transfers::relay_on(&mut conn, orch_settings::Place::Environment(door.env.id))
+        .await
+    {
+        let machine = live::require_live(&ctx, &mut conn, &door.env).await?;
+        drop(conn);
+        let found = live_stat(&ctx, &door, machine, &path, mount.as_deref())
+            .await
+            .map_err(|failure| failure.problem(Doing::Reading))?;
+        if found.entry.kind != DirEntryKind::File {
+            return Err(ApiError::not_found());
+        }
+        if query.preview == Some(true) {
+            return relay::preview(
+                &ctx,
+                door,
+                machine,
+                relay::File {
+                    path,
+                    mount,
+                    version: BlobMeta {
+                        hash: query.hash,
+                        size: found.entry.size,
+                    },
+                    media: found.media_type,
+                },
+            )
+            .await;
+        }
+        return relay::content(
+            &ctx,
+            door,
+            machine,
+            relay::File {
+                path,
+                mount,
+                version: BlobMeta {
+                    hash: query.hash,
+                    size: found.entry.size,
+                },
+                media: found.media_type,
+            },
+            query.download.unwrap_or(false),
+        )
+        .await;
+    }
     let key = paths::cache_key(mount.as_deref(), &path);
     // The hash has to belong to that path in this environment: it was cached for it, or the list of
     // the tree says that path has that content.
@@ -1252,10 +1559,8 @@ async fn audited_on(
 /// What a person changing files needs before the machine is asked: the right to write through their
 /// door, the environment's own switch, and a machine that answers.
 async fn writer(ctx: &Ctx, conn: &mut orch_db::Conn, thread: Option<Id>) -> ApiResult<(Door, Id)> {
-    let door = door::open(ctx, conn, thread).await?;
-    door.may_write()?;
-    let machine = live::require_live(ctx, conn, &door.env).await?;
-    Ok((door, machine))
+    let principal = crate::middleware::authorization::principal(ctx, conn).await?;
+    door::writing(ctx, conn, ctx.id("id")?, thread, principal).await
 }
 
 /// The summary of an act of the caller, for the history of the environment.
@@ -1274,23 +1579,35 @@ async fn content_put(
     let path = paths::clean("path", &query.path, false)?;
     let expected = expected_of(query.expected_hash.as_deref())?;
     drop(conn);
+    let relayed = relays(&ctx, door.env.id).await;
+    if relayed && query.blob.is_none() {
+        let stat = crate::uploads::save_editor(&ctx, &door, path.clone(), expected, body).await?;
+        let mut tx = ctx.app.db.begin().await?;
+        audited(&ctx,&mut tx,&door,orch_db::audit::action!(AuditAction::WorkspaceFileWritten),&said(&ctx,&format!("wrote {path}"))?,
+            serde_json::json!({"path":path,"size":stat.entry.size,"hash":stat.hash,"upload_batch":query.upload_batch,"replaced":query.expected_hash.is_none()})).await?;
+        orch_db::queries::environments::thread_engine::touch_activity(
+            &mut tx,
+            door.env.id,
+            ctx.app.clock.now(),
+        )
+        .await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        return json_reply(StatusCode::OK, &stat);
+    }
     if let Some(hash) = query.blob {
         let (mut tx, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
         crate::attachments::require(&mut tx, guard.principal(), &hash).await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
     }
     let meta = match query.blob {
-        Some(hash) => {
-            let size = ctx
-                .app
-                .blobs
-                .store()
-                .size(&hash)
-                .await
-                .map_err(ApiError::internal)?
-                .ok_or_else(ApiError::not_found)?;
-            BlobMeta { hash, size }
-        }
+        Some(hash) => ctx
+            .app
+            .blobs
+            .store()
+            .existing(&hash)
+            .await
+            .map_err(ApiError::internal)?
+            .ok_or_else(ApiError::not_found)?,
         None => ctx
             .app
             .blobs
@@ -1305,7 +1622,7 @@ async fn content_put(
     if query.blob.is_some() {
         crate::attachments::require(&mut tx, guard.principal(), &meta.hash).await?;
     }
-    ctx.app.blobs.register(&mut tx, meta, ctx.now).await?;
+    ctx.app.blobs.register(&mut tx, &meta, ctx.now).await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     let written = live::run(
         &ctx,
@@ -1321,6 +1638,7 @@ async fn content_put(
         },
     )
     .await;
+    let meta = meta.into_meta();
     let stat = match written {
         Ok(found) => found,
         Err(Failure::Machine(error)) if error.code == "conflict" => {
@@ -1341,23 +1659,25 @@ async fn content_put(
     };
     let mut tx = ctx.app.db.begin().await?;
     let hash = stat.hash.unwrap_or(meta.hash);
-    storage::record_cached(
-        &mut tx,
-        door.env.id,
-        &CachedFile {
-            path: path.clone(),
-            size: stat.entry.size,
-            mtime_ns: stat
-                .entry
-                .mtime
-                .get()
-                .timestamp_millis()
-                .saturating_mul(NANOS_PER_MILLI),
-            hash,
-            cached_at: ctx.now,
-        },
-    )
-    .await?;
+    if !relayed {
+        storage::record_cached(
+            &mut tx,
+            door.env.id,
+            &CachedFile {
+                path: path.clone(),
+                size: stat.entry.size,
+                mtime_ns: stat
+                    .entry
+                    .mtime
+                    .get()
+                    .timestamp_millis()
+                    .saturating_mul(NANOS_PER_MILLI),
+                hash,
+                cached_at: ctx.now,
+            },
+        )
+        .await?;
+    }
     audited(
         &ctx,
         &mut tx,
@@ -1381,7 +1701,7 @@ async fn upload_write(
     body: EnvironmentUploadWriteBody,
 ) -> ApiResult<orch_api_contract::workspace::JobCreationResponse> {
     use orch_db::queries::jobs::{self, NewJob, kind};
-    use orch_engine::jobs::workspace_upload::{Admission, PHASES};
+    use orch_engine::jobs::workspace_upload::{Admission, NativeUpload, PHASES};
     let id = ctx.id("upload_id")?;
     let path = paths::clean("path", &body.path, false)?;
     let expected = expected_of(body.expected_hash.as_deref())?;
@@ -1401,6 +1721,7 @@ async fn upload_write(
             || admitted.write.blob != body.blob
             || admitted.write.expected_hash != expected
             || admitted.batch != body.upload_batch
+            || admitted.relay.as_ref().map(|relay| relay.session_id) != body.relay
         {
             return Err(ApiError::new(
                 ErrorCode::ConflictExists,
@@ -1413,33 +1734,87 @@ async fn upload_write(
         return upload_creation::respond(&ctx, row.id, Some(shown)).await;
     }
     let (door, machine) = writer(&ctx, &mut tx, query.thread).await?;
-    crate::attachments::require(&mut tx, &principal, &body.blob).await?;
-    let size = ctx
-        .app
-        .blobs
-        .store()
-        .size(&body.blob)
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(ApiError::not_found)?;
-    ctx.app
-        .blobs
-        .register(
+    let relayed = body.relay.is_some()
+        || orch_engine::transfers::relay_on(
             &mut tx,
-            BlobMeta {
-                hash: body.blob,
-                size,
-            },
-            ctx.now,
+            orch_settings::Place::Environment(door.env.id),
         )
-        .await?;
-    if ctx.app.blobs.pin(&mut tx, &[body.blob]).await? != 0 {
-        return Err(ApiError::internal(
-            "the upload content could not be retained",
-        ));
-    }
+        .await;
+    let (size, relay) = if let Some(session) = body.relay {
+        let state = orch_db::queries::uploads::targets::state(&mut tx, session, true)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        let target = orch_db::queries::uploads::targets::lock(&mut tx, session)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        crate::uploads::check_session_for(
+            &ctx,
+            &state.session,
+            principal.user(),
+            ctx.app.clock.now(),
+        )?;
+        if state.cancelled_at.is_some()
+            || state.completed_at.is_some()
+            || !target.destination.relayed
+            || target.destination.environment_id != door.env.id
+            || target.destination.machine_id != Some(machine)
+            || target.destination.generation != door.env.generation
+            || target.destination.workspace_root != door.env.workspace_root
+            || target.verified()? != Some(body.blob)
+            || target.written_job.is_some_and(|old| old != id)
+        {
+            return Err(ApiError::new(
+                ErrorCode::ConflictStaleRevision,
+                "the native upload no longer names this destination and verified content",
+            ));
+        }
+        (
+            state.session.size,
+            Some(NativeUpload {
+                session_id: session,
+                receive_path: target.destination.path,
+                workspace_root: target.destination.workspace_root,
+            }),
+        )
+    } else {
+        crate::attachments::require(&mut tx, &principal, &body.blob).await?;
+        let size = ctx
+            .app
+            .blobs
+            .store()
+            .size(&body.blob)
+            .await
+            .map_err(ApiError::internal)?
+            .ok_or_else(ApiError::not_found)?;
+        ctx.app
+            .blobs
+            .register(
+                &mut tx,
+                &BlobMeta {
+                    hash: body.blob,
+                    size,
+                },
+                ctx.now,
+            )
+            .await?;
+        if ctx.app.blobs.pin(&mut tx, &[body.blob]).await? != 0 {
+            return Err(ApiError::internal(
+                "the upload content could not be retained",
+            ));
+        }
+        (size, None)
+    };
+    let accepted =
+        orch_authz::CapturedOperation::capture(principal.caller()).map_err(ApiError::internal)?;
+    let request =
+        crate::key_operations::native::http_origin::capture_operation(&ctx, &mut tx, &accepted)
+            .await?;
     let admitted = Admission {
+        request,
+        workspace_root: door.env.workspace_root.clone(),
         machine,
+        relay,
+        relayed,
         generation: door.env.generation,
         write: FsWrite {
             work: None,
@@ -1780,7 +2155,7 @@ async fn rename(
     ctx: Ctx,
     query: orch_api_contract::environment::ThroughThreadQuery,
     body: FileFromToBody,
-) -> ApiResult<FileStat> {
+) -> ApiResult<orch_api_contract::workspace::FileRenameResult> {
     let (from, to) = two_paths(&body)?;
     let mut conn = ctx.app.db.acquire().await?;
     let (door, machine) = writer(&ctx, &mut conn, query.thread).await?;
@@ -1797,7 +2172,7 @@ async fn rename(
     )
     .await
     .map_err(|failure| failure.problem(Doing::Renaming))?;
-    let stat = moved;
+    let stat = &moved.stat;
     let mut tx = ctx.app.db.begin().await?;
     storage::forget_cached_under(&mut tx, door.env.id, &from).await?;
     audited(
@@ -1806,13 +2181,13 @@ async fn rename(
         &door,
         orch_db::audit::action!(AuditAction::WorkspaceFileRenamed),
         &said(&ctx, &format!("renamed {from} to {to}"))?,
-        serde_json::json!({ "from": from, "to": to, "size": stat.entry.size, "hash": stat.hash }),
+        serde_json::json!({ "from": from, "to": to, "size": stat.entry.size, "hash": stat.hash, "kept_entries": moved.kept_entries }),
     )
     .await?;
     orch_db::queries::environments::thread_engine::touch_activity(&mut tx, door.env.id, ctx.now)
         .await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(stat)
+    Ok(moved)
 }
 
 /// Deletes a file, or a directory with what is in it.

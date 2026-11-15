@@ -1,0 +1,8 @@
+test -p orch-driver-contract --lib
+test -p orch-settings-contract --lib
+test -p orch-settings --lib
+test -p orch-provider-contract --lib
+test -p orch-link --lib -- upstream::
+test -p orch-connector-core --test forwarding --test provider_embed --test translations --test harness_program
+test -p orch-engine --test usage_rows --test provider_directory_commands --test provider_updates
+test -p orch-api-core --test provider_crud_scopes --test provider_setup_scopes --test retained_scopes --test workspace_jobs_scopes --test usage_caps

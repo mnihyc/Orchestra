@@ -203,7 +203,7 @@ async fn local_embeddings_uses_ordinary_editable_removable_templates_and_provide
         .call(ProviderCreate, &[])
         .token(&c.root.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Local embeddings".into(),
             home_id: c.acme,
             access: None,

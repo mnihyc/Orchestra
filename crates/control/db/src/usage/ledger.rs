@@ -70,6 +70,8 @@ pub mod purpose {
     pub const EMBEDDINGS: &str = "embeddings";
     /// A personal read-only question, attributed to the person asking.
     pub const ASK: &str = "ask";
+    /// Direct model API calls, attributed to their actual caller.
+    pub const RELAY: &str = "relay";
 }
 
 /// Tokens by kind. Cached tokens and tokens written to a cache are parts of the input, reasoning tokens are
