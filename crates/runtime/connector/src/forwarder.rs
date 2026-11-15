@@ -228,7 +228,7 @@ impl Protocols {
         mut self,
         translators: Vec<Arc<dyn translator::ProtocolTranslator>>,
     ) -> Self {
-        self.translators = translators;
+        self.translators.extend(translators);
         self
     }
 
@@ -902,20 +902,34 @@ impl Forwarder {
             let upstream = translator::UpstreamSide {
                 base_url: endpoint.base_url().to_string(),
                 options: serde_json::to_value(endpoint.options()).unwrap_or_default(),
+                model: lease.model_parameters(&model).cloned(),
+                output_tokens: provider.translation_output_tokens(),
+                session: Some(orch_types::Hash::of(lease.thread_id().as_bytes()).to_string()),
                 credential: (presenter == translator::Presenter::Translator
                     && provider.presenter().is_none())
                 .then(|| credential.clone())
                 .flatten(),
             };
             let translated = tokio::task::spawn_blocking(move || {
+                let response = conversion.response_for(&path, &sent_body, &upstream)?;
                 conversion
                     .translate_request(&path, sent_body, &upstream)
-                    .map(|request| (request, conversion.response_translator()))
+                    .map(|request| (request, response))
             })
             .await;
             let (request, response) = match translated {
                 Ok(Ok(result)) => result,
-                _ => {
+                Ok(Err(error)) => {
+                    return self.refuse(
+                        Some(entry),
+                        Refusal::new(
+                            StatusCode::BAD_REQUEST,
+                            code::PROTOCOL_NOT_SERVED,
+                            error.to_string(),
+                        ),
+                    );
+                }
+                Err(_) => {
                     return self.refuse(
                         Some(entry),
                         Refusal::new(

@@ -1,0 +1,8 @@
+test -p orch-link-contract --lib
+test -p orch-settings-contract --lib
+test -p orch-gateway-core --test commands
+test -p orch-protocol-openai-responses --lib
+test -p orch-protocol-openai-responses --test through_the_scripted_server --test web_search
+test -p orch-connector --lib
+test -p orch-plugin --test bridges
+test -p orch-conformance --test suites

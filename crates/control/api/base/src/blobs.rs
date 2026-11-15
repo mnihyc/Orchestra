@@ -50,6 +50,8 @@ use orch_db::queries::storage;
 
 use orch_db::Conn;
 
+use orch_db::Db;
+
 use orch_db::DbError;
 
 use orch_link_contract::content::MAX_TRANSFERS_PER_MACHINE;
@@ -179,6 +181,8 @@ struct Inner {
     /// Whether the directory of the uploads was made for this handle alone, and goes with it.
     owns_uploads: bool,
     transfers: Mutex<HashMap<Id, u32>>,
+    relays: crate::relay::Relays,
+    transit: crate::transit::Transfers,
     listed: Mutex<VecDeque<(Hash, Arc<HashSet<Hash>>)>>,
     previews: Arc<tokio::sync::Mutex<crate::previews::Cache>>,
 }
@@ -254,10 +258,21 @@ impl Blobs {
                 uploads,
                 owns_uploads,
                 transfers: Mutex::new(HashMap::new()),
+                relays: crate::relay::Relays::default(),
+                transit: crate::transit::Transfers::default(),
                 listed: Mutex::new(VecDeque::new()),
                 previews: Arc::new(tokio::sync::Mutex::new(crate::previews::Cache::default())),
             }),
         }
+    }
+
+    /// The process-wide rendezvous for file content in transit.
+    pub fn relays(&self) -> &crate::relay::Relays {
+        &self.inner.relays
+    }
+
+    pub(crate) fn transfers(&self) -> &crate::transit::Transfers {
+        &self.inner.transit
     }
 
     /// The store itself.
@@ -315,17 +330,14 @@ impl Blobs {
     /// the uploads first, because the store wants the hash before the content. Refused as soon as
     /// more than `limit` bytes have come. The blob is not recorded in the database; the caller does
     /// that in its own transaction ([`Blobs::register`]).
-    pub async fn store_stream<S, E>(&self, body: S, limit: i64) -> Result<BlobMeta, BlobsError>
+    pub async fn store_stream<S, E>(&self, body: S, limit: i64) -> Result<Stored, BlobsError>
     where
         S: Stream<Item = Result<Bytes, E>> + Unpin,
         E: std::fmt::Display,
     {
         let staged = self.stage_stream(body, limit).await?;
         let meta = staged.meta();
-        let result = self
-            .put_file(&staged.path.0, meta.hash, meta.size)
-            .await
-            .map(|_| meta);
+        let result = self.put_file(&staged.path.0, meta.hash, meta.size).await;
         discard(&staged.path.0).await;
         result
     }
@@ -406,14 +418,14 @@ impl Blobs {
     }
 
     /// Puts bytes that are in memory in the store.
-    pub async fn put_bytes(&self, bytes: Bytes) -> Result<BlobMeta, BlobsError> {
+    pub async fn put_bytes(&self, bytes: Bytes) -> Result<Stored, BlobsError> {
         let hash = Hash::of(&bytes);
         let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-        self.inner
+        Ok(self
+            .inner
             .store
             .put(&hash, Some(size), stream_of(vec![bytes]))
-            .await?;
-        Ok(BlobMeta { hash, size })
+            .await?)
     }
 
     /// Reads a blob whole into memory, if it is no larger than `limit`: for lists and other content
@@ -441,7 +453,17 @@ impl Blobs {
     pub async fn register(
         &self,
         conn: &mut Conn,
-        meta: BlobMeta,
+        meta: &BlobMeta,
+        at: DateTime<Utc>,
+    ) -> Result<bool, DbError> {
+        storage::register_owned_blob(conn, &meta.hash, meta.size, at).await
+    }
+
+    /// Records content carried only for the command's transfer without overriding another owner.
+    pub async fn register_transit(
+        &self,
+        conn: &mut Conn,
+        meta: &BlobMeta,
         at: DateTime<Utc>,
     ) -> Result<bool, DbError> {
         storage::register_blob(conn, &meta.hash, meta.size, at).await
@@ -456,25 +478,30 @@ impl Blobs {
         hashes: &[Hash],
         at: DateTime<Utc>,
     ) -> Result<Vec<Hash>, BlobsError> {
+        self.missing_protected(conn, hashes, at)
+            .await
+            .map(|(missing, _)| missing)
+    }
+
+    /// Keeps positive answers alive until a command has committed the pins its sender will rely on.
+    pub async fn missing_protected(
+        &self,
+        conn: &mut Conn,
+        hashes: &[Hash],
+        at: DateTime<Utc>,
+    ) -> Result<(Vec<Hash>, Vec<Stored>), BlobsError> {
         let mut absent = Vec::new();
         let mut held = Vec::new();
         for hash in hashes {
-            match self.inner.store.size(hash).await? {
-                Some(size) => held.push((*hash, size)),
+            match self.inner.store.existing(hash).await? {
+                Some(stored) => {
+                    storage::register_blob(conn, hash, stored.size, at).await?;
+                    held.push(stored);
+                }
                 None => absent.push(*hash),
             }
         }
-        let known: HashSet<Hash> =
-            storage::blobs_among(conn, &held.iter().map(|each| each.0).collect::<Vec<_>>())
-                .await?
-                .into_iter()
-                .collect();
-        for (hash, size) in held {
-            if !known.contains(&hash) {
-                storage::register_blob(conn, &hash, size, at).await?;
-            }
-        }
-        Ok(absent)
+        Ok((absent, held))
     }
 
     /// Adds a pin to each of `hashes`: the content stays while anything is pinned to it. Says
@@ -507,6 +534,25 @@ impl Blobs {
             .collect();
         storage::unpin_blobs(conn, &distinct, at).await?;
         Ok(())
+    }
+
+    /// Removes from the store the content a transfer through the server has ended with, if nothing else
+    /// wants it: no pin, no cached version of a file, no model input, and nobody has asked for it since
+    /// `at`, the moment the transfer ended. It is the end of a transfer whose content was never the
+    /// system's own (a template archive the machine has read, a recorded file that was read for a
+    /// person), where waiting out the grace would leave a copy on the server for a day. It never fails
+    /// the end of a transfer: what it cannot remove waits for the collection.
+    pub async fn forget_after_transfer(&self, db: &Db, hashes: &[Hash], at: DateTime<Utc>) {
+        if let Err(error) = orch_engine::transfers::retire_blobs(
+            db,
+            self.store().as_ref(),
+            hashes,
+            orch_engine::transfers::RetirementWhen::TransferEnded(at),
+        )
+        .await
+        {
+            tracing::warn!(%error, "the content of a completed transfer waits for the collection");
+        }
     }
 
     /// The hashes of the files a list of a tree names: what a download for a command that writes
@@ -591,17 +637,24 @@ pub async fn discard(path: &Path) {
 /// and for a program that has no directory to keep content in.
 #[derive(Debug, Default)]
 pub struct MemoryBlobs {
+    lifetimes: orch_blob_contract::lifetime::Lifetimes,
     blobs: Mutex<BTreeMap<Hash, Bytes>>,
 }
 
 #[async_trait]
 impl BlobStore for MemoryBlobs {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        &self.lifetimes
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         mut content: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
+        publication.check(self.lifetimes(), hash)?;
         let mut verifier = Verifier::new(*hash, size);
         let mut all = Vec::new();
         while let Some(piece) = content.next().await {
@@ -611,7 +664,7 @@ impl BlobStore for MemoryBlobs {
         }
         let meta = verifier.finish()?;
         let created = lock(&self.blobs).insert(*hash, Bytes::from(all)).is_none();
-        Ok(Stored { meta, created })
+        Ok(Stored::new(meta, created))
     }
 
     async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
@@ -645,7 +698,12 @@ impl BlobStore for MemoryBlobs {
             .map(|content| i64::try_from(content.len()).unwrap_or(i64::MAX)))
     }
 
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
         Ok(lock(&self.blobs).remove(hash).is_some())
     }
 }

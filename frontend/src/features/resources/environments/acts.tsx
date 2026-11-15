@@ -1,3 +1,5 @@
+import { environmentQuery } from '@/api/environments';
+import { currentResourceDetail, ResourceReadDialog, useCurrentResourceDetail } from '@/features/resources/ReadDialog';
 import { homeMoveEntries } from '@/features/duplicate/move';
 import { resourceDuplicateEntries } from '@/features/duplicate/target';
 /** What can be done with an environment, from its row in the list and from its own page: start or stop one that Orch made, enable or disable, open, edit, rename, copy its link and delete, each only where the reader may.
@@ -32,12 +34,15 @@ import type { EnvironmentTab } from '@/features/resources/environments/Environme
 import { RemoveEnvironmentDialog } from '@/features/resources/environments/Remove';
 import { RestartEnvironmentDialog } from '@/features/resources/environments/Restart';
 import { isBusy } from '@/features/resources/environments/words';
-import type { Environment } from '@/generated/api-types';
+import type { EnvironmentListRow, Environment as FullEnvironment } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { adminSpec } from '@/ui/AdminAct';
 import { toast } from '@/ui/Toast';
 import { UpdateDialog } from '@/features/fleet/UpdateDialog';
+
+type Environment = EnvironmentListRow | FullEnvironment;
+const canStartNetwork = (environment: Environment) => 'start_allowed' in environment ? environment.start_allowed : !(environment.network.required_mode === 'restricted' && environment.network.mode === 'open');
 
 export interface Asked {
   what: 'edit' | 'rename' | 'disable' | 'delete' | 'restart' | 'lost';
@@ -66,7 +71,10 @@ export function useEnvironmentActs(options: { onTab?: (environment: Environment,
   const enablePlan = useResourceEnable();
   const enableResource = (environment:Environment):EnableResource => ({target:{object:{kind:'environment',id:environment.id},model_id:null},name:environment.name,admin:adminSpec(environment,'environment.manage'),enable:(runWaiting)=>enableEnvironment(environment.id,runWaiting)});
   const askEnable = (environment: Environment) => enablePlan.ask(enableResource(environment));
-  const [asked, setAsked] = useState<Asked | null>(null);
+  const [requested, setAsked] = useState<Asked | null>(null);
+  const detail = useQuery({ ...environmentQuery(requested?.environment.id ?? ''), staleTime: (query) => currentResourceDetail(query.state.data, requested?.environment) === undefined ? 0 : Infinity, enabled: requested !== null });
+  const fullDetail = useCurrentResourceDetail(detail, requested?.environment);
+  const asked = requested === null || fullDetail === undefined ? null : { ...requested, environment: fullDetail };
   const [pauseDraft,setPauseDraft]=useState({id:'',text:''});
   const pauseNote=pauseDraft.id===asked?.environment.id?pauseDraft.text:'';
   const setPauseNote=(text:string)=>setPauseDraft({id:asked?.environment.id??'',text});
@@ -97,7 +105,7 @@ export function useEnvironmentActs(options: { onTab?: (environment: Environment,
     },
   });
 
-  const startApplicable = (environment: Environment) => environment.machine === null && !(environment.network.required_mode === 'restricted' && environment.network.mode === 'open') && (environment.status === 'stopped' || environment.status === 'none');
+  const startApplicable = (environment: Environment) => environment.machine === null && canStartNetwork(environment) && (environment.status === 'stopped' || environment.status === 'none');
   const canStart = (environment: Environment) => holds(environment.access, 'environment.manage') && startApplicable(environment);
   const stopApplicable = (environment: Environment) => environment.machine === null && environment.status === 'running';
   const canStop = (environment: Environment) => holds(environment.access, 'environment.manage') && stopApplicable(environment);
@@ -150,7 +158,7 @@ export function useEnvironmentActs(options: { onTab?: (environment: Environment,
     const recreateAct: Act | null = guarded(changed ? { id: 'recreate', label: t('change.env.menu.recreate'), icon: <RotateCcw aria-hidden />, run: () => openChange(target, { kind: 'recreate' }) } : null);
     const moveAct: Act | null = guarded({ id: 'move', label: t('change.env.menu.move'), icon: <ArrowRightLeft aria-hidden />, run: () => openChange(target, { kind: 'move' }) });
     // A restart reviews the work that will stop before accepting its job.
-    const restartAct:Act|null=guarded(stopApplicable(environment) && environment.job?.state!=='queued' && environment.job?.state!=='running' && !(environment.network.required_mode==='restricted' && environment.network.mode==='open') ? {id:'restart',label:t('environmentRestart.action'),icon:<RotateCcw aria-hidden />,run:()=>setAsked({what:'restart',environment})} : null);
+    const restartAct:Act|null=guarded(stopApplicable(environment) && environment.job?.state!=='queued' && environment.job?.state!=='running' && canStartNetwork(environment) ? {id:'restart',label:t('environmentRestart.action'),icon:<RotateCcw aria-hidden />,run:()=>setAsked({what:'restart',environment})} : null);
     const declare:Act|null = guarded(environment.can_declare_lost ? { id: 'declare-lost', label: t('loss.declareMenu'), icon: <TriangleAlert aria-hidden />, danger: true, run: () => setAsked({ what: 'lost', environment }) } : null);
     const recover:Act|null = guarded(environment.status === 'lost' ? { id: 'recover', label: t('loss.recover'), icon: <ArrowRightLeft aria-hidden />, run: () => openChange(target, { kind: 'recover' }) } : null);
     return {
@@ -209,6 +217,7 @@ export function useEnvironmentActs(options: { onTab?: (environment: Environment,
 
   const dialogs = (
     <>
+      {requested !== null && asked === null && <ResourceReadDialog name={requested.environment.name} read={detail} onClose={() => setAsked(null)} />}
       {cleanup.dialogs}
       {enablePlan.dialogs}
       {updating !== null && <UpdateDialog targets={{ environments: updating }} onClose={() => setUpdating(null)} />}

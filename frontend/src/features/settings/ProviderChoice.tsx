@@ -1,7 +1,7 @@
 import { ResourcePickerLookup } from '@/ui/ResourcePicker';
 /** A provider default is chosen and read by its authorized name inside the existing settings row. */
 import { queryOptions, useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
-import { type KeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react';
+import { type KeyboardEvent, type ReactNode, createContext, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
 
@@ -53,16 +53,18 @@ function NamedProvider({ id, render }: { id: string; render: ((name: string) => 
   return render === undefined ? <span className="text-text-muted">{selected}</span> : render(selected);
 }
 
+export const ProviderSuggestionCompletion=createContext<((provider:Provider)=>void)|null>(null);
+
 const readerScope = defaultProviderReader;
 const refused = (error: unknown) => error instanceof ApiError && [401, 403, 404].includes(error.status);
 
 /** The parent's revision/lock/autosave machinery remains the only writer of the setting. */
-export function ProviderDefaultChoice(props: ValueControlProps & { size?: 'sm' | 'md' }) {
+export function ProviderDefaultChoice(props: ValueControlProps & { size?: 'sm' | 'md'; providerKind?: Provider['kind'];proposal?:ReactNode }) {
   const reader = useStore(client.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
   return <ReaderChoice key={reader} {...props} reader={reader} />;
 }
 
-function ReaderChoice({ value, label, onChange, onEdited, error, disabled = false, placeholder, reader, showLabel, size = 'sm' }: ValueControlProps & { reader: string; size?: 'sm' | 'md' }) {
+function ReaderChoice({ value, label, onChange, onEdited, error, disabled = false, placeholder, reader, showLabel, size = 'sm', providerKind,proposal }: ValueControlProps & { reader: string; size?: 'sm' | 'md'; providerKind?: Provider['kind'];proposal?:ReactNode }) {
   const { t } = useTranslation();
   const cache = useQueryClient();
   const known = useKnownPlaces({ trees: false });
@@ -102,7 +104,7 @@ function ReaderChoice({ value, label, onChange, onEdited, error, disabled = fals
     const provider = item.resource?.kind === 'provider' ? item.resource.value : undefined;
     if (provider === undefined) return [];
     return item.kind === 'provider' && item.my_access !== 'path_only' && item.name !== null && item.id === provider.id
-      && provider.status !== 'disabled' && holds(provider.access, 'provider.view') && holds(provider.access, 'provider.use')
+      && provider.status !== 'disabled' && holds(provider.access, 'provider.view') && holds(provider.access, 'provider.use') && (providerKind === undefined || provider.kind === providerKind)
       && !(provider.id === selected && (currentError !== null || currentMissing)) ? [[provider.id, provider] as const] : [];
   })).values()];
   const labels = providerLabels([...new Map([...(current === undefined ? [] : [current]), ...rows].map((row) => [row.id, row])).values()], known);
@@ -176,7 +178,11 @@ function ReaderChoice({ value, label, onChange, onEdited, error, disabled = fals
       query={typed} onQueryChange={type} displayValue={shown} initialActiveValue={selected} placeholder={placeholder ?? t('places.providerDefault.choose')}
       open={open} onOpenChange={changedOpen} loading={busy} empty={listError !== null ? undefined : t('ui.combobox.empty')}
       groups={[{ id: 'providers', label: '', options }]}
-      footer={hasFooter ? <div ref={footer} className="flex min-w-0 flex-col gap-1">{currentProblem}{pages}</div> : undefined}
+      footer={hasFooter || open && proposal!==undefined ? <div ref={footer} className="flex min-w-0 flex-col gap-1">{currentProblem}{pages}{open && <ProviderSuggestionCompletion value={(provider)=>{
+        if(readerScope()!==reader)return;
+        cache.setQueryData(currentKey(provider.id),provider);currentValue.current=provider.id;
+        show(false);type('');setVisited(false);setListRecovery(null);setCurrentRecovery(null);
+      }}>{proposal}</ProviderSuggestionCompletion>}</div> : undefined}
       onSelect={(option) => {
         if (disabled || busy) return;
         const provider = rows.find((row) => row.id === option.value);

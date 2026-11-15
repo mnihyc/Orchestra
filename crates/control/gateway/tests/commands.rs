@@ -203,6 +203,7 @@ async fn a_secret_is_stored_as_a_reference_and_reaches_only_the_machine_it_is_fo
             &SerialKey::Provider(provider),
             later(300),
             &ProviderStart {
+                translation_output_tokens: 4096,
                 provider_id: provider,
                 protocols: Vec::new(),
                 upstreams: Vec::new(),

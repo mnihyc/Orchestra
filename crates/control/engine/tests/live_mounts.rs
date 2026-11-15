@@ -79,6 +79,7 @@ impl Commands for JournaledCommands {
         journal::insert_command(
             &mut conn,
             &NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),
