@@ -473,6 +473,10 @@ error_codes! {
     PolicyNotDelegated = 409, "policy.not_delegated", "The machine keeps these keys to itself";
     ConflictStaleRevision = 409, "conflict.stale_revision", "It was changed meanwhile";
     ConflictExists = 409, "conflict.exists", "It exists already";
+    PublicAddressBusy = 409, "public_address.busy", "Another public address change is being prepared";
+    PublicAddressUnverified = 409, "public_address.unverified", "The browser origin could not be verified";
+    PublicAddressMismatch = 409, "public_address.mismatch", "The browser origin does not prove this installation";
+    PublicAddressFrontendNotReady = 409, "public_address.frontend_not_ready", "The frontend certificate is not ready";
     ConflictIdempotencyMismatch = 409, "conflict.idempotency_mismatch", "The key was used for another request";
     ConflictConfirmationRequired = 409, "conflict.confirmation_required", "Confirm before going on";
     NodeArchived = 409, "node.archived", "It is archived";

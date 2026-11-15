@@ -123,6 +123,16 @@ where available. Otherwise, or when history will not
 fit, recent history goes in the handoff notice with the full transcript as a
 file. Profile overrides cannot restore the disabled import.
 
+A release may add native cases to a program's manifest. A build whose stored check passed every case it had stays
+Checked, with the new cases pending ("Checked · N checks pending"): nothing it had proved is taken away, and native import
+stays as the case that proves it left it. Within one look of the release schedule (every fifteen minutes; an interval of
+zero keeps this, like the reads, off) the background runs the pending cases of every kept build that was checked before,
+whatever its age. A host whose node is of an earlier release does not have the new cases: its check is not a failure, the
+build stays Checked, and the result says "not run by this node's version" until a host with the updated node runs them,
+so update standalone nodes with the server. A check that could not run at all (no host, a failed runner) leaves the last
+whole check as it was, and says that the later check did not run. A release's own pinned builds are not kept rows: the
+release certifies them with its manifest, and they show Checked from the day it is installed.
+
 Choose Shipped, Newest checked, Newest (untested), or Exact. Exact accepts a
 known version or fetches that exact vendor release with its checksum through
 the configured Release mirror. A newly fetched build finishes its background

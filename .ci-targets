@@ -1,0 +1,6 @@
+test -p orch-link --test commands --test resume_authority --test handshake --test tls
+test -p orch-gateway-core --test tunnels --test tunnel_attachments --test presence --test commands --test access
+test -p orch-connector-core --test harness_tools --test agent_role --test tunnel --test tool_servers --test direct_machine_programs
+test -p orch-engine --test cache_cleanup --test call_recovery --test forks --test ingest --test foreign_machine_streams
+test -p orch-api-core --test real_connector --test executor_ticket_build
+test -p orch-testkit --test harness_corpus
