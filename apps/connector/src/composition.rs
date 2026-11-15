@@ -23,7 +23,7 @@ use orch_connector_core::connector::{
     ConnectorBuilder, ConnectorParams, StartError, Supervision, run_until_with_updates,
 };
 use orch_connector_core::enrollment::{
-    DataDir, EnrollInputs, HttpsEnroll, ManagedInputs, default_data_dir, enroll, role_name,
+    Claim, DataDir, EnrollInputs, HttpsEnroll, ManagedInputs, default_data_dir, enroll, role_name,
 };
 use orch_connector_core::facts::Host;
 use orch_connector_core::forwarder::{ProtocolEntry, Protocols};
@@ -510,6 +510,34 @@ pub async fn run(dir: Option<PathBuf>, managed: bool, build: BuildInfo) -> anyho
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let shutdown = stopped().context("registering process stop signals")?;
     let transport = HttpsEnroll::new(Arc::clone(&clock), None);
+    // The machine is the unit's own. A new unit made on the volume of an earlier one finds that unit's
+    // identity there, which the system revoked with its unit: it puts that aside and enrolls as a new
+    // machine, and a unit that is given the volume back finds its own again. What is put aside, brought
+    // back or dropped is said here, with the unit, in the log that stays with the unit.
+    if let Some(launch) = &launch {
+        let unit = launch.unit.as_str();
+        let claimed = data
+            .claim_machine_state(unit)
+            .context("taking the machine state of this unit")?;
+        match claimed {
+            Claim::Own => {}
+            Claim::Fresh { put_aside, dropped } => {
+                tracing::info!(%unit, put_aside = %put_aside, "the data directory held the machine of another unit: it is put aside, and this unit enrolls as a new machine");
+                for gone in &dropped {
+                    tracing::warn!(%unit, dropped = %gone, "the machine of an earlier unit that was put aside before is dropped: one earlier machine is kept");
+                }
+            }
+            Claim::Restored { put_aside, dropped } => {
+                tracing::info!(%unit, "the machine of this unit was put aside for another unit and is back");
+                if let Some(put_aside) = put_aside {
+                    tracing::info!(%unit, put_aside = %put_aside, "the machine that was here is put aside in its place");
+                }
+                for gone in &dropped {
+                    tracing::warn!(%unit, dropped = %gone, "the machine of an earlier unit that was put aside before is dropped: one earlier machine is kept");
+                }
+            }
+        }
+    }
     if !data.is_enrolled() {
         let Some(launch) = &launch else {
             anyhow::bail!(

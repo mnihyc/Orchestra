@@ -58,4 +58,4 @@ export const detailUnitProvider: Provider = planProvider({ id: 'unit-provider', 
   runtime_support: { lifecycle: 'unit', commands_after_start: null, after_up: false },
   runtime: { state: 'running', host: { id: detailHost.id, name: detailHost.name, address: detailHost.address }, driver: 'sample',
     template: { id: detailTemplate.id, name: detailTemplate.name, owner: detailTemplate.owner }, generation: 2,
-    network: detailEnvironment.network, updates: [], update_required: false, last_active_at: null, idle_stop_at: null, renew_at: null, job: null } });
+    network: detailEnvironment.network, updates: [], update_required: false, last_active_at: null, idle_stop_at: null, renew_at: null, job: null, detail: null } });

@@ -399,10 +399,16 @@ async fn selected_initial_copy(root_alias: bool, whole_environment: bool) {
     .await;
     assert_eq!(hosting::status(&world, made.id).await.0, "provisioning");
     assert_eq!(world.commands.issued_of("turn.start"), 0);
-    unit.let_go();
-    assert_eq!(hosting::wait_over(&world, made.job.id).await.0, "succeeded");
-    assert_eq!(hosting::status(&world, made.id).await.0, "running");
-    let hash = captured.lock().unwrap().unwrap();
+    // The command is held, so the copy has pinned its list and its files and nothing has let go of them.
+    let hash: Hash = serde_json::from_value(
+        jobs::job(&mut world.pool.acquire().await.unwrap(), made.job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .plan["initial_files_manifest"]
+            .clone(),
+    )
+    .unwrap();
     let manifest = world.engine().read_manifest(&hash).await.unwrap();
     let paths: Vec<_> = manifest
         .entries()
@@ -433,16 +439,24 @@ async fn selected_initial_copy(root_alias: bool, whole_environment: bool) {
             b"the same uploaded and shared bytes".as_slice()
         );
     }
+    unit.let_go();
+    assert_eq!(hosting::wait_over(&world, made.job.id).await.0, "succeeded");
+    assert_eq!(hosting::status(&world, made.id).await.0, "running");
+    assert_eq!(
+        captured.lock().unwrap().unwrap(),
+        hash,
+        "the machine was given the list that was pinned"
+    );
     let mut conn = world.pool.acquire().await.unwrap();
     let row = jobs::job(&mut conn, made.job.id).await.unwrap().unwrap();
     assert!(row.plan["initial_files_pins"].is_null());
-    assert_eq!(
-        storage::blob(&mut conn, &hash)
-            .await
-            .unwrap()
-            .unwrap()
-            .pin_count,
-        0
+    assert!(
+        storage::blob(&mut conn, &hash).await.unwrap().is_none(),
+        "the copy's content nothing else holds is removed from the server when the copy ends"
+    );
+    assert!(
+        !prepared.store.exists(&hash).await.unwrap(),
+        "and its file is gone from the store, not left for a collection"
     );
     world.engine().stop();
     let _ = prepared.directory;
@@ -479,13 +493,12 @@ async fn cancellation_removes_the_fresh_unit_and_volumes_and_releases_its_copy_p
     let mut conn = world.pool.acquire().await.unwrap();
     let row = jobs::job(&mut conn, made.job.id).await.unwrap().unwrap();
     assert!(row.plan["initial_files_pins"].is_null());
-    assert_eq!(
+    assert!(
         storage::blob(&mut conn, &prepared.hash)
             .await
             .unwrap()
-            .unwrap()
-            .pin_count,
-        0
+            .is_none(),
+        "a cancelled copy leaves nothing of its content on the server"
     );
     assert_eq!(
         envs::environment(&mut conn, prepared.source)

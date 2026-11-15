@@ -1380,6 +1380,7 @@ async fn restore_and_early_purge_honor_the_tokens_current_scope_subtree_and_org_
         rows::lock_environment(&mut tx, made.id).await.unwrap();
         let token = orch_db::queries::identity::testing::insert_api_token(
             &mut tx,
+            orch_types::new_id(),
             world.ada,
             &[u8::try_from(number).unwrap() + 40; 32],
         )

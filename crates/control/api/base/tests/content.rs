@@ -550,12 +550,10 @@ async fn content_that_is_not_in_the_store_is_not_found() {
     assert_eq!(answer.status, StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
-async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
+/// Puts in the store the list of a tree whose one file is `file`, as an export or a snapshot made it,
+/// and says its hash.
+async fn store_a_list_naming(depot: &Depot, path: &str, file: Hash, size: i64) -> Hash {
     use orch_engine::manifest::{Entry, EntryKind, Header, build};
-    let depot = Depot::new().await;
-    let inside = depot.store(b"a file the list names").await;
-    let outside = depot.store(b"a file that no list names").await;
     let written = build(
         &Header {
             v: 1,
@@ -565,12 +563,12 @@ async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
             case_sensitive: true,
         },
         vec![Entry {
-            path: "src/a.txt".to_owned(),
+            path: path.to_owned(),
             kind: EntryKind::File,
-            size: 21,
+            size,
             mtime_ns: 1,
             mode: 0o644,
-            hash: Some(inside),
+            hash: Some(file),
             link: None,
         }],
     )
@@ -582,12 +580,21 @@ async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
         .await
         .unwrap();
     assert_eq!(list.hash, written.hash);
+    list.hash
+}
+
+#[tokio::test]
+async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
+    let depot = Depot::new().await;
+    let inside = depot.store(b"a file the list names").await;
+    let outside = depot.store(b"a file that no list names").await;
+    let list = store_a_list_naming(&depot, "src/a.txt", inside, 21).await;
     let materializing = depot
         .command(
             depot.machine,
             CommandKind::FsMaterialize,
             &json!({
-                "environment_id": new_id(), "job_id": null, "manifest_blob": list.hash,
+                "environment_id": new_id(), "job_id": null, "manifest_blob": list,
                 "target_root": "/workspace/web", "purpose": "delivery"
             }),
         )
@@ -601,7 +608,7 @@ async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
     assert_eq!(file.body.as_ref(), b"a file the list names");
     let list_itself = depot
         .content
-        .get(depot.machine, materializing, &list.hash, None)
+        .get(depot.machine, materializing, &list, None)
         .await;
     assert_eq!(
         list_itself.status,
@@ -611,6 +618,48 @@ async fn a_command_that_writes_a_tree_down_is_given_the_files_its_list_names() {
     let other = depot
         .content
         .get(depot.machine, materializing, &outside, None)
+        .await;
+    assert_eq!(other.status, StatusCode::FORBIDDEN);
+}
+
+/// A machine move carries the home and the recorded file states of an environment in two commands of
+/// this kind, each naming only the list of the exported tree: the machine that imports it fetches
+/// every file of the list by its hash, as `fs.materialize` does.
+#[tokio::test]
+async fn a_command_that_imports_a_data_part_is_given_the_files_its_list_names() {
+    let depot = Depot::new().await;
+    let inside = depot.store(b"a file of the exported data part").await;
+    let outside = depot.store(b"a file that no list names").await;
+    let list = store_a_list_naming(&depot, ".orch/file-states/state", inside, 32).await;
+    let importing = depot
+        .command(
+            depot.machine,
+            CommandKind::FsDataImport,
+            &json!({
+                "environment_id": new_id(), "job_id": new_id(), "part": "file_states",
+                "manifest_blob": list
+            }),
+        )
+        .await;
+
+    let list_itself = depot
+        .content
+        .get(depot.machine, importing, &list, None)
+        .await;
+    assert_eq!(
+        list_itself.status,
+        StatusCode::OK,
+        "the list is in the command's body"
+    );
+    let file = depot
+        .content
+        .get(depot.machine, importing, &inside, None)
+        .await;
+    assert_eq!(file.status, StatusCode::OK, "{file:?}");
+    assert_eq!(file.body.as_ref(), b"a file of the exported data part");
+    let other = depot
+        .content
+        .get(depot.machine, importing, &outside, None)
         .await;
     assert_eq!(other.status, StatusCode::FORBIDDEN);
 }
@@ -743,4 +792,271 @@ async fn a_blob_that_arrived_is_a_blob_of_the_size_it_was_announced_with() {
     let mut conn = depot.world.conn().await;
     let row = storage::blob(&mut conn, &meta.hash).await.unwrap().unwrap();
     assert_eq!(row.size, meta.size);
+}
+
+#[tokio::test]
+async fn a_relay_acknowledges_only_what_its_destination_holds_and_a_retry_uses_that_offset() {
+    use bytes::Bytes;
+    use orch_api_core::relay::{RelayError, Relays};
+    let relays = Relays::default();
+    let relay = relays.create(1, 6).await;
+    relay.stand(0).unwrap();
+    let sending = relay.clone();
+    let offer = tokio::spawn(async move { sending.offer(0, Bytes::from_static(b"abcdef")).await });
+    assert_eq!(
+        relay_wait(relay.pull(0, 3)).await.unwrap(),
+        Some(Bytes::from_static(b"abc"))
+    );
+    assert!(
+        !offer.is_finished(),
+        "reading a piece is not an acknowledgement of a durable write"
+    );
+    assert_eq!(
+        relay_wait(relay.pull(3, 3)).await.unwrap(),
+        Some(Bytes::from_static(b"def"))
+    );
+    assert!(!offer.is_finished());
+    relay.stand(6).unwrap();
+    assert_eq!(relay_wait(offer).await.unwrap().unwrap(), 6);
+    assert_eq!(
+        relay.offer(0, Bytes::from_static(b"abcdef")).await,
+        Err(RelayError::Offset { received: 6 })
+    );
+    relay.finish();
+    assert_eq!(relay_wait(relay.pull(6, 3)).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_slow_browser_backpressures_the_machine_and_closing_the_reader_ends_its_wait() {
+    use bytes::Bytes;
+    use orch_api_core::relay::{RelayError, Relays};
+    let relays = Relays::default();
+    let relay = relays.create(1, 6).await;
+    let sending = relay.clone();
+    let first = tokio::spawn(async move { sending.push(0, Bytes::from_static(b"abc")).await });
+    assert_eq!(
+        relay_wait(relay.next()).await.unwrap(),
+        Some(Bytes::from_static(b"abc"))
+    );
+    assert_eq!(relay_wait(first).await.unwrap().unwrap(), 3);
+    let sending = relay.clone();
+    let next = tokio::spawn(async move { sending.push(3, Bytes::from_static(b"def")).await });
+    tokio::task::yield_now().await;
+    assert!(!next.is_finished(), "a second piece waits for the reader");
+    relay.cancel();
+    assert_eq!(relay_wait(next).await.unwrap(), Err(RelayError::Ended));
+}
+
+#[tokio::test]
+async fn a_transfer_waits_for_memory_without_refusing_the_person_or_holding_other_work() {
+    let relays = orch_api_core::relay::Relays::default();
+    let first = relays.create(1, 1).await;
+    let queued = relays.clone();
+    let next = tokio::spawn(async move { queued.create(1, 1).await });
+    tokio::task::yield_now().await;
+    assert!(
+        !next.is_finished(),
+        "memory is allocated only when the active transfer lets go"
+    );
+    assert!(
+        relays.get(first.id()).is_some(),
+        "active transfers remain reachable while another waits"
+    );
+    drop(first);
+    let next = relay_wait(next).await.unwrap();
+    assert_eq!(relays.count(), 1);
+    assert!(relays.get(next.id()).is_some());
+}
+
+#[tokio::test]
+async fn a_dropped_browser_piece_is_not_retained_and_the_machine_can_resume_from_its_own_offset() {
+    use bytes::Bytes;
+    let relays = orch_api_core::relay::Relays::default();
+    let relay = relays.create(1, 6).await;
+    relay.stand(0).unwrap();
+    let sending = relay.clone();
+    let offer = tokio::spawn(async move { sending.offer(0, Bytes::from_static(b"abcdef")).await });
+    assert_eq!(
+        relay_wait(relay.pull(0, 3)).await.unwrap().unwrap(),
+        Bytes::from_static(b"abc")
+    );
+    offer.abort();
+    assert!(offer.await.unwrap_err().is_cancelled());
+    relay.stand(3).unwrap();
+    let sending = relay.clone();
+    let retry = tokio::spawn(async move { sending.offer(3, Bytes::from_static(b"def")).await });
+    assert_eq!(
+        relay_wait(relay.pull(3, 3)).await.unwrap().unwrap(),
+        Bytes::from_static(b"def")
+    );
+    relay.stand(6).unwrap();
+    assert_eq!(relay_wait(retry).await.unwrap().unwrap(), 6);
+}
+
+async fn relay_wait<T>(operation: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(std::time::Duration::from_secs(5), operation)
+        .await
+        .expect("the relay handshake must finish")
+}
+
+#[tokio::test]
+async fn transit_content_belongs_only_to_its_exact_open_command_and_never_grants_stored_blob_access()
+ {
+    use bytes::Bytes;
+    use http::Method;
+    let depot = Depot::new().await;
+    let relay = depot.app().blobs.relays().create(1, 3).await;
+    let path = format!("/internal/link/blobs/relay/{}?offset=0", relay.id());
+    let sender = depot.command(depot.machine, CommandKind::FsRelaySend, &json!({
+        "environment_id": new_id(), "path":"a.txt", "hash":Hash::of(b"abc"), "offset":0, "len":3,
+        "relay_id":relay.id(), "idle_secs":120, "retry_ms":250
+    })).await;
+    let other = depot.uploading().await;
+    for command in [Id::nil(), other] {
+        let answer = depot
+            .content
+            .send(depot.content.request(
+                Method::PUT,
+                &path,
+                Some(depot.machine),
+                Some(command),
+                &[],
+                Bytes::from_static(b"abc"),
+            ))
+            .await;
+        assert_eq!(answer.status, StatusCode::FORBIDDEN);
+    }
+    let wrong = depot
+        .content
+        .send(depot.content.request(
+            Method::PUT,
+            &format!("/internal/link/blobs/relay/{}?offset=0", new_id()),
+            Some(depot.machine),
+            Some(sender),
+            &[],
+            Bytes::from_static(b"abc"),
+        ))
+        .await;
+    assert_eq!(wrong.status, StatusCode::FORBIDDEN);
+    let cannot_store = depot
+        .content
+        .put(depot.machine, sender, &Hash::of(b"abc"), 0, 3, b"abc")
+        .await;
+    assert_eq!(cannot_store.status, StatusCode::FORBIDDEN);
+    let content = depot.content.clone();
+    let machine = depot.machine;
+    let push = tokio::spawn(async move {
+        content
+            .send(content.request(
+                Method::PUT,
+                &path,
+                Some(machine),
+                Some(sender),
+                &[],
+                Bytes::from_static(b"abc"),
+            ))
+            .await
+    });
+    assert_eq!(
+        relay_wait(relay.next()).await.unwrap().unwrap(),
+        Bytes::from_static(b"abc")
+    );
+    let answer = relay_wait(push).await.unwrap();
+    assert_eq!(
+        (answer.status, answer.received()),
+        (StatusCode::OK, Some(3))
+    );
+    assert!(
+        depot
+            .app()
+            .blobs
+            .store()
+            .size(&Hash::of(b"abc"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    finish(depot.app(), sender).await;
+    let gone = depot
+        .content
+        .send(depot.content.request(
+            Method::PUT,
+            &format!("/internal/link/blobs/relay/{}?offset=3", relay.id()),
+            Some(depot.machine),
+            Some(sender),
+            &[],
+            Bytes::new(),
+        ))
+        .await;
+    assert_eq!(gone.status, StatusCode::GONE);
+}
+
+#[tokio::test]
+async fn the_machine_acknowledges_a_relay_upload_after_its_write_and_cannot_read_another_transfer()
+{
+    use bytes::Bytes;
+    use http::Method;
+    let depot = Depot::new().await;
+    let relay = depot.app().blobs.relays().create(1, 6).await;
+    let command = depot.command(depot.machine, CommandKind::FsRelayReceive, &json!({
+        "environment_id":new_id(),"path":"a.txt","session_id":new_id(),"relay_id":relay.id(),
+        "size":6,"idle_secs":120,"retry_ms":250,"expires_at":"2026-11-18T01:00:00.000Z"
+    })).await;
+    let root = format!("/internal/link/blobs/relay/{}", relay.id());
+    let joined = depot
+        .content
+        .send(depot.content.request(
+            Method::HEAD,
+            &format!("{root}?received=0"),
+            Some(depot.machine),
+            Some(command),
+            &[],
+            Bytes::new(),
+        ))
+        .await;
+    assert_eq!(
+        (joined.status, joined.received()),
+        (StatusCode::OK, Some(0))
+    );
+    let sending = relay.clone();
+    let offer = tokio::spawn(async move { sending.offer(0, Bytes::from_static(b"abcdef")).await });
+    let piece = relay_wait(depot.content.send(depot.content.request(
+        Method::GET,
+        &format!("{root}?offset=0&len=6"),
+        Some(depot.machine),
+        Some(command),
+        &[],
+        Bytes::new(),
+    )))
+    .await;
+    assert_eq!(piece.body, Bytes::from_static(b"abcdef"));
+    assert!(
+        !offer.is_finished(),
+        "delivery to the machine's request is not yet a durable acknowledgement"
+    );
+    let ack = depot
+        .content
+        .send(depot.content.request(
+            Method::HEAD,
+            &format!("{root}?received=6"),
+            Some(depot.machine),
+            Some(command),
+            &[],
+            Bytes::new(),
+        ))
+        .await;
+    assert_eq!(ack.received(), Some(6));
+    assert_eq!(relay_wait(offer).await.unwrap().unwrap(), 6);
+    let wrong_direction = depot
+        .content
+        .send(depot.content.request(
+            Method::PUT,
+            &format!("{root}?offset=6"),
+            Some(depot.machine),
+            Some(command),
+            &[],
+            Bytes::new(),
+        ))
+        .await;
+    assert_eq!(wrong_direction.status, StatusCode::FORBIDDEN);
 }

@@ -23,7 +23,7 @@ use orch_api_contract::{
         UploadedBlob,
     },
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{identity, storage, uploads};
 use orch_types::{Hash, Id, Json, new_id};
 use places::Who;
@@ -55,11 +55,12 @@ async fn list(world: &World, token: &str, query: &PageQuery) -> Page<UploadInven
 async fn key(world: &World, actor: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: actor,
             name: "Upload inventory scope control",
             token_hash: &token_hash(&secret),

@@ -381,7 +381,9 @@ export function ValueControl(props: ValueControlProps & { ordered?: boolean }): 
     case 'bool': {
       // The key's title stands beside the control already: the switch keeps it for a screen reader and says its state in words.
       const word = say ?? words;
-      const state = value === true ? word('on') : word('off');
+      // The file relay says what it does in its two states, as the registry's "File relay" title stands beside it.
+      const [on, off] = key === 'storage.relay_transfers' ? ['relayed', 'cached'] : ['on', 'off'];
+      const state = value === true ? word(on) : word(off);
       return (
         <Switch
           className="w-fit items-center gap-3"

@@ -1296,9 +1296,12 @@ impl Recreating {
             )
             .await?;
         }
+        // A person who stopped or took away the old unit while the update was under way has it stay stopped.
+        let kept_stopped = plan.get("keep_old_stopped").and_then(Json::as_bool) == Some(true);
         let resume = !removed_capability
             && !guarded
             && !disabled
+            && !kept_stopped
             && (self.recipe.auto_start || !self.recipe.was_stopped);
         if resume
             && (plan.get("old_stop_requested").and_then(Json::as_bool) == Some(true)
@@ -1695,12 +1698,9 @@ impl Engine {
             tracing::warn!(job=%row.id,%error,"kept-image cleanup waits for a later sweep");
         }
         // A provider's carried files were kept in the blob store only for the move.
-        if let Ok(pins) =
-            serde_json::from_value::<Vec<orch_types::Hash>>(row.plan["carry_pins"].clone())
-            && let Ok(mut conn) = self.db().acquire().await
-            && let Err(error) =
-                orch_db::queries::storage::unpin_blobs(&mut conn, &pins, self.inner.clock.now())
-                    .await
+        if let Err(error) = self
+            .release_held(row.id, &["carry_pins"], "carry_pins_released")
+            .await
         {
             tracing::warn!(%error, "a move's carried files could not be let go");
         }

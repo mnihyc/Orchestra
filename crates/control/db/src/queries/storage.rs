@@ -168,6 +168,24 @@ pub async fn pin_blobs(conn: &mut Conn, hashes: &[Hash]) -> Result<u64, DbError>
     Ok(pinned)
 }
 
+/// Adds one pin to each of `hashes` that has a row, as [`pin_blobs`] does, and says which they were: a
+/// transfer lets go only of what it pinned, so it must know whether a hash it asked for had a row.
+pub async fn pin_transfer_blobs(conn: &mut Conn, hashes: &[Hash]) -> Result<Vec<Hash>, DbError> {
+    let mut pinned = Vec::new();
+    for batch in hashes.chunks(PIN_BATCH) {
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+            "UPDATE blobs SET pin_count = pin_count + 1 WHERE hash = ANY($1) RETURNING hash",
+        )
+        .bind(raw_hashes(batch))
+        .fetch_all(&mut *conn)
+        .await?;
+        for raw in rows {
+            pinned.push(hash_of(&raw)?);
+        }
+    }
+    Ok(pinned)
+}
+
 /// The person's saved draft and pending attachments, locked with replacement bytes before pin changes.
 pub async fn private_thread_blobs(
     conn: &mut Conn,
@@ -346,6 +364,161 @@ pub async fn unpin_blobs(
         .rows_affected();
     }
     Ok(unpinned)
+}
+
+/// Takes one pin off each of `hashes` that has one, as [`unpin_blobs`] does, and says which of them
+/// that left with none: the content a transfer brought and nothing else holds. Those are the ones the
+/// transfer may then forget ([`forget_released_blobs`]).
+pub async fn release_transfer_blobs(
+    conn: &mut Conn,
+    hashes: &[Hash],
+    at: DateTime<Utc>,
+) -> Result<Vec<Hash>, DbError> {
+    let mut freed = Vec::new();
+    for batch in hashes.chunks(PIN_BATCH) {
+        let rows: Vec<(Vec<u8>, i32)> = sqlx::query_as(
+            "UPDATE blobs
+                SET pin_count = pin_count - 1,
+                    last_access_at = CASE WHEN pin_count = 1 THEN GREATEST(last_access_at, $2) ELSE last_access_at END
+              WHERE hash = ANY($1) AND pin_count > 0
+          RETURNING hash, pin_count",
+        )
+        .bind(raw_hashes(batch))
+        .bind(at)
+        .fetch_all(&mut *conn)
+        .await?;
+        for (raw, left) in rows {
+            if left == 0 {
+                freed.push(hash_of(&raw)?);
+            }
+        }
+    }
+    Ok(freed)
+}
+
+/// Takes the rows away of those of `hashes` that nothing wants: no pin, no cached version of a file,
+/// no model input, and nobody has asked for the content since `at`, the moment the transfer let go
+/// of it. The conditions are looked at again in the statement that deletes, so a pin or a use that
+/// came meanwhile keeps the content. Says which rows went; the store's files are then the caller's
+/// to remove.
+pub async fn forget_released_blobs(
+    conn: &mut Conn,
+    hashes: &[Hash],
+    at: DateTime<Utc>,
+) -> Result<Vec<Hash>, DbError> {
+    let mut forgotten = Vec::new();
+    for batch in hashes.chunks(PIN_BATCH) {
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+            "DELETE FROM blobs b
+              WHERE b.hash = ANY($1) AND b.pin_count = 0 AND b.last_access_at <= $2
+                AND NOT EXISTS (SELECT 1 FROM file_cache f WHERE f.hash = b.hash)
+                AND NOT EXISTS (SELECT 1 FROM model_inputs m CROSS JOIN LATERAL jsonb_array_elements(m.blocks) x WHERE x->>'blob'=encode(b.hash,'hex'))
+          RETURNING b.hash",
+        )
+        .bind(raw_hashes(batch))
+        .bind(at)
+        .fetch_all(&mut *conn)
+        .await?;
+        for raw in rows {
+            forgotten.push(hash_of(&raw)?);
+        }
+    }
+    Ok(forgotten)
+}
+
+/// Holds each of `hashes` that has a row for the command `command` of the job `job`, once, until the job ends
+/// ([`release_job_command_pins`]): what the machine of a transfer uploaded, or was told the system holds, is not taken
+/// away by another transfer that lets go of the same content before the job has pinned it for itself. Says how many
+/// pins were added.
+pub async fn pin_for_command(
+    conn: &mut Conn,
+    command: Id,
+    job: Id,
+    hashes: &[Hash],
+    at: DateTime<Utc>,
+) -> Result<u64, DbError> {
+    let mut pinned = 0;
+    for batch in hashes.chunks(PIN_BATCH) {
+        pinned += sqlx::query(
+            "WITH added AS (
+                 INSERT INTO command_blob_pins (command_id, blob, job_id, pinned_at)
+                 SELECT $1, b.hash, $2, $4 FROM blobs b WHERE b.hash = ANY($3)
+                 ON CONFLICT DO NOTHING RETURNING blob)
+             UPDATE blobs b SET pin_count = b.pin_count + 1 FROM added a WHERE b.hash = a.blob",
+        )
+        .bind(command)
+        .bind(job)
+        .bind(raw_hashes(batch))
+        .bind(at)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    }
+    Ok(pinned)
+}
+
+/// Lets go of every pin the commands of `job` hold for it, and says how many there were and which hashes that left with
+/// none: the content the job's transfer brought and nothing else holds.
+pub async fn release_job_command_pins(
+    conn: &mut Conn,
+    job: Id,
+    at: DateTime<Utc>,
+) -> Result<(u64, Vec<Hash>), DbError> {
+    let rows: Vec<(Vec<u8>, i32, i64)> = sqlx::query_as(
+        "WITH gone AS (DELETE FROM command_blob_pins WHERE job_id = $1 RETURNING blob),
+              counts AS (SELECT blob, count(*)::int AS n FROM gone GROUP BY blob)
+         UPDATE blobs b
+            SET pin_count = GREATEST(b.pin_count - c.n, 0),
+                last_access_at = CASE WHEN b.pin_count - c.n <= 0 THEN GREATEST(b.last_access_at, $2) ELSE b.last_access_at END
+           FROM counts c WHERE b.hash = c.blob
+       RETURNING b.hash, b.pin_count, c.n::bigint",
+    )
+    .bind(job)
+    .bind(at)
+    .fetch_all(conn)
+    .await?;
+    let released = rows
+        .iter()
+        .map(|(_, _, n)| u64::try_from(*n).unwrap_or_default())
+        .sum();
+    let mut freed = Vec::new();
+    for (raw, left, _) in rows {
+        if left == 0 {
+            freed.push(hash_of(&raw)?);
+        }
+    }
+    Ok((released, freed))
+}
+
+/// Lets go, as the pins of an ended job are, of the pins that were made before `pinned_before` for a job that is over or
+/// is not there any more: the job's own end did not find them. The content is not removed; it has its grace. Says how
+/// many pins there were.
+pub async fn release_orphaned_command_pins(
+    conn: &mut Conn,
+    pinned_before: DateTime<Utc>,
+    at: DateTime<Utc>,
+) -> Result<u64, DbError> {
+    let rows: Vec<i64> = sqlx::query_scalar(
+        "WITH gone AS (
+             DELETE FROM command_blob_pins p
+              WHERE p.pinned_at <= $1
+                AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.id = p.job_id AND j.state NOT IN ('succeeded','failed','cancelled'))
+          RETURNING blob),
+              counts AS (SELECT blob, count(*)::int AS n FROM gone GROUP BY blob)
+         UPDATE blobs b
+            SET pin_count = GREATEST(b.pin_count - c.n, 0),
+                last_access_at = CASE WHEN b.pin_count - c.n <= 0 THEN GREATEST(b.last_access_at, $2) ELSE b.last_access_at END
+           FROM counts c WHERE b.hash = c.blob
+       RETURNING c.n::bigint",
+    )
+    .bind(pinned_before)
+    .bind(at)
+    .fetch_all(conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|n| u64::try_from(n).unwrap_or_default())
+        .sum())
 }
 
 /// Locks the native unpin writer's exact existing rows before its caller's first-effect check.
@@ -946,6 +1119,44 @@ pub async fn forget_cached_under(
     .execute(conn)
     .await?
     .rows_affected())
+}
+
+/// The environments that have any cached version of a file.
+pub async fn cached_environments(conn: &mut Conn) -> Result<Vec<Id>, DbError> {
+    Ok(
+        sqlx::query_scalar(
+            "SELECT DISTINCT environment_id FROM file_cache ORDER BY environment_id",
+        )
+        .fetch_all(conn)
+        .await?,
+    )
+}
+
+/// Forgets up to `limit` cached versions of files of `environment` that were cached before
+/// `cached_before`, and says whose content they named: the content is then the caller's to remove if
+/// nothing else wants it.
+pub async fn forget_cached_batch(
+    conn: &mut Conn,
+    environment: Id,
+    cached_before: DateTime<Utc>,
+    limit: i64,
+) -> Result<Vec<Hash>, DbError> {
+    let raw: Vec<Vec<u8>> = sqlx::query_scalar(
+        "DELETE FROM file_cache
+          WHERE (environment_id, path, size, mtime_ns) IN
+                (SELECT environment_id, path, size, mtime_ns FROM file_cache
+                  WHERE environment_id = $1 AND cached_at <= $2 LIMIT $3)
+      RETURNING hash",
+    )
+    .bind(environment)
+    .bind(cached_before)
+    .bind(limit)
+    .fetch_all(conn)
+    .await?;
+    let mut hashes = hashes_of(raw)?;
+    hashes.sort_unstable();
+    hashes.dedup();
+    Ok(hashes)
 }
 
 /// How many bytes of content each environment that has some cached holds, counting each content
