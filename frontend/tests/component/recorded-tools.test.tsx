@@ -4,8 +4,11 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Files from '@/features/files/FileTabs';
 import { NOT_PICKING, TimelineContextValue, type TimelineContext } from '@/features/timeline/context';
+import { OrchDisplay } from '@/features/timeline/tools/Orch';
 import { ToolCallRow } from '@/features/timeline/items/ToolCall';
-import { SubagentChips } from '@/features/timeline/SubagentChips';
+import { WebFetchDisplay } from '@/features/timeline/tools/WebFetch';
+import { AgentsPanel } from '@/features/thread/AgentsPanel';
+import { listAgents } from '@/features/thread/agents';
 import { timelineUi } from '@/features/timeline/state';
 import type { Segment, Thread } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
@@ -31,11 +34,37 @@ beforeEach(() => {
     arrangement: native.binding.arrangement, credential_path: native.binding.isolation.credential_path, executor: null, tool_set: null,
     env_generation: 1, started_by: native.owner, started_at: '2026-10-15T10:00:00Z', ended_at: '2026-10-15T10:01:00Z',
     end_reason: null, import_fidelity: null, import_report: null, seq_updated: 1 };
-  context = { threadId: native.id, threadName: native.name, detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined,
+  context = { threadId: native.id, threadName: native.name, detail: 'normal', layout: 'one', setLayout: () => undefined,
     meId: null, canInteract: false, canManage: false, live: true, lit: null, selection: NOT_PICKING };
   threadWriter.reset(native.id, { thread: native, segments: [ended] }, false);
 });
 afterEach(async () => { cleanup(); threadWriter.evict(native.id); timelineUi.forget(native.id); vi.useRealTimers(); await setLocale('en'); document.documentElement.removeAttribute('data-theme'); });
+
+it.each(['en', 'zh-CN'] as const)('keeps a masked native address readable with its captured page and no misleading open link in %s', async (locale) => {
+  await setLocale(locale);
+  const item = toolCall('masked-page', {kind:'web_fetch',url:'https://example.invalid/?key=********************',title:'Fetched page',status:200,content:{inline:'Captured safe page',total_len:18,blob:null,truncated:false}}, {title:'Fetched page'});
+  if (item.kind !== 'tool_call') throw new Error('The captured page is a tool step');
+  item.payload.masked_fields = ['/tool/url'];
+  show(<WebFetchDisplay item={item} />);
+  expect(screen.queryByRole('link')).not.toBeInTheDocument();
+  expect(screen.getByText('Captured safe page')).toBeVisible();
+  expect(screen.getByText(i18n.t('timeline.masking.address'))).toBeVisible();
+});
+
+it.each(['en', 'zh-CN'] as const)('keeps a masked edited path and its diff without opening a different file in %s', async (locale) => {
+  await setLocale(locale);
+  const item = {...fileChange('hidden-edit', {changes:[change('src/********************.rs', LOGIN_DIFF)]}),thread_id:native.id,segment_id:ended.id,seq_created:2,seq_updated:2};
+  if (item.kind !== 'tool_call') throw new Error('The captured edit is a tool step');
+  item.payload.masked_fields = ['/tool/changes/0/path'];
+  act(() => threadWriter.apply(native.id, {items:[item]}));
+  show(<TimelineContextValue.Provider value={context}><ToolCallRow threadId={native.id} id={item.id} /></TimelineContextValue.Provider>);
+  await userEvent.click(screen.getByRole('button', {expanded:false,name:/src\//}));
+  const open = screen.getByRole('button', {name:i18n.t('files.link.open',{path:'src/********************.rs'})});
+  expect(open).toHaveAttribute('aria-disabled','true');
+  await userEvent.click(open);
+  expect(calls.open).not.toHaveBeenCalled();
+  expect(screen.getByRole('table', {name:/src\//})).toHaveTextContent('return redirect(next ?? "/");');
+});
 
 it.each(['en', 'zh-CN'] as const)('names a message step once for either target in %s', async (locale) => {
   await setLocale(locale);
@@ -54,16 +83,17 @@ it.each(['en', 'zh-CN'] as const)('names a message step once for either target i
   }
 });
 
-it.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('keeps an ended session’s reported running step factual, without a live clock or header chip, in %s/%s', async (locale, look) => {
+it.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('keeps an ended session’s reported running step factual, without a live clock or an active agent, in %s/%s', async (locale, look) => {
   await setLocale(locale); document.documentElement.setAttribute('data-theme', look); vi.useFakeTimers();
   const item = { ...toolCall('old-helper', { kind: 'subagent', child_stream: 'sub:old-helper', name: 'reviewer', role: 'review', prompt: null, state: 'running' },
     { title: 'Review', status: 'in_progress' }), thread_id: native.id, segment_id: ended.id, seq_created: 2, seq_updated: 2 };
   act(() => threadWriter.apply(native.id, { items: [item] }));
-  show(<TimelineContextValue.Provider value={context}><SubagentChips threadId={native.id} /><ToolCallRow threadId={native.id} id={item.id} /></TimelineContextValue.Provider>);
+  show(<TimelineContextValue.Provider value={context}><AgentsPanel entries={listAgents(threadViewOf(native.id), [], i18n.t)} current={null} onMain={vi.fn()} onOpen={vi.fn()} onEnd={null} /><ToolCallRow threadId={native.id} id={item.id} /></TimelineContextValue.Provider>);
   const row = document.querySelector('[data-tool-row]');
   if (!(row instanceof HTMLElement)) throw new Error('The historical step has its own tool row');
   expect(within(row).getByRole('button', { expanded: false })).toHaveTextContent(i18n.t('timeline.step.recordedRunning'));
-  expect(screen.queryByRole('group', { name: i18n.t('timeline.subagent.running') })).not.toBeInTheDocument();
+  expect(screen.queryByRole('region', { name: i18n.t('thread.agents.active') })).not.toBeInTheDocument();
+  expect(within(screen.getByRole('region', { name: i18n.t('thread.agents.done') })).getByText(i18n.t('timeline.step.recordedRunning'))).toBeVisible();
   expect(document.querySelector('.animate-spin')).toBeNull(); expect(document.querySelector('[data-tool-duration]')).toBeNull();
   await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
   expect(document.querySelector('[data-tool-duration]')).toBeNull();
@@ -123,4 +153,32 @@ it.each(['en', 'zh-CN'] as const)('keeps the whole command visible on keyboard f
   expect(control).toHaveFocus();
   expect(await screen.findByRole('tooltip')).toHaveTextContent(`$${words}`);
   expect(control).toHaveAttribute('aria-expanded', 'false');
+});
+
+it.each(['en', 'zh-CN'] as const)('never offers Show all when only the inline command tail survived (%s)', async (locale) => {
+  await setLocale(locale);
+  const row = command('lost-output', { command: 'long-running-build', output: 'tail', exit: 0 });
+  if (row.kind !== 'tool_call' || row.payload.tool.kind !== 'command') throw new Error('A command fixture is required');
+  const item = { ...row, thread_id: native.id, segment_id: ended.id, seq_created: 2, seq_updated: 2,
+    payload: { ...row.payload, tool: { ...row.payload.tool, output: { inline: 'tail', total_len: 1_000_000, truncated: true, blob: null } } } };
+  act(() => threadWriter.apply(native.id, { items: [item] }));
+  show(<TimelineContextValue.Provider value={context}><ToolCallRow threadId={native.id} id={item.id} /></TimelineContextValue.Provider>);
+  const commandRow = document.querySelector('[data-tool-row]');
+  if (!(commandRow instanceof HTMLElement)) throw new Error('A retained command row is required');
+  const step = commandRow.closest('[data-step]');
+  if (!(step instanceof HTMLElement)) throw new Error('The command disclosure owns its output');
+  await userEvent.click(within(commandRow).getByRole('button', { expanded: false }));
+  expect(within(step).queryByRole('button', { name: /Show all|显示全部/ })).not.toBeInTheDocument();
+  expect(await within(step).findByText(i18n.t('timeline.command.outputMissing', { from: '0', to: '999996' }))).toBeVisible();
+});
+
+it.each(['en', 'zh-CN'] as const)('says whether a thread message requested wake, including an omitted request (%s)', async (locale) => {
+  await setLocale(locale);
+  const row = toolCall('wake-intent', { kind: 'orch', tool: 'send_message', arguments: { target: { kind: 'thread', path: '/Review' }, text: 'Check this' }, result: null }, { title: 'Send a message' });
+  if (row.kind !== 'tool_call' || row.payload.tool.kind !== 'orch') throw new Error('The native call supplies its own wake argument');
+  const view = show(<OrchDisplay item={row} />);
+  expect(screen.getByText(locale === 'en' ? 'No wake requested' : '未请求唤醒', { exact: false })).toBeVisible();
+  view.rerender(<OrchDisplay item={{ ...row, payload: { ...row.payload, tool: { ...row.payload.tool, arguments: { target: { kind: 'thread', path: '/Review' }, text: 'Check this', wake_idle: true } } } }} />);
+  expect(screen.getByText(locale === 'en' ? 'Wake requested' : '已请求唤醒', { exact: false })).toBeVisible();
+  expect(screen.queryByText(locale === 'en' ? 'No wake requested' : '未请求唤醒', { exact: false })).not.toBeInTheDocument();
 });
