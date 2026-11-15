@@ -17,14 +17,16 @@ Choose **This thread** or **New thread each time**. New threads can follow **Top
 
 The schedule runs as its author, with that person’s access, usable model and limits checked again when due. A stopped thread’s older held queue remains held while the new scheduled input follows its ordinary input rules.
 
+The sheet keeps the composer’s **Plan** choice and delivery preference. Review or change **Queue**, **Steer** or **Interrupt** before saving; the schedule list shows the saved modes. A Steer with a different Plan/Work mode waits for its own turn rather than changing the running turn’s mode. Interrupt takes effect only after the occurrence is committed.
+
 ## Keep or change a schedule
 
 Open **Scheduled inputs** in the topic, or the thread’s **Schedules** view. The author can edit the private message, timing and creation choices. Other readers see metadata and run history. The author and destination controllers can pause or remove future occurrences; the author resumes from a browser sign-in. Resuming a repeating schedule chooses the next future occurrence without catching up paused dates. A past Once time needs a new future time.
 
-Accepted input already in a queue stays there after pausing or removing the schedule; follow the run’s thread to inspect its queue. A failed occurrence keeps its safe reason and run history. No old permission or token is used as future authority.
+Pausing or removing a schedule does not recall already accepted input; follow the run’s thread for its ordinary queue and turn controls. A failed occurrence keeps its safe reason and run history. No old permission or token is used as future authority.
 
 ## If saving fails
 
-Loading, invalid time, refusal and a failed save keep the message intact. Acceptance clears only that unchanged accepted composer draft; typing or files added afterward stay. A stale edit retains your fields and offers the current version for an explicit review before another save. Drafts with review comments require their supported immediate-send path until those comments can be represented in a schedule.
+Loading, invalid time, refusal and a failed save keep the message intact. Acceptance clears only that unchanged accepted composer draft; later text, files or mode changes stay. A stale edit retains your fields and offers the current version for an explicit review before another save. Drafts with review comments require their supported immediate-send path until those comments can be represented in a schedule.
 
 Tab visits the time, zone and destination controls. Only the final Save button submits; Escape cancels, and Enter while an input method is composing does not save.

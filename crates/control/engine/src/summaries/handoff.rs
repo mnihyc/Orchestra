@@ -549,8 +549,16 @@ pub(crate) async fn handoff_budget(
     let mut conn = engine.db().acquire().await?;
     match orch_summarizer_model::descriptor::Config::read(&chosen.config) {
         Ok(config) if chosen.kind == "model" => {
-            super::budget::input_budget(&mut conn, thread, config.provider_id, &config.model_name)
-                .await
+            let reasons = super::budget::reasons(&mut conn, &config).await?;
+            let output = config.output_reserve(SummaryField::Handoff, reasons);
+            super::budget::input_budget(
+                &mut conn,
+                thread,
+                config.provider_id,
+                &config.model_name,
+                output,
+            )
+            .await
         }
         _ => Ok(super::budget::budget_of(None, super::budget::DEFAULT_SHARE)),
     }
@@ -589,7 +597,7 @@ pub(crate) async fn handoff_transcript(
     drop(conn);
     // The material is the newest turns in brief and a line for each older turn, within the share: never the whole.
     let bounded = bounded_input(previous, recent.as_ref(), &budget);
-    handoff_captured(engine, thread, &bounded.text, request_id, &frozen).await
+    handoff_captured(engine, thread, &bounded.text, request_id, &frozen, None).await
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -614,12 +622,38 @@ pub(crate) async fn capture_handoff_choice(
     })?)
 }
 
+/// The native cut owning this receipt; callers have already checked its source governors.
+pub(crate) struct HandoffCapture<'a> {
+    pub cut: Id,
+    pub input: &'a crate::fork_history::cut::HandoffInput,
+}
+
+impl HandoffCapture<'_> {
+    async fn keep(
+        &self,
+        engine: &Engine,
+        coverage: &orch_api_contract::summary_facts::HandoffInputCoverage,
+        result_facts: Option<orch_api_contract::summary_facts::SummaryResultFacts>,
+    ) -> Result<(), EngineError> {
+        let receipt = orch_api_contract::summary_facts::HandoffResult {
+            input_coverage: Some(coverage.clone()),
+            result_facts,
+        };
+        // A call-rule continuation may produce a later actual attempt. Its receipt is replaced as a whole;
+        // the large source and rejected output are never copied into this small retained outcome.
+        sqlx::query("UPDATE thread_history_cuts SET artifacts=jsonb_set(artifacts,'{handoff_result}',$2) WHERE id=$1")
+            .bind(self.cut).bind(serde_json::to_value(receipt)?).execute(&mut *engine.db().acquire().await?).await.map_err(orch_db::DbError::from)?;
+        Ok(())
+    }
+}
+
 pub(crate) async fn handoff_captured(
     engine: &Engine,
     thread: Id,
     previous: &str,
     request_id: Id,
     frozen: &Json,
+    capture: Option<HandoffCapture<'_>>,
 ) -> Result<String, EngineError> {
     let HandoffChoice { chosen, name } = serde_json::from_value(frozen.clone())?;
     let budget = handoff_budget(engine, thread, frozen).await?;
@@ -671,9 +705,33 @@ pub(crate) async fn handoff_captured(
         .ok_or_else(|| {
             EngineError::unreadable("the chosen producer cannot write a handoff summary")
         })?;
-    let result = producer.summarize(request).await;
+    let coverage = capture
+        .as_ref()
+        .map(|capture| capture.input.coverage_for(&request.previous));
+    if let (Some(capture), Some(coverage)) = (&capture, &coverage) {
+        capture.keep(engine, coverage, None).await?;
+    }
+    let result = producer
+        .summarize(request)
+        .await
+        .map(|answer| answer.conform(SummaryField::Handoff, &limits, &[]));
+    if let (Some(capture), Some(coverage)) = (&capture, &coverage) {
+        let facts = super::facts::produced(
+            &mut *engine.db().acquire().await?,
+            &chosen,
+            &producer.describe(),
+            call,
+            thread,
+            result.as_ref().ok(),
+            orch_types::Time::new(engine.inner.clock.now()),
+        )
+        .await?;
+        capture
+            .keep(engine, coverage, facts.and_then(|facts| facts.result))
+            .await?;
+    }
     let answer = match result {
-        Ok(answer) => answer.conform(SummaryField::Handoff, &limits, &[]),
+        Ok(answer) => answer,
         Err(error) => {
             if chosen.kind == "model" {
                 engine
