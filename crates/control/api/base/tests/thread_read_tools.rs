@@ -16,7 +16,7 @@ use orch_api_contract::common::ErrorCode;
 use orch_api_contract::directory::OrgGroupCreate;
 use orch_api_contract::share::ShareAgentCreate;
 use orch_api_contract::threads::{
-    ItemPayload, OutputRef, RawCall, ThreadItemList, ThreadItemListQuery,
+    ItemPayload, OutputRef, RawCall, ThreadItemList, ThreadItemListQuery, ThreadItemRawGet,
 };
 use orch_api_core::dispatch::StoredCommand;
 use orch_engine::commands::Commands;
@@ -383,8 +383,22 @@ async fn sharing_requires_the_current_result_notice_keeps_raw_history_and_person
     assert!(
         visible.items.iter().any(|item| item.id == retained
             && matches!(&item.payload,ItemPayload::ToolCall(body)
-        if body.raw.output.as_ref().is_some_and(|output|output.inline==expected))),
-        "confirmed sharing keeps the raw result in ordinary history"
+        if body.raw.is_none())),
+        "ordinary history carries the retained call without repeating its raw result"
+    );
+    let raw = scene
+        .rig
+        .world
+        .app
+        .call(ThreadItemRawGet, &[&thread, &retained])
+        .token(&scene.cai.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        raw.output.as_ref().map(|output| output.inline.as_str()),
+        Some(expected.as_str()),
+        "confirmed sharing lets the viewer open the retained raw result"
     );
     assert!(
         !owner_alone(&scene, thread).await,

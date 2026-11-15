@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-db --lib
+test -p orch-db --test usage_rollup --test usage_ledger --test usage_commit_scale
+test -p orch-api-core --test usage_figures --test usage_native_scopes --test syncs
+test -p orch-engine --test usage_rows --test turns --test context_fill

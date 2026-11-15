@@ -709,10 +709,12 @@ async fn file_content(ctx: Ctx, query: SnapshotPathQuery, _: Body) -> ApiResult<
     let tree = tree_of(&ctx, &row).await;
     read.check().await?;
     let tree = tree?;
-    let hash = tree
+    let entry = tree
         .get(&path)
-        .filter(|entry| entry.kind == EntryKind::File)
-        .and_then(|entry| entry.hash)
+        .ok_or_else(|| ApiError::not_found().with("reason", "not_found"))?;
+    let hash = (entry.kind == EntryKind::File)
+        .then_some(entry.hash)
+        .flatten()
         .ok_or_else(ApiError::not_found)?;
     if row.storage == "environment" {
         let pulled = recorded_read(&ctx, &row, Some(path.clone()), false, &read).await?;
@@ -735,7 +737,19 @@ async fn file_content(ctx: Ctx, query: SnapshotPathQuery, _: Body) -> ApiResult<
     )
     .await;
     read.check().await?;
-    read.response(response?).await
+    let mut response = response?;
+    // An empty file still has an observed version for a later conditional edit.
+    if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+        response.headers_mut().insert(
+            header::ETAG,
+            HeaderValue::from_str(&format!("\"{hash}\"")).map_err(ApiError::internal)?,
+        );
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-cache"),
+        );
+    }
+    read.response(response).await
 }
 
 // ---------------------------------------------------------------- as one stream

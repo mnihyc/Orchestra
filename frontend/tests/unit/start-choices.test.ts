@@ -4,12 +4,24 @@ import { describe, expect, it } from 'vitest';
 
 import { type Mode, NEW_ENVIRONMENT, NO_PICKS, type Picks, resolve, settingsToKeep } from '@/features/start/choices';
 import type { Arrangement } from '@/generated/api-types';
+import { includesInstructions } from '@/features/start/instructionSelection';
 
 import { agent, arrangement, environment, host, model, options, provider } from './start-fixtures';
 
 const starter: Mode = { suggest: false };
 const dialog: Mode = { suggest: true };
 const picked = (more: Partial<Picks>): Picks => ({ ...NO_PICKS, ...more });
+
+it('starts a prospective instruction edit from the selected source file only when that file is carried',()=>{
+  expect(includesInstructions(undefined)).toBe(true);
+  expect(includesInstructions({mode:'all'})).toBe(true);
+  expect(includesInstructions({mode:'none'})).toBe(false);
+  for(const pattern of ['AGENTS.md','*.md','**/AGENTS.md','?GENTS.md','**']) {
+    expect(includesInstructions({mode:'selection',include:[pattern]})).toBe(true);
+    expect(includesInstructions({mode:'selection',include:['**'],exclude:[pattern]})).toBe(false);
+  }
+  for(const pattern of ['src','src/**','[AGENTS].md','{AGENTS,README}.md','agents.md'])expect(includesInstructions({mode:'selection',include:[pattern]})).toBe(false);
+});
 
 describe('a feasible first suggestion', () => {
   it('suggests the first usable existing environment when a fresh default has no usable host', () => {
@@ -19,10 +31,10 @@ describe('a feasible first suggestion', () => {
       expect(resolved.fresh).toBe(false); expect(resolved.environment?.environment.id).toBe('e1');
     }
   });
-  it('keeps feasible New and refuses an impossible explicit New without substituting another location', () => {
+  it('keeps New open to choose another template while submission still needs a host', () => {
     expect(resolve(options({ environment_default: 'fresh' }), NO_PICKS, dialog).fresh).toBe(true);
     const explicit = resolve(options({ environment_default: 'fresh', hosts: [] }), picked({ environment: NEW_ENVIRONMENT }), dialog);
-    expect(explicit.fresh).toBe(false); expect(explicit.environment).toBeNull();
+    expect(explicit.fresh).toBe(true); expect(explicit.environment).toBeNull();
     expect(explicit.missing).toContainEqual({ kind: 'environment' });
     expect(resolve(options({ environment_default: 'fresh' }), picked({ environment: NEW_ENVIRONMENT }), dialog).fresh).toBe(true);
   });
@@ -88,9 +100,9 @@ describe('a new default still needs a usable host', () => {
     }
   });
 
-  it('keeps an explicit new choice unavailable rather than silently using a different environment', () => {
+  it('keeps an explicit new choice open while marking its missing host', () => {
     const resolved = resolve(options({ hosts: [] }), picked({ environment: NEW_ENVIRONMENT }), dialog);
-    expect(resolved.fresh).toBe(false); expect(resolved.environment).toBeNull();
+    expect(resolved.fresh).toBe(true); expect(resolved.environment).toBeNull();
     expect(resolved.missing).toContainEqual({ kind: 'environment' });
   });
 
