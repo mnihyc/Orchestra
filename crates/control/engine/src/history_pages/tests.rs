@@ -1,5 +1,5 @@
 //! The page readers and what is written from them: against the whole readings they replace, on small threads, and at the size
-//! of a history of 200,000 turns made by SQL.
+//! of histories spanning multiple turn and item pages. The full-size history runs alone in history_scale.
 
 use super::*;
 use crate::fork_history::{self, cut};
@@ -11,8 +11,9 @@ use orch_types::{Json, new_id};
 
 type Proof<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// How many turns the history at size has: the figure the owner's review asked for.
-const SCALE_TURNS: i64 = 200_000;
+/// Two full database pages and one partial page exercise the same page boundaries
+/// without retaining a large SQL-grown world beside the other unit cases.
+const SCALE_TURNS: i64 = 2 * cuts::PAGE + 1;
 
 /// Counts the statements that run in a piece of work: sqlx tells of each one as an event while the task that makes it is polled.
 /// One subscriber is installed for the whole test binary; it counts the events of the task that is counting, so that tests that
@@ -895,7 +896,7 @@ async fn an_oversized_neutral_turn_stops_after_one_item_page_without_holding_the
 }
 
 #[tokio::test]
-async fn a_history_of_two_hundred_thousand_turns_is_counted_in_sql_and_its_carry_reads_only_what_fits()
+async fn a_history_spanning_many_pages_is_counted_in_sql_and_its_carry_reads_only_what_fits()
 -> Proof {
     let world = common::World::new().await;
     let thread = conversation(&world, 1).await?;
@@ -1041,7 +1042,7 @@ async fn a_summary_of_a_large_cut_reads_only_the_brief_tail_and_newest_older_ind
 }
 
 #[tokio::test]
-async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_transcript_and_its_copy_a_page_at_a_time()
+async fn a_cut_spanning_turn_and_item_pages_gives_its_carry_from_the_end_its_transcript_and_its_copy_a_page_at_a_time()
 -> Proof {
     let began = std::time::Instant::now();
     eprintln!("history scale diagnostic phase=fixture_wait");
@@ -1204,10 +1205,14 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
     );
     copied?;
     tx.commit().await?;
-    let pages = 2 * SCALE_TURNS / cuts::PAGE;
+    let item_pages = (2 * SCALE_TURNS + cuts::PAGE - 1) / cuts::PAGE;
+    let turn_pages = (SCALE_TURNS + cuts::PAGE - 1) / cuts::PAGE;
+    // Each turn page is captured, copied and released. Each item page supplies
+    // two capture-metadata passes, then its copy read, insert and parent check.
+    // Small fixed metadata is bounded separately.
     assert!(
-        i64::try_from(statements)? <= 4 * pages + 200,
-        "{statements} statements copied {pages} pages of items"
+        i64::try_from(statements)? <= 3 * turn_pages + 5 * item_pages + 200,
+        "{statements} statements copied {turn_pages} turn pages and {item_pages} item pages"
     );
     let copy: (i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM turns WHERE thread_id=$1),(SELECT count(*) FROM items WHERE thread_id=$1 AND kind<>'marker')",
@@ -1229,10 +1234,11 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
     // An identity in the copy is made from the target's and the original's.
     let (made, derived): (Id, Id) = sqlx::query_as(
         "SELECT t.id, md5($1::text||o.id::text)::uuid FROM turns t, turns o
-          WHERE t.thread_id=$1 AND t.ordinal=777 AND o.thread_id=$2 AND o.ordinal=777",
+          WHERE t.thread_id=$1 AND t.ordinal=$3 AND o.thread_id=$2 AND o.ordinal=$3",
     )
     .bind(target)
     .bind(thread)
+    .bind(i32::try_from(SCALE_TURNS / 2 + 1)?)
     .fetch_one(world.pool.pool())
     .await?;
     assert_eq!(made, derived);
@@ -2041,6 +2047,57 @@ async fn decoded_page_bytes_follow_the_frozen_revision_and_always_make_progress_
     .await?;
     assert_eq!(live.len(), 3);
     drop((live, conn));
+    world.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn copied_input_metadata_crosses_full_and_partial_pages_with_its_turn_links_intact() -> Proof
+{
+    let world = common::World::new().await;
+    let source = conversation(&world, 1).await?;
+    let turns = 2 * cuts::PAGE + 1;
+    world.grow_history(source, turns).await;
+    sqlx::query(
+        "WITH seed AS MATERIALIZED (
+      SELECT to_jsonb(i) AS body FROM thread_inputs i JOIN turns t ON t.input_id=i.id
+        WHERE t.thread_id=$1 AND t.ordinal=1)
+      INSERT INTO thread_inputs SELECT p.* FROM seed,turns t
+      CROSS JOIN LATERAL jsonb_populate_record(NULL::thread_inputs,seed.body||jsonb_build_object(
+        'id',md5('page-input:'||t.id::text)::uuid,'turn_id',t.id,'client_id',NULL)) p
+      WHERE t.thread_id=$1 AND t.ordinal>1",
+    )
+    .bind(source)
+    .execute(world.pool.pool())
+    .await?;
+    sqlx::query("UPDATE turns SET input_id=md5('page-input:'||id::text)::uuid WHERE thread_id=$1 AND ordinal>1")
+        .bind(source).execute(world.pool.pool()).await?;
+    sqlx::query("UPDATE items i SET payload=jsonb_set(i.payload,'{input_id}',to_jsonb(t.input_id::text))
+      FROM turns t WHERE t.id=i.turn_id AND t.thread_id=$1 AND t.ordinal>1 AND i.kind='user_message'")
+        .bind(source).execute(world.pool.pool()).await?;
+    let target = world.thread("A copy with paged input metadata").await;
+    let segment = world.segment_of(target).await;
+    let mut tx = world.pool.begin().await?;
+    fork_history::copy_conversation(
+        &mut crate::unit::Unit::new(&mut tx, world.clock.now()),
+        source,
+        target,
+        segment,
+        Some((1, i32::try_from(turns)?)),
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    let copied: (i64, i64) = sqlx::query_as(
+        "SELECT
+      (SELECT count(*) FROM thread_inputs WHERE thread_id=$1),
+      (SELECT count(*) FROM turns t JOIN thread_inputs i ON i.id=t.input_id
+        WHERE t.thread_id=$1 AND i.turn_id=t.id)",
+    )
+    .bind(target)
+    .fetch_one(world.pool.pool())
+    .await?;
+    assert_eq!(copied, (turns, turns));
     world.shutdown().await;
     Ok(())
 }
