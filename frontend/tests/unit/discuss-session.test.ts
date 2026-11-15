@@ -12,7 +12,7 @@ vi.mock('@/api/client', async (load) => {
   const actual = await load<typeof Client>();
   return { ...actual, client: { ...actual.client, onSession: (callback: (event: SessionEvent) => void) => { session.listeners.push(callback); return () => undefined; } } };
 });
-vi.mock('@/features/workbench/openView', () => ({ revealView: session.reveal }));
+vi.mock('@/features/workbench/openView', async (loadOriginal) => ({ ...await loadOriginal<object>(), revealView: session.reveal }));
 afterEach(() => { threadWriter.evict(ACME.mainThread); useDiscuss.setState({ quotes: new Map() }); session.reveal.mockClear(); });
 it('consumes a delayed same-reader quote once and retires another pending quote on sign-out', () => {
   const world = new World(), person = world.people.get('ada'), row = world.places.rowOf(ACME.mainThread);

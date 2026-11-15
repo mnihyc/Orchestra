@@ -335,8 +335,6 @@ fn settings_of(services: &Services, parts: &EnvironmentParts) -> HostSettings {
     let tunables = &services.config.envhost;
     settings.limits.rescan = Duration::from_secs(tunables.rescan_secs);
     settings.limits.manifest_interval = Duration::from_secs(tunables.manifest_interval_secs);
-    settings.limits.index_max_entries = tunables.index_max_entries;
-    settings.limits.index_scan_max = std::time::Duration::from_secs(tunables.index_scan_max_secs);
     settings.mcp_restarts = tunables.mcp_restarts;
     settings.mcp_restart_window = Duration::from_secs(tunables.mcp_restart_window_secs);
     if let Some(scope) = parts.process_scope {
@@ -1424,12 +1422,15 @@ impl RoleHandler for EnvironmentRole {
                 "the recording deadline is invalid",
             )));
         };
+        // The command's own deadline is how long the files may take to be ready; the time it spent
+        // in the line of the environment is not counted in it.
         let captured = self
             .host
             .fs_record_capture(
                 &body,
                 call.context.id,
                 orch_types::Time::new(until),
+                call.context.deadline,
                 call.context.cancel,
             )
             .await;
@@ -1740,6 +1741,7 @@ async fn follow_policy(role: Weak<EnvironmentRole>, stop: CancellationToken) {
 /// Looks again, every so often, at the tool servers the harnesses here have configured, for each
 /// environment that is attached.
 async fn look_for_tool_servers(role: Weak<EnvironmentRole>, stop: CancellationToken) {
+    let changes = role.upgrade().and_then(|role| role.imports.changes());
     let mut ticker = tokio::time::interval(DISCOVERY_EVERY);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await;
@@ -1747,6 +1749,10 @@ async fn look_for_tool_servers(role: Weak<EnvironmentRole>, stop: CancellationTo
         tokio::select! {
             () = stop.cancelled() => return,
             _ = ticker.tick() => {}
+            () = async {
+                if let Some(changes) = &changes { changes.notified().await; }
+                else { std::future::pending::<()>().await; }
+            } => {}
         }
         let Some(role) = role.upgrade() else {
             return;

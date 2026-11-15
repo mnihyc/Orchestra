@@ -572,6 +572,7 @@ struct ListReady {
     projection: Projection,
     resource: Option<super::resources::scoped::Prepared>,
     library: Option<super::library::Prepared>,
+    sharing: std::collections::HashMap<Id, super::resources::PreparedSharing>,
 }
 
 pub(super) fn list<'a>(
@@ -690,10 +691,106 @@ pub(super) fn list<'a>(
             }
         }
         let mut plan = native.predicate.plan();
-        let names = resource
+        let mut sharing = std::collections::HashMap::new();
+        let mut sharing_names = crate::routes::access::page::NameSources::default();
+        if rows.rows {
+            let homes: std::collections::BTreeSet<_> = rows.grouping.homes().collect();
+            let slot = plan
+                .variant()
+                .facets
+                .iter()
+                .position(|facet| {
+                    matches!(facet.target,
+                TargetResolver::ResolvedCollection(name) if name == "inventory_groups")
+                })
+                .ok_or_else(|| ApiError::internal("the inventory's Group source is absent"))?;
+            for home in homes {
+                let target = crate::key_operations::targets::node(conn, home).await?;
+                let family = target.object.kind;
+                let role = super::resources::scoped::NAMES
+                    .nodes
+                    .iter()
+                    .find_map(|(kind, role)| {
+                        (family == KeyTargetKind::Object(*kind)).then_some(*role)
+                    });
+                let Some(role) = role else {
+                    continue;
+                };
+                let home_slot = plan
+                    .variant()
+                    .facets
+                    .iter()
+                    .position(|facet| {
+                        matches!(facet.target,
+                    TargetResolver::ResolvedCollection(name) if name == role)
+                    })
+                    .ok_or_else(|| {
+                        ApiError::internal("the sharing home's Read source is absent")
+                    })?;
+                if !plan.permits_binding(
+                    caller,
+                    home_slot,
+                    family,
+                    std::slice::from_ref(&target),
+                )? {
+                    continue;
+                }
+                // Home content is an optional Read source even for a system inventory's Manage selection.
+                let mut home_plan = plan.clone();
+                match native
+                    .predicate
+                    .first_candidate(&native.identities)
+                    .map_err(authorization::restoration_error)?
+                {
+                    Some((kind, candidate)) => native
+                        .predicate
+                        .bind_results(&mut home_plan, &[(kind, vec![candidate])])?,
+                    None => native.predicate.bind_results(&mut home_plan, &[])?,
+                }
+                home_plan.bind(home_slot, family, std::slice::from_ref(&target))?;
+                let reader = home_plan
+                    .preparation_principal(&read_ctx, conn, caller)
+                    .await?;
+                let prepared =
+                    match super::resources::prepare_sharing(conn, &reader, home, &rows.kinds[0])
+                        .await
+                    {
+                        Ok(prepared) => prepared,
+                        Err(error) if matches!(error.problem.status, 403 | 404 | 410) => continue,
+                        Err(error) => return Err(error),
+                    };
+                let names = prepared.name_sources();
+                let groups = crate::routes::access::operations::group_targets(
+                    conn,
+                    &names.groups.iter().copied().collect::<Vec<_>>(),
+                )
+                .await?;
+                if !groups.is_empty()
+                    && !plan.permits_binding(
+                        caller,
+                        slot,
+                        KeyTargetKind::Identity(KeyIdentityKind::Group),
+                        &groups,
+                    )?
+                {
+                    continue;
+                }
+                sharing_names.users.extend(names.users);
+                sharing_names.groups.extend(names.groups);
+                sharing_names.nodes.extend(names.nodes);
+                sharing_names.containers.extend(names.containers);
+                sharing_names.nodes.insert(home);
+                sharing.insert(home, prepared);
+            }
+        }
+        let mut names = resource
             .as_ref()
             .map(|prepared| prepared.name_sources().clone())
             .unwrap_or_default();
+        names.users.extend(sharing_names.users);
+        names.groups.extend(sharing_names.groups);
+        names.nodes.extend(sharing_names.nodes);
+        names.containers.extend(sharing_names.containers);
         let bounds = crate::routes::access::operations::projection_names(
             conn,
             caller,
@@ -703,13 +800,16 @@ pub(super) fn list<'a>(
         )
         .await?;
         if let Some(prepared) = resource.as_mut() {
-            prepared.bound_names(bounds);
+            prepared.bound_names(bounds.clone());
             rows.facts.extend(
                 prepared
                     .foreign_sources()
                     .iter()
                     .map(|object| (KeyTargetKind::Object(object.kind), object.id)),
             );
+        }
+        for prepared in sharing.values_mut() {
+            prepared.names = bounds.clone();
         }
         rows.facts.sort_unstable();
         rows.facts.dedup();
@@ -733,6 +833,7 @@ pub(super) fn list<'a>(
             projection: native.projection,
             resource,
             library,
+            sharing,
         })))
     })
 }
@@ -755,8 +856,11 @@ pub(super) async fn list_read(
                     reader,
                     ready.rows.clone(),
                     &ready.projection,
-                    ready.resource.as_ref(),
-                    ready.library.as_ref(),
+                    super::PreparedViews {
+                        resources: ready.resource.as_ref(),
+                        library: ready.library.as_ref(),
+                        sharing: Some(&ready.sharing),
+                    },
                 )
                 .await
             })
