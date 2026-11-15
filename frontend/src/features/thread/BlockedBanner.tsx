@@ -17,7 +17,7 @@ import { changeModelChoice, isSettingConflict, useRunsWith } from '@/features/co
 import { SettingConflict } from '@/features/composer/SettingConflict';
 import { useThreadPart } from '@/realtime/stores/thread';
 import { ErrorAlert } from '@/ui/ErrorState';
-import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
 import { openChange } from '@/features/change/target';
 import type { Thread } from '@/generated/api-types';
 import { isAgentHistoryRemoving, isMachineProgramVersionMismatch, waitingWords } from '@/features/timeline/waiting';
@@ -28,8 +28,7 @@ import { Button } from '@/ui/Button';
 import { providerQuery } from '@/api/resources';
 import { ProviderReset } from '@/features/resources/providers/Reset';
 import { ApiError } from '@/api/client';
-import { useFormatContext } from '@/lib/appearance';
-import { formatDateTime } from '@/lib/time';
+import { OfflineEpisodeFacts } from './OfflineEpisodeFacts';
 import { Link } from '@tanstack/react-router';
 
 /**
@@ -49,7 +48,7 @@ function OtherModels({ thread }: { thread: Thread }) {
   });
   const [state, model, family] = last === null ? ['', '', '\u0001'] : last.split('\u0000');
   const waits = state === 'failed' && family !== '\u0001';
-  const parameters = useQuery({ ...parametersQuery(thread.id), enabled: waits });
+  const parameters = useQuery({ ...parametersQuery(thread.id, true), enabled: waits });
   const runs = useRunsWith(thread, true);
   const [open, setOpen] = useState(false);
   const change = useMutation({
@@ -77,7 +76,8 @@ function OtherModels({ thread }: { thread: Thread }) {
   const selected = others.some((option) => option.model_name === currentModel) ? currentModel ?? '' : '';
   return (
     <div className="flex flex-col gap-1" data-family-limit>
-      <Select<string>
+      <ResourcePicker<string>
+        pickerKey="thread.recovery-model"
         size="sm"
         label={t('thread.blocked.familyChoose')}
         placeholder={reason ?? t('thread.blocked.familyChoose')}
@@ -99,10 +99,7 @@ function OtherModels({ thread }: { thread: Thread }) {
 
 export function BlockedBanner({ thread, onProceed }: { thread: Thread; onProceed: () => void }) {
   const { t } = useTranslation();
-  const format = useFormatContext();
   const blocked = thread.state === 'blocked' && thread.blocked !== null && thread.lock === null ? thread.blocked : null;
-  const recordedDeadline = blocked?.offline_deadline ?? null;
-  const deadline = recordedDeadline?.turn_id === thread.current_turn_id ? recordedDeadline : null;
   const secondStep = blocked?.reason === 'binding_invalid' && blocked.detail === 'second_step_required';
   const limited = blocked?.reason === 'quota_exceeded';
   const limits = useQuery({ ...limitsQuery(thread.id), enabled: limited && holds(thread.access, 'thread.interact') });
@@ -143,14 +140,7 @@ export function BlockedBanner({ thread, onProceed }: { thread: Thread; onProceed
       }
     >
       <span data-blocked={blocked.reason}>
-        {waitingWords(thread, t)}
-        {deadline !== null && <span className="block text-sm" data-offline-deadline>
-          {deadline.at !== null
-            ? t('thread.blocked.offlineDeadline', { when: formatDateTime(deadline.at, format) })
-            : Number.isSafeInteger(deadline.after_seconds)
-              ? t('thread.blocked.offlineDeadlineDuration', { seconds: deadline.after_seconds, since: formatDateTime(deadline.since, format) })
-              : t('thread.blocked.offlineDeadlineBeyondCalendar', { since: formatDateTime(deadline.since, format) })}
-        </span>}
+        {blocked.reason === 'agent_offline' ? <OfflineEpisodeFacts thread={thread} fallback={waitingWords(thread, t)} /> : waitingWords(thread, t)}
         {!secondStep && !versionMismatch && !manages && blocked.reason !== 'agent_offline' && blocked.reason !== 'quota_exceeded' && blocked.reason !== 'provider_exhausted' && <span className="ml-1 text-text-muted">{t('thread.blocked.manager', { who: thread.owner.display_name })}</span>}
       </span>
     </Banner>

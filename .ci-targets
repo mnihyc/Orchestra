@@ -1,0 +1,2 @@
+# b43t-c: a trial assembly (private branch) at 0f93db16e
+test -p orch-api-core --test container_units --test everything_resources --test realtime_diagnostics --test kfix_binding --test settings --test threads_settings --test model_entries --test provider_models --test ask --test binding_options --test binding_readiness 
