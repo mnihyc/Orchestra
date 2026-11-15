@@ -14,7 +14,7 @@ import { formatSpan } from '@/lib/time';
 import { show } from './support';
 
 const state = vi.hoisted(() => ({ jobs: new Map<string, Job>(), stop: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/forks', async (original) => ({ ...await original<object>(),
   jobQuery: (id: string) => ({ queryKey: ['live-work-job', id], queryFn: () => Promise.resolve(state.jobs.get(id)) }),
   cancelJob: state.stop,
@@ -28,8 +28,42 @@ function job(): Job {
       activity: { updated_at: '2026-10-24T10:00:05.000Z', stall_after_seconds: 30, directories_done: 9000, stopping: false } } };
 }
 const size = { reference: { job_id: 'count', measured_at: null }, measured: false, file_count: 0, total_bytes: 0 };
+
+for (const locale of ['en', 'zh-CN'] as const) it(`shows a cleanup's recorded retry and lease independently of a newer progress time (${locale})`, async () => {
+  await setLocale(locale);
+  const at = '2026-10-24T10:00:00.000Z', eligible = '2026-10-24T10:00:30.000Z', lease = '2026-10-24T10:01:00.000Z';
+  const value = { ...job(), kind: 'environment_remove', id: 'cleanup', lifecycle_wait: { phase: 'cleanup', recovering: true,
+    retry_eligible_at: { state: 'at' as const, at: eligible }, lease_recoverable_at: { state: 'at' as const, at: lease },
+    last_attempt_at: { state: 'at' as const, at }, reason: 'The machine is unavailable', observed_at: at } };
+  const view = show(<JobActivityLine job={value} />);
+  expect(screen.queryByText(value.lifecycle_wait.reason)).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('common.details') }));
+  const body = await screen.findByRole('dialog', { name: i18n.t('common.details') });
+  for (const instant of [at, eligible, lease]) expect(body.querySelector(`time[datetime="${instant}"]`)).not.toBeNull();
+  expect(body).toHaveTextContent(value.lifecycle_wait.reason);
+  const changed = { ...value, progress: { ...value.progress, activity: { ...value.progress.activity!, updated_at: '2026-11-10T10:00:00.000Z' } } };
+  view.rerender(<JobActivityLine job={changed} />);
+  expect(body.querySelector('time[datetime="2026-11-10T10:00:00.000Z"]')).toBeNull();
+  const older = { ...changed, lifecycle_wait: null };
+  view.rerender(<JobActivityLine job={older} />);
+  await waitFor(() => expect(body).not.toHaveTextContent(value.lifecycle_wait.reason));
+  expect(body).toHaveTextContent(locale === 'en' ? 'Not reported' : '尚未报告');
+  expect(state.stop).not.toHaveBeenCalled();
+});
 const files = { home: { ...size, measurement: size.reference }, file_states: null, private_views: [] } as unknown as FilesPlan;
 const plan = { files, mounts: [], blockers: [] };
+
+for (const locale of ['en', 'zh-CN'] as const) it(`dates a reused count in its existing size slot without inventing freshness (${locale})`, async () => {
+  await setLocale(locale);
+  const measuredAt = '2026-10-24T10:00:05.000Z';
+  const measured = { ...size, measured: true, file_count: 12, total_bytes: 4096, reference: { ...size.reference, measured_at: measuredAt } };
+  const view = show(<MeasurementSize size={measured} />);
+  const row = view.container.querySelector('[data-measured-size]');
+  expect(row).toHaveTextContent(locale === 'en' ? 'Counted' : '统计于');
+  expect(row?.querySelector('time')).toHaveAttribute('datetime', measuredAt);
+  view.rerender(<MeasurementSize size={{ ...measured, reference: { ...measured.reference, measured_at: null } }} />);
+  expect(view.container.querySelector('[data-measured-size] time')).toBeNull();
+});
 const observation: MigrationObservation = { step: 'schema', migration: 16, description: 'Background counts', migrations_done: 2, migrations_total: 5,
   rows_done: 1204000, rows_total: null, detail: 'building index', elapsed_seconds: 130, retry_after_seconds: 1, updated_at: '2026-10-24T10:00:05.000Z' };
 

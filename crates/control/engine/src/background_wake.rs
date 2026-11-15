@@ -13,6 +13,26 @@ use serde_json::json;
 pub(crate) const OFF: &str = "background_wake_off";
 const PREFIX: &str = "background:";
 
+/// One indexed read of the native work that holds a batch of environment idle stops.
+pub(crate) async fn running_environments(
+    conn: &mut Conn,
+    environments: &[Id],
+) -> Result<Vec<Id>, EngineError> {
+    if environments.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_scalar::<_, Id>(
+        r#"SELECT DISTINCT s.environment_id FROM items i JOIN segments s ON s.id=i.segment_id
+        WHERE i.kind='tool_call'
+          AND i.payload @? '$.background_tasks.*.task.state ? (@ == "running")'
+          AND s.environment_id=ANY($1::uuid[])"#,
+    )
+    .bind(environments)
+    .fetch_all(conn)
+    .await
+    .map_err(orch_db::DbError::from)?)
+}
+
 /// The sparse timeline index keeps idle supervision proportional to live native work.
 pub(crate) async fn running(
     conn: &mut Conn,
@@ -377,6 +397,19 @@ async fn save_item(unit: &mut Unit<'_>, item: &ItemRow, payload: &Json) -> Resul
     )
     .await?;
     threads::set_seq_state(unit.conn, item.thread_id, seq).await?;
+    let running = |value: &Json| {
+        value
+            .get("background_tasks")
+            .and_then(Json::as_object)
+            .is_some_and(|tasks| {
+                tasks
+                    .values()
+                    .any(|task| task["task"]["state"] == "running")
+            })
+    };
+    if running(&item.payload) != running(payload) {
+        unit.background_work_changed(item.segment_id);
+    }
     Ok(())
 }
 
@@ -1183,11 +1216,7 @@ impl Engine {
         }
         let mut eligible = Vec::new();
         let mut wake_held = false;
-        for task in report
-            .tasks
-            .iter()
-            .take(orch_link_contract::background::SNAPSHOT_COMMANDS)
-        {
+        for task in &report.tasks {
             let Some(item) =
                 threads::item_by_native_ref(unit.conn, segment.id, &task.native_item_ref).await?
             else {
@@ -1425,7 +1454,7 @@ impl Engine {
         let command = crate::commands::Outgoing::new(
             crate::ids::derived("background.interrupt", &[input.id.as_bytes()]),
             machine,
-            orch_link_contract::commands::SerialKey::Thread(thread.node_id),
+            orch_link_contract::commands::SerialKey::None,
             &orch_link_contract::commands::TurnInterrupt {
                 thread_id: thread.node_id,
                 turn_id: wake.origin_turn,

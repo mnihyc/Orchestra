@@ -199,6 +199,67 @@ async fn background_wake_is_on_by_default_and_an_inherited_change_waits_for_sess
 }
 
 #[tokio::test]
+async fn native_work_state_changes_refresh_the_environment_once_without_a_page_action() {
+    use orch_link_contract::background::{BackgroundTaskState, BackgroundTasks};
+
+    let world = World::new().await;
+    let thread = world.thread("Idle supervision").await;
+    let (turn, _) = world.running_turn(thread, "Begin").await;
+    let before: i64 = sqlx::query_scalar("SELECT env_seq FROM environments WHERE id=$1")
+        .bind(world.environment)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    let mut task = command_task(&world, thread, turn.turn_id).await;
+    let running: i64 = sqlx::query_scalar("SELECT env_seq FROM environments WHERE id=$1")
+        .bind(world.environment)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert!(
+        running > before,
+        "the native-work guard reaches the environment feed"
+    );
+    task.state = BackgroundTaskState::Completed;
+    task.can_end = false;
+    let report = BackgroundTasks {
+        self_waking: true,
+        native_idle: false,
+        tasks: vec![task.clone()],
+        native_wake: None,
+    };
+    world
+        .say(
+            thread,
+            orch_link_contract::events::Event::BackgroundTasks(report.clone()),
+        )
+        .await;
+    task_recorded(&world, thread, &task, "completed").await;
+    let finished: i64 = sqlx::query_scalar("SELECT env_seq FROM environments WHERE id=$1")
+        .bind(world.environment)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert!(finished > running);
+    world
+        .say(
+            thread,
+            orch_link_contract::events::Event::BackgroundTasks(report),
+        )
+        .await;
+    task_recorded(&world, thread, &task, "completed").await;
+    let repeated: i64 = sqlx::query_scalar("SELECT env_seq FROM environments WHERE id=$1")
+        .bind(world.environment)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        repeated, finished,
+        "an unchanged native observation sends no extra environment update"
+    );
+}
+
+#[tokio::test]
 async fn a_native_followup_uses_the_original_author_and_records_its_cause_before_output() {
     let world = World::new().await;
     let thread = world.thread("Native completion").await;
@@ -691,6 +752,7 @@ async fn a_lost_session_records_the_loss_and_never_revives_a_task_from_late_hist
             thread,
             orch_link_contract::events::Event::SessionLost(
                 orch_link_contract::events::SessionLost {
+                    uncertain: false,
                     reason: "the native process ended".into(),
                 },
             ),

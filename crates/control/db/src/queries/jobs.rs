@@ -1597,9 +1597,29 @@ mod tests {
             "a lease that has not run out is not taken"
         );
         assert!(
-            claim(&mut conn, job, one, until, now).await.unwrap(),
+            claim(
+                &mut conn,
+                job,
+                one,
+                until,
+                now + chrono::Duration::seconds(1)
+            )
+            .await
+            .unwrap(),
             "its holder renews it"
         );
+        let renewed: Json = sqlx::query_scalar("SELECT plan->'runner' FROM jobs WHERE id=$1")
+            .bind(job)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        let attempted: DateTime<Utc> = renewed["attempted_at"].as_str().unwrap().parse().unwrap();
+        assert_eq!(
+            attempted.timestamp_micros(),
+            now.timestamp_micros(),
+            "renewing does not replace the accepted attempt time"
+        );
+        assert_eq!(renewed["recovered"], false);
         assert!(
             runnable(&mut conn, &[kind::ENVIRONMENT_PROVISION], now, 10)
                 .await
@@ -1624,6 +1644,14 @@ mod tests {
             .await
             .unwrap()
         );
+        let recovered: Json = sqlx::query_scalar("SELECT plan->'runner' FROM jobs WHERE id=$1")
+            .bind(job)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        let attempted: DateTime<Utc> = recovered["attempted_at"].as_str().unwrap().parse().unwrap();
+        assert_eq!(attempted.timestamp_micros(), later.timestamp_micros());
+        assert_eq!(recovered["recovered"], true);
         release(&mut conn, job, two, later).await.unwrap();
         assert!(claim(&mut conn, job, one, until, later).await.unwrap());
     }
