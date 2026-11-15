@@ -35,6 +35,7 @@ pub(super) struct Value {
     plan: Plan,
     env: EnvironmentRow,
     facts: Vec<native::Facts<Role>>,
+    workspace_edit_revision: Option<orch_types::Hash>,
 }
 
 pub(super) struct Output {
@@ -44,6 +45,13 @@ pub(super) struct Output {
 // Actual same-request child association, never source admission or a skipped ordinary gate.
 #[derive(PartialEq)]
 struct Created(orch_db::queries::jobs::JobRow);
+
+/// Only this request's accepted replacement can bridge its original and applied edit revisions.
+#[derive(PartialEq)]
+pub(super) struct WorkspaceReplacement {
+    pub(super) before: orch_types::Hash,
+    pub(super) after: orch_types::Hash,
+}
 
 async fn native_mode(conn: &mut Conn, body: &EnvironmentSourcePrepareBody) -> ApiResult<bool> {
     let row = threads::thread(conn, body.thread_id)
@@ -173,6 +181,7 @@ impl Effect for Prepare {
                 .intersect_restrictions(caller)
                 .map_err(ApiError::internal)?;
             let principal = actor(ctx, conn, &caller, &body).await?;
+            let workspace_edit_revision = body.workspace_edit_revision;
             let (plan, env) = prepare_native(ctx, conn, principal, body).await?;
             let facts = operation::facts(conn, &plan)
                 .await
@@ -182,6 +191,7 @@ impl Effect for Prepare {
                     plan,
                     env,
                     facts: facts.clone(),
+                    workspace_edit_revision,
                 },
                 facts,
             ))
@@ -264,6 +274,22 @@ impl Apply for Prepare {
             )
             .await
             .map_err(ApiError::engine)?;
+            if let Some(before) = value.workspace_edit_revision {
+                let thread =
+                    threads::thread(conn, value.plan.thread.ok_or_else(ApiError::not_found)?)
+                        .await?
+                        .ok_or_else(ApiError::not_found)?;
+                let edits = thread
+                    .source
+                    .as_ref()
+                    .map(source::staged_edits)
+                    .transpose()
+                    .map_err(ApiError::engine)?
+                    .unwrap_or_default();
+                let after = source::workspace_edit_revision(&thread, value.env.generation, &edits)
+                    .map_err(ApiError::engine)?;
+                ctx.retain_source(WorkspaceReplacement { before, after })?;
+            }
             ctx.retain_source(Created(row.clone()))?;
             Ok(Outcome::Applied(Output { row }))
         })

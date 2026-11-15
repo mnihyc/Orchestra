@@ -450,8 +450,8 @@ impl SourceCommand {
         match self.canonical.get("kind").and_then(Json::as_str) {
             Some("fs.stat") => "fs.stat",
             Some("fs.mkdir") => "fs.mkdir",
+            Some("fs.write") => "fs.write",
             Some("git.prepare") => "git.prepare",
-            Some("fs.record") => "fs.record",
             Some("git.worktree") => "git.worktree",
             _ => "unknown",
         }
