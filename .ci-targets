@@ -1,0 +1,4 @@
+test -p orch-api-core --test people_reactions --test personal_state_scope
+web typecheck
+web lint
+web test -- tests/component/combobox-room.test.tsx tests/component/combobox-group-controls.test.tsx tests/component/combobox-minimum-query.test.tsx tests/component/choice-locator.test.tsx tests/component/place-picker-reads.test.tsx tests/component/place-move-choices.test.tsx tests/unit/place-picker.test.ts tests/unit/search-org-requests.test.ts tests/component/resource-picker.test.tsx tests/component/home-picker-requests.test.tsx tests/component/history-person-locator.test.tsx tests/component/import-scale.test.tsx tests/component/creation-once.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

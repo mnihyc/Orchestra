@@ -60,6 +60,8 @@ it('searches thirteen caller-eligible notifiers without resetting secrets until 
     fields: [field('endpoint', 'Delivery endpoint', 'text', `https://delivery.example.test/${index + 1}`), field('token', 'Delivery token', 'secret')] }));
   const user = userEvent.setup(); show(<NotifierDialog title="Add delivery" notifiers={notifiers} submitLabel="Create delivery" pending={false} error={null} onSubmit={calls.submit} onClose={vi.fn()} />);
   const picker = screen.getByRole('combobox', { name: i18n.t('settings.channels.kind') });
+  const name = screen.getByRole('textbox', { name: i18n.t('settings.channels.name') });
+  expect(name.compareDocumentPosition(picker) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   await user.type(screen.getByRole('textbox', { name: i18n.t('settings.channels.name') }), 'My channel');
   // Leaving the dialog's autofocused locator reveals its committed value.
   expect(picker).toHaveValue('Delivery method 1');

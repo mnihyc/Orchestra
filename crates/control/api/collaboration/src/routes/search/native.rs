@@ -177,6 +177,7 @@ pub(crate) struct PreparedNames {
     pub admin_places: HashMap<(String, Id), orch_access_contract::roles::AdminReach>,
     pub participation: HashSet<(String, Id)>,
     pub partial: bool,
+    pub next_cursor: Option<String>,
     pub bounds: NameBounds,
     pub addresses: BTreeSet<Id>,
     pub grouping: crate::routes::resources::grouping::Prepared,
@@ -273,14 +274,17 @@ async fn select_names_in(
     overview: Option<(&Principal, &crate::routes::nodes::overview::Reading<'_>)>,
 ) -> ApiResult<(PreparedNames, Vec<native::Facts<Source>>)> {
     let limit = query.limit.unwrap_or(NAME_SEARCH_LIMIT_DEFAULT);
-    if limit == 0 || limit > NAME_SEARCH_LIMIT_MAX {
-        return Err(invalid("limit", "is outside the names page limits"));
+    if limit == 0 {
+        return Err(invalid("limit", "must be greater than zero"));
     }
     let batch = i64::from(limit.max(NAME_SEARCH_LIMIT_DEFAULT)) * NAME_BATCH_PAGES;
     let limit = usize::try_from(limit).map_err(ApiError::internal)?;
     let kinds = kinds(query.kinds.as_deref(), NAME_KINDS)?;
     let text = query.q.as_deref().unwrap_or_default().trim();
-    if !text.is_empty() && text.chars().count() < NAME_QUERY_MIN_CHARS {
+    if !query.picker.unwrap_or(false)
+        && !text.is_empty()
+        && text.chars().count() < NAME_QUERY_MIN_CHARS
+    {
         return Err(invalid(
             "q",
             "type at least two characters, or leave it empty for recent visits",
@@ -321,18 +325,73 @@ async fn select_names_in(
         held.as_deref().map(|sets| &sets.held),
     )
     .await?;
-    let mut offset = 0;
+    let recent = if query.picker.unwrap_or(false) && text.is_empty() {
+        let mut recent = orch_api_base::picker_recents::read(conn, principal.user()).await?;
+        recent.choices.retain(|kind, _| kinds.contains(kind));
+        Some(recent)
+    } else {
+        None
+    };
+    let picker_count = if query.picker.unwrap_or(false) {
+        Some(
+            recent
+                .as_ref()
+                .map(|recent| i64::try_from(recent.count).map_err(ApiError::internal))
+                .transpose()?
+                .unwrap_or(0),
+        )
+    } else {
+        None
+    };
+    let recent_revision = if let Some(recent) = &recent {
+        use sha2::Digest;
+        format!(
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&recent.choices).map_err(ApiError::internal)?)
+        )
+    } else {
+        String::new()
+    };
+    let source = format!(
+        "names:{}:{:?}:{:?}:{}:{}:{:?}:{recent_revision}",
+        principal.user(),
+        query.id,
+        query.org_id,
+        kinds.join(","),
+        query.starred.unwrap_or(false),
+        (query.participating.unwrap_or(false), picker_count)
+    );
+    let page_query = orch_api_contract::common::CollectionQuery {
+        q: query.q.clone(),
+        limit: query.limit,
+        cursor: query.cursor.clone(),
+    };
+    let mut offset = orch_api_base::collection::after::<i64>(&page_query, &source)?.unwrap_or(0);
+    if offset < 0 {
+        return Err(invalid("cursor", "has a negative position"));
+    }
+    let mut batches_left = orch_settings::get::<u64>(
+        conn,
+        orch_settings::Place::System,
+        orch_settings_contract::registry::keys::SEARCH_NAME_CANDIDATE_BATCHES,
+    )
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(|| ApiError::internal("the names work setting has no value"))?;
+    let mut yielded_offset = None;
+    let mut continuation_offset = None;
     let mut selected = Vec::new();
     let mut selected_targets = std::collections::HashMap::new();
     let mut admin_places = std::collections::HashMap::new();
     let mut participation = std::collections::HashSet::new();
-    let mut partial = false;
-    for _ in 0..NAME_BATCHES_MAX {
+    let identifiers = query.id.map(|id| [id]);
+    loop {
         let candidates = rows::names(
             conn,
             &Names {
-                identifiers: None,
+                identifiers: identifiers.as_ref().map(|ids| &ids[..]),
                 starred: query.starred.unwrap_or(false),
+                picker_count,
                 at: ctx.now,
                 user: principal.user(),
                 trees: principal.member_of(),
@@ -443,18 +502,41 @@ async fn select_names_in(
                 .map(|(key, place)| (key.clone(), *place)),
         );
         participation.extend(visible.participating.iter().cloned());
-        selected.extend(candidates.into_iter().filter(|row| {
-            visible.contains(&(row.kind.clone(), row.id))
+        for (position, row) in candidates.into_iter().enumerate() {
+            if visible.contains(&(row.kind.clone(), row.id))
                 && (row.kind != "chat" || searchable_chats.contains(&row.id))
                 && (!query.participating.unwrap_or(false)
                     || visible.participating.contains(&(row.kind.clone(), row.id)))
-        }));
-        partial = count == batch || selected.len() > limit;
-        if selected.len() >= limit || count < batch {
+            {
+                selected.push(row);
+                if selected.len() == limit {
+                    continuation_offset =
+                        Some(offset + i64::try_from(position).map_err(ApiError::internal)? + 1);
+                }
+                if selected.len() > limit {
+                    break;
+                }
+            }
+        }
+        if selected.len() > limit || count < batch {
+            break;
+        }
+        batches_left = batches_left.saturating_sub(1);
+        if batches_left == 0 {
+            yielded_offset = Some(continuation_offset.unwrap_or(offset + count));
             break;
         }
         offset += count;
     }
+    let partial = selected.len() > limit || yielded_offset.is_some();
+    let next_cursor = if partial {
+        yielded_offset
+            .or(continuation_offset)
+            .map(|offset| orch_api_base::collection::cursor(&page_query, &source, offset))
+            .transpose()?
+    } else {
+        None
+    };
     selected.truncate(limit);
     let results = selected
         .iter()
@@ -537,6 +619,7 @@ async fn select_names_in(
             admin_places,
             participation,
             partial,
+            next_cursor,
             bounds,
             addresses,
             grouping,

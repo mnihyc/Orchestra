@@ -68,6 +68,14 @@ fn tier(id: &str) -> ServiceTier {
     }
 }
 
+/// The speed that `discovered()` lists, with the label its source gives it.
+fn fast() -> ServiceTier {
+    ServiceTier {
+        id: "fast".to_owned(),
+        label: "Fast".to_owned(),
+    }
+}
+
 fn words(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| (*item).to_owned()).collect()
 }
@@ -157,7 +165,8 @@ async fn an_entry_is_written_with_what_the_model_can_be_run_with_and_the_groups_
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(listed, std::slice::from_ref(&made));
 
     // Groups are changed as a whole, without touching what the model can be run with, and the other way round.
@@ -327,7 +336,8 @@ async fn an_entry_that_does_not_hold_together_is_refused_at_the_member_and_nothi
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(none.is_empty(), "nothing was written by any of them");
 
     // The same refusals when an entry is changed, and the entry stays as it was.
@@ -367,7 +377,8 @@ async fn an_entry_that_does_not_hold_together_is_refused_at_the_member_and_nothi
         .token(&c.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(still[0].parameters, everything());
     // Taking the start away first, then the speed, is the way.
     let ok = change(
@@ -403,8 +414,33 @@ fn discovered() -> serde_json::Value {
     ] })
 }
 
+/// Provider `id`'s models, accepted by name from what `discovered()` says its source lists.
+async fn accept_discovered(
+    world: &World,
+    c: &resources::Company,
+    machine: Id,
+    id: Id,
+    names: &[&str],
+) -> Vec<orch_api_contract::resources::ProviderModel> {
+    let machine_says = answer_discovery(world, machine, discovered());
+    let added = world
+        .app
+        .call(ProviderModelSuggestionAccept, &[&id])
+        .token(&c.boss.token)
+        .body(&ProviderModelSuggestionAcceptBody {
+            model_names: words(names),
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full suggestion acceptance");
+    machine_says.await.unwrap();
+    added.added
+}
+
 #[tokio::test]
-async fn accepting_a_suggestion_puts_a_larger_context_a_speed_and_a_program_on_offer_and_enables_none()
+async fn accepting_a_suggestion_switches_on_what_it_offers_and_a_thread_still_starts_with_the_window()
  {
     let world = world().await;
     let c = company(&world).await;
@@ -414,45 +450,49 @@ async fn accepting_a_suggestion_puts_a_larger_context_a_speed_and_a_program_on_o
         .base
         .id;
     online(&world, machine).await;
-    let machine_says = answer_discovery(&world, machine, discovered());
-    let added = world
-        .app
-        .call(ProviderModelSuggestionAccept, &[&id])
-        .token(&c.boss.token)
-        .body(&ProviderModelSuggestionAcceptBody {
-            model_names: words(&["gpt-6-sol", "gpt-6-luna", "gpt-6-same"]),
-        })
-        .send()
-        .await
-        .ok()
-        .into_full()
-        .expect("the ordinary caller receives the full suggestion acceptance");
-    machine_says.await.unwrap();
-    assert_eq!(added.provider.models.len(), 3);
-    let added = added.added;
+    let added = accept_discovered(
+        &world,
+        &c,
+        machine,
+        id,
+        &["gpt-6-sol", "gpt-6-luna", "gpt-6-same"],
+    )
+    .await;
+    assert_eq!(added.len(), 3);
     let get = |name: &str| added.iter().find(|m| m.model_name == name).unwrap().clone();
 
     let sol = get("gpt-6-sol");
     assert_eq!(sol.parameters.context_window, Some(272_000));
     assert_eq!(
-        sol.parameters.context_max, None,
-        "a larger context is not open for being offered"
+        sol.parameters.context_max,
+        Some(1_000_000),
+        "a larger context the source lists is switched on"
     );
-    assert_eq!(sol.parameters.service_tiers, None);
-    assert_eq!(sol.parameters.access_programs, None);
-    let offered = sol.parameters.offered.clone().unwrap();
-    assert_eq!(offered.context_max, Some(1_000_000));
     assert_eq!(
-        offered.service_tiers,
-        Some(vec![ServiceTier {
-            id: "fast".into(),
-            label: "Fast".into()
-        }]),
-        "the speed as its source names it"
+        sol.parameters.default_context,
+        Some(272_000),
+        "and a thread still starts with the model's own window"
+    );
+    assert_eq!(sol.parameters.service_tiers, Some(vec![fast()]));
+    assert_eq!(sol.parameters.access_programs, Some(words(&["early"])));
+    assert_eq!(sol.parameters.efforts, Some(words(&["low", "high"])));
+    assert_eq!(sol.parameters.default_effort.as_deref(), Some("low"));
+    assert_eq!(
+        (
+            sol.parameters.default_service_tier.clone(),
+            sol.parameters.default_access_program.clone()
+        ),
+        (None, None),
+        "the ordinary speed and no program are what a thread starts with"
+    );
+    let offered = sol.parameters.offered.clone().unwrap();
+    assert_eq!(
+        offered.context_max,
+        Some(1_000_000),
+        "the offer stays beside it"
     );
     assert_eq!(offered.access_programs, Some(words(&["early"])));
     assert!(sol.groups.is_empty());
-    assert_eq!(sol.parameters.default_effort.as_deref(), Some("low"));
 
     // Whatever a source says a thread starts with, it is not taken: that is a manager's to write.
     let luna = get("gpt-6-luna");
@@ -460,29 +500,27 @@ async fn accepting_a_suggestion_puts_a_larger_context_a_speed_and_a_program_on_o
         (
             luna.parameters.context_max,
             luna.parameters.default_context,
-            luna.parameters.default_service_tier,
-            luna.parameters.default_access_program,
+            luna.parameters.default_service_tier.clone(),
+            luna.parameters.default_access_program.clone(),
         ),
-        (None, None, None, None)
+        (Some(1_000_000), Some(272_000), None, None)
     );
-    assert_eq!(
-        luna.parameters.offered.unwrap().context_max,
-        Some(1_000_000)
-    );
+    assert_eq!(luna.parameters.service_tiers, Some(vec![fast()]));
+    assert_eq!(luna.parameters.access_programs, Some(words(&["early"])));
 
-    // A context no larger than the window offers nothing.
-    assert_eq!(get("gpt-6-same").parameters.offered, None);
+    // A context no larger than the window offers nothing, and so opens nothing.
+    let same = get("gpt-6-same");
+    assert_eq!(same.parameters.offered, None);
+    assert_eq!(same.parameters.context_max, None);
 
-    // A manager opens what they choose, and the offer stays beside it.
-    let opened = world
+    // A manager narrows afterwards, and the offer stays beside what is left on.
+    let narrowed = world
         .app
         .call(ProviderModelUpdate, &[&id, &sol.id])
         .token(&c.boss.token)
         .body(&ProviderModelUpdateBody {
             parameters: Some(ModelParameters {
-                context_max: Some(1_000_000),
-                service_tiers: Some(vec![tier("fast")]),
-                default_service_tier: Some("fast".into()),
+                service_tiers: None,
                 ..sol.parameters.clone()
             }),
             ..ProviderModelUpdateBody::default()
@@ -492,14 +530,128 @@ async fn accepting_a_suggestion_puts_a_larger_context_a_speed_and_a_program_on_o
         .ok()
         .into_full()
         .expect("the ordinary caller receives the full model");
-    assert_eq!(opened.parameters.context_max, Some(1_000_000));
+    assert_eq!(narrowed.parameters.service_tiers, None);
     assert_eq!(
-        opened.parameters.default_service_tier.as_deref(),
-        Some("fast")
-    );
-    assert_eq!(
-        opened.parameters.offered.unwrap().context_max,
-        Some(1_000_000),
+        narrowed.parameters.offered.unwrap().service_tiers,
+        Some(vec![fast()]),
         "what the source said it offers is kept"
+    );
+}
+
+#[tokio::test]
+async fn an_organization_that_switches_on_less_has_models_added_with_less() {
+    for (choice, speeds, larger) in [("basic", false, true), ("nothing", false, false)] {
+        let world = world().await;
+        let c = company(&world).await;
+        world
+            .set_at(
+                orch_settings::Target::Node(c.acme),
+                "models.add_switches_on",
+                json!(choice),
+            )
+            .await;
+        let machine =
+            machine_forwarding_to(&world, c.boss.id(), &["https://api.example.com/v1"]).await;
+        let id = provider(&world, &c.boss, c.acme, Some(machine))
+            .await
+            .base
+            .id;
+        online(&world, machine).await;
+        let added = accept_discovered(&world, &c, machine, id, &["gpt-6-sol"]).await;
+        let sol = &added[0];
+        assert_eq!(
+            sol.parameters.efforts,
+            Some(words(&["low", "high"])),
+            "{choice}: an effort is never withheld"
+        );
+        assert_eq!(sol.parameters.context_window, Some(272_000), "{choice}");
+        assert_eq!(
+            sol.parameters.context_max.is_some(),
+            larger,
+            "{choice}: the larger context"
+        );
+        assert_eq!(
+            sol.parameters.service_tiers.is_some() || sol.parameters.access_programs.is_some(),
+            speeds,
+            "{choice}: speeds and access programs"
+        );
+        let offered = sol.parameters.offered.clone().unwrap();
+        assert_eq!(
+            offered.service_tiers,
+            Some(vec![fast()]),
+            "{choice}: what is not switched on stays on offer"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_model_added_by_a_name_the_catalogue_lists_has_what_the_catalogue_says_under_what_was_written()
+ {
+    let world = world().await;
+    let c = company(&world).await;
+    let machine = machine_forwarding_to(&world, c.boss.id(), &["https://api.example.com/v1"]).await;
+    let id = provider(&world, &c.boss, c.acme, Some(machine))
+        .await
+        .base
+        .id;
+    online(&world, machine).await;
+    // Reading what the source lists keeps the list with the provider, which is the catalogue a name is looked up in.
+    let machine_says = answer_discovery(&world, machine, discovered());
+    world
+        .app
+        .call(
+            orch_api_contract::resources::ProviderModelSuggestionList,
+            &[&id],
+        )
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    machine_says.await.unwrap();
+
+    let by_name = create(&world, &c.boss, id, "gpt-6-sol", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full model");
+    assert_eq!(by_name.parameters.context_window, Some(272_000));
+    assert_eq!(by_name.parameters.efforts, Some(words(&["low", "high"])));
+    assert_eq!(by_name.parameters.default_effort.as_deref(), Some("low"));
+    assert_eq!(by_name.parameters.context_max, Some(1_000_000));
+    assert_eq!(by_name.parameters.service_tiers, Some(vec![fast()]));
+    assert_eq!(by_name.parameters.access_programs, Some(words(&["early"])));
+
+    let written = create(
+        &world,
+        &c.boss,
+        id,
+        "gpt-6-luna",
+        Some(ModelParameters {
+            efforts: Some(words(&["minimal"])),
+            ..ModelParameters::default()
+        }),
+        None,
+    )
+    .await
+    .ok()
+    .into_full()
+    .expect("the ordinary caller receives the full model");
+    assert_eq!(
+        written.parameters.efforts,
+        Some(words(&["minimal"])),
+        "what the manager wrote wins over the catalogue"
+    );
+    assert_eq!(written.parameters.default_effort, None);
+    assert_eq!(written.parameters.context_window, Some(272_000));
+
+    let unknown = create(&world, &c.boss, id, "gpt-6-unlisted", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full model");
+    assert_eq!(
+        unknown.parameters,
+        ModelParameters::default(),
+        "a name nobody lists is added as it is written"
     );
 }

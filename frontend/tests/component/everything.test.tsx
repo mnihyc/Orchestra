@@ -1,5 +1,5 @@
 /** The complete tree grid as a reader uses it: remembered columns, server sorting, keyboard branches and minimal paths. */
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -7,9 +7,11 @@ import type { EverythingFilter } from '@/api/everything';
 import type * as SearchApi from '@/api/search';
 import type * as Screen from '@/shell/screen';
 import { EverythingBrowser, EverythingScreen } from '@/features/everything/Everything';
-import { KindIcon } from '@/features/everything/EverythingTable';
+import { visibleRows, type Branch } from '@/features/everything/rows';
+import { EverythingTable, KindIcon } from '@/features/everything/EverythingTable';
 import { OrgEverything } from '@/features/settings/org/Everything';
 import type { EverythingRow, Me } from '@/generated/api-types';
+import { ScrollRegion } from '@/ui/ScrollRegion';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { readViewChoice, writeViewChoice } from '@/lib/viewChoices';
@@ -60,7 +62,7 @@ beforeEach(() => {
   levels = new Map([[null, [root]], ['acme', [project]], ['web', [leaf]]]);
 });
 afterEach(async () => {
-  cleanup(); useAppearance.setState(appearanceBefore); document.documentElement.classList.toggle('dark', darkBefore);
+  cleanup(); vi.restoreAllMocks(); useAppearance.setState(appearanceBefore); document.documentElement.classList.toggle('dark', darkBefore);
   if (themeBefore === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = themeBefore;
   await setLocale('en');
 });
@@ -449,4 +451,58 @@ describe('the complete hierarchy', () => {
     await waitFor(() => expect(reads.slice(before).map((read) => read.parent ?? 'root').sort()).toEqual(['acme', 'root']));
     expect(screen.queryByRole('link', { name: 'Release plan · Acme / Web' })).not.toBeInTheDocument();
   });
+});
+
+
+it('keeps every expanded loaded row selectable and reachable while mounting only the visible window', async () => {
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(384);
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(800);
+  const entries = Array.from({ length: 1_200 }, (_, index) => inventoryRow({ id: 'entry-' + String(index), kind: 'project', name: 'Entry ' + String(index), parent_id: root.id, href: '/project/entry-' + String(index), can_share: true }));
+  levels.set(root.id, entries);
+  const user = userEvent.setup(); show(<EverythingBrowser />);
+  await user.click(await screen.findByRole('button', { name: 'Expand all' }));
+  const grid = screen.getByRole('treegrid', { name: i18n.t('everything.tree') });
+  await waitFor(() => expect(grid).toHaveAttribute('aria-rowcount', '1202'));
+  expect(grid.querySelectorAll('[data-everything-row]').length).toBeLessThan(30);
+  const org = grid.querySelector<HTMLElement>('[data-everything-row="org:acme"]');
+  if (org === null) throw new Error('The root row stays reachable');
+  const viewport = grid.closest<HTMLElement>('[data-scroll-allow="table"]');
+  if (viewport === null) throw new Error('The inventory owns its viewport');
+  viewport.scrollTo = (options?: ScrollToOptions | number) => { if (typeof options === 'object') viewport.scrollTop = options.top ?? 0; fireEvent.scroll(viewport); };
+  fireEvent.keyDown(org, { key: 'End' });
+  await waitFor(() => expect(screen.getByRole('link', { name: 'Entry 1199' }).closest('tr')).toHaveFocus());
+  expect(grid.querySelectorAll('[data-everything-row]').length).toBeLessThan(30);
+  vi.restoreAllMocks();
+});
+
+it('keeps a deeply nested loaded hierarchy independent of the JavaScript call stack', () => {
+  const branches = new Map<string | null, Branch>();
+  for (let index = 0; index < 5_000; index += 1) {
+    branches.set(index === 0 ? null : 'deep-' + String(index - 1), {
+      rows: [inventoryRow({ id: 'deep-' + String(index), kind: 'project', name: 'Level ' + String(index), has_children: index < 4_999 })],
+      pending: false, error: null, retired: false, hasMore: false, loadingMore: false, more: vi.fn(), retry: vi.fn(),
+    });
+  }
+  const rows = visibleRows(branches, null, (row) => row.has_children, { empty: 'empty', filtering: false, order: (rows) => rows, heading: () => null });
+  expect(rows).toHaveLength(5_000);
+  expect(rows.at(-1)).toMatchObject({ type: 'item', depth: 4_999, row: { id: 'deep-4999' } });
+  expect(Math.max(...rows.map((row) => row.position.length))).toBeLessThan(100);
+});
+
+it('selects the complete loaded inventory independently of the mounted row window', async () => {
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(384);
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(800);
+  const all = vi.fn();
+  levels.set(null, Array.from({ length: 1_200 }, (_, index) => inventoryRow({ id: 'loaded-' + String(index), kind: 'project', name: 'Loaded ' + String(index), can_share: true })));
+  const filter: EverythingFilter = { scope: 'mine', kinds: [], q: '', owner: null, createdFrom: '', createdTo: '', sort: 'name', direction: 'asc' };
+  show(<ScrollRegion label="Inventory window" kind="table"><EverythingTable reader={reader.id} filter={filter} columns={['name', 'kind']} expansion="none" onSort={vi.fn()}
+    selection={{ selected: new Set(), toggle: vi.fn(), clear: vi.fn(), all }} /></ScrollRegion>);
+  const grid = screen.getByRole('treegrid');
+  await waitFor(() => expect(grid).toHaveAttribute('aria-rowcount', '1201'));
+  const header = grid.querySelector('thead');
+  if (header === null) throw new Error('The inventory has its shared selection heading');
+  await userEvent.click(within(header).getByRole('button', { name: i18n.t('navigation.recentAll') }));
+  expect(all).toHaveBeenCalledOnce();
+  expect(all.mock.calls[0]?.[0]).toHaveLength(1_200);
+  expect(grid.querySelectorAll('[data-everything-row]').length).toBeLessThan(30);
 });

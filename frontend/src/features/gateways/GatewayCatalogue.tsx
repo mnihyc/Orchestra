@@ -60,8 +60,7 @@ export function GatewayCatalogueView({ catalogue, writable = false, onSave, onRe
     finally { setPending(false); }
   };
   return <section aria-label={t('regionalGateways.title')} className="flex min-w-0 flex-col gap-3">
-    <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-2">
-      <span className="min-w-0 wrap-anywhere text-xs text-text-muted">{t('regionalGateways.revision', { revision: catalogue.revision })}</span>
+    <div className="flex min-w-0 flex-wrap items-baseline justify-end gap-2">
       <span className="inline-flex items-center gap-1"><HelpHint term={t('regionalGateways.title')} what={t('regionalGateways.catalogueHelp')}
         guide={{ article: 'connect-a-machine', heading: 'gateway-catalogue' }} />
         {onRefresh !== undefined && <IconButton action="refresh" size="sm" label={t('regionalGateways.refresh')} pending={refreshing} onClick={onRefresh} />}
@@ -96,10 +95,10 @@ export function GatewayCatalogueView({ catalogue, writable = false, onSave, onRe
             <Button size="sm" variant="ghost" disabled={pending || index === draft.length - 1} aria-label={t('regionalGateways.moveDown', { label: gateway.label })} onClick={() => move(key, 1)}>{t('regionalGateways.down')}</Button>
           </div>
           <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
-            <Input label={t('regionalGateways.id')} value={gateway.id} readOnly={existing} disabled={pending} autoComplete="off"
-              onChange={(event) => change(key, (value) => ({ ...value, id: event.target.value }))} />
             <Input label={t('regionalGateways.label')} value={gateway.label} disabled={pending}
               onChange={(event) => change(key, (value) => ({ ...value, label: event.target.value }))} />
+            <Input label={t('regionalGateways.id')} value={gateway.id} readOnly={existing} disabled={pending} autoComplete="off"
+              onChange={(event) => change(key, (value) => ({ ...value, id: event.target.value }))} />
             <Input label={t('regionalGateways.region')} value={gateway.region} disabled={pending}
               onChange={(event) => change(key, (value) => ({ ...value, region: event.target.value }))} />
           </div>

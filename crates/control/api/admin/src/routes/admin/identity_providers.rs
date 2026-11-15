@@ -53,6 +53,8 @@ use orch_api_contract::admin::IdentityProviderTestReply;
 
 use orch_api_contract::admin::IdentityProviderUpdateBody;
 
+use orch_api_contract::common::{CollectionQuery, Page};
+
 use orch_api_contract::common::BASE_PATH;
 
 use orch_api_contract::common::ErrorCode;
@@ -152,14 +154,22 @@ fn shown(config: &ServerConfig, row: IdentityProviderRow) -> IdentityProvider {
 }
 
 /// Every identity provider.
-async fn list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<IdentityProvider>> {
+async fn list(ctx: Ctx, query: CollectionQuery, (): ()) -> ApiResult<Page<IdentityProvider>> {
     admin_of(&ctx)?;
     let mut conn = ctx.app.db.acquire().await?;
-    Ok(identity::identity_providers(&mut conn)
+    let rows = identity::identity_providers(&mut conn)
         .await?
         .into_iter()
         .map(|row| shown(&ctx.app.config, row))
-        .collect())
+        .collect();
+    orch_api_base::collection::snapshot(
+        &query,
+        "admin-identity-providers",
+        rows,
+        |row: &IdentityProvider| (row.name.clone(), row.id),
+        |row| format!("{} {} {}", row.name, row.key, row.issuer),
+        false,
+    )
 }
 
 fn key_fits(key: &str) -> bool {

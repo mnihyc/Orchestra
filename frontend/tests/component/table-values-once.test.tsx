@@ -66,3 +66,12 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     for (const name of ['vendor/internal-route', 'vendor/another-route', provider.address]) expect(within(table).queryByText(name)).not.toBeInTheDocument();
   });
 }
+
+it.each(['en', 'zh-CN'] as const)('asks for the capability name before its technical key in %s', async (locale) => {
+  await setLocale(locale);
+  const user = userEvent.setup();
+  show(<Capabilities />);
+  await user.click(screen.getByRole('button', { name: i18n.t('admin.capabilities.addTitle') }));
+  const dialog = await screen.findByRole('dialog', { name: i18n.t('admin.capabilities.addTitle') });
+  expect(within(dialog).getAllByRole('textbox')[0]).toHaveAccessibleName(i18n.t('admin.capabilities.label'));
+});

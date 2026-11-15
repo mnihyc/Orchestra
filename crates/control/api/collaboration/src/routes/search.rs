@@ -22,8 +22,6 @@ use crate::routes::nodes::view;
 
 use orch_api_contract::search::NAME_SEARCH_LIMIT_DEFAULT;
 
-use orch_api_contract::search::NAME_SEARCH_LIMIT_MAX;
-
 use orch_api_contract::search::NameHit;
 
 use orch_api_contract::search::NameKind;
@@ -53,9 +51,6 @@ const NAME_QUERY_MIN_CHARS: usize = 2;
 /// One extra page avoids a second round when half the candidates are hidden,
 /// without evaluating hundreds of pages for the usual twenty-name request.
 const NAME_BATCH_PAGES: i64 = 2;
-
-/// At most four bulk access checks: a narrow reader never walks the installation to fill twenty rows.
-pub const NAME_BATCHES_MAX: usize = 4;
 
 const NAME_KINDS: &[&str] = &[
     "org",
@@ -514,6 +509,7 @@ pub(super) async fn render_names(
     Ok(NameSearchPage {
         items: found,
         partial,
+        next_cursor: value.next_cursor.clone(),
     })
 }
 
