@@ -466,6 +466,10 @@ impl Commands for ScriptedCommands {
             .and_then(|authority| authority.handover_source())
             .cloned();
         let cmd = Cmd {
+            native_members: None,
+            native_revision: None,
+
+            native_target: None,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),

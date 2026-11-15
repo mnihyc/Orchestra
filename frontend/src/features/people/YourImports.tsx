@@ -1,4 +1,5 @@
 /** Your imports keeps the person's jobs and reports, with the same history layout as exports. */
+import { PathLink } from '@/shell/TrailLink';
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Ellipsis, FileUp } from 'lucide-react';
 import { useState } from 'react';
@@ -115,7 +116,7 @@ export function YourImports() {
   return <PersonalFrame page="imports" lead={t('importWizard.mine.lead')}>
     <div className="flex min-w-0 flex-col gap-3">
       <div className="flex flex-wrap items-center justify-end gap-2">
-        <Button size="sm" variant="ghost" asChild><a href="/settings/exports">{t('importWizard.mine.exports')}</a></Button>
+        <Button size="sm" variant="ghost" asChild><PathLink href="/settings/exports">{t('importWizard.mine.exports')}</PathLink></Button>
         {rows.length > 0 && make}
       </div>
       {list.isPending ? <SkeletonRows read={list} rows={4} /> : list.isError && rows.length === 0 ? <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />

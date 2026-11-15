@@ -179,13 +179,14 @@ struct KeptEnvironment {
 struct KeptMount {
     id: Id,
     mount_id: Id,
-    machine_id: Id,
+    machine_id: Option<Id>,
     name: String,
     home_id: Option<Id>,
     owner_id: Option<Id>,
     kind: String,
     total_bytes: Option<i64>,
     kept_at: DateTime<Utc>,
+    lost: bool,
 }
 
 #[derive(Clone, serde::Serialize, sqlx::FromRow)]
@@ -257,7 +258,7 @@ async fn prepare_records(
         .fetch_all(&mut *conn).await.map_err(DbError::from)?;
     let environments:Vec<KeptEnvironment>=sqlx::query_as("SELECT id,removal_revision,name,owner_id,home_node_id,retained_bytes,retained_size_at,deleted_at,volumes_purge_at,retained_volumes FROM environments WHERE removal_phase IN ('removing','kept','restoring','purging') AND purged_at IS NULL")
         .fetch_all(&mut *conn).await.map_err(DbError::from)?;
-    let mounts:Vec<KeptMount>=sqlx::query_as("SELECT k.id,k.mount_id,k.machine_id,m.name,m.home_id,m.owner_id,k.kind,k.total_bytes,k.kept_at FROM mount_kept_data k JOIN mounts m ON m.id=k.mount_id")
+    let mounts:Vec<KeptMount>=sqlx::query_as("SELECT k.id,k.mount_id,CASE WHEN k.lost_at IS NULL THEN k.machine_id ELSE NULL END AS machine_id,m.name,m.home_id,m.owner_id,k.kind,k.total_bytes,k.kept_at,(k.lost_at IS NOT NULL) AS lost FROM mount_kept_data k JOIN mounts m ON m.id=k.mount_id UNION ALL SELECT l.id,l.mount_id,NULL::uuid,m.name,m.home_id,m.owner_id,'volume',l.total_bytes,l.lost_at,true FROM mount_lost_locations l JOIN mounts m ON m.id=l.mount_id")
         .fetch_all(&mut *conn).await.map_err(DbError::from)?;
     let skills:Vec<SkillVersion>=sqlx::query_as("SELECT v.id,v.skill_id,v.name,v.number,encode(v.archive,'hex') AS archive_hash,s.owner_id,s.home_id,v.archive_size,v.created_at,(COALESCE(s.latest_version_id=v.id,false) AND s.deleted_at IS NULL) AS latest,EXISTS(SELECT 1 FROM turns t WHERE t.skill_versions @> ARRAY[v.id]) AS retained FROM skill_versions v JOIN skills s ON s.id=v.skill_id")
         .fetch_all(&mut *conn).await.map_err(DbError::from)?;
@@ -353,7 +354,7 @@ async fn prepare_records(
             &hosts
                 .iter()
                 .map(|host| host.machine_id)
-                .chain(mounts.iter().map(|kept| kept.machine_id))
+                .chain(mounts.iter().filter_map(|kept| kept.machine_id))
                 .collect::<Vec<_>>(),
         )
         .await?;
@@ -731,7 +732,7 @@ async fn prepare_records(
                     kept.home_id,
                     hosts
                         .iter()
-                        .find(|host| host.machine_id == kept.machine_id)
+                        .find(|host| Some(host.machine_id) == kept.machine_id)
                         .map(|host| host.id),
                     Some(ObjectRef {
                         kind: ObjectKind::Mount,
@@ -758,8 +759,10 @@ async fn prepare_records(
         }
         if let Some(book) = book.as_deref_mut() {
             book.row_names(conn, None, None, kept.owner_id).await?;
-            if book.plan_names() {
-                book.destination(conn, None, kept.machine_id).await?;
+            if book.plan_names()
+                && let Some(machine) = kept.machine_id
+            {
+                book.destination(conn, None, machine).await?;
             }
         }
         admitted_mounts.push(kept);
@@ -851,6 +854,9 @@ async fn prepare_records(
         );
     }
     for row in &admitted_mounts {
+        if row.lost {
+            continue;
+        }
         native_targets.insert(
             format!("mount:{}", row.id),
             orch_engine::jobs::cleanup::Target::MountData {
@@ -1114,7 +1120,9 @@ async fn prepare_records(
                     kind: ObjectKind::Mount,
                     id: kept.mount_id,
                 };
-                let host = hosts.iter().find(|host| host.machine_id == kept.machine_id);
+                let host = hosts
+                    .iter()
+                    .find(|host| Some(host.machine_id) == kept.machine_id);
                 let host_id = host.map(|host| host.id);
                 if !manages(ObjectKind::Mount, kept.mount_id)
                     || !in_scope(kept.owner_id, kept.home_id, host_id, Some(object))
@@ -1132,9 +1140,15 @@ async fn prepare_records(
                 row.bytes = kept.total_bytes;
                 row.why = KeptWhy::Restore;
                 row.since = Some(Time::new(kept.kept_at));
-                row.availability = StorageAvailability::Ready;
-                row.can_clean = true;
-                if kept.kind == "path" {
+                row.availability = if kept.lost {
+                    StorageAvailability::Unknown
+                } else {
+                    StorageAvailability::Ready
+                };
+                row.can_clean = !kept.lost;
+                if kept.lost {
+                    row.blocker = Some("node_away".into());
+                } else if kept.kind == "path" {
                     row.blocker = Some("borrowed_path".into());
                 }
                 result.push(row);
@@ -1472,7 +1486,14 @@ async fn prepare_server(
             records.push(row);
         }
         for (hash, bytes, pins, last) in kept_blobs.clone() {
-            let mut row = model::record(format!("blob:{hash}"), StorageKind::Content, hash, at);
+            // Kept content has no name of its own: a person reads its kind, its size and its time, and its hash stays
+            // in the record's identifier.
+            let mut row = model::record(
+                format!("blob:{hash}"),
+                StorageKind::Content,
+                String::new(),
+                at,
+            );
             row.bytes = Some(bytes);
             row.why = if pins > 0 {
                 KeptWhy::InUse

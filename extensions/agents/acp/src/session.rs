@@ -70,6 +70,8 @@ pub struct Env {
 
 /// The pieces of a session that are given when it is made.
 pub struct Parts {
+    /// The accepted physical opening owned by this session's asynchronous producers.
+    pub opening_id: Id,
     /// What sessions share.
     pub env: Arc<Env>,
     /// The thread.
@@ -131,6 +133,7 @@ struct State {
 
 /// One conversation of an agent, with its process.
 pub struct Session {
+    opening_id: Id,
     event_gate: tokio::sync::Mutex<()>,
     event_batch: Mutex<std::collections::VecDeque<orch_agent_contract::adapter::AdapterEvent>>,
     env: Arc<Env>,
@@ -245,6 +248,7 @@ impl Session {
         );
         let initial_mode = parts.modes.as_ref().map(|modes| modes.current.clone());
         Arc::new(Self {
+            opening_id: parts.opening_id,
             event_gate: tokio::sync::Mutex::new(()),
             event_batch: Mutex::new(std::collections::VecDeque::new()),
             env: parts.env,
@@ -791,7 +795,11 @@ impl Session {
         }
         self.emit(events);
         if !closing {
-            self.emit([SessionEvent::SessionLost(SessionLost { reason: why })]);
+            self.emit([SessionEvent::SessionLost(SessionLost {
+                expected: false,
+                opening_id: self.opening_id,
+                reason: why,
+            })]);
         }
     }
 
@@ -1133,6 +1141,8 @@ impl Session {
         }
         self.emit(ended.0);
         self.emit([SessionEvent::SessionLost(SessionLost {
+            expected: false,
+            opening_id: self.opening_id,
             reason: "the program did not stop when it was asked to; it was ended".to_owned(),
         })]);
         self.flush_events().await;

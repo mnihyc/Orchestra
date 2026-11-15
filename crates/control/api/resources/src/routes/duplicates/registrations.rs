@@ -468,6 +468,20 @@ impl<F: Family> effects::Apply for Moving<F> {
                 ApiError::internal("the registration's cross-root source boundary disappeared")
             })?;
             let deadline = before.deadline();
+            let server_host = match value.object.kind {
+                ObjectKind::Host => Some(value.object),
+                ObjectKind::Machine => value.inventory.host.map(|id| ObjectRef {
+                    kind: ObjectKind::Host,
+                    id,
+                }),
+                _ => None,
+            };
+            let server_host = if let Some(object) = server_host {
+                crate::server_host_use::Before::take_intent(conn, principal, object, &value.plan)
+                    .await?
+            } else {
+                None
+            };
             before.check()?;
             orch_engine::copy_out::record(
                 conn,
@@ -521,6 +535,9 @@ impl<F: Family> effects::Apply for Moving<F> {
                     orch_types::Time::new(ctx.now),
                 )
                 .await?;
+            }
+            if let Some(before) = server_host {
+                before.require(ctx, conn, principal).await?;
             }
             let action = orch_db::audit::action!(AuditAction::ResourceHomeChanged);
             let mut entry = orch_db::audit::Entry::new(
