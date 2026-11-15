@@ -24,7 +24,7 @@ vi.mock('@/api/nodes', async (original) => ({...await original<Record<string, un
 vi.mock('@/api/trace', async (original) => ({...await original<Record<string, unknown>>(), selectedPersonQuery: (id: string) => ({
   queryKey: ['stream-person', id], enabled: id !== '', queryFn: () => calls.personFailure === null ? Promise.resolve({id, kind: 'human', username: 'ada', display_name: 'Ada', avatar: {text: 'A', color: 1}}) : Promise.reject(calls.personFailure),
 })}));
-vi.mock('@/shell/screen', () => ({useScreenHeading: () => undefined}));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(),useScreenHeading: () => undefined}));
 vi.mock('@/features/search/Hit', () => ({Hit: ({hit,matchField}: {hit: SearchHit;matchField?:string}) => <li data-match-field={matchField}><button>{hit.snippet}</button></li>}));
 function Page({initial = {q: 'release', sort: 'relevance'}}: {initial?: SearchParams}) {
   const [params, setParams] = useState(initial);
@@ -51,6 +51,57 @@ async function start(initial?: SearchParams, pageSize = 2, windowSecs = OPEN_WIN
   await send({type: 'options', page_size: pageSize, reorder_window_secs: windowSecs, meaning_pause_ms: 800}, source('words', 'running'), source('meaning', 'running'));
   return view;
 }
+it.each(['en', 'zh-CN'] as const)('keeps a partial count and the unavailable Meaning reason in the existing status line in %s', async (locale) => {
+  const previous = currentLocale(); await setLocale(locale);
+  try {
+    await start();
+    await send(hit('words'), order('words'), source('words'), source('meaning', 'unavailable', 'provider_disabled'), { type: 'cursor', cursor: null });
+    expect(screen.getByRole('status')).toHaveTextContent(i18n.t('search.total', { count: 1, number: '1+' }));
+    const reason = i18n.t('search.meaningReasons.provider_disabled');
+    expect(screen.getByRole('button', { name: `${i18n.t('search.meaningUnavailable')} · ${reason}` })).toBeVisible();
+    expect(rows()).toEqual(['words']);
+  } finally { cleanup(); await setLocale(previous); }
+});
+
+it('marks a continued result count as partial without changing the existing Show more steps', async () => {
+  await start(undefined, 1);
+  await send(hit('first'), hit('second'), order('first', 'second'), source('words'), source('meaning'), { type: 'cursor', cursor: 'more-matches' });
+  expect(screen.getByRole('status')).toHaveTextContent(i18n.t('search.total', { count: 2, number: '2+' }));
+  expect(rows()).toEqual(['first']);
+  fireEvent.click(screen.getByRole('button', { name: i18n.t('search.more') }));
+  expect(rows()).toEqual(['first', 'second']);
+  expect(calls.requests).toHaveLength(1);
+});
+
+it.each(['en', 'zh-CN'] as const)('names an ended continuation beside its retained results in %s', async (locale) => {
+  const previous = currentLocale(); await setLocale(locale);
+  try {
+    await start();
+    await send(hit('words'), order('words'), source('words'), source('meaning'), { type: 'cursor', cursor: 'ended-search' });
+    calls.failures.push(new ApiError({ type: 'orch:error:request.invalid', code: 'request.invalid', status: 400,
+      title: 'Invalid request', detail: '', request_id: 'ended-search', errors: [{ path: 'cursor', message: 'is expired or belongs to another search' }] }, null));
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('search.more') }));
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('search.more') }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(i18n.t('search.continuationEnded'));
+    expect(rows()).toEqual(['words']);
+    expect(screen.getByText(locale === 'en' ? 'End of current results' : '当前结果到此为止')).toBeVisible();
+  } finally { cleanup(); await setLocale(previous); }
+});
+
+it.each(['en', 'zh-CN'] as const)('describes indexed fields and the effective allowance before claiming an empty search in %s', async (locale) => {
+  const previous = currentLocale(); await setLocale(locale);
+  try {
+    await start();
+    await send({ type: 'coverage', conversation_chars: 24_000 }, source('words'), source('meaning'), { type: 'cursor', cursor: null });
+    const coverage = screen.getByRole('button', { name: i18n.t('search.coverage.label') });
+    expect(coverage).toBeVisible();
+    expect(screen.getByText(i18n.t('search.state.nothingIndexed', { query: 'release' }))).toBeVisible();
+    expect(screen.queryByText(i18n.t('search.state.nothing', { query: 'release' }))).not.toBeInTheDocument();
+    fireEvent.click(coverage);
+    expect(screen.getByText(i18n.t('search.coverage.about', { number: '24,000' }))).toBeVisible();
+    expect(screen.getByText(i18n.t('search.coverage.omitted'))).toBeVisible();
+  } finally { cleanup(); await setLocale(previous); }
+});
 it('starts a linked search through strict-mode remounts and cancels it when the view closes', async () => {
   const view = show(<StrictMode><Page /></StrictMode>);
   await waitFor(() => expect(calls.requests.length).toBeGreaterThan(0));
@@ -233,7 +284,7 @@ for (const locale of ['en', 'zh-CN'] as const) it.each(['provider_disabled', 'pr
     await start();
     await send(hit('meaning', 'meaning'), hit('words'), order('meaning', 'words'), source('words'), source('meaning', 'done', reason));
     expect(rows()).toEqual(['meaning', 'words']);
-    const status = screen.getByRole('button', {name: i18n.t('search.indexPaused')});
+    const status = screen.getByRole('button', {name: `${i18n.t('search.indexPaused')} · ${i18n.t(`search.meaningReasons.${reason}`)}`});
     expect(status).toHaveAttribute('title', i18n.t(`search.meaningReasons.${reason}`));
     expect(screen.queryByText(i18n.t('search.meaningUnavailable'))).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();
@@ -244,7 +295,7 @@ it('keeps words and the provider pause reason when a fresh query cannot be embed
   await start();
   await send(hit('words'), order('words'), source('words'), source('meaning', 'unavailable', 'provider_disabled'));
   expect(rows()).toEqual(['words']);
-  expect(screen.getByRole('button', {name: i18n.t('search.meaningUnavailable')})).toHaveAttribute('title', i18n.t('search.meaningReasons.provider_disabled'));
+  expect(screen.getByRole('button', {name: `${i18n.t('search.meaningUnavailable')} · ${i18n.t('search.meaningReasons.provider_disabled')}`})).toHaveAttribute('title', i18n.t('search.meaningReasons.provider_disabled'));
   expect(screen.queryByRole('alert')).toBeNull();
   expect(screen.queryByRole('button', {name: i18n.t('common.tryAgain')})).toBeNull();
 });
@@ -293,10 +344,12 @@ it('reveals all received results on the first Show more and resumes both sources
   expect(rows()).toEqual(['first', 'second', 'third']);
 });
 it('aborts the old search on a keystroke, debounces words, and asks meaning after a pause or immediately on Enter', async () => {
+  vi.useFakeTimers({shouldAdvanceTime: true});
   await start(); const field = screen.getByRole('textbox', {name: i18n.t('search.field.label')});
   fireEvent.change(field, {target: {value: 'rollback'}}); expect(calls.requests[0]?.signal.aborted).toBe(true);
   expect(calls.requests).toHaveLength(1);
-  await waitFor(() => expect(calls.requests.length).toBe(2)); expect(calls.requests[1]?.immediate).toBe(false);
+  await act(async () => { await vi.advanceTimersByTimeAsync(401); });
+  expect(calls.requests).toHaveLength(2); expect(calls.requests[1]?.immediate).toBe(false);
   fireEvent.submit(screen.getByRole('search')); await waitFor(() => expect(calls.requests.at(-1)?.immediate).toBe(true));
 });
 it('sends every filter in the one search request', async () => {
@@ -345,7 +398,7 @@ it.each(['回', '回滚'])('starts one indexed streamed search for a short Chine
 
 it('shows a meaning failure reason on tap and keyboard focus and closes it with Escape',async()=>{
   await start();await send(hit('words'),order('words'),source('meaning','unavailable','query_timeout'),source('words'));
-  const reason=screen.getByRole('button',{name:i18n.t('search.meaningUnavailable')});
+  const reason=screen.getByRole('button',{name:`${i18n.t('search.meaningUnavailable')} · ${i18n.t('search.meaningReasons.query_timeout')}`});
   fireEvent.click(reason);
   expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('search.meaningReasons.query_timeout'));
   fireEvent.keyDown(reason,{key:'Escape'});
