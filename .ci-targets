@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-engine --lib -- sessions::tests::
+test -p orch-api-core --lib -- only_a_known_current_binding_refusal_names_its_setup_cause
+test -p orch-api-core --test binding_options

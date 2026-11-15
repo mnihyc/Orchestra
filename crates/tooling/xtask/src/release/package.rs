@@ -26,8 +26,7 @@ use crate::release::identity;
 use crate::release::image;
 use crate::release::licences;
 use crate::release::manifest::{
-    self, Asset, AssetNames, CONNECTOR_MINIMUM, LinkProtocol, MANIFEST_FILE, Manifest, PROJECT,
-    SCHEMA_VERSION,
+    self, Asset, AssetNames, LinkProtocol, MANIFEST_FILE, Manifest, PROJECT, SCHEMA_VERSION,
 };
 use crate::release::stock;
 use crate::release::{ReleaseError, capture, run as run_command};
@@ -368,6 +367,7 @@ fn build(root: &Path, args: &PackageArgs) -> Result<(), ReleaseError> {
     }
 
     // The manifest, written from the files as they now are, and read again.
+    let connector_minimum = manifest::connector_minimum(&version);
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
         project: PROJECT.to_owned(),
@@ -378,7 +378,7 @@ fn build(root: &Path, args: &PackageArgs) -> Result<(), ReleaseError> {
             current: PROTOCOL_VERSION,
             minimum: OLDEST_PROTOCOL_VERSION,
         },
-        connector_minimum: CONNECTOR_MINIMUM.to_owned(),
+        connector_minimum,
         assets: manifest::assets_of(out, args.base_url.as_deref())?,
         images,
         harness_builds: harness_builds(root)?,
@@ -626,7 +626,7 @@ fn connector_entries(
             current: PROTOCOL_VERSION,
             minimum: OLDEST_PROTOCOL_VERSION,
         },
-        connector_minimum: CONNECTOR_MINIMUM.to_owned(),
+        connector_minimum: manifest::connector_minimum(version),
         assets,
         images: Vec::new(),
         harness_builds: harness_builds(root)?,
@@ -817,22 +817,28 @@ fn content_problems(dir: &Path, manifest: &Manifest) -> Result<Vec<String>, Rele
         }
         // The configuration that ships has to be one the programs accept: a key
         // they do not know stops them.
-        if let (_, Some(config)) =
-            archive::list_tar_gz(&dir.join(&asset.name), Some("deploy/config/orch.toml"))?
-        {
-            let text = String::from_utf8_lossy(&config);
-            if let Err(error) = orch_config::load_text::<orch_config::ServerConfig>(
-                &text,
-                "deploy/config/orch.toml",
-                |_| None,
-            ) {
-                found.push(format!(
-                    "{} holds a deploy/config/orch.toml that the programs refuse: {error}",
-                    asset.name
-                ));
+        for (path, machine) in [
+            ("deploy/config/orch.toml", false),
+            ("deploy/config/node.toml", true),
+        ] {
+            if let (_, Some(config)) = archive::list_tar_gz(&dir.join(&asset.name), Some(path))? {
+                let text = String::from_utf8_lossy(&config);
+                let checked = if machine {
+                    orch_config::load_text::<orch_config::ConnectorConfig>(&text, path, |_| None)
+                        .map(|_| ())
+                } else {
+                    orch_config::load_text::<orch_config::ServerConfig>(&text, path, |_| None)
+                        .map(|_| ())
+                };
+                if let Err(error) = checked {
+                    found.push(format!(
+                        "{} holds a {path} that the programs refuse: {error}",
+                        asset.name
+                    ));
+                }
+            } else {
+                found.push(format!("{} holds no {path}", asset.name));
             }
-        } else {
-            found.push(format!("{} holds no deploy/config/orch.toml", asset.name));
         }
     }
     Ok(found)
@@ -1053,6 +1059,10 @@ mod tests {
                 file("deploy/compose.yml", &compose),
                 file("deploy/nginx.conf", b"events {}"),
                 file("deploy/config/orch.toml", b"version = 1\n"),
+                file(
+                    "deploy/config/node.toml",
+                    b"[drivers]\nallowed=['docker']\n",
+                ),
                 file("RELEASE_TAG", format!("{tag}\n").as_bytes()),
             ],
         )
@@ -1282,6 +1292,10 @@ mod tests {
                     "deploy/config/orch.toml",
                     b"[auth]\nlogin_failure_limt = 3\n",
                 ),
+                file(
+                    "deploy/config/node.toml",
+                    b"[drivers.images]\nbuildz = true\n",
+                ),
                 file("RELEASE_TAG", b"v9.9.9\n"),
             ],
         )
@@ -1294,6 +1308,51 @@ mod tests {
         assert!(found.contains("says it is \"v9.9.9\""), "{found}");
         assert!(found.contains("that the programs refuse"), "{found}");
         assert!(found.contains("login_failure_limt"), "{found}");
+        assert!(found.contains("deploy/config/node.toml"), "{found}");
+        assert!(found.contains("buildz"), "{found}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn first_start_seeds_the_shipped_node_policy_without_overwriting_a_local_choice() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap();
+        let source = fs::read_to_string(root.join("deploy/update.sh")).unwrap();
+        let start = source
+            .find("seed_node_policy() {\n")
+            .expect("first-start policy initialization");
+        let function = &source[start..];
+        let end = function.find("\n}\n").unwrap() + 2;
+        let script = format!(
+            "set -eu\nSERVICE_UID=$(id -u)\nSERVICE_GID=$(id -g)\ndie() {{ exit 1; }}\n{}\nseed_node_policy\n",
+            &function[..end]
+        );
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir_all(directory.path().join("config")).unwrap();
+        fs::create_dir_all(directory.path().join("runtime/node")).unwrap();
+        let shipped = fs::read(root.join("deploy/config/node.toml")).unwrap();
+        fs::write(directory.path().join("config/node.toml"), &shipped).unwrap();
+        let run = || {
+            Command::new("bash")
+                .args(["-c", &script])
+                .current_dir(directory.path())
+                .status()
+                .unwrap()
+        };
+        assert!(run().success());
+        let path = directory.path().join("runtime/node/config.toml");
+        assert_eq!(fs::read(&path).unwrap(), shipped);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let kept = b"[drivers.images]\nbuilds = false\n";
+        fs::write(&path, kept).unwrap();
+        assert!(run().success());
+        assert_eq!(fs::read(&path).unwrap(), kept);
     }
 
     #[test]
@@ -1327,6 +1386,7 @@ mod tests {
             "update.sh",
             ".env.example",
             "config/orch.toml",
+            "config/node.toml",
             "config/secrets/.gitkeep",
             "config/ca-certificates/.gitignore",
             "config/ca-certificates/README.md",
