@@ -352,6 +352,75 @@ pub struct SystemInfo {
     pub threads_running: i64,
     /// The queues.
     pub queues: SystemQueues,
+    /// Allowlisted running values captured at startup; absent when this process did not report them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_configuration: Option<EffectiveConfiguration>,
+}
+
+/// Safe public names for process configuration; no credential, URL or path may enter this list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ConfigurationKey {
+    /// Pool acquisition, including opening and checking a connection.
+    #[serde(rename = "database.acquire_timeout_ms")]
+    DatabaseAcquireTimeout,
+    /// Statements of the API request pool.
+    #[serde(rename = "database.request_statement_timeout_ms")]
+    DatabaseRequestStatementTimeout,
+    /// Statements of a worker or maintenance pool, when that process reports them.
+    #[serde(rename = "database.background_statement_timeout_ms")]
+    DatabaseBackgroundStatementTimeout,
+    /// Idle transactions of the reporting process.
+    #[serde(rename = "database.idle_transaction_timeout_ms")]
+    DatabaseIdleTransactionTimeout,
+}
+
+/// An actual configured deadline; an unreported value never becomes indefinite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConfigurationValue {
+    /// Unsigned decimal millisecond text preserves the complete native range.
+    Finite {
+        /// The exact millisecond value, without rounding through a browser number.
+        milliseconds: String,
+    },
+    /// This deadline was explicitly disabled.
+    Indefinite,
+}
+
+/// When a changed configuration value reaches its consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationApplication {
+    /// This consumer is constructed at process startup.
+    Restart,
+    /// This consumer reads changes while running.
+    Live,
+}
+
+/// One safe running value and its captured provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EffectiveConfigurationValue {
+    /// A public name from the explicit allowlist.
+    pub public_key: ConfigurationKey,
+    /// The applied value, distinct from unreported data.
+    pub typed_value: ConfigurationValue,
+    /// Uncaptured provenance stays unreported.
+    pub origin: Option<crate::common::ConfigurationOrigin>,
+    /// How this consumer applies changes.
+    pub application: ConfigurationApplication,
+}
+
+/// A process observation, never the contents of its currently edited file or environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EffectiveConfiguration {
+    /// The actual reporting process; another service's loaded values are not inferred.
+    pub service: SystemComponentName,
+    /// Opaque identity of the captured startup configuration.
+    pub process_revision: String,
+    /// When the configuration was captured.
+    pub measured_at: Time,
+    /// Complete authorized page of safe rows, with native continuation when needed.
+    pub values: crate::common::Page<EffectiveConfigurationValue>,
 }
 
 /// A read-only lookup at the operator's configured release source.

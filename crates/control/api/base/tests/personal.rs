@@ -731,7 +731,46 @@ async fn the_read_positions_of_the_callers_threads_are_listed_by_org() {
 }
 
 #[tokio::test]
-async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_person() {
+async fn catch_up_defaults_follow_the_installation_without_replacing_personal_choices() {
+    use orch_api_contract::admin::{AdminSettingSet, AdminSettingSetBody};
+    use orch_api_contract::auth::MetaGet;
+    let world = World::new().await;
+    let metadata = || world.app.call(MetaGet, &[]).send();
+    let first = serde_json::to_value(metadata().await.ok()).unwrap();
+    assert_eq!(
+        first["interface_defaults"]["catch_up_above_items"],
+        json!(20)
+    );
+    assert_eq!(
+        first["interface_defaults"]["catch_up_above_items_source"]["scope"],
+        json!("default")
+    );
+    let admin = places::admin(&world, "catchup-admin").await;
+    world
+        .app
+        .call(AdminSettingSet, &[&"thread.catch_up_above_items"])
+        .token(&admin.token)
+        .body(&AdminSettingSetBody {
+            value: json!(80),
+            locked: None,
+            expected_revision: None,
+        })
+        .send()
+        .await
+        .ok();
+    let changed = serde_json::to_value(metadata().await.ok()).unwrap();
+    assert_eq!(
+        changed["interface_defaults"]["catch_up_above_items"],
+        json!(80)
+    );
+    assert_eq!(
+        changed["interface_defaults"]["catch_up_above_items_source"]["scope"],
+        json!("system")
+    );
+}
+
+#[tokio::test]
+async fn the_personal_interface_keeps_declared_values_whole_and_follows_the_person() {
     let world = World::new().await;
     let ada = person(&world, "ada").await;
     let bob = person(&world, "bob").await;
@@ -757,6 +796,14 @@ async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_perso
     );
     // The whole value is replaced.
     assert_eq!(set(&ada, "help", json!({ "closed": [] })).await.status, 204);
+    let reading = json!({
+        "kept_closed_tabs": 25,
+        "progress_delay_ms": 333,
+        "catch_up_above_items": 250,
+        "read_freshness_ms": { "lookup": 2000 },
+        "other_choice": "kept"
+    });
+    assert_eq!(set(&ada, "interface", reading.clone()).await.status, 204);
     let state = world
         .app
         .call(MeStateGet, &[])
@@ -766,7 +813,8 @@ async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_perso
         .ok();
     assert_eq!(state["help"], json!({ "closed": [] }));
     assert_eq!(state["layouts"]["wide"]["panes"], 3);
-    assert_eq!(state.len(), 2);
+    assert_eq!(state["interface"], reading);
+    assert_eq!(state.len(), 3);
     // Nobody else's.
     let other = world
         .app
@@ -776,6 +824,17 @@ async fn the_interface_state_is_kept_whole_under_four_keys_and_follows_the_perso
         .await
         .ok();
     assert!(other.is_empty());
+    for invalid_reading in [
+        json!({ "kept_closed_tabs": -1 }),
+        json!({ "progress_delay_ms": "soon" }),
+        json!({ "catch_up_above_items": -1 }),
+        json!({ "catch_up_above_items": 2.5 }),
+        json!({ "read_freshness_ms": { "lookups": 2000 } }),
+        json!([]),
+    ] {
+        let refused = set(&ada, "interface", invalid_reading).await.problem();
+        assert_eq!(refused.code, ErrorCode::RequestInvalid);
+    }
     // No other key, and no value over 64 KiB.
     let unknown = set(&ada, "theme", json!(1)).await.problem();
     assert_eq!(unknown.code, ErrorCode::RequestInvalid);

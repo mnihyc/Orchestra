@@ -160,7 +160,7 @@ pub async fn run(
         config.api.db_pool,
         Duration::from_millis(config.database.slow_statement_ms),
         Duration::from_millis(config.database.slow_acquire_ms),
-        orch_db::pool::Limits::REQUESTS,
+        orch_db::pool::Limits::requests(&config.database),
     )
     .await
     .context("connecting to the database")?;
@@ -242,9 +242,11 @@ pub async fn run(
         orch_identity_oidc::OidcKind::new().context("the client of the identity providers")?,
     ));
     // The ways out of the application that channels and destinations can be made from.
-    orch_api_core::routes::notifications::install_notifiers(
-        notifiers(&config, launch.secrets_dir).context("the notifiers")?,
-    );
+    let notifiers = notifiers(&config, launch.secrets_dir).context("the notifiers")?;
+    orch_worker_core::channel_setup::ensure_default_push(&db, &notifiers, clock.now())
+        .await
+        .context("setting up browser notifications")?;
+    orch_api_core::routes::notifications::install_notifiers(notifiers);
     let link = match &secrets {
         Some(secrets) => Link::new(LinkParts {
             db: db.clone(),
