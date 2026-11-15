@@ -1,0 +1,10 @@
+test -p orch-connector-core --test agent_role --test harness_tools --test tool_servers --test tunnel --test direct_machine_programs
+test -p orch-engine --test ingest --test cache_cleanup --test call_recovery --test mcp_resolution --test forks --test background_wake
+test -p orch-engine --test background_wake_native --test native_executor_loss
+test -p orch-link --test commands --test resume_authority --test tunnels --test spool --test raw_spool_restart
+test -p orch-adapter-claude-code --test child_usage --test process_faults --test input_prefix --test sessions
+test -p orch-adapter-codex --test process_faults --test sessions --test recorded_failures
+test -p orch-adapter-acp --test process --test turns
+test -p orch-testkit --test harness_corpus
+test -p orch-plugin --test adapter
+test -p orch-api-core --test installation_records
