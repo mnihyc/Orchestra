@@ -1,0 +1,2 @@
+test -p orch-api-core --test thread_opening_scopes --test everything_resources --test everything_operation_scopes --test provider_models --test thread_child_windows
+test -p orch-api-core --test realtime_diagnostics
