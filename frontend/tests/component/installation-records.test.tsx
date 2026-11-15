@@ -6,28 +6,67 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiError } from '@/api/client';
 import { Installation } from '@/features/admin/Installation';
-import type { BackupRestoreList, DatabaseBackupRecord, InstallationRecords, ReleaseCheck, ResolvedSetting } from '@/generated/api-types';
+import { Overview } from '@/features/admin/Overview';
+import { OverviewCharts } from '@/features/admin/Charts';
+import type { BackupRestoreList, DatabaseBackupRecord, InstallationRecords, MetricSeries, ReleaseCheck, ResolvedSetting, SystemInfo } from '@/generated/api-types';
+import { i18n, setLocale } from '@/i18n';
+import { useAppearance } from '@/lib/appearance';
 
 import { show } from './support';
 
-const { read, settings, check, restore } = vi.hoisted(() => ({
+const { read, settings, check, restore, readSystem, readMetrics } = vi.hoisted(() => ({
   read: vi.fn<() => Promise<InstallationRecords>>(),
   settings: vi.fn<() => Promise<ResolvedSetting[]>>(),
   check: vi.fn<() => Promise<ReleaseCheck>>(),
   restore: vi.fn<() => Promise<BackupRestoreList | null>>(),
+  readSystem: vi.fn<() => Promise<SystemInfo>>(),
+  readMetrics: vi.fn<() => Promise<MetricSeries[]>>(),
 }));
 vi.mock('@/api/admin', async (original) => ({ ...await original<object>(),
   installationRecordsQuery: { queryKey: ['admin', 'installation-records'], queryFn: read },
   systemSettingsQuery: { queryKey: ['admin', 'settings'], queryFn: settings },
   checkRelease: check,
   backupRestoreListQuery: { queryKey: ['admin', 'backup-restore-list'], queryFn: restore },
+  systemQuery: { queryKey: ['admin', 'system'], queryFn: readSystem },
+  metricsQuery: () => ({ queryKey: ['admin', 'metrics-fixture'], queryFn: readMetrics }),
 }));
+vi.mock('@/features/admin-messages/Sent', () => ({ MessagesSection: () => null }));
 
-afterEach(() => { vi.clearAllMocks(); });
+const appearance = useAppearance.getState();
+afterEach(async () => { vi.clearAllMocks(); useAppearance.setState(appearance); await setLocale('en'); });
 
 const BACKUP: DatabaseBackupRecord = { completed_at: '2026-10-12T08:02:00Z', database_at: '2026-10-12T08:00:00Z', release: '0.1.0', schema: '1', dump_name: 'orch-20261012-backup.dump', bytes: 65_536, hash: 'a'.repeat(64), cause: 'pre_update', database_only: true, last_failure: { at: '2026-10-14T08:00:00Z', reason: 'The backup disk is full.' } };
 const RELEASE: ReleaseCheck = { checked_at: '2026-10-12T09:00:00Z', installed_version: '0.1.0', offered_version: '0.2.0', newer: true, source: 'https://releases.example/latest/download/version.json', error: null, command: './update.sh v0.2.0' };
 const empty = (): InstallationRecords => ({ release: null, backup: null, backup_error: null, backup_warning: true });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) it(`keeps the API serving while naming its unavailable metrics listener in ${locale}/${theme}`, async () => {
+  await setLocale(locale); useAppearance.setState({ locale, theme, resolvedTheme: theme });
+  const info = { version: '0.1.3', build: 'fixture', started_at: new Date().toISOString(), machines_online: 0, threads_running: 0, queues: { outbox_pending: 0, commands_open: 0, jobs_running: 0 },
+    components: [{ name: 'api', ok: true, detail: null, issue: 'metrics_listener_unavailable', seen_at: new Date().toISOString() }] } as unknown as SystemInfo;
+  readSystem.mockResolvedValue(info); readMetrics.mockResolvedValue([]); read.mockResolvedValue(empty()); settings.mockResolvedValue([]); restore.mockResolvedValue(null);
+  show(<Overview search={{}} onSearch={vi.fn()} />);
+  const reason = await screen.findByText(locale === 'en' ? 'Metrics listener unavailable' : '指标监听不可用');
+  expect(reason).toBeVisible();
+  const part = reason.closest('[data-part="api"]');
+  expect(part).toHaveAttribute('data-ok', 'true');
+  expect(part).toHaveTextContent(i18n.t('admin.overview.well'));
+  expect(part).not.toHaveTextContent('metrics_listener_unavailable');
+});
+
+for (const locale of ['en', 'zh-CN'] as const) for (const resolution of ['minute', 'hour'] as const) it(`names the delivered ${resolution} metric resolution instead of guessing from the chosen period in ${locale}`, async () => {
+  await setLocale(locale); useAppearance.setState({ locale });
+  readMetrics.mockResolvedValue([{ name: 'threads', labels: { state: 'running' }, resolution, points: [[new Date(Date.now() - 60_000).toISOString(), 1]], peaks: null }]);
+  show(<OverviewCharts span="day" />);
+  const text = resolution === 'hour' ? locale === 'en' ? 'From hourly data' : '按小时数据汇总' : locale === 'en' ? 'From minute data' : '按分钟数据汇总';
+  expect(await screen.findByText(text, { exact: true })).toBeVisible();
+});
+
+it('does not invent a metric resolution when the selected range contains no readings', async () => {
+  readMetrics.mockResolvedValue([]); show(<OverviewCharts span="day" />);
+  expect(await screen.findAllByText('No readings in this range')).not.toHaveLength(0);
+  expect(screen.queryByText('From hourly data')).not.toBeInTheDocument();
+  expect(screen.queryByText('From minute data')).not.toBeInTheDocument();
+});
 
 function setting(key: string, value: number): ResolvedSetting {
   return { key, value, source: { scope: 'default', node: null }, own: null, locked_by: null, writable: true, parts: [] };

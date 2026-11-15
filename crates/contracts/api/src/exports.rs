@@ -129,6 +129,8 @@ pub struct ExportCounts {
 pub struct ExportLimits {
     /// The most bytes: `export.max_bytes` as it resolves at the place.
     pub max_bytes: i64,
+    /// The server's current per-file allowance; larger files are left out and reported.
+    pub max_file_bytes: u64,
     /// The most conversations, chats and documents together: `export.max_items`.
     pub max_items: i64,
     /// For how many hours a finished archive is kept: `export.keep_hours`.
@@ -240,6 +242,8 @@ pub struct Export {
 pub struct ExportJobResult {
     /// The archive.
     pub export_id: Id,
+    /// Actual omitted items, or unknown if the completed archive's metadata could not be read.
+    pub omitted_items: Option<i64>,
 }
 
 /// Whether the files that a chat's messages carry go with it.

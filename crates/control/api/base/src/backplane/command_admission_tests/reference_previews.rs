@@ -152,6 +152,7 @@ async fn reference_live_stat_fetch_and_delivery_keep_raw_identity_physical_sourc
                 build: old.build,
                 blobs: old.blobs.clone(),
                 cache: crate::cache::Cache::new(&old.config),
+                metrics_listener_failed: old.metrics_listener_failed.clone(),
                 host_ports: old.host_ports.clone(),
                 builtin_sources: old.builtin_sources.clone(),
             }),
