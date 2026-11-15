@@ -40,6 +40,8 @@ async fn a_frame_delivered_twice_is_kept_once_and_a_new_frame_with_the_same_json
     world.running_turn(thread, "Keep the frames").await;
     let segment = world.segment_of(thread).await;
     let frame = Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n: 7,
         direction: "in".to_owned(),
         payload: json!({ "method": "frame", "authorization": "private credential" }),
@@ -100,6 +102,8 @@ async fn a_reopened_session_starts_above_the_segment_cursor_after_all_frame_byte
     let (turn, _) = world.running_turn(thread, "First turn").await;
     let segment = world.segment_of(thread).await;
     let frame = Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n: 71,
         direction: "in".to_owned(),
         payload: json!({"frame": "old"}),
@@ -123,6 +127,16 @@ async fn a_reopened_session_starts_above_the_segment_cursor_after_all_frame_byte
         .execute(world.pool.pool())
         .await
         .unwrap();
+    assert_eq!(
+        orch_db::queries::raw_events::last_number(
+            &mut *world.pool.acquire().await.unwrap(),
+            segment
+        )
+        .await
+        .unwrap(),
+        71,
+        "pruning frame bytes preserves the captured source cursor",
+    );
     // A fresh API process has no session cache; its opening uses the durable segment cursor.
     world.restart_api().await;
     world.running_turn(thread, "Second turn").await;
@@ -130,8 +144,12 @@ async fn a_reopened_session_starts_above_the_segment_cursor_after_all_frame_byte
         .seen
         .of_kind(CommandKind::SessionOpen)
         .into_iter()
+        .chain(world.seen.of_kind(CommandKind::SessionOpenFenced))
         .filter_map(|cmd| match cmd {
             Command::SessionOpen(open) if open.thread_id == thread => Some(open.raw_after),
+            Command::SessionOpenFenced(open) if open.thread_id == thread => {
+                Some(open.session.raw_after)
+            }
             _ => None,
         })
         .collect();

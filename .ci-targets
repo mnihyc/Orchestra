@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-engine --test raw_frames_once --test approvals
+test -p orch-api-core --lib -- backplane::session_source_tests::

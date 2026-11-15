@@ -6,7 +6,7 @@ const record = (value: unknown): Record<string, unknown> => typeof value === 'ob
 /** Undefined follows the model start; null is an explicitly stored none. */
 export function selectionEffort(params: unknown): string | null | undefined {
   const value = record(params);
-  for (const effort of [value.effort, record(value.reasoning).effort, value.reasoning_effort, record(value.output_config).effort]) {
+  for (const effort of [value.effort, record(value.reasoning).effort, value.reasoning_effort, record(value.output_config).effort, record(value.generation_config).thinking_level]) {
     if (effort !== undefined) return typeof effort === 'string' ? effort : null;
   }
   return undefined;
@@ -15,9 +15,9 @@ export function selectionEffort(params: unknown): string | null | undefined {
 /** The server accepts the canonical effort field; remove conflicting wire aliases only. */
 export function selectionWithEffort(params: unknown, effort: string): Record<string, unknown> {
   const { effort: _effort, reasoning_effort: _alias, ...next } = record(params);
-  for (const key of ['reasoning', 'output_config']) {
-    if (!Object.hasOwn(record(next[key]), 'effort')) continue;
-    const { effort: _old, ...rest } = record(next[key]);
+  for (const [key, field] of [['reasoning', 'effort'], ['output_config', 'effort'], ['generation_config', 'thinking_level']] as const) {
+    if (!Object.hasOwn(record(next[key]), field)) continue;
+    const { [field]: _old, ...rest } = record(next[key]);
     if (Object.keys(rest).length === 0) Reflect.deleteProperty(next, key); else next[key] = rest;
   }
   return { ...next, effort };
