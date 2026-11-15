@@ -1,5 +1,6 @@
 import { Select } from '@/ui/Select';
 import { ResourcePicker } from '@/ui/ResourcePicker';
+import { PlacePicker, type PlaceRow } from '@/features/start/PlacePicker';
 /** Where the result works: the same environment, another one the person manages or a new one at a place, with the files that go along into it.
  *
  * Where the result works, as the dialog that starts a thread asks it, in the three ways a thread can be placed: the
@@ -9,6 +10,8 @@ import { ResourcePicker } from '@/ui/ResourcePicker';
  * environments they manage. A host that is full can still be chosen, unless it takes nothing more, and says so.
  */
 import { useQuery } from '@tanstack/react-query';
+import { useStore } from 'zustand';
+import { client } from '@/api/client';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 
@@ -20,13 +23,11 @@ import { useFocusFirst } from '@/features/change/Sentence';
 import type { MoveMachine, Place, PlaceEnvironment, PlaceHost, Thread } from '@/generated/api-types';
 import { hostNotes } from '@/features/resources/hosts/words';
 import { TemporaryChoice } from '@/features/resources/environments/Temporary';
-import { HostCapacity, ResourceHint, resourceChoice, resourcePreview } from '@/features/resource-facts/ResourceFacts';
+import { ResourceHint, resourceChoice, resourcePreview } from '@/features/resource-facts/ResourceFacts';
 import { Checkbox } from '@/ui/Checkbox';
-import { EnvironmentDot } from '@/ui/EnvironmentDot';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
-import { UserChip } from '@/ui/UserChip';
 
 const isEnvironment = (place: Place): place is PlaceEnvironment => 'environment' in place;
 const isHost = (place: Place): place is PlaceHost => 'automatic' in place;
@@ -60,12 +61,7 @@ export function HostChoices({ hosts, value, onChange, loading, machines = [], ma
             name: place.host.name,
             resource:{kind:'host',id:place.host.id,data:place},
             preview: resourcePreview({ kind: 'host', host: place.host, place }),
-            description: <span className="flex flex-col gap-1">
-              {place.usable ? <ResourceHint subject={{ kind: 'host', host: place.host, place }} /> : <HostCapacity place={place} />}
-              {notes.warn !== null && <span className="text-warning">{notes.warn}</span>}
-              {notes.off !== null && <span>{notes.off}</span>}
-              {!place.usable && notes.off === null && <span>{t('uniformMoves.unavailable')}</span>}
-            </span>,
+            description: notes.off ?? notes.warn ?? (place.usable ? <ResourceHint subject={{ kind: 'host', host: place.host, place }} /> : t('uniformMoves.unavailable')),
             disabled: !place.usable || notes.off !== null,
           };
         }),
@@ -89,6 +85,7 @@ export interface WhereProps {
 export function Where({ thread, choices, onChange, fork, focus = false }: WhereProps) {
   const { t } = useTranslation();
   const places = useQuery(placesQuery(thread.topic_id));
+  const me = useStore(client.session, (state) => state.userId);
   const where = choices.where;
   const set = (next: WhereChoice) => onChange({ where: next });
   const current = thread.environment;
@@ -127,30 +124,23 @@ export function Where({ thread, choices, onChange, fork, focus = false }: WhereP
           ) : environments.length === 0 ? (
             <InlineAlert tone="info">{t(hasSourceFiles ? 'change.where.noOther' : 'start.where.noExisting')}</InlineAlert>
           ) : (
-            <ResourcePicker pickerKey="change.Where.change.where.another"
+            <PlacePicker
               label={t('change.where.another')}
+              hideLabel={false}
               placeholder={t('changeCompact.chooseEnvironment')}
               fieldClassName="w-fit max-w-full"
-              value={where.id}
-              onValueChange={(id) => set({ ...where, id })}
-              options={environments.map((place) => ({
-                value: place.environment.id,
-                resource:{kind:'environment',id:place.environment.id,data:place},
-                preview: resourcePreview({ kind: 'environment', environment: place.environment, host: place.host }),
-                accessory: <UserChip user={place.environment.owner} />,
-                name: (
-                  <span className="inline-flex items-center gap-2">
-                    {place.environment.name}
-                    <EnvironmentDot status={place.environment.status} />
-                  </span>
-                ),
-                description: (
-                  <span className="flex flex-wrap gap-x-3 gap-y-1">
-                    <ResourceHint subject={{ kind: 'environment', environment: place.environment, host: place.host }} />
-                    {!place.usable && <span>{place.reasons.length === 0 ? t('uniformMoves.unavailable') : place.reasons.map((reason) => t(`change.where.envReason.${reason}`)).join(t('startFlow.separator'))}</span>}
-                  </span>
-                ),
-                disabled: !place.usable,
+              value={where.id === '' ? null : where.id}
+              onPick={(id) => set({ ...where, id })}
+              rows={environments.map((place): PlaceRow => ({
+                id: place.environment.id,
+                name: place.environment.name,
+                on: place.machine?.name ?? place.host?.name ?? null,
+                owner: place.environment.owner.id === me ? null : place.environment.owner,
+                state: place.usable && place.environment.status !== 'running' ? t(`environments.status.${place.environment.status}`) : null,
+                group: place.usable ? 'ready' : 'unavailable',
+                reason: place.usable ? null : place.reasons.length === 0 ? t('uniformMoves.unavailable') : place.reasons.map((reason) => t(`change.where.envReason.${reason}`)).join(t('startFlow.separator')),
+                status: place.environment.status,
+                keywords: [place.environment.address, place.environment.owner.display_name],
               }))}
             />
           )}

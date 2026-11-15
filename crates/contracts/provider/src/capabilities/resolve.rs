@@ -557,31 +557,47 @@ fn fallback_views(
                 let crate::calls::Step::Failover { candidate } = step else {
                     return None;
                 };
-                let reference = candidate
-                    .route
-                    .as_ref()
-                    .and_then(|route| route.offering.as_ref());
-                let offering_id = reference.map_or(candidate.model.as_str(), |reference| {
-                    reference.offering.as_str()
-                });
-                let state = context
-                    .availability
-                    .get(&candidate.provider_id)
-                    .and_then(|offerings| offerings.get(offering_id));
+                let (provider_id, offering_id, pool_kind) = match &candidate.target {
+                    crate::pools::Target::Single {
+                        resource: crate::pools::Leaf::Model { backend },
+                    } => {
+                        let reference = backend.offering.as_ref()?;
+                        (
+                            Some(reference.provider),
+                            Some(reference.offering.as_str()),
+                            None,
+                        )
+                    }
+                    crate::pools::Target::Single {
+                        resource: crate::pools::Leaf::Provider { id },
+                    } => (
+                        Some(*id),
+                        current.map(|reference| reference.offering.as_str()),
+                        None,
+                    ),
+                    crate::pools::Target::Pool { kind, .. } => (None, None, Some(*kind)),
+                    _ => return None,
+                };
+                let state = provider_id
+                    .and_then(|provider| context.availability.get(&provider))
+                    .and_then(|offerings| offering_id.and_then(|id| offerings.get(id)));
                 Some(FallbackView {
                     rule_id: rule.id.clone(),
                     scope: policy.scope.clone(),
                     when: rule.when.kind.clone().unwrap_or_else(|| "any".into()),
+                    pool_kind,
                     provider: state
                         .filter(|state| state.show_provider)
-                        .and_then(|_| declarations.providers.get(&candidate.provider_id))
+                        .and_then(|_| {
+                            provider_id.and_then(|provider| declarations.providers.get(&provider))
+                        })
                         .map(|provider| ProviderView {
-                            id: candidate.provider_id,
+                            id: provider_id.unwrap_or_default(),
                             title: provider.title.clone(),
                         }),
                     offering: state
                         .filter(|state| state.show_offering)
-                        .map(|_| offering_id.into()),
+                        .and_then(|_| offering_id.map(str::to_owned)),
                 })
             })
         })

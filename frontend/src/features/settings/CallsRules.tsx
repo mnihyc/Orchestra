@@ -6,11 +6,16 @@ import { useCallback, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { agentsQuery, providerModelsQuery, providerQuery } from '@/api/resources';
-import type { CallRecovery } from '@/generated/api-types';
+import type { BackendRef, CallRecovery } from '@/generated/api-types';
+import { poolQuery } from '@/api/pools';
+import { client } from '@/api/client';
+import { useStore } from 'zustand';
+import { usePoolTargetChoices } from '@/features/resources/pools/targetChoices';
 import { useFormatContext } from '@/lib/appearance';
 import { formatNumber } from '@/lib/format';
 import { formatSpan } from '@/lib/time';
 import { ProviderDefaultChoice } from './ProviderChoice';
+import { ProviderModelChoice } from './ProviderModelChoice';
 import type { ValueControlProps } from './ValueControl';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
@@ -26,8 +31,8 @@ import { profilesFor } from '@/features/change/RunsOn';
 import { holds } from '@/lib/permissions';
 import { SchemaDraftState } from '@/features/resources/templates/SchemaForm';
 import { ModelRequestOptions } from '@/features/models/RequestOptions';
-import { CallModel } from '@/features/calls/Model';
-import { candidateRoute, capabilityOfPurpose, routeChoices, type RouteChoice } from '@/features/calls/routes';
+import { CallDestination } from '@/features/calls/Destination';
+import { candidateBackend, candidateRoute, capabilityOfPurpose, routeChoices, type RouteChoice } from '@/features/calls/routes';
 import { CallHelp } from '@/features/calls/Help';
 import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
 import { modelResource } from '@/features/resource-facts/facts';
@@ -43,7 +48,7 @@ function rulesOf(value: unknown): Rule[] { return Array.isArray(value) ? value.f
 function defaultStep(type: Step['type']): Step {
   const rule = SETTINGS_REGISTRY.find((setting) => setting.key === 'calls.rules');
   const held = rulesOf(rule?.default).flatMap((rule) => rule.steps).find((step) => step.type === type);
-  return held === undefined ? type === 'failover' ? { type, candidate: { provider_id: '', model: '', params: {} } } : { type: 'wait', until: 'person' } : structuredClone(held);
+  return held === undefined ? type === 'failover' ? { type, candidate: { target: {type:'single',resource:{kind:'model',backend:{route:'generation.model',offering:{provider:'',offering:''},config:{}}}}, params: {} } } : { type: 'wait', until: 'person' } : structuredClone(held);
 }
 
 export function ruleSummary(rule: Rule, t: TFunction, locale: string): string {
@@ -54,7 +59,7 @@ export function ruleSummary(rule: Rule, t: TFunction, locale: string): string {
 function stepSummary(step: Step, t: TFunction, locale: string): string {
   return step.type === 'retry' ? t('calls.ruleRetry', { delay: formatSpan(step.delay_secs * 1_000, { locale }, 'short'), times: formatNumber(step.times, locale) })
     : step.type === 'continue' ? t('calls.ruleContinue', { times: formatNumber(step.times, locale) })
-      : step.type === 'failover' ? candidateRoute(step.candidate) === null ? step.candidate.model : t('calls.capabilityDestination') : t(step.until === 'reset' ? 'calls.waitReset' : 'calls.waitPerson');
+      : step.type === 'failover' ? step.candidate.target.type==='pool' ? t('screens.pools.title') : candidateRoute(step.candidate) === null ? candidateBackend(step.candidate)?.offering?.offering ?? t('calls.provider') : t('calls.capabilityDestination') : t(step.until === 'reset' ? 'calls.waitReset' : 'calls.waitPerson');
 }
 
 export function CallsSummary({ value }: { value: unknown }) {
@@ -64,31 +69,40 @@ export function CallsSummary({ value }: { value: unknown }) {
 
 function RuleSteps({ rule }: { rule: Rule }) {
   const { t } = useTranslation(); const format = useFormatContext();
-  return rule.steps.map((step, index) => <span key={index} className="inline-flex min-w-0 max-w-full items-center gap-1"><span aria-hidden>→</span>{step.type === 'failover' ? candidateRoute(step.candidate) === null ? <CallModel providerId={step.candidate.provider_id} model={step.candidate.model} /> : <span>{t('calls.capabilityDestination')}</span> : <span>{stepSummary(step, t, format.locale)}</span>}</span>);
+  return rule.steps.map((step, index) => <span key={index} className="inline-flex min-w-0 max-w-full items-center gap-1"><span aria-hidden>→</span>{step.type === 'failover' ? <CallDestination target={step.candidate.target} /> : <span>{stepSummary(step, t, format.locale)}</span>}</span>);
 }
 
 export function CandidateEditor({ step, onChange, purpose, sourceProviderId }: { purpose: Rule['when']['purpose']; sourceProviderId?: string; step: Extract<Step, { type: 'failover' }>; onChange: (step: Step) => void }) {
   const { t } = useTranslation();
   const candidate = step.candidate;
   const displayFormat = useFormatContext();
+  const backend=candidateBackend(candidate);
   const route = candidateRoute(candidate);
+  const providerId=backend?.offering?.provider ?? (candidate.target.type==='single' && candidate.target.resource.kind==='provider'?candidate.target.resource.id:'');
+  const model=backend?.route==='generation.model' ? backend.offering?.offering ?? '' : '';
+  const pool=candidate.target.type==='pool'?candidate.target:null;
+  const [modelsOpen,setModelsOpen]=useState(false), [typed,setTyped]=useState('');
+  const pools=usePoolTargetChoices('model',modelsOpen,typed);
+  const reader=useStore(client.session,(state)=>`${state.userId ?? ''}:${state.readerVersion ?? 0}`);
+  const selectedPool=useQuery({...poolQuery(pool?.id ?? '',reader),enabled:pool?.kind==='model',retry:false});
   const declaredRoutes = routeChoices(purpose, displayFormat.locale);
+  const setBackend=(next:BackendRef)=>onChange({...step,candidate:{...candidate,target:{type:'single',resource:{kind:'model',backend:next}}}});
+  const setModel=(offering:string)=>setBackend({...(backend?.route==='generation.model'?backend:{}),route:'generation.model',config:backend?.route==='generation.model'?backend.config ?? {}:{},offering:{provider:providerId,offering}});
   const setRoute = (next: RouteChoice) => {
     const { agent_id: _profile, dimensions: _dimensions, ...kept } = candidate;
-    const value = { ...kept, model: '', route: { ...next, config: next.config, offering: next.offering ?? null } };
-    onChange({ ...step, candidate: value });
+    onChange({ ...step, candidate: { ...kept, target:{type:'single',resource:{kind:'model',backend:{...next,config:next.config ?? {},offering:next.offering ?? null}}} } });
   };
-  const providerChoice = <ProviderDefaultChoice showLabel shape={{ type: 'text', maxLength: null, pattern: null }} value={candidate.provider_id} label={t('calls.provider')} onChange={(value) => {
-    const provider = typeof value === 'string' ? value : '';
-    const changed = { ...candidate, provider_id: provider, model: '', ...(route === null ? {} : { route: { ...route, config: route.config, offering: { provider, offering: '' } } }) };
-    onChange({ ...step, candidate: changed });
-  }} />;
-  const [modelsOpen,setModelsOpen]=useState(false);
-  const models = useQuery({ ...providerModelsQuery(candidate.provider_id), enabled: candidate.provider_id !== '' && modelsOpen, retry: false });
-  const provider=useQuery({...providerQuery(candidate.provider_id),enabled:candidate.provider_id!=='',retry:false});
+  const providerChoice = <ProviderDefaultChoice showLabel shape={{ type: 'text', maxLength: null, pattern: null }} value={providerId} label={t('calls.provider')}
+    pools={{id:pool?.kind==='provider'?pool.id:null,onSelect:(id)=>onChange({...step,candidate:{...candidate,target:{type:'pool',kind:'provider',id}}})}}
+    onChange={(value) => {
+      const provider = typeof value === 'string' ? value : '';
+      setBackend(route===null?{route:'generation.model',offering:{provider,offering:''},config:{}}:{...route,config:route.config ?? {},offering:{provider,offering:''}});
+    }} />;
+  const models = useQuery({ ...providerModelsQuery(providerId), enabled: providerId !== '' && modelsOpen, retry: false });
+  const provider=useQuery({...providerQuery(providerId),enabled:providerId!=='',retry:false});
   const source = useQuery({ ...providerQuery(sourceProviderId ?? ''), enabled: sourceProviderId !== undefined && sourceProviderId !== '', retry: false });
   const [preview, setPreview] = useState('');
-  const agents=useQuery({...agentsQuery(),enabled:candidate.provider_id!=='',retry:false});
+  const agents=useQuery({...agentsQuery(),enabled:providerId!=='',retry:false});
   const profiles=profilesFor(provider.data,agents.data??[]);
   const failure=models.error??provider.error??agents.error;
   const retry=models.error!==null?models.refetch:provider.error!==null?provider.refetch:agents.refetch;
@@ -98,33 +112,32 @@ export function CandidateEditor({ step, onChange, purpose, sourceProviderId }: {
   const format = actual ?? (choices.includes(preview) ? preview : null);
   const fallback = completionFallback(formats);
   const destination = (capabilityOfPurpose(purpose) !== null || route !== null) ? <Select label={t('calls.destination')} value={route === null ? 'model' : 'capability'} options={[{value:'model',label:t('calls.modelDestination')},{value:'capability',label:t('calls.capabilityDestination'),disabled:declaredRoutes.length===0}]} onValueChange={(kind) => {
-    if (kind === 'model') {
-      const { route: _route, ...kept } = candidate as typeof candidate & { route?: unknown };
-      onChange({ ...step, candidate: { ...kept, model: '' } });
-    } else {
-      const first = declaredRoutes[0];
-      if (first !== undefined) setRoute({ route:first.value,offering:{provider:candidate.provider_id,offering:''},config:{} });
-    }
+    if (kind === 'model') setModel('');
+    else { const first = declaredRoutes[0]; if (first !== undefined) setRoute({ route:first.value,offering:{provider:providerId,offering:''},config:{} }); }
   }} /> : null;
   if (route !== null) {
     const options = declaredRoutes.some((choice) => choice.value === route.route) ? declaredRoutes : [...declaredRoutes,{value:route.route,label:t('calls.configuredRoute')}];
     return <div className="flex min-w-0 flex-col gap-2">
       {destination}{providerChoice}
       <Select label={t('calls.route')} value={route.route} options={options} onValueChange={(selected) => setRoute({...route,route:selected})} />
-      <Input label={t('calls.offering')} value={route.offering?.offering ?? ''} onChange={(event) => setRoute({...route,offering:{provider:candidate.provider_id,offering:event.target.value}})} />
+      <Input label={t('calls.offering')} value={route.offering?.offering ?? ''} onChange={(event) => setRoute({...route,offering:{provider:providerId,offering:event.target.value}})} />
       {failure!==null && <ErrorAlert error={failure} />}
     </div>;
   }
+  const poolLabel=pool?.kind==='model' ? selectedPool.isError ? t('settings.compact.managed') : selectedPool.isSuccess ? selectedPool.data.name : t('common.loading') : null;
   return <div className="flex min-w-0 flex-col gap-2">
     {destination}{providerChoice}
     <ResourcePicker pickerKey="settings.CallsRules.calls.profile" label={t('calls.profile')} value={candidate.agent_id??'\u0000current'} valueLabel={typeof candidate.agent_id==='string' && !profiles.some((agent)=>agent.id===candidate.agent_id)?t(agents.isFetching?'common.loading':'calls.managed'):undefined} options={[{value:'\u0000current',label:t('calls.keepProfile')},...profiles.map((agent)=>({value:agent.id,label:agent.name,...resourceChoice({kind:'agent',agent,provider:provider.data}),disabled:!holds(agent.access,'agent.use'),...(!holds(agent.access,'agent.use')?{description:t('calls.profileUseRequired')}:{})}))]} onValueChange={(agent_id)=>{const {agent_id:_old,...rest}=candidate;onChange({...step,candidate:{...rest,...(agent_id==='\u0000current'?{}:{agent_id})}});}} />
-    <Combobox label={t('calls.model')} onOpenChange={setModelsOpen} query={candidate.model} onQueryChange={(model) => onChange({ ...step, candidate: { ...candidate, model } })} loading={models.isFetching} groups={[{ id: 'models', label: t('calls.model'), options: (models.data ?? []).filter((model) => model.enabled).map((model) => ({ value: model.model_name, label: model.display_name || model.model_name, text: model.display_name || model.model_name, ...resourceChoice(modelResource(model,candidate.provider_id,{usage:provider.data?.choice_usage})) })) }]} onSelect={({ value: model }) => onChange({ ...step, candidate: { ...candidate, model } })} />
+    <Combobox label={t('calls.model')} onOpenChange={(open)=>{setModelsOpen(open);if(!open)setTyped('');}} query={typed} displayValue={poolLabel ?? model} onQueryChange={(value)=>{setTyped(value);if(pool===null)setModel(value);}} loading={models.isFetching || pools.loading}
+      groups={[{ id: 'models', label: t('calls.model'), options: (models.data ?? []).filter((model) => model.enabled).map((model) => ({ value: model.model_name, label: model.display_name || model.model_name, text: model.display_name || model.model_name, ...resourceChoice(modelResource(model,providerId,{usage:provider.data?.choice_usage})) })) },{id:'model-pools',label:t('screens.pools.title'),options:pools.options}]} footer={pools.footer}
+      onSelect={({ value }) => {const pool=pools.rows.find((pool)=>value===`\u0000pool:${pool.id}`);if(pool!==undefined)onChange({...step,candidate:{...candidate,target:{type:'pool',kind:'model',id:pool.id}}});else setModel(value);setTyped('');}} />
+    {pool?.kind==='provider' && <span className="text-sm text-text-muted">{t('providerFields.originalCall')}</span>}
     <div className="flex min-w-0 flex-wrap items-center gap-1 text-sm text-text-muted"><span>{t('providerFields.parameterFormat')}</span><code>{actual === 'native' ? t('providerFields.agentParameters') : actual ?? t('providerFields.originalCall')}</code>
       <HelpHint term={t('providerFields.parameterFormat')} what={t('providerFields.protocolHelp', { fallback: fallback ?? '–' })} />
     </div>
     {actual === undefined && choices.length > 0 && <Select<string> size="sm" label={t('providerFields.preview')} value={format ?? '\u0000original'}
       options={[{ value: '\u0000original', label: t('providerFields.originalCall') }, ...choices.map((value) => ({ value, label: value === 'native' ? t('providerFields.agentParameters') : value }))]} onValueChange={(value) => setPreview(value === '\u0000original' ? '' : value)} />}
-    <ModelRequestOptions protocol={format} label={t('calls.parameters')} providerId={candidate.provider_id} model={candidate.model} value={candidate.params ?? {}} onChange={(params) => onChange({ ...step, candidate: { ...candidate, params } })} />
+    <ModelRequestOptions protocol={format} label={t('calls.parameters')} providerId={providerId} model={model} value={candidate.params} onChange={(params) => onChange({ ...step, candidate: { ...candidate, params } })} />
     {source.isError && <ErrorAlert error={source.error} />}
     {failure!==null && <ErrorAlert error={failure} action={<Button size="sm" onClick={()=>void retry()}>{t('common.tryAgain')}</Button>} />}
     <Input type="number" min={1} label={t('calls.dimensions')} value={candidate.dimensions ?? ''} onChange={(event) => { const dimensions = event.target.value === '' ? undefined : Number(event.target.value); const { dimensions: _old, ...rest } = candidate; onChange({ ...step, candidate: { ...rest, ...(dimensions === undefined ? {} : { dimensions }) } }); }} />
@@ -138,7 +151,7 @@ function StepEditor({ step, onChange, purpose, sourceProviderId }: { purpose: Ru
     {(step.type === 'retry' || step.type === 'continue') && <Input label={t('calls.times')} type="number" min={1} value={step.times} onChange={(event) => onChange({ ...step, times: Number(event.target.value) })} />}
     {step.type === 'retry' && <div className="grid min-w-0 grid-cols-2 gap-2"><Input label={t('calls.delay')} type="number" min={0} value={step.delay_secs} onChange={(event) => onChange({ ...step, delay_secs: Number(event.target.value) })} /><Input label={t('calls.backoff')} type="number" min={1} value={step.backoff} onChange={(event) => onChange({ ...step, backoff: Number(event.target.value) })} /></div>}
     {step.type === 'wait' && <Select label={t('calls.until')} value={step.until} options={(['person', 'reset'] as const).map((value) => ({ value, label: t(value === 'person' ? 'calls.waitPerson' : 'calls.waitReset') }))} onValueChange={(until) => onChange({ ...step, until })} />}
-    {step.type === 'failover' && <CandidateEditor purpose={purpose} sourceProviderId={sourceProviderId} key={step.candidate.provider_id} step={step} onChange={onChange} />}
+    {step.type === 'failover' && <CandidateEditor purpose={purpose} sourceProviderId={sourceProviderId} key={candidateBackend(step.candidate)?.offering?.provider ?? (step.candidate.target.type==='pool'?step.candidate.target.id:'provider')} step={step} onChange={onChange} />}
   </div>;
 }
 
@@ -163,7 +176,7 @@ export function CallsRules({ value, onChange, onEdited, disabled, error }: Value
     setOpen(true);
   };
   const invalid = Object.values(draftErrors).some(Boolean) || editing === null || editing.rule.id.trim() === '' || rules.some((rule, index) => index !== editing.index && rule.id === editing.rule.id)
-    || editing.rule.steps.some((step) => step.type === 'failover' ? step.candidate.provider_id === '' || (candidateRoute(step.candidate) === null ? step.candidate.model.trim() === '' : !candidateRoute(step.candidate)?.offering?.offering.trim()) || !record(step.candidate.params===undefined?{}:step.candidate.params) || step.candidate.dimensions!==undefined && step.candidate.dimensions!==null && (!Number.isInteger(step.candidate.dimensions) || step.candidate.dimensions<=0)
+    || editing.rule.steps.some((step) => step.type === 'failover' ? (step.candidate.target.type==='pool' ? step.candidate.target.id==='' || !['model','provider'].includes(step.candidate.target.kind) : step.candidate.target.resource.kind==='provider' ? step.candidate.target.resource.id==='' : candidateBackend(step.candidate)?.offering?.provider==='' || !candidateBackend(step.candidate)?.offering?.offering.trim()) || !record(step.candidate.params===undefined?{}:step.candidate.params) || step.candidate.dimensions!==undefined && step.candidate.dimensions!==null && (!Number.isInteger(step.candidate.dimensions) || step.candidate.dimensions<=0)
       : step.type === 'retry' ? !Number.isInteger(step.times) || !Number.isInteger(step.delay_secs) || !Number.isInteger(step.backoff) || step.times <= 0 || step.delay_secs < 0 || step.backoff <= 0 : step.type === 'continue' && (!Number.isInteger(step.times) || step.times <= 0));
   const update = (rule: Rule) => { if (editing !== null) { onEdited?.(); setEditing({ ...editing, rule }); } };
   const move = (index: number, delta: number) => {
@@ -211,11 +224,20 @@ export function CallsRules({ value, onChange, onEdited, disabled, error }: Value
       <div className="flex min-w-0 flex-col gap-3">
         <Input label={t('calls.name')} help={<CallHelp section="rules" />} value={editing.rule.id} onChange={(event)=>update({...editing.rule,id:event.target.value})} />
         <Select hideLabel={false} label={t('calls.reason')} value={editing.rule.when.reason??'any'} options={[{value:'any',label:t('calls.anyReason')},...(['cyber','safety','access','other'] as const).map((reason)=>({value:reason,label:t(`calls.reasons.${reason}`)}))]} onValueChange={(reason)=>{const {reason:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(reason==='any'?{}:{reason})}});}} />
-        <ProviderDefaultChoice shape={{type:'text',maxLength:null,pattern:null}} showLabel label={t('calls.provider')} placeholder={t('calls.anyProvider')} value={editing.rule.when.provider_id??''} onChange={(value)=>{const {provider_id:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(typeof value==='string'&&value!==''?{provider_id:value}:{})}});}} />
+        <ProviderDefaultChoice shape={{type:'text',maxLength:null,pattern:null}} showLabel label={t('calls.provider')} placeholder={t('calls.anyProvider')} value={editing.rule.when.provider_id??''} onChange={(value)=>{
+          const {provider_id:previous,model,...when}=editing.rule.when;const provider=typeof value==='string'&&value!==''?value:undefined;
+          // A model is one of a provider's own: another provider's model is not carried over to it.
+          const another=previous!==undefined&&provider!==undefined&&provider!==previous;
+          update({...editing.rule,when:{...when,...(provider===undefined?{}:{provider_id:provider}),...(model===undefined||another?{}:{model})}});}} />
         {editing.rule.when.provider_id!==undefined && <Button size="sm" variant="ghost" onClick={()=>{const {provider_id:_old,...when}=editing.rule.when;update({...editing.rule,when});}}>{t('calls.anyProvider')}</Button>}
         <Select label={t('calls.when')} value={editing.rule.when.kind??'any'} options={KINDS.map((kind)=>({value:kind,label:t(`calls.kinds.${kind}`)}))} onValueChange={(kind)=>update({...editing.rule,when:{...editing.rule.when,kind}})} />
         <Select label={t('calls.purpose')} value={editing.rule.when.purpose??'any'} options={(['any','agent','summary','embedding','review','web_search','page_fetch','image_generation'] as const).map((purpose)=>({value:purpose,label:t(`calls.purposes.${purpose}`)}))} onValueChange={(purpose)=>{const {purpose:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(purpose==='any'?{}:{purpose})}});}} />
-        <Input label={t('calls.model')} placeholder={t('calls.anyModel')} value={editing.rule.when.model??''} onChange={(event)=>{const {model:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(event.target.value===''?{}:{model:event.target.value})}});}} />
+        {editing.rule.when.provider_id!==undefined
+          ? <>
+            <ProviderModelChoice allowTyped providerId={editing.rule.when.provider_id} label={t('calls.model')} placeholder={t('calls.anyModel')} value={editing.rule.when.model??''} onChange={(model)=>{const {model:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(model===''?{}:{model})}});}} />
+            {editing.rule.when.model!==undefined && <Button size="sm" variant="ghost" onClick={()=>{const {model:_old,...when}=editing.rule.when;update({...editing.rule,when});}}>{t('calls.anyModel')}</Button>}
+          </>
+          : <Input label={t('calls.model')} placeholder={t('calls.anyModel')} value={editing.rule.when.model??''} onChange={(event)=>{const {model:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(event.target.value===''?{}:{model:event.target.value})}});}} />}
         <Input label={t('calls.statusCode')} type="number" placeholder={t('calls.anyStatus')} value={editing.rule.when.status??''} onChange={(event)=>{const {status:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(event.target.value===''?{}:{status:Number(event.target.value)})}});}} />
         <Input label={t('calls.contains')} placeholder={t('calls.anyWords')} value={editing.rule.when.contains??''} onChange={(event)=>{const {contains:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(event.target.value===''?{}:{contains:event.target.value})}});}} />
         <Input label={t('calls.regex')} placeholder={t('calls.anyPattern')} value={editing.rule.when.regex??''} onChange={(event)=>{const {regex:_old,...when}=editing.rule.when;update({...editing.rule,when:{...when,...(event.target.value===''?{}:{regex:event.target.value})}});}} />

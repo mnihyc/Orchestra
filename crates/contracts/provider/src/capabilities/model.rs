@@ -665,6 +665,8 @@ pub struct FallbackView {
     pub scope: String,
     /// Failure kind, or any when unconstrained.
     pub when: String,
+    /// An unresolved pool intent; the preview discloses neither members nor private configuration.
+    pub pool_kind: Option<crate::pools::Kind>,
     /// Provider reference only where the SAME context says it may be read.
     pub provider: Option<ProviderView>,
     /// Offering only where readable; private backend configuration is never included.

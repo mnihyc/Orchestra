@@ -358,3 +358,479 @@ async fn a_turn_takes_the_same_few_statements_whoever_asks_and_however_much_the_
         "a refused turn takes {refused_cost} statements"
     );
 }
+
+#[tokio::test]
+async fn using_a_pool_does_not_give_direct_use_of_its_members() {
+    let w = World::new().await;
+    let owner = w.member("pool_owner").await;
+    let reader = w.member("pool_reader").await;
+    let provider = w.provider(owner, w.root, "Private account").await;
+    let pool = {
+        let mut conn = w.conn().await;
+        let id = orch_db::queries::resources::access_fixtures::insert_resource(
+            &mut conn,
+            "pool",
+            Some(owner),
+            Some(w.root),
+            "Shared models",
+        )
+        .await
+        .unwrap();
+        orch_authz::ownership::start_resource(
+            &mut conn,
+            orch_access_contract::decisions::ObjectRef {
+                kind: ObjectKind::Pool,
+                id,
+            },
+            owner,
+            orch_authz::ownership::NewAccess::OnlyMe,
+            w.now,
+        )
+        .await
+        .unwrap();
+        id
+    };
+    w.grant("pool", pool, P::PoolUse, Holder::User { id: reader })
+        .await;
+    assert!(matches!(
+        w.usable(Caller::session(reader), pool, None).await,
+        Usable::Yes(_)
+    ));
+    assert!(!matches!(
+        w.usable(Caller::session(reader), provider, None).await,
+        Usable::Yes(_)
+    ));
+}
+
+#[tokio::test]
+async fn a_pool_retains_the_real_members_entry_when_a_current_holder_lends_its_use() {
+    use orch_access_contract::{permissions::ProviderUsePurpose, pools::PathMember};
+    use orch_db::queries::pools::{BackendRef, Leaf, OfferingRef};
+    let w = World::new().await;
+    let owner = w.member("entry_owner").await;
+    let giver = w.member("entry_giver").await;
+    let reader = w.member("entry_reader").await;
+    let provider = w.provider(owner, w.root, "Member accounting").await;
+    w.model(provider, "small", &["low"]).await;
+    let entry = w
+        .put(
+            "provider",
+            provider,
+            P::ProviderUse,
+            Holder::User { id: giver },
+            json!({"models":["small"],"efforts":["low"]}),
+        )
+        .await;
+    let mut conn = w.conn().await;
+    let pool = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut conn,
+        "pool",
+        Some(owner),
+        Some(w.root),
+        "Accounting pool",
+    )
+    .await
+    .unwrap();
+    orch_authz::ownership::start_resource(
+        &mut conn,
+        orch_access_contract::decisions::ObjectRef {
+            kind: ObjectKind::Pool,
+            id: pool,
+        },
+        owner,
+        orch_authz::ownership::NewAccess::OnlyMe,
+        w.now,
+    )
+    .await
+    .unwrap();
+    let member = orch_types::new_id();
+    sqlx::query(
+        "UPDATE pools SET definition=jsonb_set(definition,'{lend_members}','true') WHERE id=$1",
+    )
+    .bind(pool)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO pool_members(pool_id,id,position,rule,enabled) VALUES($1,$2,0,$3,true)",
+    )
+    .bind(pool)
+    .bind(member)
+    .bind(json!({"type":"provider_models","provider_id":provider,"group":null}))
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO pool_lending(id,resource_kind,resource_id,giver_id,matcher,options) VALUES($1,'provider',$2,$3,$4,$5)").bind(orch_types::new_id()).bind(provider).bind(giver).bind(json!({"kind":"pool","pool_id":pool})).bind(json!({"models":["small"],"efforts":["low"]})).execute(&mut *conn).await.unwrap();
+    drop(conn);
+    w.grant("pool", pool, P::PoolUse, Holder::User { id: reader })
+        .await;
+    let principal = w.principal(Caller::session(reader)).await;
+    let leaf = Leaf::Model {
+        backend: BackendRef {
+            route: "generation.model".into(),
+            offering: Some(OfferingRef {
+                provider,
+                offering: "small".into(),
+            }),
+            ..Default::default()
+        },
+    };
+    let path = [PathMember {
+        pool_id: pool,
+        member_id: member,
+        revision: 1,
+    }];
+    let wanted = orch_authz::options::Wanted {
+        model: Some(("small", &[])),
+        effort: Some("low"),
+        ..Default::default()
+    };
+    let policies = orch_authz::usable::Policies::default().with_sharing(
+        Some(w.root),
+        orch_authz::Policy {
+            holders_share: true,
+            ..Default::default()
+        },
+    );
+    let mut conn = w.conn().await;
+    let contribution = orch_authz::pools::provider_choice(
+        &mut conn,
+        &principal,
+        &path,
+        &leaf,
+        None,
+        &wanted,
+        ProviderUsePurpose::Work,
+        &policies,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(contribution.member_entry(), Some(entry));
+    assert!(!matches!(
+        w.usable(Caller::session(reader), provider, None).await,
+        Usable::Yes(_)
+    ));
+}
+
+#[tokio::test]
+async fn a_provider_is_lent_only_when_both_consents_and_its_giver_still_allow_the_request() {
+    use orch_access_contract::{permissions::ProviderUsePurpose, pools::PathMember};
+    use orch_db::queries::pools::{BackendRef, Leaf, OfferingRef};
+    let w = World::new().await;
+    let owner = w.member("lending_owner").await;
+    let reader = w.member("lending_reader").await;
+    let provider = w.provider(owner, w.root, "Account").await;
+    w.model(provider, "small", &["low"]).await;
+    let (pool, member) = {
+        let mut conn = w.conn().await;
+        let pool = orch_db::queries::resources::access_fixtures::insert_resource(
+            &mut conn,
+            "pool",
+            Some(owner),
+            Some(w.root),
+            "Models",
+        )
+        .await
+        .unwrap();
+        orch_authz::ownership::start_resource(
+            &mut conn,
+            orch_access_contract::decisions::ObjectRef {
+                kind: ObjectKind::Pool,
+                id: pool,
+            },
+            owner,
+            orch_authz::ownership::NewAccess::OnlyMe,
+            w.now,
+        )
+        .await
+        .unwrap();
+        let row = orch_db::queries::pools::get(&mut conn, pool)
+            .await
+            .unwrap()
+            .unwrap();
+        let member = orch_types::new_id();
+        orch_db::queries::pools::put_member(
+            &mut conn,
+            &row,
+            &orch_db::queries::pools::Member {
+                id: member,
+                position: 0,
+                rule: json!({"type":"provider_models","provider_id":provider,"group":null}),
+                enabled: true,
+                priority: None,
+                weight: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        (pool, member)
+    };
+    w.grant("pool", pool, P::PoolUse, Holder::User { id: reader })
+        .await;
+    let principal = w.principal(Caller::session(reader)).await;
+    let leaf = Leaf::Model {
+        backend: BackendRef {
+            route: "model-backed".into(),
+            offering: Some(OfferingRef {
+                provider,
+                offering: "small".into(),
+            }),
+            ..Default::default()
+        },
+    };
+    let wanted = orch_authz::options::Wanted {
+        model: Some(("small", &[])),
+        effort: Some("low"),
+        ..Default::default()
+    };
+    let path = [PathMember {
+        pool_id: pool,
+        revision: 1,
+        member_id: member,
+    }];
+    let mut conn = w.conn().await;
+    assert!(
+        orch_authz::pools::provider_choice(
+            &mut conn,
+            &principal,
+            &path,
+            &leaf,
+            None,
+            &wanted,
+            ProviderUsePurpose::Work,
+            &Default::default()
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    sqlx::query("UPDATE pools SET definition=jsonb_set(definition,'{lend_members}','true'::jsonb) WHERE id=$1").bind(pool).execute(&mut *conn).await.unwrap();
+    assert!(
+        orch_authz::pools::provider_choice(
+            &mut conn,
+            &principal,
+            &path,
+            &leaf,
+            None,
+            &wanted,
+            ProviderUsePurpose::Work,
+            &Default::default()
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    sqlx::query("INSERT INTO pool_lending(id,resource_kind,resource_id,giver_id,matcher,options) VALUES($1,'provider',$2,$3,$4,$5)")
+        .bind(orch_types::new_id()).bind(provider).bind(owner).bind(json!({"kind":"pool","pool_id":pool})).bind(json!({"models":["small"],"efforts":["low"],"purposes":["work"]})).execute(&mut *conn).await.unwrap();
+    assert!(
+        orch_authz::pools::provider_choice(
+            &mut conn,
+            &principal,
+            &path,
+            &leaf,
+            None,
+            &wanted,
+            ProviderUsePurpose::Work,
+            &Default::default()
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    let high = orch_authz::options::Wanted {
+        effort: Some("high"),
+        ..wanted
+    };
+    assert!(
+        orch_authz::pools::provider_choice(
+            &mut conn,
+            &principal,
+            &path,
+            &leaf,
+            None,
+            &high,
+            ProviderUsePurpose::Work,
+            &Default::default()
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        orch_authz::pools::provider_choice(
+            &mut conn,
+            &principal,
+            &path,
+            &leaf,
+            None,
+            &wanted,
+            ProviderUsePurpose::Ask,
+            &Default::default()
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let other = w.member("new_member_owner").await;
+    sqlx::query("UPDATE providers SET owner_id=$2 WHERE id=$1")
+        .bind(provider)
+        .bind(other)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE permission_entries SET removed_at=$3 WHERE object_kind='provider' AND object_id=$1 AND holder_id=$2 AND permission='access.own'").bind(provider).bind(owner).bind(w.now.get()).execute(&mut *conn).await.unwrap();
+    assert!(
+        orch_authz::pools::provider_choice(
+            &mut conn,
+            &principal,
+            &path,
+            &leaf,
+            None,
+            &wanted,
+            ProviderUsePurpose::Work,
+            &Default::default()
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    drop(conn);
+    assert!(!matches!(
+        w.usable(Caller::session(reader), provider, None).await,
+        Usable::Yes(_)
+    ));
+}
+
+#[tokio::test]
+async fn a_native_turn_can_borrow_one_pool_member_without_gaining_direct_provider_use() {
+    use orch_access_contract::pools::PathMember;
+    use orch_authz::usable::{Author, TurnAsk};
+    use orch_db::queries::pools::{BackendRef, Leaf, OfferingRef};
+    let w = World::new().await;
+    let owner = w.member("turn_pool_owner").await;
+    let reader = w.member("turn_pool_reader").await;
+    w.give(w.project, reader, Role::Interactor).await;
+    let provider = w.provider(owner, w.root, "Lent turn account").await;
+    w.model(provider, "small", &["low"]).await;
+    w.model(provider, "other", &["low"]).await;
+    let mut conn = w.conn().await;
+    let pool = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut conn,
+        "pool",
+        Some(owner),
+        Some(w.root),
+        "Native turn pool",
+    )
+    .await
+    .unwrap();
+    orch_authz::ownership::start_resource(
+        &mut conn,
+        orch_access_contract::decisions::ObjectRef {
+            kind: ObjectKind::Pool,
+            id: pool,
+        },
+        owner,
+        orch_authz::ownership::NewAccess::OnlyMe,
+        w.now,
+    )
+    .await
+    .unwrap();
+    let member = orch_types::new_id();
+    sqlx::query(
+        "UPDATE pools SET definition=jsonb_set(definition,'{lend_members}','true') WHERE id=$1",
+    )
+    .bind(pool)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO pool_members(pool_id,id,position,rule,enabled) VALUES($1,$2,0,$3,true)",
+    )
+    .bind(pool)
+    .bind(member)
+    .bind(json!({"type":"provider_models","provider_id":provider,"group":null}))
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    let consent = orch_types::new_id();
+    sqlx::query("INSERT INTO pool_lending(id,resource_kind,resource_id,giver_id,matcher,options) VALUES($1,'provider',$2,$3,$4,$5)").bind(consent).bind(provider).bind(owner).bind(json!({"kind":"pool","pool_id":pool})).bind(json!({"models":["small"],"efforts":["low"],"purposes":["work"]})).execute(&mut *conn).await.unwrap();
+    drop(conn);
+    w.grant("pool", pool, P::PoolUse, Holder::User { id: reader })
+        .await;
+    let principal = w.principal(Caller::session(reader)).await;
+    let leaf = Leaf::Model {
+        backend: BackendRef {
+            route: "generation.model".into(),
+            offering: Some(OfferingRef {
+                provider,
+                offering: "small".into(),
+            }),
+            ..Default::default()
+        },
+    };
+    let path = [PathMember {
+        pool_id: pool,
+        member_id: member,
+        revision: 1,
+    }];
+    let selection = orch_authz::pools::Selection {
+        leaf: &leaf,
+        path: &path,
+    };
+    let ask = TurnAsk {
+        thread: w.thread,
+        provider,
+        profile: None,
+        model: "small",
+        effort: Some("low"),
+        arrangement: None,
+        models_allowed: None,
+    };
+    let mut conn = w.conn().await;
+    let decision = orch_authz::usable::check_turn_at_pool(
+        &mut conn,
+        Author::Person(&principal),
+        &ask,
+        &Default::default(),
+        None,
+        selection,
+    )
+    .await
+    .unwrap();
+    let TurnDecision::Allowed(grant) = decision else {
+        panic!("the native turn must honor both current consents")
+    };
+    assert_eq!(grant.models, vec!["small"]);
+    assert_eq!(grant.efforts, vec!["low"]);
+    assert!(
+        !w.turn(reader, w.thread, provider, "small", Some("low"))
+            .await
+            .is_allowed()
+    );
+    sqlx::query("UPDATE pool_lending SET removed_at=$2 WHERE id=$1")
+        .bind(consent)
+        .bind(w.now.get())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(
+        !orch_authz::usable::check_turn_at_pool(
+            &mut conn,
+            Author::Person(&principal),
+            &ask,
+            &Default::default(),
+            None,
+            selection
+        )
+        .await
+        .unwrap()
+        .is_allowed()
+    );
+    drop(conn);
+    assert!(!matches!(
+        w.usable(Caller::session(reader), provider, None).await,
+        Usable::Yes(_)
+    ));
+}
