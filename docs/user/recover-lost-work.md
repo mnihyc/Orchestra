@@ -40,7 +40,7 @@ Review the destination and file-copy consequences before confirming. The batch u
 
 ## Tell the affected people
 
-Each confirmation has its own **Notify N people** choice. **Operation notices** (`notify.operations`) sets its default: when work is blocked, always, or never. You can change the choice before confirming. The setting follows its place and any system lock. A recovery across several places uses the system default.
+Each confirmation has its own **Notify N people** choice. **Operation notices** (`notify.operations`) sets its default: never initially, or when work is blocked or always if you choose that policy. You can change the choice before confirming. The setting follows its place and any system lock. A recovery across several places uses the system default.
 
 The number counts people who will receive that kind under their own notification settings. Hover, focus or press the count to open the common people list. It shows the names you may see and a count for the rest. Select a person to open their card. One Inbox item groups the operation's affected work for each recipient. Updates stay in that item. Turning Notify off suppresses it.
 
