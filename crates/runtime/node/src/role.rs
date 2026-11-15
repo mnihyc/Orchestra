@@ -54,6 +54,7 @@ pub const NODE_KINDS: &[CommandKind] = &[
     CommandKind::NodeResourcesList,
     CommandKind::NodeResourcesRemove,
     CommandKind::NodeRuntimeCreate,
+    CommandKind::NodeProgramAdmit,
     CommandKind::NodeRuntimeStart,
     CommandKind::NodeRuntimeStop,
     CommandKind::NodeRuntimeRemove,
@@ -177,6 +178,7 @@ struct Inner {
     images: Arc<Images>,
     desk: Arc<BlobDesk>,
     runtimes: Runtimes,
+    programs: Arc<crate::program_work::Programs>,
     facts: Arc<Facts>,
     reconciler: Arc<Reconciler>,
     storages: Arc<Storages>,
@@ -264,6 +266,18 @@ impl NodeRole {
         runtimes.set_link(services.link.clone());
         images.set_policy(Arc::clone(&services.policy));
         volumes.set_policy(Arc::clone(&services.policy));
+        let programs = crate::program_work::Programs::new(
+            Arc::clone(&drivers),
+            Arc::clone(&ledger),
+            Arc::clone(&services.clock),
+            services.link.clone(),
+            runtimes.clone(),
+            settings.stop_grace,
+        );
+        services.tunnels.register(
+            orch_link_contract::tunnels::TunnelKind::Program,
+            programs.clone(),
+        );
         let facts = Arc::new(Facts::new(
             Arc::clone(&drivers),
             Arc::clone(&storages),
@@ -289,6 +303,7 @@ impl NodeRole {
                 images,
                 desk,
                 runtimes,
+                programs,
                 facts,
                 reconciler,
                 storages,
@@ -368,6 +383,7 @@ impl Inner {
         self.reconciler.pass().await;
         self.runtimes.report_networks().await;
         self.runtimes.recover_volume_copy_holds().await;
+        self.programs.sweep().await;
         // A unit that came up and ended by itself is given the operator's post_down.
         self.runtimes.settle_hooks().await;
         self.runtimes.reconcile_live_mounts().await;
@@ -551,6 +567,33 @@ impl RoleHandler for NodeRole {
                 let made = node.runtimes.create(id, body, cancel).await;
                 node.images.finish(id).await;
                 made.map(CommandResult::NodeRuntimeCreate)
+            }
+            Command::NodeProgramAdmit(body) => {
+                if body.runtime_id != body.work.work
+                    || body.work.work == body.work.helper
+                    || body.work.deadline <= node.clock.time()
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::InvalidSpec,
+                        "the program work has an invalid identity or an ended lifetime",
+                    ));
+                }
+                node.ledger
+                    .retain_program(&body.work)
+                    .map_err(|_| {
+                        CommandError::new(
+                            ErrorCode::Internal,
+                            "the program placement could not be retained",
+                        )
+                    })?
+                    .filter(|work| !work.retired)
+                    .ok_or_else(|| {
+                        CommandError::new(
+                            ErrorCode::Conflict,
+                            "the program placement is unknown, changed or retired",
+                        )
+                    })?;
+                Ok(CommandResult::NodeProgramAdmit(Empty {}))
             }
             Command::NodeRuntimeStart(body) => node
                 .runtimes
@@ -867,6 +910,7 @@ impl RoleHandler for NodeRole {
         self.disconnected().await;
         self.inner.publisher.close_all().await;
         self.inner.stop.cancel();
+        self.inner.programs.stop();
         self.inner.runtimes.stop_watching();
         self.inner.runtimes.stop_copy_work().await;
         let tasks: Vec<JoinHandle<()>> = self
@@ -882,6 +926,7 @@ impl RoleHandler for NodeRole {
 
     fn abandon(&self) {
         self.inner.stop.cancel();
+        self.inner.programs.stop();
         self.inner.runtimes.abandon_watches();
         let tasks: Vec<JoinHandle<()>> = self
             .tasks

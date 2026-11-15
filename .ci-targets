@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-agent-contract --lib
+test -p orch-link-contract --lib --test largest_messages
+test -p orch-connector-core --lib
+test -p orch-adapter-codex --lib --test sessions
+test -p orch-node-core --lib --test runtimes
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --lib

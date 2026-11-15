@@ -386,6 +386,42 @@ async fn a_mail_server_is_put_with_its_password_sealed_and_a_sample_goes_through
     );
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_documented_email_setup_accepts_redirected_fields_and_sends_its_test_message() {
+    let world = Deployment::new().await;
+    admin(&world.db(), "boss").await;
+    let smtp = Smtp::start(Some(MAIL_PASSWORD)).await;
+    let file = write(
+        &world,
+        "email.json",
+        &json!({
+            "host": "127.0.0.1", "port": smtp.port.to_string(), "security": "none", "auth": "plain",
+            "username": support::smtp::USER, "password": MAIL_PASSWORD, "from": "orch@example.org"
+        }),
+    );
+    let mut command = world.command();
+    command.stdin(std::process::Stdio::from(
+        std::fs::File::open(file).unwrap(),
+    ));
+    let put = support::run(
+        command,
+        &["channel", "put", "email", "--file", "/dev/stdin"],
+    )
+    .await;
+    assert!(put.succeeded().contains("made the email channel"));
+    assert!(!readable_anywhere(&world, MAIL_PASSWORD).await);
+    world
+        .run(&["channel", "test", "email", "--to", "you@example.org"])
+        .await
+        .succeeded();
+    assert!(
+        smtp.told()
+            .iter()
+            .any(|line| line.contains("RCPT TO:<you@example.org>"))
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn what_the_mail_server_answers_is_printed_when_it_does_not_take_the_sample() {
     let world = Deployment::new().await;

@@ -312,6 +312,32 @@ impl AgentRole {
             .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
         let provider_id = provider_of(&body.provider);
         let process = self.hosting.process(provider_id, body.agent_id)?;
+        let program_io: Option<Arc<dyn orch_agent_contract::program_work::ProgramIo>> =
+            match &body.program_work {
+                Some(work) => {
+                    if work.helper != body.thread_id
+                        || body.transport_only
+                        || body.mode != orch_link_contract::commands::SessionMode::New
+                        || body.archive.is_some()
+                        || body.history.is_some()
+                        || !matches!(body.provider, SessionOpenProvider::Native { .. })
+                    {
+                        return Err(internal(
+                            "The isolated work does not match this new native helper session.",
+                        ));
+                    }
+                    let ticket = signed(&work.ticket)
+                        .ok_or_else(|| internal("The isolated program channel was not signed."))?;
+                    Some(crate::program_work::Work::new(
+                        orch_link::program_work::Client::new(
+                            self.hosting.services().link.clone(),
+                            ticket,
+                        ),
+                        work.work,
+                    ))
+                }
+                None => None,
+            };
         if body.transport_only {
             process.check_segment(body.thread_id, Some(body.segment_id))?;
             if body.native_session_ref.as_deref()
@@ -497,6 +523,14 @@ impl AgentRole {
                     &self.hosting.services().link,
                 );
             }
+            if let Some(work) = &body.program_work {
+                retain_route(
+                    &mut tickets,
+                    "program".into(),
+                    &work.ticket,
+                    &self.hosting.services().link,
+                );
+            }
             if process.session_key(body.thread_id).is_some() {
                 process.session_closed(body.thread_id);
             }
@@ -527,7 +561,11 @@ impl AgentRole {
                     Box::pin(async move {
                         match intent {
                             OpenIntent::Ordinary | OpenIntent::Guarded(_) => {
-                                adapter.open_session(spec).await.map(|session| Opened {
+                                let opened = match program_io {
+                                    Some(io) => adapter.open_program_session(spec, io).await,
+                                    None => adapter.open_session(spec).await,
+                                };
+                                opened.map(|session| Opened {
                                     session,
                                     prefix: None,
                                 })

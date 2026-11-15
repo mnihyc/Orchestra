@@ -43,6 +43,7 @@ mod native_web;
 pub mod parameters;
 pub mod performance;
 pub mod process;
+mod program_work;
 pub mod protocol;
 pub mod provider;
 pub mod review;
@@ -159,6 +160,7 @@ struct Running {
     kill: Arc<Notify>,
     pump: JoinHandle<()>,
     catalogue: Option<Arc<model_catalogue::Catalogue>>,
+    identity: Option<model_catalogue::Identity>,
     events: Arc<model_processes::ProcessEvents>,
 }
 
@@ -176,6 +178,7 @@ pub struct CodexAdapter {
     patience: Patience,
     running: Option<Running>,
     model_processes: HashMap<model_catalogue::Identity, Running>,
+    unit_work: HashMap<ThreadId, program_work::Context>,
     /// Exact lanes observed idle when the native client unsubscribed them.
     prefix_sources: std::collections::HashSet<orch_agent_contract::history::NativePrefixSource>,
     history_inventory: Option<(Id, Arc<native_history::Inventory>)>,
@@ -286,6 +289,7 @@ impl CodexAdapter {
             patience: Patience::default(),
             running: None,
             model_processes: HashMap::new(),
+            unit_work: HashMap::new(),
             prefix_sources: Default::default(),
             history_inventory: None,
         }
@@ -333,7 +337,7 @@ impl CodexAdapter {
     // -- starting and stopping -----------------------------------------------------------------------
 
     async fn launch(&self, start: AgentStart, sink: EventSink) -> Result<Running, AdapterError> {
-        self.launch_model(start, model_processes::ProcessEvents::new(sink), None)
+        self.launch_model(start, model_processes::ProcessEvents::new(sink), None, None)
             .await
     }
 
@@ -346,8 +350,10 @@ impl CodexAdapter {
         start: AgentStart,
         events: Arc<model_processes::ProcessEvents>,
         catalogue: Option<Arc<model_catalogue::Catalogue>>,
+        identity: Option<model_catalogue::Identity>,
     ) -> Result<Running, AdapterError> {
-        let sink = events.sink_for(catalogue.as_ref().map(|catalogue| catalogue.identity));
+        let identity = identity.or_else(|| catalogue.as_ref().map(|catalogue| catalogue.identity));
+        let sink = events.sink_for(identity);
         if start.profile.attach_mode() == AttachMode::Daemon {
             return Err(AdapterError::Unsupported(
                 "attaching to a daemon: this adapter starts the harness itself and talks to it over its standard streams"
@@ -617,6 +623,21 @@ impl CodexAdapter {
             version: version.clone(),
             exit: Arc::clone(&exit),
             patience: self.patience,
+            native_result_wait: Duration::from_millis(
+                start
+                    .profile
+                    .config
+                    .get("native_result_wait_ms")
+                    .and_then(Json::as_u64)
+                    .unwrap_or(runtime::DEFAULT_NATIVE_RESULT_WAIT_MS),
+            ),
+            native_result_buffer_bytes: start
+                .profile
+                .config
+                .get("native_result_buffer_bytes")
+                .and_then(Json::as_u64)
+                .map(|bytes| usize::try_from(bytes).unwrap_or(usize::MAX))
+                .unwrap_or(runtime::DEFAULT_NATIVE_RESULT_BUFFER_BYTES),
         });
         if let Some(home) = harness_home.as_deref().filter(|_| managed) {
             let (method, expires_at) = provider::read_login_note(home);
@@ -646,6 +667,7 @@ impl CodexAdapter {
             kill,
             pump,
             catalogue,
+            identity,
             events,
         })
     }
@@ -663,14 +685,14 @@ impl CodexAdapter {
             stopping.push(Self::stop_running(running));
         }
         let _ = futures::future::join_all(stopping).await;
+        for (_, unit) in self.unit_work.drain() {
+            let _ = unit.io.retire().await;
+        }
     }
 
     async fn stop_running(running: Running) {
         let events = Arc::clone(&running.events);
-        let identity = running
-            .catalogue
-            .as_ref()
-            .map(|catalogue| catalogue.identity);
+        let identity = running.identity;
         running.shared.stopping();
         running.shared.rpc().finish();
         if running.shared.exit_message(STOP_GRACE).await.is_none() {
@@ -1009,6 +1031,7 @@ impl CodexAdapter {
             directory: settings.directory.clone(),
         })
         .with_native_web_results(true)
+        .with_web_action_wait(Duration::from_secs(settings.web_action_wait_secs))
         .with_external_images(
             spec.exec.executor.is_some()
                 || settings.arrangement
@@ -1432,6 +1455,14 @@ impl AgentAdapter for CodexAdapter {
         Ok(opened)
     }
 
+    async fn open_program_session(
+        &mut self,
+        spec: SessionSpec,
+        io: Arc<dyn orch_agent_contract::program_work::ProgramIo>,
+    ) -> Result<SessionOpened, AdapterError> {
+        self.open_unit(spec, io).await
+    }
+
     async fn inspect_input_prefix(
         &mut self,
         source: orch_agent_contract::history::NativePrefixSource,
@@ -1639,6 +1670,12 @@ impl AgentAdapter for CodexAdapter {
                     segment_id: segment,
                     native_session_ref: native,
                 });
+        }
+        if let Some(unit) = self.unit_work.remove(&thread) {
+            if let Some(running) = self.model_processes.remove(&unit.identity) {
+                Self::stop_running(running).await;
+            }
+            unit.io.retire().await?;
         }
         Ok(())
     }
