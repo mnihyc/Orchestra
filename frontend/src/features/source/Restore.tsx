@@ -11,6 +11,8 @@ import { workspaceDenial } from '@/features/files/door';
 import { Checkbox } from '@/ui/Checkbox';
 import { revealView } from '@/features/workbench/openView';
 import type { ActiveTurn, ChangeOptions, Job, RestorePlan, Thread, Turn } from '@/generated/api-types';
+import { useFormatContext } from '@/lib/appearance';
+import { formatExact } from '@/lib/time';
 import { newActKey } from '@/lib/requests';
 import { useThreadRow } from '@/realtime/stores/thread';
 import { Badge } from '@/ui/Badge';
@@ -28,7 +30,7 @@ import { RelativeTime } from '@/ui/RelativeTime';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Tooltip } from '@/ui/Tooltip';
 
-import { confirmable, planWentStale, restoreBlocker, restoreResult, wholeUnavailableReason } from './words';
+import { confirmable, planWentStale, restoreBlocker, restoreResult, restoreTurnActionState, wholeUnavailableReason } from './words';
 
 /** The longest a restore waits for a turn that writes there, in minutes: a day, as the change wizard bounds it. */
 const WAIT_MOST_MINUTES = 1_440;
@@ -40,15 +42,11 @@ export function RestoreFromTurn({ threadId, turn, compact = false, hasChanges = 
   const { t } = useTranslation();
   const thread = useThreadRow(threadId);
   const [open, setOpen] = useState(false);
-  const reads = thread?.environment_permissions.includes('files.view') === true;
-  const writes = thread?.environment_permissions.includes('files.manage') === true;
   const snapshotId = turn.before_snapshot_id;
-  const reason = readOnly ? t('messageVersions.activeActions') : !thread?.environment ? t('source.restore.noEnvironment')
-    : !reads ? workspaceDenial(t, READ_PERMISSION, thread.environment) : !writes ? workspaceDenial(t, WRITE_PERMISSION, thread.environment)
-    : turn.completed_at === null ? t('thread.turnActions.turnRunning') : snapshotId === null && !hasChanges ? t('thread.turnActions.noCheckpoint') : null;
-  if (reason !== null || thread === null) {
+  const state = restoreTurnActionState(thread, turn, hasChanges, readOnly, t);
+  if (state.review || thread === null) {
     if (!fallback) return null;
-    return <IconButton action="restore" size="sm" label={t('source.restore.review')} reason={reason ?? t('thread.turnActions.noCheckpoint')} blocked={!reads || readOnly}
+    return <IconButton action="restore" size="sm" label={t('source.restore.review')} reason={state.reason ?? t('thread.turnActions.noCheckpoint')} blocked={state.blocked}
       onClick={() => revealView('changes', { thread: threadId, scope: 'turn', turn: turn.id })} />;
   }
   return (
@@ -66,6 +64,7 @@ export function RestoreFromTurn({ threadId, turn, compact = false, hasChanges = 
 /** One restore from the first plan to the end of its job, and on to its undo. */
 export function RestoreDialog({ thread, snapshotId: first, onClose }: { thread: Thread; snapshotId: string | null; onClose: () => void }) {
   const { t } = useTranslation();
+  const format = useFormatContext();
   const live = useThreadRow(thread.id) ?? thread;
   const environment = thread.environment;
   // A thread moved to another environment, or a right taken away, ends what this dialog may show and do.
@@ -165,6 +164,9 @@ export function RestoreDialog({ thread, snapshotId: first, onClose }: { thread: 
             ) : (
               <p className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-text-muted">
                 <span>{t('source.restore.coverage', { count: recorded.data.file_count })}</span><RelativeTime at={recorded.data.created_at} />
+                {recorded.data.expires_at !== null && (recorded.data.state === 'expired' || recorded.data.state === 'complete' && recorded.data.missing_count === 0) && <span>
+                  {t(recorded.data.state === 'expired' ? 'source.restore.expiredAt' : 'source.restore.recoverableUntil')} <time dateTime={recorded.data.expires_at}>{formatExact(recorded.data.expires_at, format)}</time>
+                </span>}
               </p>
             )}
             {!writes && <InlineAlert tone="warning">{workspaceDenial(t, WRITE_PERMISSION, environment)}</InlineAlert>}
@@ -231,6 +233,7 @@ function PlanBody({ plan, overwrite, chooseOverwrite }: {
           {plan.form.whole_unavailable !== 'touched_restore' && <> — {t('source.restore.fallback', { reason: wholeUnavailableReason(t, plan.form.whole_unavailable) })}</>}
         </> : t('source.restore.whole')}
       </p>
+      <p className="text-xs text-text-muted">{t('source.restore.gitignore')}</p>
       {plan.form.kind === 'touched_files' && <InlineAlert tone="warning">{t('source.restore.toolCoverage')}</InlineAlert>}
       {plan.writers.map((writer, index) => (
         <InlineAlert key={writer.thread?.id ?? `hidden-${index}`} tone={writer.active ? 'warning' : 'info'}>

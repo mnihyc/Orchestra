@@ -249,7 +249,7 @@ The existing `shell/Page` `PageHeader` remains the shared page heading,
 with optional mark and compact actions aligned to its first title line. Word `Badge`, labelled
 `StatusDot` and `StateChip` all use the same `StatusChip`; numeric badges remain small counters.
 
-`SectionNav` gives real router links the same selected and focused treatment in every settings scope.
+`SectionNav` gives real router links the same selected and focused treatment in every settings scope, as a list beside the content or a strip above it, never a dropdown. `SecretField` shows a saved secret as dots with "Set" and Replace.
 Supply `current` and `items` with their `link`, `label`, optional `icon` and grouping. The list stays
 vertical when its page container has room, and keeps its choices inside that page on narrow screens.
 Global navigation is never replaced by page sections. Never use an overflow menu.
