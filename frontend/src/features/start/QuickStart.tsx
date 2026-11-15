@@ -17,7 +17,7 @@ import type { Project, Topic } from '@/generated/api-types';
 import { canCreateIn } from '@/lib/permissions';
 import { isComposing } from '@/lib/shortcuts';
 import { Button } from '@/ui/Button';
-import { Checkbox } from '@/ui/Checkbox';
+import { EnvironmentAccessChoice } from '@/features/access/GeneralAccess';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Skeleton } from '@/ui/Skeleton';
@@ -151,7 +151,7 @@ function Composer({ node }: { node: Topic | Project }) {
       {options !== null && resolved !== null && <NewAudienceSummary place={node.kind === 'project' ? t('places.project.newTopic') : place.name}
         summary={resolved.environment?.environment.placement === 'connected' ? options.access.connected : options.access.managed}
          />}
-      {options !== null && resolved !== null && viewers.value !== undefined && <Checkbox label={t('access.general.letIn')}
+      {options !== null && resolved !== null && viewers.value !== undefined && <EnvironmentAccessChoice
         checked={viewers.value} onCheckedChange={viewers.onChange} disabled={make.pending}
         tooltip={make.pending ? make.step===null?t('start.why.checking'):t(`start.making.${make.step}`) : viewers.tooltip} />}
       <CreationAgentAccess access={agentAccess} disabled={make.pending} />
