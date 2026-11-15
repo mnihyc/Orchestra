@@ -14,8 +14,8 @@ import { show } from './support';
 const calls = vi.hoisted(() => ({ read: vi.fn<(target: FactTarget) => Promise<ResourceImpact>>(), disable: vi.fn(), remove: vi.fn(), updateModel:vi.fn(),removeModel:vi.fn(), switch: vi.fn() }));
 vi.mock('@/api/resource-impact', () => ({ resourceImpactQuery: (target: FactTarget) => ({ queryKey: ['pause-dialog', target], queryFn: () => calls.read(target), retry: false }) }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<typeof ResourceApi>(), disableProvider: calls.disable, deleteProvider: calls.remove,updateModel:calls.updateModel,deleteModel:calls.removeModel }));
-vi.mock('@/features/change/target', () => ({ openChange: calls.switch }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/change/target', async (loadOriginal) => ({ ...await loadOriginal<object>(), openChange: calls.switch }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const provider = planProvider();
 const model:ProviderModel={id:'model',model_name:'route-model',display_name:'Research model',enabled:true,source:'manual',groups:[],parameters:{},token_estimate:{...tokenDensity.unmeasured,measured:false}};

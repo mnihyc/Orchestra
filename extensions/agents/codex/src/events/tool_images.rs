@@ -32,6 +32,7 @@ pub(super) fn raw_result(
     result: &Json,
     ctx: &Context<'_>,
     blob: &mut Option<BlobRef>,
+    limit: u64,
 ) -> Option<OutputRef> {
     if !result
         .get("content")
@@ -41,15 +42,22 @@ pub(super) fn raw_result(
         return None;
     }
     let raw = result.to_string();
-    let retained = ctx.outputs.put(raw.as_bytes()).ok()?;
-    let hash = retained.hash;
-    *blob = Some(retained);
-    Some(OutputRef {
+    let total = i64::try_from(raw.len()).ok()?;
+    let kept = orch_agent_contract::output::tail(&raw, limit);
+    let retained = ctx.outputs.put(kept.as_bytes()).ok()?;
+    let output = OutputRef {
+        inline_limit: None,
         inline: String::new(),
-        total_len: i64::try_from(raw.len()).unwrap_or(i64::MAX),
+        total_len: total,
         truncated: true,
-        blob: Some(hash),
-    })
+        blob: Some(retained.hash),
+        retained: Some(orch_api_contract::threads::OutputRange {
+            offset: total - retained.size,
+            len: retained.size,
+        }),
+    };
+    *blob = Some(retained);
+    Some(output)
 }
 
 pub(super) fn returned_images(

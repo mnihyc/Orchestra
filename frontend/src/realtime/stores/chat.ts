@@ -20,6 +20,8 @@ import type { Chat, ChatDraft, ChatMentionName, ChatMessage, ChatMessageListRepl
 import { feeds, socket, useUserFeed } from '@/realtime/live';
 import { onUserEvent } from '@/realtime/stores/user';
 import { type DurableFeed, followFeed, loadWithRetries } from '@/realtime/sync';
+import { useKeptModel } from '@/features/workbench/KeptModels';
+import { useViewReadsReady } from '@/features/workbench/KeptQueries';
 
 // ---------------------------------------------------------------- the numbers of the protocol
 
@@ -550,8 +552,10 @@ if (typeof document !== 'undefined') {
  * `watching` is false while the chat is in a tab nobody has in front: it is then not followed at all.
  */
 export function useChatFeed(chatId: string | null, watching = true): void {
+  useKeptModel(chatId, retainChat);
+  const ready = useViewReadsReady();
   useEffect(() => {
-    if (chatId === null || !watching) return;
+    if (chatId === null || !watching || !ready) return;
     const release = feeds.use(
       chatFeedKey(chatId),
       () => followFeed(socket, chatFeed(chatId)),
@@ -566,7 +570,12 @@ export function useChatFeed(chatId: string | null, watching = true): void {
       socket.visible(chatFeedKey(chatId), left > 0);
       release();
     };
-  }, [chatId, watching]);
+  }, [chatId, watching, ready]);
+}
+
+/** A kept conversation owns rows while its hidden feed is stopped. */
+export function retainChat(chatId: string): () => void {
+  return feeds.hold(chatFeedKey(chatId), () => chatWriter.evict(chatId));
 }
 
 /** Loads a chat again from nothing: after a failure, and to go back to the newest messages from a window of the past. */

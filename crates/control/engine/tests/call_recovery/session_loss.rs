@@ -75,6 +75,7 @@ async fn a_lost_session_without_a_recorded_machine_does_not_borrow_the_environme
         .say(
             thread,
             Event::SessionLost(SessionLost {
+                uncertain: false,
                 reason: "The original process ended with no surviving source fact".into(),
             }),
         )
@@ -147,6 +148,7 @@ async fn lost(world: &World, thread: Id, turn: Id) {
         .say(
             thread,
             Event::SessionLost(SessionLost {
+                uncertain: false,
                 reason: "The scripted native process ended".to_owned(),
             }),
         )
