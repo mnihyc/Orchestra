@@ -671,6 +671,7 @@ pub async fn create(
     let hash = Hash::of(
         &serde_json::to_vec(request).map_err(|error| HostError::Internal(error.to_string()))?,
     );
+    let mut source_pin = None;
     let mut journal = if journal_path.exists() {
         let journal: Journal = serde_json::from_slice(&read_bounded(&journal_path, READ_BOUND)?)
             .map_err(|_| {
@@ -720,7 +721,27 @@ pub async fn create(
                         "From now requires a complete current file state".to_owned(),
                     )
                 })?;
-                let root = states.store().load(snapshot, now)?.0;
+                let captured = {
+                    let files = files.clone();
+                    let store = states.store().clone();
+                    let source = source.clone();
+                    let environment = request.environment_id;
+                    let operation = request.job_id;
+                    crate::error::blocking(move || {
+                        FileStates::new(store).capture_source(
+                            &files,
+                            environment,
+                            snapshot,
+                            &source,
+                            generation,
+                            now,
+                            operation,
+                        )
+                    })
+                    .await?
+                };
+                source_pin = Some(captured);
+                let root = states.store().load_for_recovery(snapshot)?.0;
                 if root.directory != request.choice.repository_dir {
                     return Err(HostError::Changed(
                         "the current files belong to another repository directory".to_owned(),
@@ -881,6 +902,7 @@ pub async fn create(
             save(&journal_path, &journal)?;
         }
     }
+    let _source_pin = source_pin;
     if !journal.populated && !journal.installed {
         let tree = text(
             &git(
@@ -1583,7 +1605,7 @@ mod tests {
         let config_before = std::fs::read(original.join(".git/config")).unwrap();
         let index = Index::new(
             orch_link_contract::commands::IndexMode::Full,
-            Limits::default().index_max_entries,
+            orch_link_contract::commands::WorkspaceLimits::default().index_entries,
         );
         states.request(
             &files.parse("repo").unwrap(),
@@ -1600,6 +1622,7 @@ mod tests {
                     environment_id: environment,
                     snapshot_id: snapshot,
                     directory: "repo".to_owned(),
+                    wait_for_indexing: true,
                     kind: RecordKind::Turn,
                     record_days: 7,
                     max_bytes: crate::file_states::DEFAULT_RECORD_MAX_BYTES,

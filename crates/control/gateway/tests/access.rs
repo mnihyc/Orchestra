@@ -244,7 +244,7 @@ async fn a_token_is_good_once_and_only_while_it_lasts_and_a_bad_request_does_not
     let bad = serde_json::json!({
         "token": token, "csr_pem": "not a request", "name": "alice-laptop",
         "platform": { "os": "linux", "arch": "x86_64" }, "connector_version": "0.1.0",
-        "protocol_versions": [1], "roles": ["agent"]
+        "protocol_versions": [orch_link_contract::version::PROTOCOL_VERSION], "roles": ["agent"]
     });
     let (status, _) = post_json(
         world.gateway.pinned,
