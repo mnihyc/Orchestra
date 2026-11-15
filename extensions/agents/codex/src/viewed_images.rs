@@ -231,10 +231,15 @@ fn retain_output(payload: &Json, outputs: &OutputStore) -> Saved {
 pub(crate) fn retain_original(payload: &Json, outputs: &OutputStore) -> Option<OutputRef> {
     let original = payload.to_string();
     let raw = outputs.put(original.as_bytes()).ok().map(|blob| OutputRef {
+        inline_limit: None,
         inline: String::new(),
         total_len: i64::try_from(original.len()).unwrap_or(i64::MAX),
         truncated: true,
         blob: Some(blob.hash),
+        retained: Some(orch_api_contract::threads::OutputRange {
+            offset: 0,
+            len: blob.size,
+        }),
     });
     drop(original);
     raw
