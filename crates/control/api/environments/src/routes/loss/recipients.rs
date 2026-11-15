@@ -61,6 +61,16 @@ pub(super) struct Prepared {
 /// Native saved-plan polymorphism, not an HTTP endpoint or permission selector.
 fn subjects(record: &PreflightRow) -> ApiResult<Vec<ObjectRef>> {
     Ok(match record.kind.as_str() {
+        "resource_stop" => vec![
+            serde_json::from_value(
+                record
+                    .plan
+                    .get("object")
+                    .cloned()
+                    .ok_or_else(|| ApiError::internal("the resource review has no subject"))?,
+            )
+            .map_err(ApiError::internal)?,
+        ],
         "loss" => {
             vec![orch_engine::loss::recipient_subject(&record.plan).map_err(ApiError::engine)?]
         }

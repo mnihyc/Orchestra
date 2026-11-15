@@ -21,6 +21,7 @@ use orch_api_contract::common::FieldFault;
 
 use orch_api_contract::common::PROBLEM_JSON;
 
+use orch_api_contract::common::DatabaseWait;
 use orch_api_contract::common::Problem;
 
 use orch_api_contract::common::REQUEST_ID_HEADER;
@@ -70,11 +71,25 @@ impl ApiError {
         .into()
     }
 
+    /// Retains a typed native timeout through wrappers; every other cause stays generic.
+    #[must_use]
+    pub fn from_cause(cause: impl std::error::Error + 'static) -> Self {
+        let wait = database_wait(&cause);
+        let mut error = Self::internal(cause);
+        error.problem.database_wait = wait;
+        error
+    }
+
     /// A failure of the engine. A commit refused because what it decided under changed meanwhile is the
     /// caller's to send again, as any write's is (`conflict.stale_revision`); anything else is a failure
     /// nobody foresaw. A database fault of another kind stays the engine's: it is not the request's fault.
     #[must_use]
     pub fn engine(error: orch_engine::EngineError) -> Self {
+        if let Some(wait) = database_wait(&error) {
+            let mut answer = Self::internal(error);
+            answer.problem.database_wait = Some(wait);
+            return answer;
+        }
         match error {
             orch_engine::EngineError::BackgroundRunning(_thread) => Self::new(
                 ErrorCode::PlanBlocked,
@@ -117,7 +132,7 @@ impl ApiError {
                     missing: None,
                 }],
             ),
-            other => Self::internal(other),
+            other => Self::from_cause(other),
         }
     }
 
@@ -182,9 +197,32 @@ impl ApiError {
     /// The same native problem and retry hint used by an HTTP reply, for a bounded opening member.
     pub fn into_parts_for(mut self, request_id: &str) -> (Problem, Option<u64>) {
         self.problem.request_id = request_id.to_owned();
+        if let Some(wait) = &mut self.problem.database_wait
+            && wait.occurrence_id.is_empty()
+        {
+            wait.occurrence_id = request_id.to_owned();
+        }
         words::prepare(&mut self.problem);
         (*self.problem, self.retry_after)
     }
+}
+
+fn database_wait(cause: &(dyn std::error::Error + 'static)) -> Option<DatabaseWait> {
+    let mut current = Some(cause);
+    while let Some(error) = current {
+        if let Some(timeout) = error.downcast_ref::<orch_db::pool::DatabaseTimeout>() {
+            return Some(DatabaseWait {
+                phase: timeout.phase,
+                applied_limit_ms: timeout
+                    .applied_limit
+                    .and_then(|limit| u64::try_from(limit.as_millis()).ok()),
+                service: "api".to_owned(),
+                occurrence_id: String::new(),
+            });
+        }
+        current = error.source();
+    }
+    None
 }
 
 impl From<Problem> for ApiError {
@@ -232,7 +270,7 @@ impl From<DbError> for ApiError {
                     )
                     .into()
             }
-            other => Self::internal(other),
+            other => Self::from_cause(other),
         }
     }
 }

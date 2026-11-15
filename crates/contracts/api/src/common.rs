@@ -526,6 +526,7 @@ error_codes! {
     ImportNothing = 409, "import.nothing", "There is nothing in it that you may bring here";
     ImportInvalid = 422, "import.invalid", "The source is not a package or files that can be imported";
     ImportUndone = 409, "import.undone", "The import was taken back already, or is being";
+    SummaryNothingNew = 409, "summary.nothing_new", "There is nothing new to summarize";
     Gone = 410, "gone", "It expired or was used";
     DocsTooLarge = 413, "docs.too_large", "The document would be too large";
     ShareTooLarge = 413, "share.too_large", "The copy would be too large";
@@ -555,6 +556,31 @@ impl std::fmt::Display for ErrorCode {
     }
 }
 
+/// The native database phase whose own deadline expired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseWaitPhase {
+    /// Waiting for a connection from the pool.
+    Acquire,
+    /// PostgreSQL cancelled a statement because its statement deadline expired.
+    Statement,
+    /// PostgreSQL ended a transaction left idle past its deadline.
+    IdleTransaction,
+}
+
+/// Safe facts captured from a known native timeout, belonging to this failed request alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DatabaseWait {
+    /// The native phase, never inferred from a generic error or cancellation code.
+    pub phase: DatabaseWaitPhase,
+    /// The applied deadline in milliseconds; null when the original pool profile was not reported.
+    pub applied_limit_ms: Option<u64>,
+    /// The answering service; currently `api`, without a database address or configuration value.
+    pub service: String,
+    /// The request identifier of this occurrence; not a resource or database identifier.
+    pub occurrence_id: String,
+}
+
 /// An error, as it is answered: `application/problem+json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, thiserror::Error)]
 #[error("{code}: {detail}")]
@@ -572,6 +598,9 @@ pub struct Problem {
     pub detail: String,
     /// The request this answers, as in the `X-Request-Id` header.
     pub request_id: String,
+    /// The request's own known native database timeout, absent for every other failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database_wait: Option<DatabaseWait>,
     /// What the code adds, member by member.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Json>,
@@ -589,6 +618,7 @@ impl Problem {
             status: code.status(),
             detail: detail.into(),
             request_id: String::new(),
+            database_wait: None,
             extra: serde_json::Map::new(),
         }
     }
