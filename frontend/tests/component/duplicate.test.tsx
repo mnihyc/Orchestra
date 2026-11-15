@@ -134,6 +134,8 @@ it('a lost answer retries the same act key and never borrows source configuratio
 });
 it('a changed deliberate destination/name gets a different act identity', async () => {
   calls.copy.mockRejectedValue(new NetworkError('failed')); const user = userEvent.setup(); show(<DuplicateDialog target={target} onClose={() => undefined} />);
+  const name = screen.getByRole('textbox', { name: new RegExp(i18n.t('duplicate.name')) });
+  expect(name.compareDocumentPosition(screen.getByRole('combobox', { name: i18n.t('duplicate.destination') })) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   await chooseOther(user); await user.click(screen.getByRole('button', { name: i18n.t('duplicate.now') }));
   await screen.findByRole('alert'); await user.type(screen.getByRole('textbox', { name: new RegExp(i18n.t('duplicate.name')) }), 'Separate provider');
   await user.click(screen.getByRole('button', { name: i18n.t('duplicate.now') }));

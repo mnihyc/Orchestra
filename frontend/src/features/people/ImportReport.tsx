@@ -121,7 +121,7 @@ export function ImportReport({ id, onOpen, inspectOnly = false }: { id: string; 
     {!inspectOnly && undoing && <ImportUndo id={id} onClose={() => setUndoing(false)} onStarted={(job) => {
       watchImport(job, item.node?.id ?? null, false, true, id);
       void cache.invalidateQueries({ queryKey: importKeys.one(id), exact: true });
-      void cache.invalidateQueries({ queryKey: importKeys.mine(), exact: true });
+      void cache.invalidateQueries({ queryKey: importKeys.mine() });
     }} />}
   </div>;
 }

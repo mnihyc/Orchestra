@@ -9,6 +9,7 @@
  * A cap that is made carries the key of the act, so that a second attempt after a lost answer makes nothing
  * twice; a change names the revision the person saw.
  */
+import { readAllPages } from '@/api/collection';
 import { scheduledReads, suppliedRead } from '@/api/readScheduler';
 import { ADMIN_QUERY } from '@/api/queryAuthority';
 import { CancelledError, infiniteQueryOptions, type QueryClient, queryOptions } from '@tanstack/react-query';
@@ -344,7 +345,7 @@ export function refreshRates(queryClient: QueryClient): Promise<void> {
 export const orgGroupsQuery = (orgId: string) =>
   queryOptions({
     queryKey: ['org-groups', orgId] as const,
-    queryFn: ({ signal }): Promise<Group[]> => ok(api.GET('/orgs/{id}/groups', { params: { path: { id: orgId } }, signal })),
+    queryFn: ({ signal }): Promise<Group[]> => readAllPages((cursor) => ok(api.GET('/orgs/{id}/groups', { params: { path: { id: orgId }, query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
     staleTime: 60_000,
   });
 

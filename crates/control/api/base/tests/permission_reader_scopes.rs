@@ -151,6 +151,7 @@ async fn scoped_manage_inspects_private_node_and_document_without_granting_conte
             .call(PermissionPeopleList, &[&object, &id])
             .token(&token)
             .query(&PermissionPeopleListQuery {
+                q: None,
                 holder: "admins".into(),
                 limit: None,
                 cursor: None,

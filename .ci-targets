@@ -1,0 +1,1 @@
+test -p orch-api-core --test credential_collections --test provider_harness --test personal_notification_scope
