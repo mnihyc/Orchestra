@@ -1,0 +1,6 @@
+# place the third trial's new reds: the same checks on 8bdd6bd65 (the named assembly with the large-directory lane's last items only, without the where lane)
+test -p orch-api-contract --lib
+test -p orch-envhost --lib
+test -p orch-engine --lib -- history_pages::
+test -p orch-api-core --test threads_drive
+test -p orch-engine --test background --test background_wake --test failures --test foreign_machine_streams --test limits --test provider_sign_in --test shared_write --test updates
