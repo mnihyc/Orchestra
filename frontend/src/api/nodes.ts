@@ -13,6 +13,7 @@
  * makes nothing twice. A change to something with a revision carries the revision the person saw, and
  * a stale one comes back as `conflict.stale_revision`, which the screen shows and never retries alone.
  */
+import { collectionQuery, readAllPages } from '@/api/collection';
 import { CancelledError, infiniteQueryOptions, queryOptions, type QueryClient, type QueryKey } from '@tanstack/react-query';
 
 import { scheduledReads, suppliedRead } from '@/api/readScheduler';
@@ -34,6 +35,7 @@ import type {
   DeletedNodePage,
   HiddenItem,
   Node,
+  NodeKind,
   NodeArchivePlan,
   NodeArchiveResult,
   NodeDeleteBody,
@@ -170,22 +172,15 @@ export function listedPage<T>(page: { items: readonly unknown[]; next_cursor?: s
 }
 
 /** What lies directly in an org: the orgs inside it and its projects, in the order they were made. */
-export const childrenQuery = (id: string, archived: ArchivedFilter = 'exclude', participating = false) =>
-  infiniteQueryOptions({
-    queryKey: [...childrenKey(id), archived, participating] as const,
-    ...suppliedRead([...childrenKey(id), archived, participating]),
-    initialPageParam: null as string | null,
-    queryFn: async ({ pageParam, signal }): Promise<NodePage> =>
-      listedPage<Node>(
-        await ok(
-          api.GET('/nodes/{id}/children', {
-            params: { path: { id }, query: { archived, limit: PAGE_SIZE, ...(participating ? { participating: true } : {}), ...(pageParam === null ? {} : { cursor: pageParam }) } },
-            signal,
-          }),
-        ),
-      ),
-    getNextPageParam: (last) => last.next_cursor,
+export const childrenQuery = (id: string, archived: ArchivedFilter = 'exclude', participating = false, q = '', kind?: NodeKind) => {
+  const key = [...childrenKey(id), archived, participating, ...(q.trim() !== '' || kind !== undefined ? [{ q: q.trim(), kind }] : [])] as const;
+  return infiniteQueryOptions({
+    queryKey: key, ...suppliedRead(key), initialPageParam: null as string | null,
+    queryFn: async ({ pageParam, signal }): Promise<NodePage> => listedPage<Node>(await ok(api.GET('/nodes/{id}/children', {
+      params: { path: { id }, query: { archived, limit: PAGE_SIZE, ...(kind === undefined ? {} : { kind }), ...(q.trim() === '' ? {} : { q: q.trim() }), ...(participating ? { participating: true } : {}), ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal,
+    }))), getNextPageParam: (last) => last.next_cursor,
   });
+};
 
 /** What the topic list of a project is asked with; everything but the project is optional. */
 export interface TopicFilters {
@@ -274,7 +269,7 @@ export function setNodeTags(id: string, tagIds: string[], revision: number): Pro
 export const tagsQuery = (id: string) =>
   queryOptions({
     queryKey: tagsKey(id),
-    queryFn: ({ signal }): Promise<Tag[]> => ok(api.GET('/nodes/{id}/tags', { params: { path: { id } }, signal })),
+    queryFn: ({ signal }): Promise<Tag[]> => readAllPages((cursor) => ok(api.GET('/nodes/{id}/tags', { params: { path: { id }, query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
 
 /** What was deleted directly under a node and is not purged yet. */
@@ -485,3 +480,10 @@ export function setSubscription(id: string, level: SubscriptionLevel | null): Pr
     ? ok(api.DELETE('/nodes/{id}/subscription', { params: { path: { id } } }))
     : ok(api.PUT('/nodes/{id}/subscription', { params: { path: { id } }, body: { level } }));
 }
+
+export const tagsPageQuery = (id: string, q: string, picker = false) => {
+  const { userId, readerVersion } = client.session.getState();
+  const key = picker ? [...tagsKey(id), 'picker', userId, readerVersion] : tagsKey(id);
+  const source = collectionQuery(key, q, (query, signal) => ok(api.GET('/nodes/{id}/tags', { params: { path: { id }, query: { ...query, ...(picker ? { picker: true } : {}) } }, signal })));
+  return { ...source, ...(picker ? { staleTime: q === '' ? 0 : 15_000, retry: false, refetchOnWindowFocus: false } : {}) };
+};

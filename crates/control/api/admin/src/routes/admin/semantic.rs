@@ -118,7 +118,11 @@ fn org_ref(id: orch_types::Id, name: String) -> NodeRef {
     }
 }
 
-async fn overview(ctx: Ctx, (): (), (): ()) -> ApiResult<SemanticSearchOverview> {
+async fn overview(
+    ctx: Ctx,
+    query: orch_api_contract::common::CollectionQuery,
+    (): (),
+) -> ApiResult<SemanticSearchOverview> {
     admin_of(&ctx)?;
     let engine = &ctx.app.engine;
     let ready = engine
@@ -129,12 +133,22 @@ async fn overview(ctx: Ctx, (): (), (): ()) -> ApiResult<SemanticSearchOverview>
         .semantic_interval()
         .await
         .map_err(ApiError::internal)?;
-    let mut orgs = Vec::new();
-    for (id, name) in engine
+    let roots = engine
         .semantic_orgs_shown()
         .await
-        .map_err(ApiError::internal)?
-    {
+        .map_err(ApiError::internal)?;
+    let source = format!("admin-semantic:{}", ctx.user()?.id());
+    // Eligibility is native; only a matched page asks the indexer for its detailed live state.
+    let page = orch_api_base::collection::snapshot(
+        &query,
+        &source,
+        roots,
+        |(id, name)| (name.to_lowercase(), *id),
+        |(_, name)| name.clone(),
+        false,
+    )?;
+    let mut orgs = Vec::new();
+    for (id, name) in page.items {
         let state = engine
             .semantic_state(id)
             .await
@@ -146,6 +160,7 @@ async fn overview(ctx: Ctx, (): (), (): ()) -> ApiResult<SemanticSearchOverview>
         unavailable_reason: ready.err(),
         interval_secs,
         orgs,
+        orgs_next_cursor: page.next_cursor,
     })
 }
 

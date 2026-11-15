@@ -6,13 +6,16 @@
  * last did anything. Narrowed to one pool or one host from the address. A unit that is behind is
  * updated from its own page, which its name opens.
  */
-import { useQuery } from '@tanstack/react-query';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { Pagination } from '@/ui/Pagination';
+import { Input } from '@/ui/Input';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Boxes } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { choiceOption } from '@/i18n/choices';
 
-import { hostsQuery, runtimesQuery } from '@/api/admin';
+import { hostsQuery, runtimesPageQuery } from '@/api/admin';
 import type { SectionProps } from '@/features/admin/sections';
 import type { Runtime } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
@@ -67,9 +70,11 @@ export function Runtimes({ search, onSearch }: SectionProps) {
   const pool: Pool = search.kind ?? 'all';
   const host = search.host ?? ALL_HOSTS;
   const hosts = useQuery(hostsQuery);
-  const runtimes = useQuery(runtimesQuery({ host: host === ALL_HOSTS ? '' : host, kind: pool === 'all' ? '' : pool }));
+  const searchText = useCollectionSearch('admin-runtimes:' + host + ':' + pool);
+  const runtimes = useInfiniteQuery(runtimesPageQuery({ host: host === ALL_HOSTS ? '' : host, kind: pool === 'all' ? '' : pool }, searchText.q));
+  const rows = runtimes.data?.pages.flatMap((page) => page.items) ?? [];
   const hostName = (id: string) => hosts.data?.find((one) => one.id === id)?.name ?? '';
-  const behind = (runtimes.data ?? []).filter((one) => one.updates > 0).length;
+  const behind = rows.filter((one) => one.updates > 0).length;
 
   const columns: Column<Runtime>[] = [
     {
@@ -124,7 +129,7 @@ export function Runtimes({ search, onSearch }: SectionProps) {
 
   return (
     <div className="flex flex-col gap-4">
-      <FilterBar>
+      <FilterBar search={<Input type="search" hideLabel label={t("ui.collection.find", { name: t("admin.sections.runtimes.title") })} placeholder={t("ui.combobox.search")} value={searchText.text} onChange={(event) => searchText.onText(event.target.value)} />}>
         <SegmentedControl
           label={t('admin.runtimes.pool')}
           value={pool}
@@ -146,16 +151,17 @@ export function Runtimes({ search, onSearch }: SectionProps) {
 
       {runtimes.isPending ? (
         <SkeletonRows read={runtimes} rows={4} />
-      ) : runtimes.isError ? (
+      ) : runtimes.isError && rows.length === 0 ? (
         <ErrorState error={runtimes.error} retrying={runtimes.isRefetching} onRetry={() => void runtimes.refetch()} />
-      ) : runtimes.data.length === 0 ? (
+      ) : rows.length === 0 ? (
         <EmptyState compact icon={<Boxes aria-hidden />} title={t('admin.runtimes.none')} />
       ) : (
         <>
-          <Table label={t('admin.sections.runtimes.title')} columns={columns} rows={runtimes.data} rowKey={(runtime) => runtime.id} />
-          {behind > 0 && <p className="text-sm text-text-muted">{t('admin.runtimes.updateNote', { count: behind, number: formatNumber(behind, locale) })}</p>}
+          <Table label={t('admin.sections.runtimes.title')} columns={columns} rows={rows} virtual rowKey={(runtime) => runtime.id} />
+          {behind > 0 && <p className="text-sm text-text-muted">{t('admin.runtimes.updateNote', { count: behind, number: runtimes.hasNextPage ? t("ui.collection.atLeast", { number: formatNumber(behind, locale) }) : formatNumber(behind, locale) })}</p>}
         </>
       )}
+      <Pagination hasMore={runtimes.hasNextPage} loading={runtimes.isFetchingNextPage} error={runtimes.isFetchNextPageError ? runtimes.error : undefined} onMore={() => void runtimes.fetchNextPage()} />
     </div>
   );
 }

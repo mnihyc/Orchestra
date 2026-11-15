@@ -1274,3 +1274,99 @@ async fn related_items_page_on_with_a_cursor_that_holds_nothing_hidden() {
         assert!(owner_names.iter().all(|name| !text.contains(name)));
     }
 }
+
+#[tokio::test]
+async fn reference_names_are_searched_before_paging_and_a_written_label_never_reveals_a_private_name()
+ {
+    let s = Scene::new().await;
+    let node = s.tree.topic.base.id;
+    let target = document(&s, node, "Searched target", "", false).await;
+    let mut sources = Vec::new();
+    for index in 0..13 {
+        let name = format!("Source {index:02}");
+        let source = document(
+            &s,
+            node,
+            &name,
+            &format!("[Plan](/documents/{target})"),
+            false,
+        )
+        .await;
+        sources.push((source, name));
+    }
+    let mut first_query = ask(LinkDirection::In);
+    first_query.limit = Some(1);
+    let first = list(&s, target, &s.cai.token, &first_query).await;
+    let late = sources
+        .iter()
+        .find(|(id, _)| *id != first.items[0].id)
+        .unwrap();
+    let mut query = form_urlencoded::Serializer::new(String::new());
+    query
+        .append_pair("direction", "in")
+        .append_pair("q", &late.1)
+        .append_pair("limit", "1");
+    let found = s
+        .rig
+        .world
+        .app
+        .call(DocumentReferencesList, &[&target])
+        .token(&s.cai.token)
+        .raw_query(&query.finish())
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        found.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [late.0]
+    );
+    let hidden = document(&s, node, "Private title sentinel", "", true).await;
+    let public = document(&s, node, "Public target", "", false).await;
+    let from = document(
+        &s,
+        node,
+        "Outgoing",
+        &format!("[Written clue](/documents/{hidden}) and [Public alias](/documents/{public})"),
+        false,
+    )
+    .await;
+    let written = s
+        .rig
+        .world
+        .app
+        .call(DocumentReferencesList, &[&from])
+        .token(&s.cai.token)
+        .raw_query("direction=out&q=Written%20clue&limit=1")
+        .send()
+        .await
+        .ok();
+    assert_eq!(written.items.len(), 1);
+    assert_eq!(written.items[0].id, hidden);
+    assert!(written.items[0].name.is_none());
+    assert!(!written.items[0].readable);
+    let hidden_name = s
+        .rig
+        .world
+        .app
+        .call(DocumentReferencesList, &[&from])
+        .token(&s.cai.token)
+        .raw_query("direction=out&q=Private%20title%20sentinel&limit=1")
+        .send()
+        .await
+        .ok();
+    assert!(hidden_name.items.is_empty());
+    let named = s
+        .rig
+        .world
+        .app
+        .call(DocumentReferencesList, &[&from])
+        .token(&s.cai.token)
+        .raw_query("direction=out&q=Public%20target&limit=1")
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        named.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [public]
+    );
+}

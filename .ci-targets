@@ -1,0 +1,12 @@
+fmt
+clippy
+contracts
+test -p orch-api-contract --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test users --test account_native_scopes
+test -p orch-api-core --test search_names --test search_native_scopes --test people_reactions --test personal_state_scope
+test -p orch-api-core --test holder_model --test holder_search_native_scopes --test moves_tags --test directory_native_scopes --test credential_collections
+web typecheck
+web lint
+web test -- tests/component/holder-picker.test.tsx tests/component/holder-place-locator.test.tsx tests/component/access-people.test.tsx tests/component/access-view-as.test.tsx tests/component/admin-system-defaults.test.tsx tests/component/access-compact.test.tsx tests/component/reader-copy.test.tsx tests/component/share-review.test.tsx tests/component/uniform-places.test.tsx tests/component/starting-files-environment.test.tsx tests/component/search-org-requests.test.tsx tests/component/forward-receipt.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

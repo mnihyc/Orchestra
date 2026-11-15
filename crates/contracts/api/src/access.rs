@@ -280,6 +280,18 @@ pub struct HolderSearchQuery {
     /// The place control lists visible places of its tree, or matching addresses in any tree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_places: Option<bool>,
+    /// Picker mode opens with private recent people and groups; name filtering starts with one character.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picker: Option<bool>,
+    /// Comma-separated holder kinds, filtered before paging; absent means every kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<String>,
+    /// Entries per page; any positive u32, fifty by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Continue this actor, source place, tree, kinds and literal locator search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// Accurate search results; an empty list says that nothing visible is called that.
@@ -287,6 +299,9 @@ pub struct HolderSearchQuery {
 pub struct HolderSearchReply {
     /// The page's tree first, every result with its whole place.
     pub items: Vec<HolderCandidate>,
+    /// Native continuation; absent at the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// How an entry came to be on a page.
@@ -1415,6 +1430,9 @@ pub enum HistoryKind {
 /// The roles held in a place and above it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NodeRoleListReply {
+    /// More assignments held here; owners and inherited policy facts remain complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     /// The Owners row of this place, in its stored order. Owners hold every role here;
     /// they are not fabricated role assignments and have no role-expiry controls.
     pub owners: Vec<Holder>,
@@ -1494,6 +1512,9 @@ pub struct PermissionPeopleListReply {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionPeopleListQuery {
+    /// Visible person-name or username words, before paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// Which holder to list. The forms are `role:<place>:<role>` with the place a node identifier
     /// or `system`; `group:<id>`; `node:<id>`, for those with a role in a
     /// place named in a Use row; and `admins`, for the admins of the page's place. Only holders
@@ -1505,6 +1526,16 @@ pub struct PermissionPeopleListQuery {
     /// The `next_cursor` of the page before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+}
+impl PermissionPeopleListQuery {
+    /// Shared name search and bound continuation.
+    pub fn collection(&self) -> crate::common::CollectionQuery {
+        crate::common::CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
 }
 
 /// The history of a thing, newest first.
@@ -1846,7 +1877,7 @@ crate::endpoints! {
     HolderSearch: GET "/holders/search", User, query HolderSearchQuery, none, json HolderSearchReply, 200,
         operation Op::facets(crate::access_sources::HOLDER_SEARCH_FACETS);
     /// Lists who holds which role in a place and in the places above it.
-    NodeRoleList: GET "/nodes/{id}/roles", Permission("node.view"), none, none, json NodeRoleListReply, 200;
+    NodeRoleList: GET "/nodes/{id}/roles", Permission("node.view"), query crate::common::CollectionQuery, none, json NodeRoleListReply, 200;
     /// Gives a role in a place, up to the role the caller holds there.
     NodeRoleCreate: POST "/nodes/{id}/roles", Rule("holding that role there or a higher one, and being an owner of the place or a manager of its page (access.manage), or the place letting holders share"), none, json RoleCreateBody, json RoleWriteResponse, 200,
         operation Op::receipt(&Op::facets(ROLE_WRITE_FACETS));

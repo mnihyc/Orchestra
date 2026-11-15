@@ -1,4 +1,4 @@
-/** Share stays on its access list until typing; ownership is native metadata, never a Viewer inference. */
+/** Share keeps its access list while its picker opens current choices; ownership is native metadata, never a Viewer inference. */
 import { infiniteQueryOptions } from '@tanstack/react-query';
 import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -29,6 +29,7 @@ const changes: Changes = { busy: false, doing: null, error: null, stale: null, f
 vi.mock('@/api/access', async (load) => ({ ...await load<typeof AccessApi>(),
   permissionsQuery: { queryKey: ['people-permissions'], queryFn: () => Promise.resolve(CATALOGUE.reply) },
   defaultsQuery: (id: string) => ({ queryKey: ['people-defaults', id], queryFn: () => Promise.resolve(pageFor('org')) }),
+  rolesPageQuery:(id:string,q:string)=>({queryKey:['fixture-role-pages',id,q],initialPageParam:null,queryFn:()=>Promise.resolve({...{owners:[{kind:'user' as const,user:ADA},group],own:[],above:[],can_give:[]},items:[],next_cursor:null}),getNextPageParam:()=>null}),
   rolesQuery: (id: string) => ({ queryKey: ['people-roles', id], queryFn: (): Promise<NodeRoleListReply> => Promise.resolve({ owners: [{ kind: 'user', user: ADA }, group], own: [], above: [], can_give: [] }) }),
   waitingRequestsQuery: (id: string) => ({ queryKey: ['people-waiting', id], queryFn: () => Promise.resolve([]) }),
   peopleQuery: (target: AccessApi.AccessTarget, param: string) => infiniteQueryOptions({
@@ -65,7 +66,7 @@ afterEach(async () => {
 });
 
 for (const [locale, theme] of modes) {
-  it(`opens Share on its owners and access list, searching only while typing in ${locale}/${theme}`, async () => {
+  it(`keeps Share on its owners and access list while opening native choices before typing in ${locale}/${theme}`, async () => {
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme }); document.documentElement.dataset.theme = theme;
     const page = pageFor();
     const target = { kind: 'thread', id: page.object.id, name: 'Release' } as const;
@@ -75,18 +76,16 @@ for (const [locale, theme] of modes) {
     await waitFor(() => expect(field).toHaveFocus());
     expect(field).toHaveAttribute('aria-expanded', 'true');
     const list = screen.getByRole('listbox', { name: i18n.t('access.add.label') });
-    expect(within(list).getByText(i18n.t('ui.combobox.minimumQuery', { count: 1 }))).toBeVisible();
-    expect(within(list).queryByRole('option')).not.toBeInTheDocument();
+    expect(within(list).getByRole('option', { name: BEA.display_name })).toBeVisible();
     expect(screen.getByRole('group', { name: i18n.t('access.owners.label') })).toHaveTextContent(ADA.display_name);
     expect(screen.getByRole('region', { name: i18n.t('access.roster.title') })).toBeVisible();
-    expect(calls.search.mock.calls.filter(([, options]) => options.kinds.includes('members')).at(-1)?.[1].enabled).toBe(false);
+    expect(calls.search.mock.calls.filter(([, options]) => options.kinds.includes('members')).at(-1)?.[1].enabled).toBe(true);
     await user.type(field, 'be');
     expect(await screen.findByRole('option', { name: BEA.display_name })).toBeVisible();
     expect(calls.search.mock.calls.filter(([, options]) => options.kinds.includes('members')).at(-1)?.[1].enabled).toBe(true);
     await user.clear(field);
-    expect(within(list).getByText(i18n.t('ui.combobox.minimumQuery', { count: 1 }))).toBeVisible();
-    expect(within(list).queryByRole('option')).not.toBeInTheDocument();
-    expect(calls.search.mock.calls.filter(([, options]) => options.kinds.includes('members')).at(-1)?.[1].enabled).toBe(false);
+    expect(within(list).getByRole('option', { name: BEA.display_name })).toBeVisible();
+    expect(calls.search.mock.calls.filter(([, options]) => options.kinds.includes('members')).at(-1)?.[1].enabled).toBe(true);
     expect(changes.run).not.toHaveBeenCalled();
   });
 

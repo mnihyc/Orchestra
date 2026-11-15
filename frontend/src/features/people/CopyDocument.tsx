@@ -22,7 +22,7 @@ import { Checkbox } from '@/ui/Checkbox';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { Tree, type TreeRow } from '@/ui/Tree';
-import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
 
 export function CopyDocumentDialog({ source, destination, onClose }: { source?: Document | null; destination: string; onClose: () => void }) {
   const { t } = useTranslation();
@@ -72,12 +72,12 @@ export function CopyDocumentDialog({ source, destination, onClose }: { source?: 
       {sourceId !== null && read.isPending && <p role="status">{t('common.loading')}</p>}
       {read.isError && <ErrorAlert error={read.error} />}
       <p className="text-sm font-medium">{t('people.destination')}: {place.isSuccess ? place.data.name : t('common.loading')}</p>
-      {orgs.isSuccess && root !== null && <Select<string> label={t('people.destinationOrg')} value={root} options={orgs.data.map((org) => ({ value: org.id, ...choiceOption(t, 'dynamic.place', { name: org.name }) }))} onValueChange={(next) => { setRootChoice(next); setTarget(next); }} />}
+      {orgs.isSuccess && root !== null && <ResourcePicker<string> groupHomes={false} pickerKey="document-copy-org" label={t('people.destinationOrg')} value={root} options={orgs.data.map((org) => ({ value: org.id, resource:{kind:'org',id:org.id},...choiceOption(t, 'dynamic.place', { name: org.name }) }))} onValueChange={(next) => { setRootChoice(next); setTarget(next); }} />}
       <div className="max-h-60 overflow-y-auto rounded-lg border border-border"><Tree label={t('people.destination')} rows={rows} currentId={target} onExpandedChange={(id, expanded) => setClosed((before) => new Set(expanded ? [...before].filter((one) => one !== id) : [...before, id]))} onTick={(row, on) => on && setTarget(row.id)} nameOf={(node) => node.name} renderRow={(row) => <span className="flex min-w-0 flex-1 items-center gap-2 py-1"><span className="truncate">{row.item.name}</span>{row.item.archived && <span className="text-xs text-text-muted">{t('documents.list.archived')}</span>}</span>} /></div>
       {place.isError && <ErrorAlert error={place.error} />}
       {settings.isError && <ErrorAlert error={settings.error} />}
       {place.isSuccess && !canCreate && <p className="text-sm text-text-muted">{disabled ? t('people.documentsDisabled') : t('people.destinationNeedsCreate')}</p>}
-      <Checkbox label={t(priv ? 'people.copyPrivateLabel' : 'people.copyFollowsLabel')} checked={priv} onCheckedChange={setPrivate} />
+      <Checkbox presentation="compact" label={t('people.copyPrivateLabel')} tooltip={t(priv ? 'people.copyPrivateHint' : 'people.copyFollowsHint')} checked={priv} onCheckedChange={setPrivate} />
       {error !== null && <ErrorAlert error={error} />}
     </div>
   </Dialog>;

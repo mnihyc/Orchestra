@@ -1033,9 +1033,10 @@ export class Access implements Part {
 
   // ---------------------------------------------------------------- the requests
 
-  private searchHolders(person: Person, query: URLSearchParams): { items: HolderCandidate[] } {
+  private searchHolders(person: Person, query: URLSearchParams): { items: HolderCandidate[]; next_cursor: string | null } {
     const text = (query.get('q') ?? '').trim().toLowerCase();
     const wantedRoot = query.get('org_id');
+    const recent = query.get('picker') === 'true' && text === '' ? this.world.settings.pickerRecentsOf(person).choices : {};
     const rows = [...this.world.trees.values()].flatMap((tree) => [...tree.nodes.values()])
       .filter((row) => row.kind !== 'thread' && !row.deleted && this.world.places.access(person, row.id).permissions.includes(`${row.kind}.view`));
     const known = (id: string) => rows.some((row) => row.id === id) || (this.world.places.rowOf(id)?.kind === 'org' && this.isMember(person, this.rootOf('nodes', id)));
@@ -1077,16 +1078,17 @@ export class Access implements Part {
       for (const entry of this.groups) {
         if (!rows.some((row) => row.id === entry.group.org_id)) continue;
         const name = entry.group.name.toLowerCase();
-        if (cleaned === '' ? entry.group.org_id !== start : tail === '' ? !name.startsWith(path) : !matched.some((row) => row.id === entry.group.org_id) || !name.startsWith(tail)) continue;
+        if (cleaned === '' ? entry.group.org_id !== start && recent.group?.includes(entry.group.id) !== true : !name.startsWith(cleaned) && (tail === '' || !matched.some((row) => row.id === entry.group.org_id) || !name.startsWith(tail))) continue;
         const place = placeOf(entry.group.org_id); const group = { ...entry.group, place, member_count: [...this.world.people.values()].filter((one) => this.groupHas(entry.group.id, one)).length };
         add({ kind: 'group', id: group.id }, { kind: 'group', group }, place, `${addressOf(group.org_id)} ${group.name}`, this.rootOf('nodes', group.org_id));
       }
-      if (tail === '' && path !== '' && directRole === undefined) {
+      if (cleaned !== '' || query.get('picker') === 'true') {
+        const path = cleaned;
         const mail = path.includes('@') && !path.startsWith('@');
         const username = mail ? path : path.split('.').at(-1)?.replace(/^@/, '') ?? '';
         for (const one of this.world.people.values()) {
           const exactName = one.me.username.toLowerCase() === username || (one.me.email ?? '').toLowerCase() === username;
-          if (!exactName && !(this.isMember(person, ACME.org) && this.isMember(one, ACME.org) && (one.me.username.toLowerCase().startsWith(username) || one.me.display_name.toLowerCase().includes(username)))) continue;
+          if (recent.user?.includes(one.me.id) !== true && !exactName && !(this.isMember(person, ACME.org) && this.isMember(one, ACME.org) && (one.me.username.toLowerCase().startsWith(username) || one.me.display_name.toLowerCase().includes(username)))) continue;
           const domain = this.world.places.roles.get(wantedRoot ?? ACME.org)?.get(one.me.username)?.domain;
           const address = domain === undefined ? `@${one.me.username}` : `${addressOf(domain)}.${one.me.username}`;
           if (!mail && path.includes('.') && address !== path && !address.endsWith(`.${path}`)) continue;
@@ -1095,7 +1097,17 @@ export class Access implements Part {
       }
     }
     const seen = new Set<string>();
-    return { items: items.filter((item) => { const key = JSON.stringify(item.input); if (seen.has(key)) return false; seen.add(key); return true; }).sort((one, other) => Number(one.outside) - Number(other.outside) || one.place.localeCompare(other.place)) };
+    const kinds = query.has('kinds') ? new Set((query.get('kinds') ?? '').split(',')) : null;
+    const recentRank = (item: HolderCandidate) => {
+      const resource = item.holder.kind === 'user' ? ['user', item.holder.user.id] : item.holder.kind === 'group' ? ['group', item.holder.group.id]
+        : listingPlaces && item.holder.kind === 'role' && item.holder.at !== null ? [item.holder.at.kind, item.holder.at.id] : null;
+      const rank = resource === null || resource[0] === undefined || resource[1] === undefined ? -1 : recent[resource[0]]?.indexOf(resource[1]) ?? -1;
+      return rank < 0 ? Infinity : rank;
+    };
+    const found = items.filter((item) => { const key = JSON.stringify(item.input); if (seen.has(key) || kinds !== null && !kinds.has(item.input.kind)) return false; seen.add(key); return true; })
+      .sort((one, other) => recentRank(one) - recentRank(other) || Number(one.outside) - Number(other.outside) || one.place.localeCompare(other.place));
+    const startAt = Number(query.get('cursor') ?? 0), limit = Number(query.get('limit') ?? 50);
+    return { items: found.slice(startAt, startAt + limit), next_cursor: startAt + limit < found.length ? String(startAt + limit) : null };
   }
 
   handle(person: Person, method: string, path: string, query: URLSearchParams, body: Record<string, unknown>): Answer | null {

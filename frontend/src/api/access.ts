@@ -7,6 +7,7 @@
  * other people before it is made; the people behind one holder of a page, a page at a time; what one
  * person holds on a thing and through what; the roles held in a place; and asking for access.
  */
+import { collectionQuery, readAllPages } from '@/api/collection';
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { ApiError, accepted, api, client, done, ok, repeatable } from '@/api/client';
@@ -183,16 +184,16 @@ export function currentPageOf(error: unknown): PermissionPage | null {
 export const PEOPLE_PAGE = 8;
 
 /** The people behind one holder of a page, a page at a time. `holder` is the form the API names (`role:<place>:<role>`, `group:<id>`, ...). */
-export const peopleQuery = (target: Pick<AccessTarget, 'kind' | 'id'>, holder: string) =>
+export const peopleQuery = (target: Pick<AccessTarget, 'kind' | 'id'>, holder: string, q = '') =>
   infiniteQueryOptions({
-    queryKey: ['page-people', pathOf(target.kind), target.id, holder] as const,
+    queryKey: ['page-people', pathOf(target.kind), target.id, holder, ...(q.trim() === '' ? [] : [q.trim()])] as const,
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }): Promise<PermissionPeopleListReply> =>
       ok(
         api.GET('/{object}/{id}/permissions/people', {
           params: {
             path: { object: pathOf(target.kind), id: target.id },
-            query: { holder, limit: PEOPLE_PAGE, ...(pageParam === null ? {} : { cursor: pageParam }) },
+            query: { holder, limit: PEOPLE_PAGE, ...(q.trim() === '' ? {} : { q: q.trim() }), ...(pageParam === null ? {} : { cursor: pageParam }) },
           },
           signal,
         }),
@@ -272,12 +273,18 @@ export const uploadHistoryQuery = (environment: string, line: string, cursor: st
 /** The fewest characters the server searches for. */
 export const SEARCH_MIN_CHARS = 2;
 
-/** One holder search: names, whole or partial locators, and predefined holders of the chosen place. */
-export const holderSearchQuery = (q: string, placeId: string | null, orgId: string | null, includeWork: boolean, listPlaces = false) =>
-  queryOptions({ queryKey: ['holder-search', q, placeId, orgId, includeWork, listPlaces] as const,
-    queryFn: ({ signal }): Promise<HolderSearchReply> => ok(api.GET('/holders/search', { params: { query: {
-      q, ...(placeId === null ? {} : { place_id: placeId }), ...(orgId === null ? {} : { org_id: orgId }), include_work: includeWork, list_places: listPlaces,
-    } }, signal })), staleTime: 15_000 });
+/** One native holder page retains the locator grammar and filters actual kinds before paging. */
+export const holderPickerQuery = (q: string, placeId: string | null, orgId: string | null, includeWork: boolean, kinds: readonly string[], listPlaces = false) => {
+  const { userId, readerVersion } = client.session.getState();
+  return infiniteQueryOptions({ queryKey: ['holder-search', 'pages', userId, readerVersion, q, placeId, orgId, includeWork, kinds.join(','), listPlaces] as const,
+    initialPageParam: null as string | null,
+    queryFn: ({ pageParam, signal }): Promise<HolderSearchReply> => ok(api.GET('/holders/search', { params: { query: {
+      q, picker: true, kinds: kinds.join(','), limit: 50,
+      ...(placeId === null ? {} : { place_id: placeId }), ...(orgId === null ? {} : { org_id: orgId }),
+      include_work: includeWork, list_places: listPlaces, ...(pageParam === null ? {} : { cursor: pageParam }),
+    } }, signal })), getNextPageParam: (last) => last.next_cursor ?? undefined,
+    staleTime: q.trim() === '' ? 0 : 15_000, refetchOnWindowFocus: false, retry: false });
+};
 
 /** A chosen permission holder as the subject of a role, retaining its source place. */
 export function roleSubject(input: HolderInput, placeId: string): SubjectInput | null {
@@ -293,28 +300,48 @@ export const searchPeopleQuery = (q: string, orgId: string | null) =>
   queryOptions({
     queryKey: ['people-search', q, orgId] as const,
     queryFn: ({ signal }): Promise<UserRef[]> =>
-      ok(api.GET('/users/search', { params: { query: { q, ...(orgId === null ? {} : { org_id: orgId }) } }, signal })),
+      readAllPages((cursor)=>ok(api.GET('/users/search', { params: { query: { q, ...(orgId === null ? {} : { org_id: orgId }),...(cursor===null?{}:{cursor}) } }, signal })),signal),
     enabled: q.length >= SEARCH_MIN_CHARS,
     staleTime: 15_000,
   });
+
+/** People pickers use the same native account projection, with continuation and one-letter filtering. */
+export const personPickerQuery=(q:string,orgId:string|null,includeExternal=false)=>infiniteQueryOptions({
+  queryKey:['people-search','picker',q,orgId,includeExternal] as const,
+  initialPageParam:null as string|null,
+  queryFn:({pageParam,signal})=>ok(api.GET('/users/search',{params:{query:{
+    q,picker:true,...(orgId===null?{}:{org_id:orgId}),...(includeExternal?{include_external:true}:{}),...(pageParam===null?{}:{cursor:pageParam}),
+  }},signal})),
+  getNextPageParam:(page)=>page.next_cursor??undefined,
+  staleTime:q.trim()===''?0:15_000,
+  refetchOnWindowFocus:false,
+  retry:false,
+});
 
 /** The groups kept by the org containing the chosen place. */
 export const groupsQuery = (orgId: string) =>
   queryOptions({
     queryKey: ['groups', orgId] as const,
     queryFn: ({ signal }): Promise<Group[]> =>
-      ok(api.GET('/nodes/{id}/groups', { params: { path: { id: orgId } }, signal })),
+      readAllPages((cursor) => ok(api.GET('/nodes/{id}/groups', { params: { path: { id: orgId }, query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
 
 // ---------------------------------------------------------------- roles held in a place
 
 /** Who holds which role in a place, and who holds one in a place above it. */
-export const rolesQuery = (nodeId: string) =>
-  queryOptions({
-    queryKey: rolesKey(nodeId),
-    queryFn: ({ signal }): Promise<NodeRoleListReply> =>
-      ok(api.GET('/nodes/{id}/roles', { params: { path: { id: nodeId } }, signal })),
-  });
+export const rolesQuery = (nodeId: string) => queryOptions({ queryKey: rolesKey(nodeId), queryFn: async ({ signal }): Promise<NodeRoleListReply> => {
+  let facts: NodeRoleListReply | undefined;
+  const own = await readAllPages(async (cursor) => {
+    const reply = await ok(api.GET('/nodes/{id}/roles', { params: { path: { id: nodeId }, query: cursor === null ? {} : { cursor } }, signal }));
+    facts = reply; return { items: reply.own, next_cursor: reply.next_cursor ?? null };
+  }, signal);
+  if (facts === undefined) throw new Error('The native role reader did not return its policy facts.');
+  return { ...facts, own, next_cursor: null };
+} });
+export const rolesPageQuery = (nodeId: string, q: string) => collectionQuery(rolesKey(nodeId), q, async (query, signal) => {
+  const reply = await ok(api.GET('/nodes/{id}/roles', { params: { path: { id: nodeId }, query }, signal }));
+  return { ...reply, items: reply.own, next_cursor: reply.next_cursor ?? null };
+});
 
 /** Gives a role held already another one, on the revision of the row the person saw. */
 export function changeRole(roleId: string, role: Role, revision: number): Promise<RoleHeld> {

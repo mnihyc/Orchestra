@@ -234,7 +234,7 @@ function Browser({ person, scope = 'mine', parent = null, q = '', onQuery, onSco
       <SelectionSharing rows={[...selected.values()]} />
       <Button size="sm" variant="ghost" disabled={selected.size === 0} onClick={() => setSelection({ key: selectionKey, rows: new Map() })}>{t('day100.batch.clear')}</Button>
     </div>}
-    <ScrollRegion visibleScrollbars label={t('everything.tree')} kind="table" className="relative flex-none rounded-lg border border-border bg-surface sm:min-h-0 sm:flex-1">
+    <ScrollRegion visibleScrollbars label={t('everything.tree')} kind="table" className="relative h-[70dvh] max-h-[70dvh] min-h-0 flex-1 rounded-lg border border-border bg-surface">
       <EverythingTable key={`${scope}:${parent ?? ''}:${arrangement}:${expansionVersion}`} reader={person.id} filter={filter} extraColumns={arrangement === 'recent' ? shownColumns : []} columns={arrangement === 'recent' ? ['name', 'where', ...(recentOrder === 'opened' ? ['opened', 'last_activity'] as const : ['last_activity', 'activity_by'] as const), 'state', ...shownColumns.filter((column) => column !== 'last_activity' && column !== 'state')] : ['name', ...shownColumns]}
         selection={selecting ? { selected: new Set(selected.keys()), toggle: toggleRow, clear: clearSelection, all: (rows) => setSelection({ key: selectionKey, rows: new Map(rows.map((row) => [`${row.kind}:${row.id}`, row])) }) } : undefined}
         parent={parent} expansion={expansion} onSort={order} onOwner={(owner) => setOwner({ id: owner.id, name: owner.display_name })} />

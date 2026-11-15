@@ -1,3 +1,6 @@
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { Input } from '@/ui/Input';
+import { ScrollRegion } from '@/ui/ScrollRegion';
 /** The documents beside a place: the list of an org at any level, a project and a topic, with open discussions, what changed since the reader was there, the mark of one an agent made, New document and Import Markdown.
  *
  * A row is the title, a lock when it is private, where it is written when the list spans several nodes,
@@ -60,8 +63,9 @@ export function DocumentList({ node, below = false }: { node: ListedNode; below?
   const [priv, setPrivate] = useListChoice('documents', 'private', false);
   const [deleted, setDeleted] = useListChoice('documents', 'deleted', false);
   const [copying, setCopying] = useState(false);
-  const list = useInfiniteQuery(documentsOfNodeQuery(node.id, { under, participating }));
-  const gone = useInfiniteQuery(documentsOfNodeQuery(node.id, { deleted: true, participating }));
+  const search = useCollectionSearch('documents:' + node.id);
+  const list = useInfiniteQuery(documentsOfNodeQuery(node.id, { under, participating, q: search.q }));
+  const gone = useInfiniteQuery(documentsOfNodeQuery(node.id, { deleted: true, participating, q: search.q }));
   const deletedId = useId();
   const deletedDocs = gone.data?.pages.flatMap((page) => page.items) ?? [];
   const canMake = holds(node.access, 'doc.create') && !node.archived;
@@ -81,7 +85,7 @@ export function DocumentList({ node, below = false }: { node: ListedNode; below?
   const reason = node.archived ? t('documents.list.archived') : denial(t, 'doc.create', node.name, node.owner);
   return (
     <section aria-label={t('documents.list.title')} className="flex flex-col gap-3">
-      <FilterBar participation={<ParticipationFilter checked={participating} onCheckedChange={setParticipating} />} action={<>
+      <FilterBar search={<Input type="search" hideLabel label={t('ui.collection.find', { name: t('documents.list.title') })} placeholder={t('ui.combobox.search')} value={search.text} onChange={(event) => search.onText(event.target.value)} />} participation={<ParticipationFilter checked={participating} onCheckedChange={setParticipating} />} action={<>
           <Button asChild icon={<Folder aria-hidden />}><Link to="/documents/$nodeId" params={{ nodeId: node.id }}>{t('documentFolders.browse')}</Link></Button>
           <PermissionGate allowed={canMake} mode="block" reason={reason}>
             <Button icon={<Upload aria-hidden />} onClick={() => openImport({ id: node.id, label: node.name })}>
@@ -123,11 +127,11 @@ export function DocumentList({ node, below = false }: { node: ListedNode; below?
           title={t('documents.list.empty', { kind: t(`documents.kind.${node.kind}` as 'documents.kind.topic') })}
         />
       ) : docs.length > 0 ? (
-        <ul className="divide-y divide-border rounded-lg border border-border bg-surface">
+        <ScrollRegion kind="table" label={t('documents.list.title')} className="max-h-96 overflow-y-auto"><ul className="divide-y divide-border rounded-lg border border-border bg-surface">
           {docs.map((doc) => (
             <DocumentRow key={doc.id} doc={doc} here={node.id} where={under} me={me} />
           ))}
-        </ul>
+        </ul></ScrollRegion>
       ) : null}
       <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : null} onMore={() => void list.fetchNextPage()} />
       {(deletedDocs.length > 0 || gone.hasNextPage || gone.isError) && <div className="flex flex-col gap-2">
@@ -143,7 +147,7 @@ export function DocumentList({ node, below = false }: { node: ListedNode; below?
         </button>
         {deleted && (
           <div id={deletedId} className="flex flex-col gap-2">
-            {gone.isError && deletedDocs.length === 0 ? <ErrorState compact error={gone.error} retrying={gone.isRefetching} onRetry={() => void gone.refetch()} /> : <ul className="divide-y divide-border rounded-lg border border-border bg-surface">
+            {gone.isError && deletedDocs.length === 0 ? <ErrorState compact error={gone.error} retrying={gone.isRefetching} onRetry={() => void gone.refetch()} /> : <ScrollRegion kind="table" label={t('documents.list.recentlyDeleted')} className="max-h-96 overflow-y-auto"><ul className="divide-y divide-border rounded-lg border border-border bg-surface">
             {deletedDocs.map((doc) => (
               <li key={doc.id} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
                 <span data-user-content className="truncate">{doc.title}</span>
@@ -152,7 +156,7 @@ export function DocumentList({ node, below = false }: { node: ListedNode; below?
                 </Button>
               </li>
             ))}
-            </ul>}
+            </ul></ScrollRegion>}
             <Pagination hasMore={gone.hasNextPage} loading={gone.isFetchingNextPage} error={gone.isFetchNextPageError ? gone.error : null} onMore={() => void gone.fetchNextPage()} />
           </div>
         )}

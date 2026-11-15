@@ -170,7 +170,7 @@ fn selected(
 
 impl native::Selected for Mounts {
     type Source = Source;
-    type Query = ();
+    type Query = api::MachineMountListQuery;
     type Value = MountsReady;
     type Reply = api::MachineMounts;
     const DECLARATION: &'static Declaration<Source> = &sources::MACHINE_MOUNT_READ;
@@ -178,7 +178,7 @@ impl native::Selected for Mounts {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        _query: &'a (),
+        _query: &'a Self::Query,
     ) -> BoxFuture<'a, ApiResult<(MountsReady, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
             let (machine, principal, plan, mut facts) =
@@ -325,7 +325,7 @@ impl native::Selected for Mounts {
         _ctx: &'a Ctx,
         _conn: &'a mut Conn,
         _principal: &'a Principal,
-        _query: &'a (),
+        _query: &'a Self::Query,
         old: &'a MountsReady,
         fresh: &'a MountsReady,
     ) -> BoxFuture<'a, ApiResult<bool>> {

@@ -1005,7 +1005,7 @@ async fn the_sessions_of_a_person_are_listed_with_the_one_that_asks_and_ended_on
             .send()
     };
 
-    let listed = list(&this).await.ok();
+    let listed = list(&this).await.ok().items;
     assert_eq!(listed.len(), 2);
     assert_eq!(listed.iter().filter(|session| session.current).count(), 1);
     let current = listed.iter().find(|session| session.current).unwrap();
@@ -1021,7 +1021,8 @@ async fn the_sessions_of_a_person_are_listed_with_the_one_that_asks_and_ended_on
         .token(made.token.as_deref().unwrap())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(by_token.iter().all(|session| !session.current));
 
     // Not somebody else's, and not one that is none.
@@ -1062,7 +1063,7 @@ async fn the_sessions_of_a_person_are_listed_with_the_one_that_asks_and_ended_on
             .code,
         ErrorCode::AuthInvalidToken
     );
-    assert_eq!(list(&this).await.ok().len(), 1);
+    assert_eq!(list(&this).await.ok().items.len(), 1);
     assert_eq!(end(&other_id).await.problem().code, ErrorCode::NotFound);
     assert!(
         world
@@ -1079,7 +1080,8 @@ async fn bobs_session(world: &World, bobs: &Signed) -> Id {
         .token(bobs.token())
         .send()
         .await
-        .ok()[0]
+        .ok()
+        .items[0]
         .id
 }
 
@@ -1117,7 +1119,7 @@ async fn an_api_token_is_shown_once_stored_as_a_hash_and_made_only_from_a_browse
         .send()
         .await;
     assert!(!String::from_utf8_lossy(&listed.raw).contains(made.token.as_deref().unwrap()));
-    assert_eq!(listed.ok().len(), 1);
+    assert_eq!(listed.ok().items.len(), 1);
 
     // It acts as its person, and its last use is noted.
     let me = world
@@ -1134,7 +1136,8 @@ async fn an_api_token_is_shown_once_stored_as_a_hash_and_made_only_from_a_browse
         .token(made.token.as_deref().unwrap())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(after[0].last_used_at.is_some());
     // But it makes none of its own: it is not a browser session.
     let refused = world
@@ -1359,6 +1362,7 @@ async fn a_revoked_api_token_stops_working_at_once_and_only_its_person_revokes_i
             .send()
             .await
             .ok()
+            .items
             .is_empty()
     );
     assert_eq!(
