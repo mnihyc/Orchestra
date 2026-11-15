@@ -40,3 +40,24 @@ for (const reported of [true, false]) it(`updates visible choices when the agent
     expect(read).toHaveBeenCalledTimes(1);
   } finally { stop(); stopOther(); cache.clear(); }
 });
+
+it('repairs displayed choices when a newly reported agent was absent from every cached candidate list', async () => {
+  const world = new World(), person = world.people.get('ada')!;
+  const id = RUNS_ON.codex;
+  const answer = () => world.starts.handle(person, 'GET', `/nodes/${ACME.fixLogin}/binding/options`, new URLSearchParams(), {})!.body as BindingOptions;
+  const full = answer();
+  const before = { ...full, providers: full.providers.map((provider) => ({ ...provider, agents: provider.agents.filter((candidate) => candidate.agent.id !== id) })) };
+  const cache = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } });
+  const key = ['start-options', ACME.fixLogin, ''];
+  cache.setQueryData(key, before);
+  const read = vi.fn(() => Promise.resolve(answer()));
+  const stop = new QueryObserver(cache, { queryKey: key, queryFn: read }).subscribe(() => undefined);
+  try {
+    world.resources.report(id, true);
+    const row = world.resources.inventoryView(person, 'agent', id);
+    if (row === null) throw new Error('The native agent report exists');
+    await applyChanges(resourceChanges('agent', id, { row }, 'news'), cache);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(cache.getQueryData(key)).toEqual(answer());
+  } finally { stop(); cache.clear(); }
+});

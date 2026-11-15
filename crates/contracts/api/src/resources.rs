@@ -73,6 +73,9 @@ pub struct MachineRef {
     pub platform_os: MachineOs,
     /// Whether it is a person's own machine or one the system manages.
     pub placement: Placement,
+    /// The host of a managed machine, independent of the host's displayed name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<Id>,
 }
 
 /// A host, named wherever another thing points at one.
@@ -260,6 +263,8 @@ pub struct Machine {
 /// The running hello version compared with the server's recommendation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ComponentUpdate {
+    /// The pending request was automatic rather than an explicit Update action.
+    pub automatic: bool,
     /// Version reported by the currently executing program.
     pub running_version: String,
     /// Build served by this server and announced in ready.versions.
@@ -270,7 +275,7 @@ pub struct ComponentUpdate {
     pub status: String,
     /// A machine's refusal or verification failure, in its own words.
     pub detail: Option<String>,
-    /// The local command, including when local policy refuses the web action.
+    /// The explicit local verified update command, available independently of Auto.
     pub command: String,
 }
 
@@ -370,9 +375,11 @@ pub struct ProviderFacts {
     /// True only when the vendor authenticated this facts observation with the provider's credential.
     #[serde(default)]
     pub credential_verified: Option<bool>,
-    /// The last successfully discovered model list; suggestions remain separate from the accepted allowlist.
+    /// How many models the last successful discovery listed; null where no list was read. The list itself
+    /// is not part of a provider's view: it is read from `GET /providers/{id}/facts/models`, by the places
+    /// that draw it.
     #[serde(default)]
-    pub models: Option<Vec<ModelSuggestion>>,
+    pub models_count: Option<i64>,
     /// The last successful observation of each source group; absent groups were never observed.
     #[serde(default)]
     pub field_times: std::collections::BTreeMap<String, Time>,
@@ -845,6 +852,9 @@ pub struct ProviderModel {
     /// Effective provider option schemas, including declared tier/program lists; keyed by protocol.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub option_constraints: std::collections::BTreeMap<String, Json>,
+    /// Declared per-thread option forms, keyed by outgoing interface, shared by thread and place defaults.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_forms: std::collections::BTreeMap<String, Json>,
     /// What its tokenizer comes to, for the estimates where nobody counted.
     pub token_estimate: crate::programs::TokenEstimate,
     /// The groups its managers put it in (`frontier`, `small`): names of their own, by which a cap,
@@ -1132,6 +1142,8 @@ pub struct Provider {
     /// Who last used a reset, while its resulting windows still stand.
     #[serde(default)]
     pub last_reset: Option<ProviderLastReset>,
+    /// How many models it lists. A row of a list carries this and no models: the page of the provider reads them.
+    pub models_count: i64,
     /// The models it lists.
     pub models: Vec<ProviderModel>,
     /// How many turns run on it now.
@@ -1148,6 +1160,32 @@ pub struct Provider {
     pub updated_at: Time,
     /// What the caller holds on it.
     pub access: ResourceAccess,
+}
+
+impl Provider {
+    /// Leaves in the provider what the row of a list draws of it, and out what only its own page does. Its models are
+    /// not listed (`models_count` says how many), the seven days of how each performed and the descriptors of its
+    /// sources are left out, and so are its spending, its resets and its extra usage. The caps stay, for they say at a
+    /// glance that one is reached; the whole view is `GET /providers/{id}`.
+    pub fn thin_for_list(&mut self) {
+        self.models.clear();
+        if let Some(usage) = self.choice_usage.as_mut() {
+            usage.performance.clear();
+        }
+        self.plan_forecasts = None;
+        self.service_catalogue = None;
+        self.service_offerings.clear();
+        self.model_group_options.clear();
+        self.runtime_changes = None;
+        self.sources.facts.descriptor = None;
+        self.sources.models.descriptor = None;
+        if let Some(presenter) = self.sources.presenter.as_mut() {
+            presenter.descriptor = None;
+        }
+        self.facts.spend.clear();
+        self.facts.available_resets = None;
+        self.facts.extra_usage = None;
+    }
 }
 
 /// Safe service metadata and manager choices for the existing provider editor.
@@ -2567,7 +2605,9 @@ pub struct ProviderModelCreateBody {
     pub display_name: Option<String>,
     /// What it can be run with here. A default (`default_effort`, `default_service_tier`,
     /// `default_access_program`) has to be among what is enabled; `context_max` may not be below
-    /// `context_window`; `default_context` is at most `context_max` and needs one.
+    /// `context_window`; `default_context` is at most `context_max` and needs one. Omitted uses
+    /// the catalogue defaults. An explicit object is the whole enabled definition; blank factual
+    /// window/efforts still use the catalogue, while cleared optional choices stay off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<ModelParameters>,
     /// The groups to put it in, within the home's configured limit, each named as [`is_model_group_name`]
@@ -2576,10 +2616,31 @@ pub struct ProviderModelCreateBody {
     pub groups: Option<Vec<String>>,
 }
 
+/// The exact routing name whose current catalogue defaults the add form shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderModelDefaultsQuery {
+    /// A provider catalogue name; an unlisted name returns unknown facts without a guessed window.
+    pub model_name: String,
+}
+
+/// The stored model definition on which an options or groups draft was based.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderModelState {
+    /// The enabled options read before editing.
+    pub parameters: ModelParameters,
+    /// The groups read before editing.
+    pub groups: Vec<String>,
+}
+
 /// Changes a model of a provider. A routing name is not changed: another model is added.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderModelUpdateBody {
+    /// Required when replacing parameters or groups; a changed definition refuses the whole draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<ProviderModelState>,
     /// A new display name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -2596,9 +2657,10 @@ pub struct ProviderModelUpdateBody {
     pub enabled: Option<bool>,
 }
 
-/// Accepts models that discovery suggested. Each is added with what its suggestion says of it,
-/// except that the service tiers and access programs it lists and a context larger than the usual
-/// one become `parameters.offered`, and none of them is enabled.
+/// Accepts models that discovery suggested. Each is added with what its suggestion says of it, and what
+/// the organization chose to switch on (`models.add_switches_on`) is enabled: by default every effort, the
+/// window, every context size, speed and access program it lists. Whatever is left off stays under
+/// `parameters.offered`, and what a thread starts with is never taken from a suggestion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderModelSuggestionAcceptBody {
@@ -3827,9 +3889,9 @@ crate::endpoints! {
             },
         ]));
     /// Deletes a provider that no thread is bound to, signing its harness out first and retiring its runtime.
-    ProviderDelete: DELETE "/providers/{id}", Permission("provider.manage"), none, none, none, 204;
+    ProviderDelete: DELETE "/providers/{id}", Permission("provider.manage"), query crate::resource_facts::ResourceNotificationQuery, none, none, 204;
     /// Switches a provider off.
-    ProviderDisable: POST "/providers/{id}/disable", Permission("provider.manage"), query crate::resource_facts::ResourcePauseQuery, none, json Provider, 200,
+    ProviderDisable: POST "/providers/{id}/disable", Permission("provider.manage"), query crate::resource_facts::ResourceStopQuery, none, json Provider, 200,
         operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Switches a provider on again.
     ProviderEnable: POST "/providers/{id}/enable", Permission("provider.manage"), query crate::resource_facts::ResourceResumeQuery, none, json Provider, 200,
@@ -3912,6 +3974,12 @@ crate::endpoints! {
         operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Lists the models a provider lists.
     ProviderModelList: GET "/providers/{id}/models", Rule("any permission on the provider"), none, none, json Vec<ProviderModel>, 200,
+        operation Op::single(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
+    /// The current catalogue defaults for adding one model, under the provider home's add policy, without discovery or a write.
+    ProviderModelDefaultsGet: GET "/providers/{id}/models/defaults", Permission("provider.manage"), query ProviderModelDefaultsQuery, none, json ModelParameters, 200,
+        operation Op::single(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
+    /// Lists the models the provider's source last listed, as it kept them and not as the provider's own list; discovery suggests them and never adds one. Empty where no list was read; `facts_state.models` says why.
+    ProviderFactsModelsGet: GET "/providers/{id}/facts/models", Permission("provider.view"), none, none, json Vec<ModelSuggestion>, 200,
         operation Op::single(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
     /// Lists explicit capability backends of this provider at a governed place.
     ProviderCapabilityBackendList: GET "/providers/{id}/capability-backends", Permission("provider.view"), query CapabilityBackendQuery, none, json crate::common::Page<CapabilityBackendCandidate>, 200,
@@ -4052,7 +4120,7 @@ crate::endpoints! {
     McpServerUpdate: PATCH "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), none, json McpServerUpdateBody, json McpServerUpdateResponse, 200,
         operation Op::receipt(&Op::facets(&crate::mcp_sources::UPDATE_FACETS));
     /// Deletes an MCP server; one imported from a machine has that machine's connector forget its copy.
-    McpServerDelete: DELETE "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), none, none, none, 204,
+    McpServerDelete: DELETE "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), query crate::resource_facts::ResourceNotificationQuery, none, none, 204,
         operation Op::facets(&[
             Facet::required(Manage, &[Object(K::McpServer)], Target::Resolved("server_subject")),
             Facet::required(Manage, &[Object(K::Machine)], Target::ResolvedCollection("forgotten_copies")),
@@ -4087,7 +4155,7 @@ crate::endpoints! {
     /// Saves delegated connector roles and reconnects after its answer is journaled.
     MachineRolesSet: PUT "/machines/{id}/roles", Rule("machine.manage; machine.roles must be handed over and enabled"), none, json MachineRolesSetBody, json MachineRolesResponse, 200,
         operation Op::receipt(&Op::facets(&crate::machine_sources::ACK_FACETS));
-    /// Requests a verified physical connector update, drained under its local update.auto policy.
+    /// Requests an explicit verified physical connector update after its active work drains.
     MachineUpdateNow: POST "/machines/{id}/update", Rule("machine.manage, or host.manage on its node facade"), none, none, json MachineUpdateNowResponse, 200,
         operation Op::receipt(&Op::facets(&crate::machine_sources::AGAIN_FACETS));
     /// Requests the same verified procedure for a host's node, after its units finish their turns.
@@ -4222,7 +4290,7 @@ mod tests {
                     "balances": [{ "id": "plan", "label": "Plan credits", "unit": "credits", "remaining": "12.5",
                                    "total": null, "used": null, "unlimited": false, "parts": null, "expires_at": null }],
                     "spend": [],
-                    "ordinary_usage_allowed": null, "credential_verified": null, "models": null, "field_times": {}
+                    "ordinary_usage_allowed": null, "credential_verified": null, "models_count": null, "field_times": {}
                 },
                 "facts_state": {
                     "identity": "told", "credential": "told", "credential_verified": "not_read_yet", "plan": "told",
@@ -4264,7 +4332,7 @@ mod tests {
                     "token_estimate": { "ascii_prose_x100": 400, "ascii_structured_x100": 300, "other_x100": 100, "image_tokens": 1000, "measured": false },
                     "enabled": true, "source": "suggested"
                 }],
-                "running_threads": 3
+                "models_count": 1, "running_threads": 3
             }),
             json!({
                 "runtime": {
