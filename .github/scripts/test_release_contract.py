@@ -25,8 +25,9 @@ class SourceContractTests(unittest.TestCase):
             'pub const KEY_BASE_PATH: &str = "/openapi/v1";\n')
         (root / "deploy").mkdir()
         (root / "deploy/nginx.conf").write_text("\n".join(
-            f"location {route} {{ proxy_pass $upstream$request_uri; }}"
-            for route in ["/api/", "/api/v1/ws", "/openapi/", "/openapi/v1/ws"]))
+            ["upstream orch_api { zone orch_api 64k; server api:8443 resolve; keepalive 32; }"] + [
+                f"location {route} {{ proxy_pass https://orch_api; }}"
+                for route in ["/api/", "/api/v1/ws", "/openapi/", "/openapi/v1/ws"]]))
         target = root / "crates/tooling/xtask/src/release/connectors.rs"
         target.parent.mkdir(parents=True)
         target.write_text((ROOT / "crates/tooling/xtask/src/release/connectors.rs").read_text())
@@ -103,6 +104,23 @@ class SourceContractTests(unittest.TestCase):
             edge = root / "deploy/nginx.conf"
             edge.write_text(edge.read_text().replace("location /openapi/", "location /old-keys/"))
             with self.assertRaisesRegex(ValueError, "unchanged /openapi/"):
+                source_contract(root, HEAD, TAG)
+
+    def test_an_edge_that_rewrites_a_route_or_keeps_a_stale_address_is_refused(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            self.candidate(root)
+            seal_schema(root)
+            edge = root / "deploy/nginx.conf"
+            original = edge.read_text()
+            # A URI part after the group's name replaces the matched prefix: the route would no longer be unchanged.
+            edge.write_text(original.replace(
+                "location /api/ { proxy_pass https://orch_api; }", "location /api/ { proxy_pass https://orch_api/; }"))
+            with self.assertRaisesRegex(ValueError, "unchanged /api/ "):
+                source_contract(root, HEAD, TAG)
+            # Without `resolve` the name is looked up once: an API made again by an update is not found.
+            edge.write_text(original.replace("server api:8443 resolve;", "server api:8443;"))
+            with self.assertRaisesRegex(ValueError, "look the API's address up again"):
                 source_contract(root, HEAD, TAG)
 
     def test_a_different_or_dirty_checkout_cannot_claim_the_pinned_sha(self):

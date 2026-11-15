@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test skills
