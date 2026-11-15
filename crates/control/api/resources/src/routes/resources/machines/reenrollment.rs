@@ -295,7 +295,7 @@ async fn create_on(ctx: Ctx) -> ApiResult<MachineEnrollmentAgainResponse> {
             "A machine declared lost needs a new enrollment and identity",
         ));
     }
-    let installation = super::installation_config(&ctx);
+    let installation = super::installation_config(&ctx).await?;
     if value.host.is_some() {
         super::require_node_installable(&installation)?;
     } else {
@@ -357,7 +357,7 @@ fn response(ctx: &Ctx, subject: &Subject, made: &NewToken) -> ApiResult<Enrollme
     } else {
         Installer::Connector
     };
-    let installation = super::installation_config(ctx);
+    let installation = super::installation_config(ctx).await?;
     let mut commands = enrollment_commands(&installation, &made.token, installer);
     if matches!(installer, Installer::Connector) {
         let roles = row

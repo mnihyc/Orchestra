@@ -1,0 +1,8 @@
+test -p orch-link-contract --test largest_messages
+test -p orch-worker-core --lib
+test -p orch-worker-core --test outbox --test mail --test channel_setup
+test -p orch-api-core --test machines --test koidc --test reset_links --test admin_catalogue --test hosts --test ports_core --test host_ports --test ask --test ask_tools_native_origin --test imports
+test -p orch-api-core --test notifications_channels --test notifications_destinations --test people_discussion_delivery --test people_notify --test chat_duplicates
+web typecheck
+web lint
+web test -- tests/component/installation-records.test.tsx tests/component/system-banner-dismissal.test.tsx tests/component/blocked-models.test.tsx tests/unit/waiting-start-steps.test.ts tests/unit/meta-admission-lifetime.test.ts tests/unit/acts.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/trace.test.ts

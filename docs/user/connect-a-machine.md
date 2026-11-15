@@ -29,9 +29,12 @@ on the primary and target attachment to finish; a selected primary never moves
 on its own.
 
 A selected gateway stays selected when it is unavailable or removed from the
-catalogue. Change that choice in the machine's local console or installer when
-you mean to replace it. Re-enrollment without a gateway flag retains the saved
-choice. The machine or Host overview's **Connector** card shows the reported
+catalogue. On a connected machine or Host overview, managers can use **Change gateway**
+in the **Connector** card, choose **Automatic** or an advertised gateway and **Save**.
+The enrolled identity stays the same; no new token or installer run is needed.
+The native answer is saved before reconnecting. The local console remains available,
+and a later local choice supersedes an older remote completion.
+Re-enrollment without a gateway flag retains the saved choice. The card shows the reported
 primary and selection. Automatic also shows the gateway measurements and when
 they were taken; **Not measured** is not a zero-latency result. **Refresh** reads
 the latest report with its original measurement time.

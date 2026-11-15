@@ -42,6 +42,7 @@
   {"name": "TopicInputScheduleCreate", "boundary": "guarded", "reason": "Browser-only author and ordinary destination/model creation checks are repeated inside the transaction which freezes the draft and pins its content."},
   {"name": "InputScheduleUpdate", "boundary": "guarded", "reason": "Author or current controller, scopes/subtree and revision are checked in the edit transaction; definition changes and resume require a browser and repeat ordinary current creation checks."},
   {"name": "InputScheduleDelete", "boundary": "guarded", "reason": "Current author/controller and token narrowing are checked in the transaction which stops future work; queued inputs keep their independent content pins."},
+  {"name": "AdminServerUpdateStart", "boundary": "guarded", "reason": "The original browser-session system administrator and exact offered release are checked before filing one durable bundled-node updater job."},
   {"name": "AdminReleaseCheck", "boundary": "guarded", "reason": "Browser-session system admin is rechecked under the action guard while the configured read-only lookup stores its facts and once-only local notice."},
   {"name": "NodeDocumentCopy", "boundary": "guarded", "reason": "Current source View and destination Create are checked in the transaction of the normal fresh block/file producer."},
   {"name": "NodeDocumentImport", "boundary": "guarded", "reason": "Each accepted entry uses the ordinary guarded document producer; repeats retain its stable creation identity."},

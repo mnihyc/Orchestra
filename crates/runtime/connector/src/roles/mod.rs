@@ -213,6 +213,9 @@ pub struct Call {
 /// Something that carries out commands of one role.
 #[async_trait]
 pub trait RoleHandler: Send + Sync {
+    /// A role may apply a prepared local change only after the durable command answer is sent.
+    fn answered(&self, _id: Id) {}
+
     /// Reconciles external work from an interrupted journal entry before acknowledging that it stopped.
     async fn interrupted(&self, _id: Id, _command: &Command) -> Result<(), CommandError> {
         Ok(())
