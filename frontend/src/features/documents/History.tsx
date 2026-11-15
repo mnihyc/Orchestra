@@ -5,6 +5,7 @@
  * alike. Choosing an entry shows what it changed, block by block, with who changed each. "Put this version
  * back" makes it the document again after keeping the present one as a version, so that nothing is lost.
  */
+import { carryDeviceChoice } from '@/lib/viewChoiceFacts';
 import { useListChoice } from '@/lib/listState';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { Columns2, Rows2 } from 'lucide-react';
@@ -23,7 +24,7 @@ import { authorName } from '@/features/documents/Together';
 import { AuthorChip } from '@/ui/AuthorChip';
 import type { Author } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
-import { formatBytes } from '@/lib/format';
+import { formatNumber } from '@/lib/format';
 import { holds } from '@/lib/permissions';
 import { documentWriter } from '@/realtime/stores/document';
 import { refreshDocument } from '@/realtime/live';
@@ -163,13 +164,13 @@ export function ChangesView({ changes, columns, doc, onStale = () => undefined }
 function Detail({ doc, entry, onShow }: { doc: Document; entry: DocumentVersion; onShow: (version: number) => void }) {
   const { t } = useTranslation();
   const [columns, changeColumns] = useListChoice<'1' | '2'>(`document-history.${doc.id}`, 'difference', '1');
-  const setColumns = (next: '1' | '2') => { changeColumns(next); };
+  const setColumns = carryDeviceChoice((next: '1' | '2') => { changeColumns(next); }, changeColumns);
   const [putting, setPutting] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const from = entry.version === null ? doc.version : entry.version - 1;
   const [reviewCurrent, setReviewCurrent] = useState(false);
-  const changes = useQuery({ ...changesQuery(doc.id, String(from), reviewCurrent ? null : entry.version), staleTime: 0 });
+  const changes = useQuery({ ...changesQuery(doc.id, String(from), reviewCurrent ? null : entry.version) });
   const canManage = holds(doc.access, 'doc.manage') && !doc.archived;
   const files = entry.changed.files ?? [];
   const hasBlocks = changes.data !== undefined && changes.data.blocks.length > 0;
@@ -237,7 +238,7 @@ export function HistoryDrawer({ doc, open, onOpenChange, onShow }: { doc: Docume
   const [chosen, setChosen] = useState<number | 'open' | null>(null);
   const say = (key: 'changed' | 'added' | 'removed', count: number): string => t(`documents.history.${key}` as 'documents.history.changed', { count });
   const sayFile = (kind: FileChange['kind'], count: number): string => t(FILE_COUNTS[kind], { count });
-  const list = useInfiniteQuery({ ...versionsQuery(doc.id, author === 'all' ? null : author), enabled: open, staleTime: 0, refetchOnMount: 'always' });
+  const list = useInfiniteQuery({ ...versionsQuery(doc.id, author === 'all' ? null : author), enabled: open, refetchOnMount: 'always' });
   const entries = useMemo(() => list.data?.pages.flatMap((page) => page.items) ?? [], [list.data]);
   const authors = useMemo(() => {
     const seen = new Map<string, Author>();
@@ -245,9 +246,7 @@ export function HistoryDrawer({ doc, open, onOpenChange, onShow }: { doc: Docume
     return [...seen];
   }, [entries]);
   const selected = entries.find((one) => (one.version === null ? chosen === 'open' : one.version === chosen)) ?? null;
-  const numbered = entries.filter((one) => one.version !== null);
-  const bytes = numbered.reduce((sum, one) => sum + one.bytes, 0);
-  const oldest = numbered[numbered.length - 1];
+  const loadedVersions = entries.filter((one) => one.version !== null).length;
 
   return (
     <Drawer
@@ -265,10 +264,10 @@ export function HistoryDrawer({ doc, open, onOpenChange, onShow }: { doc: Docume
         <Select<string>
           label={t('documents.history.author')}
           value={author}
-          onValueChange={(next) => {
+          onValueChange={carryDeviceChoice((next: string) => {
             setAuthor(next);
             setChosen(null);
-          }}
+          }, setAuthor)}
           options={[{ value: 'all', ...choiceOption(t, 'statusFilter.any'), description: t('documents.history.everybody') }, ...authors.map(([key, one]) => ({ value: key, ...choiceOption(t, 'dynamic.value', { name: authorName(one), context: t('documents.history.everybody') }) }))]}
         />
         {list.isPending ? (
@@ -312,11 +311,9 @@ export function HistoryDrawer({ doc, open, onOpenChange, onShow }: { doc: Docume
             }}
           />
         )}
-        <p className="text-xs text-text-muted">
-          {numbered.length === 0
-            ? t('documents.history.footNone')
-            : t('documents.history.foot', { count: numbered.length, size: formatBytes(bytes, locale), since: oldest === undefined ? '' : new Date(oldest.to).toLocaleDateString(locale, { day: 'numeric', month: 'long' }) })}
-        </p>
+        {list.data !== undefined && <p className="text-sm text-text-muted">
+          {t('documents.history.foot', { count: loadedVersions, number: formatNumber(loadedVersions, locale) })}
+        </p>}
       </div>
     </Drawer>
   );
