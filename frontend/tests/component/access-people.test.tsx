@@ -29,6 +29,7 @@ const changes: Changes = { busy: false, doing: null, error: null, stale: null, f
 vi.mock('@/api/access', async (load) => ({ ...await load<typeof AccessApi>(),
   permissionsQuery: { queryKey: ['people-permissions'], queryFn: () => Promise.resolve(CATALOGUE.reply) },
   defaultsQuery: (id: string) => ({ queryKey: ['people-defaults', id], queryFn: () => Promise.resolve(pageFor('org')) }),
+  rolesPageQuery:(id:string,q:string)=>({queryKey:['fixture-role-pages',id,q],initialPageParam:null,queryFn:()=>Promise.resolve({...{owners:[{kind:'user' as const,user:ADA},group],own:[],above:[],can_give:[]},items:[],next_cursor:null}),getNextPageParam:()=>null}),
   rolesQuery: (id: string) => ({ queryKey: ['people-roles', id], queryFn: (): Promise<NodeRoleListReply> => Promise.resolve({ owners: [{ kind: 'user', user: ADA }, group], own: [], above: [], can_give: [] }) }),
   waitingRequestsQuery: (id: string) => ({ queryKey: ['people-waiting', id], queryFn: () => Promise.resolve([]) }),
   peopleQuery: (target: AccessApi.AccessTarget, param: string) => infiniteQueryOptions({

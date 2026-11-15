@@ -523,8 +523,29 @@ impl native::Selected for MachineRead {
     }
 }
 
+pub(super) fn prepare_children<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a Caller,
+    _query: orch_api_contract::common::ChildCollectionQuery,
+    (): (),
+) -> crate::registry::OptionalOperationFuture<'a> {
+    native::selected::<MachineRead>(ctx, conn, caller, (), ())
+}
+
 /// Retain the actual native individual source for ordinary and admitted HTTP publication.
-pub(super) async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Machine> {
+pub(super) async fn get(
+    ctx: Ctx,
+    query: orch_api_contract::common::ChildCollectionQuery,
+    (): (),
+) -> ApiResult<Machine> {
+    use crate::routes::resources::child_pages::Children;
+    let source = format!(
+        "resource-children:{}:{}:{}",
+        ctx.route.name,
+        ctx.user()?.id(),
+        ctx.id("id")?
+    );
     let rendered = native::selected_read::<MachineRead>(ctx, (), ()).await?;
     publication::retain(
         &rendered.ctx,
@@ -543,5 +564,5 @@ pub(super) async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Machine> {
             })
         },
     )?;
-    Ok(rendered.machine)
+    rendered.machine.child_page(&query, &source)
 }

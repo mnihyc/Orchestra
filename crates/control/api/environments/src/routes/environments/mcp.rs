@@ -95,7 +95,7 @@ pub fn mount(registry: &mut Registry) {
         .on_snapshot_read_with_optional_operation(
             api::EnvironmentMcpGet,
             crate::key_operations::native::selected::<read_sources::Servers>,
-            crate::key_operations::native::selected_read::<read_sources::Servers>,
+            list,
         )
         .on(api::EnvironmentMcpServerRestart, restart)
         .on_with_operation(
@@ -119,6 +119,61 @@ pub fn mount(registry: &mut Registry) {
 }
 
 /// Maps the connector's directory scope into the API's project scope without exposing a definition.
+async fn list(ctx: Ctx, query: api::EnvironmentMcpListQuery, (): ()) -> ApiResult<EnvironmentMcp> {
+    let source = format!("environment-mcp:{}:{}", ctx.user()?.id(), ctx.id("id")?);
+    let mut reply = crate::key_operations::native::selected_read::<read_sources::Servers>(
+        ctx,
+        query.clone(),
+        (),
+    )
+    .await?;
+    let selected = query.collection();
+    let first = api::EnvironmentMcpListQuery {
+        limit: query.limit,
+        ..Default::default()
+    }
+    .collection();
+    let found = matches!(query.collection, Some(api::EnvironmentMcpCollection::Found));
+    let definitions = crate::collection::snapshot(
+        if found { &selected } else { &first },
+        &format!("{source}:found"),
+        reply.found,
+        |row| {
+            (
+                row.source.clone(),
+                format!("{:?}", row.scope),
+                row.directory.clone(),
+                row.name.clone(),
+            )
+        },
+        |row| {
+            format!(
+                "{} {} {}",
+                row.name,
+                row.source,
+                row.directory.as_deref().unwrap_or("")
+            )
+        },
+        false,
+    )?;
+    let servers = crate::collection::snapshot(
+        if found { &first } else { &selected },
+        &format!("{source}:servers"),
+        reply.servers,
+        |row| (row.server.name.clone(), row.server.id),
+        |row| row.server.name.clone(),
+        false,
+    )?;
+    reply.next_cursor = if found {
+        definitions.next_cursor
+    } else {
+        servers.next_cursor
+    };
+    reply.found = definitions.items;
+    reply.servers = servers.items;
+    Ok(reply)
+}
+
 pub(super) fn found_view(found: &Json) -> Option<api::McpFound> {
     let mut found = found.clone();
     if found["scope"] == "directory" {
@@ -487,6 +542,7 @@ impl PreparedGet {
                 .map(|row| row.id);
         }
         Ok(EnvironmentMcp {
+            next_cursor: None,
             servers,
             applies: self.applies,
             found,

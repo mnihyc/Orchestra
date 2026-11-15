@@ -1,0 +1,12 @@
+fmt
+clippy
+contracts
+test -p orch-api-contract --lib
+test -p orch-api-core --lib
+test -p orch-api-core --test admin_catalogue --test semantic_admin
+test -p orch-api-core --test admin_native_scopes -- semantic::
+test -p orch-db --test released_migrations
+test -p orch-engine --lib -- --skip history_pages::
+web typecheck
+web lint
+web test -- tests/component/admin-semantic-search.test.tsx tests/component/table-values-once.test.tsx tests/component/person-words.test.tsx tests/unit/admin-mode-cache.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

@@ -5,29 +5,32 @@
  * interval. An org where nothing is named can be given the provider Local embeddings, which is then named
  * there; an index that waits for a choice offers the two, with the size and time of a new set shown first.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useMemo,useState } from 'react';
+import {useStore} from 'zustand';
+import {client} from '@/api/client';
+import {SemanticActionsOwner,useSemanticActions} from './semanticActions';
+import {useCollectionSearch} from '@/lib/collectionSearch';
+import {CollectionSearch} from '@/ui/CollectionSearch';
+import {Pagination} from '@/ui/Pagination';
 import { ReferenceCard } from '@/ui/ReferenceCard';
 import { PLACE_ICONS } from '@/features/navigation/places';
 import { isPlainClick } from '@/features/chat/open';
 import { Link } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 
-import { keepSemanticSearch, rebuildSemanticSearch, semanticSearchKey, semanticSearchQuery } from '@/api/admin';
-import { settingsKey } from '@/api/settings';
+import { semanticSearchPageQuery } from '@/api/admin';
 import { StatusDot, type DotTone } from '@/ui/StatusDot';
-import { Dialog } from '@/ui/Dialog';
-import { AddProviderDialog } from '@/features/resources/providers/AddProvider';
 import { providerQuery, templateQuery } from '@/api/resources';
 import { SettingsEditor } from '@/features/settings/Editor';
 import { Hint } from '@/features/help/Hint';
-import type { SemanticSearchOrg, SemanticSearchOverview, SemanticState } from '@/generated/api-types';
+import type { SemanticSearchOrg, SemanticState } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
 import { formatBytes, formatNumber, formatTokens } from '@/lib/format';
 import { formatSpan } from '@/lib/time';
 import { Section } from '@/shell/Page';
 import { Button } from '@/ui/Button';
-import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
+import { ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Meter } from '@/ui/Meter';
 import { SkeletonRows } from '@/ui/Skeleton';
@@ -133,24 +136,7 @@ function Disk({ org }: { org: SemanticSearchOrg }) {
 function Actions({ org }: { org: SemanticSearchOrg }) {
   const { t } = useTranslation();
   const format = useFormats();
-  const client = useQueryClient();
-  const refresh = (row: SemanticSearchOrg) => {
-    client.setQueryData<SemanticSearchOverview>(semanticSearchKey, (before) => before === undefined ? before : {...before, orgs: before.orgs.map((org) => org.org.id === row.org.id ? row : org)});
-    void client.invalidateQueries({ queryKey: settingsKey(org.org.id), exact: true });
-  };
-  const [adding, setAdding] = useState(false);
-  const [settings, setSettings] = useState(false);
-  const rebuild = useMutation({ mutationFn: () => rebuildSemanticSearch(org.org.id), onSuccess: refresh });
-  // Keeping the present model names again, for this org, exactly what made its vectors.
-  const keep = useMutation({
-    mutationFn: () => {
-      const active = org.active;
-      if (active === null) return Promise.reject(new Error(t('admin.semantic.noActive')));
-      return keepSemanticSearch(org.org.id, active.id);
-    },
-    onSuccess: refresh,
-  });
-  const failed = rebuild.error ?? keep.error;
+  const {setAdding,setSettings,rebuild,keep}=useSemanticActions(org);
   if (org.state === 'not_named') {
     return (
       <span className="flex flex-col items-start gap-1">
@@ -158,11 +144,6 @@ function Actions({ org }: { org: SemanticSearchOrg }) {
           {t('admin.semantic.addLocal')}
         </Button>
         <Button size="sm" variant="ghost" onClick={() => setSettings(true)}>{t('admin.semantic.embeddings')}</Button>
-        {adding && <AddProviderDialog initialHome={org.org.id} initialPreset="Local embeddings" onClose={() => setAdding(false)} onCreated={() => { setAdding(false); setSettings(true); }} />}
-        {settings && <Dialog open title={t('admin.semantic.embeddings')} onOpenChange={setSettings} footer={<Button onClick={() => setSettings(false)}>{t('common.close')}</Button>}>
-          <SettingsEditor target={{kind: 'node', id: org.org.id}} scope="org" only={['search.semantic.embeddings']} compact place={{name: org.org.name ?? '', owner: null, access: null, kind: 'org'}} />
-        </Dialog>}
-        {failed !== null && <ErrorAlert error={failed} />}
       </span>
     );
   }
@@ -184,7 +165,6 @@ function Actions({ org }: { org: SemanticSearchOrg }) {
           {t('admin.semantic.keep')}
         </Button>
       </span>
-      {failed !== null && <ErrorAlert error={failed} />}
     </span>
   );
 }
@@ -210,18 +190,25 @@ function TemplateUsed({ providerId }: { providerId: string | null }) {
 }
 
 export function SemanticSearch() {
+ const reader=useStore(client.session,(state)=>`${state.userId}:${state.readerVersion}`);
+ return <SemanticActionsOwner key={reader}><SemanticSearchPage/></SemanticActionsOwner>;
+}
+function SemanticSearchPage() {
   const { t } = useTranslation();
   const format = useFormats();
   // Follow the indexer's interval even while idle: a changed setting can begin work after this read.
-  const overview = useQuery({
-    ...semanticSearchQuery,
-    refetchInterval: (query) => query.state.data === undefined ? false : query.state.data.interval_secs * 1000,
+  const search=useCollectionSearch('admin-semantic-orgs');
+  const overview = useInfiniteQuery({
+    ...semanticSearchPageQuery(search.q),
+    refetchInterval: (query) => query.state.data?.pages[0]===undefined ? false : query.state.data.pages[0].interval_secs * 1000,
   });
+  const rows=useMemo(()=>overview.data?.pages.flatMap((page)=>page.orgs)??[],[overview.data]);
 
   if (overview.isPending) return <SkeletonRows read={overview} rows={4} />;
-  if (overview.isError) return <ErrorState error={overview.error} retrying={overview.isRefetching} onRetry={() => void overview.refetch()} />;
+  if (overview.isError&&!overview.isFetchNextPageError) return <ErrorState error={overview.error} retrying={overview.isRefetching} onRetry={() => void overview.refetch()} />;
 
-  const data = overview.data;
+  const data = overview.data?.pages[0];
+  if(data===undefined)return <SkeletonRows rows={4}/>;
   const columns: Column<SemanticSearchOrg>[] = [
     { id: 'org', header: t('admin.semantic.org'), grow: true, cell: (row, shown) => <span className="flex min-w-0 flex-col gap-1">
       <span className="flex flex-wrap items-center gap-2"><OrgName org={row.org} />
@@ -264,11 +251,13 @@ export function SemanticSearch() {
         </InlineAlert>
       )}
       <Section id="admin-semantic-orgs" title={t('admin.semantic.orgsTitle')} action={<Hint id="semantic-search-index" />}>
-        {data.orgs.length === 0 ? (
+        <CollectionSearch name={t('admin.semantic.orgsTitle')} {...search}/>
+        {rows.length === 0 ? (
           <p className="text-sm text-text-muted">{t('admin.semantic.noOrgs')}</p>
         ) : (
-          <Table label={t('admin.semantic.orgsTitle')} columns={columns} rows={data.orgs} rowKey={(row) => row.org.id} />
+          <Table label={t('admin.semantic.orgsTitle')} columns={columns} rows={rows} virtual rowKey={(row) => row.org.id} />
         )}
+        <Pagination hasMore={overview.hasNextPage} loading={overview.isFetchingNextPage} error={overview.isFetchNextPageError?overview.error:null} onMore={()=>{void overview.fetchNextPage();}}/>
       </Section>
       <Section id="admin-semantic-choice" title={t('admin.semantic.choiceTitle')}>
         <SettingsEditor target={{ kind: 'system' }} scope="system" only={KEYS} compact place={{ name: t('admin.nav.groups.system'), owner: null, access: null, kind: null }} />
