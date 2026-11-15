@@ -43,6 +43,8 @@ pub enum LedgerError {
 /// A session that is open in a harness process.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostedSession {
+    /// The accepted physical opening whose reports this record can produce.
+    pub opening_id: Id,
     /// The thread.
     pub thread_id: Id,
     /// The stretch of the thread it serves.
@@ -231,6 +233,22 @@ impl Ledger {
         self.write(&record);
     }
 
+    /// A delayed close removes only its original physical opening.
+    pub fn session_closed_if(&self, thread_id: Id, opening_id: Id) {
+        let mut record = self.record();
+        let mut changed = false;
+        for harness in &mut record.harnesses {
+            let previous = harness.sessions.len();
+            harness
+                .sessions
+                .retain(|open| open.thread_id != thread_id || open.opening_id != opening_id);
+            changed |= previous != harness.sessions.len();
+        }
+        if changed {
+            self.write(&record);
+        }
+    }
+
     /// Records which turn of a session runs, or that none does.
     pub fn turn_running(&self, thread_id: Id, turn: Option<Id>) {
         let mut record = self.record();
@@ -318,6 +336,7 @@ mod tests {
 
     fn session(thread: Id) -> HostedSession {
         HostedSession {
+            opening_id: orch_types::new_id(),
             thread_id: thread,
             segment_id: new_id(),
             native_session_ref: "fake_1".into(),

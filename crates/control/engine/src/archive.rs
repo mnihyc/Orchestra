@@ -863,6 +863,7 @@ impl Engine {
             self.inner
                 .commands
                 .issue(Outgoing {
+                    native_target: None,
                     authority: None,
                     id: row.id,
                     machine: row.machine_id,
@@ -915,6 +916,7 @@ impl Engine {
                 link::insert_command(
                     &mut tx,
                     &link::NewCommand {
+                        native_target: None,
                         id,
                         machine_id: previous.machine_id,
                         kind: &previous.kind,
@@ -943,6 +945,7 @@ pub(crate) async fn persist(
     link::insert_command(
         conn,
         &link::NewCommand {
+            native_target: None,
             id: command.id,
             machine_id: command.machine,
             kind: command.kind.as_str(),

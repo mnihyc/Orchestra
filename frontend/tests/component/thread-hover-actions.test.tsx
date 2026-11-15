@@ -71,7 +71,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(wire.copy).toHaveBeenCalledWith('Fix this route\n\nThe route is fixed.', i18n.t('thread.turnActions.copied'));
     await userEvent.click(within(person).getByRole('button', { name: i18n.t('thread.turnActions.restoreBefore') }));
     await waitFor(() => expect(wire.checkpoint).toHaveBeenCalledExactlyOnceWith('before-person-message'));
-    expect(screen.getByRole('dialog', { name: i18n.t('source.restore.titleTurn') })).toBeVisible();
+    expect(await screen.findByRole('dialog', { name: i18n.t('source.restore.titleTurn') })).toBeVisible();
     expect(wire.send).not.toHaveBeenCalled(); expect(wire.retry).not.toHaveBeenCalled();
   });
 }

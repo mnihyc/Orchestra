@@ -106,10 +106,18 @@ fn usage(turn: Id) -> Event {
 }
 
 /// A turn's worth of everything a session says.
-fn script(world: &World, segment: Id, turn: Id) -> Vec<DeliveredEvent> {
+async fn script(world: &World, segment: Id, turn: Id) -> Vec<DeliveredEvent> {
     let at = world.clock.now();
+    let opening_id = orch_db::queries::session_dependencies::current_opening(
+        &mut world.pool.acquire().await.unwrap(),
+        segment,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let events = vec![
         Event::SessionOpened(SessionOpened {
+            opening_id,
             native_session_ref: format!("native-{segment}"),
             resumed: false,
         }),
@@ -188,7 +196,7 @@ async fn the_same_events_delivered_twice_change_nothing_the_second_time() {
         .unwrap();
     let start = world.turn_start(thread, 0).await;
     let segment = world.segment_of(thread).await;
-    let events = script(&world, segment, start.turn_id);
+    let events = script(&world, segment, start.turn_id).await;
 
     apply(&world, thread, segment, &events).await;
     let forwarded = world.live.deltas().len();
@@ -578,6 +586,7 @@ async fn anonymous_native_failures_keep_source_event_identity_across_transport_r
             &world,
             1,
             &Event::SessionOpened(SessionOpened {
+                opening_id: world.opening_of(thread).await,
                 native_session_ref: "native-session".into(),
                 resumed: false,
             }),
@@ -666,6 +675,7 @@ async fn a_marker_only_compaction_resends_context_once_without_borrowing_a_child
                 &world,
                 1,
                 &Event::SessionOpened(SessionOpened {
+                    opening_id: world.opening_of(thread).await,
                     native_session_ref: "native-compaction".into(),
                     resumed: false,
                 }),
@@ -807,6 +817,7 @@ async fn native_runtime_changes_audit_their_source_once_without_copying_native_b
             &world,
             1,
             &Event::SessionOpened(SessionOpened {
+                opening_id: world.opening_of(thread).await,
                 native_session_ref: "runtime-audit".into(),
                 resumed: false,
             }),

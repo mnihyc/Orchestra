@@ -706,7 +706,8 @@ impl Commands for Process {
     }
     async fn observe(&self, command: Outgoing) -> Result<Outcome, CommandsError> {
         self.alive()?;
-        let cmd = Cmd {
+        let mut cmd = Cmd {
+            native_target: None,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
@@ -716,6 +717,47 @@ impl Commands for Process {
             ),
             body: command.body,
         };
+        if let Some(action) =
+            orch_link_contract::native_target::session_action(&cmd.kind, &cmd.body)
+        {
+            let mut tx = self
+                .commands
+                .db
+                .begin()
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+            cmd.native_target = if action == orch_link_contract::native_target::SessionAction::Model
+            {
+                let facts = orch_db::queries::session_dependencies::admit_transport(
+                    &mut tx,
+                    cmd.id,
+                    command.machine,
+                    &cmd.body,
+                )
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+                Some(
+                    serde_json::from_value(facts["native_target"].clone())
+                        .map_err(|error| CommandsError::Other(error.to_string()))?,
+                )
+            } else {
+                let (thread, segment) =
+                    orch_link_contract::native_target::session_address(&cmd.kind, &cmd.body)
+                        .ok_or_else(|| {
+                            CommandsError::Other(
+                                "the native observation has no logical address".into(),
+                            )
+                        })?;
+                Some(
+                    orch_db::queries::session_dependencies::target(&mut tx, thread, segment)
+                        .await
+                        .map_err(|error| CommandsError::Other(error.to_string()))?,
+                )
+            };
+            tx.commit()
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+        }
         let handle = self.commands.link_of(command.machine).commands().issue(cmd);
         self.wait_handle(handle).await
     }
@@ -726,8 +768,7 @@ impl Commands for Process {
         before: Option<orch_engine::commands::BeforeCommand<'_>>,
     ) -> Result<(), CommandsError> {
         self.alive()?;
-        let mut issued = lock(&self.commands.issued);
-        if issued.contains_key(&command.id) {
+        if lock(&self.commands.issued).contains_key(&command.id) {
             if let Some(check) = before {
                 check().map_err(CommandsError::BeforeEffect)?;
             }
@@ -737,7 +778,8 @@ impl Commands for Process {
         let deadline = command.deadline.unwrap_or_else(|| {
             Time::new(now + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())))
         });
-        let cmd = Cmd {
+        let mut cmd = Cmd {
+            native_target: None,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
@@ -746,6 +788,37 @@ impl Commands for Process {
         };
         if let Some(check) = before {
             check().map_err(CommandsError::BeforeEffect)?;
+        }
+        {
+            let mut conn = self
+                .commands
+                .db
+                .acquire()
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+            link_queries::insert_command(
+                &mut conn,
+                &link_queries::NewCommand {
+                    native_target: command.native_target.as_ref(),
+                    id: cmd.id,
+                    machine_id: command.machine,
+                    kind: &cmd.kind,
+                    body: &cmd.body,
+                    serial_key: cmd.key.as_deref(),
+                    deadline_at: cmd.deadline.get(),
+                },
+                now,
+            )
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+            cmd.native_target =
+                orch_db::queries::session_dependencies::command_native_target(&mut conn, cmd.id)
+                    .await
+                    .map_err(|error| CommandsError::Other(error.to_string()))?;
+        }
+        let mut issued = lock(&self.commands.issued);
+        if issued.contains_key(&command.id) {
+            return Ok(());
         }
         let handle = self
             .commands
@@ -2539,6 +2612,35 @@ impl World {
                 &event,
             )
             .await;
+    }
+
+    /// The physical opening already admitted by this world's actual session command.
+    pub async fn opening_of(&self, thread: Id) -> Id {
+        let segment = self.segment_of(thread).await;
+        let opening: String = sqlx::query_scalar(
+            "SELECT delivered_resources#>>'{tool_admission,opening_id}' FROM segments WHERE id=$1",
+        )
+        .bind(segment)
+        .fetch_one(self.pool.pool())
+        .await
+        .unwrap();
+        opening.parse().unwrap()
+    }
+
+    /// Waits for this session report's native cursor, including an intentionally ignored old report.
+    pub async fn say_session_taken_in(&self, thread: Id, event: Event) {
+        let segment = self.segment_of(thread).await;
+        let stream = Stream::Session {
+            thread_id: thread,
+            segment_id: segment,
+        }
+        .to_string();
+        let before = self.taken_in(&stream).await;
+        self.say(thread, event).await;
+        eventually("the session report to be consumed", || async {
+            self.taken_in(&stream).await > before
+        })
+        .await;
     }
 
     /// Opens the planned harness session before this world reports from a segment.

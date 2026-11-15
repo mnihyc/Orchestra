@@ -91,6 +91,7 @@ pub mod processes;
 pub mod program_admin;
 pub mod programs;
 pub mod provider_update_sources;
+pub mod public_addresses;
 pub mod resource_facts;
 pub mod resource_facts_sources;
 pub mod resource_groups;

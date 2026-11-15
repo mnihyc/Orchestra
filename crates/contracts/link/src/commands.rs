@@ -27,6 +27,8 @@ pub use crate::browser::{
     BrowserAdopt, BrowserAdoptResult, BrowserClose, BrowserOpen, BrowserOpenResult,
     BrowserProfileCommand, BrowserProfileResult, ScreenLook, ScreenLookResult,
 };
+pub use crate::native_target::{NativeTarget, SessionTarget};
+
 use crate::events::{EnvironmentFacts, NodeCapacity, NodeStorage};
 use crate::foreign;
 use crate::policy::LocalPolicy;
@@ -346,6 +348,9 @@ pub fn resolve_reference_values<E>(
 /// A command, as it is sent to a machine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Cmd {
+    /// The physical operand captured at acceptance; absent only for acts without a native target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_target: Option<crate::native_target::NativeTarget>,
     /// The command's identifier: the same every time it is sent.
     pub id: Id,
     /// Its kind.
@@ -931,12 +936,16 @@ commands! {
     /// Installs the recommended verified build after the server has fenced and drained hosted turns.
     /// Local update.auto is checked again on receipt and immediately before installation.
     MachineUpdateNow = "machine.update.now": ANY, Machine, 30, None, MachineUpdateNow => MachineUpdateNowResult;
+    /// Runs or observes only this installation's release updater on its bundled node.
+    NodeServerUpdate = "node.server.update": NODE, Machine, 60, None, NodeServerUpdate => orch_api_contract::admin::ServerUpdateObservation;
     /// Changes keys of a machine's local policy that its owner handed over.
     MachinePolicySet = "machine.policy.set": CONNECTED, Machine, 30, None, MachinePolicySet => MachinePolicySetResult;
     /// Changes or probes locally supervised programs, within the existing provider startup budget.
     MachinePrograms = "machine.programs": ANY, Machine, 120, None, MachineProgramsCommand => MachineFacts;
     /// Saves delegated connector roles, then reconnects through the native supervisor.
     MachineRolesSet = "machine.roles.set": ANY, Machine, 30, None, MachineRolesSet => MachineRolesSetResult;
+    /// Saves a primary choice within the same advertised installation, then reconnects after its durable reply.
+    MachineGatewaySet = "machine.gateway.set": ANY, Machine, 30, None, MachineGatewaySet => MachineGatewaySetResult;
     /// Runs one named command after a managed unit starts, keeping its result for this run.
     /// Its hour-long maximum plus thirty seconds allows bounded drain and durable result storage.
     UnitAfterUp = "unit.after_up": AFTER_UP_HOST, Runtime, 3630, None, UnitAfterUp => UnitAfterUpResult;
@@ -1266,6 +1275,7 @@ impl Cmd {
         body: &B,
     ) -> Result<Self, serde_json::Error> {
         Ok(Self {
+            native_target: None,
             id,
             kind: B::KIND.as_str().to_owned(),
             key: key.wire(),
@@ -1341,6 +1351,18 @@ pub struct MachineUpdateNowResult {
     pub detail: String,
 }
 
+/// A release selection, never a native path, executable, argument list or download URL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NodeServerUpdate {
+    /// Positive preparation allowance from the accepted system setting, not a cap on the detached release job.
+    pub timeout_secs: u64,
+    /// The same durable job identity across API and node restarts.
+    pub job_id: orch_types::Id,
+    /// The exact validated semantic release selected at admission.
+    pub release: String,
+}
+
 /// The body of `machine.policy.set`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MachinePolicySet {
@@ -1363,6 +1385,19 @@ pub struct MachineRolesSetResult {
     pub roles: Vec<String>,
     /// False for an idempotent request for the currently active roles.
     pub reconnecting: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MachineGatewaySet {
+    pub choice: crate::gateways::GatewayChoice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MachineGatewaySetResult {
+    pub choice: crate::gateways::GatewayChoice,
+    pub changed: bool,
 }
 
 /// The result of `machine.policy.set`.

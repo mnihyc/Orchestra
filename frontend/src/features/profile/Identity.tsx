@@ -1,4 +1,5 @@
 /** The identity column and the compact name card use the same visible page facts. */
+import { PathLink } from '@/shell/TrailLink';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
@@ -57,6 +58,6 @@ export function Identity({ profile, compact = false, heading = false, hideMessag
     <Memberships user={profile.user} orgs={profile.member_of} />
     {profile.personal_org !== null && <PlaceLink place={profile.personal_org} className="text-sm text-accent-text hover:underline">{t('profile.page.personalOrganization', { name: profile.personal_org.name })}</PlaceLink>}
     <p className="text-sm text-text-muted">{t('profile.page.joined', { date: new Intl.DateTimeFormat(i18n.language, { year: 'numeric', month: 'long' }).format(new Date(profile.joined_at)) })}</p>
-    {profile.is_me ? <Button asChild><a href="/settings/your-page" onClick={onNavigate}>{t('profile.page.edit')}</a></Button> : !hideMessage && profile.can_message && <ProfileMessage profile={profile} onNavigate={onNavigate} />}
+    {profile.is_me ? <Button asChild><PathLink href="/settings/your-page" onClick={onNavigate}>{t('profile.page.edit')}</PathLink></Button> : !hideMessage && profile.can_message && <ProfileMessage profile={profile} onNavigate={onNavigate} />}
   </div>;
 }
