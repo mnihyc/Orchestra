@@ -2,8 +2,6 @@
 
 use super::invalid;
 
-use super::page_size;
-
 use super::read_ahead;
 
 use crate::key_operations::credentials;
@@ -126,43 +124,33 @@ pub(super) struct Selected {
     owners: Vec<(Id, Id)>,
 }
 
-pub(super) fn cursor(route: &str, owner: Option<Id>, at: DateTime<Utc>, id: Id) -> String {
-    format!(
-        "{route}|{}|{}|{id}",
-        owner.map_or_else(|| "-".into(), |id| id.to_string()),
-        at.timestamp_micros()
-    )
+fn collection(query: &AdminTokenListQuery) -> orch_api_contract::common::CollectionQuery {
+    orch_api_contract::common::CollectionQuery {
+        q: query.q.clone(),
+        limit: query.limit,
+        cursor: query.cursor.clone(),
+    }
 }
-
+fn source(ctx: &Ctx, owner: Option<Id>) -> ApiResult<String> {
+    Ok(format!(
+        "admin-credentials:{}:{}:{owner:?}",
+        ctx.route.name,
+        ctx.user()?.id()
+    ))
+}
+pub(super) fn cursor(
+    ctx: &Ctx,
+    query: &AdminTokenListQuery,
+    at: DateTime<Utc>,
+    id: Id,
+) -> ApiResult<String> {
+    crate::collection::cursor(&collection(query), &source(ctx, query.owner_id)?, (at, id))
+}
 pub(super) fn after(
     ctx: &Ctx,
     query: &AdminTokenListQuery,
 ) -> ApiResult<Option<(DateTime<Utc>, Id)>> {
-    query
-        .cursor
-        .as_deref()
-        .map(|text| {
-            let bad = || invalid("cursor", "is not a cursor of this list");
-            let parts: Vec<_> = text.split('|').collect();
-            if parts.len() != 4
-                || parts[0] != ctx.route.name
-                || parts[1]
-                    != query
-                        .owner_id
-                        .map_or_else(|| "-".into(), |id| id.to_string())
-            {
-                return Err(bad());
-            }
-            Ok((
-                parts[2]
-                    .parse::<i64>()
-                    .ok()
-                    .and_then(DateTime::<Utc>::from_timestamp_micros)
-                    .ok_or_else(bad)?,
-                parts[3].parse().map_err(|_| bad())?,
-            ))
-        })
-        .transpose()
+    crate::collection::after(&collection(query), &source(ctx, query.owner_id)?)
 }
 
 async fn row_targets(
@@ -201,12 +189,19 @@ async fn select(
         "admin_tokens.discovery_standing",
         super::native::standing(ctx, &principal),
     )?;
-    let size = page_size(query.limit);
+    let size = usize::try_from(crate::collection::limit(&collection(query))?)
+        .map_err(ApiError::internal)?;
     let mut after = after(ctx, query)?;
     let mut kept = Vec::new();
     'pages: loop {
-        let batch =
-            identity::api_token_inventory(conn, query.owner_id, after, read_ahead(size)).await?;
+        let batch = identity::api_token_inventory(
+            conn,
+            query.owner_id,
+            after,
+            read_ahead(size),
+            query.q.as_deref().unwrap_or(""),
+        )
+        .await?;
         let exhausted = batch.len() < size.saturating_add(1);
         let facts = row_targets(conn, &batch).await?;
         for (row, target) in batch.into_iter().zip(facts) {
@@ -225,14 +220,9 @@ async fn select(
     let more = kept.len() > size;
     kept.truncate(size);
     let next_cursor = if more {
-        kept.last().map(|row| {
-            cursor(
-                ctx.route.name,
-                query.owner_id,
-                row.key.created_at,
-                row.key.id,
-            )
-        })
+        kept.last()
+            .map(|row| cursor(ctx, query, row.key.created_at, row.key.id))
+            .transpose()?
     } else {
         None
     };

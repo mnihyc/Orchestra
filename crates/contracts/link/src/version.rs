@@ -35,6 +35,16 @@ pub const OLDEST_PROTOCOL_VERSION: u32 = if PROTOCOL_VERSION > 1 {
 /// a fast link moves data in few frames, and a control frame that waits
 /// behind one does not wait long.
 pub const MAX_FRAME_BYTES: u32 = 262_144;
+/// The most bytes of one message of any kind: a command, its answer, an event
+/// or a report. What does not fit a frame travels in parts that the receiver
+/// puts together again, so a message is held back only by this figure, which is
+/// sixty-four frames: eight times the largest page of anything a machine lists,
+/// and about thirteen seconds on a line of ten megabits.
+pub const MAX_MESSAGE_BYTES: u32 = 16_777_216;
+/// What a message of the backplane may have beyond the message of a machine it
+/// carries: the machine and the session it names and the type around it, a few
+/// hundred bytes, with room to spare.
+pub const BACKPLANE_ENVELOPE_BYTES: usize = 65_536;
 /// The credit a receiver gives a new channel. One mebibyte: what an end
 /// holds, for each direction of each channel, for a consumer that has
 /// stopped reading.
@@ -114,6 +124,8 @@ impl ProtocolRange {
 pub struct Limits {
     /// The most bytes of one frame.
     pub max_frame_bytes: u32,
+    /// The most bytes of one message: one over a frame travels in parts.
+    pub max_message_bytes: u32,
     /// The credit a receiver gives a new channel.
     pub tunnel_window_bytes: u32,
     /// The most channels open at once.
@@ -189,6 +201,22 @@ impl Limits {
     pub fn frame_bytes(&self) -> usize {
         usize::try_from(self.max_frame_bytes).unwrap_or(usize::MAX)
     }
+
+    /// The most bytes of one message, as a length: never less than a frame, so
+    /// that what a frame carries is always a message.
+    #[must_use]
+    pub fn message_bytes(&self) -> usize {
+        usize::try_from(self.max_message_bytes.max(self.max_frame_bytes)).unwrap_or(usize::MAX)
+    }
+
+    /// The most bytes of one message of the backplane between a gateway and the
+    /// system: the largest message of a machine, whole, and the machine, the
+    /// session and the type that wrap it.
+    #[must_use]
+    pub fn backplane_bytes(&self) -> usize {
+        self.message_bytes()
+            .saturating_add(BACKPLANE_ENVELOPE_BYTES)
+    }
 }
 
 impl Default for Limits {
@@ -196,12 +224,18 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_frame_bytes: MAX_FRAME_BYTES,
+            max_message_bytes: MAX_MESSAGE_BYTES,
             tunnel_window_bytes: TUNNEL_WINDOW_BYTES,
             max_channels: MAX_CHANNELS,
             ports: PortLimits::SHIPPED,
         }
     }
 }
+
+/// The oldest connector a system that is a release accepts: the first that carries a message larger than a
+/// frame in parts. A connector before it would meet a frame it does not know, so its session is refused with
+/// the version it needs. The system, its gateway and the manifest of a release all take this one figure.
+pub const OLDEST_CONNECTOR_VERSION: &str = "0.1.3";
 
 /// The connector builds a system accepts and prefers.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -226,6 +260,28 @@ pub enum Standing {
 }
 
 impl ConnectorVersions {
+    /// What a system built as `release` states: it would have every machine run `release`, and accepts the
+    /// connectors from [`OLDEST_CONNECTOR_VERSION`], or from `release` itself where that is older, so that a
+    /// build that is not a release of its own (a development build states the version of its package)
+    /// accepts the connectors made with it. A `release` that is no version cannot be compared: the oldest
+    /// stands.
+    #[must_use]
+    pub fn of_release(release: &str) -> Self {
+        let before_the_oldest = |own: &ReleaseVersion| {
+            OLDEST_CONNECTOR_VERSION
+                .parse::<ReleaseVersion>()
+                .is_ok_and(|oldest| *own < oldest)
+        };
+        let min = match release.parse::<ReleaseVersion>() {
+            Ok(own) if before_the_oldest(&own) => release,
+            _ => OLDEST_CONNECTOR_VERSION,
+        };
+        Self {
+            min: min.to_owned(),
+            recommended: release.to_owned(),
+        }
+    }
+
     /// Where a connector of `version` stands.
     pub fn standing(&self, version: &str) -> Result<Standing, NotAVersion> {
         let version: ReleaseVersion = version.parse()?;
@@ -468,6 +524,37 @@ mod tests {
     }
 
     #[test]
+    fn a_release_accepts_no_connector_that_cannot_carry_a_message_of_any_size() {
+        let shipped = ConnectorVersions::of_release("0.1.3");
+        assert_eq!(shipped.recommended, "0.1.3");
+        for old in ["0.1.0", "0.1.1", "0.1.2"] {
+            assert_eq!(shipped.standing(old), Ok(Standing::TooOld), "{old}");
+        }
+        assert_eq!(shipped.standing("0.1.3"), Ok(Standing::Current));
+        assert_eq!(shipped.standing("0.2.0"), Ok(Standing::Current));
+        assert_eq!(
+            ConnectorVersions::of_release("0.4.0").min,
+            shipped.min,
+            "a later release keeps the same oldest connector until it raises it"
+        );
+    }
+
+    #[test]
+    fn a_build_that_is_not_a_release_of_its_own_accepts_the_connectors_made_with_it() {
+        // A development build states the version of its package, which is before the oldest connector.
+        let development = ConnectorVersions::of_release("0.1.0");
+        assert_eq!(development.standing("0.1.0"), Ok(Standing::Current));
+        // So does a candidate of the release that raised the oldest, and it still refuses what is older.
+        let candidate = ConnectorVersions::of_release("0.1.3-rc.1");
+        assert_eq!(candidate.standing("0.1.3-rc.1"), Ok(Standing::Current));
+        assert_eq!(candidate.standing("0.1.2"), Ok(Standing::TooOld));
+        // A text that is no version cannot be compared, so the oldest stands and nothing is current.
+        let unknown = ConnectorVersions::of_release("test");
+        assert_eq!(unknown.min, OLDEST_CONNECTOR_VERSION);
+        assert!(unknown.standing("0.1.3").is_err());
+    }
+
+    #[test]
     fn versions_compare_by_their_numbers_and_not_as_text() {
         let older: ReleaseVersion = "0.9.0".parse().unwrap();
         let newer: ReleaseVersion = "0.10.0".parse().unwrap();
@@ -521,9 +608,26 @@ mod tests {
     }
 
     #[test]
+    fn a_message_is_never_limited_below_a_frame() {
+        let limits = Limits {
+            max_frame_bytes: 1_000,
+            max_message_bytes: 10,
+            ..Limits::default()
+        };
+        assert_eq!(limits.message_bytes(), 1_000);
+        assert_eq!(Limits::default().message_bytes(), 16 * 1024 * 1024);
+        assert_eq!(Limits::default().frame_bytes(), 262_144);
+        assert_eq!(
+            Limits::default().backplane_bytes(),
+            16 * 1024 * 1024 + 65_536,
+            "the backplane carries the largest message whole, with its wrapper"
+        );
+    }
+
+    #[test]
     fn limits_are_written_as_the_gateway_states_them() {
         let limits: Limits = serde_json::from_str(
-            r#"{ "max_frame_bytes": 262144, "tunnel_window_bytes": 1048576, "max_channels": 256 }"#,
+            r#"{ "max_frame_bytes": 262144, "max_message_bytes": 16777216, "tunnel_window_bytes": 1048576, "max_channels": 256 }"#,
         )
         .unwrap();
         assert_eq!(limits, Limits::default());

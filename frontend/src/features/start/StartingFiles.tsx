@@ -3,6 +3,7 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { environmentQuery } from '@/api/environments';
+import { ApiError } from '@/api/client';
 import { namesQuery } from '@/api/search';
 import { snapshotQuery, threadSnapshotsQuery } from '@/api/source';
 import { FilesChoice } from '@/features/change/Files';
@@ -11,13 +12,15 @@ import { NamedChip } from '@/features/people/NamedChip';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 import { labelOfName, labelsOfNames } from '@/features/search/labels';
 import { restorable, unrecordedReason } from '@/features/source/words';
-import type { NameHit, NewEnvironmentFiles } from '@/generated/api-types';
+import type { NameHit, NewEnvironmentFiles, Snapshot } from '@/generated/api-types';
 import { useDebounced } from '@/lib/debounce';
 import { Button } from '@/ui/Button';
 import { ByteSize } from '@/ui/ByteSize';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { Input } from '@/ui/Input';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
 import { Pagination } from '@/ui/Pagination';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { SegmentedControl } from '@/ui/SegmentedControl';
@@ -42,6 +45,7 @@ function EnvironmentName({ id }: { id: string }) {
 
 export function StartingFiles({ value, onChange, disabled = false }: { value?: NewEnvironmentFiles | null; onChange: (value: NewEnvironmentFiles | undefined) => void; disabled?: boolean }) {
   const { t } = useTranslation();
+  const { scope } = useCollectionSearch('starting-files');
   const [open, setOpen] = useState(false);
   return <div className="flex min-w-0 flex-col gap-2">
     <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -51,7 +55,7 @@ export function StartingFiles({ value, onChange, disabled = false }: { value?: N
         <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onChange(undefined)}>{t('start.where.clearFiles')}</Button>
       </>}
     </div>
-    {open && <StartingFilesDialog onClose={() => setOpen(false)} onChoose={(files) => { onChange(files); setOpen(false); }} />}
+    {open && <StartingFilesDialog key={scope} onClose={() => setOpen(false)} onChoose={(files) => { onChange(files); setOpen(false); }} />}
   </div>;
 }
 
@@ -63,16 +67,18 @@ function StartingFilesDialog({ onClose, onChoose }: { onClose: () => void; onCho
   const [thread, setThread] = useState<NameHit | null>(null);
   const [mode, setMode] = useState<'current' | 'snapshot'>('current');
   const [files, setFiles] = useState<FileChoice>({ mode: 'all' });
-  const [snapshot, setSnapshot] = useState<string | null>(null);
-  const snapshots = useInfiniteQuery({ ...threadSnapshotsQuery(thread?.id ?? ''), enabled: thread !== null && mode === 'snapshot' });
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const snapshotSearch = useCollectionSearch('starting-snapshots:' + (thread?.id ?? ''));
+  const snapshots = useInfiniteQuery({ ...threadSnapshotsQuery(thread?.id ?? '', snapshotSearch.q), enabled: thread !== null && mode === 'snapshot' });
   const recorded = snapshots.data?.pages.flatMap((page) => page.items) ?? [];
-  const pickedSnapshot = recorded.find((row) => row.id === snapshot);
+  const pickedSnapshot = recorded.find((row) => row.id === snapshot?.id) ?? snapshot ?? undefined;
   const waiting = search.trim() !== rested || names.isFetching;
   const hits = names.isPlaceholderData || waiting ? [] : (names.data ?? []).filter((hit) => hit.kind === 'thread');
   const labels = labelsOfNames(hits);
   const rows = hits.map((hit): TreeRow<NameHit> => ({ id: hit.id, item: hit, parentId: null, depth: 0, expandable: false, expanded: false, tick: hit.id === thread?.id }));
   const draw = useCallback((row: TreeRow<NameHit>) => <NamedChip kind="thread" id={row.id} path={`/thread/${row.id}`} name={labelOfName(row.item, labels)} />, [labels]);
-  const ready = thread !== null && (mode === 'current' || pickedSnapshot !== undefined && restorable(pickedSnapshot));
+  const refused = snapshots.error instanceof ApiError && (snapshots.error.status === 403 || snapshots.error.status === 404);
+  const ready = thread !== null && (mode === 'current' || !refused && pickedSnapshot !== undefined && restorable(pickedSnapshot));
   return <Dialog open title={t('start.where.filesFrom')} size="md" onOpenChange={(open) => { if (!open) onClose(); }} footer={<>
     <Button onClick={onClose}>{t('common.cancel')}</Button>
     <Button variant="primary" disabled={!ready} reason={!ready ? t(mode === 'current' || thread === null ? 'start.where.chooseFileThread' : 'start.where.chooseSnapshot') : undefined}
@@ -92,7 +98,8 @@ function StartingFilesDialog({ onClose, onChoose }: { onClose: () => void; onCho
           { value: 'current', name: t('start.where.currentFiles') }, { value: 'snapshot', name: t('start.where.recordedFiles') },
         ]} />
         {mode === 'current' ? <FilesChoice value={files} onChange={setFiles} /> : <>
-          {snapshots.isPending ? <SkeletonRows rows={2} /> : snapshots.isError && recorded.length === 0 ? <ErrorState compact error={snapshots.error} onRetry={() => void snapshots.refetch()} /> : recorded.length === 0 ? <p className="text-sm text-text-muted">{t('start.where.noSnapshots')}</p> : <Select label={t('start.where.snapshot')} value={snapshot ?? ''} placeholder={t('start.where.chooseSnapshot')} onValueChange={setSnapshot}
+          <CollectionSearch name={t('start.where.snapshot')} {...snapshotSearch} />
+          {snapshots.isPending ? <SkeletonRows rows={2} /> : snapshots.isError && recorded.length === 0 ? <ErrorState compact error={snapshots.error} onRetry={() => void snapshots.refetch()} /> : recorded.length === 0 ? <p className="text-sm text-text-muted">{t('start.where.noSnapshots')}</p> : <Select label={t('start.where.snapshot')} value={snapshot?.id ?? ''} valueLabel={pickedSnapshot?.label} placeholder={t('start.where.chooseSnapshot')} onValueChange={(id) => { const selected = recorded.find((row) => row.id === id); if (selected !== undefined) { setSnapshot(selected); } }}
             options={recorded.map((row) => ({ value: row.id, label: row.label, disabled: !restorable(row), description: <span className="flex flex-wrap items-center gap-2">
               <RelativeTime at={row.created_at} /><ByteSize bytes={row.total_bytes} />{row.created_by !== null && <UserChip user={row.created_by} />}
               {!restorable(row) && <span>{unrecordedReason(t, row)}</span>}

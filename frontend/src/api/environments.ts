@@ -8,6 +8,7 @@
  */
 import { queryOptions } from '@tanstack/react-query';
 
+import { collectionQuery, readAllPages } from '@/api/collection';
 import { accepted, api, done, ok, repeatable } from '@/api/client';
 import { cachedRow, feedSequences } from '@/api/cache';
 import { agentReachKey } from '@/api/agentReach';
@@ -31,8 +32,35 @@ export const environmentKey = (id: string) => ['environment', id] as const;
 export const environmentSettingsKey = (id: string) => ['environment-settings', id] as const;
 export const environmentMcpKey = (id: string) => ['environment-mcp', id] as const;
 
+/** A visible child directory uses the same native whole/through-thread/retained read authority. */
+export const environmentThreadsPageQuery = (id: string, q: string, version = '') => collectionQuery(['environment-threads', id, version], q,
+  async (query, signal) => {
+    const reply = await ok(api.GET('/environments/{id}', { params: { path: { id }, query: {
+      threads_q: query.q, threads_limit: query.limit, ...(query.cursor === undefined ? {} : { threads_cursor: query.cursor }),
+    } }, signal }));
+    return { items: reply.threads, next_cursor: reply.threads_next_cursor ?? null, hidden: reply.threads_hidden };
+  });
+
 /** Current hosted server states and masked failures. */
-export const environmentMcpQuery = (id: string) => queryOptions({ queryKey: environmentMcpKey(id), queryFn: ({ signal }): Promise<EnvironmentMcp> => ok(api.GET('/environments/{id}/mcp', { params: { path: { id } }, signal })) });
+export const environmentMcpPageQuery = (id: string, collection: 'servers' | 'found', q: string) => collectionQuery([...environmentMcpKey(id), collection], q,
+  async (query, signal) => {
+    const reply = await ok(api.GET('/environments/{id}/mcp', { params: { path: { id }, query: { ...query, collection } }, signal }));
+    return { ...reply, items: collection === 'found' ? reply.found : reply.servers };
+  });
+
+/** Bulk import/configuration needs every admitted definition, independently of the visible page. */
+export const environmentMcpQuery = (id: string) => queryOptions({ queryKey: [...environmentMcpKey(id), 'complete'], queryFn: async ({ signal }): Promise<EnvironmentMcp> => {
+  let facts: EnvironmentMcp | undefined;
+  const read = async (collection: 'servers' | 'found', cursor: string | null) => {
+    const reply = await ok(api.GET('/environments/{id}/mcp', { params: { path: { id }, query: { collection, ...(cursor === null ? {} : { cursor }) } }, signal }));
+    facts = reply;
+    return reply;
+  };
+  const servers = await readAllPages(async (cursor) => { const reply = await read('servers', cursor); return { items: reply.servers, next_cursor: reply.next_cursor }; }, signal);
+  const found = await readAllPages(async (cursor) => { const reply = await read('found', cursor); return { items: reply.found, next_cursor: reply.next_cursor }; }, signal);
+  if (facts === undefined) throw new Error('The native catalogue did not return its facts.');
+  return { ...facts, servers, found, next_cursor: null };
+} });
 
 /** Import and optional enablement are one producer, including an accepted restricted receipt. */
 export async function importEnvironmentMcp(id: string, body: EnvironmentMcpImportCreateBody, key: string) {

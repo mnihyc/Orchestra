@@ -5,7 +5,7 @@ import { outsideStatusQuery } from '@/api/away';
 import { firstStepsKey } from '@/api/firstSteps';
 import { activityQuery, childrenQuery, listedPage, nodeKey, orgBySlugKey } from '@/api/nodes';
 import { outsideOpeningsQuery } from '@/api/ports';
-import { namesQuery, NAME_LIMIT_MAX } from '@/api/search';
+import { namesQuery, NAME_OVERVIEW_COUNT } from '@/api/search';
 import { usageQuery, type UsageParams } from '@/api/usage';
 import { scheduledReads } from '@/api/readScheduler';
 import type { Node, OrgOverview } from '@/generated/api-types';
@@ -25,7 +25,7 @@ export function hydrateOverview(cache: QueryClient, key: QueryKey, data: OrgOver
   put(nodeKey(org.id), org);
   put(orgBySlugKey(org.address), org);
   put(childrenQuery(org.id, 'exclude', params.participating).queryKey, { pages: [listedPage(data.children)], pageParams: [null] });
-  put(namesQuery({ q: '', kinds: ['thread'], orgId: org.org_id, limit: NAME_LIMIT_MAX }).queryKey, data.recent);
+  put(namesQuery({ q: '', kinds: ['thread'], orgId: org.org_id, limit: NAME_OVERVIEW_COUNT }).queryKey, data.recent);
   section(firstStepsKey(org.id), data.first_steps);
   section(outsideStatusQuery(org.id).queryKey, data.outside_status);
   section(usageQuery(params.usage).queryKey, data.usage);

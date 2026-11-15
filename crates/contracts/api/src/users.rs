@@ -18,7 +18,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::access::Role;
-use crate::common::{Page, PageQuery};
+use crate::common::{CollectionQuery, Page, PageQuery};
 use crate::nodes::{NodeKind, NodeRef, Org};
 use crate::routes::Access::{Public, Rule, User};
 
@@ -27,8 +27,8 @@ use crate::routes::Access::{Public, Rule, User};
 pub const COLOR_COUNT: u32 = 12;
 /// The fewest characters of a search for people.
 pub const USER_SEARCH_MIN_CHARS: u32 = 2;
-/// The most people a search for people returns, whatever is asked.
-pub const USER_SEARCH_MAX_RESULTS: u32 = 20;
+/// The default number of people in a native name page.
+pub const USER_SEARCH_DEFAULT_RESULTS: u32 = 20;
 
 /// The picture a person has in place of a photograph: a few letters on a
 /// colour.
@@ -325,7 +325,7 @@ pub struct InvitationTerms {
 /// Searches for people by the start of a username or a part of a display name
 /// among those who share an org with the caller, and by an exact username or
 /// address anywhere. It never lists everybody.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UserSearchQuery {
     /// What to look for, at least [`USER_SEARCH_MIN_CHARS`] characters.
@@ -333,6 +333,31 @@ pub struct UserSearchQuery {
     /// Look among the members of this org, at whatever level it lies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<Id>,
+    /// Also find admitted public people outside the selected org, retaining actual membership facts.
+    /// Requires org_id; false by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_external: Option<bool>,
+    /// Picker mode accepts the first character and opens with private recents and shared-org people.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picker: Option<bool>,
+    /// Entries per page; any positive u32, twenty by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Continue the same actor, org, picker mode and words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// Native people results with membership facts for the selected org, independent of loaded pages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UserSearchReply {
+    /// Current public references admitted by this search.
+    pub items: Vec<UserRef>,
+    /// Continuation of the same search, absent at the end.
+    pub next_cursor: Option<String>,
+    /// Returned people who are members of org_id; absent when no org was selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_member_ids: Option<Vec<Id>>,
 }
 
 /// Makes an invitation. With `email` it is a personal link; without, a shared
@@ -424,6 +449,33 @@ pub struct InvitationListQuery {
     /// Only the invitations into this org.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<Id>,
+    /// Only invitations that are unrevoked, unexpired and not used up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    /// Words in its visible destination, address, note or inviter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries in this page; 50 by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::common::query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// Continue the same org, active choice and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl InvitationListQuery {
+    /// Its ordinary named page.
+    #[must_use]
+    pub fn collection(&self) -> CollectionQuery {
+        CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
 }
 
 /// Accepts an invitation.
@@ -690,7 +742,7 @@ crate::endpoints! {
     MeProfilePinsSet: PUT "/me/profile/pins", User, none, json MeProfilePinsSetBody, json UserProfile, 200,
         operation Op::returning(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Finds people by the start of a name, or by an exact username or address.
-    UserSearch: GET "/users/search", User, query UserSearchQuery, none, json Vec<UserRef>, 200,
+    UserSearch: GET "/users/search", User, query UserSearchQuery, none, json UserSearchReply, 200,
         operation Op::single(Read, &[Identity(I::Account)], Target::ResolvedCollection("results"));
     /// Reads one person as others see them.
     UserGet: GET "/users/{id}", User, none, none, json UserRef, 200,
@@ -713,7 +765,7 @@ crate::endpoints! {
             Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("invitation_names_threads")),
         ]));
     /// Lists the invitations of a place, newest first.
-    InvitationList: GET "/invitations", Rule("the same as making one"), query InvitationListQuery, none, json Vec<Invitation>, 200,
+    InvitationList: GET "/invitations", Rule("the same as making one"), query InvitationListQuery, none, json Page<Invitation>, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Identity(I::Invitation)], Target::ResolvedCollection("invitation_destinations")),
             Facet::response_content(&[Identity(I::Chat)], Target::ResolvedCollection("invitation_chats")),

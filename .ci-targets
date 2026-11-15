@@ -1,0 +1,13 @@
+fmt
+clippy
+contracts
+test -p orch-api-contract --lib
+test -p orch-api-core --lib
+test -p orch-chat --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test users --test account_native_scopes --test search_names --test search_native_scopes --test people_reactions --test personal_state_scope
+test -p orch-api-core --test chats_people --test chat_list_scopes --test org_contents --test chats_resource_visibility --test semantic_admin
+test -p orch-db --test released_migrations
+web typecheck
+web lint
+web test -- tests/component/forward-receipt.test.tsx tests/unit/chat-forward.test.ts tests/component/group-chat-create.test.tsx tests/component/chat-group-receipts.test.tsx tests/component/group-chat-access.test.tsx tests/component/history-person-locator.test.tsx tests/component/resource-picker.test.tsx tests/component/admin-semantic-search.test.tsx tests/component/table-values-once.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

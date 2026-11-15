@@ -481,6 +481,7 @@ async fn the_people_behind_a_holder_of_a_resource_s_page_are_listed_only_for_a_h
         .call(PermissionPeopleList, &[&"providers", &id])
         .token(&ada.token)
         .query(&PermissionPeopleListQuery {
+            q: None,
             holder: format!("role:{org}:viewer"),
             limit: None,
             cursor: None,
@@ -506,6 +507,7 @@ async fn the_people_behind_a_holder_of_a_resource_s_page_are_listed_only_for_a_h
         .call(PermissionPeopleList, &[&"providers", &id])
         .token(&ada.token)
         .query(&PermissionPeopleListQuery {
+            q: None,
             holder: format!("group:{}", orch_types::new_id()),
             limit: None,
             cursor: None,
@@ -525,6 +527,7 @@ async fn the_people_behind_a_holder_of_a_resource_s_page_are_listed_only_for_a_h
         .call(PermissionPeopleList, &[&"providers", &id])
         .token(&office.desk.stranger("sam").await.token)
         .query(&PermissionPeopleListQuery {
+            q: None,
             holder: format!("role:{org}:viewer"),
             limit: None,
             cursor: None,
@@ -569,6 +572,7 @@ async fn a_node_is_served_as_before_and_a_chat_or_a_made_up_kind_is_answered_pla
             .call(PermissionPeopleList, &[&plural, &id])
             .token(&ada.token)
             .query(&PermissionPeopleListQuery {
+                q: None,
                 holder: "admins".to_owned(),
                 limit: None,
                 cursor: None,
@@ -756,11 +760,13 @@ async fn a_person_of_another_org_is_found_by_an_exact_username_or_address_and_a_
             .query(&UserSearchQuery {
                 q: q.to_owned(),
                 org_id: org,
+                ..Default::default()
             });
         async move {
             call.send()
                 .await
                 .ok()
+                .items
                 .into_iter()
                 .map(|found| found.username)
                 .collect::<Vec<_>>()
@@ -804,6 +810,7 @@ async fn the_people_behind_a_holder_of_a_document_s_page_are_listed_for_whoever_
             .call(PermissionPeopleList, &[&"documents", &document])
             .token(&who.token)
             .query(&PermissionPeopleListQuery {
+                q: None,
                 holder: holder.to_owned(),
                 limit: None,
                 cursor: None,
@@ -832,6 +839,7 @@ async fn the_people_behind_a_holder_of_a_document_s_page_are_listed_for_whoever_
         .app
         .call(PermissionPeopleList, &[&"documents", &document])
         .query(&PermissionPeopleListQuery {
+            q: None,
             holder: "admins".to_owned(),
             limit: None,
             cursor: None,
@@ -925,6 +933,7 @@ async fn each_resource_kind_answers_the_same_permission_readers_and_refuses_a_st
             .call(PermissionPeopleList, &[&plural, &id])
             .token(&ada.token)
             .query(&PermissionPeopleListQuery {
+                q: None,
                 holder: "admins".to_owned(),
                 limit: None,
                 cursor: None,
