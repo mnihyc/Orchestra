@@ -714,6 +714,7 @@ pub(crate) fn issue<'a>(
                 .map(serde_json::to_value)
                 .transpose()?;
             let proposed = link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),
@@ -854,6 +855,7 @@ pub(crate) async fn download_state(
     let environment: Id = serde_json::from_value(row.body["environment_id"].clone())?;
     Ok(Some((
         Outgoing {
+            content_transit: false,
             authority: None,
             id,
             machine: row.machine_id,
@@ -976,6 +978,7 @@ async fn fence(engine: &Engine, id: Id) -> Result<(), EngineError> {
             link::insert_command(
                 &mut tx,
                 &link::NewCommand {
+                    content_transit: false,
                     id: fence_id,
                     machine_id: owned.machine_id,
                     kind: CommandKind::MachineProbe.as_str(),

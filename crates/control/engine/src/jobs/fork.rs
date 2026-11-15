@@ -1615,6 +1615,11 @@ impl Forking {
                 )
                 .await?;
             }
+            // What the source uploaded belongs to this fork until it ends: held for the target to
+            // fetch, let go of, and removed from the server, with the job.
+            engine
+                .hold_for_transfer(job.id(), "fork_live_pins", taken.manifest_blob)
+                .await?;
             job.progress(
                 f64::from(pass) / 2.0 + 0.25,
                 Some("the files are read from the source"),
@@ -2880,6 +2885,7 @@ impl Engine {
             input_id: Id::nil(),
             before_snapshot_id: None,
             files_end_manifest: None,
+            files_changed: None,
             end_manifest_blob: None,
             model: plan.to.model.clone(),
             effort: plan.to.effort.clone(),

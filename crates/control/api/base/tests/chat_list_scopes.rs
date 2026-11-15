@@ -15,7 +15,7 @@ use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::chats::{
     ChatListScope, ChatStateSet, ChatStateSetBody, OrgChatList, OrgChatListQuery,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity;
 use orch_types::{Id, Json, new_id};
 use places::Who;
@@ -27,11 +27,12 @@ fn rule(operation: &str, action: &str, kind: &str, id: Id, reach: &str) -> Json 
 async fn key(room: &Room, by: &Who, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *room.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: by.id(),
             name: "Native chat-list fixture",
             token_hash: &token_hash(&secret),

@@ -1,0 +1,3 @@
+test -p orch-api-core --test document_convert --test document_file_creation_scopes --test document_import_files --test uploads --test upload_inventory
+test -p orch-api-core --test skills --test imports --test exports --test chats_export
+test -p orch-engine --test skills --test shared_attachment_download --test forks

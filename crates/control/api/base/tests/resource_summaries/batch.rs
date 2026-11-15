@@ -72,11 +72,12 @@ async fn an_opted_in_document_sync_carries_only_the_summary_its_reader_may_read(
         {"target":{"kind":"document","id":source,"reach":"self"},"allow":[{"operation":"SummaryGet","actions":["read"]}]}
     ]})).unwrap();
     assert!(scope.validate().is_empty());
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = orch_api_core::middleware::authentication::new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *desk.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: desk.ada.id(),
             name: "Document opening summary control",
             token_hash: &token_hash(&token),
@@ -295,11 +296,12 @@ async fn a_topic_only_opening_key_keeps_its_summary_without_borrowing_chat_or_do
         }]}))
         .unwrap();
     assert!(scope.validate().is_empty());
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = orch_api_core::middleware::authentication::new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *desk.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: desk.ada.id(),
             name: "One topic opening",
             token_hash: &token_hash(&token),
@@ -657,11 +659,12 @@ async fn a_thread_only_opening_key_keeps_its_summary_without_borrowing_chat_or_d
         }]}))
         .unwrap();
     assert!(scope.validate().is_empty());
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = orch_api_core::middleware::authentication::new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: scene.ada.id(),
             name: "One thread opening",
             token_hash: &token_hash(&token),
@@ -800,11 +803,12 @@ async fn a_batch_key_cannot_borrow_a_missing_governors_read_from_its_primary_tar
         "target":{"kind":"topic","id":desk.topic,"reach":"self"},"resources":["topic"],"allow":[{"operation":"SummaryBatchGet","actions":["read"]}]
     }]})).unwrap();
     assert!(scope.validate().is_empty());
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = orch_api_core::middleware::authentication::new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *desk.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: desk.ada.id(),
             name: "One batch source",
             token_hash: &token_hash(&token),

@@ -252,7 +252,7 @@ async fn create(ctx: Ctx, (): (), body: Body) -> ApiResult<Response> {
         .store_stream(body.into_data_stream(), IMAGE_UPLOAD_MAX_BYTES)
         .await
         .map_err(uploads::stored_badly)?;
-    uploads::register_named(&ctx, meta, Some(&name), Some(&media_type)).await?;
+    uploads::register_named(&ctx, &meta, Some(&name), Some(&media_type)).await?;
     json_reply(
         StatusCode::OK,
         &UploadedBlob {

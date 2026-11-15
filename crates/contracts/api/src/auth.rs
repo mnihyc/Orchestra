@@ -345,7 +345,8 @@ pub struct ApiTokenInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TokenCreated {
     /// The secret, in the first answer only; `null` when the same creation is asked again with its key,
-    /// since no secret is kept to be given twice.
+    /// since no secret is kept to be given twice. The canonical encoding is
+    /// opat_<32 lowercase key-id hex digits>_<43 base64url secret characters><6 Base62 CRC32 digits>.
     pub token: Option<String>,
     /// The token as it is listed.
     pub info: ApiTokenInfo,
@@ -360,7 +361,8 @@ pub struct TokenCreateReceipt {
     pub projection: crate::common::ReceiptProjection,
     /// The credential that was made.
     pub token_id: Id,
-    /// The newly generated secret, once; null on an idempotent replay.
+    /// The newly generated identity-bound 256-bit secret with its CRC32 checksum, once;
+    /// null on an idempotent replay. It uses the same canonical encoding as TokenCreated.token.
     pub token: Option<String>,
     /// When the credential was created.
     pub created_at: Time,
