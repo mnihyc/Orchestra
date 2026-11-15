@@ -475,6 +475,7 @@ async fn observed_success(
                 segment_id: body.session.segment_id,
             },
             &Event::SessionOpened(SessionOpened {
+                opening_id: original.id,
                 native_session_ref: opened.native_session_ref.clone(),
                 resumed: false,
             }),

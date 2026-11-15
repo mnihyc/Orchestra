@@ -13,6 +13,122 @@ An option is offered only where its interface or program declares it. Provider l
 
 | Reference | Meaning |
 | --- | --- |
+| `option:Cmd.native_target` | The original physical operand accepted for a native act. A known absent session remains absent for that act; later execution never looks up a replacement. It grants no permission. |
+| `option:NativeTarget.session` | A captured session operand carried by the current machine-link protocol; an older receiver cannot silently ignore it. |
+| `option:SessionTarget.thread_id` | The exact thread of the accepted native operation, matched against its ordinary command body. |
+| `option:SessionTarget.segment_id` | Its captured logical segment, or null when the act was accepted without one. |
+| `option:SessionTarget.opening_id` | The immutable physical opening; null records an already absent target, rather than a request to close a later session. |
+| `option:SessionTarget.opening_epoch` | The accepted opening order across a thread’s segments, independent from timestamps and process IDs. Native retirement keeps that order across an empty slot and restart. |
+| `option:ToolSessionScope.opening_epoch` | The signed accepted opening order; an older segment cannot regain access after a provisional successor is removed. |
+| `option:ToolSessionUpdate.opening_epoch` | Orders physical opening changes across logical segments; a delayed older update cannot close its successor. |
+| `option:McpServerCreateBody.name` | The added server's name; exec and orch belong to builtin tool servers and cannot name an added definition. |
+| `option:EnvironmentMcpServerCreateBody.name` | The environment-owned server's name, distinct from the builtin exec and orch services. |
+| `option:SessionSpec.opening_id` | The accepted physical opening command passed to the adapter; it is separate from logical settings and from the private loopback key. |
+| `option:SessionOpened.opening_id` | The physical opening that produced this report. A delayed earlier report cannot fill or reopen its replacement. |
+| `option:SessionLost.expected` | A planned idle retirement closes the old physical opening quietly while retaining its conversation. A turn that was running still receives its actual loss and recovery outcome. |
+| `option:SessionLost.opening_id` | The physical opening that actually ended, also retained across connector restart; only its matching live admission closes and recovers. |
+| `option:TicketClaims.tool_session` | The immutable physical opening, segment, thread, member nonce and admitted revision of a session tool ticket; every Open and Resume also asks the API for current admission. |
+| `option:ToolSessionScope.opening_id` | The accepted physical opening command; a reopen takes a new identity and transport refresh preserves the existing one. |
+| `option:ToolSessionScope.member` | The native exec member (including the builtin MCP executor transport), the llm member, or mcp followed by the stable server UUID; a server name cannot stand for its identity. |
+| `option:ToolSessionScope.nonce` | The unchanged member keeps its nonce; withdrawal and re-add issue a new one, leaving other members usable. |
+| `option:ToolSessionScope.revision` | The durable ordering of session and membership facts; older replies cannot restore a closed or withdrawn channel. |
+| `option:ToolSessionScope.thread_id` | The exact thread of this physical session, checked against both the signed ticket and the current segment. |
+| `option:ToolSessionScope.segment_id` | The existing logical segment containing the physical opening; it alone does not identify a reopen. |
+| `option:CleanupPlan.effects` | Current consequences from the shared usage-facts service: mount references switch off now; existing environment attachments end at their next start. Names follow current visibility; hidden consumers remain counts. |
+| `option:CleanupStart.plan_id` | The exact current preview read by this person; replacing a mount location invalidates its old preview even at the same timestamp. |
+| `option:CleanupStart.choices` | One displayed fate per selected item. Mount Delete can proceed with every item kept, including an empty mount. |
+| `option:CleanupStart.confirmation_name` | The exact mount or plan name when selected owned data is destroyed; keeping data never asks for a typed name. |
+| `option:CleanupStart.notify` | An explicit notification choice for the whole operation, narrowed by each recipient's preferences and grouped once per person. |
+| `option:CleanupItem.record.blocker` | The actual reason a physical fate is unavailable, including not_permitted when data-management authority is absent; deleting the definition and keeping data remain possible. |
+| `option:NotificationOperation.kind` | mount_delete identifies the one accepted mount deletion and updates its existing grouped notice as its shared cleanup job ends. |
+| `option:ServerUpdateStart.release` | The exact currently offered semantic release selected by a system administrator; no path, command, URL or argument list is accepted. |
+| `option:ServerUpdateView.installed_version` | The release of the API answering this read, including after an update or rollback. |
+| `option:ServerUpdateView.offered_version` | The last validated release offer, or null before one is available. |
+| `option:ServerUpdateView.update_available` | Whether that offer is newer than the API answering now; a cached earlier check never claims the new server is still behind. |
+| `option:ServerUpdateView.availability` | The actual bundled-node, connection and local Docker condition for the Management update action. |
+| `option:ServerUpdateView.command` | The same update.sh operator command remains available when the native bundled-node path cannot run. |
+| `option:ServerUpdateView.job` | The most recent durable server update job, retained across API restart and page reload; another press joins an open job. |
+| `option:ServerUpdateView.observation` | The latest safe phase and outcome recorded by the host updater, without native logs or credentials. |
+| `option:ServerUpdateObservation.stage` | The phase recorded by the release updater; updated and rolled_back are confirmed outcomes. |
+| `option:ServerUpdateObservation.reason` | A fixed safe failure reason, separate from the phase and from unfiltered native output. |
+| `option:ServerUpdateObservation.from_version` | The release being left, once the existing updater journal records it. |
+| `option:ServerUpdateObservation.to_version` | The exact release admitted for this job, unchanged by reconnection or another release check. |
+| `option:NodeServerUpdate.timeout_secs` | The positive native preparation allowance captured from server.update_prepare_timeout_secs; it overrides the command kind’s default and does not time-limit the detached release transaction. |
+| `option:NodeServerUpdate.command_id` | The exact successful native command behind this job’s prepared helper; observations without the same stored job, machine, release and private source are ignored. |
+| `option:NodeServerUpdate.job_id` | The same durable update job on its authenticated bundled node; another node cannot supply its outcome. |
+| `option:NodeServerUpdate.release` | The exact validated release for the fixed installation updater; native paths and host commands are never request fields. |
+| `option:NodeServerUpdate.observation` | The bundled node reports only its own operation’s safe updater record through its durable node stream. |
+| `option:MachineFacts.server_update` | A locally reported fixed updater capability, present only on the physical bundled installation with local Docker access. |
+| `option:AuditAction.server.update_requested` | Records who requested the server release, its durable job and the exact bundled host and node. |
+| `option:update.sh.ORCH_UPDATE_JOB` | The native helper attaches its durable job UUID for phase recording and recovery. Ordinary shell updates omit it; it contains no credential and chooses no host command. |
+| `error:server_update_rolled_back` | The selected release failed readiness and the existing updater confirmed that the earlier release is running again. |
+| `error:server_update_failed` | The existing updater could not finish; the retained observation says whether the original recovery command is needed. |
+| `state:ServerUpdateAvailability.ready` | The connected bundled node offers the fixed local updater. |
+| `state:ServerUpdateAvailability.no_bundled_node` | No active node is marked as bundled with the server; use the shown shell command. |
+| `state:ServerUpdateAvailability.ambiguous_bundled_nodes` | More than one active node claims the server bundle, so no host is guessed. |
+| `state:ServerUpdateAvailability.node_offline` | The bundled node must reconnect before it can receive an update job. |
+| `state:ServerUpdateAvailability.docker_unavailable` | The bundled node lacks the installation’s local Docker updater path; the operator command remains. |
+| `state:ServerUpdateStage.queued` | The admitted job has not started fetching. |
+| `state:ServerUpdateStage.fetching` | The existing updater is fetching its manifest and assets. |
+| `state:ServerUpdateStage.verifying` | The fetched release has reached its native verification step. |
+| `state:ServerUpdateStage.applying` | The verified payload generations are being prepared. |
+| `state:ServerUpdateStage.stopping` | The application services are stopping for the transaction. |
+| `state:ServerUpdateStage.dumping` | The existing updater is taking the rollback database snapshot. |
+| `state:ServerUpdateStage.activating` | The existing updater is selecting the new payload generations. |
+| `state:ServerUpdateStage.starting` | The application services are restarting on the selected release. |
+| `state:ServerUpdateStage.checking` | The existing updater is probing service and browser-route readiness. |
+| `state:ServerUpdateStage.rolling_back` | The existing updater is restoring the previous payloads and database. |
+| `state:ServerUpdateStage.recovering` | The same operation is recovering its existing journal after interruption. |
+| `state:ServerUpdateStage.updated` | The selected release is running and passed readiness. |
+| `state:ServerUpdateStage.rolled_back` | The previous release is confirmed running again after the attempted update. |
+| `state:ServerUpdateStage.failed` | The updater did not confirm an updated or restored release; retain its recovery path. |
+| `state:ServerUpdateFailure.health_check_failed` | The selected release did not pass service or browser readiness. |
+| `state:ServerUpdateFailure.update_failed` | The updater ended before confirming its requested release or rollback. |
+| `state:ServerUpdateFailure.recovery_required` | The original journal remains and the same update.sh recover path applies. |
+| `option:PublicAddressUpdateBody.expected_revision` | The applied address revision used to prepare this draft. A concurrent publication or local reset refuses the stale draft without returning another system projection. |
+| `option:PublicAddressUpdateBody.public_url` | The complete proposed primary origin, published only after certificate and installation checks succeed. |
+| `option:PublicAddressUpdateBody.alternate_urls` | The complete proposed alternate origin set; omission is invalid, and an empty list clears it atomically with the primary. |
+| `option:PublicAddressSnapshot.using_example` | The effective primary is still the shipped example address, rather than an installation-specific browser origin. |
+| `option:PublicAddressUpdated.projection` | An intrinsic receipt of a prepared address publication. It carries no prior file seed or general system configuration. |
+| `option:PublicAddressUpdated.revision` | The revision committed by this publication. |
+| `option:PublicAddressUpdated.public_url` | The accepted canonical primary origin, derived from this caller’s draft. |
+| `option:PublicAddressUpdated.alternate_urls` | The accepted alternate origins, normalized together with the primary. |
+| `option:PublicAddressUpdated.using_example` | Whether the accepted primary is the shipped example. |
+| `option:Meta.public_address_revision` | The committed revision read atomically with public_url and alternate_urls. A changed revision refreshes readers and a one-line browser notice, without reloading other browsers. |
+| `option:orchctl.public-address.reset` | Restore the validated file primary and alternate seed through the local database, clear the stored override and advance its revision. Restoring an already admitted seed or current address set needs no HTTP hostname. A novel file origin uses the same certificate/origin preparation before commit. No credential is printed. |
+| `option:orchctl.public-address.get` | Print only the committed effective primary address for local scripts. The file is used only if the system store has not been seeded; later file edits do not replace it. |
+| `option:orchctl.doctor.only` | Includes public-address for the stored primary, alternates, revision and seed/override state. Without an explicit --url, selected browser checks use the committed address; default local checks probe the page and API. |
+| `option:headers.X-Orch-Frontend-Generation` | The shipped frontend’s loaded worker certificate generation. Publication verifies this marker, the served TLS leaf and the installation proof before changing the effective addresses. |
+| `option:PublicAddressProofQuery.challenge` | A fresh noncredential UUID challenge for one browser-origin check. |
+| `option:PublicAddressProof.challenge` | The exact challenge given to this origin; a proof for another attempt is refused. |
+| `option:PublicAddressProof.proof` | A purpose-bound keyed proof from this installation’s existing private authority. It signs nobody in and reveals no key or credential. |
+| `option:PublicAddresses.public_url` | The primary HTTP(S) browser origin, validated with its alternates and read from one committed system-store revision for new links, commands and deliveries. |
+| `option:PublicAddresses.alternate_urls` | Other explicit browser origins of this installation. Publication replaces the whole set atomically; a file edit does not replace an already seeded value. |
+| `option:PublicAddressSnapshot.public_url` | The primary address in force at this revision. Already admitted logins, issued claims and exported packages keep their admitted address. |
+| `option:PublicAddressSnapshot.alternate_urls` | The alternate origins committed together with the primary address. |
+| `option:PublicAddressSnapshot.revision` | The monotone revision checked before publishing a prepared address candidate; a stale draft changes nothing. |
+| `option:PublicAddressSnapshot.from_file_seed` | The stored initial seed is in force. The configuration file is read only to create the first snapshot or for an explicit local reset. |
+| `option:MachineGatewaySetBody.selection` | Choose Automatic or a selected advertised gateway without reenrolling or replacing the machine identity. |
+| `option:MachineGatewaySetBody.gateway_id` | Required only for Selected; Automatic omits or clears this value. Addresses outside the installation catalogue are refused. |
+| `option:MachineGatewaySetReceipt.projection` | A receipt for the accepted native choice, without existing machine content. |
+| `option:MachineGatewaySetReceipt.machine_id` | The same enrolled machine named by the request. |
+| `option:MachineGatewaySetReceipt.selection` | The accepted primary selection; actual connection state remains in gateway status. |
+| `option:MachineGatewaySetReceipt.gateway_id` | The selected advertised gateway identity, or null for Automatic. |
+| `option:MachineGatewaySetReceipt.changed` | Whether this native write changed the saved choice; its reply is journaled before reconnecting. |
+| `option:MachineGatewaySet.choice` | Native primary selection, validated against the machine’s deployment-bound advertisement. |
+| `option:MachineGatewaySetResult.choice` | The exact native choice that was saved. |
+| `option:MachineGatewaySetResult.changed` | Whether the saved configuration changed; this does not claim the new connection is already online. |
+| `option:AuditAction.machine.gateway_changed` | Records who changed the primary gateway, its machine, saved choice and native command. |
+| `option:Host.bundled_with_server` | Immutable origin recorded only by the protected server bootstrap token; never inferred from a host name or chosen home. |
+| `option:PagePreview.server_host_use` | Current warning and exact acknowledgement for a Host Use, Manage or ownership grant on the host installed with the server; absent when it gains no new grant. |
+| `option:ServerHostUseDisclosure.hosts` | How many protected server hosts gain or change a native grant through this page or its defaults; no host identities or names are disclosed. |
+| `option:ServerHostUseDisclosure.confirmation` | Acknowledge the exact permission change and current native grants with the orch-server-host-use-confirmed header. Changed intent asks again; this proof grants no access. |
+| `option:ProviderPauseQuery.note` | A short note beside the provider stop, visible in affected threads. |
+| `option:ProviderPauseQuery.notify` | Explicitly send one grouped lifecycle notice per affected person when disabling a provider; omitted is silent. The dialog begins with Operation notices and lets the confirmer change it. |
+| `option:ResourceDeleteQuery.notify` | Explicitly send one grouped lifecycle notice per affected person when deleting a provider or MCP definition; omitted is silent. Provider child-job progress updates the same Inbox item. MCP removal records the definition change while durable machine cleanup continues. |
+| `option:ResourceImpact.notification` | The current notification audience and initial checkbox value for a provider-wide disable, provider deletion or MCP definition deletion; absent for other impact kinds and individual models. |
+| `option:ResourceOperationNotification.audience` | Visible affected people and the count whose association remains private; the confirming person is excluded and each person is counted once. |
+| `option:ResourceOperationNotification.default_on` | The inherited Operation notices default for this consequence; the confirmer may change the choice before acting. |
 | `option:ask.models.*.model` | The enabled API model’s routing name. Together with provider_id it identifies one allowed Ask model; child lists can narrow the choices while retaining the parent’s order. |
 | `option:ask.models.*.provider_id` | The API provider’s identity for this allowed Ask model. The person and current payer must still be allowed to use that provider and model in the conversation’s organization. |
 | `option:AccessOptions.models` | The models. |
@@ -25,6 +141,7 @@ An option is offered only where its interface or program declares it. Provider l
 | `option:BindingOptions.providers` | The providers, each with its models and agents. |
 | `option:BindingOptions.environments` | Every existing environment the caller manages. This topic's come first (its default, then those its threads use or that were made for it), and the rest follow. |
 | `option:BindingOptions.environment_default` | What a new thread does about its environment unless told. |
+| `option:BindingOptions.default_environment` | The environment the nearest setting names as the default, wherever it is set, and why the reader cannot use it when they cannot; absent when no setting names one and when an existing thread is bound again. |
 | `option:BindingOptions.source` | Safe resolved repository settings and the place supplying the repository address. |
 | `option:BindingOptions.access` | The permission page that a thread created here would begin with. |
 | `option:BindingOptions.agent_access` | Agent privilege choices for this creation context. Rebinding an existing holder does not create another contribution and leaves this field absent. |

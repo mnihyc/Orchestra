@@ -48,6 +48,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 
+#[path = "relay/tool_sessions.rs"]
+mod tool_sessions;
+use tool_sessions::{PendingTool, ToolAction};
+
 /// Where a gateway sends what is for the system's end of a terminal.
 pub trait ApiPort: Send + Sync {
     /// A text frame of a terminal's channel.
@@ -103,6 +107,11 @@ struct MachineSession {
 
 /// The routes of a gateway.
 pub struct Relay {
+    tool_available: bool,
+    tool_wait: Duration,
+    tool_pending: HashMap<Id, PendingTool>,
+    tool_revisions: HashMap<Id, i64>,
+    tool_openings: HashMap<Id, i64>,
     port_available: bool,
     port_records: Arc<PortRecords>,
     udp: HashMap<Id, Arc<UdpBudget>>,
@@ -134,6 +143,13 @@ impl Relay {
     #[must_use]
     pub fn new(limits: Limits, clock: Arc<dyn Clock>) -> Self {
         Self {
+            tool_available: false,
+            tool_wait: Duration::from_millis(
+                orch_link_contract::tool_sessions::DEFAULT_ADMISSION_TIMEOUT_MS,
+            ),
+            tool_pending: HashMap::new(),
+            tool_revisions: HashMap::new(),
+            tool_openings: HashMap::new(),
             limits,
             port_available: false,
             port_records: Arc::new(PortRecords::with_limits(
@@ -158,6 +174,9 @@ impl Relay {
     /// Fault injection discards only volatile route memory, keeping the actual authenticated endpoints.
     #[cfg(feature = "test-observers")]
     pub fn lose_route_memory_for_test(&mut self) {
+        self.tool_pending.clear();
+        self.tool_revisions.clear();
+        self.tool_openings.clear();
         self.routes.clear();
         self.by_channel.clear();
         self.by_api_channel.clear();
@@ -492,6 +511,7 @@ impl Relay {
         {
             return;
         }
+        self.cancel_tool_pending(machine, None);
         self.sessions.remove(&machine);
         let now = Instant::now();
         let touched: Vec<RouteId> = self
@@ -640,9 +660,12 @@ impl Relay {
                     }
                 }
             }
+            Frame::Close(close) => {
+                self.cancel_tool_pending(from, Some(close.channel));
+                self.pass(from, Frame::Close(close));
+            }
             frame @ (Frame::Credit(_)
             | Frame::Eof(_)
-            | Frame::Close(_)
             | Frame::ChAck(_)
             | Frame::PtyResize(_)
             | Frame::PtyExit(_)) => self.pass(from, frame),
@@ -852,7 +875,13 @@ impl Relay {
             host_peer,
             route,
         });
-        if !Side::Machine.owns(channel) || self.lookup(from, channel).is_some() {
+        if !Side::Machine.owns(channel)
+            || self.lookup(from, channel).is_some()
+            || self.pending_channel(End::Machine {
+                id: from,
+                channel: Some(channel),
+            })
+        {
             return self.refuse(
                 from,
                 channel,
@@ -868,15 +897,22 @@ impl Relay {
                 "too many channels",
             );
         }
-        self.start(
-            End::Machine {
-                id: from,
-                channel: Some(channel),
-            },
-            claims,
-            host_template_jti,
-            retention,
-        );
+        let opener = End::Machine {
+            id: from,
+            channel: Some(channel),
+        };
+        if claims.tool_session.is_some() {
+            self.ask_tool(
+                claims,
+                ToolAction::Open {
+                    opener,
+                    host_template_jti,
+                    retention,
+                },
+            );
+        } else {
+            self.start(opener, claims, host_template_jti, retention);
+        }
     }
 
     /// The system presents a ticket to open a tunnel that ends at a terminal.
@@ -917,7 +953,23 @@ impl Relay {
                 "that channel number is in use",
             );
         }
-        self.start(End::Api { machine, channel }, claims, None, None);
+        let opener = End::Api { machine, channel };
+        if claims.tool_session.is_some() {
+            self.ask_tool(
+                claims,
+                ToolAction::Open {
+                    opener,
+                    host_template_jti: None,
+                    retention: Some(orch_link_contract::gateways::TunnelRetention {
+                        ticket: ticket.to_owned(),
+                        host_peer: None,
+                        route: None,
+                    }),
+                },
+            );
+        } else {
+            self.start(opener, claims, None, None);
+        }
     }
 
     fn check_ticket(
@@ -1189,6 +1241,10 @@ impl Relay {
 
     /// The opener asks to carry a tunnel on over its new session.
     fn resume(&mut self, from: Id, resume: Resume) {
+        self.resume_current(from, resume, false);
+    }
+
+    fn resume_current(&mut self, from: Id, resume: Resume, approved: bool) {
         let reset = |relay: &Self, why: &str| {
             if let Some(session) = relay.sessions.get(&from) {
                 let _ = session.sender.send(Frame::Close(Close {
@@ -1202,7 +1258,7 @@ impl Relay {
             return reset(self, "the ticket is not accepted");
         };
         let Some(&id) = self.by_cid.get(&resume.jti_channel) else {
-            return self.resume_retained(from, resume);
+            return self.resume_retained(from, resume, approved);
         };
         let Some(route) = self.routes.get(&id) else {
             return reset(self, "no such tunnel");
@@ -1224,8 +1280,17 @@ impl Relay {
         if !opener_is_from || route.claims.dst != claims.dst || !same_service {
             return reset(self, "that ticket is not the tunnel's");
         }
-        if self.by_channel.contains_key(&(from, resume.channel)) {
+        if self.by_channel.contains_key(&(from, resume.channel))
+            || self.pending_channel(End::Machine {
+                id: from,
+                channel: Some(resume.channel),
+            })
+        {
             return reset(self, "that channel number is in use");
+        }
+        if claims.tool_session.is_some() && !approved {
+            self.ask_tool(claims, ToolAction::Resume { from, resume });
+            return;
         }
         if let Some(route) = self.routes.get_mut(&id) {
             if let End::Machine { channel: old, .. } = &mut route.opener {
@@ -1245,7 +1310,7 @@ impl Relay {
     }
 
     /// A lost relay map is rebuilt only by asking the destination for its retained socket and offsets.
-    fn resume_retained(&mut self, from: Id, resume: Resume) {
+    fn resume_retained(&mut self, from: Id, resume: Resume, approved: bool) {
         let reset = |relay: &Self, why: &str| {
             if let Some(session) = relay.sessions.get(&from) {
                 let _ = session.sender.send(Frame::Close(Close {
@@ -1276,6 +1341,10 @@ impl Relay {
             || self.channels_of(claims.dst) >= self.limits.max_channels as usize
         {
             return reset(self, "the retained channel cannot be admitted");
+        }
+        if claims.tool_session.is_some() && !approved {
+            self.ask_tool(claims, ToolAction::Resume { from, resume });
+            return;
         }
         if let Some(port) = &claims.port {
             let now = self.clock.time().unix_millis().div_euclid(1_000);
@@ -1405,6 +1474,14 @@ impl Relay {
     /// A frame from the system's end of a terminal.
     pub fn on_api_frame(&mut self, frame: BackplaneFrame) {
         match frame {
+            BackplaneFrame::ToolSessionReply(reply) => self.tool_answer(reply),
+            BackplaneFrame::ToolSessionUpdate(update) => self.tool_update(update),
+            BackplaneFrame::ToolSessionControl(control) => {
+                if control.admission_timeout_ms > 0 {
+                    self.tool_wait = Duration::from_millis(control.admission_timeout_ms);
+                }
+                self.tool_control(control.available && control.admission_timeout_ms > 0);
+            }
             BackplaneFrame::TunOpen(open) => {
                 self.api_open(open.machine_id, open.channel, &open.ticket)
             }
@@ -1489,6 +1566,7 @@ impl Relay {
     /// Looks at the clocks: a tunnel that has waited out its grace is reset,
     /// and an opening nobody answered is refused.
     pub fn tick(&mut self, now: Instant) {
+        self.tool_tick(now);
         self.port_records.prune(self.clock.time());
         let open_wait = Duration::from_secs(u64::from(OPEN_TIMEOUT_SECS));
         let expired: Vec<(RouteId, bool)> = self
@@ -1576,6 +1654,7 @@ mod retained_host_tests {
             tool_environment_id: None,
             tool_environment_generation: None,
             tool_executor_version: None,
+            tool_session: None,
             exp: at.unix_millis().div_euclid(1000) + 3600,
             port: Some(PortTicketClaims {
                 environment_id: new_id(),

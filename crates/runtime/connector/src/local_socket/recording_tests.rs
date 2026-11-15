@@ -106,6 +106,8 @@ fn fixture() -> TestResult<Fixture> {
 
 fn context(clock: &dyn Clock) -> CommandContext {
     CommandContext {
+        native_fences: None,
+        native_target: None,
         id: new_id(),
         key: Some(new_id().to_string()),
         deadline: Time::new(

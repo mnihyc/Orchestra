@@ -253,6 +253,7 @@ pub async fn issue(app: &App, machine: Id, kind: CommandKind, body: &Json) -> Id
     command_rows::insert_command(
         &mut conn,
         &command_rows::NewCommand {
+            native_target: None,
             id,
             machine_id: machine,
             kind: kind.as_str(),

@@ -6,7 +6,8 @@ import { Popover } from '@/ui/Popover';
 import { Tooltip } from '@/ui/Tooltip';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { buildRefusal } from '@/lib/versions';
-import { caseUnavailable, checkName, disabledFeatures, featureFallback, featureName, unsupportedReason } from './buildChecks';
+import { formatNumber } from '@/lib/format';
+import { caseUnavailable, checkName, disabledFeatures, featureFallback, featureName, pendingCases, unsupportedReason } from './buildChecks';
 import { programNameIn } from '@/features/resources/programNames';
 import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
 
@@ -20,14 +21,16 @@ export function BuildStatus({ build, name, catalogue }: { build: HarnessBuild; n
   const cases = check?.cases ?? [];
   const firstFailure = cases.find(caseUnavailable);
   const off = disabledFeatures(build);
+  const pending = status === 'checked' ? pendingCases(build, catalogue, locale) : [];
   const tone: TagTone = refusal !== null || status === 'failed' ? 'danger' : off.length > 0 ? 'warning' : status === 'checked' ? 'accent' : 'neutral';
   const firstFeature = firstFailure?.feature ?? off[0];
   const failedName = firstFailure === undefined ? null : checkName(firstFailure.name, t, catalogue, locale);
-  const hasDetails = check !== undefined && check !== null && (check.error !== null || check.missing.length > 0 || off.length > 0 || cases.length > 0);
+  const hasDetails = check !== undefined && check !== null && (check.error !== null || check.missing.length > 0 || off.length > 0 || cases.length > 0 || pending.length > 0);
   const label = refusal !== null ? t('programVersions.refused') : status === 'checking' ? t(`admin.harnesses.checking.${check?.stage === 'conformance' ? 'conformance' : 'interface'}`)
     : firstFeature !== undefined ? t('programVersions.offInBuild', { feature: featureName(firstFeature, t, catalogue, locale) })
-      : status === 'failed' && failedName !== null ? <>{t('admin.harnesses.status.failed')}{' · '}{failedName.known ? failedName.text : <code className="font-mono">{failedName.text}</code>}</> : t(`admin.harnesses.status.${status}`);
-  const plainStatus = refusal !== null || (status !== 'checking' && firstFeature === undefined && !(status === 'failed' && failedName !== null));
+      : status === 'failed' && failedName !== null ? <>{t('admin.harnesses.status.failed')}{' · '}{failedName.known ? failedName.text : <code className="font-mono">{failedName.text}</code>}</>
+        : pending.length > 0 ? t('programVersions.checkedPending', { count: pending.length, number: formatNumber(pending.length, locale) }) : t(`admin.harnesses.status.${status}`);
+  const plainStatus = refusal !== null || (status !== 'checking' && firstFeature === undefined && pending.length === 0 && !(status === 'failed' && failedName !== null));
   const tag = <StatusTag tone={tone} className={plainStatus ? 'min-w-max whitespace-nowrap' : 'max-w-full whitespace-normal wrap-anywhere'}>{label}</StatusTag>;
   return !hasDetails ? tag : <Popover label={t('admin.harnesses.checkResults')} trigger={<Tooltip content={t('admin.harnesses.checkResults')}><button type="button" className="focus-inset min-w-0 max-w-full rounded-md text-left">{tag}</button></Tooltip>}>
     <div className="flex min-w-0 flex-col gap-3 text-sm wrap-anywhere">
@@ -44,6 +47,7 @@ export function BuildStatus({ build, name, catalogue }: { build: HarnessBuild; n
           {(unsupported ?? result.error) !== null && <div className="text-text-muted whitespace-pre-line">{unsupported ?? result.error}</div>}
         </div>;
       })}
+      {pending.length > 0 && <div>{t('programVersions.casesPending', { names: pending.join(', ') })}</div>}
       {off.includes('import_native') && <ArticleGuideLink article="carry-a-thread" heading="read-the-method" title={t('admin.harnesses.historySupport')} />}
       {check.error !== null && <div className="text-text-muted whitespace-pre-line">{check.error}</div>}
       {check.missing.length > 0 && <div className="text-text-muted">{t('admin.harnesses.missing', { names: check.missing.join(', ') })}</div>}

@@ -691,6 +691,8 @@ async fn a_lost_session_records_the_loss_and_never_revives_a_task_from_late_hist
             thread,
             orch_link_contract::events::Event::SessionLost(
                 orch_link_contract::events::SessionLost {
+                    expected: false,
+                    opening_id: world.opening_of(thread).await,
                     reason: "the native process ended".into(),
                 },
             ),

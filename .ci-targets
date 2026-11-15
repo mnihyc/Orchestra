@@ -1,0 +1,10 @@
+test -p orch-link --lib
+test -p orch-link --test commands --test resume_authority --test handshake --test tls
+test -p orch-gateway-core --test tunnels --test tunnel_attachments --test presence --test access
+test -p orch-api-core --test executor_ticket_build --test real_connector
+test -p orch-pki --test secrets --test enrolment
+test -p orch-db --test commands_in_line --test migration_progress --test released_migrations
+test -p orch-connector-core --test enrollment --test gateway_choice --test tunnel --test executors --test tool_servers
+test -p orch-engine --test forks --test ingest --test failures --test foreign_machine_streams
+test -p orch-testkit --test harness_corpus
+test -p orch-node-core --test mount_copy_cancel

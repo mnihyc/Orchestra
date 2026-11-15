@@ -108,6 +108,29 @@ enum OpenIntent {
     },
 }
 
+/// A cancelled opening owns only its own local key and physical slot.
+struct OpeningBinding {
+    process: Arc<Process>,
+    loopback: Arc<crate::loopback::Loopback>,
+    binding: Arc<crate::loopback::SessionBinding>,
+    opening_id: orch_types::Id,
+    kept: bool,
+}
+impl OpeningBinding {
+    fn keep(mut self) {
+        self.kept = true;
+    }
+}
+impl Drop for OpeningBinding {
+    fn drop(&mut self) {
+        if !self.kept {
+            self.process
+                .session_closed_if(self.binding.thread_id, self.opening_id);
+            self.loopback.unbind(&self.binding.session_key);
+        }
+    }
+}
+
 struct Opened {
     session: orch_agent_contract::session::SessionOpened,
     prefix: Option<NativeInputPrefix>,
@@ -201,6 +224,80 @@ fn retain_route(
 }
 
 impl AgentRole {
+    fn captured_session(
+        call: &Call,
+        thread: Id,
+        segment: Option<Id>,
+    ) -> Result<orch_link_contract::commands::SessionTarget, CommandError> {
+        let Some(orch_link_contract::commands::NativeTarget::Session(target)) =
+            &call.context.native_target
+        else {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the command has no captured native session target",
+            ));
+        };
+        if !target.coherent()
+            || target.thread_id != thread
+            || segment.is_some_and(|segment| target.segment_id != Some(segment))
+        {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the captured native session target names another logical address",
+            ));
+        }
+        Ok(target.clone())
+    }
+
+    async fn observe_target(
+        call: &Call,
+        target: &orch_link_contract::commands::SessionTarget,
+        action: orch_link_contract::native_target::SessionAction,
+    ) -> Result<bool, CommandError> {
+        let fences = call
+            .context
+            .native_fences
+            .clone()
+            .ok_or_else(|| internal("the native ordering store is unavailable"))?;
+        let target = target.clone();
+        tokio::task::spawn_blocking(move || fences.observe_session(&target, action))
+            .await
+            .map_err(|_| internal("the native ordering check failed"))?
+            .map_err(|_| internal("the native ordering marker cannot be read or saved"))
+    }
+
+    async fn close_captured(
+        &self,
+        call: &Call,
+        thread: Id,
+        segment: Option<Id>,
+    ) -> Result<(), CommandError> {
+        let target = Self::captured_session(call, thread, segment)?;
+        if target.opening_id.is_none() {
+            return Ok(());
+        }
+        let _ = Self::observe_target(
+            call,
+            &target,
+            orch_link_contract::native_target::SessionAction::Close,
+        )
+        .await?;
+        self.hosting.retire_older_session_keys(&target);
+        let Some(process) = self.hosting.process_for_target(&target) else {
+            return Ok(());
+        };
+        if process
+            .call_session(&target, |adapter| adapter.close_session(thread))
+            .await?
+            .is_some()
+        {
+            if let Some(opening) = target.opening_id {
+                process.session_closed_if(thread, opening);
+            }
+        }
+        Ok(())
+    }
+
     /// The role over the hosting of this connector's harness processes.
     #[must_use]
     pub fn new(hosting: Arc<Hosting>) -> Self {
@@ -310,9 +407,36 @@ impl AgentRole {
             )
             .await
             .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
+        let target = Self::captured_session(call, body.thread_id, Some(body.segment_id))?;
+        if !body.transport_only && target.opening_id != Some(call.context.id) {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the physical opening does not own this command",
+            ));
+        }
+        let action = if body.transport_only {
+            orch_link_contract::native_target::SessionAction::Model
+        } else {
+            orch_link_contract::native_target::SessionAction::Open
+        };
+        if !Self::observe_target(call, &target, action).await? {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the accepted physical opening was superseded or closed",
+            ));
+        }
+        if !body.transport_only {
+            self.hosting.retire_older_session_keys(&target);
+        }
         let provider_id = provider_of(&body.provider);
         let process = self.hosting.process(provider_id, body.agent_id)?;
         if body.transport_only {
+            if process.session_target(body.thread_id).as_ref() != Some(&target) {
+                return Err(CommandError::new(
+                    ErrorCode::SessionNotFound,
+                    "the captured physical session is no longer current",
+                ));
+            }
             process.check_segment(body.thread_id, Some(body.segment_id))?;
             if body.native_session_ref.as_deref()
                 != process.native_session_ref(body.thread_id).as_deref()
@@ -385,6 +509,7 @@ impl AgentRole {
         let command = call.context.id;
         let fenced =
             !matches!(&intent, OpenIntent::Ordinary) || process.continuation_fenced(body.thread_id);
+        let mut opening_binding = None;
         let outcome = async {
             let archive = match &body.archive {
                 Some(archive) => {
@@ -497,17 +622,31 @@ impl AgentRole {
                     &self.hosting.services().link,
                 );
             }
+            if !Self::observe_target(call, &target, action).await? {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the accepted physical opening ended during preparation",
+                ));
+            }
             if process.session_key(body.thread_id).is_some() {
                 process.session_closed(body.thread_id);
             }
             let binding = self
                 .hosting
                 .bind(&process, body.thread_id, body.segment_id, tickets);
+            opening_binding = Some(OpeningBinding {
+                process: Arc::clone(&process),
+                loopback: Arc::clone(&self.hosting.services().loopback),
+                binding: Arc::clone(&binding),
+                opening_id: command,
+                kept: false,
+            });
             self.hosting
                 .services()
                 .loopback
                 .set_reach(&binding.session_key, crate::loopback::Reach::of(&body));
             let spec = SessionSpec {
+                opening_id: command,
                 settings,
                 session_key: binding.session_key.clone(),
                 archive,
@@ -522,8 +661,9 @@ impl AgentRole {
                 mcp: body.mcp.iter().map(|server| server.name.clone()).collect(),
                 skills,
             };
-            let opened = process
-                .call(move |adapter| {
+            let generation = process.generation();
+            let opening = process
+                .call_opening(&call.context, generation, move |adapter| {
                     Box::pin(async move {
                         match intent {
                             OpenIntent::Ordinary | OpenIntent::Guarded(_) => {
@@ -552,11 +692,22 @@ impl AgentRole {
                                 }),
                         }
                     })
-                })
-                .await;
+                });
+            tokio::pin!(opening);
+            let opened=tokio::select! {
+                biased;
+                ()=call.context.cancel.cancelled()=>Err(CommandError::new(ErrorCode::Conflict,"the physical session opening was cancelled")),
+                result=&mut opening=>result,
+            };
             match opened {
                 Ok(opened) => {
-                    process.session_opened(&binding, &opened.session.native_session_ref);
+                    process.session_opened(
+                        &binding,
+                        command,
+                        target.opening_epoch.ok_or_else(||internal("the physical opening has no accepted order"))?,
+                        generation,
+                        &opened.session.native_session_ref,
+                    )?;
                     if fenced {
                         process.fence_continuation(body.thread_id);
                     }
@@ -576,6 +727,17 @@ impl AgentRole {
         }
         .await;
         content.finish(command).await;
+        if call.context.cancel.is_cancelled() {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the physical session opening was cancelled",
+            ));
+        }
+        if outcome.is_ok()
+            && let Some(binding) = opening_binding.take()
+        {
+            binding.keep();
+        }
         outcome
     }
 
@@ -615,7 +777,7 @@ impl AgentRole {
         };
         process.reserve_turn(body.thread_id, Some(body.turn_id));
         if let Err(error) = process
-            .call(move |adapter| {
+            .call_target(&call.context, move |adapter| {
                 Box::pin(async move {
                     match selection {
                         Some(selection) => adapter.start_native_turn(turn, selection).await,
@@ -751,6 +913,43 @@ impl RoleHandler for AgentRole {
         reason = "one arm for each command of the role is the clearest form of the table"
     )]
     async fn handle(&self, call: Call, command: Command) -> Result<CommandResult, CommandError> {
+        let action =
+            orch_link_contract::native_target::session_action(command.kind().as_str(), &Json::Null);
+        if matches!(
+            action,
+            Some(
+                orch_link_contract::native_target::SessionAction::Use
+                    | orch_link_contract::native_target::SessionAction::Mcp
+            )
+        ) {
+            let written = command
+                .body()
+                .map_err(|_| internal("the native command address cannot be read"))?;
+            let (thread, segment) = orch_link_contract::native_target::session_address(
+                command.kind().as_str(),
+                &written,
+            )
+            .ok_or_else(|| internal("the native command has no session address"))?;
+            let target = Self::captured_session(&call, thread, segment)?;
+            if !Self::observe_target(
+                &call,
+                &target,
+                action.ok_or_else(|| internal("the native session action is missing"))?,
+            )
+            .await?
+            {
+                return Err(CommandError::new(
+                    ErrorCode::SessionNotFound,
+                    "the captured physical session is no longer current",
+                ));
+            }
+            if self.hosting.process_for_target(&target).is_none() {
+                return Err(CommandError::new(
+                    ErrorCode::SessionNotFound,
+                    "the captured physical session is no longer open",
+                ));
+            }
+        }
         Ok(match command {
             Command::UnitAfterUp(body) => {
                 let process = self.hosting.process(
@@ -942,12 +1141,15 @@ impl RoleHandler for AgentRole {
                 if body.thread_id != body.source.thread_id {
                     return Err(internal("The retained session names another thread."));
                 }
-                let process = self.hosting.process(body.provider_id, body.agent_id)?;
-                process.check_idle_source(&body.source, None)?;
-                process
-                    .call(|adapter| adapter.close_session(body.thread_id))
-                    .await?;
-                process.session_closed(body.thread_id);
+                let target =
+                    Self::captured_session(&call, body.thread_id, Some(body.source.segment_id))?;
+                if let Ok(process) = self.hosting.process(body.provider_id, body.agent_id)
+                    && process.session_target(body.thread_id).as_ref() == Some(&target)
+                {
+                    process.check_idle_source(&body.source, None)?;
+                    self.close_captured(&call, body.thread_id, Some(body.source.segment_id))
+                        .await?;
+                }
                 CommandResult::SessionContinuationClose(Empty {})
             }
             Command::AgentHistoryHomeCleanup(body) => {
@@ -991,23 +1193,12 @@ impl RoleHandler for AgentRole {
                 )
             }
             Command::SessionClose(body) => {
-                if let Ok(process) = self.process_of_thread(body.thread_id) {
-                    process.check_segment(body.thread_id, None)?;
-                    process
-                        .call(|adapter| adapter.close_session(body.thread_id))
-                        .await?;
-                    process.session_closed(body.thread_id);
-                }
+                self.close_captured(&call, body.thread_id, None).await?;
                 CommandResult::SessionClose(Empty {})
             }
             Command::SessionCloseFenced(body) => {
-                if let Ok(process) = self.process_of_thread(body.thread_id) {
-                    process.check_segment(body.thread_id, Some(body.segment_id))?;
-                    process
-                        .call(|adapter| adapter.close_session(body.thread_id))
-                        .await?;
-                    process.session_closed(body.thread_id);
-                }
+                self.close_captured(&call, body.thread_id, Some(body.segment_id))
+                    .await?;
                 CommandResult::SessionCloseFenced(Empty {})
             }
             Command::SessionMcpReload(body) => {
@@ -1059,7 +1250,9 @@ impl RoleHandler for AgentRole {
                     .replace_mcp_routed(&key, replacement)
                     .ok_or_else(|| internal("the session's tool routes are gone"))?;
                 if let Err(error) = process
-                    .call(|adapter| adapter.reload_mcp(body.thread_id, names))
+                    .call_target(&call.context, |adapter| {
+                        adapter.reload_mcp(body.thread_id, names)
+                    })
                     .await
                 {
                     loopback.replace_mcp_routed(&key, previous);
@@ -1078,7 +1271,7 @@ impl RoleHandler for AgentRole {
                     () = call.context.cancel.cancelled() => {
                         return Err(cancelled("the export of the session"));
                     }
-                    archive = process.call(|adapter| {
+                    archive = process.call_target(&call.context, |adapter| {
                         adapter.export_session(body.thread_id, kind, body.upto_turn_ordinal)
                     }) => archive?,
                 };
@@ -1102,7 +1295,9 @@ impl RoleHandler for AgentRole {
                     .process_of_segment(body.thread_id, body.segment_id)?;
                 let fill = if process.has_segment(body.thread_id, body.segment_id) {
                     process
-                        .call(|adapter| adapter.count_context(body.thread_id))
+                        .call_target(&call.context, |adapter| {
+                            adapter.count_context(body.thread_id)
+                        })
                         .await?
                 } else {
                     None
@@ -1124,7 +1319,9 @@ impl RoleHandler for AgentRole {
                 let initial = if body.cursor.is_none() {
                     Some(
                         process
-                            .call(|adapter| adapter.background_commands(body.thread_id))
+                            .call_target(&call.context, |adapter| {
+                                adapter.background_commands(body.thread_id)
+                            })
                             .await?,
                     )
                 } else {
@@ -1148,7 +1345,9 @@ impl RoleHandler for AgentRole {
                     ));
                 }
                 let mut catalog = process
-                    .call(|adapter| adapter.native_actions(body.thread_id, body.refresh))
+                    .call_target(&call.context, |adapter| {
+                        adapter.native_actions(body.thread_id, body.refresh)
+                    })
                     .await?;
                 if catalog.state == orch_agent_contract::native::NativeCatalogState::Ready {
                     catalog.revision = format!("{}:{}", body.segment_id, catalog.revision);
@@ -1167,7 +1366,7 @@ impl RoleHandler for AgentRole {
                 }
                 CommandResult::SessionBackgroundEnd(
                     process
-                        .call(move |adapter| {
+                        .call_target(&call.context, move |adapter| {
                             Box::pin(async move {
                                 adapter
                                     .end_background_command(body.thread_id, &body.command_id)
@@ -1180,7 +1379,9 @@ impl RoleHandler for AgentRole {
             Command::SessionResync(body) => {
                 let process = self.process_of_thread(body.thread_id)?;
                 let items = process
-                    .call(|adapter| adapter.resync_session(body.thread_id))
+                    .call_target(&call.context, |adapter| {
+                        adapter.resync_session(body.thread_id)
+                    })
                     .await?;
                 CommandResult::SessionResync(SessionResyncResult {
                     items: i64::from(items),
@@ -1214,7 +1415,7 @@ impl RoleHandler for AgentRole {
                     images,
                 };
                 process
-                    .call(move |adapter| {
+                    .call_target(&call.context, move |adapter| {
                         Box::pin(async move {
                             match selection {
                                 Some(selection) => adapter.steer_native(steer, selection).await,
@@ -1228,7 +1429,9 @@ impl RoleHandler for AgentRole {
             Command::TurnInterrupt(body) => {
                 let process = self.process_of_thread(body.thread_id)?;
                 process
-                    .call(|adapter| adapter.interrupt(body.thread_id, body.turn_id))
+                    .call_target(&call.context, |adapter| {
+                        adapter.interrupt(body.thread_id, body.turn_id)
+                    })
                     .await?;
                 CommandResult::TurnInterrupt(Empty {})
             }
@@ -1237,7 +1440,7 @@ impl RoleHandler for AgentRole {
                 let decision: ApprovalDecision = body.decision.clone();
                 let (thread, request_ref) = (body.thread_id, body.request_ref.clone());
                 process
-                    .call(move |adapter| {
+                    .call_target(&call.context, move |adapter| {
                         Box::pin(async move {
                             adapter
                                 .resolve_approval(thread, &request_ref, decision)
@@ -1273,7 +1476,7 @@ impl RoleHandler for AgentRole {
                 };
                 let (thread, call_ref) = (body.thread_id, body.call_ref.clone());
                 process
-                    .call(move |adapter| {
+                    .call_target(&call.context, move |adapter| {
                         Box::pin(
                             async move { adapter.tool_result(thread, &call_ref, result).await },
                         )
