@@ -19,6 +19,10 @@ pub struct ScheduleRow {
     pub target: Json,
     /// Private frozen authored parts.
     pub content: Json,
+    /// Authored planning choice.
+    pub plan: bool,
+    /// Authored delivery mode.
+    pub delivery: String,
     /// Optional private native selection.
     pub native_action: Option<Json>,
     /// Private captured definition origins; never projected as schedule metadata.
@@ -105,18 +109,20 @@ pub async fn topic(
 
 /// Inserts a frozen authored definition; caller already checked and pinned its content.
 pub async fn insert(conn: &mut Conn, row: &ScheduleRow) -> Result<(), DbError> {
-    sqlx::query("INSERT INTO input_schedules(id,topic_id,author_id,name,target,content,native_action,timing,state,next_run_at,revision,topic_seq,created_at,updated_at,deleted_at,definition_authority) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)")
+    sqlx::query("INSERT INTO input_schedules(id,topic_id,author_id,name,target,content,native_action,timing,state,next_run_at,revision,topic_seq,created_at,updated_at,deleted_at,definition_authority,plan,delivery) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)")
         .bind(row.id).bind(row.topic_id).bind(row.author_id).bind(&row.name).bind(&row.target).bind(&row.content)
         .bind(&row.native_action).bind(&row.timing).bind(&row.state).bind(row.next_run_at).bind(row.revision)
-        .bind(row.topic_seq).bind(row.created_at).bind(row.updated_at).bind(row.deleted_at).bind(&row.definition_authority).execute(conn).await?;
+        .bind(row.topic_seq).bind(row.created_at).bind(row.updated_at).bind(row.deleted_at).bind(&row.definition_authority)
+        .bind(row.plan).bind(&row.delivery).execute(conn).await?;
     Ok(())
 }
 
 /// Updates the definition and future state while the caller holds its row lock.
 pub async fn update(conn: &mut Conn, row: &ScheduleRow) -> Result<(), DbError> {
-    sqlx::query("UPDATE input_schedules SET name=$2,target=$3,content=$4,native_action=$5,timing=$6,state=$7,next_run_at=$8,revision=$9,topic_seq=$10,updated_at=$11,deleted_at=$12,definition_authority=$13 WHERE id=$1")
+    sqlx::query("UPDATE input_schedules SET name=$2,target=$3,content=$4,native_action=$5,timing=$6,state=$7,next_run_at=$8,revision=$9,topic_seq=$10,updated_at=$11,deleted_at=$12,definition_authority=$13,plan=$14,delivery=$15 WHERE id=$1")
         .bind(row.id).bind(&row.name).bind(&row.target).bind(&row.content).bind(&row.native_action).bind(&row.timing)
         .bind(&row.state).bind(row.next_run_at).bind(row.revision).bind(row.topic_seq).bind(row.updated_at).bind(row.deleted_at).bind(&row.definition_authority)
+        .bind(row.plan).bind(&row.delivery)
         .execute(conn).await?;
     Ok(())
 }

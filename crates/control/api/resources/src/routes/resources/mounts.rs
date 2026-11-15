@@ -526,7 +526,12 @@ async fn seen(
     else {
         return Ok(None);
     };
-    let object = match machine.host_id {
+    // A host's node and a unit that a host runs are named by that host; a person's own machine has a page.
+    let named_by = match machine.host_id {
+        Some(host) => Some(host),
+        None => orch_db::queries::resources::hosting::host_running(conn, machine_id).await?,
+    };
+    let object = match named_by {
         Some(host) => ObjectRef {
             kind: ResourceKind::Host.into(),
             id: host,
@@ -799,7 +804,11 @@ async fn remove_location(
     .await
 }
 
-async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
+async fn delete(
+    ctx: Ctx,
+    query: orch_api_contract::resource_facts::ResourceNotificationQuery,
+    (): (),
+) -> ApiResult<()> {
     let id = ctx.id("id")?;
     let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
     require(
@@ -813,7 +822,30 @@ async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     let row = rows::lock(&mut tx, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    delete_native(&ctx, &mut tx, &principal, &row).await?;
+    let operation = super::lifecycle_notifications::accept(
+        &ctx,
+        &mut tx,
+        &principal,
+        orch_access_contract::decisions::ObjectRef {
+            kind: ResourceKind::Mount.into(),
+            id,
+        },
+        &row.name,
+        "mount_delete",
+        &query,
+    )
+    .await?;
+    orch_engine::notifications::operation_scope(
+        Some(operation.id),
+        delete_native(&ctx, &mut tx, &principal, &row),
+    )
+    .await?;
+    orch_engine::notifications::attach_operation(&mut tx, &[], &operation, ctx.now)
+        .await
+        .map_err(ApiError::engine)?;
+    orch_engine::notifications::notify_operation(&mut tx, &operation, "done", ctx.now)
+        .await
+        .map_err(ApiError::engine)?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(())
 }
