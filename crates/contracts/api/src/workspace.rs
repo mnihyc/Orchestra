@@ -39,21 +39,13 @@ pub const FETCH_WAIT_MAX_SECONDS: u32 = 25;
 pub const EXPECTED_HASH_NONE: &str = "none";
 /// The fewest characters a search for files may be asked.
 pub const FILE_SEARCH_QUERY_MIN_CHARS: u32 = 2;
-/// The most entries a search by name returns.
-pub const FILE_SEARCH_NAMES_MAX: u32 = 200;
 /// How many matches a search in content returns when it does not say.
 pub const FILE_SEARCH_LIMIT_DEFAULT: u32 = 200;
-/// The most matches a search in content may be asked for.
-pub const FILE_SEARCH_LIMIT_MAX: u32 = 1_000;
 /// How many characters of a line a match carries, cut around the match.
 pub const FILE_MATCH_TEXT_CHARS: u32 = 400;
 /// How many entries a listing of an archive holds when it is not told.
 pub const ARCHIVE_LIST_LIMIT_DEFAULT: u32 = 1_000;
-/// The most entries a listing of an archive may be asked for.
-pub const ARCHIVE_LIST_LIMIT_MAX: u32 = 5_000;
-/// The most bytes of a unified diff of a repository; more is cut and says so.
-pub const GIT_DIFF_MAX_BYTES: i64 = 2 * 1024 * 1024;
-/// The header that is `1` on a diff that was cut at [`GIT_DIFF_MAX_BYTES`].
+/// The header that is `1` when the native difference has another page.
 pub const TRUNCATED_HEADER: &str = "x-truncated";
 
 /// How far a phase of a job has come.
@@ -169,6 +161,9 @@ pub struct JobError {
 /// A job: work that takes a while and is carried out apart from the request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Job {
+    /// Captured retry and lease facts under this job's current read authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_wait: Option<JobLifecycleWait>,
     /// A model recovery awaited by this workflow, with its known due time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_recovery: Option<crate::calls::CallRecovery>,
@@ -203,6 +198,43 @@ pub struct Job {
     pub started_at: Option<Time>,
     /// When it ended.
     pub finished_at: Option<Time>,
+}
+
+/// A lifecycle time is unknown, inapplicable or a recorded instant; none of these means a promised start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum JobWaitTime {
+    /// This record did not capture the instant.
+    Unreported,
+    /// This job is not waiting on that kind of boundary.
+    NotApplicable,
+    /// The instant captured by the actual lease or retry decision.
+    At {
+        /// The earliest eligible instant, not an execution guarantee.
+        at: Time,
+    },
+}
+
+/// What an accepted cleanup or retry currently waits on, separate from progress counters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct JobLifecycleWait {
+    /// The actual phase, or cleanup after an accepted abort.
+    pub phase: String,
+    /// The retry boundary retained by the deciding operation.
+    pub retry_eligible_at: JobWaitTime,
+    /// The current runner lease's recoverable boundary.
+    pub lease_recoverable_at: JobWaitTime,
+    /// When the latest retained attempt was claimed or ended in a retry.
+    pub last_attempt_at: JobWaitTime,
+    /// The ordinary public failure wording; never a runner's private diagnostic.
+    pub reason: Option<String>,
+    /// The public failure catalogue key, for the reader's language.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    /// Whether the current claim recovers an earlier execution, when captured.
+    pub recovering: Option<bool>,
+    /// When these retry or lease facts were last recorded; null if not reported.
+    pub observed_at: Option<Time>,
 }
 
 /// What `result` is on the job that takes a snapshot.
@@ -449,11 +481,34 @@ pub struct FileMatch {
 /// What a search in content found.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FileSearchContent {
+    /// Continue the same live traversal; null means it reached the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// The beginning of live observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_from: Option<Time>,
     /// The lines that hold it.
     pub matches: Vec<FileMatch>,
-    /// Whether there were more than were returned.
+    /// Whether traversal can continue; another slice may examine entries without finding a match.
     pub truncated: bool,
     /// How many files were searched.
+    pub searched: i64,
+}
+
+/// A filename-search window with its actual source and continuation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileSearchNames {
+    /// Matching paths from this observation.
+    pub entries: Vec<DirEntry>,
+    /// The next window of the same selected search.
+    pub next_cursor: Option<String>,
+    /// Live traversal or the last complete cached manifest.
+    pub source: FilesSource,
+    /// The end of this page's observation.
+    pub as_of: Time,
+    /// The beginning of live traversal, or the cached manifest's observation time.
+    pub observed_from: Option<Time>,
+    /// Entries examined so far; this is not a count of the whole directory.
     pub searched: i64,
 }
 
@@ -461,7 +516,7 @@ pub struct FileSearchContent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FileSearchIn {
-    /// A substring of the path, without regard to case, in the latest manifest.
+    /// A substring of the path, from live traversal or the last complete cached manifest.
     Names,
     /// The lines of text files, in the environment as it is now.
     Content,
@@ -519,6 +574,9 @@ pub struct ArchiveEntry {
 /// What an archive holds, read where the file lies and without unpacking it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ArchiveListing {
+    /// Continue the same archive traversal, including a slice with no matching child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     /// Its format.
     pub format: ArchiveFormat,
     /// How it is compressed, if it is.
@@ -617,8 +675,8 @@ pub struct EnvironmentChangeListReply {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum EnvironmentFileSearchReply {
-    /// For a search by name: at most [`FILE_SEARCH_NAMES_MAX`] entries.
-    Names(Vec<DirEntry>),
+    /// Matching names with source coverage and continuation.
+    Names(FileSearchNames),
     /// For a search in content.
     Content(FileSearchContent),
 }
@@ -654,7 +712,7 @@ pub struct EnvironmentFileListQuery {
     /// Opaque continuation of exactly this environment/source/path membership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
-    /// One through 5,000 rows, with an independent two-MiB serialized page bound.
+    /// Positive rows per page; omitted uses the workspace default, with independent wire-byte paging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -843,6 +901,9 @@ pub struct EnvironmentChangeListQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentFileSearchQuery {
+    /// Continue exactly this selected search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
     /// The thread the caller works beside. It gives nothing: what is needed is held on the environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<Id>,
@@ -863,8 +924,7 @@ pub struct EnvironmentFileSearchQuery {
     /// With content: whether case matters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub case: Option<bool>,
-    /// With content: how many matches at most, [`FILE_SEARCH_LIMIT_DEFAULT`] when left out and at
-    /// most [`FILE_SEARCH_LIMIT_MAX`].
+    /// Matches in this page; the workspace's default when omitted. Continuation retains the rest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -873,6 +933,12 @@ pub struct EnvironmentFileSearchQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentArchiveListQuery {
+    /// Match child names without regard to case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Continue the same archive selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
     /// The thread the caller works beside. It gives nothing: what is needed is held on the environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<Id>,
@@ -881,8 +947,7 @@ pub struct EnvironmentArchiveListQuery {
     /// A directory within it to list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inside: Option<String>,
-    /// How many entries at most, [`ARCHIVE_LIST_LIMIT_DEFAULT`] when left out and at most
-    /// [`ARCHIVE_LIST_LIMIT_MAX`].
+    /// Entries in this page; omitted uses the workspace default. Continuation retains the rest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -916,6 +981,12 @@ pub struct EnvironmentGitStatusGetQuery {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentGitDiffGetQuery {
+    /// Continue the same native Git output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Preferred bytes in this page; omitted uses the workspace default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
     /// The thread the caller works beside. It gives nothing: what is needed is held on the environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<Id>,
@@ -1360,7 +1431,7 @@ crate::endpoints! {
             Target::Resolved("snapshot_environment"),
         );
     /// Reads a job.
-    JobGet: GET "/jobs/{id}", Rule("node.view on the job's thread, any permission on its environment, or provider.manage on its provider; an export's maker, or current access to a measurement's subject"), none, none, json Job, 200,
+    JobGet: GET "/jobs/{id}", Rule("node.view on the job's thread, any permission on its environment, or provider.manage on its provider; an export or thread move-out's maker, or current access to a measurement's subject"), none, none, json Job, 200,
         operation Op::variants(&[
             Variant {
                 name: "ordinary",
@@ -1536,8 +1607,12 @@ mod tests {
             by_content,
             EnvironmentFileSearchReply::Content(FileSearchContent { searched: 41, .. })
         ));
-        let by_name: EnvironmentFileSearchReply = serde_json::from_value(json!([])).unwrap();
-        assert!(matches!(by_name, EnvironmentFileSearchReply::Names(names) if names.is_empty()));
+        let by_name: EnvironmentFileSearchReply = serde_json::from_value(json!({
+            "entries":[], "next_cursor":null, "source":"cached", "as_of":"2026-10-08T17:04:05.000Z", "observed_from":null, "searched":0
+        })).unwrap();
+        assert!(
+            matches!(by_name, EnvironmentFileSearchReply::Names(names) if names.entries.is_empty())
+        );
         let query: EnvironmentFileSearchQuery = serde_json::from_value(
             json!({ "q": "parse", "in": "content", "glob": "*.rs", "case": true }),
         )

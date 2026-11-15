@@ -219,6 +219,7 @@ pub(crate) async fn view_with_machine_sources(
         None
     };
     Ok(Job {
+        lifecycle_wait: orch_engine::jobs::runner::lifecycle_wait(row),
         call_recovery,
         id: row.id,
         kind: row.kind.clone(),

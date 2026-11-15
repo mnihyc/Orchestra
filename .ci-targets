@@ -1,0 +1,13 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- jobs::
+test -p orch-db --lib -- queries::jobs::tests::
+test -p orch-api-core --test hosted_environments --test environments
+test -p orch-engine --test lifecycle
+test -p orch-engine --test environments -- taking_over_a_lease_keeps_the_retry_boundary_before_any_native_work_begins
+test -p orch-engine --test connected
+web typecheck
+web lint
+web test -- tests/component/live-work.test.tsx tests/component/thread-change-review.test.tsx tests/component/change-preview.test.tsx tests/component/resource-status-agreement.test.tsx tests/component/fact-disclosure.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts
