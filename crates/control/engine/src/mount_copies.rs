@@ -34,6 +34,8 @@ use crate::jobs::runner::{Failure, Job, Stop};
 use crate::mounts::Fated;
 use crate::{Engine, EngineError};
 
+pub mod location;
+
 /// How many trailing hexadecimal digits of an identifier name a machine or a copy in a volume's name: the last
 /// ones, since the first twelve of an identifier are the millisecond it was made in.
 const NAME_DIGITS: usize = 12;
@@ -337,11 +339,24 @@ async fn measure(
             Some(source) => Some(source.accept_on(engine, &mut conn).await?),
             None => None,
         };
+        let copy = location::preparation::active();
+        let copy_check = match &copy {
+            Some(source) => Some(
+                source
+                    .accept_on(&mut conn, engine.inner.clock.as_ref())
+                    .await?,
+            ),
+            None => None,
+        };
+        let copy_deadline = copy_check.as_ref().map(|check| check.deadline());
         sqlx::query("SELECT mount_id FROM mount_locations WHERE mount_id=$1 AND machine_id=$2 AND kind=$3 AND source=$4 FOR UPDATE")
             .bind(mount).bind(machine).bind(&data.kind).bind(&data.source)
             .fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
         if let Some(accepted) = &accepted {
             accepted.check(engine.inner.clock.as_ref())?;
+        }
+        if let Some(check) = copy_check {
+            check.check(engine.inner.clock.as_ref())?;
         }
         sqlx::query("UPDATE mount_locations SET last_bytes=$3,size_at=$4 WHERE mount_id=$1 AND machine_id=$2 AND kind=$5 AND source=$6")
             .bind(mount).bind(machine).bind(measured.total_bytes).bind(at.get()).bind(&data.kind).bind(&data.source)
@@ -349,7 +364,13 @@ async fn measure(
         if let Some(accepted) = &accepted {
             accepted.check(engine.inner.clock.as_ref())?;
         }
+        if let Some(deadline) = &copy_deadline {
+            deadline.check(engine.inner.clock.as_ref())?;
+        }
         conn.commit().await.map_err(orch_db::DbError::from)?;
+        if let Some(deadline) = &copy_deadline {
+            deadline.check(engine.inner.clock.as_ref())?;
+        }
     }
     Ok((measured, count.reference))
 }
@@ -420,13 +441,14 @@ pub async fn decide(
     decide_from(engine, conn, ask, None).await
 }
 
-/// Plans an authorized host location's move with the same new-location copy used by environment moves.
+/// Plans an authorized location copy with the same reviewed destination choices used by environment moves.
 pub async fn decide_location_copy(
     engine: &Engine,
     conn: &mut Conn,
     principal: &Principal,
     source: &rows::LocationRow,
     target: Id,
+    into: Option<CopyInto>,
     at: DateTime<Utc>,
 ) -> Result<Decided, EngineError> {
     use orch_api_contract::mounts::{EnvMountState, MountRef};
@@ -451,7 +473,7 @@ pub async fn decide_location_copy(
     let choices = [MountChoice {
         mount_id: source.mount_id,
         fate: MountFate::Copy,
-        into: Some(CopyInto::NewLocation),
+        into,
     }];
     decide_from(
         engine,

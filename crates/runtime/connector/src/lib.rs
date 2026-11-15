@@ -48,6 +48,7 @@ pub mod enrollment;
 pub mod events;
 pub mod facts;
 pub mod forwarder;
+pub mod gateway_control;
 pub mod gateway_selection;
 pub mod gateway_selector;
 pub mod harnesses;

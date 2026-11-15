@@ -422,6 +422,10 @@ impl Commands for ScriptedCommands {
         }
         // Use the real scripted link without retaining the volatile roster in issued rows.
         let cmd = Cmd {
+            native_members: None,
+            native_revision: None,
+
+            native_target: None,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
@@ -469,6 +473,10 @@ impl Commands for ScriptedCommands {
             Time::new(now + Span::seconds(i64::from(command.kind.deadline_secs())))
         });
         let cmd = Cmd {
+            native_members: None,
+            native_revision: None,
+
+            native_target: None,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
@@ -1730,8 +1738,22 @@ impl Rig {
         }
         // This scripted producer has one ordered event lane. Returning means
         // its own report committed, not only that its local spool accepted it.
-        let _publishing = self.publishing.lock().await;
         let segment = self.segment_of(thread).await;
+        let mut producers = Vec::with_capacity(events.len());
+        for event in events {
+            producers.push(
+                orch_testkit::doubles::sessions::report_opening(
+                    self.pool.pool(),
+                    thread,
+                    segment,
+                    event,
+                    events,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let _publishing = self.publishing.lock().await;
         if let Some(opening) =
             orch_testkit::doubles::sessions::prepare(self.pool.pool(), thread, segment)
                 .await
@@ -1797,7 +1819,8 @@ impl Rig {
         // allowing the link's normal batching and one disk flush for the ordered group.
         let handed: Vec<_> = events
             .iter()
-            .map(|event| self.machine.link.publish_now(&stream, event))
+            .zip(producers)
+            .map(|(event, producer)| self.machine.link.publish_from_now(producer, &stream, event))
             .collect();
         futures::future::try_join_all(handed).await.unwrap();
         let committed = tokio::time::timeout(PATIENCE, async {

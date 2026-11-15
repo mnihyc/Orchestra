@@ -492,3 +492,62 @@ async fn publication_cancellation_panic_and_wrong_result_each_finalize_once_and_
     }
     Ok(())
 }
+
+struct Closes(Arc<Mutex<Vec<Id>>>);
+
+#[async_trait]
+impl CommandHandler for Closes {
+    async fn handle(&self, context: CommandContext, command: Command) -> CommandOutcome {
+        lock(&self.0).push(context.id);
+        match command {
+            Command::SessionClose(_) => Ok(CommandResult::SessionClose(Empty {})),
+            _ => Err(CommandError::new(
+                ErrorCode::Unsupported,
+                "the test role takes only closes",
+            )),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_command_whose_write_down_stalls_past_its_deadline_still_runs_when_the_disk_answers()
+-> TestResult {
+    let directory = tempfile::tempdir()?;
+    let now: Time = "2026-10-16T00:00:00Z".parse()?;
+    let clock = ManualClock::new(now.get());
+    let stalled = new_id();
+    let writes = Arc::new(TestWrites::new(stalled, true, 0).accepting());
+    let _release = ReleaseWrites(Arc::clone(&writes));
+    let mut journal = Journal::open(directory.path(), Duration::from_secs(86_400), now)?;
+    journal.terminal_writes(Arc::clone(&writes));
+    let server = CommandServer::new(
+        journal,
+        Arc::new(clock.clone()),
+        ServerOptions {
+            roles: vec![Role::Environment, Role::Agent],
+            connected: true,
+        },
+    );
+    let runs = Arc::new(Mutex::new(Vec::new()));
+    let serving: Arc<dyn CommandHandler> = Arc::new(Closes(Arc::clone(&runs)));
+    server.serve(serving);
+    let thread = new_id();
+    let cmd = Cmd::new(
+        stalled,
+        &SerialKey::Thread(thread),
+        Time::new(now.get() + chrono::Duration::seconds(30)),
+        &SessionClose { thread_id: thread },
+    )?;
+    server.on_cmd(cmd).await;
+    // The disk stalls on writing the command down for far longer than the thirty seconds it was given.
+    tokio::time::timeout(PATIENCE, writes.entered()).await??;
+    clock.advance(chrono::Duration::seconds(90));
+    writes.release();
+    let result = settled(&server, stalled).await?;
+    assert!(
+        result.outcome.is_ok(),
+        "time lost before a command starts is not the command's own: {result:?}"
+    );
+    assert_eq!(lock(&runs).as_slice(), &[stalled]);
+    Ok(())
+}

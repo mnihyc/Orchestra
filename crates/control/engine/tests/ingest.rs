@@ -24,6 +24,7 @@ use std::time::Duration;
 
 fn delivered(world: &World, seq: i64, event: &Event) -> DeliveredEvent {
     DeliveredEvent {
+        native_opening_id: None,
         seq,
         at: Time::new(world.clock.now()),
         kind: event.kind().as_str().to_owned(),
@@ -34,6 +35,18 @@ fn delivered(world: &World, seq: i64, event: &Event) -> DeliveredEvent {
 /// Applies events as the link would hand them over, in a transaction of their own.
 async fn apply(world: &World, thread: Id, segment: Id, events: &[DeliveredEvent]) {
     world.open_session_for_reports(thread, segment).await;
+    // These are current-producer fixture reports; delayed cases supply their original source explicitly.
+    let opening = world.opening_of(thread).await;
+    let events: Vec<_> = events
+        .iter()
+        .cloned()
+        .map(|mut event| {
+            if event.native_opening_id.is_none() {
+                event.native_opening_id = Some(opening);
+            }
+            event
+        })
+        .collect();
     let mut tx = world.pool.begin().await.unwrap();
     world
         .engine()
@@ -44,7 +57,7 @@ async fn apply(world: &World, thread: Id, segment: Id, events: &[DeliveredEvent]
                 thread_id: thread,
                 segment_id: segment,
             },
-            events,
+            &events,
         )
         .await
         .unwrap();
@@ -106,10 +119,18 @@ fn usage(turn: Id) -> Event {
 }
 
 /// A turn's worth of everything a session says.
-fn script(world: &World, segment: Id, turn: Id) -> Vec<DeliveredEvent> {
+async fn script(world: &World, segment: Id, turn: Id) -> Vec<DeliveredEvent> {
     let at = world.clock.now();
+    let opening_id = orch_db::queries::session_dependencies::current_opening(
+        &mut world.pool.acquire().await.unwrap(),
+        segment,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let events = vec![
         Event::SessionOpened(SessionOpened {
+            opening_id,
             native_session_ref: format!("native-{segment}"),
             resumed: false,
         }),
@@ -177,6 +198,306 @@ fn script(world: &World, segment: Id, turn: Id) -> Vec<DeliveredEvent> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_earlier_openings_reports_preserve_its_output_without_changing_the_current_phase() {
+    let world = World::new().await;
+    let thread = world.thread("Replacement phase").await;
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Begin"))
+        .await
+        .unwrap();
+    let turn = world.turn_start(thread, 0).await;
+    let segment = world.segment_of(thread).await;
+    world.open_session_for_reports(thread, segment).await;
+    let original = world.opening_of(thread).await;
+    let from = |opening, seq, event: &Event| {
+        let mut report = delivered(&world, seq, event);
+        report.native_opening_id = Some(opening);
+        report
+    };
+    apply(
+        &world,
+        thread,
+        segment,
+        &[
+            from(original, 1, &turn_began(turn.turn_id)),
+            from(original, 2, &message_began(turn.turn_id, "original-output")),
+            from(
+                original,
+                3,
+                &message_grew("original-output", 0, "Original output"),
+            ),
+        ],
+    )
+    .await;
+    let (_, opening) = world
+        .commands
+        .issued_commands("session.open")
+        .into_iter()
+        .find(|(_, command)| command.body["thread_id"] == json!(thread))
+        .unwrap();
+    let replacement = orch_types::new_id();
+    let mut conn = world.pool.acquire().await.unwrap();
+    orch_db::queries::link::insert_command(
+        &mut conn,
+        &orch_db::queries::link::NewCommand {
+            native_target: None,
+            id: replacement,
+            machine_id: world.machine_id,
+            kind: "session.open",
+            body: &opening.body,
+            serial_key: None,
+            deadline_at: world.clock.now() + chrono::Duration::minutes(2),
+        },
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    let turn_body = serde_json::to_value(&turn).unwrap();
+    orch_db::queries::link::insert_command(
+        &mut conn,
+        &orch_db::queries::link::NewCommand {
+            native_target: None,
+            id: orch_types::new_id(),
+            machine_id: world.machine_id,
+            kind: "turn.start",
+            body: &turn_body,
+            serial_key: None,
+            deadline_at: world.clock.now() + chrono::Duration::minutes(2),
+        },
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    assert_eq!(world.opening_of(thread).await, replacement);
+    let phase = |kind| {
+        Event::TurnPhase(TurnPhase {
+            turn_id: turn.turn_id,
+            kind,
+            retry_attempt: None,
+            at: world.clock.time(),
+        })
+    };
+    apply(
+        &world,
+        thread,
+        segment,
+        &[from(replacement, 4, &phase(TurnPhaseKind::Retrying))],
+    )
+    .await;
+    let complete = |reference: &str, payload: Json| {
+        Event::decode(
+            "item.completed",
+            json!({"native_ref":reference,"status":"completed","payload":payload}),
+        )
+        .unwrap()
+    };
+    let old_review =
+        orch_agent_contract::review::reported(orch_agent_contract::review::ReportedReview {
+            native_ref: "original-review".into(),
+            turn: Some(turn.turn_id),
+            at: world.clock.time(),
+            model: "original-reviewer",
+            model_reported: true,
+            outcome: "approved",
+            reason: None,
+            action: json!({"command":"original review"}),
+            usage: None,
+            raw: &json!({}),
+        });
+    let mut reports=vec![
+        from(original,5,&phase(TurnPhaseKind::Compacting)),
+        from(original,6,&message_done("original-output","Original output")),
+        from(original,7,&turn_ended(turn.turn_id,TurnOutcome::Completed)),
+        from(original,8,&message_began(turn.turn_id,"original-late-start")),
+        from(original,9,&complete("original-compaction",json!({"marker":"compacted","data":{"duration_ms":null}}))),
+        from(original,10,&complete("original-reroute",json!({"code":"model_rerouted","message":"An earlier native observation","retryable":false,
+            "details":{"turn_id":turn.turn_id,"from_model":"original-model","to_model":"earlier-effective"}}))),
+        from(original,11,&Event::ModelRequest(orch_link_contract::events::ModelRequest {
+            turn_id:turn.turn_id,request:serde_json::from_value(json!({"id":"original-late-request","model":common::MODEL,
+                "asked":world.clock.time(),"end":world.clock.time(),"outcome":{"status":"done"},
+                "tokens":{"input_tokens":10,"cached_input_tokens":0,"cache_write_tokens":0,"output_tokens":2,"reasoning_tokens":0,"total_tokens":12}})).unwrap(),
+        })),
+    ];
+    for (number, event) in old_review.iter().enumerate() {
+        let value = serde_json::to_value(event).unwrap();
+        let linked = Event::decode(event.kind(), value["body"].clone()).unwrap();
+        reports.push(from(original, 12 + i64::try_from(number).unwrap(), &linked));
+    }
+    // Hold the real thread row while seeding the replacement and applying the deterministic late batch.
+    let mut tx = world.pool.begin().await.unwrap();
+    orch_db::queries::threads::lock(&mut tx, thread)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE turns SET state='starting',usage_detail=$2 WHERE id=$1")
+        .bind(turn.turn_id)
+        .bind(json!({"effective_model":"current-model"}))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let context = json!({"given":"replacement"});
+    let reviewer = json!({"model":"current-reviewer","reported":true,"usage_apart":false});
+    sqlx::query("UPDATE segments SET context_sent=$2,approval_reviewer=$3 WHERE id=$1")
+        .bind(segment)
+        .bind(&context)
+        .bind(&reviewer)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    world
+        .engine()
+        .apply_stream_events(
+            &mut tx,
+            world.machine_id,
+            &Stream::Session {
+                thread_id: thread,
+                segment_id: segment,
+            },
+            &reports,
+        )
+        .await
+        .unwrap();
+    let state: (String, Json) = sqlx::query_as("SELECT state,usage_detail FROM turns WHERE id=$1")
+        .bind(turn.turn_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(
+        state.0, "starting",
+        "old output cannot begin the replacement's retried turn"
+    );
+    assert_eq!(state.1["effective_model"], "current-model");
+    let kept: (Json, Json) =
+        sqlx::query_as("SELECT context_sent,approval_reviewer FROM segments WHERE id=$1")
+            .bind(segment)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(kept, (context, reviewer));
+    let ledger = orch_db::usage::ledger::events_of_turn(&mut tx, turn.turn_id)
+        .await
+        .unwrap();
+    assert!(
+        ledger
+            .iter()
+            .any(|entry| entry.request_ref.as_deref() == Some("original-late-request")),
+        "actual earlier request use remains recorded"
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(
+        world
+            .scalar::<Option<String>>("SELECT phase FROM turns WHERE id=$1", turn.turn_id)
+            .await
+            .as_deref(),
+        Some("retrying")
+    );
+    assert!(
+        !world
+            .scalar::<bool>(
+                "SELECT native_end_confirmed FROM turns WHERE id=$1",
+                turn.turn_id
+            )
+            .await
+    );
+    let output: (String, Json) = sqlx::query_as(
+        "SELECT status,payload FROM items WHERE thread_id=$1 AND native_ref='original-output'",
+    )
+    .bind(thread)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(output.0, "completed");
+    assert!(output.1.to_string().contains("Original output"));
+    world.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_result_from_before_a_keeper_change_cannot_rewrite_the_current_providers_health() {
+    for success in [false, true] {
+        let world = World::new().await;
+        let thread = world.thread("Keeper change").await;
+        let (turn, _) = world
+            .running_turn(thread, "An admitted model request")
+            .await;
+        let segment = world.segment_of(thread).await;
+        let opening = world.opening_of(thread).await;
+        let keeper = world.add_machine("Replacement keeper", &["provider"]).await;
+        let mut tx = world.pool.begin().await.unwrap();
+        orch_db::queries::threads::lock(&mut tx, thread)
+            .await
+            .unwrap()
+            .unwrap();
+        let present:bool=sqlx::query_scalar("SELECT (delivered_resources#>'{tool_admission,members}')?'llm' FROM segments WHERE id=$1")
+            .bind(segment).fetch_one(&mut *tx).await.unwrap();
+        assert!(
+            present,
+            "the deciding control starts with the real admitted model member"
+        );
+        sqlx::query("UPDATE providers SET key_machine_id=$2 WHERE id=$1")
+            .bind(world.provider)
+            .bind(keeper.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let expected = if success { "error" } else { "ready" };
+        sqlx::query("UPDATE providers SET status=$2 WHERE id=$1")
+            .bind(world.provider)
+            .bind(expected)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            orch_db::queries::session_dependencies::current_opening(&mut tx, segment)
+                .await
+                .unwrap(),
+            Some(opening)
+        );
+        let event=Event::decode("turn.completed",json!({"turn_id":turn.turn_id,"status":if success {"completed"}else{"failed"},
+            "error":if success {Json::Null}else{json!({"code":"provider_unauthorized","message":"The earlier keeper rejected its credential","retryable":false})}})).unwrap();
+        let report = DeliveredEvent {
+            native_opening_id: Some(opening),
+            ..delivered(&world, 90, &event)
+        };
+        world
+            .engine()
+            .apply_stream_events(
+                &mut tx,
+                world.machine_id,
+                &Stream::Session {
+                    thread_id: thread,
+                    segment_id: segment,
+                },
+                &[report],
+            )
+            .await
+            .unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM providers WHERE id=$1")
+            .bind(world.provider)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            status, expected,
+            "a result from the old member cannot change the new keeper"
+        );
+        let state: String = sqlx::query_scalar("SELECT state FROM turns WHERE id=$1")
+            .bind(turn.turn_id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            state,
+            if success { "completed" } else { "failed" },
+            "the original turn still keeps its actual outcome"
+        );
+        tx.commit().await.unwrap();
+        world.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_same_events_delivered_twice_change_nothing_the_second_time() {
     let world = World::new().await;
     let thread = world.thread("Twice delivered").await;
@@ -188,7 +509,7 @@ async fn the_same_events_delivered_twice_change_nothing_the_second_time() {
         .unwrap();
     let start = world.turn_start(thread, 0).await;
     let segment = world.segment_of(thread).await;
-    let events = script(&world, segment, start.turn_id);
+    let events = script(&world, segment, start.turn_id).await;
 
     apply(&world, thread, segment, &events).await;
     let forwarded = world.live.deltas().len();
@@ -578,6 +899,7 @@ async fn anonymous_native_failures_keep_source_event_identity_across_transport_r
             &world,
             1,
             &Event::SessionOpened(SessionOpened {
+                opening_id: world.opening_of(thread).await,
                 native_session_ref: "native-session".into(),
                 resumed: false,
             }),
@@ -666,6 +988,7 @@ async fn a_marker_only_compaction_resends_context_once_without_borrowing_a_child
                 &world,
                 1,
                 &Event::SessionOpened(SessionOpened {
+                    opening_id: world.opening_of(thread).await,
                     native_session_ref: "native-compaction".into(),
                     resumed: false,
                 }),
@@ -807,6 +1130,7 @@ async fn native_runtime_changes_audit_their_source_once_without_copying_native_b
             &world,
             1,
             &Event::SessionOpened(SessionOpened {
+                opening_id: world.opening_of(thread).await,
                 native_session_ref: "runtime-audit".into(),
                 resumed: false,
             }),

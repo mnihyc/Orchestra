@@ -14,6 +14,168 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 
 | 参考标识 | 含义 |
 | --- | --- |
+| `option:McpBinding.server_id` | 与机器链路绑定一致的已注册 MCP UUID；面向适配器的对应结构在读取和写回时保留该标识。 |
+| `option:Job.kind` | mount_copy 任务按已确认的计划独立复制挂载数据，使用共用的进度和结果记录；server_update 在随服务器安装的节点上运行发行版更新程序。 |
+| `option:MountCopyPreflightBody.source_machine_id` | 保存此挂载位置的现有机器；服务器记录该位置的确切关联、路径或自有卷。 |
+| `option:MountCopyPreflightBody.target_machine_id` | 允许的目标机器；服务器根据其当前数据存储能力选择存储位置。 |
+| `option:MountCopyPreflightBody.into` | 目标已有数据时选择替换或新位置；两种选择均保留原有数据。 |
+| `option:MountCopyPlan.preflight_id` | 当前用户保存的复制计划；确认复制及查看可见通知对象均使用此标识。 |
+| `option:MountCopyPlan.expires_at` | 计划的到期时间；实际数据来源发生变化时须提前重新查看计划。 |
+| `option:MountCopyPlan.mount` | 当前可读、即将复制的挂载。 |
+| `option:MountCopyPlan.source` | 读取数据的原始机器，仅在可读时显示。 |
+| `option:MountCopyPlan.target` | 可读的目标机器。 |
+| `option:MountCopyPlan.copy` | 共用的复制计划，包含测量结果、目标数据及其保留方式；未完成的统计显示为未知。 |
+| `option:MountCopyPlan.blockers` | 当前阻止确认的原因；查看受阻计划不会更改数据。 |
+| `option:MountCopyPlan.notification` | 共用的通知选择，以及去重后的受影响人数。 |
+| `option:MountCopyPlanReceipt.projection` | 已保存计划的受限回执，不包含现有资源内容。 |
+| `option:MountCopyPlanReceipt.mount_id` | 本次请求指定的挂载。 |
+| `option:MountCopyPlanReceipt.preflight_id` | 已保存计划的标识，不包含测量数据或私有位置详情。 |
+| `option:MountCopyPlanReceipt.expires_at` | 确认此计划的截止时间。 |
+| `option:MountCopyCreateBody.preflight_id` | 需要确认的当前计划；重复确认会返回同一个持久任务。 |
+| `option:MountCopyCreateBody.notify` | 显式通知选择；省略时使用计划中的默认值，每次操作对每位接收者只生成一条汇总通知。 |
+| `option:AdapterEvent.native_opening_id` | 输出进入队列前，从获准的 SessionSpec 取得产生报告的物理打开标识；空值仅用于未绑定的历史记录，不能控制活动会话。 |
+| `option:ModelRequestReport.native_opening_id` | 实际观察到该请求的物理打开标识；送达和重放均保留此标识，实测用量仍属于原来的逻辑轮次。 |
+| `option:Ev.native_opening_id` | 随持久会话事件保存的原始产生方；较早的报告保留其事实，但不能控制后继会话。 |
+| `option:EvbEntry.native_opening_id` | 批次中的每条记录分别保留产生方；合批、合并增量及重启都不能用当前会话重新标记它。 |
+| `option:SessionOpenMcp.server_id` | 会话中提供的每个 MCP 服务器都携带其注册 UUID 和当前名称；仅有名称会被拒绝。 |
+| `option:Cmd.native_members` | 会话配置被接受时冻结的成员名称和 nonce。MCP 和模型变更在原生生效前只比较各自的成员；其他独立成员变更不会阻止它们。 |
+| `option:Cmd.native_revision` | 与原始会话成员一同捕获的事实修订。重试会保留该值；送达时不会用较新的配置重标旧命令。 |
+| `option:ToolSessionControl.refreshing` | 主连接正在同步当前作用范围事实。本地访问会等待；独立保留的远程传输继续使用各自中继的实时准入。 |
+| `option:Frame.tool_session_update` | 已提交的会话和成员撤回只送达原来源机器的认证主连接；通知不会安装原生路由。 |
+| `option:Frame.tool_session_control` | API 的当前控制状态暂停本地工具交换，同时保留原生会话。 |
+| `option:ToolSessionUpdate.machine_id` | 该物理会话原来的来源机器；其他机器的主连接或仅隧道连接不能接收它的原生控制。 |
+| `option:ToolSessionUpdate.thread_id` | 本次已提交物理作用范围变更所属的确切线程。 |
+| `option:ToolSessionUpdate.segment_id` | 原来的逻辑分段；更新不会改选较新的分段。 |
+| `option:ToolSessionUpdate.opening_id` | 访问发生变更的物理会话，即使其分段已移除也保留该标识。 |
+| `option:ToolSessionUpdate.revision` | 单调递增的成员事实；旧通知不能恢复访问或结束后继会话。 |
+| `option:ToolSessionUpdate.live` | false 撤回整个物理会话；true 仅保留 nonce 仍相同的现有成员。 |
+| `option:ToolSessionUpdate.members` | 剩余成员的事实名称和 nonce；此列表不授予新路由或权限。 |
+| `option:ToolSessionMember.member` | 物理会话内的 exec、llm 或具有稳定标识的 MCP 成员。 |
+| `option:ToolSessionMember.nonce` | 未变更成员的身份；移除后再次添加会产生不同的 nonce。 |
+| `option:ToolSessionControl.available` | 实时 API 当前能否验证此安装中的会话工具。 |
+| `option:ToolSessionControl.admission_timeout_ms` | API 准入查询的正数等待时限，由 tunnels.control_timeout_ms 设置。 |
+| `option:ToolSessionQuery.n` | 一次待答的准入查询；稍后返回的答案不能用于其他通道。 |
+| `option:ToolSessionQuery.claims` | Open 或 Resume 所提交原始已验票据中的确切声明。 |
+| `option:ToolSessionQuery.ticket` | API 会再次验签的原始票据，不进入诊断输出。 |
+| `option:ToolSessionReply.n` | 此答案一次性完成的那次待答查询。 |
+| `option:ToolSessionReply.allowed` | 当前原生物理会话及成员是否准许这次确切请求。 |
+| `option:ToolSessionReply.revision` | 此次准入实际读取的已提交原生修订。 |
+| `option:Cmd.native_target` | 原生操作获准时记录的原始物理目标。若当时没有会话，该操作之后也不会查找并影响后来的会话；此字段不授予任何权限。 |
+| `option:NativeTarget.session` | 当前机器链路协议携带的会话目标快照；旧接收端不能忽略此字段后继续执行。 |
+| `option:SessionTarget.thread_id` | 获准原生操作的确切线程，须与原命令正文匹配。 |
+| `option:SessionTarget.segment_id` | 操作获准时记录的逻辑片段；当时没有片段则为空。 |
+| `option:SessionTarget.opening_id` | 不可变的物理打开标识；空值表示目标当时已不存在，不代表可以关闭后来的会话。 |
+| `option:SessionTarget.opening_epoch` | 同一线程各片段之间的获准打开顺序，不依赖时间戳或进程号。原生会话退役后，即使槽位为空或程序重启，也会保留此顺序。 |
+| `option:ToolSessionScope.opening_epoch` | 签名绑定的获准打开顺序；临时后继片段被移除后，旧片段也不能重新取得访问权。 |
+| `option:ToolSessionUpdate.opening_epoch` | 给逻辑片段之间的物理打开变化排序；延迟送达的旧更新不能关闭后继会话。 |
+| `option:McpServerCreateBody.name` | 所添加服务器的名称；exec 与 orch 属于内置工具服务器，不能用作新增定义的名称。 |
+| `option:EnvironmentMcpServerCreateBody.name` | 环境自有服务器的名称，须与内置的 exec、orch 服务区分。 |
+| `option:SessionSpec.opening_id` | 传给适配器的获准物理打开命令标识，与逻辑设置和私有回环密钥分别保存。 |
+| `option:SessionOpened.opening_id` | 产生此报告的物理打开标识；延迟送达的旧报告不能填充或重新打开后继会话。 |
+| `option:SessionLost.expected` | 正常的空闲会话退役会安静地关闭旧物理打开状态，并保留对话。已有运行中的轮次仍会收到实际丢失及恢复结果。 |
+| `option:SessionLost.opening_id` | 实际结束的物理打开标识，也会在连接器重启记录中保留；只有匹配的有效准入才会关闭并进入恢复。 |
+| `option:TicketClaims.tool_session` | 会话工具票据绑定不可变的物理打开标识、片段、线程、成员随机标识及准入修订号；每次打开或恢复通道还须向 API 确认当前准入。 |
+| `option:ToolSessionScope.opening_id` | 获准物理打开操作的命令标识；重新打开取得新标识，仅刷新传输则保留现有标识。 |
+| `option:ToolSessionScope.member` | 原生 exec 成员（也包括内置执行器的 MCP 传输）、llm 成员，或 mcp 与服务器稳定 UUID 的组合；服务器名称不能代替其身份。 |
+| `option:ToolSessionScope.nonce` | 成员未变时保留随机标识；撤回后重新加入须取得新标识，其他成员仍可使用。 |
+| `option:ToolSessionScope.revision` | 会话及成员事实的持久顺序；较旧的答复不能恢复已关闭或撤回的通道。 |
+| `option:ToolSessionScope.thread_id` | 该物理会话的确切线程，须与签名票据和当前片段同时匹配。 |
+| `option:ToolSessionScope.segment_id` | 承载物理打开操作的现有逻辑片段；单凭片段标识不能区分重新打开。 |
+| `option:CleanupPlan.effects` | 来自统一使用事实服务的当前影响：相关设置立即关闭此挂载，环境已有的挂载在下次启动时卸下。仅显示有权查看的名称，其余保留为数量。 |
+| `option:CleanupStart.plan_id` | 此人实际查看过的当前计划。挂载位置被替换后，即使时间戳相同，旧计划也会失效。 |
+| `option:CleanupStart.choices` | 已展示数据项的去向。删除挂载允许全部保留，也允许删除没有数据的挂载。 |
+| `option:CleanupStart.confirmation_name` | 选中销毁由 Orch 管理的数据时须输入准确的挂载或计划名称；保留数据无需输入名称。 |
+| `option:CleanupStart.notify` | 对整次操作明确选择是否通知，再按接收人的偏好筛选，每人最多一条分组通知。 |
+| `option:CleanupItem.record.blocker` | 数据去向不可用的真实原因；not_permitted 表示缺少数据管理权限。仍可删除挂载定义并保留数据。 |
+| `option:NotificationOperation.kind` | mount_delete 表示一次已确认的挂载删除，其统一清理任务结束后更新原有的分组通知。 |
+| `option:ServerUpdateStart.release` | 系统管理员选择的当前已验证语义版本，不接受路径、命令、网址或参数列表。 |
+| `option:ServerUpdateView.installed_version` | 当前回答读取请求的 API 版本，更新或回滚后也反映实际运行版本。 |
+| `option:ServerUpdateView.offered_version` | 最近一次已验证的可用版本，尚无可用信息时为 null。 |
+| `option:ServerUpdateView.update_available` | 可用版本是否新于当前回答的 API；旧检查缓存不会让已更新服务器仍显示落后。 |
+| `option:ServerUpdateView.availability` | 管理页更新操作所需的随服务端安装节点、连接及本机 Docker 条件。 |
+| `option:ServerUpdateView.command` | 原生节点路径不可用时仍可使用的同一个 update.sh 运维命令。 |
+| `option:ServerUpdateView.job` | 最近一次持久化服务器更新作业，API 重启或页面重载后保留；再次点击加入正在进行的作业。 |
+| `option:ServerUpdateView.observation` | 主机更新器记录的最新安全阶段及结果，不含原生日志或凭据。 |
+| `option:ServerUpdateObservation.stage` | 发布更新器记录的阶段；updated 和 rolled_back 表示已经确认的结果。 |
+| `option:ServerUpdateObservation.reason` | 固定且安全的失败原因，与阶段及未过滤的原生输出分开。 |
+| `option:ServerUpdateObservation.from_version` | 现有更新日志记录的更新前版本，尚未记录时为 null。 |
+| `option:ServerUpdateObservation.to_version` | 此作业获准的精确版本，不因重新连接或再次检查版本而改变。 |
+| `option:NodeServerUpdate.timeout_secs` | 从 server.update_prepare_timeout_secs 捕获的正数原生准备时限，覆盖命令类型默认值；不会限制独立运行的发布事务总时长。 |
+| `option:NodeServerUpdate.command_id` | 此作业已准备辅助进程对应的精确成功原生命令；缺少同一已存作业、计算机、版本及私有来源的观测会被忽略。 |
+| `option:NodeServerUpdate.job_id` | 已认证随服务端安装节点上的同一持久更新作业，其他节点不能提供它的结果。 |
+| `option:NodeServerUpdate.release` | 固定安装更新器使用的精确已验证版本；请求字段不接受本机路径或主机命令。 |
+| `option:NodeServerUpdate.observation` | 随服务端安装节点仅通过持久节点事件流报告自身操作的安全更新记录。 |
+| `option:MachineFacts.server_update` | 本机报告的固定更新能力，仅由具备本地 Docker 访问权的随服务端安装物理节点提供。 |
+| `option:AuditAction.server.update_requested` | 记录请求服务器版本更新的人、持久作业及精确的随服务端安装主机和节点。 |
+| `option:update.sh.ORCH_UPDATE_JOB` | 原生辅助进程附带持久作业 UUID，供记录阶段及恢复使用。普通 shell 更新省略它；它不含凭据，也不能选择主机命令。 |
+| `error:server_update_rolled_back` | 所选版本未通过就绪检查，现有更新器已确认之前版本重新运行。 |
+| `error:server_update_failed` | 现有更新器未能完成；保留的观测会说明是否需要执行原有恢复命令。 |
+| `state:ServerUpdateAvailability.ready` | 已连接的随服务端安装节点提供固定本机更新器。 |
+| `state:ServerUpdateAvailability.no_bundled_node` | 没有活动节点被标记为随服务端安装；可使用显示的 shell 命令。 |
+| `state:ServerUpdateAvailability.ambiguous_bundled_nodes` | 有多个活动节点声称随服务端安装，因此不会猜测要更新哪个主机。 |
+| `state:ServerUpdateAvailability.node_offline` | 随服务端安装节点须重新连接，才能接收更新作业。 |
+| `state:ServerUpdateAvailability.docker_unavailable` | 随服务端安装节点缺少此安装的本地 Docker 更新路径；运维命令仍然可用。 |
+| `state:ServerUpdateStage.queued` | 作业已获准，尚未开始获取发布。 |
+| `state:ServerUpdateStage.fetching` | 现有更新器正在获取清单和文件。 |
+| `state:ServerUpdateStage.verifying` | 获取的发布已进入原生验证步骤。 |
+| `state:ServerUpdateStage.applying` | 正在准备已验证的程序版本目录。 |
+| `state:ServerUpdateStage.stopping` | 应用服务正在停止，以执行更新事务。 |
+| `state:ServerUpdateStage.dumping` | 现有更新器正在制作回滚数据库快照。 |
+| `state:ServerUpdateStage.activating` | 现有更新器正在切换新程序版本目录。 |
+| `state:ServerUpdateStage.starting` | 应用服务正在以所选版本重新启动。 |
+| `state:ServerUpdateStage.checking` | 现有更新器正在探测服务及浏览器入口是否就绪。 |
+| `state:ServerUpdateStage.rolling_back` | 现有更新器正在恢复之前的程序及数据库。 |
+| `state:ServerUpdateStage.recovering` | 同一操作正在根据已有日志从中断中恢复。 |
+| `state:ServerUpdateStage.updated` | 所选版本已运行并通过就绪检查。 |
+| `state:ServerUpdateStage.rolled_back` | 尝试更新后，已确认之前版本重新运行。 |
+| `state:ServerUpdateStage.failed` | 更新器未能确认新版本或已恢复版本；保留恢复路径。 |
+| `state:ServerUpdateFailure.health_check_failed` | 所选版本未通过服务或浏览器入口就绪检查。 |
+| `state:ServerUpdateFailure.update_failed` | 更新器在确认所选版本或回滚前结束。 |
+| `state:ServerUpdateFailure.recovery_required` | 原有日志仍然存在，可使用同一个 update.sh recover 恢复路径。 |
+| `option:PublicAddressUpdateBody.expected_revision` | 准备此草稿所依据的生效地址版本。若期间发生其他发布或本地重置，过期草稿会被拒绝，且不会返回其他系统投影。 |
+| `option:PublicAddressUpdateBody.public_url` | 完整的候选主来源地址，须通过证书与安装验证后才会发布。 |
+| `option:PublicAddressUpdateBody.alternate_urls` | 完整的候选其他来源地址集合，不可省略；空列表会与主地址一并原子清除其他地址。 |
+| `option:PublicAddressSnapshot.using_example` | 生效主地址仍是随产品提供的示例地址，并非此安装实际使用的浏览器来源地址。 |
+| `option:PublicAddressUpdated.projection` | 已准备地址发布的固有回执，不包含之前的文件初始值或其他系统配置。 |
+| `option:PublicAddressUpdated.revision` | 此次发布提交的地址版本。 |
+| `option:PublicAddressUpdated.public_url` | 由本次调用者草稿确定并获准的规范主来源地址。 |
+| `option:PublicAddressUpdated.alternate_urls` | 获准的其他来源地址，与主地址一并规范化。 |
+| `option:PublicAddressUpdated.using_example` | 获准的主地址是否仍为随产品提供的示例。 |
+| `option:Meta.public_address_revision` | 与 public_url 及 alternate_urls 一并原子读取的已提交版本。版本变化会刷新读取结果，并显示一行浏览器提示，不会自动重载其他浏览器。 |
+| `option:orchctl.public-address.reset` | 通过本地数据库恢复经校验的文件主地址及其他地址初始值，清除已存覆盖值并递增版本。恢复已获准的初始值或当前地址集合时不依赖 HTTP 主机名；全新文件来源地址须先完成相同的证书及来源地址准备，再提交。不会输出凭据。 |
+| `option:orchctl.public-address.get` | 仅输出已提交的生效主地址，供本地脚本使用。系统存储尚未初始化时才使用文件初始值；之后的文件修改不会替换生效地址。 |
+| `option:orchctl.doctor.only` | 可选择 public-address 查看已存主地址、其他地址、版本及初始值或覆盖值状态。未明确指定 --url 时，选定的浏览器检查使用已提交地址；默认本地检查会探测页面和 API。 |
+| `option:headers.X-Orch-Frontend-Generation` | 随产品提供的前端进程已载入的证书版本。发布地址前会检查此标记、实际提供的 TLS 证书和安装证明。 |
+| `option:PublicAddressProofQuery.challenge` | 单次浏览器来源地址检查使用的全新 UUID 挑战值，不是凭据。 |
+| `option:PublicAddressProof.challenge` | 提供给此来源地址的同一挑战值；其他检查的证明无效。 |
+| `option:PublicAddressProof.proof` | 使用此安装现有私有证书颁发机构生成的专用密钥证明；不会登录任何人，也不披露密钥或凭据。 |
+| `option:PublicAddresses.public_url` | 主要 HTTP(S) 浏览器来源地址，与其他地址一并校验；新链接、命令和投递均读取系统存储中同一已提交版本。 |
+| `option:PublicAddresses.alternate_urls` | 此安装明确声明的其他浏览器来源地址。发布会原子替换整个地址集合；文件修改不会覆盖已存储的初始值。 |
+| `option:PublicAddressSnapshot.public_url` | 此版本正在生效的主要地址。已开始的登录、已签发的凭据和已导出的包保留获准时的地址。 |
+| `option:PublicAddressSnapshot.alternate_urls` | 与主要地址一并提交的其他来源地址。 |
+| `option:PublicAddressSnapshot.revision` | 发布已准备好的候选地址前核对的递增版本号；过期草稿不会改变生效地址。 |
+| `option:PublicAddressSnapshot.from_file_seed` | 当前生效的是已存储的文件初始值。配置文件仅用于创建首个快照或明确执行的本地重置。 |
+| `option:MachineGatewaySetBody.selection` | 选择自动或当前公布的网关，不重新注册或更换计算机身份。 |
+| `option:MachineGatewaySetBody.gateway_id` | 仅在选择指定网关时必填；自动模式省略或清除此值。安装目录之外的网关会被拒绝。 |
+| `option:MachineGatewaySetReceipt.projection` | 原生选择已接受的回执，不含计算机现有内容。 |
+| `option:MachineGatewaySetReceipt.machine_id` | 请求指定的同一台已注册计算机。 |
+| `option:MachineGatewaySetReceipt.selection` | 已接受的主网关选择；实际连接状态仍由网关状态提供。 |
+| `option:MachineGatewaySetReceipt.gateway_id` | 所选已公布网关的标识，自动模式为 null。 |
+| `option:MachineGatewaySetReceipt.changed` | 此次原生写入是否更改了保存的选择；重新连接前会持久记录回执。 |
+| `option:MachineGatewaySet.choice` | 原生主网关选择，按计算机所属安装公布的网关验证。 |
+| `option:MachineGatewaySetResult.choice` | 实际保存的原生选择。 |
+| `option:MachineGatewaySetResult.changed` | 保存的配置是否发生变化，不表示新连接已经上线。 |
+| `option:AuditAction.machine.gateway_changed` | 记录更改主网关的人、计算机、保存的选择和原生命令。 |
+| `option:Host.bundled_with_server` | 仅由受保护的服务端引导令牌记录的不可变安装来源，不根据主机名或所选归属推断。 |
+| `option:PagePreview.server_host_use` | 向随服务端安装的主机授予使用、管理或所有者权限前的当前提示和精确确认凭据；没有新增授权时省略。 |
+| `option:ServerHostUseDisclosure.hosts` | 本次页面或默认权限变更会新增或更改授权的受保护服务端主机数量，不公开主机标识或名称。 |
+| `option:ServerHostUseDisclosure.confirmation` | 通过 orch-server-host-use-confirmed 请求头确认此次权限变更及当前原生授权集合；变更意图改变时需重新确认，此凭据本身不授予访问权限。 |
+| `option:ProviderPauseQuery.note` | 显示在受影响会话中的提供方停用简短备注。 |
+| `option:ProviderPauseQuery.notify` | 停用提供方时，明确选择向每位受影响者发送一条合并通知；省略时不通知。对话框按“操作通知”设置初始选项，确认者可修改。 |
+| `option:ResourceDeleteQuery.notify` | 删除提供方或 MCP 定义时，明确选择向每位受影响者发送一条合并通知；省略时不通知。提供方子任务进度更新同一条收件箱通知。MCP 通知记录定义移除，机器上的清理仍通过持久命令继续。 |
+| `option:ResourceImpact.notification` | 提供方整体停用、提供方删除或 MCP 定义删除操作当前的通知对象和复选框初始值；其他影响类型和单个模型不提供此字段。 |
+| `option:ResourceOperationNotification.audience` | 可显示的受影响人员，以及关联关系不可见的人员数量；不包含操作确认者，每人只计一次。 |
+| `option:ResourceOperationNotification.default_on` | 根据此次影响继承的“操作通知”初始值；确认者可在执行前修改选项。 |
 | `option:ask.models.*.model` | 已启用 API 模型的路由名称，与 provider_id 一起标识一个允许的问一问模型。子级列表可以缩小可选范围，并保留父级顺序。 |
 | `option:ask.models.*.provider_id` | 此项允许的问一问模型所使用的 API 提供方标识。提问者和当前付费人仍须有权在对话所属组织中使用该提供方及模型。 |
 | `option:AccessOptions.models` | 此使用权限涵盖的模型。 |
@@ -26,6 +188,7 @@ summary: 提供方接口接受的每个请求选项，以及它改变什么。
 | `option:BindingOptions.providers` | 每个提供方及其模型和代理。 |
 | `option:BindingOptions.environments` | 当前读者可管理的已有环境，当前话题的环境优先。 |
 | `option:BindingOptions.environment_default` | 未另行选择时，新线程如何选择环境。 |
+| `option:BindingOptions.default_environment` | 最近一层设置指定的默认环境（无论设在哪一层），以及当前读者无法使用它时的原因；没有设置指定默认环境、或重新绑定现有线程时缺省。 |
 | `option:BindingOptions.source` | 已安全解析的仓库设置及仓库地址的来源位置。 |
 | `option:BindingOptions.access` | 在这里创建的线程最初采用的权限页。 |
 | `option:BindingOptions.agent_access` | 此创建上下文可选的代理权限；重新绑定不会创建新贡献。 |

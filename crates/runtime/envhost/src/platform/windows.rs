@@ -471,3 +471,60 @@ pub fn send_group(_group: u32, _sig: Sig) -> io::Result<()> {
         "Windows has no process groups",
     ))
 }
+
+#[cfg(test)]
+mod directory_identity_cases {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn a_held_directory_never_reads_a_replacement_ancestors_data() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("root");
+        let moved = scratch.path().join("original");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("value"), b"original").unwrap();
+        // Establish that the test account can move this directory before it is held.
+        std::fs::rename(&root, &moved).unwrap();
+        std::fs::rename(&moved, &root).unwrap();
+        let directory = Dir::open_path(&nested).unwrap();
+        if std::fs::rename(&root, &moved).is_ok() {
+            std::fs::create_dir_all(&nested).unwrap();
+            std::fs::write(nested.join("value"), b"replacement").unwrap();
+        }
+        let mut bytes = Vec::new();
+        directory
+            .open_read(OsStr::new("value"))
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, b"original");
+    }
+
+    #[test]
+    fn a_cloned_directory_keeps_its_original_identity_and_can_still_create_children() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("root");
+        let moved = scratch.path().join("original");
+        std::fs::create_dir(&root).unwrap();
+        let directory = Dir::open_path(&root).unwrap();
+        let clone = directory.try_clone().unwrap();
+        drop(directory);
+        let relocated = std::fs::rename(&root, &moved).is_ok();
+        if relocated {
+            std::fs::create_dir(&root).unwrap();
+        }
+        clone
+            .create_new(OsStr::new("child"), MODE_WRITABLE)
+            .unwrap()
+            .write_all(b"kept")
+            .unwrap();
+        let actual = if relocated { &moved } else { &root };
+        assert_eq!(std::fs::read(actual.join("child")).unwrap(), b"kept");
+        if relocated {
+            assert!(!root.join("child").exists());
+        }
+        drop(clone);
+    }
+}
