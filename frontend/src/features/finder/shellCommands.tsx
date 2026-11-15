@@ -7,7 +7,6 @@
  * own menu, made commands: one list of acts, written once, with what the caller may not do switched off and
  * why.
  */
-import { screenBuilt } from '@/shell/availability';
 import { usePlaceLabel } from '@/features/navigation/placeLabels';
 import { useMutation } from '@tanstack/react-query';
 import { useRouter } from '@tanstack/react-router';
@@ -198,17 +197,17 @@ export function useGlobalCommands(): void {
     const list: Command[] = [];
     const keysOf = (action: KeyActionId | undefined) => (action === undefined ? undefined : keysAct(action, choices) ?? undefined);
     /** A command that leads to a screen: by the route it has in the table of routes, and offered only where the router has the route. */
-    const leadsTo = (id: string, pattern: string, address: string, title: Command['title'], icon: LucideIcon, shortcut?: string) =>
+    const leadsTo = (id: string, pattern: string, address: string, title: Command['title'], icon: LucideIcon, shortcut?: string, keywords?: Command['keywords']) =>
       list.push({
         id,
         kind: 'go',
         title,
-        keywords: (t2) => words(t2, 'commands.words.go'),
+        keywords: (t2) => [...words(t2, 'commands.words.go'), ...(keywords?.(t2) ?? [])],
         icon,
         ...(shortcut === undefined ? {} : { shortcut }),
         path: address,
         run: (how) => (how === 'tab' ? window.open(address, '_blank', 'noopener') : router.history.push(address)),
-        available: () => exists(pattern) && screenBuilt(address),
+        available: () => exists(pattern),
       });
 
     for (const where of SCREENS.filter((entry) => entry.section !== 'settings')) {
@@ -232,7 +231,7 @@ export function useGlobalCommands(): void {
     if (slug !== null) {
       leadsTo('go.messages', '/org/$slug/messages', pathOf({ to: '/org/$slug/messages', params: { slug } }), (t2) => t2('commands.goTo', { where: t2('screens.messages.title') }), MessagesSquare, keysOf('messages'));
       if (org !== undefined && !(context?.kind === 'org' && context.id === org.id)) {
-        for (const section of settingsDestinations({ ...org, kind: 'org' }, t)) leadsTo(`go.org-settings.${section.id}`, section.pattern, section.path, () => section.title, Settings);
+        for (const section of settingsDestinations({ ...org, kind: 'org' }, t)) leadsTo(`go.org-settings.${section.id}`, section.pattern, section.path, () => section.title, Settings, undefined, () => section.keywords);
       }
       leadsTo('go.org', '/org/$slug', pathOf({ to: '/org/$slug', params: { slug } }), () => t('commands.goTo', { where: org?.name ?? '' }), Building);
     }
@@ -240,7 +239,8 @@ export function useGlobalCommands(): void {
     // Management is for the administrators of the system, who expect it; nobody else is offered it.
     if (system) for (const section of LISTED) {
       leadsTo(`go.admin.${section.id}`, '/admin/$section', pathOf({ to: '/admin/$section', params: { section: section.id } }),
-        (t2) => t2('commands.settingsSection', { scope: t2('screens.admin.title'), section: t2(`admin.sections.${section.id}.title`) }), section.icon);
+        (t2) => t2('commands.settingsSection', { scope: t2('screens.admin.title'), section: t2(`admin.sections.${section.id}.title`) }), section.icon,
+        undefined, section.id === 'email' ? (t2) => words(t2, 'commands.words.email') : undefined);
     }
     if (mode.data?.available === true) {
       const enabled = !mode.data.as_admin;
@@ -390,7 +390,7 @@ export function PlaceCommands({ place, settingsPlace }: { place: PlaceRef; setti
     return settingsDestinations({ id: scopeId, kind: scopeKind, name: scopeName, flat, address }, t).map((target): Command => ({
         id: `go.place-settings.${target.id}`,
         kind: 'go', title: () => target.title,
-        keywords: (t) => words(t, 'commands.words.go'),
+        keywords: (t) => [...words(t, 'commands.words.go'),...target.keywords],
         icon: Settings,
         path: target.path,
         run: (how) => (how === 'tab' ? window.open(target.path, '_blank', 'noopener') : router.history.push(target.path)),

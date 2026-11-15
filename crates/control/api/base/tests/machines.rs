@@ -391,7 +391,7 @@ async fn enrollment_roles_sections_and_dedication_are_bound_to_the_token_and_eac
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".into(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Agent],
     };
     assert_eq!(
@@ -900,6 +900,61 @@ async fn a_machine_asked_for_its_facts_again_answers_with_them_and_a_machine_tha
         .await
         .problem();
     assert_eq!(stranger.code, ErrorCode::NotFound);
+}
+
+#[tokio::test]
+async fn policy_applicability_and_authority_follow_the_current_native_roles_and_delegation() {
+    let world = World::new().await;
+    let owner = person(&world, "owner").await;
+    let machine = machine_with_policy(&world, &owner, &["mcp.add"]).await;
+    let before = world
+        .app
+        .call(MachinePolicyGet, &[&machine])
+        .token(&owner.token)
+        .send()
+        .await
+        .ok();
+    let before = serde_json::to_value(before).unwrap();
+    let keys = before["limits"]["applicable_keys"]
+        .as_array()
+        .expect("native applicability is reported with the policy");
+    let terminal = keys
+        .iter()
+        .find(|key| key["key"] == "environment.terminal")
+        .unwrap();
+    assert_eq!(terminal["governing_resource"], "environment");
+    assert_eq!(terminal["authority_source"], "physical_operator");
+    assert_eq!(
+        keys.iter().find(|key| key["key"] == "mcp.add").unwrap()["authority_source"],
+        "delegated"
+    );
+    sqlx::query("UPDATE machines SET roles=ARRAY['provider'],revision=revision+1 WHERE id=$1")
+        .bind(machine)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let after = world
+        .app
+        .call(MachinePolicyGet, &[&machine])
+        .token(&owner.token)
+        .send()
+        .await
+        .ok();
+    let after = serde_json::to_value(after).unwrap();
+    assert!(
+        !after["limits"]["applicable_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key["key"] == "environment.terminal")
+    );
+    assert!(
+        after["limits"]["applicable_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key["key"] == "provider.upstreams")
+    );
 }
 
 #[tokio::test]
