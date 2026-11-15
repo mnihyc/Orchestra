@@ -59,7 +59,20 @@ async fn a_jobs_upload_is_distinguished_without_scanning_older_or_other_uploads(
     for expected in 0..=2 {
         if expected > 0 {
             let hash = Hash::from_bytes([expected; 32]);
-            assert!(storage::begin_upload(&mut conn, &hash, 10000, Some(machine), at).await?);
+            assert!(
+                storage::begin_upload(
+                    &mut conn,
+                    &hash,
+                    10000,
+                    Some(machine),
+                    at,
+                    storage::UploadRetention {
+                        seconds: 86400,
+                        default_source: true
+                    }
+                )
+                .await?
+            );
         }
         let found = storage::uploads_of_machine(&mut conn, machine, since, 2).await?;
         assert_eq!(found.len(), usize::from(expected));
@@ -121,5 +134,58 @@ async fn a_jobs_upload_is_distinguished_without_scanning_older_or_other_uploads(
             "{plan}"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_resumed_machine_transfer_keeps_its_captured_idle_retention_and_moves_its_expiry() -> Proof
+{
+    let test = TestDb::fresh().await;
+    let mut conn = test.pool.acquire().await?;
+    let machine = resources::testing::insert_machine(&mut conn, "source", "connected").await?;
+    let at = Utc::now();
+    let hash = Hash::of(b"a resumable source transfer");
+    storage::begin_upload(
+        &mut conn,
+        &hash,
+        10000,
+        Some(machine),
+        at,
+        storage::UploadRetention {
+            seconds: 3600,
+            default_source: false,
+        },
+    )
+    .await?;
+    let first = storage::upload(&mut conn, &hash)
+        .await?
+        .ok_or("transfer absent")?;
+    assert_eq!(first.idle_retention_secs, Some(3600));
+    assert_eq!(first.expires_at, Some(at + Duration::hours(1)));
+    let resumed = at + Duration::minutes(30);
+    storage::advance_upload(&mut conn, &hash, 100, Some(new_id()), resumed).await?;
+    let later = storage::upload(&mut conn, &hash)
+        .await?
+        .ok_or("resumed transfer absent")?;
+    assert_eq!(later.idle_retention_secs, first.idle_retention_secs);
+    assert_eq!(later.retention_default, Some(false));
+    assert_eq!(later.expires_at, Some(resumed + Duration::hours(1)));
+    assert!(
+        !storage::stale_uploads(&mut conn, at + Duration::hours(1), 1, 10)
+            .await?
+            .contains(&hash),
+        "a shorter current default cannot replace this transfer's recorded allowance"
+    );
+    assert!(
+        storage::stale_uploads(
+            &mut conn,
+            resumed + Duration::hours(1) + Duration::seconds(1),
+            86400,
+            10
+        )
+        .await?
+        .contains(&hash),
+        "a longer later default cannot extend its recorded allowance"
+    );
     Ok(())
 }

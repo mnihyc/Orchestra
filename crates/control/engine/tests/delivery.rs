@@ -562,6 +562,47 @@ async fn image_delivery(
     assert_eq!(writes.all().len(), 1);
     let list = files.list(&writes.all()[0].manifest_blob).await;
     assert_eq!(list.get("attachments/shot.png").unwrap().hash, Some(png));
+    let recorded = orch_db::queries::threads::input(
+        &mut *world.pool.acquire().await.unwrap(),
+        submitted.input.id,
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .native_image_delivery
+    .unwrap();
+    assert_eq!(
+        recorded[0]["applied_delivery"],
+        if native_count == 1 { "native" } else { "path" }
+    );
+    if let Some(limit) = limit {
+        world
+            .set(
+                world.topic,
+                "files.native_image_bytes",
+                serde_json::json!(limit + 1000),
+            )
+            .await;
+        let later = orch_db::queries::threads::input(
+            &mut *world.pool.acquire().await.unwrap(),
+            submitted.input.id,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .native_image_delivery
+        .unwrap();
+        assert_eq!(
+            later, recorded,
+            "a later allowance edit cannot rewrite the admitted command's delivery receipt"
+        );
+        assert_eq!(later[0]["native_image_bytes"], limit);
+        assert_eq!(
+            later[0]["allowance_exceeded"],
+            program_native && model_native && limit > 0 && limit < 15
+        );
+    }
+
     assert_eq!(world.count("SELECT jsonb_array_length(attachment_issues)::bigint FROM thread_inputs WHERE id=$1", submitted.input.id).await, 0);
 }
 

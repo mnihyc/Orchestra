@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-db --lib --test upload_discovery --test commands_in_line
+test -p orch-envhost --lib
+test -p orch-envhost --test environment
+test -p orch-link-contract --lib --test largest_messages
