@@ -320,6 +320,9 @@ pub struct NodeBase<K> {
     pub tags_source: FieldSource,
     /// When automation last wrote the title or tags.
     pub auto_updated_at: Option<Time>,
+    /// Retained automatic field outcomes and actual scheduling facts; current ownership still wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_fields: Option<crate::summary_facts::AutomaticFields>,
     /// How its permission page stands against the defaults.
     pub page: PageState,
     /// The node's chat; reading it needs its own permission.
