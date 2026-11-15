@@ -65,6 +65,8 @@ pub enum Place {
     Provider(Id),
     /// One host's maintenance policy, inherited from the system.
     Host(Id),
+    /// A pool's own defaults, after the path to its home.
+    Pool(Id),
 }
 
 /// Where a setting is written: a row of the system or of a node. The own

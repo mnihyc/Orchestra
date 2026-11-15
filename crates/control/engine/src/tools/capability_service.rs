@@ -341,6 +341,14 @@ impl ServiceCommand {
             }
             return Ok(None);
         };
+        if self
+            .native()
+            .is_some_and(CommandAuthority::reads_before_fence)
+        {
+            // The native verifier has now fenced the source after its read. Keep the paid
+            // continuation's own rows in the same source-before-command order as ordinary work.
+            self.lock_source(conn).await?;
+        }
         if let Some(recovery) = &self.recovery
             && !recovery.current(conn, self).await?
         {
@@ -1190,6 +1198,23 @@ pub(crate) async fn reconcile(engine: &Engine, command: Id) -> Result<(), Engine
         deadline_at: retained.command.deadline_at,
     })? {
         return Err(EngineError::ToolCallIdentity);
+    }
+    if matches!(
+        retained.command.state.as_str(),
+        "succeeded" | "failed" | "cancelled" | "expired"
+    ) {
+        crate::resource_choice::health::outcome(
+            &mut tx,
+            command,
+            retained.command.state == "succeeded",
+            retained
+                .command
+                .error
+                .as_ref()
+                .and_then(|error| error.pointer("/details/failure")),
+            engine.inner.clock.now(),
+        )
+        .await?;
     }
     if evidence.model.is_some() {
         model::counted(engine, &mut tx, evidence, retained.command).await?;

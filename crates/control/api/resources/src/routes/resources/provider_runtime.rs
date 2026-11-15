@@ -360,7 +360,7 @@ pub(crate) async fn runtime_views(
                         .and_then(|r| r.machine_id)
                         .and_then(|id| versions.get(&id))
                         .map(String::as_str),
-                    orch_engine::updates::CONNECTOR_MINIMUM,
+                    ctx.app.link.connector_minimum(),
                 ),
                 updates,
                 last_active_at: runtime
