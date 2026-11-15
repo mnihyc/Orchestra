@@ -1,0 +1,7 @@
+fmt
+contracts
+clippy
+test -p orch-db --lib -- sequences::tests::
+test -p orch-api-core --lib
+test -p orch-api-core --test bootstrap --test account_native_scopes
+test -p orch-engine --lib -- --skip history_pages::
