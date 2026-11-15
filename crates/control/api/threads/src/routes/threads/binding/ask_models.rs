@@ -51,15 +51,18 @@ async fn inputs(
             .map_err(ApiError::internal)?
             .into_iter()
             .filter_map(|(id, decision)| {
-                decision.granted().map(|granted| {
-                    (
-                        id,
-                        granted
-                            .each
-                            .iter()
-                            .map(|allowance| allowance.provider.clone())
-                            .collect(),
-                    )
+                decision.granted().and_then(|granted| {
+                    let entries: Vec<_> = granted
+                        .each
+                        .iter()
+                        .filter(|allowance| {
+                            allowance.provider.allows_purpose(
+                                orch_access_contract::permissions::ProviderUsePurpose::Ask,
+                            )
+                        })
+                        .map(|allowance| allowance.provider.clone())
+                        .collect();
+                    (!entries.is_empty()).then_some((id, entries))
                 })
             })
             .collect();
@@ -78,13 +81,14 @@ async fn inputs(
         .map(|(id, rows)| {
             Ok((
                 id,
-                model_options(
+                model_options_for(
                     rows,
                     settings,
                     grants
                         .get(&id)
                         .map(|each| each.iter().collect::<Vec<_>>())
                         .as_deref(),
+                    orch_access_contract::permissions::ProviderUsePurpose::Ask,
                 )?
                 .into_iter()
                 .map(|model| (model.model_name.clone(), model))
@@ -168,6 +172,15 @@ fn choice(selection: AskModelIdentity, inputs: &Inputs) -> AskModelOption {
             .get(protocol)
             .cloned()
     });
+    // Ask declares its own read tools and never selects hosted web search, so it is not offered.
+    if let Some(schema) = choice.request_option_schema.as_mut() {
+        if let Some(properties) = schema.get_mut("properties").and_then(Json::as_object_mut) {
+            properties.remove("web_search");
+        }
+        if let Some(required) = schema.get_mut("required").and_then(Json::as_array_mut) {
+            required.retain(|name| name.as_str() != Some("web_search"));
+        }
+    }
     let reason = if provider.status == "disabled" {
         Some("disabled")
     } else if matches!(
@@ -203,18 +216,16 @@ fn choice(selection: AskModelIdentity, inputs: &Inputs) -> AskModelOption {
             orch_model_contract::parameters::resolve(protocol, &model.parameters, defaults, &empty);
         let permitted = resolved.as_ref().is_ok_and(|params| {
             orch_provider_contract::calls::requested_effort(params).is_ok_and(|effort| {
-                effort.is_none_or(|effort| {
-                    // One entry has to allow the model and its effort together.
-                    grant.iter().any(|entry| {
-                        orch_authz::options::entry_allows(
-                            entry,
-                            &orch_authz::options::Wanted {
-                                model: Some((&choice.selection.model, &model.groups)),
-                                effort: Some(effort),
-                                ..orch_authz::options::Wanted::default()
-                            },
-                        )
-                    })
+                grant.iter().any(|entry| {
+                    orch_authz::options::entry_allows_for(
+                        entry,
+                        &orch_authz::options::Wanted {
+                            model: Some((&choice.selection.model, &model.groups)),
+                            effort,
+                            ..orch_authz::options::Wanted::default()
+                        },
+                        orch_access_contract::permissions::ProviderUsePurpose::Ask,
+                    )
                 })
             })
         });

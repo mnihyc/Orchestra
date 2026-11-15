@@ -166,6 +166,8 @@ impl Answer {
 /// May a person run a provider, as a thread is set to use it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderUse<'a> {
+    /// The factual purpose of this use, shared with permission selection and accounting.
+    pub purpose: orch_access_contract::permissions::ProviderPurpose,
     /// The person: the author of an input, the thread's first owner for an
     /// input that has none, or whoever puts a thread on the provider.
     pub person: Id,
