@@ -26,7 +26,8 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     function Form() { const [value, setValue] = useState<Record<string, unknown>>({ image: 'research:stable', extension: { keep: true } }); return <SchemaForm compact schema={detailSchema} spec={value} driver="sample" onChange={(next) => { setValue(next); changed(next); }} />; }
     show(<Form />);
     expect(screen.getByRole('textbox', { name: 'Image reference' })).toHaveValue('research:stable');
-    expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument();
+    // Every section is on the page under the one before it; a section of many rows is read a dozen at a time.
+    expect(screen.getAllByRole('spinbutton')).toHaveLength(12);
     await user.click(screen.getByRole('link', { name: i18n.t('templates.editor.sections.uses') }));
     expect(screen.getAllByRole('spinbutton')).toHaveLength(12);
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Worker limit 1' }), { target: { value: '7' } });
@@ -56,7 +57,7 @@ it('keeps full JSON behind Details, extensions behind their explicit editor, and
   await waitFor(() => expect(valid).toHaveBeenLastCalledWith(false));
   expect(screen.getByRole('searchbox', { name: i18n.t('templateSettings.search') })).toBeDisabled();
   await user.click(screen.getByRole('link', { name: i18n.t('templates.editor.sections.uses') }));
-  expect(screen.getByRole('textbox', { name: 'Image reference' })).toBeVisible(); expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument();
+  expect(screen.getByRole('textbox', { name: 'Image reference' })).toBeVisible();
   fireEvent.change(other, { target: { value: '{"extension":{"keep":true}}' } });
   await waitFor(() => expect(valid).toHaveBeenLastCalledWith(true));
   await user.click(screen.getByRole('link', { name: i18n.t('templates.editor.sections.uses') })); expect(screen.getByRole('spinbutton', { name: 'Worker limit 1' })).toBeVisible();

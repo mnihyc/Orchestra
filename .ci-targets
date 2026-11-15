@@ -1,0 +1,6 @@
+test -p orch-settings-contract --lib
+test -p orch-summarizer-contract --lib
+test -p orch-summarizer-model --lib
+test -p orch-engine --test goals --test resource_summaries --test forks
+test -p orch-api-core --test summaries --test resource_summaries
+test -p orch-engine --lib -- history_pages::tests::a_summary_of_a_large_cut_reads_only_the_brief_tail_and_newest_older_index_lines
