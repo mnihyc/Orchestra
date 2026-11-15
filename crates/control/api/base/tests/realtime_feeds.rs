@@ -611,3 +611,102 @@ async fn a_topic_follows_its_own_sequence_and_is_followed_by_those_who_may_view_
     assert_eq!(frame["data"]["topic"]["name"], "Login, renamed");
     assert_eq!(frame["data"]["topic"]["seq"], frame["seq"]);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unread_work_inside_a_closed_branch_changes_its_folded_row_without_sending_descendants() {
+    let rig = Rig::tuned(|tuning| tuning.sweep_every = Duration::ZERO).await;
+    let thread = rig.thread("Hidden below the folded project").await;
+    {
+        let mut conn = rig.pool.acquire().await.unwrap();
+        sqlx::query("INSERT INTO thread_reads(user_id,thread_id,continuation_id,last_read_seq) SELECT $1,node_id,active_continuation_id,activity_seq FROM threads WHERE node_id=$2")
+            .bind(rig.ada).bind(thread).execute(&mut *conn).await.unwrap();
+        hierarchy::put_subscription(
+            &mut conn,
+            rig.ada,
+            rig.root,
+            "all",
+            "manual",
+            rig.clock.now(),
+        )
+        .await
+        .unwrap();
+    }
+    let feed = orch_realtime_contract::feeds::Feed::DocumentTree(
+        orch_realtime_contract::document_tree::DocumentTreeView::Hierarchy {
+            root: rig.root,
+            queries: vec![
+                orch_api_contract::nodes::OrgTreeGetQuery {
+                    parent_id: Some(rig.root),
+                    ..Default::default()
+                },
+                orch_api_contract::nodes::OrgTreeGetQuery {
+                    parent_id: Some(rig.project),
+                    ..Default::default()
+                },
+            ],
+        },
+    )
+    .to_string();
+    let mut client = Client::signed_in(rig.server.addr, &rig.token).await;
+    client.sub(1, &feed, None).await;
+    client.expect("subscribed").await;
+    let opening = next_of(&mut client, "event").await;
+    let first = &opening["data"]["hierarchy"]["nodes"];
+    assert_eq!(first.as_array().unwrap().len(), 1);
+    assert_eq!(first[0]["id"], rig.project.to_string());
+    assert_eq!(first[0]["folded"]["unread"], false);
+    let mut tx = rig.pool.begin().await.unwrap();
+    sqlx::query("UPDATE threads SET activity_seq=activity_seq+1 WHERE node_id=$1")
+        .bind(thread)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    hierarchy::stamp(&mut tx, thread).await.unwrap();
+    tx.commit().await.unwrap();
+    let changed = loop {
+        let frame = next_of(&mut client, "event").await;
+        if frame["data"]["query"]["parent_id"] == rig.root.to_string()
+            && frame["data"]["hierarchy"]["nodes"][0]["folded"]["unread"] == true
+        {
+            break frame;
+        }
+    };
+    let nodes = changed["data"]["hierarchy"]["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0]["id"], rig.project.to_string());
+    assert!(
+        !serde_json::to_string(nodes)
+            .unwrap()
+            .contains(&thread.to_string())
+    );
+    let before = hierarchy::tree_seq(&mut rig.pool.acquire().await.unwrap(), rig.root)
+        .await
+        .unwrap();
+    let mut tx = rig.pool.begin().await.unwrap();
+    let read:i64=sqlx::query_scalar("UPDATE thread_reads r SET last_read_seq=t.activity_seq FROM threads t WHERE r.thread_id=t.node_id AND r.thread_id=$1 AND r.user_id=$2 AND r.continuation_id=t.active_continuation_id RETURNING r.last_read_seq")
+        .bind(thread).bind(rig.ada).fetch_one(&mut *tx).await.unwrap();
+    assert!(
+        orch_db::sequences::notify_user_event(
+            &mut tx,
+            &[rig.ada],
+            &json!({"what":"read_state","thread_id":thread,"last_read_seq":read})
+        )
+        .await
+        .unwrap()
+    );
+    tx.commit().await.unwrap();
+    loop {
+        let frame = next_of(&mut client, "event").await;
+        if frame["data"]["query"]["parent_id"] == rig.root.to_string()
+            && frame["data"]["hierarchy"]["nodes"][0]["folded"]["unread"] == false
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        hierarchy::tree_seq(&mut rig.pool.acquire().await.unwrap(), rig.root)
+            .await
+            .unwrap(),
+        before
+    );
+}

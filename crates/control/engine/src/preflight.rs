@@ -281,6 +281,18 @@ impl Engine {
         else {
             return Ok(Outcome::Gone);
         };
+        // A Stop that is open is carried out before anything else: no turn is made behind its back.
+        let thread = if Self::preflight_phase(|| self.apply_open_stops_in(unit, thread_id))
+            .await?
+            .carried_out
+        {
+            match threads::thread(unit.conn, thread_id).await? {
+                Some(thread) => thread,
+                None => return Ok(Outcome::Gone),
+            }
+        } else {
+            thread
+        };
         if Self::preflight_phase(|| orch_db::queries::ask::get(unit.conn, thread_id, false))
             .await?
             .is_some()
@@ -810,7 +822,8 @@ impl Engine {
             }
             // A terminal source failure keeps the same input without re-entering preparation on every wake.
             if crate::preparation::source_failed(&thread)? {
-                let blocked = Blocked::new("error", crate::preparation::SOURCE_FAILED);
+                let blocked =
+                    Blocked::new("source_failed", crate::preparation::SOURCE_FAILED_DETAIL);
                 Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
                 return Ok(Outcome::Blocked(blocked));
             }
@@ -1043,6 +1056,7 @@ impl Engine {
         }
         let now = Time::new(unit.now());
         let ask = |person: Id| ProviderUse {
+            purpose: orch_access_contract::permissions::UsagePurpose::Turn,
             person,
             node: thread.node_id,
             provider: thread.provider_id.unwrap_or_else(Id::nil),
@@ -1607,7 +1621,10 @@ impl Engine {
         // lets a credential be used in is asked as well: it comes before every page.
         let machine_list = binding::machine_arrangements_of(conn, &provider).await?;
         let permission = binding::policy_with_machine(&facts, machine_list.clone()).permission;
-        let arrangement = match binding::choose_with_machine(&facts, machine_list, requested) {
+        // An environment that is being made has reported no executors yet: it is judged by what its
+        // template promises, as at the creation of the thread, and never refused for the lack of a report.
+        let place = binding::initial_place(conn, &facts).await?;
+        let arrangement = match binding::choose_placed(&facts, &place, machine_list, requested) {
             Ok(arrangement) => arrangement,
             Err(why) => {
                 // A role removed from an existing binding is an availability failure.
@@ -1790,6 +1807,7 @@ impl Engine {
             .provider_use(
                 &mut *unit.conn,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person,
                     node: thread.node_id,
                     provider: provider.id,
@@ -2201,6 +2219,7 @@ pub(crate) fn sessions_params(
     use orch_agent_contract::descriptor::Placement;
     use orch_agent_contract::parameters::{Eligibility, sendable};
     let _ = arrangement;
+    let features = descriptor.feature_values(&settings.features);
     // The options of the profile that hold back the end of a turn must fit under the time an unanswered interrupt is
     // given: the program declares which they are, and the engine knows the time.
     if let Some(delays) = declared_turn_end_delays(descriptor) {
@@ -2228,7 +2247,7 @@ pub(crate) fn sessions_params(
     let sent = sendable(
         &descriptor.parameters,
         &context,
-        &settings.features,
+        &features,
         &settings.params,
     );
     let params = Json::Object(sent.values.into_iter().collect());
@@ -2242,7 +2261,7 @@ pub(crate) fn sessions_params(
         bindings.validate(
             agent.profile.get("config").unwrap_or(&Json::Null),
             parameters,
-            &settings.features,
+            &features,
         )?
     } else {
         std::collections::BTreeMap::new()
@@ -2259,7 +2278,7 @@ pub(crate) fn sessions_params(
         object.remove(orch_agent_contract::parameters::MODEL_WINDOW_KEY);
         for def in &descriptor.parameters {
             if def.chooses_none()
-                && def.is_shown(&context, &settings.features)
+                && def.is_shown(&context, &features)
                 && !object.contains_key(&def.key)
             {
                 object.insert(def.key.clone(), Json::Null);
@@ -2410,6 +2429,7 @@ mod tests {
             sources: serde_json::json!({}),
             facts: Json::Null,
             revision: 1,
+            observation_revision: 0,
             deleted_at: None,
         }
     }

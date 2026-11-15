@@ -373,6 +373,7 @@ pub async fn names(conn: &mut Conn, ask: &Names<'_>) -> Result<Vec<NameRow>, DbE
             -- and root tests the batch applies below, before any place is read.
             SELECT d.id, d.title, d.node_id, d.org_id, d.owner_id, d.updated_at FROM documents d
              WHERE d.deleted_at IS NULL AND __DOCUMENT_NAME__ AND 'document' = ANY($6) AND ($7::uuid IS NULL OR d.org_id = $7)
+               AND ($12::uuid[] IS NULL OR d.id = ANY($12))
                AND ($3 OR $12::uuid[] IS NOT NULL OR d.org_id IS NULL OR d.org_id = ANY($11::uuid[]) OR d.owner_id = $1)
         ), document_places AS MATERIALIZED (
             -- Each live place of those documents is read once, not once for every document in it.
@@ -843,7 +844,11 @@ pub(super) fn advanced_source_sql(selection: &str, kind: &str, source: &str, par
         "(SELECT COALESCE(adv_m.edited_at,adv_m.created_at) FROM chat_messages adv_m WHERE adv_m.id={part})"
     );
     let edited = fact("adv_d.updated_at", "adv_n.updated_at", &chat_edited);
-    advanced_facts_sql(selection, &owner, &creator, &editor, &created, &edited)
+    let facts = advanced_facts_sql(selection, &owner, &creator, &editor, &created, &edited);
+    format!(
+        "({facts}) AND ({selection}->>'stream' IS NULL OR ({kind}='item' AND EXISTS \
+        (SELECT 1 FROM items adv_i WHERE adv_i.id={part} AND adv_i.stream={selection}->>'stream')))"
+    )
 }
 
 /// Compare the recorded source facts without changing the ordering of candidate streams.
@@ -871,7 +876,7 @@ pub(super) fn advanced_source_needed(selection: Option<&orch_types::Json>) -> bo
             .and_then(|value| value.get(key))
             .is_some_and(|value| !value.is_null())
     };
-    ["owner_id", "created_by_id", "edited_by_id"]
+    ["owner_id", "created_by_id", "edited_by_id", "stream"]
         .iter()
         .any(|key| present(key))
         || present("date_field") && (present("from") || present("to"))
