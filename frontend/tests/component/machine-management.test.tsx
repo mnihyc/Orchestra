@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => ({
   act: vi.fn(),
   roles: vi.fn<typeof Resources.setMachineRoles>(),
 }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), Link: ({ children }: { children: ReactNode }) => <a href="/resources/machines/personal?tab=policy">{children}</a> }));
 vi.mock('@/api/resources', async (load) => ({ ...await load<typeof Resources>(), setMachineRoles: mocks.roles }));
 vi.mock('@/api/auth', async (load) => ({ ...await load<typeof Auth>(), meQuery: { queryKey: ['management-caller'], queryFn: () => mocks.me() } }));

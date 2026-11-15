@@ -1,0 +1,5 @@
+fmt
+contracts
+test -p orch-engine --lib -- views::tests::
+test -p orch-engine --test delivery
+test -p orch-api-core --lib -- previews::tests::

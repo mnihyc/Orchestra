@@ -56,17 +56,30 @@ pub struct Outcome {
     pub unreadable: Vec<RelPath>,
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static ENUMERATED_NAMES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 struct Level {
     dir: Dir,
     scope: Option<Scope>,
     path: RelPath,
-    names: std::vec::IntoIter<OsString>,
+    names: Box<dyn Iterator<Item = std::io::Result<OsString>>>,
 }
 
-fn sorted_names(dir: &Dir) -> std::io::Result<std::vec::IntoIter<OsString>> {
+fn directory_names(
+    dir: &Dir,
+    ordered: bool,
+) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<OsString>>>> {
+    if !ordered {
+        return dir.names_stream();
+    }
     let mut names = dir.names()?;
+    #[cfg(test)]
+    ENUMERATED_NAMES.with(|count| count.set(count.get() + names.len()));
     names.sort();
-    Ok(names.into_iter())
+    Ok(Box::new(names.into_iter().map(Ok)))
 }
 
 /// Walks what is below the directory `start` (a real path, with no link in it), handing each entry
@@ -75,6 +88,29 @@ pub fn walk(
     workspace: &Workspace,
     ignore: Option<&Arc<IgnoreRules>>,
     start: &RelPath,
+    visit: &mut dyn FnMut(&Entry<'_>) -> Flow,
+) -> Result<Outcome> {
+    walk_in(workspace, ignore, start, true, &mut || true, visit)
+}
+
+/// Walks a working slice without collecting sibling lists. The budget is checked before
+/// every name, including ignored/internal names that are never handed to the entry visitor.
+pub(crate) fn walk_streamed(
+    workspace: &Workspace,
+    ignore: Option<&Arc<IgnoreRules>>,
+    start: &RelPath,
+    keep_going: &mut dyn FnMut() -> bool,
+    visit: &mut dyn FnMut(&Entry<'_>) -> Flow,
+) -> Result<Outcome> {
+    walk_in(workspace, ignore, start, false, keep_going, visit)
+}
+
+fn walk_in(
+    workspace: &Workspace,
+    ignore: Option<&Arc<IgnoreRules>>,
+    start: &RelPath,
+    ordered: bool,
+    keep_going: &mut dyn FnMut() -> bool,
     visit: &mut dyn FnMut(&Entry<'_>) -> Flow,
 ) -> Result<Outcome> {
     let located = workspace.locate(start, Locate::ENTRY)?;
@@ -86,8 +122,11 @@ pub fn walk(
         },
         None => None,
     };
-    let names =
-        sorted_names(&dir).map_err(|error| HostError::io(format!("listing {start}"), error))?;
+    if let Some(problem) = scope.as_ref().and_then(Scope::problem) {
+        return Err(HostError::Unsupported(problem.message()));
+    }
+    let names = directory_names(&dir, ordered)
+        .map_err(|error| HostError::io(format!("listing {start}"), error))?;
     let mut stack = vec![Level {
         dir,
         scope,
@@ -97,10 +136,19 @@ pub fn walk(
     let mut outcome = Outcome::default();
     'walk: while let Some(level) = stack.last_mut() {
         crate::error::check_cancelled()?;
+        if !keep_going() {
+            outcome.stopped = true;
+            break;
+        }
         let Some(name) = level.names.next() else {
             stack.pop();
             continue;
         };
+        let name = name.map_err(|error| HostError::io(format!("listing {}", level.path), error))?;
+        #[cfg(test)]
+        if !ordered {
+            ENUMERATED_NAMES.with(|count| count.set(count.get() + 1));
+        }
         let Some(text) = name.to_str() else { continue };
         if is_internal_entry(&level.path, text) {
             continue;
@@ -161,7 +209,10 @@ pub fn walk(
                     .last()
                     .and_then(|level| level.scope.as_ref())
                     .map(|scope| scope.enter(&path, &child));
-                match sorted_names(&child) {
+                if let Some(problem) = scope.as_ref().and_then(Scope::problem) {
+                    return Err(HostError::Unsupported(problem.message()));
+                }
+                match directory_names(&child, ordered) {
                     Ok(names) => stack.push(Level {
                         dir: child,
                         scope,
