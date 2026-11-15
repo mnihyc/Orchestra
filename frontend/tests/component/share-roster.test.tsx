@@ -3,6 +3,7 @@ import { cleanup, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Access from '@/api/access';
+import { serverClock } from '@/lib/serverClock';
 import { AccessRoster } from '@/features/access/AccessRoster';
 import type { Changes } from '@/features/access/changes';
 import { linesOf } from '@/features/access/model';
@@ -69,4 +70,22 @@ it('keeps an uneditable inherited level read-only and offers no ineffective acti
   expect(view.container.querySelectorAll('[aria-haspopup="menu"]')).toHaveLength(0);
   expect(calls.take).not.toHaveBeenCalled();
   expect(calls.level).not.toHaveBeenCalled();
+});
+
+it.each(['en','zh-CN'] as const)('names an expired direct contribution on its existing source line in %s',async(locale)=>{
+  await setLocale(locale);const now=Date.now();serverClock.observe(new Date(now).toISOString(),now,now);
+  try {
+    const p=page();p.rows=p.rows.map((row)=>({...row,entries:row.entries.map((entry)=>({...entry,expires_at:'2000-01-01T12:00:00.000Z'}))}));
+    const view=show(<AccessRoster lines={linesOf(p,CATALOGUE,'thread')} target={target} page={p} catalogue={CATALOGUE} changes={changes} meId={ADA.id} onTake={calls.take} onLevel={calls.level}/>);
+    expect(view.container).toHaveTextContent(locale==='en'?'Expired access':'授权已到期');
+  } finally {serverClock.clear();}
+});
+
+it('does not call a mixed live and expired set of stored entries wholly expired',()=>{
+  const now=Date.now();serverClock.observe(new Date(now).toISOString(),now,now);
+  try {
+    const p=page();let first=true;p.rows=p.rows.map((row)=>({...row,entries:row.entries.map((entry)=>{const end=first?'2000-01-01T12:00:00.000Z':null;first=false;return {...entry,expires_at:end};})}));
+    const view=show(<AccessRoster lines={linesOf(p,CATALOGUE,'thread')} target={target} page={p} catalogue={CATALOGUE} changes={changes} meId={ADA.id} onTake={calls.take} onLevel={calls.level}/>);
+    expect(view.container).not.toHaveTextContent('Expired access');
+  } finally {serverClock.clear();}
 });

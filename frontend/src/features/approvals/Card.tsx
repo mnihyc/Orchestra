@@ -204,6 +204,8 @@ export function CardFrame({
           <Title className="text-base font-semibold wrap-anywhere text-text">{subject}</Title>
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
             <Requester approval={approval} placed={placed} />
+            {approval.state==='pending' && (approval.expires_at!==null ? <span className="inline-flex items-center gap-1 text-text-muted"><span>{t('approvals.decisionUntil')}</span><RelativeTime at={approval.expires_at}/></span>
+              : approval.kind==='harness' ? <span className="text-text-muted">{t('approvals.whileAgentWaits')}</span> : null)}
             {where !== null && (approval.thread_id === null ? (
                   <span className="text-text-muted">{where}</span>
                 ) : (
