@@ -993,3 +993,104 @@ async fn batch_windows_continue_and_bind_only_actual_current_read_sources() {
     );
     assert_eq!(second.next_offset, None);
 }
+
+#[tokio::test]
+async fn a_batch_read_during_which_the_summarys_request_is_taken_up_is_answered_with_the_newer_state()
+ {
+    let desk = Desk::new().await;
+    let doc = desk
+        .make(&desk.ada, "A summary that is being written")
+        .await
+        .base
+        .id;
+    let target = SummaryTarget::Document { id: doc };
+    let summary = cache(
+        &desk,
+        target,
+        None,
+        "The earlier paragraph.",
+        json!([target]),
+    )
+    .await;
+    let request = queued_request(&desk, summary, target).await;
+    let log = Boundaries::new();
+    let pool = desk.world.db.pool.clone();
+    let moved =
+        when_the_read_is_checked_again(&log, "SummaryBatchGet", "selected.settle", move || {
+            take_up(pool.clone(), request)
+        });
+    let batch = follow(log, async {
+        desk.world
+            .app
+            .call(SummaryBatchGet, &[])
+            .token(&desk.ada.token)
+            .body(&SummaryBatchBody {
+                targets: vec![target],
+                full: true,
+                ..Default::default()
+            })
+            .send()
+            .await
+    })
+    .await
+    .ok();
+    assert!(moved.load(Ordering::SeqCst));
+    assert!(batch.unavailable.is_empty());
+    let full = batch.items[0].full.as_ref().unwrap();
+    assert_eq!(full.state, SummaryState::Updating);
+    assert!(
+        full.wait.is_none(),
+        "the batch gives the newer state, in which the request is no longer waiting for its turn"
+    );
+}
+
+#[tokio::test]
+async fn a_document_opening_that_carries_a_summary_is_answered_when_the_summary_moves_while_it_is_read()
+ {
+    use orch_api_contract::documents::{DocumentSyncGet, DocumentSyncGetQuery};
+    let desk = Desk::new().await;
+    let id = desk
+        .make(&desk.ada, "Document with a summary that moves")
+        .await
+        .base
+        .id;
+    let target = SummaryTarget::Document { id };
+    let summary = cache(
+        &desk,
+        target,
+        None,
+        "The earlier paragraph.",
+        json!([target]),
+    )
+    .await;
+    let request = queued_request(&desk, summary, target).await;
+    let log = Boundaries::new();
+    let pool = desk.world.db.pool.clone();
+    let moved =
+        when_the_read_is_checked_again(&log, "DocumentSyncGet", "embedded.settle", move || {
+            take_up(pool.clone(), request)
+        });
+    let opening = follow(log, async {
+        desk.world
+            .app
+            .call(DocumentSyncGet, &[&id])
+            .token(&desk.ada.token)
+            .query(&DocumentSyncGetQuery {
+                summary: Some(true),
+                ..Default::default()
+            })
+            .send()
+            .await
+    })
+    .await
+    .ok();
+    assert!(moved.load(Ordering::SeqCst));
+    assert_eq!(opening.document.base.id, id);
+    assert_eq!(
+        opening
+            .summary
+            .as_ref()
+            .and_then(|summary| summary.text.as_deref()),
+        Some("The earlier paragraph.")
+    );
+}
