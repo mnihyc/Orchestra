@@ -1,10 +1,13 @@
 /** Source people are matched to visible accounts or kept as imported-person labels. */
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { PEOPLE_SEARCH_MIN_CHARS, peopleQuery } from '@/api/chats';
 import { ImportPagination } from '@/features/people/ImportPagination';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+
 import type { ImportAuthors, ImportPersonMatch, ImportPlanPerson } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
 import { useDebounced } from '@/lib/debounce';
@@ -63,7 +66,18 @@ export function ImportPeople({ people, authors, mayAttribute, onAuthors, onPerso
 }) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
-  const [start, setStart] = useState(0);
+  const search = useCollectionSearch('import-source-people');
+  const scope = search.scope + '\u0000' + search.text;
+  const [page, setPage] = useState({ scope, start: 0 });
+  const found = useMemo(() => {
+    const words = search.text.toLocaleLowerCase().split(/\s+/u).filter(Boolean);
+    return words.length === 0 ? people : people.filter((person) => {
+      const text = `${person.display_name} ${person.username}`.toLocaleLowerCase();
+      return words.every((word) => text.includes(word));
+    });
+  }, [people, search.text]);
+  const start = page.scope === scope ? Math.min(page.start, Math.max(0, Math.floor((found.length - 1) / PEOPLE_PAGE) * PEOPLE_PAGE)) : 0;
+  const setStart = (start: number) => setPage({ scope, start });
   const match = (person: ImportPlanPerson) => <PersonMatch person={person} onChoose={(user) => onPerson(person.principal, user)} />;
   const columns: Column<ImportPlanPerson>[] = [
     { id: 'name', header: t('importWizard.review.sourcePerson'), cell: (person, shown) => <div className="flex min-w-0 flex-col gap-1 py-1">
@@ -79,8 +93,9 @@ export function ImportPeople({ people, authors, mayAttribute, onAuthors, onPerso
       { value: 'labels', label: t('importWizard.review.byLabels') },
     ]} />
     {!mayAttribute && <p className="text-sm text-text-muted">{t('importWizard.review.needsAdmin')}</p>}
-    {people.length === 0 ? <StateLine compact message={t('importWizard.review.noPeople')} />
-      : <Table label={t('importWizard.review.people')} columns={columns} rows={people.slice(start, start + PEOPLE_PAGE)} rowKey={(person) => person.principal} boundedIdentity />}
-    <ImportPagination first={start > 0} more={people.length > start + PEOPLE_PAGE} onFirst={() => setStart(0)} onMore={() => setStart((at) => at + PEOPLE_PAGE)} />
+    {(people.length > 10 || search.text !== '') && <CollectionSearch name={t('importWizard.review.people')} {...search} />}
+    {found.length === 0 ? <StateLine compact message={t(people.length === 0 ? 'importWizard.review.noPeople' : 'ui.collection.none')} />
+      : <Table label={t('importWizard.review.people')} columns={columns} rows={found.slice(start, start + PEOPLE_PAGE)} rowKey={(person) => person.principal} boundedIdentity />}
+    <ImportPagination first={start > 0} more={found.length > start + PEOPLE_PAGE} onFirst={() => setStart(0)} onMore={() => setStart(start + PEOPLE_PAGE)} />
   </div>;
 }

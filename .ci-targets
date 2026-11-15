@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/creation-once.test.tsx tests/component/table-virtual.test.tsx tests/component/mount-location-status.test.tsx tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

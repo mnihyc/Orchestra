@@ -53,6 +53,8 @@ export interface ParameterDef {
   default: string;
   /** What it may be, written as a short phrase. */
   options: string;
+  /** The feature of `agent.features` that has to be on for a thread to offer it, where it names one. */
+  feature: string | null;
 }
 
 export interface ArrangementOffer {
@@ -135,6 +137,7 @@ export function readDescriptor(value: unknown, locale = 'en'): DescriptorView {
           description: translated(`parameters.${key}.description`, text(entry.description) ?? ''),
           default: phrase(entry.default),
           options: phrase(entry.options),
+          feature: text(entry.feature),
         },
       ];
     }),

@@ -141,7 +141,7 @@ const kept: HostKeptData[] = [
   { environment_id: 'private-env', name: null, home: { ...home, name: 'hidden-home', redacted: true }, storages: ['ssd'], phase: 'purging', bytes: null, purge_at: null,
     job: { id: 'failed-job', kind: 'environment_purge', state: 'failed', phase: 'volumes', percent: 50 } },
 ];
-const host = (permissions: string[] = ['host.manage']): Pick<Host, 'kept_data' | 'access'> => ({ kept_data: kept, access: { permissions, administers: false, through: [], admin_only: [], participating: true } });
+const host = (permissions: string[] = ['host.manage']): Pick<Host, 'id' | 'kept_data' | 'access'> => ({ id: 'kept-host', kept_data: kept, access: { permissions, administers: false, through: [], admin_only: [], participating: true } });
 
 it('QS-013 renders the host payload with known zero, unknown size, redaction, storages and a safe failed job', () => {
   show(<HostKept host={host()} />);
@@ -173,7 +173,7 @@ it('QS-013 a host view grant alone exposes no kept-data rows or acts', () => {
 
 it('QS-013 an omitted optional kept_data list is the served empty state', () => {
   const { access } = host();
-  show(<HostKept host={{ access }} />);
+  show(<HostKept host={{ id: 'kept-host', access }} />);
   expect(screen.getByText('No environments have files kept here')).toBeInTheDocument();
   expect(within(screen.getByRole('region', { name: 'Kept after removal' })).queryByRole('button')).not.toBeInTheDocument();
   expect(read).not.toHaveBeenCalled();

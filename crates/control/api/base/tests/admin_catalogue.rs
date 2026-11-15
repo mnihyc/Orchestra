@@ -773,6 +773,65 @@ fn corp() -> IdentityProviderInput {
     }
 }
 
+#[tokio::test]
+async fn management_finds_a_late_sign_in_provider_and_can_continue_every_page() {
+    use orch_api_contract::common::CollectionQuery;
+    let world = World::new().await;
+    let c = cast(&world).await;
+    for index in 0..13 {
+        add_provider(
+            &world,
+            &c.root,
+            &IdentityProviderInput {
+                key: format!("source{index:02}"),
+                name: format!("Sign-in source {index:02}"),
+                issuer: format!("https://id{index}.example.com"),
+                ..corp()
+            },
+        )
+        .await
+        .ok();
+    }
+    let found = world
+        .app
+        .call(AdminIdentityProviderList, &[])
+        .token(&c.root.token)
+        .query(&CollectionQuery {
+            q: Some("source 12".into()),
+            limit: Some(3),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(found.items.len(), 1);
+    assert_eq!(found.items[0].name, "Sign-in source 12");
+    let mut cursor = None;
+    let mut ids = std::collections::HashSet::new();
+    loop {
+        let page = world
+            .app
+            .call(AdminIdentityProviderList, &[])
+            .token(&c.root.token)
+            .query(&CollectionQuery {
+                limit: Some(3),
+                cursor,
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        for row in page.items {
+            assert!(ids.insert(row.id));
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(ids.len(), 13);
+}
+
 async fn add_provider(
     world: &World,
     by: &Who,
@@ -820,6 +879,7 @@ async fn providers(world: &World, by: &Who) -> Vec<IdentityProvider> {
         .send()
         .await
         .ok()
+        .items
 }
 
 /// What is kept sealed for the provider, opened with the key of these tests.
@@ -902,7 +962,7 @@ async fn an_identity_provider_is_added_with_the_usual_claims_and_its_secret_is_k
         "the secret is write-only"
     );
     assert_eq!(kept_secret(&world, made.id).await.unwrap(), b"s3cret-value");
-    assert_eq!(listed.ok(), std::slice::from_ref(&made));
+    assert_eq!(listed.ok().items, std::slice::from_ref(&made));
     let lines = lines_of(&world, "identity_provider.created").await;
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0].actor_id, Some(c.root.id()));

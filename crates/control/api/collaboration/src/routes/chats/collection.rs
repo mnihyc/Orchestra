@@ -60,6 +60,7 @@ struct Witness {
     root: Id,
     scope: Scope,
     participating: bool,
+    q: String,
     ids: Vec<Id>,
     previews: HashMap<Id, Id>,
     next: Option<After>,
@@ -231,6 +232,252 @@ async fn select_page(
     }
 }
 
+async fn select_batch(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    caller: &Caller,
+    query: &OrgChatListQuery,
+    frozen: Option<&Witness>,
+) -> ApiResult<(Arc<Selection>, Vec<native::Facts<Source>>)> {
+    let root = ctx.id("id")?;
+    let scope = intent(query)?;
+    let participating = query.participating.unwrap_or(false);
+    let base = OperationPlan::new(ctx.route, declaration(scope).operation)?;
+    let principal = native::preparation_principal(ctx, conn, caller, &base).await?;
+    if frozen.as_ref().is_some_and(|old| {
+        old.root != root
+            || old.scope != scope
+            || old.participating != participating
+            || old.q != query.q.as_deref().unwrap_or("").trim().to_lowercase()
+    }) {
+        return Err(ApiError::internal("the retained chat-list intent changed"));
+    }
+    let listed = select_page(ctx, conn, &principal, query, root, scope, &base, frozen).await?;
+    let ids: Vec<_> = listed.chats.iter().map(|row| row.id).collect();
+    let mut members = chats::members_of(conn, &ids, principal.now())
+        .await
+        .map_err(ApiError::internal)?;
+    let direct = chats::direct_allowed(conn, root)
+        .await
+        .map_err(ApiError::internal)?;
+    let mut selected = Vec::new();
+    for row in listed.chats {
+        let people = members.remove(&row.id).unwrap_or_default();
+        let policy = if row.node_id.is_some() {
+            chats::policy_of(conn, &row)
+                .await
+                .map_err(ApiError::internal)?
+        } else {
+            orch_authz::chats::ChatPolicy {
+                enabled: true,
+                direct,
+            }
+        };
+        let standing = orch_authz::chats::standing(conn, &principal, &row, &people, policy)
+            .await
+            .map_err(ApiError::internal)?;
+        if standing.reads() {
+            selected.push(Loaded {
+                row,
+                members: people,
+                standing,
+                policy,
+            });
+        }
+    }
+    if frozen
+        .as_ref()
+        .is_some_and(|old| selected.len() != old.ids.len())
+    {
+        return Err(ApiError::not_found());
+    }
+    let ids: Vec<_> = selected.iter().map(Loaded::id).collect();
+    let mut previews = HashMap::new();
+    if let Some(old) = frozen {
+        for (chat, message) in &old.previews {
+            let row = rows::message(conn, *chat, *message)
+                .await?
+                .ok_or_else(ApiError::not_found)?;
+            previews.insert(*chat, row);
+        }
+    } else {
+        previews.extend(
+            rows::last_messages(conn, &ids)
+                .await?
+                .into_iter()
+                .map(|row| (row.chat_id, row)),
+        );
+    }
+    let rows: Vec<_> = selected.iter().map(|row| row.row.clone()).collect();
+    let targets = targets::from_chat_rows(conn, &rows).await?;
+    let actual: Vec<_> = ids
+        .iter()
+        .map(|id| targets.get(id).cloned().ok_or_else(ApiError::not_found))
+        .collect::<ApiResult<_>>()?;
+    let primary = native::Facts::collection(
+        Source::ListResults,
+        if actual.is_empty() {
+            Vec::new()
+        } else {
+            vec![(CHAT, actual)]
+        },
+    );
+    let mut plan = native::bind_known(ctx, declaration(scope), std::slice::from_ref(&primary))?;
+    let mut sources = NameSources::default();
+    for row in &selected {
+        sources.nodes.extend(row.row.node_id);
+        if row.row.kind == rows::KIND_GROUP {
+            sources.nodes.insert(row.row.home());
+        }
+        sources
+            .nodes
+            .extend(row.standing.admin_place.and_then(|place| place.node()));
+        sources.nodes.extend(
+            row.standing
+                .admin_access
+                .and_then(|reach| reach.place.node()),
+        );
+    }
+    sources
+        .nodes
+        .extend(previews.values().filter_map(|row| row.author_thread_id));
+    let bounds = projection_names(conn, principal.caller(), &mut plan, sources, &NAMES).await?;
+    let graph = Graph::load(conn, &bounds.nodes.iter().copied().collect::<Vec<_>>())
+        .await
+        .map_err(ApiError::internal)?;
+    let (mut facts, _) = native::node_name_facts(
+        &plan,
+        declaration(scope),
+        principal.caller(),
+        &graph,
+        &bounds.nodes,
+        NODES,
+    )?;
+    facts.push(primary);
+    let allowed = bounds
+        .nodes
+        .iter()
+        .copied()
+        .map(names::NameSource::Node)
+        .collect();
+    let witness = Witness {
+        root,
+        scope,
+        participating,
+        q: query.q.as_deref().unwrap_or("").trim().to_lowercase(),
+        ids,
+        previews: previews.iter().map(|(chat, row)| (*chat, row.id)).collect(),
+        next: listed.next,
+    };
+    Ok((
+        Arc::new(Selection {
+            witness,
+            chats: selected,
+            previews,
+            bounds,
+            allowed,
+        }),
+        facts,
+    ))
+}
+
+/// Search only the same public name projection the person receives, then freeze one final native page.
+async fn select_named(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    caller: &Caller,
+    query: &OrgChatListQuery,
+) -> ApiResult<(Arc<Selection>, Vec<native::Facts<Source>>)> {
+    let frozen = ctx.optional_retained_source::<Witness>()?;
+    let words = orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or(""));
+    if frozen.is_some() || words.terms().is_empty() {
+        return select_batch(ctx, conn, caller, query, frozen.as_deref()).await;
+    }
+    let wanted = usize::try_from(
+        query
+            .limit
+            .unwrap_or(orch_api_contract::common::DEFAULT_LIMIT)
+            .max(1),
+    )
+    .map_err(ApiError::internal)?;
+    let mut scan = query.clone();
+    scan.limit = Some(
+        query
+            .limit
+            .unwrap_or(orch_api_contract::common::DEFAULT_LIMIT)
+            .max(orch_api_contract::common::DEFAULT_LIMIT),
+    );
+    let mut ids = Vec::new();
+    let mut previews = HashMap::new();
+    let mut last = None;
+    let mut more = false;
+    loop {
+        let (selection, facts) = select_batch(ctx, conn, caller, &scan, None).await?;
+        let plan = native::bind_known(ctx, declaration(selection.witness.scope), &facts)?;
+        let principal = native::preparation_principal(ctx, conn, caller, &plan).await?;
+        let output = <Lists as native::Selected>::render(ctx, conn, &principal, &selection).await?;
+        for chat in output.page.items {
+            let people = chat
+                .members
+                .as_ref()
+                .into_iter()
+                .flatten()
+                .map(|user| format!("{} {}", user.display_name, user.username))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let node = chat
+                .base
+                .node
+                .as_ref()
+                .filter(|node| !node.redacted)
+                .and_then(|node| node.name.as_deref())
+                .unwrap_or("");
+            if !words.matches(&format!(
+                "{} {people} {node}",
+                chat.base.name.as_deref().unwrap_or("")
+            )) {
+                continue;
+            }
+            if ids.len() == wanted {
+                more = true;
+                break;
+            }
+            let loaded = selection
+                .chats
+                .iter()
+                .find(|row| row.id() == chat.base.id)
+                .ok_or_else(|| {
+                    ApiError::internal("a projected conversation lost its native row")
+                })?;
+            last = Some(After {
+                at: loaded.row.active_at(),
+                id: loaded.id(),
+            });
+            ids.push(loaded.id());
+            if let Some(preview) = selection.witness.previews.get(&loaded.id()) {
+                previews.insert(loaded.id(), *preview);
+            }
+        }
+        if more {
+            break;
+        }
+        match output.page.next_cursor {
+            Some(next) => scan.cursor = Some(next),
+            None => break,
+        }
+    }
+    let witness = Witness {
+        root: ctx.id("id")?,
+        scope: intent(query)?,
+        participating: query.participating.unwrap_or(false),
+        q: query.q.as_deref().unwrap_or("").trim().to_lowercase(),
+        ids,
+        previews,
+        next: if more { last } else { None },
+    };
+    select_batch(ctx, conn, caller, query, Some(&witness)).await
+}
+
 impl native::Selected for Lists {
     type Source = Source;
     type Query = OrgChatListQuery;
@@ -248,157 +495,7 @@ impl native::Selected for Lists {
         caller: &'a Caller,
         query: &'a Self::Query,
     ) -> BoxFuture<'a, ApiResult<(Self::Value, Vec<native::Facts<Source>>)>> {
-        Box::pin(async move {
-            let root = ctx.id("id")?;
-            let scope = intent(query)?;
-            let participating = query.participating.unwrap_or(false);
-            let base = OperationPlan::new(ctx.route, declaration(scope).operation)?;
-            let principal = native::preparation_principal(ctx, conn, caller, &base).await?;
-            let frozen = ctx.optional_retained_source::<Witness>()?;
-            if frozen.as_ref().is_some_and(|old| {
-                old.root != root || old.scope != scope || old.participating != participating
-            }) {
-                return Err(ApiError::internal("the retained chat-list intent changed"));
-            }
-            let listed = select_page(
-                ctx,
-                conn,
-                &principal,
-                query,
-                root,
-                scope,
-                &base,
-                frozen.as_deref(),
-            )
-            .await?;
-            let ids: Vec<_> = listed.chats.iter().map(|row| row.id).collect();
-            let mut members = chats::members_of(conn, &ids, principal.now())
-                .await
-                .map_err(ApiError::internal)?;
-            let direct = chats::direct_allowed(conn, root)
-                .await
-                .map_err(ApiError::internal)?;
-            let mut selected = Vec::new();
-            for row in listed.chats {
-                let people = members.remove(&row.id).unwrap_or_default();
-                let policy = if row.node_id.is_some() {
-                    chats::policy_of(conn, &row)
-                        .await
-                        .map_err(ApiError::internal)?
-                } else {
-                    orch_authz::chats::ChatPolicy {
-                        enabled: true,
-                        direct,
-                    }
-                };
-                let standing = orch_authz::chats::standing(conn, &principal, &row, &people, policy)
-                    .await
-                    .map_err(ApiError::internal)?;
-                if standing.reads() {
-                    selected.push(Loaded {
-                        row,
-                        members: people,
-                        standing,
-                        policy,
-                    });
-                }
-            }
-            if frozen
-                .as_ref()
-                .is_some_and(|old| selected.len() != old.ids.len())
-            {
-                return Err(ApiError::not_found());
-            }
-            let ids: Vec<_> = selected.iter().map(Loaded::id).collect();
-            let mut previews = HashMap::new();
-            if let Some(old) = frozen.as_deref() {
-                for (chat, message) in &old.previews {
-                    let row = rows::message(conn, *chat, *message)
-                        .await?
-                        .ok_or_else(ApiError::not_found)?;
-                    previews.insert(*chat, row);
-                }
-            } else {
-                previews.extend(
-                    rows::last_messages(conn, &ids)
-                        .await?
-                        .into_iter()
-                        .map(|row| (row.chat_id, row)),
-                );
-            }
-            let rows: Vec<_> = selected.iter().map(|row| row.row.clone()).collect();
-            let targets = targets::from_chat_rows(conn, &rows).await?;
-            let actual: Vec<_> = ids
-                .iter()
-                .map(|id| targets.get(id).cloned().ok_or_else(ApiError::not_found))
-                .collect::<ApiResult<_>>()?;
-            let primary = native::Facts::collection(
-                Source::ListResults,
-                if actual.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![(CHAT, actual)]
-                },
-            );
-            let mut plan =
-                native::bind_known(ctx, declaration(scope), std::slice::from_ref(&primary))?;
-            let mut sources = NameSources::default();
-            for row in &selected {
-                sources.nodes.extend(row.row.node_id);
-                if row.row.kind == rows::KIND_GROUP {
-                    sources.nodes.insert(row.row.home());
-                }
-                sources
-                    .nodes
-                    .extend(row.standing.admin_place.and_then(|place| place.node()));
-                sources.nodes.extend(
-                    row.standing
-                        .admin_access
-                        .and_then(|reach| reach.place.node()),
-                );
-            }
-            sources
-                .nodes
-                .extend(previews.values().filter_map(|row| row.author_thread_id));
-            let bounds =
-                projection_names(conn, principal.caller(), &mut plan, sources, &NAMES).await?;
-            let graph = Graph::load(conn, &bounds.nodes.iter().copied().collect::<Vec<_>>())
-                .await
-                .map_err(ApiError::internal)?;
-            let (mut facts, _) = native::node_name_facts(
-                &plan,
-                declaration(scope),
-                principal.caller(),
-                &graph,
-                &bounds.nodes,
-                NODES,
-            )?;
-            facts.push(primary);
-            let allowed = bounds
-                .nodes
-                .iter()
-                .copied()
-                .map(names::NameSource::Node)
-                .collect();
-            let witness = Witness {
-                root,
-                scope,
-                participating,
-                ids,
-                previews: previews.iter().map(|(chat, row)| (*chat, row.id)).collect(),
-                next: listed.next,
-            };
-            Ok((
-                Arc::new(Selection {
-                    witness,
-                    chats: selected,
-                    previews,
-                    bounds,
-                    allowed,
-                }),
-                facts,
-            ))
-        })
+        Box::pin(select_named(ctx, conn, caller, query))
     }
 
     fn require<'a>(
@@ -464,6 +561,7 @@ impl native::Selected for Lists {
         Box::pin(async move {
             Ok(opened.witness.root == fresh.witness.root
                 && opened.witness.scope == fresh.witness.scope
+                && opened.witness.q == fresh.witness.q
                 && opened.chats.iter().all(|old| {
                     fresh.chats.iter().any(|new| {
                         old.id() == new.id()
