@@ -129,6 +129,8 @@ for (const locale of ['en', 'zh-CN'] as const) it(`names a running program even 
   show(<ProgramBuild program={program} />);
   expect(screen.getByText(`${name} 1.2.3`, { exact: true })).toBeVisible();
   expect(screen.getByText(i18n.t('programVersions.unknownCheck'))).toBeVisible();
+  // The reason is said beside it: no build of this version is kept, so nothing could be checked.
+  expect(screen.getByText(i18n.t('programVersions.unknownCheckWhy'))).toBeVisible();
   expect(document.body).not.toHaveTextContent(i18n.t('resources.harnessNameUnknown'));
   expect(document.body).not.toHaveTextContent('named-external');
 });

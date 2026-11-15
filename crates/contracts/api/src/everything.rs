@@ -276,7 +276,7 @@ pub struct EverythingListQuery {
     /// An agent's harness, applied before the page limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
-    /// A template's unit kind, or an environment's origin (machine/template).
+    /// A template's unit kind, an environment's origin (machine/template), or system for an agent without a home.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_kind: Option<String>,
     /// Nested ownership, management, use and view of the selected resource kind.

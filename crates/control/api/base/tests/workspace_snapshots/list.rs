@@ -423,3 +423,49 @@ async fn snapshot_list_publication_keeps_actual_rows_instead_of_a_replacement_un
     );
     assert_eq!(current.items[0].environment.id, site.environment);
 }
+
+#[tokio::test]
+async fn snapshot_names_are_searched_before_thread_and_workspace_page_limits() {
+    let site = Site::new().await;
+    let mut ids = Vec::new();
+    for index in 0..13 {
+        ids.push(
+            saved(
+                &site,
+                site.environment,
+                &format!("Saved research {index:02}"),
+                false,
+            )
+            .await,
+        );
+    }
+    let all = shown(list(&site, &site.ada.token, &PageQuery::default()).await);
+    assert_eq!(all.items.len(), 13);
+    let wanted = all.items.last().unwrap();
+    let query = json!({"q": wanted.label, "limit":1});
+    let thread = site
+        .app()
+        .call(ThreadSnapshotList, &[&site.thread])
+        .token(&site.ada.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(thread.items.len(), 1);
+    assert_eq!(thread.items[0].id, wanted.id);
+    sqlx::query("UPDATE snapshots SET thread_id=NULL WHERE id=ANY($1)")
+        .bind(&ids)
+        .execute(&site.world.db.pool)
+        .await
+        .unwrap();
+    let workspace = site
+        .app()
+        .call(EnvironmentSnapshotList, &[&site.environment])
+        .token(&site.ada.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(workspace.items.len(), 1);
+    assert_eq!(workspace.items[0].id, wanted.id);
+}

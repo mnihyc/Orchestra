@@ -256,6 +256,7 @@ CREATE INDEX environments_home_idx ON environments USING btree (home_node_id) WH
 CREATE INDEX environments_kept_idx ON environments USING btree (home_node_id, volumes_purge_at) WHERE (removal_phase = 'kept'::text);
 
 CREATE UNIQUE INDEX environments_owner_name_key ON environments USING btree (org_id, owner_id, lower(name)) WHERE (deleted_at IS NULL);
+CREATE INDEX environments_kept_name_trgm ON environments USING gin (name gin_trgm_ops) WHERE deleted_at IS NOT NULL AND purged_at IS NULL;
 
 CREATE INDEX environments_removal_due_idx ON environments USING btree (remove_at, id) WHERE ((deleted_at IS NULL) AND (remove_at IS NOT NULL));
 
