@@ -1,0 +1,4 @@
+test -p orch-engine --lib -- history_pages::
+test -p orch-engine --test forks
+test -p orch-engine --test source --test source_uniform
+test -p orch-engine --lib -- --skip history_pages::

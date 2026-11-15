@@ -9,7 +9,8 @@ for (const width of [400, 1440] as const) for (const theme of ['light', 'dark'] 
     await scenario(); await configureThread(ACME.mainThread, { reset: true }); await signInScreenRoute(page, { width, theme, locale });
     await page.goto(`/thread/${ACME.mainThread}`);
     const words = (key: string) => caption(`@${key}`, locale);
-    await page.locator('[data-thread-header]').getByRole('button', { name: words('thread.header.shareThread'), exact: true }).click();
+    await page.locator('[data-thread-header] [data-thread-more]').click();
+    await page.getByRole('menuitem', { name: words('thread.header.shareThread'), exact: true }).click();
     const input = page.getByRole('combobox', { name: words('access.add.label'), exact: true });
     await expect(input).toBeFocused(); await expect(input).toHaveAttribute('aria-expanded', 'true');
     const list = page.getByRole('listbox', { name: words('access.add.label'), exact: true });
