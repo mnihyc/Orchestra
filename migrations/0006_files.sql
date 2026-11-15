@@ -114,3 +114,7 @@ CREATE TABLE snapshot_blob_refs (
     CONSTRAINT snapshot_blob_refs_blob_fkey FOREIGN KEY (blob) REFERENCES blobs(hash),
     CONSTRAINT snapshot_blob_refs_snapshot_id_fkey FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
 );
+
+-- Personal upload names are selected before custody and reference pages are projected.
+CREATE INDEX completed_uploads_name_search_idx ON completed_uploads USING gin (name gin_trgm_ops) WHERE name IS NOT NULL;
+CREATE INDEX upload_sessions_name_search_idx ON upload_sessions USING gin (name gin_trgm_ops) WHERE cancelled_at IS NULL AND completed_at IS NULL;

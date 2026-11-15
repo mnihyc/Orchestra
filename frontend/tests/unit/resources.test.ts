@@ -1,6 +1,7 @@
 /** What the screens of resources read out of what the server says, and write back into it: the facts a machine reports, a harness's own declaration, a template's recipe, the endpoints of a provider, a host's figures, and the words of an address that narrows a list. */
 import type { TFunction } from 'i18next';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { QueryClient } from '@tanstack/react-query';
 
 import { humanize, phrase, readDescriptor, versionPin } from '@/features/resources/agents/descriptor';
 import { declaredShare, usedShare } from '@/features/resources/hosts/words';
@@ -15,6 +16,46 @@ import { settingValue } from '@/features/resources/SettingsTable';
 import { amountsOf, confinementOf, execOffers, hasAmounts, imageSource, readSpec, schemaFields, specSchema, specText, starterSpec } from '@/features/resources/templates/spec';
 import type { EnrollmentToken, ProviderSetupProtocol } from '@/generated/api-types';
 import { initialValues, missingFields, textValues } from '@/ui/FieldForm';
+import { readAllPages } from '@/api/collection';
+import { ApiError, api, client } from '@/api/client';
+import { harnessSessionsPageQuery } from '@/api/adoption';
+
+it('retires an expired native catalogue read without retrying its obsolete continuation', async () => {
+  const expired = vi.fn(), refused = vi.fn(), captured = vi.fn();
+  const failure = new ApiError({ type: 'orch:error:request.invalid', code: 'request.invalid', title: '', status: 400, detail: '', request_id: 'capture', errors: [{ path: 'source', message: 'expired' }] }, null);
+  const request = vi.spyOn(api, 'GET').mockRejectedValue(failure);
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  try {
+    await expect(cache.infiniteQuery(harnessSessionsPageQuery('provider', 'profile', 'Late name', {
+      view: 'view', generation: 0, source: 'captured', expired, refused, captured,
+    }))).rejects.toHaveProperty('silent', true);
+    expect(expired).toHaveBeenCalledOnce(); expect(refused).not.toHaveBeenCalled(); expect(captured).not.toHaveBeenCalled(); expect(request).toHaveBeenCalledOnce();
+  } finally { request.mockRestore(); cache.clear(); }
+});
+
+describe('complete metadata reads', () => {
+  it('keeps every page without crossing a change of reader', async () => {
+    const before = client.session.getState();
+    try {
+      const cursors: (string | null)[] = [];
+      expect(await readAllPages((cursor) => {
+        cursors.push(cursor);
+        return Promise.resolve(cursor === null ? { items: [1], next_cursor: 'second' } : { items: [2], next_cursor: null });
+      }, new AbortController().signal)).toEqual([1, 2]);
+      expect(cursors).toEqual([null, 'second']);
+      await expect(readAllPages(() => {
+        client.session.setState({ readerVersion: (before.readerVersion ?? 0) + 1 });
+        return Promise.resolve({ items: [3], next_cursor: 'next' });
+      }, new AbortController().signal)).rejects.toHaveProperty('name', 'AbortError');
+    } finally { client.session.setState(before); }
+  });
+
+  it('ends a cancelled read and rejects a repeated continuation', async () => {
+    const cancelled = new AbortController(); cancelled.abort();
+    await expect(readAllPages(() => Promise.resolve({ items: [1], next_cursor: null }), cancelled.signal)).rejects.toHaveProperty('name', 'AbortError');
+    await expect(readAllPages(() => Promise.resolve({ items: [1], next_cursor: 'same' }), new AbortController().signal)).rejects.toThrow('repeated a cursor');
+  });
+});
 
 /** What a harness's adapter says of itself, cut down to what the screens read. */
 const declared = {

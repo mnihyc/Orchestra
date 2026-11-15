@@ -1,0 +1,7 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-api-base --lib -- collection::
+test -p orch-api-core --test page_people_chips --test document_discovery --test permission_reader_scopes --test upload_inventory
+test -p orch-db --test released_migrations
