@@ -38,6 +38,7 @@ use orch_executor_orch::server::OrchExec;
 use orch_plugin::registration::{BuiltIn, Plugins};
 use orch_plugin_contract::registration::{PluginHost, PluginKind, PluginRegistration};
 use orch_protocol_anthropic_messages::AnthropicMessages;
+use orch_protocol_google_interactions::GoogleInteractions;
 use orch_protocol_openai_responses::{OpenAiChat, OpenAiEmbeddings, OpenAiResponses};
 use orch_telemetry::LogFormat;
 use orch_types::{Clock, SystemClock};
@@ -385,6 +386,9 @@ pub fn protocols() -> Protocols {
         }))
         .with(ProtocolEntry::new(OpenAiEmbeddings, "/v1", |names| {
             OpenAiEmbeddings.models_response(names)
+        }))
+        .with(ProtocolEntry::new(GoogleInteractions, "/v1beta", |names| {
+            GoogleInteractions.models_response(names)
         }))
         .with(ProtocolEntry::new(AnthropicMessages, "", |names| {
             AnthropicMessages.models_response(names)

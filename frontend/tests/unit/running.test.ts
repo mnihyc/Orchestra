@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { BackgroundCommand, ThreadBackground } from '@/generated/api-types';
 import { backgroundWake, backgroundWork } from '../doubles/background-wake';
+import { ApiError } from '@/api/client';
 import { fetchBackground } from '@/api/background';
 import { canEndAll, endResults, loadReview, reviewedRequest, reviewedTargetRequest } from '@/features/running/review';
 vi.mock('@/api/background', () => ({ fetchBackground: vi.fn() }));
@@ -76,4 +77,15 @@ it('refuses a task source identity change inside one native review transfer', as
   vi.mocked(fetchBackground).mockResolvedValueOnce(roster({ total: 2, next_cursor: 'second', wake: backgroundWake({ tasks: [backgroundWork({ end_id: 'one' })] }) }))
     .mockResolvedValueOnce(roster({ items: [command('two')], total: 2, wake: backgroundWake({ tasks: [backgroundWork({ item_id: 'later-source', end_id: 'two' })] }) }));
   await expect(loadReview('thread', new AbortController().signal)).rejects.toThrow('the native task changed during transfer');
+});
+
+it('renews an expired review during transfer and confirms only the complete replacement set', async () => {
+  vi.mocked(fetchBackground).mockReset();
+  vi.mocked(fetchBackground).mockResolvedValueOnce(roster({ items: [command('old')], total: 2, next_cursor: 'expired' }))
+    .mockRejectedValueOnce(new ApiError({ type: 'about:blank', title: 'Expired', detail: 'The snapshot expired', request_id: 'fixture', status: 409, code: 'conflict.stale_revision' }, null))
+    .mockResolvedValueOnce(roster({ list_ref: 'fresh', items: [command('fresh-one')], total: 2, next_cursor: 'fresh-next' }))
+    .mockResolvedValueOnce(roster({ list_ref: 'fresh', items: [command('fresh-two')], total: 2 }));
+  const review = await loadReview('thread', new AbortController().signal);
+  expect(review.items.map((item) => item.id)).toEqual(['fresh-one', 'fresh-two']);
+  expect(reviewedRequest(review, 'all')).toEqual({ list_ref: 'fresh', all: true, count: 2 });
 });
