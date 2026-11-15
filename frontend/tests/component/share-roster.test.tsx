@@ -1,5 +1,5 @@
 /** Share names the holder, its level and its source; people behind a group load only on request. */
-import { cleanup, screen, within } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Access from '@/api/access';
@@ -55,8 +55,12 @@ it.each(modes)('lists direct people, groups and inherited roles once with their 
   await userEvent.click(group);
   expect(await within(row).findByText(i18n.t('access.roster.personVia', { level: i18n.t('choiceCatalog.accessLevel.view.name'), holder: 'Crew, Acme' }))).toBeVisible();
   expect(calls.people).toHaveBeenCalledTimes(1);
-  expect(calls.people).toHaveBeenCalledWith(target, 'group:crew');
+  expect(calls.people).toHaveBeenCalledWith(target, 'group:crew', '');
   expect(group).toHaveAttribute('aria-expanded', 'true');
+  const user = userEvent.setup();
+  await user.click(within(row).getByRole('searchbox'));
+  await user.paste('Bea');
+  await waitFor(() => expect(calls.people).toHaveBeenLastCalledWith(target, 'group:crew', 'Bea'));
   await userEvent.click(group);
   expect(group).toHaveAttribute('aria-expanded', 'false');
   expect(calls.take).not.toHaveBeenCalled();

@@ -754,7 +754,8 @@ async fn the_device_list_hides_endpoints_and_only_its_person_can_remove_a_device
         .token(&ada.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(own.len(), 1);
     let expected: String =
         sqlx::query_scalar("SELECT encode(sha256(convert_to($1, 'UTF8')), 'hex')")
@@ -790,6 +791,7 @@ async fn the_device_list_hides_endpoints_and_only_its_person_can_remove_a_device
             .send()
             .await
             .ok()
+            .items
             .is_empty()
     );
     assert_eq!(
@@ -800,6 +802,7 @@ async fn the_device_list_hides_endpoints_and_only_its_person_can_remove_a_device
             .send()
             .await
             .ok()
+            .items
             .len(),
         1
     );
@@ -1221,4 +1224,67 @@ async fn nobody_who_is_not_signed_in_reads_or_changes_an_inbox() {
     for problem in signed_out {
         assert_eq!(problem.code, ErrorCode::AuthRequired);
     }
+}
+
+#[tokio::test]
+async fn a_person_finds_a_late_browser_and_continues_every_device_without_its_endpoint() {
+    let world = World::new().await;
+    let ada = person(&world, "paging-devices").await;
+    for index in 0..13 {
+        world
+            .app
+            .call(MePushSubscriptionCreate, &[])
+            .token(&ada.token)
+            .header("user-agent", &format!("Browser {index:02}"))
+            .body(&MePushSubscriptionCreateBody {
+                endpoint: format!("https://push.example/device-{index}"),
+                keys: keys(),
+            })
+            .send()
+            .await
+            .ok();
+    }
+    let page = world
+        .app
+        .call(MePushSubscriptionList, &[])
+        .token(&ada.token)
+        .query(&orch_api_contract::common::CollectionQuery {
+            q: Some("Browser 12".into()),
+            limit: Some(3),
+            cursor: None,
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.items.len(), 1);
+    assert!(page.items[0].label.contains("12"));
+    assert!(
+        !serde_json::to_string(&page)
+            .unwrap()
+            .contains("push.example")
+    );
+    let mut cursor = None;
+    let mut ids = std::collections::BTreeSet::new();
+    loop {
+        let page = world
+            .app
+            .call(MePushSubscriptionList, &[])
+            .token(&ada.token)
+            .query(&orch_api_contract::common::CollectionQuery {
+                limit: Some(3),
+                cursor,
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        for device in page.items {
+            assert!(ids.insert(device.id));
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(ids.len(), 13);
 }

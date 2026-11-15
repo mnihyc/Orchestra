@@ -7,7 +7,10 @@ import { holderParam, peopleQuery, type AccessTarget } from '@/api/access';
 import type { AccessChoice, PermissionPage } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
 import { denial } from '@/lib/permissions';
-import { Avatar } from '@/ui/Avatar';
+import { UserChip } from '@/ui/UserChip';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { ScrollRegion } from '@/ui/ScrollRegion';
 import { Button } from '@/ui/Button';
 import { ErrorState } from '@/ui/ErrorState';
 import { Menu, type MenuEntry } from '@/ui/Menu';
@@ -33,16 +36,17 @@ interface Props {
 
 export function HolderPeople({ target, param, level, via }: { target: AccessTarget; param: string; level: string; via: string }) {
   const { t } = useTranslation();
-  const query = useInfiniteQuery(peopleQuery(target, param));
+  const search = useCollectionSearch('access-people:' + target.kind + ':' + target.id + ':' + param);
+  const query = useInfiniteQuery(peopleQuery(target, param, search.q));
   const rows = query.data?.pages.flatMap((page) => page.items) ?? [];
   const owners = new Set(query.data?.pages.flatMap((page) => page.owners ?? []) ?? []);
   return <div className="flex min-w-0 flex-col gap-2 pl-6">
+    <CollectionSearch name={via} {...search} />
     {query.isPending ? <SkeletonRows read={query} rows={2} /> : query.isError && rows.length === 0 ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />
-      : <ul className="flex flex-col gap-2">{rows.map((user) => <li key={user.id} className="flex min-w-0 items-start gap-2 text-sm">
-        <Avatar size={24} text={user.avatar.text} color={user.avatar.color} kind={user.kind === 'service' ? 'service' : 'human'} />
-        <span className="min-w-0 flex-1 wrap-anywhere"><span className="font-medium text-text">{user.display_name}</span>
-          <span className="block text-text-muted">{owners.has(user.id) ? t('access.roster.owner') : t('access.roster.personVia', { level, holder: via })}</span></span>
-      </li>)}</ul>}
+      : <ScrollRegion kind="table" label={via} className="max-h-64 overflow-y-auto"><ul className="flex flex-col gap-2">{rows.map((user) => <li key={user.id} className="flex min-w-0 flex-col gap-1 text-sm">
+        <UserChip user={user} size={24} />
+        <span className="min-w-0 text-text-muted">{owners.has(user.id) ? t('access.roster.owner') : t('access.roster.personVia', { level, holder: via })}</span>
+      </li>)}</ul></ScrollRegion>}
     <Pagination hasMore={query.hasNextPage} loading={query.isFetchingNextPage} error={query.isFetchNextPageError ? query.error : null} onMore={() => void query.fetchNextPage()} />
   </div>;
 }
@@ -81,10 +85,7 @@ function RosterRow({ holder, line, ...props }: Omit<Props, 'lines'> & { holder: 
   return <li className="flex min-w-0 flex-col gap-2 py-2" data-access-level={line}>
     <div className="flex min-w-0 flex-wrap items-start gap-x-3 gap-y-1">
       <div className="min-w-0 flex-1 basis-[min(100%,12rem)]">
-        {holder.holder.kind === 'user' ? <span className="flex min-w-0 items-start gap-2">
-          <Avatar size={24} text={holder.holder.user.avatar.text} color={holder.holder.user.avatar.color} kind={holder.holder.user.kind === 'service' ? 'service' : 'human'} />
-          <span className="min-w-0 font-medium text-text wrap-anywhere">{name}</span>
-        </span> : <button type="button" className="focus-inset flex min-w-0 max-w-full items-start gap-1 rounded-sm text-left text-sm font-medium text-text wrap-anywhere"
+        {holder.holder.kind === 'user' ? <UserChip user={holder.holder.user} size={24} /> : <button type="button" className="focus-inset flex min-w-0 max-w-full items-start gap-1 rounded-sm text-left text-sm font-medium text-text wrap-anywhere"
           aria-label={name} aria-expanded={param === null ? undefined : open} aria-controls={param === null ? undefined : id} disabled={param === null} onClick={() => setOpen(!open)}>
           {param !== null && <ChevronRight aria-hidden className={open ? 'mt-0.5 shrink-0 rotate-90' : 'mt-0.5 shrink-0'} />}<Users aria-hidden className="mt-0.5 shrink-0" /><span className="min-w-0">{name}</span>
           {count !== null && <span aria-hidden className="text-text-muted">{count}</span>}

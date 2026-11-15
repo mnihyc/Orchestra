@@ -399,3 +399,11 @@ describe('what is kept as the default of a place', () => {
     expect(settingsToKeep(noModel, resolved)).toEqual([{ key: 'agent.model', value: 'm2' }]);
   });
 });
+
+
+it('keeps an authored environment name while leaving a blank optional name to its real default', () => {
+  for (const value of ['  Analysis workspace  ', '   ']) {
+    const result = resolve(options({ environment_default: 'fresh' }), picked({ newEnvironment: { name: value } }), dialog);
+    expect(result.newEnvironment).toEqual(value.trim() === '' ? {} : { name: value.trim() });
+  }
+});

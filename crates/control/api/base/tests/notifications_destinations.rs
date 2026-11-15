@@ -28,6 +28,66 @@ struct Place {
     topic: Id,
 }
 
+#[tokio::test]
+async fn every_destination_is_reachable_by_name_search_and_continuations() {
+    use orch_api_contract::common::CollectionQuery;
+    let p = place().await;
+    let far = FarSide::taking().await;
+    for index in 0..13 {
+        add(
+            &p,
+            &p.o.bea,
+            p.project,
+            &NodeDestinationCreateBody {
+                name: format!("Room {index:02}"),
+                ..room(&far.url)
+            },
+        )
+        .await
+        .ok();
+    }
+    let found =
+        p.o.world
+            .app
+            .call(NodeDestinationList, &[&p.project])
+            .token(&p.o.bea.token)
+            .query(&CollectionQuery {
+                q: Some("Room 12".into()),
+                limit: Some(3),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+    assert_eq!(found.items.len(), 1);
+    assert_eq!(found.items[0].name, "Room 12");
+    let mut cursor = None;
+    let mut ids = std::collections::HashSet::new();
+    loop {
+        let page =
+            p.o.world
+                .app
+                .call(NodeDestinationList, &[&p.project])
+                .token(&p.o.bea.token)
+                .query(&CollectionQuery {
+                    limit: Some(3),
+                    cursor,
+                    ..Default::default()
+                })
+                .send()
+                .await
+                .ok();
+        for row in page.items {
+            assert!(ids.insert(row.id));
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(ids.len(), 13);
+}
+
 async fn place() -> Place {
     let o = Outside::new().await;
     let project = make_project(&o.world, &o.bea, o.acme, "Web").await.base.id;
@@ -82,12 +142,19 @@ async fn add(
 }
 
 async fn list(p: &Place, by: &Who, node: Id) -> Reply<Vec<Destination>> {
-    p.o.world
-        .app
-        .call(NodeDestinationList, &[&node])
-        .token(&by.token)
-        .send()
-        .await
+    let reply =
+        p.o.world
+            .app
+            .call(NodeDestinationList, &[&node])
+            .token(&by.token)
+            .send()
+            .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|page| page.items),
+    }
 }
 
 async fn patch(p: &Place, by: &Who, id: Id, body: &DestinationUpdateBody) -> Reply<Destination> {
