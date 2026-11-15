@@ -1,0 +1,9 @@
+fmt
+clippy
+contracts
+test -p orch-xtask --bin orch-xtask -- names::tests::
+test -p orch-model-contract --lib
+test -p orch-protocol-google-interactions --lib
+test -p orch-authz --test depends
+test -p orch-connector-core --test provider_role
+test -p orch-conformance --test plugins -- provider_examples::native::

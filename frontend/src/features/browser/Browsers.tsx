@@ -10,6 +10,7 @@ import { Link } from '@tanstack/react-router';
 import { AppWindow, Ellipsis } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { choiceCopy } from '@/i18n/choices';
 
 import { BrowserProgramsMissing, browserKeys, browsersQuery, deleteProfile, lookAgain, renameProfile } from '@/api/browsers';
 import type { Browser, BrowserProfile, Environment, EnvironmentBrowsers } from '@/generated/api-types';
@@ -129,6 +130,7 @@ export function BrowsersPanel({ environment, threadId }: { environment: Environm
                 <span className="block truncate text-sm font-medium leading-(--control-sm)">{browser.profile ?? t('browser.list.ownProfile')}</span>
                 <span className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-muted">
                   <span>{browser.opened_by !== null ? t('browser.list.openedBy', { name: browser.opened_by.display_name }) : browser.thread !== null ? t('browser.list.openedByAgent', { thread: browser.thread.name ?? t('browser.list.hiddenThread') }) : t('browser.list.announced')}</span>
+                  {browser.preset !== null && <span>{choiceCopy(t, `browserMode.${browser.preset}`).name}</span>}
                   {browser.tabs !== null && <span>{t('browser.list.tabs', { count: browser.tabs })}</span>}
                   {browser.note !== null && <span className="wrap-anywhere">{browser.note}</span>}
                 </span>
