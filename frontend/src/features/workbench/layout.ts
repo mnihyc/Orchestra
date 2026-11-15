@@ -249,6 +249,11 @@ export function findTab(layout: Layout, tabId: string): Place | null {
   return null;
 }
 
+/** Whether the tab is a side section that was closed by hiding: its view is kept, with what is typed in it, and nothing of it is shown. */
+export function tabHidden(layout: Layout, tabId: string): boolean {
+  return findTab(layout, tabId)?.section?.hidden === true;
+}
+
 export function findGroup(layout: Layout, groupId: string): { area: AreaId; group: Group } | null {
   return allGroups(layout).find(({ group }) => group.id === groupId) ?? null;
 }

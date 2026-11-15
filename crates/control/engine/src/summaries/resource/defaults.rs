@@ -59,7 +59,7 @@ pub async fn manual_default(
                 continue;
             };
             let Ok(mut config) = Config::read(
-                &serde_json::json!({"provider_id":provider_id,"model_name":model_name,"params":params}),
+                &serde_json::json!({"backend":{"route":orch_summarizer_model::capabilities::ROUTE,"offering":{"provider":provider_id,"offering":model_name}},"params":params}),
             ) else {
                 continue;
             };

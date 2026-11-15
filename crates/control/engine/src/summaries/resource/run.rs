@@ -58,7 +58,7 @@ impl Engine {
         let attempt = self.execute_resource_work(&work).await;
         match attempt {
             Ok((text, actual)) => {
-                let current = work.candidate(&actual);
+                let current = work.selected_candidate(actual.clone());
                 let mut tx = self.db().begin().await?;
                 let frame = match current.frame(&mut tx, self.inner.clock.as_ref()).await {
                     Ok(frame) => frame,
@@ -69,7 +69,7 @@ impl Engine {
                     }
                 };
                 let parts = frame.into_parts();
-                let producer = json!({"kind":"model","provider_id":actual.provider_id,"model_name":actual.model_name});
+                let producer = json!({"kind":"model","backend":actual.backend});
                 let refs = serde_json::to_value(&work.refs)?;
                 parts
                     .first_effect
@@ -150,14 +150,13 @@ impl Engine {
                 .cloned()
                 .unwrap_or(Json::Null),
         )?;
-        let body: orch_api_contract::summaries::SummaryRefreshBody =
-            serde_json::from_value(request.arguments.clone())?;
-        let accepted_model = request
-            .accepted_source
-            .get("model")
-            .cloned()
-            .map(serde_json::from_value::<SummaryModelChoice>)
-            .transpose()?;
+        let selected_model: ModelSelection = serde_json::from_value(
+            request
+                .accepted_source
+                .get("selection")
+                .cloned()
+                .ok_or_else(refused)?,
+        )?;
         let payer = request.paying_user.ok_or_else(refused)?;
         let mut tx = self.db().begin().await?;
         orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
@@ -188,12 +187,12 @@ impl Engine {
         } else {
             Caller::session(payer).with_admin_mode(false)
         };
-        let selected = select_with_snapshot(
+        let selected = select_with_backend_snapshot(
             &mut tx,
             &caller,
             target,
             range,
-            body.model.as_ref().or(accepted_model.as_ref()),
+            Some(&selected_model),
             self.inner.clock.time(),
             request.accepted_source.get("snapshot"),
         )
@@ -249,7 +248,7 @@ impl Engine {
     async fn execute_resource_work(
         &self,
         work: &Work,
-    ) -> Result<(String, ProviderComplete), EngineError> {
+    ) -> Result<(String, ModelSelection), EngineError> {
         let mut tx = self.db().begin().await?;
         let frame = work.frame(&mut tx, self.inner.clock.as_ref()).await?;
         let selected = frame.value();
@@ -303,20 +302,26 @@ impl Engine {
             task: "resource_summary",
             resource: Some(work.clone()),
         };
+        let program = selected.config.backend.route == "summary.delegation";
+        let adapter = if program {
+            orch_summarizer_model::capabilities::Executor::program(
+                Arc::new(host),
+                source.clone(),
+                field,
+            )
+        } else if field == SummaryField::Title {
+            orch_summarizer_model::capabilities::Executor::title(Arc::new(host), source.clone())
+        } else {
+            orch_summarizer_model::capabilities::Executor::new(Arc::new(host), source.clone())
+        };
         executors
             .register(
-                orch_summarizer_model::capabilities::EXECUTOR,
-                Arc::new(if field == SummaryField::Title {
-                    orch_summarizer_model::capabilities::Executor::title(
-                        Arc::new(host),
-                        source.clone(),
-                    )
+                if program {
+                    "program-session"
                 } else {
-                    orch_summarizer_model::capabilities::Executor::new(
-                        Arc::new(host),
-                        source.clone(),
-                    )
-                }),
+                    orch_summarizer_model::capabilities::EXECUTOR
+                },
+                Arc::new(adapter),
             )
             .map_err(EngineError::unreadable)?;
         let resolution = resolve_route(
@@ -380,13 +385,29 @@ impl Engine {
                     .and_then(|id| id.parse::<Id>().ok())
             })
             .unwrap_or(work.request);
-        let body = self
-            .inner
-            .commands
-            .retained_body(actual)
-            .await?
-            .ok_or_else(refused)?;
-        let actual: ProviderComplete = serde_json::from_value(body)?;
+        let actual = if program {
+            let request =
+                crate::summaries::ProgramSource::retained_request(&mut conn, actual).await?;
+            ModelSelection {
+                backend: request.backend,
+                params: request.params.unwrap_or_else(|| json!({})),
+            }
+        } else {
+            let body = self
+                .inner
+                .commands
+                .retained_body(actual)
+                .await?
+                .ok_or_else(refused)?;
+            let request: ProviderComplete = serde_json::from_value(body)?;
+            let mut selected = work.selected.clone();
+            selected.backend.offering = Some(orch_provider_contract::capabilities::OfferingRef {
+                provider: request.provider_id,
+                offering: request.model_name,
+            });
+            selected.params = request.params.unwrap_or_else(|| json!({}));
+            selected
+        };
         Ok((text, actual))
     }
 }

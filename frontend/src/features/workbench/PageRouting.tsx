@@ -1,6 +1,6 @@
 /** Only resolved browser navigation enters the workspace. A pane's URL echo keeps its exact origin. */
 import { useMatches, useRouter, useRouterState } from '@tanstack/react-router';
-import { useLayoutEffect, useReducer, useRef } from 'react';
+import { useEffect, useLayoutEffect, useReducer, useRef } from 'react';
 import { useStore } from 'zustand';
 import { client } from '@/api/client';
 import { useNodeLabel } from '@/features/navigation/placeLabels';
@@ -10,10 +10,20 @@ import { allTabs, findTab, mapGroups, setTabTarget } from './layout';
 import { EMPTY_WORKBENCH, canonicalPageAddress, openPage, pageAddress } from './PageView';
 import { clearPageNavigation, markPageNavigation, pageNavigationOrigin, setPageFailure } from './pageNavigation';
 import { useWorkbench } from './store';
-import { bindContentNavigation } from './contentNavigation';
+import { bindContentNavigation, followContentLink } from './contentNavigation';
 import { contentTab, parseContentAddress } from './contentAddress';
+import { mark } from '@/lib/marks';
+import { startPageReads } from './pageReads';
 
-export function PageRouting({ ready, onAddressed }: { ready: boolean; onAddressed?: () => void }) {
+/**
+ * Opens the tab of the address in the bar, as soon as the router has settled on it: it needs the person's id and nothing the
+ * shell's first read brings, so the tab strip is drawn, and the page's own first read started, before that read has answered.
+ */
+export function PageRouting({ onAddressed }: { onAddressed?: () => void }) {
+  useEffect(() => {
+    document.addEventListener('click', followContentLink);
+    return () => document.removeEventListener('click', followContentLink);
+  }, []);
   const user = useStore(client.session, (state) => state.userId);
   const router = useRouter();
   const location = useRouterState({ select: (state) => state.location });
@@ -42,7 +52,7 @@ export function PageRouting({ ready, onAddressed }: { ready: boolean; onAddresse
   }), [router]);
 
   useLayoutEffect(() => {
-    if (!ready || user === null || !settled) return;
+    if (user === null || !settled) return;
     useWorkbench.getState().enter(user, screen);
     const state = useWorkbench.getState();
     const href = location.href;
@@ -66,7 +76,7 @@ export function PageRouting({ ready, onAddressed }: { ready: boolean; onAddresse
         const fresh = useWorkbench.getState();
         if (href === EMPTY_WORKBENCH || href === `${EMPTY_WORKBENCH}/`) return;
         const current = fresh.activeContent === null ? null : findTab(fresh.layout, fresh.activeContent);
-        if (first && current !== null && pageAddress(current.tab) === href) { setPageFailure(current.tab.id, rejected); return; }
+        if (first && current !== null && pageAddress(current.tab) === href) { mark('tab/opened', { tab: current.tab.id }); startPageReads(current.tab); setPageFailure(current.tab.id, rejected); return; }
         const legacy = allTabs(fresh.layout).find((tab) => tab.view === 'screen');
         const requested = parseContentAddress(href);
         const resource = requested === null ? { view: 'page', of: { href } } : contentTab(requested);
@@ -76,6 +86,7 @@ export function PageRouting({ ready, onAddressed }: { ready: boolean; onAddresse
           fresh.focus(legacy.id); id = legacy.id;
         } else id = requested === null ? fresh.openTab(resource.view, resource.of) : openPage(href);
         if (id !== null) setPageFailure(id, rejected);
+        else publishFocus();
       };
       const restored = first && state.activeContent !== null ? findTab(state.layout, state.activeContent)?.tab : undefined;
       const restoredHref = restored === undefined ? null : pageAddress(restored);
@@ -126,14 +137,14 @@ export function PageRouting({ ready, onAddressed }: { ready: boolean; onAddresse
       if (href !== EMPTY_WORKBENCH && href !== `${EMPTY_WORKBENCH}/`) { enterAddress(); return; }
     }
     publishFocus();
-  }, [ready, user, location, settled, rejected, active, layout, router, screen, resolvedVisit]);
+  }, [user, location, settled, rejected, active, layout, router, screen, resolvedVisit]);
   useLayoutEffect(() => {
-    if (!ready || user === null || !settled) return;
+    if (user === null || !settled) return;
     const state = useWorkbench.getState();
     const tab = state.activeContent === null ? null : findTab(state.layout, state.activeContent)?.tab;
     const address = tab === null || tab === undefined ? EMPTY_WORKBENCH : pageAddress(tab) ?? EMPTY_WORKBENCH;
     if (location.href === EMPTY_WORKBENCH || location.href === `${EMPTY_WORKBENCH}/`
       || address === location.href || `${address}/` === location.href) onAddressed?.();
-  }, [ready, user, settled, location.href, active, layout, onAddressed]);
+  }, [user, settled, location.href, active, layout, onAddressed]);
   return null;
 }

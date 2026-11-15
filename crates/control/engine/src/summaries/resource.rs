@@ -23,6 +23,8 @@ mod events;
 pub use events::node_event;
 mod route;
 mod run;
+#[cfg(test)]
+mod tests;
 pub use route::{preview_route, resolve_route};
 mod defaults;
 pub use defaults::{ManualDefault, manual_default};
@@ -48,6 +50,13 @@ pub struct Selection {
     pub config: Config,
 }
 impl Selection {
+    /// Frozen choice facts for the actual accepting producer; these contain no acting authority.
+    pub fn backend_selection(&self) -> Result<Json, EngineError> {
+        Ok(serde_json::to_value(ModelSelection::configured(
+            &self.config,
+        ))?)
+    }
+
     /// Canonical typed facts, including every contributing resource.
     pub fn facts(&self) -> Vec<operation_scope::sources::Facts<Role>> {
         let mut groups = BTreeMap::new();
@@ -92,6 +101,63 @@ pub async fn select_with_snapshot(
     now: Time,
     snapshot: Option<&Json>,
 ) -> Result<Selection, EngineError> {
+    let selected = model.map(ModelSelection::api);
+    select_with_backend_snapshot(
+        conn,
+        caller,
+        target,
+        range,
+        selected.as_ref(),
+        now,
+        snapshot,
+    )
+    .await
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelSelection {
+    backend: orch_provider_contract::capabilities::BackendRef,
+    params: Json,
+}
+
+impl ModelSelection {
+    fn configured(config: &Config) -> Self {
+        Self {
+            backend: config.backend.clone(),
+            params: config.params.clone(),
+        }
+    }
+    fn api(model: &SummaryModelChoice) -> Self {
+        Self {
+            backend: orch_provider_contract::capabilities::BackendRef {
+                route: orch_summarizer_model::capabilities::ROUTE.into(),
+                offering: Some(orch_provider_contract::capabilities::OfferingRef {
+                    provider: model.provider_id,
+                    offering: model.model.clone(),
+                }),
+                ..Default::default()
+            },
+            params: model
+                .params
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({})),
+        }
+    }
+    fn offering(&self) -> Result<&orch_provider_contract::capabilities::OfferingRef, EngineError> {
+        self.backend.offering.as_ref().ok_or_else(refused)
+    }
+}
+
+async fn select_with_backend_snapshot(
+    conn: &mut Conn,
+    caller: &Caller,
+    target: SummaryTarget,
+    range: Option<SummaryChatRange>,
+    model: Option<&ModelSelection>,
+    now: Time,
+    snapshot: Option<&Json>,
+) -> Result<Selection, EngineError> {
     let plan = operation_scope::Prepared::new(
         SummaryRefresh::ROUTE,
         summary_sources::RESOURCE_REFRESH.operation,
@@ -113,18 +179,14 @@ pub async fn select_with_snapshot(
         .filter(|producer| producer.kind == "model")
     {
         Some(producer) => Config::read(&producer.config).map_err(|_| refused())?,
-        None if model.is_some() => serde_json::from_value(
-            serde_json::json!({"provider_id":model.map(|m|m.provider_id),"model_name":model.map(|m|&m.model)}),
-        )?,
+        None if model.is_some() => {
+            serde_json::from_value(serde_json::json!({"backend":model.map(|model|&model.backend)}))?
+        }
         None => return Err(refused()),
     };
     if let Some(model) = model {
-        config.provider_id = model.provider_id;
-        config.model_name = model.model.clone();
-        config.params = model
-            .params
-            .clone()
-            .unwrap_or_else(|| serde_json::json!({}));
+        config.backend = model.backend.clone();
+        config.params = model.params.clone();
     }
     config.context_tokens = policy.context_tokens.get();
     let previous = snapshot
@@ -202,24 +264,35 @@ pub async fn model_entry(
     place: Id,
     config: &Config,
 ) -> Result<Option<Id>, EngineError> {
-    let provider = resources::provider(conn, config.provider_id)
+    let offering = config.offering().map_err(EngineError::unreadable)?;
+    let program = config.backend.route == "summary.delegation";
+    let provider = resources::provider(conn, offering.provider)
         .await?
         .filter(|row| {
             row.deleted_at.is_none()
-                && crate::providers::request_status_available(&row.status)
-                && !row.protocols.is_empty()
+                && (program || crate::providers::request_status_available(&row.status))
+                && (program || !row.protocols.is_empty())
         })
         .ok_or_else(refused)?;
-    if completion_protocol(&provider.protocols)?.is_none() {
+    if program {
+        crate::tools::capability_service::delegation::backend_state(
+            conn,
+            &orch_provider_contract::builtins::BuiltinSources::default(),
+            "summary",
+            &config.backend,
+        )
+        .await?
+        .map_err(EngineError::from)?;
+    } else if completion_protocol(&provider.protocols)?.is_none() {
         return Err(refused());
     }
-    let model = resources::model(conn, config.provider_id, &config.model_name)
+    let model = resources::model(conn, offering.provider, &offering.offering)
         .await?
         .filter(|row| row.enabled)
         .ok_or_else(refused)?;
     let effective = crate::resolved::load(conn, place).await?;
     if effective.models_allowed.as_ref().is_some_and(|patterns| {
-        !crate::models::allowed_by(patterns, &config.model_name, &model.groups)
+        !crate::models::allowed_by(patterns, &offering.offering, &model.groups)
     }) || crate::provider_policy::forbidden(conn, place, provider.id)
         .await?
         .is_some()
@@ -236,18 +309,20 @@ pub async fn model_entry(
         orch_provider_contract::calls::requested_effort(&config.params).map_err(|_| refused())?;
     // One entry has to allow the model and the effort together.
     if !usable.allows(&orch_authz::options::Wanted {
-        model: Some((&config.model_name, &model.groups)),
+        model: Some((&offering.offering, &model.groups)),
         effort,
         ..orch_authz::options::Wanted::default()
     }) {
         return Err(refused());
     }
-    let machine = provider.key_machine_id.ok_or_else(refused)?;
-    if !orch_db::queries::resources::machine(conn, machine)
-        .await?
-        .is_some_and(|machine| machine.online)
-    {
-        return Err(refused());
+    if !program {
+        let machine = provider.key_machine_id.ok_or_else(refused)?;
+        if !orch_db::queries::resources::machine(conn, machine)
+            .await?
+            .is_some_and(|machine| machine.online)
+        {
+            return Err(refused());
+        }
     }
     Ok(usable.entry)
 }
@@ -263,7 +338,7 @@ pub struct Work {
     target: SummaryTarget,
     issuer: Option<Id>,
     payer: Id,
-    model: SummaryModelChoice,
+    selected: ModelSelection,
     config: Config,
     policy: Hash,
     source: Json,
@@ -306,6 +381,20 @@ impl Work {
         if http.as_ref().is_some_and(|http| http.origin() != &origin) {
             return Err(refused());
         }
+        selected
+            .config
+            .offering()
+            .map_err(EngineError::unreadable)?;
+        let frozen: ModelSelection = serde_json::from_value(
+            request
+                .accepted_source
+                .get("selection")
+                .cloned()
+                .ok_or_else(refused)?,
+        )?;
+        if frozen != ModelSelection::configured(&selected.config) {
+            return Err(refused());
+        }
         Ok(Self {
             origin,
             http,
@@ -313,11 +402,7 @@ impl Work {
             target: selected.material.identity.target(),
             issuer: request.requested_by,
             payer: principal.caller().user(),
-            model: SummaryModelChoice {
-                provider_id: selected.config.provider_id,
-                model: selected.config.model_name.clone(),
-                params: Some(selected.config.params.clone()),
-            },
+            selected: frozen,
             config: selected.config.clone(),
             policy: selected.policy.fingerprint,
             source: selected.material.snapshot.clone(),
@@ -337,10 +422,32 @@ impl Work {
     /// Fallback candidates retain this original caller/source and get a fresh provider binding.
     pub(crate) fn candidate(&self, request: &ProviderComplete) -> Self {
         let mut work = self.clone();
-        work.model = SummaryModelChoice {
-            provider_id: request.provider_id,
-            model: request.model_name.clone(),
-            params: request.params.clone(),
+        work.selected.backend.offering = Some(orch_provider_contract::capabilities::OfferingRef {
+            provider: request.provider_id,
+            offering: request.model_name.clone(),
+        });
+        work.selected.params = request
+            .params
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+        work
+    }
+    fn selected_candidate(&self, selected: ModelSelection) -> Self {
+        let mut work = self.clone();
+        work.selected = selected;
+        work
+    }
+    pub(crate) fn program_candidate(
+        &self,
+        request: &orch_summarizer_model::CompletionRequest,
+    ) -> Self {
+        let mut work = self.clone();
+        work.selected = ModelSelection {
+            backend: request.backend.clone(),
+            params: request
+                .params
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({})),
         };
         work
     }
@@ -425,11 +532,15 @@ impl Work {
 
 /// Hold only the native source/settings/provider footprint on the caller's short transaction.
 pub async fn lock_selection(conn: &mut Conn, selected: &Selection) -> Result<(), EngineError> {
+    let offering = selected
+        .config
+        .offering()
+        .map_err(EngineError::unreadable)?;
     command::lock_sources(
         conn,
         selected.material.identity.target(),
         &selected.material.source_refs,
-        selected.config.provider_id,
+        offering.provider,
     )
     .await
 }
