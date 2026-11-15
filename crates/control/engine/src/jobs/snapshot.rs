@@ -588,6 +588,12 @@ impl Engine {
             return Ok(());
         };
         let (before, _) = read_progress(&row);
+        let deadline = crate::jobs::runner::reported_deadline(
+            &row,
+            command_id,
+            reported.activity.as_ref(),
+            before.activity.as_ref(),
+        );
         if reported.files_done != before.files_done
             || reported.bytes_done != before.bytes_done
             || reported.phase != before.phase
@@ -595,6 +601,7 @@ impl Engine {
             || reported.message != before.message
         {
             reported.activity = Some(orch_api_contract::workspace::JobActivity {
+                captured_deadline: deadline.clone(),
                 waiting_for: None,
                 updated_at: orch_types::Time::new(self.inner.clock.now()),
                 stall_after_seconds: 0,
@@ -606,6 +613,9 @@ impl Engine {
             });
         } else {
             reported.activity = before.activity.clone();
+        }
+        if let Some(activity) = &mut reported.activity {
+            activity.captured_deadline = deadline;
         }
         reported.percent = reported.percent.max(before.percent);
         if row.kind == kind::SNAPSHOT {

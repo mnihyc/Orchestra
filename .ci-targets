@@ -1,0 +1,10 @@
+fmt
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test hosted_environments -- a_removal_uses_the_previewed_recovery_window_and_refuses_a_changed_policy_before_effects
+test -p orch-api-core --test environments -- a_directory_reports_its_recorded_attach_wait_without_borrowing_a_later_metadata_time
+test -p orch-engine --test connected
+test -p orch-engine --test background_wake -- instruction_refresh_waits_for_live_work_without_replacing_its_session_generation
+test -p orch-engine --test forks -- a_completed_handoff_records_the_actual_carried_suffix_and_full_transcript_after_settings_change
+test -p orch-engine --test forks -- an_omitted_transcript_cannot_be_reported_as_complete_or_open_the_replacement_session

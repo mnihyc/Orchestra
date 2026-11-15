@@ -57,6 +57,7 @@ pub struct Unit<'c> {
     touched: BTreeMap<Id, Seq>,
     wakes: BTreeSet<Id>,
     approval_deciders: BTreeSet<Id>,
+    background_segments: BTreeSet<Id>,
     source_checked: bool,
 }
 
@@ -79,6 +80,7 @@ impl<'c> Unit<'c> {
             touched: BTreeMap::new(),
             wakes: BTreeSet::new(),
             approval_deciders: BTreeSet::new(),
+            background_segments: BTreeSet::new(),
             source_checked: false,
         }
     }
@@ -143,10 +145,24 @@ impl<'c> Unit<'c> {
         self.approval_deciders.extend(people.iter().copied());
     }
 
+    /// Coalesces native idle-guard changes into the existing environment feed at commit.
+    pub(crate) fn background_work_changed(&mut self, segment: Id) {
+        self.background_segments.insert(segment);
+    }
+
     /// Queues the announcement of every thread touched and returns what is
     /// left for after the commit. The transaction is the caller's to commit.
     pub async fn finish(mut self) -> Result<Finished, EngineError> {
         self.check_tool_source().await?;
+        if !self.background_segments.is_empty() {
+            let segments: Vec<_> = self.background_segments.into_iter().collect();
+            let environments: Vec<Id> = sqlx::query_scalar("SELECT DISTINCT environment_id FROM segments WHERE id=ANY($1::uuid[]) AND environment_id IS NOT NULL ORDER BY environment_id")
+                .bind(&segments).fetch_all(&mut *self.conn).await.map_err(orch_db::DbError::from)?;
+            for environment in environments {
+                orch_db::queries::jobs::stamp_environment(&mut *self.conn, environment, self.now)
+                    .await?;
+            }
+        }
         for (thread, seq) in &self.touched {
             sequences::notify(&mut *self.conn, *thread, *seq).await?;
         }
