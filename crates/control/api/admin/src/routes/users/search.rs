@@ -26,6 +26,7 @@ pub(super) struct Accounts;
 pub(super) struct Selected {
     rows: Vec<identity::UserSearchRow>,
     org: Option<Id>,
+    next_cursor: Option<String>,
 }
 
 async fn require_org(
@@ -58,7 +59,7 @@ impl native::Selected for Accounts {
     type Source = Source;
     type Query = UserSearchQuery;
     type Value = Selected;
-    type Reply = Vec<UserRef>;
+    type Reply = orch_api_contract::common::Page<UserRef>;
     const DECLARATION: &'static Declaration<Source> = &sources::USER_SEARCH;
 
     fn select<'a>(
@@ -69,7 +70,9 @@ impl native::Selected for Accounts {
     ) -> BoxFuture<'a, ApiResult<(Selected, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
             let text = query.q.trim();
-            if text.chars().count() < usize::try_from(USER_SEARCH_MIN_CHARS).unwrap_or(2) {
+            if !query.picker.unwrap_or(false)
+                && text.chars().count() < usize::try_from(USER_SEARCH_MIN_CHARS).unwrap_or(2)
+            {
                 return Err(invalid(
                     "q",
                     &format!("must be at least {USER_SEARCH_MIN_CHARS} characters"),
@@ -80,37 +83,77 @@ impl native::Selected for Accounts {
             {
                 return Err(invalid("org_id", "is no org"));
             }
-            let limit = usize::try_from(USER_SEARCH_MAX_RESULTS).map_err(ApiError::internal)?;
+            let limit = usize::try_from(query.limit.unwrap_or(USER_SEARCH_DEFAULT_RESULTS))
+                .map_err(ApiError::internal)?;
+            if limit == 0 {
+                return Err(invalid("limit", "must be greater than zero"));
+            }
+            let recent = if query.picker.unwrap_or(false) && text.is_empty() {
+                orch_api_base::picker_recents::read(conn, caller.user())
+                    .await?
+                    .choices
+                    .remove("user")
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|key| key.parse::<Id>().ok())
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let mut ranks = std::collections::HashMap::new();
+            for (index, id) in recent.iter().enumerate() {
+                ranks
+                    .entry(*id)
+                    .or_insert(i64::try_from(index).map_err(ApiError::internal)? + 1);
+            }
+            let rank = |row: &identity::UserSearchRow| {
+                ranks.get(&row.user.id).copied().unwrap_or(i64::MAX)
+            };
+            let page_query = orch_api_contract::common::CollectionQuery {
+                q: Some(query.q.clone()),
+                limit: query.limit,
+                cursor: query.cursor.clone(),
+            };
+            let source = serde_json::to_string(&(
+                "people",
+                caller.user(),
+                query.org_id,
+                query.picker.unwrap_or(false),
+                text,
+                &recent,
+            ))
+            .map_err(ApiError::internal)?;
             let plan = OperationPlan::new(ctx.route, Self::DECLARATION.operation)?;
             if !native::modern(caller) {
                 let principal = native::preparation_principal(ctx, conn, caller, &plan).await?;
                 require_org(ctx, conn, &principal, query.org_id).await?;
             }
-            let mut after: Option<(String, Id)> = None;
+            let mut after =
+                orch_api_base::collection::after::<(i64, String, Id)>(&page_query, &source)?;
             let mut selected = Vec::new();
             let mut selected_targets = Vec::new();
             loop {
-                let rows = identity::search_user_rows(
+                let rows = identity::search_user_page_rows(
                     conn,
-                    caller.user(),
-                    text,
-                    query.org_id,
-                    i64::try_from(limit).map_err(ApiError::internal)?,
-                    after.as_ref().map(|(name, id)| (name.as_str(), *id)),
+                    &identity::UserSearchPage {
+                        caller: caller.user(),
+                        text,
+                        org: query.org_id,
+                        limit: i64::try_from(limit + 1).map_err(ApiError::internal)?,
+                        after: after
+                            .as_ref()
+                            .map(|(rank, name, id)| (*rank, name.as_str(), *id)),
+                        recent: &recent,
+                    },
                 )
                 .await?;
-                let exhausted = rows.len() < limit;
+                let exhausted = rows.len() < limit + 1;
                 let next = rows
                     .last()
-                    .map(|row| (row.user.username.clone(), row.user.id));
+                    .map(|row| (rank(row), row.user.username.clone(), row.user.id));
                 if !native::modern(caller) {
-                    return Ok((
-                        Selected {
-                            rows,
-                            org: query.org_id,
-                        },
-                        Vec::new(),
-                    ));
+                    selected = rows;
+                    break;
                 }
                 let identities = rows
                     .iter()
@@ -147,11 +190,12 @@ impl native::Selected for Accounts {
                 require_org(ctx, conn, &principal, query.org_id).await?;
                 selected.extend(batch);
                 selected_targets.extend(facts);
-                if selected.len() >= limit || exhausted {
+                if selected.len() > limit || exhausted {
                     break;
                 }
                 after = next;
             }
+            let more = selected.len() > limit;
             selected.truncate(limit);
             selected_targets.truncate(limit);
             let groups = if selected_targets.is_empty() {
@@ -159,10 +203,25 @@ impl native::Selected for Accounts {
             } else {
                 vec![(ACCOUNT, selected_targets)]
             };
+            let next_cursor = if more {
+                selected
+                    .last()
+                    .map(|row| {
+                        orch_api_base::collection::cursor(
+                            &page_query,
+                            &source,
+                            (rank(row), row.user.username.clone(), row.user.id),
+                        )
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
             Ok((
                 Selected {
                     rows: selected,
                     org: query.org_id,
+                    next_cursor,
                 },
                 vec![native::Facts::collection(Source::SearchAccounts, groups)],
             ))
@@ -187,14 +246,17 @@ impl native::Selected for Accounts {
         conn: &'a mut Conn,
         principal: &'a Principal,
         value: &'a Selected,
-    ) -> BoxFuture<'a, ApiResult<Vec<UserRef>>> {
+    ) -> BoxFuture<'a, ApiResult<orch_api_contract::common::Page<UserRef>>> {
         Box::pin(async move {
             require_org(ctx, conn, principal, value.org).await?;
-            Ok(value
-                .rows
-                .iter()
-                .map(|row| refusals::user_ref(&row.user))
-                .collect())
+            Ok(orch_api_contract::common::Page {
+                items: value
+                    .rows
+                    .iter()
+                    .map(|row| refusals::user_ref(&row.user))
+                    .collect(),
+                next_cursor: value.next_cursor.clone(),
+            })
         })
     }
 }

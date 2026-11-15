@@ -2899,7 +2899,11 @@ export class Resources {
     }
     if ((found = /^GET \/environments\/([^/]+)\/mcp$/.exec(route))) {
       const record = this.findEnvironment(found[1] ?? '');
-      return { status: 200, body: this.mcpServers.get(record.id) ?? { servers: [], applies: 'next_turn', found: [], import: { allowed: false, reason: 'policy' } } };
+      const reply = this.mcpServers.get(record.id) ?? { next_cursor: null, servers: [], applies: 'next_turn', found: [], import: { allowed: false, reason: 'policy' } };
+      const q = (query.get('q') ?? '').toLowerCase(), part = query.get('collection') === 'found' ? 'found' : 'servers';
+      const rows = part === 'found' ? reply.found.filter((row) => [row.name, row.source, row.directory ?? ''].join(' ').toLowerCase().includes(q)) : reply.servers.filter((row) => row.server.name.toLowerCase().includes(q));
+      const start = Number(query.get('cursor') ?? 0), limit = Number(query.get('limit') ?? 50);
+      return { status: 200, body: { ...reply, [part]: rows.slice(start, start + limit), next_cursor: start + limit < rows.length ? String(start + limit) : null } };
     }
     if ((found = /^POST \/environments\/([^/]+)\/mcp\/servers\/([^/]+)\/restart$/.exec(route))) {
       const record = this.findEnvironment(found[1] ?? '');
@@ -2965,7 +2969,10 @@ export class Resources {
     if ((found = /^GET \/hosts\/([^/]+)\/runtimes$/.exec(route))) {
       const record = this.findHost(found[1] ?? '');
       this.mustManageHost(person, record);
-      return { status: 200, body: this.runtimes.filter((runtime) => runtime.host === record.id).map((runtime) => this.runtime(runtime)) };
+      const q = (query.get('q') ?? '').toLowerCase();
+      const rows = this.runtimes.filter((runtime) => runtime.host === record.id).map((runtime) => this.runtime(runtime)).filter((runtime) => [runtime.environment?.name ?? '', runtime.provider?.name ?? '', runtime.driver, runtime.state].join(' ').toLowerCase().includes(q));
+      const start = Number(query.get('cursor') ?? 0), limit = Number(query.get('limit') ?? 50);
+      return { status: 200, body: { items: rows.slice(start, start + limit), next_cursor: start + limit < rows.length ? String(start + limit) : null } };
     }
     if ((found = /^POST \/hosts\/([^/]+)\/runtimes\/([^/]+)\/stop$/.exec(route))) {
       const record = this.findHost(found[1] ?? '');

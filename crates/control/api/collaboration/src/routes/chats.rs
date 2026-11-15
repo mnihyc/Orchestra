@@ -863,7 +863,11 @@ async fn org_chat_create(
 }
 
 /// Reads a chat.
-async fn chat_get(ctx: Ctx, (): (), (): ()) -> ApiResult<Chat> {
+async fn chat_get(
+    ctx: Ctx,
+    query: orch_api_contract::chats::ChatGetQuery,
+    (): (),
+) -> ApiResult<Chat> {
     let mut tx = ctx.app.db.begin_snapshot().await?;
     let principal = ctx.operation_principal(&mut tx).await?;
     let prepared = ctx.operation_data::<read_operation::PreparedRead>()?;
@@ -874,10 +878,24 @@ async fn chat_get(ctx: Ctx, (): (), (): ()) -> ApiResult<Chat> {
         origin: origin(&ctx),
     };
     note_opened(&mut tx, &work, &prepared.loaded).await?;
-    let chat = read_operation::project(&mut tx, &work.principal, &prepared)
+    let mut chat = read_operation::project(&mut tx, &work.principal, &prepared)
         .await?
         .chat
         .ok_or_else(|| ApiError::internal("the chat read has no chat projection"))?;
+    if let Some(query) = query.members()
+        && let Some(members) = chat.members.take()
+    {
+        let page = crate::collection::snapshot(
+            &query,
+            &format!("chat-members:{}:{}", ctx.user()?.id(), chat.base.id),
+            members,
+            |user| (user.display_name.to_lowercase(), user.id),
+            |user| format!("{} {}", user.display_name, user.username),
+            false,
+        )?;
+        chat.members = Some(page.items);
+        chat.members_next_cursor = page.next_cursor;
+    }
     tx.commit().await.map_err(DbError::from)?;
     Ok(chat)
 }

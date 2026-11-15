@@ -1752,7 +1752,8 @@ async fn a_topic_names_the_environment_that_new_threads_join_and_lists_its_envir
         .token(&t.c.admin.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         listed
             .iter()
@@ -1762,6 +1763,45 @@ async fn a_topic_names_the_environment_that_new_threads_join_and_lists_its_envir
         Some(&second.base.id),
         "the default first"
     );
+    let searched = world
+        .app
+        .call(TopicEnvironmentList, &[&t.topic])
+        .token(&t.c.admin.token)
+        .query(&orch_api_contract::common::CollectionQuery {
+            q: Some("First".into()),
+            limit: Some(1),
+            cursor: None,
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(searched.items.len(), 1);
+    assert_eq!(searched.items[0].base.id, first.base.id);
+    let one = world
+        .app
+        .call(TopicEnvironmentList, &[&t.topic])
+        .token(&t.c.admin.token)
+        .query(&orch_api_contract::common::CollectionQuery {
+            limit: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(one.items[0].base.id, second.base.id);
+    let rest = world
+        .app
+        .call(TopicEnvironmentList, &[&t.topic])
+        .token(&t.c.admin.token)
+        .query(&orch_api_contract::common::CollectionQuery {
+            limit: Some(1),
+            cursor: one.next_cursor,
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(rest.items[0].base.id, first.base.id);
     assert_ne!(first.base.id, second.base.id);
     // Only whoever manages the topic names its default, and nothing changes for the rest.
     let refused = set(Some(first.base.id), &t.c.viewer).await.problem();
@@ -1772,7 +1812,8 @@ async fn a_topic_names_the_environment_that_new_threads_join_and_lists_its_envir
         .token(&t.c.admin.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(still[0].base.id, second.base.id);
     let cleared = set(None, &t.c.admin).await.ok();
     assert_eq!(cleared.default_environment_id, None);
@@ -2006,10 +2047,12 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .token(&t.c.admin.token)
         .query(&HostRuntimeListQuery {
             kind: Some(UnitKind::Environment),
+            ..Default::default()
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].unit_name, "orch-environment-0123456789ab");
     assert_eq!(listed[0].environment.as_ref().unwrap().id, made.base.id);
@@ -2020,10 +2063,12 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .token(&t.c.admin.token)
         .query(&HostRuntimeListQuery {
             kind: Some(UnitKind::Provider),
+            ..Default::default()
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(providers.is_empty());
     // Somebody who does not manage the host sees nothing of it.
     let refused = world

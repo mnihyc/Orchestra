@@ -11,7 +11,8 @@ import { AgentScreen } from '@/features/resources/agents/Profile';
 import { TemplateScreen } from '@/features/resources/templates/Template';
 import type { Agent, Template } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+skipOverflowFallback();
 import { harnessName } from '../doubles/harness-names';
 
 const server = vi.hoisted(() => ({ agent: vi.fn<() => Promise<Agent>>(), template: vi.fn<() => Promise<Template>>() }));

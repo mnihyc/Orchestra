@@ -16,7 +16,7 @@ const calls = vi.hoisted(() => ({ save: vi.fn<typeof ResourcesApi.updateModel>()
 vi.mock('@/api/resources', async (original) => ({ ...await original<typeof ResourcesApi>(), updateModel: calls.save }));
 vi.mock('@/features/resources/providers/Caps', async (original) => ({ ...await original<Record<string, unknown>>(), ModelLimits: () => null }));
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
-const model: ProviderModel = { ...MODEL_ESTIMATE, id: 'family-model', model_name: 'family-model', display_name: 'Family model', enabled: true, source: 'manual', groups: ['kept'], parameters: {} };
+const model: ProviderModel = { ...MODEL_ESTIMATE, id: 'family-model', model_name: 'family-model', display_name: 'Family model', enabled: true, source: 'manual', groups: ['kept'], parameters: { context_window: 272_000 } };
 const provider = planProvider({ models: [model], model_groups_max: 8 });
 const observed = (line = 'vendor-family'): ModelSuggestion => ({ model_name: model.model_name, display_name: model.display_name, listed: true,
   parameters: { offered: { report: { line } } }, origins: { '/parameters/offered/report/line': 'vendor' } });
@@ -51,7 +51,7 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     expect(within(dialog).getByRole('list', { name: i18n.t('models.groups.of') })).toHaveTextContent('vendor-family');
     expect(within(dialog).getByRole('list', { name: i18n.t('models.groups.of') })).not.toHaveTextContent('new-family');
     await user.click(within(dialog).getByRole('button', { name: i18n.t('providers.models.save') }));
-    await waitFor(() => expect(calls.save).toHaveBeenCalledExactlyOnceWith(provider.id, model.id, { parameters: {}, groups: ['kept', 'vendor-family'] }));
+    await waitFor(() => expect(calls.save).toHaveBeenCalledExactlyOnceWith(provider.id, model.id, { parameters: { context_window: 272_000 }, groups: ['kept', 'vendor-family'] }));
   });
 
   it('keeps a lowered zero limit, while allowing removal of the proposal and unchanged old membership', async () => {

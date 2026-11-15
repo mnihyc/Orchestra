@@ -48,6 +48,7 @@ async fn key(room: &Room, by: &Who, rules: Vec<Json>) -> String {
 }
 fn query(scope: ChatListScope) -> OrgChatListQuery {
     OrgChatListQuery {
+        q: None,
         scope: Some(scope),
         participating: None,
         of: None,

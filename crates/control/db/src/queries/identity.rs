@@ -951,13 +951,16 @@ pub async fn session_inventory(
     now: DateTime<Utc>,
     after: Option<(DateTime<Utc>, Id)>,
     limit: i64,
+    search: &str,
 ) -> Result<Vec<SessionListed>, DbError> {
     let (at, id) = after.map_or((None, None), |(at, id)| (Some(at), Some(id)));
-    Ok(sqlx::query_as("SELECT id,user_id,user_agent,host(ip) AS ip,created_at,last_used_at,expires_at FROM sessions
+    let named = super::search::matching_sql("concat_ws(' ',user_agent,host(ip))", "$6");
+    let patterns = super::search::Query::parse(search).like_patterns();
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT id,user_id,user_agent,host(ip) AS ip,created_at,last_used_at,expires_at FROM sessions
         WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>$2
         AND ($3::timestamptz IS NULL OR created_at<$3 OR (created_at=$3 AND id>$4))
-        ORDER BY created_at DESC,id LIMIT $5")
-        .bind(user).bind(now).bind(at).bind(id).bind(limit).fetch_all(conn).await?)
+        AND ({named}) ORDER BY created_at DESC,id LIMIT $5")))
+        .bind(user).bind(now).bind(at).bind(id).bind(limit).bind(patterns).fetch_all(conn).await?)
 }
 /// Refresh the exact previously emitted live sessions, never a replacement page.
 pub async fn session_inventory_selected(
@@ -1303,19 +1306,23 @@ pub async fn api_token_inventory(
     owner: Option<Id>,
     after: Option<(DateTime<Utc>, Id)>,
     limit: i64,
+    search: &str,
 ) -> Result<Vec<ApiTokenInventory>, DbError> {
     let (at, id) = after.map_or((None, None), |(at, id)| (Some(at), Some(id)));
+    let named = super::search::matching_sql("t.name", "$5");
+    let patterns = super::search::Query::parse(search).like_patterns();
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {API_TOKEN_COLUMNS}, u.kind AS owner_kind, u.service_org_id AS owner_org
          FROM api_tokens t JOIN users u ON u.id=t.user_id LEFT JOIN nodes n ON n.id=t.node_id
          WHERE t.revoked_at IS NULL AND ($1::uuid IS NULL OR t.user_id=$1)
            AND ($2::timestamptz IS NULL OR t.created_at<$2 OR (t.created_at=$2 AND t.id>$3))
-         ORDER BY t.created_at DESC,t.id LIMIT $4"
+         AND ({named}) ORDER BY t.created_at DESC,t.id LIMIT $4"
     )))
     .bind(owner)
     .bind(at)
     .bind(id)
     .bind(limit)
+    .bind(patterns)
     .fetch_all(conn)
     .await?)
 }
@@ -2216,6 +2223,33 @@ pub async fn put_interface_state(
     Ok(())
 }
 
+/// Promotes one private picker key under the preference row's lock. Other kinds survive concurrent writes.
+pub async fn note_picker_choice(
+    conn: &mut Conn,
+    user: Id,
+    kind: &str,
+    key: &str,
+    count: i64,
+    at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO user_state (user_id,key,value,updated_at)
+         VALUES ($1,'picker_recents',jsonb_build_object($2::text,
+             CASE WHEN $4::bigint = 0 THEN '[]'::jsonb ELSE jsonb_build_array($3::text) END),$5)
+         ON CONFLICT (user_id,key) DO UPDATE SET value = jsonb_set(
+             user_state.value, ARRAY[$2::text],
+             COALESCE((SELECT jsonb_agg(recent.choice ORDER BY recent.position) FROM (
+                 SELECT choice, min(position) AS position FROM (
+                     SELECT to_jsonb($3::text) AS choice, 0::bigint AS position
+                     UNION ALL
+                     SELECT choice, position FROM jsonb_array_elements(
+                         COALESCE(user_state.value->$2::text,'[]'::jsonb)) WITH ORDINALITY AS old(choice,position)
+                 ) candidates GROUP BY choice ORDER BY min(position) LIMIT $4
+             ) recent), '[]'::jsonb)), updated_at=EXCLUDED.updated_at",
+    ).bind(user).bind(kind).bind(key).bind(count).bind(at).execute(conn).await?;
+    Ok(())
+}
+
 /// Keeps `view` as the entry of `project` in the `project_views` value of the interface state of
 /// `user`, beside the entries of the other projects, under the row's lock: two writes for two
 /// projects do not replace each other. A value that is no object is begun again. The answer is the
@@ -2302,12 +2336,50 @@ pub async fn search_user_rows(
     limit: i64,
     after: Option<(&str, Id)>,
 ) -> Result<Vec<UserSearchRow>, DbError> {
+    search_user_page_rows(
+        conn,
+        &UserSearchPage {
+            caller,
+            text,
+            org,
+            limit,
+            after: after.map(|(name, id)| (i64::MAX, name, id)),
+            recent: &[],
+        },
+    )
+    .await
+}
+
+/// One native account-name page, including this caller's already captured recent identifiers.
+pub struct UserSearchPage<'a> {
+    /// The actor whose shared organizations are searched.
+    pub caller: Id,
+    /// Literal name words or an exact public username/address.
+    pub text: &'a str,
+    /// Optional admitted org.
+    pub org: Option<Id>,
+    /// Native batch size.
+    pub limit: i64,
+    /// Last native rank, username and identifier.
+    pub after: Option<(i64, &'a str, Id)>,
+    /// Newest-first private keys; empty leaves ordinary native ordering.
+    pub recent: &'a [Id],
+}
+
+/// Scope filtering still follows this original account projection before its result page fills.
+pub async fn search_user_page_rows(
+    conn: &mut Conn,
+    ask: &UserSearchPage<'_>,
+) -> Result<Vec<UserSearchRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT u.id, u.kind, u.username, u.display_name, u.avatar_color, u.service_org_id
-           FROM users u
+        "WITH picked AS MATERIALIZED (
+            SELECT id,min(position) AS rank FROM unnest($7::uuid[]) WITH ORDINALITY recent(id,position) GROUP BY id
+         ) SELECT u.id, u.kind, u.username, u.display_name, u.avatar_color, u.service_org_id
+           FROM users u LEFT JOIN picked p ON p.id=u.id
           WHERE u.status = 'active'
             AND (($3::uuid IS NULL
                   AND (u.username = lower($2) OR lower(u.email) = lower($2)
+                       OR ($2 = '' AND u.id=ANY($7::uuid[]))
                        OR (EXISTS (SELECT 1 FROM org_members a JOIN org_members b ON a.org_id = b.org_id
                                     WHERE a.user_id = u.id AND b.user_id = $1)
                            AND (starts_with(u.username, lower($2))
@@ -2319,17 +2391,19 @@ pub async fn search_user_rows(
                           OR strpos(lower(u.display_name), lower($2)) > 0
                           OR lower(u.email) = lower($2))))
             AND ($5::text IS NULL OR
-                 (-((u.username=lower($2))::int),u.username,u.id) >
-                 (-((($5::text)=lower($2))::int),$5::text,$6::uuid))
-          ORDER BY (u.username = lower($2)) DESC, u.username, u.id
+                 (COALESCE(p.rank,9223372036854775807),-((u.username=lower($2))::int),u.username,u.id) >
+                 ($8::bigint,-((($5::text)=lower($2))::int),$5::text,$6::uuid))
+          ORDER BY COALESCE(p.rank,9223372036854775807), (u.username = lower($2)) DESC, u.username, u.id
           LIMIT $4",
     )
-    .bind(caller)
-    .bind(text)
-    .bind(org)
-    .bind(limit)
-    .bind(after.map(|(name, _)| name))
-    .bind(after.map(|(_, id)| id))
+    .bind(ask.caller)
+    .bind(ask.text)
+    .bind(ask.org)
+    .bind(ask.limit)
+    .bind(ask.after.map(|(_,name,_)|name))
+    .bind(ask.after.map(|(_,_,id)|id))
+    .bind(ask.recent)
+    .bind(ask.after.map(|(rank,_,_)|rank))
     .fetch_all(conn)
     .await?)
 }

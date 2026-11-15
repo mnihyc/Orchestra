@@ -565,6 +565,42 @@ async fn schedule_readers_filter_actual_rows_and_keep_another_authors_definition
     let mut other = once(&s, to_thread(thread), "second private draft");
     other.name = Some("Second hidden schedule".into());
     let b = full(create(&s, &s.ada.token, &other).await, 201);
+    for row in [&a, &b] {
+        let page = s
+            .rig
+            .world
+            .app
+            .call(TopicInputScheduleList, &[&s.tree.topic.base.id])
+            .token(&s.ada.token)
+            .query(&InputScheduleListQuery {
+                q: Some(row.name.clone()),
+                page: PageQuery {
+                    limit: Some(1),
+                    cursor: None,
+                },
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, row.id);
+        assert!(page.next_cursor.is_none());
+    }
+    let another = s
+        .rig
+        .world
+        .app
+        .call(TopicInputScheduleList, &[&s.tree.topic.base.id])
+        .token(&s.ada.token)
+        .query(&InputScheduleListQuery {
+            thread_id: Some(new_id()),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert!(another.items.is_empty());
     let root_only = key(
         &s,
         s.ada.id(),

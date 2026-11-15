@@ -1,3 +1,4 @@
+import { readAllPages } from '@/api/collection';
 import { adoptSummaryOpening } from '@/api/summarySnapshots';
 /** API client for Chats, messages, forwarding, and sharing with agents and taking it back.
  *
@@ -202,11 +203,21 @@ export const orgChatsKey = (orgId: string) => ['chats', orgId] as const;
 
 /** What a list of an org's chats is of: the caller's own, the others' they may read, or those of nodes. */
 export interface ChatListFilter {
+  q?: string;
   participating?: boolean;
   scope: ChatListScope;
   /** With `others`: the org of the tree whose people's chats are read. */
   of: string | null;
 }
+
+/** The roster uses ChatGet's actual name and read projection, without replacing the complete chat cache. */
+export const chatMembersPageQuery = (id: string, q: string) => infiniteQueryOptions({
+  queryKey: ['chat-members', id, 'pages', q] as const, initialPageParam: null as string | null,
+  queryFn: async ({ pageParam, signal }) => {
+    const reply = await ok(api.GET('/chats/{id}', { params: { path: { id }, query: { members_q: q, members_limit: 50, ...(pageParam === null ? {} : { members_cursor: pageParam }) } }, signal }));
+    return { items: reply.members ?? [], next_cursor: reply.members_next_cursor ?? null, disclosed: reply.members !== null };
+  }, getNextPageParam: (last) => last.next_cursor, retry: false,
+});
 
 /** The chats of a root org, newest activity first, a page at a time. */
 export const orgChatsQuery = (orgId: string, filter: ChatListFilter) =>
@@ -220,6 +231,7 @@ export const orgChatsQuery = (orgId: string, filter: ChatListFilter) =>
             path: { id: orgId },
             query: {
               scope: filter.scope,
+              ...(filter.q?.trim() ? { q: filter.q.trim() } : {}),
               ...(filter.participating === true ? { participating: true } : {}),
               limit: CHATS_PAGE,
               ...(filter.of === null ? {} : { of: filter.of }),
@@ -240,7 +252,7 @@ export const peopleQuery = (orgId: string | null, q: string) =>
   queryOptions({
     queryKey: peopleKey(orgId, q),
     queryFn: ({ signal }): Promise<UserRef[]> =>
-      ok(api.GET('/users/search', { params: { query: { q, ...(orgId === null ? {} : { org_id: orgId }) } }, signal })),
+      readAllPages((cursor)=>ok(api.GET('/users/search', { params: { query: { q, ...(orgId === null ? {} : { org_id: orgId }),...(cursor===null?{}:{cursor}) } }, signal })),signal),
     staleTime: 60_000,
   });
 

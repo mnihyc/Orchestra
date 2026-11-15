@@ -177,6 +177,7 @@ impl Samples {
 }
 
 struct CacheInner {
+    native_sessions: crate::collection::Snapshots<orch_api_contract::resources::NativeSession>,
     ports: crate::ports_runtime::PortRuntime,
     manifests: Mutex<VecDeque<(Id, Hash, Arc<Manifest>)>>,
     manifests_kept: usize,
@@ -198,6 +199,13 @@ impl std::fmt::Debug for Cache {
 }
 
 impl Cache {
+    /// Native session discovery stays captured while its own source is searched and paged.
+    #[must_use]
+    pub fn native_sessions(
+        &self,
+    ) -> &crate::collection::Snapshots<orch_api_contract::resources::NativeSession> {
+        &self.inner.native_sessions
+    }
     /// Current port measurements and ephemeral admissions, never durable caller rows.
     #[must_use]
     pub fn ports(&self) -> &crate::ports_runtime::PortRuntime {
@@ -215,6 +223,7 @@ impl Cache {
         let samples = seconds / config.engine.stats_interval_secs.max(1);
         Self {
             inner: Arc::new(CacheInner {
+                native_sessions: crate::collection::Snapshots::default(),
                 ports: crate::ports_runtime::PortRuntime::default(),
                 manifests: Mutex::new(VecDeque::new()),
                 manifests_kept: usize::try_from(config.limits.manifest_trees)
