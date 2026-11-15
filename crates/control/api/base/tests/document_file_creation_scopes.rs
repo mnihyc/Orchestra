@@ -16,10 +16,7 @@ use orch_api_contract::documents::{
     DocumentFileCreate, DocumentFileCreateQuery, NewDocumentAccess,
 };
 use orch_api_contract::threads::FILENAME_HEADER;
-use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
-    testing::RawReply,
-};
+use orch_api_core::{middleware::authentication::token_hash, testing::RawReply};
 use orch_blob_contract::{
     range::ByteRange,
     store::{BlobError, BlobRead, BlobStore, ByteStream, Stored},
@@ -50,9 +47,10 @@ fn upload(user: Id) -> Json {
 async fn key(desk: &Desk, user: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
+    let issued_key_id = new_id();
     let key = Key {
-        id: new_id(),
-        secret: new_token(API_TOKEN_PREFIX),
+        id: issued_key_id,
+        secret: orch_api_core::middleware::authentication::new_api_token(issued_key_id),
     };
     identity::create_api_token_scoped(
         &mut *desk.world.conn().await,
@@ -265,16 +263,22 @@ impl Probe {
 }
 #[async_trait::async_trait]
 impl BlobStore for Probe {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.inner.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         body: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
+        publication.check(self.lifetimes(), hash)?;
         if *hash == self.hash {
             self.puts.fetch_add(1, Ordering::SeqCst);
         }
-        let stored = self.inner.put(hash, size, body).await;
+        let stored = self.inner.put_held(hash, size, body, publication).await;
         self.pause(Hold::Put, hash).await;
         stored
     }
@@ -295,8 +299,13 @@ impl BlobStore for Probe {
         }
         self.inner.size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.inner.delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.inner.delete_held(hash, retirement).await
     }
 }
 fn probe(desk: &mut Desk, hash: Hash, hold: Hold) -> Arc<Probe> {

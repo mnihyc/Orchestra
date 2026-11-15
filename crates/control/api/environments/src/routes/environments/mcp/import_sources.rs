@@ -335,6 +335,7 @@ async fn forget(ctx: &Ctx, copy: CopyCommand) {
             .link
             .dispatcher()
             .issue_stored(StoredCommand {
+                content_transit: false,
                 id: Some(command.id),
                 machine: command.machine,
                 kind: command.kind.as_str().to_owned(),
@@ -406,6 +407,7 @@ impl ApplyOwned for Imports {
                 .dispatcher()
                 .issue_stored_before(
                     StoredCommand {
+                        content_transit: false,
                         id: Some(command.id),
                         machine: command.machine,
                         kind: command.kind.as_str().to_owned(),

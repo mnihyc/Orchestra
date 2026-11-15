@@ -65,6 +65,7 @@ url.workspace = true
 webpki-roots.workspace = true
 
 [dev-dependencies]
+orch-translator-responses-messages.workspace = true
 orch-plugin.workspace = true
 axum.workspace = true
 orch-adapter-claude-code.workspace = true
@@ -73,6 +74,7 @@ orch-adapter-fake.workspace = true
 orch-executor-orch.workspace = true
 orch-protocol-anthropic-messages.workspace = true
 orch-protocol-openai-responses.workspace = true
+orch-protocol-google-interactions.workspace = true
 orch-testkit.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true

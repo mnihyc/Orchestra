@@ -664,7 +664,7 @@ impl Engine {
                         Outgoing::new(
                             ids::turn_interrupt(turn.id),
                             machine,
-                            SerialKey::Thread(*id),
+                            SerialKey::None,
                             &TurnInterrupt {
                                 thread_id: *id,
                                 turn_id: turn.id,
@@ -863,6 +863,7 @@ impl Engine {
             self.inner
                 .commands
                 .issue(Outgoing {
+                    content_transit: row.content_transit,
                     authority: None,
                     id: row.id,
                     machine: row.machine_id,
@@ -915,6 +916,7 @@ impl Engine {
                 link::insert_command(
                     &mut tx,
                     &link::NewCommand {
+                        content_transit: previous.content_transit,
                         id,
                         machine_id: previous.machine_id,
                         kind: &previous.kind,
@@ -943,6 +945,7 @@ pub(crate) async fn persist(
     link::insert_command(
         conn,
         &link::NewCommand {
+            content_transit: command.content_transit,
             id: command.id,
             machine_id: command.machine,
             kind: command.kind.as_str(),

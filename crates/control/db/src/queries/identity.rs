@@ -1126,10 +1126,11 @@ pub struct ApiTokenRow {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-/// The API token whose hash is `token_hash`, where it is neither revoked
+/// The API token whose identity and hash both match, where it is neither revoked
 /// nor expired at `now`. Its last use is noted when another action is not using it.
-pub async fn api_token_by_hash(
+pub async fn api_token_by_identity(
     conn: &mut Conn,
+    key_id: Id,
     token_hash: &[u8],
     now: DateTime<Utc>,
 ) -> Result<Option<ApiTokenRow>, DbError> {
@@ -1141,7 +1142,7 @@ pub async fn api_token_by_hash(
             UPDATE api_tokens SET last_used_at = $2
             WHERE id IN (
                 SELECT id FROM api_tokens
-                WHERE token_hash = $1 AND revoked_at IS NULL
+                WHERE id=$3 AND token_hash = $1 AND revoked_at IS NULL
                   AND (expires_at IS NULL OR expires_at > $2)
                 FOR NO KEY UPDATE SKIP LOCKED
             ) RETURNING id, user_id, scopes, operation_scope, node_id, expires_at
@@ -1149,12 +1150,13 @@ pub async fn api_token_by_hash(
          SELECT * FROM touched
          UNION ALL
          SELECT id, user_id, scopes, operation_scope, node_id, expires_at FROM api_tokens
-         WHERE token_hash = $1 AND revoked_at IS NULL
+         WHERE id=$3 AND token_hash = $1 AND revoked_at IS NULL
            AND (expires_at IS NULL OR expires_at > $2)
            AND NOT EXISTS (SELECT 1 FROM touched)",
     )
     .bind(token_hash)
     .bind(now)
+    .bind(key_id)
     .fetch_optional(conn)
     .await?)
 }
@@ -2778,10 +2780,10 @@ pub mod testing {
     /// An API token of `user` that never expires and may do all its user may.
     pub async fn insert_api_token(
         conn: &mut Conn,
+        id: Id,
         user: Id,
         token_hash: &[u8],
     ) -> Result<Id, DbError> {
-        let id = orch_types::new_id();
         sqlx::query(
             "INSERT INTO api_tokens (id, user_id, name, token_hash) VALUES ($1, $2, 'test', $3)",
         )
@@ -3791,7 +3793,7 @@ mod tests {
             .execute(&mut *conn)
             .await
             .unwrap();
-        let found = api_token_by_hash(&mut conn, b"h", now)
+        let found = api_token_by_identity(&mut conn, token, b"h", now)
             .await
             .unwrap()
             .unwrap();
@@ -3800,7 +3802,7 @@ mod tests {
             (token, ada, vec!["*".to_owned()])
         );
         assert_eq!(
-            api_token_by_hash(&mut conn, b"h", now + Duration::days(2))
+            api_token_by_identity(&mut conn, token, b"h", now + Duration::days(2))
                 .await
                 .unwrap(),
             None
@@ -3810,7 +3812,12 @@ mod tests {
             .execute(&mut *conn)
             .await
             .unwrap();
-        assert_eq!(api_token_by_hash(&mut conn, b"h", now).await.unwrap(), None);
+        assert_eq!(
+            api_token_by_identity(&mut conn, token, b"h", now)
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

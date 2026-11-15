@@ -7,6 +7,7 @@
  * shown off with the server's own reason and is never put in place of the one that was asked for. What the thread
  * then runs on is told in its head.
  */
+import { ModelTranslation } from '@/features/models/ModelTranslation';
 import { TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { choiceOption } from '@/i18n/choices';
@@ -113,6 +114,7 @@ export function ArrangementSection({ resolved, refreshing, onChange }: { resolve
         onValueChange={onChange}
         options={options}
       /></ChoiceField>
+      <ModelTranslation value={resolved.arrangements.find((row) => row.type === resolved.arrangement)?.entry.isolation.translation ?? first?.entry.isolation.translation} />
     </div>
   );
 }
