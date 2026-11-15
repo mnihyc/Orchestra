@@ -245,6 +245,7 @@ async fn native_skill_sources_keep_actual_environment_or_host_raw_origin_and_onc
                     build: old.build,
                     blobs: old.blobs.clone(),
                     cache: crate::cache::Cache::new(&old.config),
+                    metrics_listener_failed: old.metrics_listener_failed.clone(),
                     host_ports: old.host_ports.clone(),
                     builtin_sources: old.builtin_sources.clone(),
                 }),

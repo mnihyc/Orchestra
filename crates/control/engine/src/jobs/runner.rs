@@ -254,7 +254,6 @@ fn persistence_column(value: &str) -> Option<&'static str> {
         "error",
         "execution_revision",
         "executor",
-        "files_end_manifest",
         "id",
         "import_fidelity",
         "import_report",
@@ -351,7 +350,10 @@ fn persistence_facts(error: &orch_db::DbError) -> PersistenceFacts {
             facts.category = "transaction_retry";
             (None, None)
         }
-        DbError::Other(error) => {
+        DbError::Other(error)
+        | DbError::Timeout {
+            source: orch_db::pool::DatabaseTimeout { source: error, .. },
+        } => {
             if let Some(database) = error.as_database_error() {
                 facts.column = database
                     .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()

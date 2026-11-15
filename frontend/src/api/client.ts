@@ -15,7 +15,7 @@
 import createClient, { type Client } from 'openapi-fetch';
 import { createStore, type StoreApi } from 'zustand/vanilla';
 
-import type { AuthResult, ErrorCode, MissingAccess, NodeRef, paths, Problem, SignInProof } from '@/generated/api-types';
+import type { AuthResult, DatabaseWait, ErrorCode, MissingAccess, NodeRef, paths, Problem, SignInProof } from '@/generated/api-types';
 import { NetworkError, sendUntilSilent } from '@/lib/requests';
 import { openingId } from '@/lib/opening';
 import { apiErrorSentence, fieldErrorSentence } from '@/i18n/errors';
@@ -135,6 +135,22 @@ export class ApiError extends Error {
     return (this.extra('request.invalid')?.errors ?? this.extra('request.value_refused')?.errors ?? this.extra('conflict.exists')?.errors ?? [])
       .map((fault) => ({ ...fault, message: fieldErrorSentence(fault.message) }));
   }
+}
+
+/** A native timeout receipt belongs only to the request whose error carries it. */
+export function databaseWaitOf(error: unknown): DatabaseWait | null {
+  if (!(error instanceof ApiError) || error.code !== 'internal' || error.status < 500) return null;
+  return readDatabaseWait(error.problem.database_wait, error.requestId);
+}
+
+function readDatabaseWait(wait: unknown, requestId: string): DatabaseWait | null {
+  if (!isRecord(wait)) return null;
+  const phase = wait.phase;
+  const limit = wait.applied_limit_ms;
+  if (phase !== 'acquire' && phase !== 'statement' && phase !== 'idle_transaction') return null;
+  if (!(limit === null || (typeof limit === 'number' && Number.isSafeInteger(limit) && limit > 0))) return null;
+  if (wait.service !== 'api' || typeof wait.occurrence_id !== 'string' || wait.occurrence_id === '' || wait.occurrence_id !== requestId) return null;
+  return { phase, applied_limit_ms: limit, service: wait.service, occurrence_id: wait.occurrence_id };
 }
 
 /** Whether the invitation's maker can no longer authorize its grant. */

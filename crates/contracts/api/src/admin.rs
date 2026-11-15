@@ -311,6 +311,14 @@ pub enum SystemComponentName {
     Database,
 }
 
+/// A diagnosed operational issue of a service that can still answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemComponentIssue {
+    /// The optional metrics listener could not bind; the API continues serving.
+    MetricsListenerUnavailable,
+}
+
 /// How one part of the system fares.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SystemComponent {
@@ -320,6 +328,9 @@ pub struct SystemComponent {
     pub ok: bool,
     /// What is wrong, where something is.
     pub detail: Option<String>,
+    /// A known operational issue, separate from the component's own diagnostic text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue: Option<SystemComponentIssue>,
     /// When it last reported.
     pub seen_at: Option<Time>,
 }
