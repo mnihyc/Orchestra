@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-db --lib -- queries::hierarchy::tests::
+test -p orch-api-core --test nodes_lists --test realtime_feeds --test hierarchy_native_scopes

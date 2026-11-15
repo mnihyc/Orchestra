@@ -572,6 +572,20 @@ impl Inner {
                     self.tell_meta_changed(request_id)
                 }
                 Some(sequences::UserNotice::Event { users, event }) => {
+                    if matches!(
+                        event.get("what").and_then(serde_json::Value::as_str),
+                        Some(
+                            "read_state"
+                                | "continuation_read_state"
+                                | "subscription"
+                                | "chat_state"
+                                | "chat"
+                        )
+                    ) || event.get("what").and_then(serde_json::Value::as_str) == Some("state")
+                        && event.get("key").and_then(serde_json::Value::as_str) == Some("sidebar")
+                    {
+                        self.ephemeral.hierarchy_readers_changed(&users);
+                    }
                     self.tell_connections(&users, &event);
                 }
                 None => {}
