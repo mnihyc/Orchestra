@@ -17,7 +17,7 @@ const compiler = vi.hoisted(() => {
   fonts: vi.fn(),
   };
 });
-vi.mock('@/api/client', () => ({ assetBytes: () => Promise.resolve(new Uint8Array([1, 2, 3])) }));
+vi.mock('@/api/client', async (loadOriginal) => ({ ...await loadOriginal<object>(), assetBytes: () => Promise.resolve(new Uint8Array([1, 2, 3])) }));
 vi.mock('@vedivad/typst-web-service', () => ({ TypstProject: {
   create: () => Promise.resolve({
     addFont: compiler.fonts,

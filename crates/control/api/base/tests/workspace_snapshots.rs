@@ -1655,3 +1655,56 @@ async fn a_snapshot_whose_machine_is_gone_when_the_job_runs_fails_with_why() {
         SnapshotState::Failed
     );
 }
+
+#[tokio::test]
+async fn an_instruction_preview_distinguishes_a_missing_source_file_from_refused_reads_and_an_empty_version()
+ {
+    let site = Site::new().await;
+    let empty = snapshot_scopes::copied(
+        &site,
+        Some(site.thread),
+        vec![("AGENTS.md".into(), Vec::new())],
+    )
+    .await;
+    let read = site
+        .app()
+        .call(SnapshotFileContentGet, &[&empty])
+        .token(&site.ada.token)
+        .query(&SnapshotPathQuery {
+            path: "AGENTS.md".into(),
+        })
+        .header("Range", "bytes=0-1023")
+        .send_bytes()
+        .await;
+    assert_eq!(read.status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(read.headers["content-range"], "bytes */0");
+    assert_eq!(
+        read.headers["etag"].to_str().unwrap(),
+        format!("\"{}\"", Hash::of(b""))
+    );
+    let absent = snapshot_scopes::copied(&site, Some(site.thread), Vec::new()).await;
+    let missing = site
+        .app()
+        .call(SnapshotFileContentGet, &[&absent])
+        .token(&site.ada.token)
+        .query(&SnapshotPathQuery {
+            path: "AGENTS.md".into(),
+        })
+        .send_bytes()
+        .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    let problem: serde_json::Value = serde_json::from_slice(&missing.raw).unwrap();
+    assert_eq!(problem["reason"], "not_found");
+    let refused = site
+        .app()
+        .call(SnapshotFileContentGet, &[&absent])
+        .token(&site.eve.token)
+        .query(&SnapshotPathQuery {
+            path: "AGENTS.md".into(),
+        })
+        .send_bytes()
+        .await;
+    assert!(!refused.status.is_success());
+    let problem: serde_json::Value = serde_json::from_slice(&refused.raw).unwrap();
+    assert_ne!(problem["reason"], "not_found");
+}
