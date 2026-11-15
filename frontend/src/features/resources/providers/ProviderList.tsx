@@ -24,7 +24,7 @@ import { providerLabels } from './labels';
 import { ResourceHint, ResourceName } from '@/features/resource-facts/ResourceFacts';
 import { ResourceList, useSearchText } from '@/features/resources/ResourceList';
 import { oneOf } from '@/features/resources/search';
-import type { Provider } from '@/generated/api-types';
+import type { Provider as FullProvider, ProviderListRow } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
 import { useNow } from '@/lib/time';
 import { Button } from '@/ui/Button';
@@ -37,12 +37,14 @@ import { Tooltip } from '@/ui/Tooltip';
 import { UpdateDialog } from '@/features/fleet/UpdateDialog';
 import { RuntimeChange } from '@/features/resources/TechnicalValue';
 
+type ProviderTarget = FullProvider | ProviderListRow;
+
 export { PROVIDER_STATUSES, PROVIDER_VIEWS, type ProviderView, type ProvidersSearch };
 
 /** How many of a plan's windows a row draws: what fits beside the other columns, and the most urgent are first. */
 const WINDOWS_IN_A_ROW = 2;
 
-export function ProviderLink({ provider, label = provider.name }: { provider: Pick<Provider, 'id' | 'name'> & Partial<Provider>; label?: string }) {
+export function ProviderLink({ provider, label = provider.name }: { provider: Pick<ProviderTarget, 'id' | 'name'> & Partial<ProviderTarget>; label?: string }) {
   return (
     <span className="flex min-w-0 flex-col gap-0.5"><ResourceName subject={{ kind: 'provider', provider }} asChild><Link to="/resources/providers/$id" params={{ id: provider.id }} className="min-w-0 truncate font-medium text-text hover:underline">
       {label}
@@ -51,7 +53,7 @@ export function ProviderLink({ provider, label = provider.name }: { provider: Pi
 }
 
 /** A provider's standing as a dot and one phrase. */
-export function ProviderStatusText({ provider, compact = false }: { provider: Provider; compact?: boolean }) {
+export function ProviderStatusText({ provider, compact = false }: { provider: ProviderTarget; compact?: boolean }) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
   const timeZone = useAppearance((state) => state.timeZone);
@@ -61,7 +63,7 @@ export function ProviderStatusText({ provider, compact = false }: { provider: Pr
 }
 
 /** A unit's connector name is an implementation id; its readable host is where the provider runs. */
-export function ProviderLocation({ provider }: { provider: Provider }) {
+export function ProviderLocation({ provider }: { provider: ProviderTarget }) {
   const { t } = useTranslation();
   const host = provider.runtime_support?.lifecycle === 'attach' ? null : provider.runtime?.host;
   if (host) return <ResourceName subject={{ kind: 'host', host }} asChild><Link to="/resources/hosts/$id" params={{ id: host.id }} className="block max-w-36 truncate rounded-sm text-text-muted hover:underline">{host.name}</Link></ResourceName>;
@@ -80,7 +82,7 @@ export function ProviderList({ search, onSearch }: { search: ProvidersSearch; on
 
   const places = useKnownPlaces({ trees: false });
 
-  const columns = (rows: readonly Provider[]): Column<Provider>[] => {
+  const columns = (rows: readonly ProviderTarget[]): Column<ProviderTarget>[] => {
     const labels = providerLabels(rows, places);
     return [
     {
@@ -145,7 +147,7 @@ export function ProviderList({ search, onSearch }: { search: ProvidersSearch; on
       from: 'xl',
       align: 'end',
       className: 'text-right tabular-nums',
-      cell: (provider) => provider.models.length,
+      cell: (provider) => provider.models_count,
     },
   ]; };
 

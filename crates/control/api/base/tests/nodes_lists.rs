@@ -52,6 +52,79 @@ async fn tree(world: &World) -> Tree {
 }
 
 #[tokio::test]
+async fn a_hierarchy_branch_pages_its_children_without_loading_other_branches() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let query: OrgTreeGetQuery =
+        serde_json::from_value(serde_json::json!({"parent_id":t.web,"limit":1})).unwrap();
+    let first = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.boss.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(first.readable().len(), 1);
+    assert_eq!(first.readable()[0].parent_id, Some(t.web));
+    let cursor = first
+        .next_cursor
+        .clone()
+        .expect("the other child has a continuation");
+    let second_query: OrgTreeGetQuery =
+        serde_json::from_value(serde_json::json!({"parent_id":t.web,"limit":1,"cursor":cursor}))
+            .unwrap();
+    let second = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.boss.token)
+        .query(&second_query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(second.seq, first.seq);
+    assert_eq!(second.readable().len(), 1);
+    assert_ne!(first.readable()[0].id, second.readable()[0].id);
+    assert_eq!(second.readable()[0].parent_id, Some(t.web));
+    assert!(second.complete);
+    let wrong: OrgTreeGetQuery =
+        serde_json::from_value(serde_json::json!({"parent_id":t.acme,"cursor":first.next_cursor}))
+            .unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(OrgTreeGet, &[&t.acme])
+            .token(&t.boss.token)
+            .query(&wrong)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::RequestInvalid
+    );
+}
+
+#[tokio::test]
+async fn a_tree_page_size_can_exceed_the_shipped_delta_threshold() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let query = OrgTreeGetQuery {
+        limit: Some(u32::try_from(TREE_SYNC_MAX_CHANGES + 1).unwrap()),
+        ..Default::default()
+    };
+    let reply = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.boss.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert!(reply.complete);
+    assert_eq!(reply.readable().len(), 5);
+}
+
+#[tokio::test]
 async fn a_tree_holds_every_node_the_caller_may_view_with_its_marks() {
     let world = World::new().await;
     let t = tree(&world).await;
@@ -161,6 +234,7 @@ async fn a_full_tree_pages_past_the_delta_bound_and_keeps_its_initial_sequence()
         .call(OrgTreeGet, &[&t.acme])
         .token(&t.dan.token)
         .query(&OrgTreeGetQuery {
+            parent_id: None,
             since: Some(seq),
             ..Default::default()
         })
@@ -300,6 +374,7 @@ async fn a_tree_since_a_sequence_holds_what_changed_and_marks_what_is_gone_from_
         .call(OrgTreeGet, &[&t.acme])
         .token(&t.dan.token)
         .query(&OrgTreeGetQuery {
+            parent_id: None,
             since: Some(first.seq),
             ..OrgTreeGetQuery::default()
         })
@@ -330,6 +405,7 @@ async fn a_tree_since_a_sequence_holds_what_changed_and_marks_what_is_gone_from_
         .call(OrgTreeGet, &[&t.acme])
         .token(&t.dan.token)
         .query(&OrgTreeGetQuery {
+            parent_id: None,
             since: Some(since.seq),
             ..OrgTreeGetQuery::default()
         })
@@ -1033,4 +1109,89 @@ async fn the_audit_trail_of_a_place_includes_what_is_below_it_and_is_for_its_aud
     .await
     .ok();
     assert!(none.items.is_empty());
+}
+
+#[tokio::test]
+async fn fifty_thousand_places_open_as_one_bounded_first_level_with_folded_facts() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    sqlx::query("INSERT INTO nodes(id,kind,parent_id,org_id,path,name,owner_id,created_by,created_at,updated_at)
+        SELECT id,'project',$1,$2,ARRAY[$2,$1,id], 'Nested ' || n,$3,$3,$4,$4
+        FROM (SELECT gen_random_uuid() id,n FROM generate_series(1,50000) n) made")
+        .bind(t.web).bind(t.acme).bind(t.boss.id()).bind(world.now())
+        .execute(&mut *world.conn().await).await.unwrap();
+    let reply = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(
+            &serde_json::from_value::<OrgTreeGetQuery>(serde_json::json!({"parent_id":t.acme}))
+                .unwrap(),
+        )
+        .send()
+        .await
+        .ok();
+    assert_eq!(reply.readable().len(), 1);
+    let wire = serde_json::to_value(&reply).unwrap();
+    assert_eq!(wire["nodes"][0]["folded"]["children"], 50002);
+    assert!(serde_json::to_vec(&reply).unwrap().len() < 120_000);
+    assert!(reply.complete);
+}
+
+#[tokio::test]
+async fn a_deep_address_returns_its_ancestors_without_reading_siblings() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let mut parent = t.web;
+    let mut expected = vec![t.acme, t.web];
+    for index in 0..65 {
+        parent = make_project(&world, &t.boss, parent, &format!("Folder {index}"))
+            .await
+            .base
+            .id;
+        expected.push(parent);
+    }
+    let reply = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(
+            &serde_json::from_value::<OrgTreeGetQuery>(serde_json::json!({"path_to":parent}))
+                .unwrap(),
+        )
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        reply
+            .readable()
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(!reply.readable().iter().any(|row| row.id == t.topics[1]));
+}
+
+#[tokio::test]
+async fn a_picker_search_finds_an_unopened_place_with_its_authorized_path() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let reply = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(
+            &serde_json::from_value::<OrgTreeGetQuery>(
+                serde_json::json!({"q":"Web / Billing","below_id":t.web,"kind":"topic","limit":1}),
+            )
+            .unwrap(),
+        )
+        .send()
+        .await
+        .ok();
+    assert_eq!(reply.readable().len(), 1);
+    assert_eq!(reply.readable()[0].name, "Billing");
+    let wire = serde_json::to_value(&reply).unwrap();
+    assert_eq!(wire["ancestors"].as_array().unwrap().len(), 2);
 }

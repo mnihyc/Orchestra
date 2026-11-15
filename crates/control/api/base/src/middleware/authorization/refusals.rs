@@ -171,8 +171,10 @@ pub async fn missing_access(
                 .map(|permission| permission.as_str().to_owned())
                 .collect(),
             options: missing.options.as_ref().map(|options| AccessOptions {
+                purposes: options.purposes.clone(),
                 models: options.models.clone(),
                 services: options.services.clone(),
+                purposes: options.purposes.clone(),
                 efforts: options.efforts.clone(),
                 r#where: options.r#where.clone(),
             }),

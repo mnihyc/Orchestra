@@ -21,7 +21,7 @@ vi.mock('@/api/auth', async (load) => ({ ...await load<typeof Auth>(),
   meQuery: { queryKey: ['profile-help-me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada')) },
 }));
 vi.mock('@/features/resources/trail', async (load) => ({ ...await load<typeof Trail>(), useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 beforeEach(() => { vi.clearAllMocks(); });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 
