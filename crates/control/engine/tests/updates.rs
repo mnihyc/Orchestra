@@ -68,6 +68,274 @@ async fn queue(world: &World, draft: orch_engine::updates::Draft) -> jobs::JobRo
     row
 }
 
+async fn pending_mount_environments(world: &World, mount: Id) -> usize {
+    let mut conn = world.pool.acquire().await.unwrap();
+    let facts = orch_engine::resource_facts::target_dependents(
+        &mut conn,
+        &orch_api_contract::resource_facts::FactTarget {
+            object: orch_access_contract::decisions::ObjectRef {
+                kind: orch_access_contract::permissions::ObjectKind::Mount,
+                id: mount,
+            },
+            model_id: None,
+        },
+        Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    let applications = orch_engine::resource_facts::applications::read(
+        &world.engine(),
+        &mut conn,
+        orch_access_contract::permissions::ObjectKind::Mount,
+        &facts,
+    )
+    .await
+    .unwrap();
+    if !applications.complete {
+        let observed: Vec<(String, Option<String>, bool, bool, Option<i64>, bool)> = sqlx::query_as(
+            "SELECT r.state,e.status,i.mount_fingerprints IS NOT NULL,
+              COALESCE(i.mount_fingerprints ? $1,false),
+              (SELECT jsonb_array_length(c.body->'mounts')::bigint FROM commands c
+                WHERE c.kind='node.runtime.create' AND c.state='succeeded'
+                  AND c.body->>'runtime_id'=r.id::text AND jsonb_typeof(c.body->'mounts')='array'
+                ORDER BY c.created_at DESC,c.id DESC LIMIT 1),
+              EXISTS(SELECT 1 FROM jobs j WHERE j.environment_id=e.id AND j.state IN ('queued','running')
+                AND j.kind IN ('environment_provision','environment_recreate','environment_move','environment_remove'))
+              FROM runtimes r LEFT JOIN environments e ON e.id=r.environment_id
+              LEFT JOIN runtime_resource_inputs i ON i.runtime_id=r.id
+              WHERE r.state='running' AND r.lost_at IS NULL AND r.environment_id IS NOT NULL",
+        )
+        .bind(mount.to_string())
+        .fetch_all(&mut *conn)
+        .await
+        .unwrap();
+        panic!(
+            "native mount facts incomplete; dependencies_complete={}; (runtime state,environment state,receipt known,resource recorded,accepted creation mounts,lifecycle active)={observed:?}",
+            facts.dependents_complete
+        );
+    }
+    applications
+        .groups
+        .iter()
+        .flat_map(|group| group.members())
+        .filter(|(_, object)| {
+            object.kind == orch_access_contract::permissions::ObjectKind::Environment
+        })
+        .map(|(_, object)| object.id)
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
+#[tokio::test]
+async fn a_mount_change_stays_pending_through_a_same_unit_restart_and_clears_after_the_real_update_applies_it()
+ {
+    use orch_access_contract::{decisions::ObjectRef, permissions::ResourceKind};
+    use orch_authz::ownership::{NewAccess, start_resource};
+    use orch_db::queries::resources::mounts::{self as mounts, LocationRow, MountRow};
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "mount-application", 16_384).await;
+    let template = template(&world).await;
+    // Both updates attach through the running unit's existing connector.
+    let (environment, _, _unit) = running(&world, &host, template, "Mount application").await;
+    let mount = orch_types::new_id();
+    let mut conn = world.pool.acquire().await.unwrap();
+    sqlx::query("UPDATE hosts SET drivers=jsonb_set(jsonb_set(drivers,'{docker,mounts}','\"placed\"'::jsonb),'{docker,private_views}','true'::jsonb),storages=$2 WHERE id=$1")
+        .bind(host.id).bind(json!([{"name":"fast","default":true,"capacity_gb":100,"free_gb":80,"private_views":true}]))
+        .execute(&mut *conn).await.unwrap();
+    mounts::insert(
+        &mut conn,
+        &MountRow {
+            id: mount,
+            name: "application-data".into(),
+            description: String::new(),
+            org_id: Some(world.root),
+            home_id: Some(world.root),
+            owner_id: Some(world.ada),
+            target: "/data/original".into(),
+            read_only: true,
+            enabled: true,
+            default_fate: "as_is".into(),
+            revision: 1,
+        },
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    start_resource(
+        &mut conn,
+        ObjectRef {
+            kind: ResourceKind::Mount.into(),
+            id: mount,
+        },
+        world.ada,
+        NewAccess::OnlyMe,
+        Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    mounts::set_location(
+        &mut conn,
+        &LocationRow {
+            mount_id: mount,
+            machine_id: host.machine,
+            host_id: Some(host.id),
+            host_name: Some("mount-application".into()),
+            kind: "path".into(),
+            source: "/srv/application".into(),
+            storage: None,
+            data_kind: None,
+            created_by: world.ada,
+            created_at: world.clock.now(),
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE environments SET config=$2 WHERE id=$1")
+        .bind(environment)
+        .bind(json!({"env.mounts":{(mount.to_string()):"private"}}))
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let initial = queue(
+        &world,
+        draft(&world, environment, UpdatePreflightReason::Update).await,
+    )
+    .await;
+    assert_eq!(wait_over(&world, initial.id).await.0, "succeeded");
+    let before = envs::live_runtime(&mut world.pool.acquire().await.unwrap(), environment)
+        .await
+        .unwrap()
+        .unwrap();
+    let installed: (bool, bool) = sqlx::query_as(
+        "SELECT r.state='running',COALESCE(i.mount_fingerprints ? $2,false)
+         FROM runtimes r LEFT JOIN runtime_resource_inputs i ON i.runtime_id=r.id WHERE r.id=$1",
+    )
+    .bind(before.id)
+    .bind(mount.to_string())
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    let created = host
+        .calls()
+        .into_iter()
+        .find(|call| {
+            call.kind == CommandKind::NodeRuntimeCreate
+                && call.body["runtime_id"] == json!(before.id)
+        })
+        .unwrap();
+    assert!(
+        created.body["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |entry| entry["resource_id"] == json!(mount) && entry["target"] == "/data/original"
+            ),
+        "the actual accepted creation carried the original mount; mounts={}, associated={}",
+        created.body["mounts"].as_array().unwrap().len(),
+        created.body["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.get("resource_id").is_some())
+            .count()
+    );
+    assert_eq!(
+        installed,
+        (true, true),
+        "the running native creation must record this mount before its change"
+    );
+    assert_eq!(
+        pending_mount_environments(&world, mount).await,
+        0,
+        "an applied mount is not a pending change"
+    );
+    sqlx::query("UPDATE mounts SET target='/data/updated',revision=revision+1 WHERE id=$1")
+        .bind(mount)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    world.engine().mount_resource_changed(mount).await.unwrap();
+    let updates = world
+        .engine()
+        .pending_runtime_updates(&mut world.pool.acquire().await.unwrap(), &[before.id])
+        .await
+        .unwrap();
+    assert!(
+        updates[&before.id]
+            .iter()
+            .any(|change| change.name == "Mount attachments"),
+        "the native update observer must see the changed mount; reported update kinds: {:?}",
+        updates[&before.id]
+            .iter()
+            .map(|change| &change.name)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(pending_mount_environments(&world, mount).await, 1);
+    let mut tx = world.pool.begin().await.unwrap();
+    let principal = Principal::load(
+        &mut tx,
+        Caller::session(world.ada),
+        Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    let restart = world
+        .engine()
+        .queue_restart(
+            &mut tx,
+            &principal,
+            environment,
+            orch_api_contract::environment::EnvironmentRestartMode::Wait,
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    world.engine().kick();
+    assert_eq!(wait_over(&world, restart.id).await.0, "succeeded");
+    assert_eq!(
+        envs::live_runtime(&mut world.pool.acquire().await.unwrap(), environment)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        before.id
+    );
+    assert_eq!(
+        pending_mount_environments(&world, mount).await,
+        1,
+        "Restart did not apply another mount definition"
+    );
+    let change = draft(&world, environment, UpdatePreflightReason::Update).await;
+    assert!(
+        change
+            .updates
+            .iter()
+            .any(|entry| entry.name == "Mount attachments")
+    );
+    let update = queue(&world, change).await;
+    assert_eq!(wait_over(&world, update.id).await.0, "succeeded");
+    assert_eq!(pending_mount_environments(&world, mount).await, 0);
+    let current = envs::live_runtime(&mut world.pool.acquire().await.unwrap(), environment)
+        .await
+        .unwrap()
+        .unwrap();
+    let definition =
+        jobs::changes::definition(&mut world.pool.acquire().await.unwrap(), current.id)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(
+        definition["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["target"] == "/data/updated")
+    );
+}
+
 #[tokio::test]
 async fn a_verified_template_change_names_both_choices_once_without_claiming_an_ordinary_recreate()
 {
@@ -1271,4 +1539,32 @@ async fn only_an_owners_on_start_policy_updates_a_stopped_unit_and_a_failure_sta
         old
     );
     world.engine().stop();
+}
+
+#[tokio::test]
+async fn runtime_updates_keep_longer_and_shorter_health_check_times_with_clock_bounds() {
+    let world = World::new().await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    for seconds in [1, 3_601] {
+        let given = orch_api_contract::forks::ChangeOptions {
+            wait_minutes: Some(1_441),
+            verify_timeout_secs: Some(seconds),
+            ..Default::default()
+        };
+        let applied =
+            orch_engine::updates::options(&mut conn, orch_settings::Place::System, Some(&given))
+                .await
+                .unwrap();
+        assert_eq!(applied.wait_minutes, 1_441);
+        assert_eq!(applied.verify_timeout_secs, seconds);
+    }
+    let outside = orch_api_contract::forks::ChangeOptions {
+        verify_timeout_secs: Some(i64::MAX),
+        ..Default::default()
+    };
+    assert!(matches!(
+        orch_engine::updates::options(&mut conn, orch_settings::Place::System, Some(&outside))
+            .await,
+        Err(UpdateError::Invalid(_))
+    ));
 }

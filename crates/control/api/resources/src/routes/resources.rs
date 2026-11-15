@@ -295,6 +295,9 @@ pub mod host_storage;
 #[path = "resources/hosts.rs"]
 pub mod hosts;
 
+#[path = "resources/lifecycle_notifications.rs"]
+pub mod lifecycle_notifications;
+
 #[path = "resources/impact.rs"]
 pub mod impact;
 

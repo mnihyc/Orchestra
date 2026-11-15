@@ -19,8 +19,8 @@ use orch_blob_local::LocalBlobStore;
 use orch_db::queries::agent_history as rows;
 use orch_engine::config::EngineConfig;
 use orch_link_contract::commands::{
-    AgentHistoryManageResult, Command, CommandError, CommandKind as K, CommandResult, ErrorCode,
-    FsMaterializeResult, SessionMode,
+    AgentHistoryManageResult, Command, CommandError, CommandKind as K, CommandResult, Empty,
+    ErrorCode, FsMaterializeResult, SessionMode, TurnStart,
 };
 use orch_link_contract::events::TurnOutcome;
 use orch_types::{Clock, Id, new_id};
@@ -36,6 +36,7 @@ fn without_sweeps(config: &mut EngineConfig) {
 }
 
 async fn quiet() -> World {
+    terminal_diagnostics();
     World::from_setup(Setup {
         tune: Some(without_sweeps),
         ..Setup::default()
@@ -44,6 +45,7 @@ async fn quiet() -> World {
 }
 
 async fn quiet_with_clock(clock: Arc<dyn Clock>) -> World {
+    terminal_diagnostics();
     World::from_setup(Setup {
         clock: Some(clock),
         tune: Some(without_sweeps),
@@ -53,12 +55,71 @@ async fn quiet_with_clock(clock: Arc<dyn Clock>) -> World {
 }
 
 async fn quiet_observed() -> World {
+    terminal_diagnostics();
     World::from_setup(Setup {
         observed: true,
         tune: Some(without_sweeps),
         ..Setup::default()
     })
     .await
+}
+
+/// Capture only the existing safe terminal phase/category facts when an eventual barrier fails.
+fn terminal_diagnostics() {
+    struct Terminal;
+    impl tracing::Subscriber for Terminal {
+        fn enabled(&self, meta: &tracing::Metadata<'_>) -> bool {
+            meta.target() == "orch_engine::terminal_work"
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            #[derive(Default)]
+            struct Fields {
+                failed: bool,
+                values: Vec<String>,
+            }
+            impl tracing::field::Visit for Fields {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "outcome" {
+                        self.failed = value == "error";
+                    }
+                    if matches!(
+                        field.name(),
+                        "thread" | "phase" | "outcome" | "error_class" | "sqlstate" | "stopped"
+                    ) {
+                        self.values.push(format!("{}={value}", field.name()));
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if matches!(
+                        field.name(),
+                        "thread" | "phase" | "outcome" | "error_class" | "sqlstate" | "stopped"
+                    ) {
+                        self.values.push(format!("{}={value:?}", field.name()));
+                    }
+                }
+            }
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            if fields.failed {
+                eprintln!("Terminal follow-up {}", fields.values.join(" "));
+            }
+        }
+    }
+    static START: std::sync::Once = std::sync::Once::new();
+    START.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(Terminal);
+    });
 }
 
 fn serve_history(world: &World) -> Arc<Mutex<HashSet<String>>> {
@@ -246,21 +307,37 @@ async fn batched_native_observations_preserve_aliases_stale_identity_and_failed_
     world.shutdown().await;
 }
 
-fn serve_native_generations(world: &World, missing: bool) {
+fn serve_native_generations(
+    world: &World,
+    missing: bool,
+    hold_after: Option<Id>,
+) -> Arc<AtomicBool> {
     let missing = Arc::new(AtomicBool::new(missing));
-    world.machine.handler.on(K::SessionOpen, move |command| {
-        let Command::SessionOpen(body) = command else {
-            panic!("the command kind is exact");
-        };
-        let resume = matches!(body.mode, SessionMode::Resume | SessionMode::Adopt);
-        if resume && missing.swap(false, Ordering::SeqCst) {
-            return Err(CommandError::new(
-                ErrorCode::SessionNotFound,
-                "The native history is missing",
-            ));
-        }
-        Ok(CommandResult::SessionOpen(
-            orch_link_contract::commands::SessionOpenResult {
+    for kind in [K::SessionOpen, K::SessionOpenFenced] {
+        let state = Arc::clone(&missing);
+        let handler = Arc::downgrade(&world.machine.handler);
+        world.machine.handler.on(kind, move |command| {
+            let (body, fenced) = match command {
+                Command::SessionOpen(body) => (body, false),
+                Command::SessionOpenFenced(body) => (body.session.as_ref(), true),
+                _ => unreachable!(),
+            };
+            let resume = matches!(body.mode, SessionMode::Resume | SessionMode::Adopt);
+            if resume && state.load(Ordering::SeqCst) {
+                return Err(CommandError::new(
+                    ErrorCode::SessionNotFound,
+                    "The native history is missing",
+                ));
+            }
+            if hold_after.is_some_and(|original| !resume && body.segment_id != original) {
+                state.store(false, Ordering::SeqCst);
+                if let Some(handler) = handler.upgrade() {
+                    handler.hold(K::TurnStart);
+                    handler.hold(K::TurnStartFenced);
+                }
+            }
+            let result = orch_link_contract::commands::SessionOpenResult {
+                mcp: None,
                 native_session_ref: if resume {
                     body.native_session_ref.clone().unwrap()
                 } else {
@@ -270,9 +347,48 @@ fn serve_native_generations(world: &World, missing: bool) {
                 import_report: None,
                 instruction_sources: Vec::new(),
                 approval_reviewer: None,
-            },
-        ))
-    });
+            };
+            Ok(if fenced {
+                CommandResult::SessionOpenFenced(result)
+            } else {
+                CommandResult::SessionOpen(result)
+            })
+        });
+    }
+    missing
+}
+
+/// Only a still-pending executed command can be the native input held for inspection.
+async fn pending_recovery_start(world: &World, thread: Id, original: Id) -> Option<TurnStart> {
+    for (_, command) in world
+        .commands
+        .issued_commands(K::TurnStart.as_str())
+        .into_iter()
+        .chain(world.commands.issued_commands(K::TurnStartFenced.as_str()))
+    {
+        let start = match command.command().unwrap() {
+            Command::TurnStart(start) => start,
+            Command::TurnStartFenced(start) => *start.turn,
+            _ => continue,
+        };
+        if start.thread_id != thread
+            || start.turn_id == original
+            || world.machine.handler.runs_of(command.id) == 0
+        {
+            continue;
+        }
+        if world
+            .commands
+            .as_engine()
+            .status(command.id)
+            .await
+            .unwrap()
+            .is_some_and(|info| info.outcome.is_none())
+        {
+            return Some(start);
+        }
+    }
+    None
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -306,7 +422,7 @@ async fn a_native_only_no_tools_side_keeps_its_needed_cache_after_seven_idle_day
 async fn an_unsaid_handoff_follows_a_resumed_alias_and_only_delivered_notices_are_cleared() {
     let world = quiet().await;
     serve_history(&world);
-    serve_native_generations(&world, false);
+    let _native = serve_native_generations(&world, false, None);
     let (thread, segment) = completed(&world).await;
     let alias = new_id();
     let mut tx = world.pool.begin().await.unwrap();
@@ -957,6 +1073,7 @@ async fn retained_native_creation_and_open_receipts_protect_their_exact_child_hi
     let history = rows::get(&mut conn, segment).await.unwrap().unwrap();
     let opened = NativePrefixOpened {
         session: orch_agent_contract::session::SessionOpened {
+            mcp: None,
             native_session_ref: history.native_session_ref.clone(),
             resumed: false,
             import_report: None,
@@ -980,6 +1097,7 @@ async fn retained_native_creation_and_open_receipts_protect_their_exact_child_hi
     let created = serde_json::to_value(&opened).unwrap();
     let prefix = serde_json::to_value(&opened.prefix).unwrap();
     let resumed = orch_link_contract::commands::SessionOpenResult {
+        mcp: None,
         native_session_ref: history.native_session_ref.clone(),
         resumed: true,
         import_report: None,
@@ -1020,7 +1138,7 @@ async fn adopted_native_history_is_excluded_even_in_a_managed_provider_home() {
 
     let world = quiet_observed().await;
     let removed = serve_history(&world);
-    serve_native_generations(&world, false);
+    let _native = serve_native_generations(&world, false, None);
     let native = "external-native-history";
     let mut descriptor = common::descriptor();
     descriptor["capabilities"]["discover_sessions"] = json!(true);
@@ -1171,7 +1289,7 @@ async fn an_outstanding_native_command_holds_admission_through_a_server_restart(
 async fn recovery(import_neutral: bool, missing: bool, choice: &str) {
     let world = quiet().await;
     serve_history(&world);
-    serve_native_generations(&world, missing);
+    let _native = serve_native_generations(&world, missing, None);
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(LocalBlobStore::open(directory.path()).await.unwrap());
     world.engine().attach_blobs(store.clone());
@@ -1210,9 +1328,34 @@ async fn recovery(import_neutral: bool, missing: bool, choice: &str) {
     world.restart_api().await;
     world.engine().attach_blobs(store.clone());
     let file = choice != "none" && !(import_neutral && choice == "carry");
-    if file {
-        world.machine.handler.hold(K::TurnStart);
-        world.machine.handler.hold(K::TurnStartFenced);
+    let missing_native = serve_native_generations(&world, missing, file.then_some(segment));
+    let accepted = Arc::new(Mutex::new(Vec::<TurnStart>::new()));
+    if missing {
+        // A restored hint first tries the actual native input; its missing session refuses it.
+        for kind in [K::TurnStart, K::TurnStartFenced] {
+            let state = Arc::clone(&missing_native);
+            let accepted = Arc::clone(&accepted);
+            world.machine.handler.on(kind, move |command| {
+                if state.load(Ordering::SeqCst) {
+                    return Err(CommandError::new(
+                        ErrorCode::SessionNotFound,
+                        "The native history is missing",
+                    ));
+                }
+                let (start, reply) = match command {
+                    Command::TurnStart(start) => {
+                        (start.clone(), CommandResult::TurnStart(Empty {}))
+                    }
+                    Command::TurnStartFenced(start) => (
+                        (*start.turn).clone(),
+                        CommandResult::TurnStartFenced(Empty {}),
+                    ),
+                    _ => unreachable!(),
+                };
+                accepted.lock().unwrap().push(start);
+                Ok(reply)
+            });
+        }
     }
     world.machine.handler.on(K::FsMaterialize, |_| {
         Ok(CommandResult::FsMaterialize(FsMaterializeResult {
@@ -1232,32 +1375,19 @@ async fn recovery(import_neutral: bool, missing: bool, choice: &str) {
         .unwrap();
     let held = if file {
         let original = world.turn_starts(thread)[0].turn_id;
-        let mut held = None;
         common::eventually(
             "the recovery start to reach the held native handler",
-            || {
-                held = world
-                    .commands
-                    .issued_commands(K::TurnStart.as_str())
-                    .into_iter()
-                    .chain(world.commands.issued_commands(K::TurnStartFenced.as_str()))
-                    .find_map(|(_, command)| {
-                        if world.machine.handler.runs_of(command.id) == 0 {
-                            return None;
-                        }
-                        let start = match command.command().unwrap() {
-                            Command::TurnStart(start) => start,
-                            Command::TurnStartFenced(start) => *start.turn,
-                            _ => return None,
-                        };
-                        (start.thread_id == thread && start.turn_id != original).then_some(start)
-                    });
-                let reached = held.is_some();
-                async move { reached }
+            || async {
+                !missing_native.load(Ordering::SeqCst)
+                    && pending_recovery_start(&world, thread, original)
+                        .await
+                        .is_some()
             },
         )
         .await;
-        let held = held.unwrap();
+        let held = pending_recovery_start(&world, thread, original)
+            .await
+            .unwrap();
         assert!(
             !held.text.contains("Obsolete recovery context"),
             "{}",
@@ -1281,7 +1411,19 @@ async fn recovery(import_neutral: bool, missing: bool, choice: &str) {
     } else {
         None
     };
-    let next = world.turn_start(thread, 1).await;
+    let next = if missing {
+        common::eventually(
+            "the reconstructed native session to accept its input",
+            || {
+                let ready = !accepted.lock().unwrap().is_empty();
+                async move { ready }
+            },
+        )
+        .await;
+        accepted.lock().unwrap()[0].clone()
+    } else {
+        world.turn_start(thread, 1).await
+    };
     if let Some(held) = held {
         assert_eq!(
             next, held,

@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-api-core --lib
+test -p orch-api-core --test threads_start_source --test workspace_source_scopes --test thread_creator_initial_files_scopes
+test -p orch-engine --test agent_history -- --nocapture
+test -p orch-engine --test updates -- a_mount_change_stays_pending_through_a_same_unit_restart_and_clears_after_the_real_update_applies_it

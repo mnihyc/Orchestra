@@ -409,14 +409,20 @@ pub async fn status(
     };
     type RecordedWork = (Id, Id, Option<Id>, Id, Option<Id>, bool, Json);
     let rows: Vec<RecordedWork> = sqlx::query_as(
-            "SELECT i.id,i.segment_id,s.environment_id,t.input_id,q.author_id,
+            "WITH picked AS (
+                SELECT i.id FROM segments s JOIN items i ON i.segment_id=s.id AND i.thread_id=$1
+                WHERE s.thread_id=$1 AND s.continuation_id=$2 AND i.kind='tool_call'
+                    AND i.payload @? '$.background_tasks.*.task.state ? (@ == \"running\")'
+                UNION SELECT i.id FROM items i WHERE i.thread_id=$1 AND i.segment_id=$3 AND i.kind='tool_call'
+                    AND i.payload @? '$.background_tasks.*.task.state ? (@ == \"lost\")'
+             ) SELECT i.id,i.segment_id,s.environment_id,t.input_id,q.author_id,
              s.ended_at IS NULL AND s.native_session_ref IS NOT NULL,
              jsonb_build_object('background_tasks',i.payload->'background_tasks')
-             FROM items i JOIN segments s ON s.id=i.segment_id
+             FROM picked JOIN items i ON i.id=picked.id JOIN segments s ON s.id=i.segment_id
              JOIN turns t ON t.id=i.turn_id JOIN thread_inputs q ON q.id=t.input_id
-             WHERE i.thread_id=$1 AND s.continuation_id=$2 AND i.kind='tool_call' AND i.payload ? 'background_tasks'
+             WHERE s.continuation_id=$2
              ORDER BY i.seq_created")
-            .bind(row.node_id).bind(row.active_continuation_id).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
+            .bind(row.node_id).bind(row.active_continuation_id).bind(row.current_segment_id).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
     let mut tasks = Vec::new();
     let people = crate::views::People::load(
         conn,
@@ -472,9 +478,12 @@ pub async fn status(
         }
     }
     let held_completions: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(sum(jsonb_array_length(m.payload->'data'->'causes')),0)::bigint FROM thread_inputs q
-             JOIN items m ON q.client_id='background:'||m.id::text
-             WHERE q.thread_id=$1 AND q.continuation_id=$2 AND q.state='pending' AND q.state_detail='background_stopped'")
+            "WITH held AS MATERIALIZED (
+                SELECT CASE WHEN client_id ~ '^background:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    THEN substring(client_id FROM length('background:')+1)::uuid END AS item_id
+                FROM thread_inputs WHERE thread_id=$1 AND continuation_id=$2 AND state='pending' AND state_detail='background_stopped'
+             ) SELECT COALESCE(sum(jsonb_array_length(m.payload->'data'->'causes')),0)::bigint
+             FROM held JOIN items m ON m.id=held.item_id")
             .bind(row.node_id).bind(row.active_continuation_id).fetch_one(&mut *conn).await.map_err(orch_db::DbError::from)?;
     let refresh_deferred = tasks
         .iter()
@@ -1183,11 +1192,7 @@ impl Engine {
         }
         let mut eligible = Vec::new();
         let mut wake_held = false;
-        for task in report
-            .tasks
-            .iter()
-            .take(orch_link_contract::background::SNAPSHOT_COMMANDS)
-        {
+        for task in &report.tasks {
             let Some(item) =
                 threads::item_by_native_ref(unit.conn, segment.id, &task.native_item_ref).await?
             else {
@@ -1425,7 +1430,7 @@ impl Engine {
         let command = crate::commands::Outgoing::new(
             crate::ids::derived("background.interrupt", &[input.id.as_bytes()]),
             machine,
-            orch_link_contract::commands::SerialKey::Thread(thread.node_id),
+            orch_link_contract::commands::SerialKey::None,
             &orch_link_contract::commands::TurnInterrupt {
                 thread_id: thread.node_id,
                 turn_id: wake.origin_turn,
