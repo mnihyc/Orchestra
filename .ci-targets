@@ -1,0 +1,6 @@
+fmt
+test -p orch-settings-contract --lib
+test -p orch-summarizer-contract --lib
+test -p orch-engine --lib -- summaries::
+test -p orch-engine --test goals
+test -p orch-api-core --test summaries

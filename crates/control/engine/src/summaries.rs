@@ -14,7 +14,6 @@ pub mod resource;
 pub mod sources;
 
 pub(crate) use budget::InputBudget;
-pub(crate) use budget::UNKNOWN_WINDOW_TOKENS;
 pub(crate) use estimate::handoff_estimate;
 pub use handoff::{
     Carried, IndexedTranscript, handoff, indexed_transcript, notice as handoff_notice,
@@ -252,6 +251,24 @@ impl Engine {
             .map(|producer| producer.describe().config_schema)
     }
 
+    /// The registered producers and their configuration forms, including the built-in model producer.
+    pub fn summarizer_descriptors(
+        &self,
+    ) -> Vec<orch_summarizer_contract::descriptor::SummarizerDescriptor> {
+        let mut descriptors = vec![orch_summarizer_model::descriptor::descriptor()];
+        descriptors.extend(
+            self.inner
+                .summarizers
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .filter(|(name, _)| name.as_str() != "model")
+                .map(|(_, producer)| producer.describe()),
+        );
+        descriptors.sort_by(|one, other| one.name.cmp(&other.name));
+        descriptors
+    }
+
     fn producer(
         &self,
         chosen: &Choice,
@@ -362,6 +379,14 @@ impl Engine {
             .await
             .map_err(stored_error)?;
         let min = seconds(triggers.as_ref(), "min_interval_secs", MIN_INTERVAL_SECS);
+        let retry_ceiling = setting::<u64>(
+            &mut conn,
+            Place::Node(node),
+            keys::SUMMARY_RETRY_CEILING_SECS,
+        )
+        .await
+        .map_err(stored_error)?
+        .unwrap_or(3600);
         let history = threads::thread(&mut conn, node)
             .await?
             .as_ref()
@@ -388,12 +413,19 @@ impl Engine {
             next_interval(
                 Duration::from_secs(u64::try_from(min).unwrap_or(u64::MAX)),
                 u32::try_from(failures + 1).unwrap_or(u32::MAX),
+                Duration::from_secs(retry_ceiling),
             )
         } else {
             Duration::from_secs(u64::try_from(min).unwrap_or(u64::MAX))
         };
-        let next =
-            self.inner.clock.now() + chrono::Duration::from_std(backoff).map_err(stored_error)?;
+        let next = self
+            .inner
+            .clock
+            .now()
+            .checked_add_signed(
+                chrono::Duration::from_std(backoff).unwrap_or(chrono::Duration::MAX),
+            )
+            .unwrap_or(DateTime::<Utc>::MAX_UTC);
         let mut conn = self.db().acquire().await?;
         sqlx::query("WITH current_history AS (SELECT ($8::uuid IS NULL OR EXISTS(SELECT 1 FROM threads
             WHERE node_id=$1 AND active_continuation_id=$8 AND execution_revision=$9)) AS same)
@@ -486,7 +518,8 @@ impl Engine {
         let configured = chosen.clone();
         let context_tokens = if chosen.kind == "model" {
             let mut config = orch_summarizer_model::descriptor::Config::read(&chosen.config)?;
-            config.context_tokens = budget::context_tokens(&mut conn, &config)
+            let field = budget::activity_field(&config, &fields);
+            config.context_tokens = budget::context_tokens(&mut conn, &config, field)
                 .await
                 .map_err(internal)?;
             let tokens = config.context_tokens;
@@ -850,6 +883,10 @@ fn safe_reason(error: &SummarizeError) -> String {
         SummarizeError::Config(_) => "The summarizer configuration is not usable.".to_owned(),
         SummarizeError::Unsupported(_) => {
             "The chosen summarizer does not write this field.".to_owned()
+        }
+        SummarizeError::Failed { message, .. } if message == orch_summarizer_contract::summarizer::OUTPUT_CUT => {
+            "The summarizer's model used its output allowance before finishing. Raise the summarizer's output allowance or choose another model."
+                .to_owned()
         }
         SummarizeError::Failed { .. } => {
             "The summarizer returned no usable answer; it will try again after the backoff."

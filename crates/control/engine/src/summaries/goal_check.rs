@@ -22,17 +22,8 @@ pub(crate) const GOAL_CHECK: &str = "You judge whether a coding agent has finish
 /// The key of the instruction among the model producer's replacement prompts.
 const PROMPT_KEY: &str = "goal_check";
 
-/// The most tokens the answer may take: a word and a sentence, with room for a longer reason.
-const ANSWER_TOKENS: i64 = 200;
-
-/// The most items a turn may have for it to be read and sent to the helper.
-const TURN_ITEMS_MAX: i64 = 2_000;
-
 /// What says that the older part of a turn was left in the transcript.
 const TURN_START_OMITTED: &str = "(the start of the turn is left out)\n";
-
-/// The most characters of the reason that is kept and told to the agent.
-const REASON_MAX_CHARS: usize = 600;
 
 /// What the helper made of a report.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +47,7 @@ pub(crate) async fn available(conn: &mut orch_db::Conn, node: Id) -> Result<bool
 }
 
 /// Reads the helper's answer: the first word, then the reason.
-pub(crate) fn read_answer(answer: &str) -> Option<Checked> {
+pub(crate) fn read_answer(answer: &str, reason_chars: usize) -> Option<Checked> {
     let mut lines = answer
         .lines()
         .map(str::trim)
@@ -66,7 +57,7 @@ pub(crate) fn read_answer(answer: &str) -> Option<Checked> {
         .collect::<Vec<_>>()
         .join(" ")
         .chars()
-        .take(REASON_MAX_CHARS)
+        .take(reason_chars)
         .collect();
     let word: String = first
         .chars()
@@ -180,9 +171,30 @@ pub(crate) async fn ask(
         .and_then(Option::as_deref)
         .unwrap_or(GOAL_CHECK)
         .to_owned();
-    let budget =
-        super::budget::input_budget(&mut conn, thread, config.provider_id, &config.model_name)
-            .await?;
+    let turn_items = orch_settings::get::<i64>(
+        &mut conn,
+        orch_settings::Place::Node(thread),
+        orch_settings_contract::registry::keys::SUMMARY_GOAL_TURN_ITEMS,
+    )
+    .await?
+    .unwrap_or(2000);
+    let reason_chars = orch_settings::get::<usize>(
+        &mut conn,
+        orch_settings::Place::Node(thread),
+        orch_settings_contract::registry::keys::SUMMARY_GOAL_REASON_CHARS,
+    )
+    .await?
+    .unwrap_or(600);
+    let reasons = super::budget::reasons(&mut conn, &config).await?;
+    let output = config.goal_output_reserve(reasons);
+    let budget = super::budget::input_budget(
+        &mut conn,
+        thread,
+        config.provider_id,
+        &config.model_name,
+        output,
+    )
+    .await?;
     let row = orch_db::queries::threads::thread(&mut conn, thread)
         .await?
         .ok_or_else(|| EngineError::unreadable("the thread is gone"))?;
@@ -215,7 +227,7 @@ pub(crate) async fn ask(
                FROM (SELECT payload_bytes FROM items WHERE turn_id = $1 LIMIT $2) counted",
         )
         .bind(turn)
-        .bind(TURN_ITEMS_MAX + 1)
+        .bind(turn_items.saturating_add(1))
         .fetch_one(&mut *conn)
         .await
         .map_err(orch_db::DbError::from)?,
@@ -230,8 +242,8 @@ pub(crate) async fn ask(
     .unwrap_or(i64::MAX);
     let turn_text = match report.turn_ordinal {
         _ if room == 0 => String::new(),
-        _ if items > TURN_ITEMS_MAX => format!(
-            "(The turn has more than {TURN_ITEMS_MAX} items: too many to send. Judge from the evidence.)"
+        _ if items > turn_items => format!(
+            "(The turn has more than {turn_items} items: too many to send. Judge from the evidence.)"
         ),
         _ if written > readable => {
             "(The turn's messages are too large to read here. Judge from the evidence.)".to_owned()
@@ -272,12 +284,19 @@ pub(crate) async fn ask(
         task: "goal_check",
         resource: None,
     };
-    let request = config.completion(system, input, config.max_output_tokens.max(ANSWER_TOKENS));
+    let reasoning = match host
+        .reasoning(thread, config.provider_id, &config.model_name)
+        .await
+    {
+        Ok(reasoning) => reasoning,
+        Err(error) => return Ok(Checked::Unavailable(super::safe_reason(&error))),
+    };
+    let request = config.completion_with(&reasoning, system, input, config.goal_max_output_tokens);
     let answered = match host.complete(thread, request).await {
         Ok(answer) => answer,
         Err(error) => return Ok(Checked::Unavailable(super::safe_reason(&error))),
     };
-    let read = read_answer(&answered.text);
+    let read = read_answer(&answered.text, reason_chars);
     let mut conn = engine.db().acquire().await?;
     if read.is_some() {
         crate::calls::finish_service(
@@ -305,21 +324,21 @@ mod tests {
     #[test]
     fn the_first_word_decides_and_the_rest_is_the_reason() {
         assert_eq!(
-            read_answer("met\nThe run shows all 212 tests passing."),
+            read_answer("met\nThe run shows all 212 tests passing.", 600),
             Some(Checked::Met)
         );
         assert_eq!(
-            read_answer("not_yet\nNo test output is given.\nRun them."),
+            read_answer("not_yet\nNo test output is given.\nRun them.", 600),
             Some(Checked::NotYet(
                 "No test output is given. Run them.".to_owned()
             ))
         );
         assert_eq!(
-            read_answer("Not yet\nWhy."),
+            read_answer("Not yet\nWhy.", 600),
             Some(Checked::NotYet("Why.".to_owned()))
         );
-        assert_eq!(read_answer("maybe\nsure"), None);
-        assert_eq!(read_answer("  \n "), None);
+        assert_eq!(read_answer("maybe\nsure", 600), None);
+        assert_eq!(read_answer("  \n ", 600), None);
     }
 
     #[test]
