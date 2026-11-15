@@ -253,6 +253,7 @@ pub async fn issue(app: &App, machine: Id, kind: CommandKind, body: &Json) -> Id
     command_rows::insert_command(
         &mut conn,
         &command_rows::NewCommand {
+            native_target: None,
             id,
             machine_id: machine,
             kind: kind.as_str(),
@@ -1471,6 +1472,7 @@ impl Site {
             "bytes_total": 1000, "rate_bps": null, "eta_seconds": null, "message": "reading"
         });
         let event = orch_link::streams::DeliveredEvent {
+            native_opening_id: None,
             seq: 1,
             at: Time::new(self.world.now()),
             kind: "job.progress".to_owned(),
@@ -1616,6 +1618,7 @@ impl Site {
             .upload(self.machine, nil, &written.bytes, PIECE)
             .await;
         let event = orch_link::streams::DeliveredEvent {
+            native_opening_id: None,
             seq: 1,
             at: Time::new(self.world.now()),
             kind: "env.manifest".to_owned(),

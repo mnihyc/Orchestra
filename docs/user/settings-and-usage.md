@@ -52,6 +52,12 @@ The access choice and usage reports use the same readable program names as the
 provider's model editor. **None** means no access program; **Standard** is a
 program when the provider offers and enables it.
 
+An agent program may keep a parameter behind a feature, as Codex does for its
+access program. **Agent features** lists each such feature by the program and the
+parameter it opens. The access program of Codex ships on, so a program that a
+manager enabled for a model is offered in a thread; a place that does not want it
+offered switches the feature off there, and the others keep it.
+
 Model, reasoning effort and parameters apply from the next turn. Steering a
 running turn adds a message and does not change that turn's parameters. Stop,
 change and continue when the new setting must take effect sooner. The provider
