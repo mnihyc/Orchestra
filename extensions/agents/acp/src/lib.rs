@@ -1031,6 +1031,7 @@ impl AgentAdapter for AcpAdapter {
             stderr: launched.stderr.clone(),
             learned,
             mapper: MapperConfig {
+                output_capture_bytes: settings.output_capture_bytes,
                 thread_id: settings.thread_id,
                 segment_id: settings.segment_id,
                 program: Arc::clone(&program),
@@ -1114,6 +1115,19 @@ impl AgentAdapter for AcpAdapter {
 
     async fn steer(&mut self, steer: TurnSteer) -> Result<(), AdapterError> {
         self.session(steer.thread_id)?.steer(steer).await
+    }
+
+    fn interrupt_handle(&self) -> Option<orch_agent_contract::adapter::Interrupt> {
+        let shared = Arc::clone(&self.running.as_ref()?.shared);
+        Some(Arc::new(move |thread, turn| {
+            let session = lock(&shared.sessions).get(&thread).cloned();
+            Box::pin(async move {
+                session
+                    .ok_or_else(|| AdapterError::SessionNotFound(thread.to_string()))?
+                    .interrupt(turn)
+                    .await
+            })
+        }))
     }
 
     async fn interrupt(&mut self, thread: ThreadId, turn: TurnId) -> Result<(), AdapterError> {
