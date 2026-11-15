@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use common::fake::FakeLauncher;
+use common::fake::{FakeLauncher, copied_chatgpt_token};
 use common::{kinds, plain_spec, session_events};
 use futures::StreamExt;
 use orch_adapter_codex::CodexAdapter;
@@ -282,6 +282,105 @@ fn working() -> FakeLauncher {
         "turn/start" => Ok(json!({ "turn": { "id": "turn_1", "status": "inProgress" } })),
         _ => Ok(json!({})),
     })
+}
+
+#[tokio::test]
+async fn a_process_warning_is_visible_in_status_and_the_running_session_without_interrupting_it() {
+    let mut setup = setup(working());
+    running_turn(&mut setup).await;
+    let message = "Codex is continuing with the session model.";
+    setup
+        .fake
+        .state
+        .notify("warning", json!({"message":message}));
+    let events = setup
+        .until(|event| {
+            matches!(event, AdapterEvent::Session {
+        event: SessionEvent::ItemCompleted(item), ..
+    } if item.payload["data"]["change"] == "warning")
+        })
+        .await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::Status(status)
+        if status.detail.as_deref() == Some(message) && status.status == HarnessState::Online))
+    );
+    assert!(
+        !session_events(&events)
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnCompleted(_)))
+    );
+    assert!(setup.fake.state.calls("turn/interrupt").is_empty());
+    setup.adapter.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_web_action_times_out_while_codex_says_nothing_and_accepts_its_later_end() {
+    use orch_agent_contract::events::ItemStatus;
+    let clock = Arc::new(orch_types::ManualClock::new(
+        "2026-11-14T08:00:00Z".parse().unwrap(),
+    ));
+    let mut setup = setup(working());
+    setup.adapter = setup.adapter.with_clock(clock.clone());
+    setup
+        .adapter
+        .start(setup.start_request(), setup.sink.clone())
+        .await
+        .unwrap();
+    let thread = new_id();
+    let mut spec = plain_spec(
+        "/workspace/web",
+        new_id(),
+        new_id(),
+        new_id(),
+        thread,
+        SessionMode::New,
+        None,
+    );
+    spec.settings.web_action_wait_secs = 3;
+    setup.adapter.open_session(spec).await.unwrap();
+    setup
+        .adapter
+        .start_turn(TurnStart {
+            native_model: None,
+            native_wake: None,
+            plan: false,
+            thread_id: thread,
+            turn_id: new_id(),
+            text: "Check an announcement".into(),
+            images: Vec::new(),
+            model: "mock-large".into(),
+            effort: None,
+            params: json!({}),
+            approval_mode: ApprovalMode::Bypass,
+            sandbox_mode: orch_agent_contract::descriptor::SandboxMode::Open,
+        })
+        .await
+        .unwrap();
+    setup.fake.state.notify(
+        "turn/started",
+        json!({"threadId":"thr_1","turn":{"id":"turn_1","status":"inProgress"}}),
+    );
+    setup.fake.state.notify("item/started", json!({"threadId":"thr_1","turnId":"turn_1","item":{"type":"webSearch","id":"silent","action":{"type":"other"}}}));
+    setup.until(|event| matches!(event, AdapterEvent::Session { event: SessionEvent::ItemStarted(item), .. } if item.native_ref == "silent")).await;
+    clock.advance(chrono::Duration::seconds(3));
+    let expired = setup.until(|event| matches!(event, AdapterEvent::Session { event: SessionEvent::ItemCompleted(item), .. } if item.payload["code"] == "native_web_no_end")).await;
+    assert!(session_events(&expired).iter().any(|event| matches!(event, SessionEvent::ItemCompleted(item) if item.native_ref == "silent" && item.status == ItemStatus::Failed)));
+    assert!(
+        !session_events(&expired)
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnCompleted(_)))
+    );
+    assert!(setup.fake.state.calls("turn/interrupt").is_empty());
+    setup.fake.state.notify("item/completed", json!({"threadId":"thr_1","turnId":"turn_1","item":{"type":"webSearch","id":"silent","action":{"type":"search","query":"announcement"}}}));
+    let late = setup.until(|event| matches!(event, AdapterEvent::Session { event: SessionEvent::ItemCompleted(item), .. } if item.native_ref == "silent" && item.status == ItemStatus::Completed)).await;
+    assert!(
+        !session_events(&late)
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TurnCompleted(_)))
+    );
+    setup.adapter.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -605,7 +704,7 @@ async fn a_carried_history_is_told_to_the_new_thread_in_pages_and_in_order() {
 
 #[tokio::test]
 async fn a_harness_older_than_the_range_is_refused_and_a_newer_one_is_untested() {
-    for version in ["0.159.0", "0.162.1"] {
+    for version in ["0.159.0", "0.162.1", "0.166.9"] {
         let mut old = setup(FakeLauncher::plain());
         old.fake.state.set_version(version);
         let error = old
@@ -2581,4 +2680,212 @@ async fn managed_command_checkpoints_and_network_prompts_always_wait_for_each_pe
         assert_eq!(setup.fake.state.calls("turn/start").len(), 1);
         setup.adapter.stop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn a_subscription_issues_only_its_current_access_token_with_its_actual_expiry() {
+    let mut setup = setup(working());
+    let copied = copied_chatgpt_token(1);
+    let native=json!({"auth_mode":"chatgpt","tokens":{"access_token":copied.credential.expose(),"refresh_token":"private-refresh-material","id_token":"private-identity-material","account_id":"workspace-account"}}).to_string();
+    std::fs::write(setup.home.path().join("auth.json"), &native).unwrap();
+    let mut start = setup.start_request();
+    start.provider_kind = Some(orch_agent_contract::descriptor::ProviderKind::Subscription);
+    let descriptor = setup
+        .adapter
+        .start(start, setup.sink.clone())
+        .await
+        .unwrap()
+        .descriptor;
+    assert!(
+        descriptor.arrangements.iter().any(|entry| entry.kind
+            == orch_agent_contract::descriptor::ArrangementType::CredentialShared)
+    );
+    assert_eq!(
+        descriptor.native_provider.unwrap().arrangements,
+        vec![orch_agent_contract::descriptor::ArrangementType::Separated]
+    );
+    let issued = setup
+        .adapter
+        .issue_credential("codex_access_token")
+        .await
+        .unwrap();
+    assert!(
+        setup
+            .fake
+            .state
+            .calls("account/read")
+            .iter()
+            .any(|call| call["params"]["refreshToken"] == true)
+    );
+    assert_eq!(issued.credential.expose(), copied.credential.expose());
+    assert_eq!(
+        issued.expires_at.unwrap().get().timestamp(),
+        copied.expires_at.unwrap().get().timestamp()
+    );
+    assert_eq!(
+        std::fs::read_to_string(setup.home.path().join("auth.json")).unwrap(),
+        native
+    );
+    setup.adapter.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_environment_installs_and_replaces_a_copy_through_native_external_auth_without_an_auth_file()
+ {
+    let mut setup = setup(working());
+    let mut start = setup.start_request();
+    start.provider_kind = Some(orch_agent_contract::descriptor::ProviderKind::Subscription);
+    setup
+        .adapter
+        .start(start, setup.sink.clone())
+        .await
+        .unwrap();
+    for sequence in [1, 2] {
+        let copied = copied_chatgpt_token(sequence);
+        setup.adapter.set_credential(copied.clone()).await.unwrap();
+        let calls = setup.fake.state.calls("account/login/start");
+        let parameters = &calls.last().unwrap()["params"];
+        assert_eq!(parameters["type"], "chatgptAuthTokens");
+        assert_eq!(parameters["accessToken"], copied.credential.expose());
+        assert_eq!(parameters["chatgptAccountId"], "workspace-account");
+        assert!(parameters.get("refreshToken").is_none());
+        assert!(!setup.home.path().join("auth.json").exists());
+    }
+    let mut expired = copied_chatgpt_token(3);
+    expired.expires_at = Some(orch_types::Time::new(
+        chrono::Utc::now() - chrono::Duration::seconds(1),
+    ));
+    assert!(setup.adapter.set_credential(expired).await.is_err());
+    assert_eq!(setup.fake.state.calls("account/login/start").len(), 2);
+    setup.adapter.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_refresh_waits_for_one_new_copy_and_answers_every_waiting_request_without_recording_the_token()
+ {
+    let mut setup = setup(working());
+    let mut start = setup.start_request();
+    start.provider_kind = Some(orch_agent_contract::descriptor::ProviderKind::Subscription);
+    setup
+        .adapter
+        .start(start, setup.sink.clone())
+        .await
+        .unwrap();
+    let original = copied_chatgpt_token(1);
+    setup
+        .adapter
+        .set_credential(original.clone())
+        .await
+        .unwrap();
+    let thread = new_id();
+    let mut spec = plain_spec(
+        "/workspace/web",
+        new_id(),
+        new_id(),
+        new_id(),
+        thread,
+        SessionMode::New,
+        None,
+    );
+    spec.provider = orch_agent_contract::session::ProviderAccess::Shared {
+        provider_id: new_id(),
+        form: "codex_access_token".into(),
+    };
+    spec.settings.arrangement = orch_agent_contract::descriptor::ArrangementType::CredentialShared;
+    spec.settings.raw_events = true;
+    setup.adapter.open_session(spec).await.unwrap();
+    setup.drain();
+    setup.fake.state.ask(
+        64,
+        "account/chatgptAuthTokens/refresh",
+        json!({"reason":"unauthorized","previousAccountId":"workspace-account"}),
+    );
+    setup
+        .until(|event| {
+            matches!(
+                event,
+                AdapterEvent::Session {
+                    event: SessionEvent::CredentialNeeded(_),
+                    ..
+                }
+            )
+        })
+        .await;
+    assert!(setup.fake.state.answer_to(64).is_none());
+    setup.fake.state.ask(
+        65,
+        "account/chatgptAuthTokens/refresh",
+        json!({"reason":"unauthorized","previousAccountId":"workspace-account"}),
+    );
+    setup.fake.state.notify(
+        "thread/name/updated",
+        json!({"threadId":"thr_1","threadName":"Refresh requests read"}),
+    );
+    setup.until(|event|matches!(event,AdapterEvent::Session{event:SessionEvent::SessionTitle(title),..} if title.title=="Refresh requests read")).await;
+    let replacement = copied_chatgpt_token(2);
+    setup
+        .adapter
+        .set_credential(replacement.clone())
+        .await
+        .unwrap();
+    for id in [64, 65] {
+        let answer =
+            tokio::time::timeout(Duration::from_secs(30), setup.fake.state.wait_answer(id))
+                .await
+                .unwrap();
+        assert_eq!(
+            answer["result"]["accessToken"],
+            replacement.credential.expose()
+        );
+        assert_eq!(answer["result"]["chatgptAccountId"], "workspace-account");
+    }
+    assert_eq!(
+        setup.fake.state.calls("account/login/start").len(),
+        1,
+        "a native refresh reply does not sign in again"
+    );
+    let events = format!("{:?}", setup.drain());
+    assert!(!events.contains(original.credential.expose()));
+    assert!(!events.contains(replacement.credential.expose()));
+    assert!(!setup.home.path().join("auth.json").exists());
+    setup.adapter.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_copied_sign_in_is_not_restored_after_logout_or_carried_into_another_provider() {
+    let mut setup = setup(working());
+    let start = setup.start_request();
+    setup
+        .adapter
+        .start(start.clone(), setup.sink.clone())
+        .await
+        .unwrap();
+    setup
+        .adapter
+        .set_credential(copied_chatgpt_token(1))
+        .await
+        .unwrap();
+    setup.adapter.logout().await.unwrap();
+    let mut changed = start.clone();
+    changed.agent_id = new_id();
+    setup
+        .adapter
+        .start(changed, setup.sink.clone())
+        .await
+        .unwrap();
+    assert_eq!(setup.fake.state.calls("account/login/start").len(), 1);
+    setup
+        .adapter
+        .set_credential(copied_chatgpt_token(2))
+        .await
+        .unwrap();
+    let mut other = start;
+    other.provider_id = new_id();
+    setup
+        .adapter
+        .start(other, setup.sink.clone())
+        .await
+        .unwrap();
+    assert_eq!(setup.fake.state.calls("account/login/start").len(), 2);
+    setup.adapter.stop().await.unwrap();
 }

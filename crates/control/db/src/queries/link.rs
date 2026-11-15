@@ -115,7 +115,7 @@ pub struct CommandRow {
     /// Its body in the form the system keeps it: references to secrets and
     /// tickets in place of their values.
     pub body: Json,
-    /// Its protected serial queue identity; absent on an older retained row.
+    /// Its protected serial queue identity, for a command that uses one.
     pub serial_key: Option<String>,
     /// Where it stands: `queued`, `sent`, `accepted`, `succeeded`,
     /// `failed`, `expired` or `cancelled`.
@@ -136,12 +136,10 @@ pub struct CommandRow {
 }
 
 impl CommandRow {
-    /// The authoritative queue identity, reading an older stored member only when no column was supplied.
+    /// The authoritative queue identity is separate from command data.
     #[must_use]
     pub fn serial_key(&self) -> Option<&str> {
-        self.serial_key
-            .as_deref()
-            .or_else(|| self.body.get("$key").and_then(Json::as_str))
+        self.serial_key.as_deref()
     }
 
     /// Whether nothing more is to happen to the command.
@@ -206,15 +204,14 @@ pub async fn insert_command_with_authority(
 ) -> Result<bool, DbError> {
     let inserted = sqlx::query(
         "INSERT INTO commands (id, machine_id, kind, body, serial_key, deadline_at, created_at, updated_at, login_authority, authority_required)
-         VALUES ($1, $2, $3, CASE WHEN jsonb_typeof($4::jsonb) = 'object'
-                    THEN $4::jsonb - '$key' ELSE $4::jsonb END, $5, $6, $7, $7, $8, $9)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9)
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(command.id)
     .bind(command.machine_id)
     .bind(command.kind)
     .bind(command.body)
-    .bind(command.serial_key.or_else(|| command.body.get("$key").and_then(Json::as_str)))
+    .bind(command.serial_key)
     .bind(command.deadline_at)
     .bind(at)
     .bind(authority)
@@ -477,6 +474,29 @@ pub async fn finish_command(
     Ok(changed.is_some())
 }
 
+/// The command that holds `command` up: the oldest other command, with the same machine and the same serial
+/// key, that the machine has taken and not answered and that was made before it. Its kind, and when it was
+/// made. None for a command without a key, one the machine has not taken yet (it waits for the machine, not
+/// for other work), and one that is over.
+pub async fn held_up_by(
+    conn: &mut Conn,
+    command: Id,
+) -> Result<Option<(String, DateTime<Utc>)>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT ahead.kind, ahead.created_at
+           FROM commands me
+           JOIN commands ahead ON ahead.machine_id = me.machine_id AND ahead.serial_key = me.serial_key
+          WHERE me.id = $1 AND me.serial_key IS NOT NULL AND me.state = 'accepted'
+            AND ahead.id <> me.id AND ahead.state = 'accepted'
+            AND (ahead.created_at, ahead.id) < (me.created_at, me.id)
+          ORDER BY ahead.created_at, ahead.id
+          LIMIT 1",
+    )
+    .bind(command)
+    .fetch_optional(conn)
+    .await?)
+}
+
 /// Expires the commands that no machine took before their deadline, on any
 /// machine, and returns them. A command the machine has written down stays
 /// open: the machine owes an answer. The commands in `followed` are left to
@@ -706,11 +726,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_command_reload_preserves_its_protected_queue_key_and_reads_an_older_retained_body() {
+    async fn a_command_reload_uses_only_its_protected_queue_key() {
         let test = TestDb::fresh().await;
         let mut conn = test.pool.acquire().await.unwrap();
         let owner = machine(&mut conn).await;
-        let body = json!({"$key":"obsolete"});
+        let body = json!({});
         let mut asked = new_command(owner, &body, clock::start() + Duration::seconds(30));
         asked.serial_key = Some("authoritative");
         insert_command(&mut conn, &asked, clock::start())
@@ -726,7 +746,7 @@ mod tests {
             json!({}),
             "storage metadata never belongs to a machine request"
         );
-        // Older durable commands have no column value; their queue order still survives a restart.
+        // Payload members never select a protected queue, including when the column has no value.
         sqlx::query("UPDATE commands SET serial_key=NULL,body=$2 WHERE id=$1")
             .bind(id)
             .bind(json!({"$key":"older"}))
@@ -741,7 +761,7 @@ mod tests {
             .pop()
             .unwrap();
         assert_eq!(row.id, id);
-        assert_eq!(row.serial_key(), Some("older"));
+        assert_eq!(row.serial_key(), None);
     }
 
     #[tokio::test]

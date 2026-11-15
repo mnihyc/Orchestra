@@ -949,7 +949,47 @@ impl Engine {
         self.discover_provider_models_for_read(provider, false)
     }
 
+    /// How long a request for a refresh waits for the read before it answers with the provider as it is stored: a
+    /// third of the wait for a start, which is twenty seconds of sixty, so that it answers inside the thirty seconds
+    /// of silence after which a page gives up. The read goes on by itself and stores what it finds.
+    #[must_use]
+    pub fn refresh_wait(&self) -> std::time::Duration {
+        self.inner.config.start_timeout / 3
+    }
+
     fn discover_provider_models_for_read(
+        &self,
+        provider: Id,
+        scheduled: bool,
+    ) -> BoxFuture<
+        '_,
+        Result<Option<Vec<orch_agent_contract::discovery::ModelSuggestion>>, EngineError>,
+    > {
+        Box::pin(async move {
+            // One model read of a provider at a time, held by a lease row as its facts read is: a read asked for while
+            // one is in flight has nothing to add and stores nothing, and the one in flight stores its list when it ends.
+            let name = format!("provider.models:{provider}");
+            let holder = new_id().to_string();
+            let length =
+                chrono::Duration::from_std(self.inner.config.start_timeout.saturating_mul(3))
+                    .unwrap_or_else(|_| chrono::Duration::minutes(5));
+            let taken = {
+                let now = self.inner.clock.now();
+                let mut conn = self.inner.db.acquire().await?;
+                orch_db::queries::job_leases::take(&mut conn, &name, &holder, now, now + length)
+                    .await?
+            };
+            if !taken {
+                return Ok(None);
+            }
+            let read = self.read_provider_models(provider, scheduled).await;
+            let mut conn = self.inner.db.acquire().await?;
+            orch_db::queries::job_leases::release(&mut conn, &name, &holder).await?;
+            read
+        })
+    }
+
+    fn read_provider_models(
         &self,
         provider: Id,
         scheduled: bool,
@@ -2303,93 +2343,83 @@ impl Engine {
     /// `providers.expiry_notice_days`, and again when it has passed: the provider then needs a sign-in.
     pub(crate) async fn watch_token_ends(&self) -> Result<(), EngineError> {
         let now = self.inner.clock.now();
-        let ends = {
-            let mut conn = self.inner.db.acquire().await?;
-            runtime_rows::token_ends(&mut conn, LOOK_BATCH).await?
-        };
-        for end in ends {
-            let notice: i64 = {
+        let mut after = None;
+        loop {
+            let ends = {
                 let mut conn = self.inner.db.acquire().await?;
-                setting(
-                    &mut conn,
-                    SettingsPlace::Node(end.org_id),
-                    keys::PROVIDERS_EXPIRY_NOTICE_DAYS,
-                )
-                .await?
-                .unwrap_or(0)
+                runtime_rows::token_ends(&mut conn, after, LOOK_BATCH).await?
             };
-            let day = end.expires_at.format("%Y-%m-%d").to_string();
-            if end.expires_at <= now {
-                let moved = {
-                    let mut tx =
-                        orch_db::queries::transaction_guard::scope(true, self.inner.db.begin())
-                            .await?;
-                    let current_end =
-                        orch_db::queries::provider_facts::credential_end(&mut tx, end.provider_id)
-                            .await?;
-                    // A fresh sign-in must not be demoted by the old token's clock after the scan.
-                    if current_end.is_none_or(|expires| {
-                        expires != end.expires_at || expires > self.inner.clock.now()
-                    }) {
-                        continue;
-                    }
-                    let moved = keeper::move_status(
-                        &mut tx,
+            let Some(last) = ends.last() else {
+                return Ok(());
+            };
+            after = Some(last.provider_id);
+            for end in ends {
+                let notice: i64 = {
+                    let mut conn = self.inner.db.acquire().await?;
+                    setting(
+                        &mut conn,
+                        SettingsPlace::Provider(end.provider_id),
+                        keys::PROVIDERS_EXPIRY_NOTICE_DAYS,
+                    )
+                    .await?
+                    .unwrap_or(0)
+                };
+                let day = end.expires_at.format("%Y-%m-%d").to_string();
+                if end.expires_at <= now {
+                    let moved = {
+                        let mut tx =
+                            orch_db::queries::transaction_guard::scope(true, self.inner.db.begin())
+                                .await?;
+                        let current_end = orch_db::queries::provider_facts::credential_end(
+                            &mut tx,
+                            end.provider_id,
+                        )
+                        .await?;
+                        // A fresh sign-in must not be demoted by the old token's clock after the scan.
+                        if current_end.is_none_or(|expires| {
+                            expires != end.expires_at || expires > self.inner.clock.now()
+                        }) {
+                            continue;
+                        }
+                        let moved = keeper::move_status(
+                            &mut tx,
+                            end.provider_id,
+                            &["ready", "exhausted", "offline"],
+                            "needs_setup",
+                            Some(&format!("its token lapsed on {day}")),
+                            now,
+                        )
+                        .await?;
+                        tx.commit().await.map_err(orch_db::DbError::from)?;
+                        moved
+                    };
+                    self.tell_attention(
                         end.provider_id,
-                        &["ready", "exhausted", "offline"],
-                        "needs_setup",
-                        Some(&format!("its token lapsed on {day}")),
-                        now,
+                        &format!("lapsed:{}", end.expires_at.to_rfc3339()),
+                        "Its token has lapsed",
+                        &format!(
+                            "The token it is signed in with lapsed on {day}: it needs a sign-in."
+                        ),
                     )
                     .await?;
-                    tx.commit().await.map_err(orch_db::DbError::from)?;
-                    moved
-                };
-                self.tell_attention(
-                    end.provider_id,
-                    &format!("lapsed:{}", end.expires_at.to_rfc3339()),
-                    "Its token has lapsed",
-                    &format!("The token it is signed in with lapsed on {day}: it needs a sign-in."),
-                )
-                .await?;
-                if moved {
-                    self.reevaluate_provider(end.provider_id).await?;
+                    if moved {
+                        self.reevaluate_provider(end.provider_id).await?;
+                    }
+                } else if notice > 0
+                    && end.expires_at - now
+                        <= chrono::Duration::try_days(notice).unwrap_or(chrono::Duration::MAX)
+                {
+                    self.tell_attention(
+                        end.provider_id,
+                        &format!("soon:{}", end.expires_at.to_rfc3339()),
+                        "Its token is about to lapse",
+                        &format!("The token it is signed in with lapses on {day}."),
+                    )
+                    .await?;
                 }
-            } else if notice > 0
-                && end.expires_at - now
-                    <= expiry_notice_window(end.issued_at, end.expires_at, notice)
-            {
-                self.tell_attention(
-                    end.provider_id,
-                    &format!("soon:{}", end.expires_at.to_rfc3339()),
-                    "Its token is about to lapse",
-                    &format!("The token it is signed in with lapses on {day}."),
-                )
-                .await?;
             }
         }
-        Ok(())
     }
-}
-
-/// A short token is warned when a quarter of its life remains; longer ones use the manager's setting.
-fn expiry_notice_window(
-    issued: Option<chrono::DateTime<chrono::Utc>>,
-    expires: chrono::DateTime<chrono::Utc>,
-    days: i64,
-) -> chrono::Duration {
-    // Twice the setting separates tokens that would otherwise be warned immediately after importing them.
-    const SHORT_LIFE_FACTOR: i32 = 2;
-    // One quarter leaves time to replace a short token without warning at sign-in.
-    const LIFE_NOTICE_DIVISOR: i32 = 4;
-    let configured = chrono::Duration::days(days);
-    if let Some(issued) = issued.filter(|issued| *issued < expires) {
-        let life = expires - issued;
-        if life < configured * SHORT_LIFE_FACTOR {
-            return life / LIFE_NOTICE_DIVISOR;
-        }
-    }
-    configured
 }
 
 /// Whether the sign-in that waits can be given to the harness as its adapter declares: the method is

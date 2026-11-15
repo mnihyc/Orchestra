@@ -1,6 +1,6 @@
 /** One definition for each live value, its words, permitted places and inspection subject. */
 import type { TFunction } from 'i18next';
-import type { Environment, Host, Provider, ResourceSample, Thread, Turn } from '@/generated/api-types';
+import type { Environment, Host, Provider, ResourceSample, Thread, ThreadProvider, Turn } from '@/generated/api-types';
 import type { ResourceSubject } from '@/features/resource-facts/facts';
 import { providerHint } from '@/features/resource-facts/facts';
 import { turnActiveMs, turnWaiting } from '@/features/timeline/turnTime';
@@ -27,7 +27,8 @@ export interface StatusContext extends TimeContext {
   outputCounts: CharacterCounts | null;
   /** The current turn's model estimate, when its option has been read. */
   tokenEstimate: unknown;
-  provider: Provider | undefined;
+  /** The provider as it was read, or the thread's own row of it, which has what the values here need. */
+  provider: Provider | ThreadProvider | undefined;
   environment: Environment | undefined;
   sample: ResourceSample | null;
   host: Host | undefined;
@@ -66,6 +67,14 @@ function cost(context: StatusContext, of: 'turn' | 'thread'): StatusValue | null
   ] };
 }
 
+/** How full the context is, as the share of its window; where the harness named no window, the tokens alone. */
+function contextFill(c: StatusContext): StatusValue | null {
+  const used = c.turn?.context?.used ?? c.thread.usage?.context_used, window = c.turn?.context?.window ?? c.thread.usage?.context_window;
+  if (used === null || used === undefined) return null;
+  const mark = c.turn?.context?.count === 'orch' || c.turn?.context?.count === 'estimated' ? '≈' : '';
+  if (window === null || window === undefined || window <= 0) return { text: c.t('statusItems.context', { value: `${mark}${formatTokens(used, c.locale)}` }), details: [{ name: c.t('resourceFacts.context'), value: formatTokens(used, c.locale) }] };
+  return { text: c.t('statusItems.context', { value: `${mark}${formatPercent(used / window, c.locale)}` }), details: [{ name: c.t('resourceFacts.context'), value: `${formatTokens(used, c.locale)} / ${formatTokens(window, c.locale)}` }] };
+}
 function tokens(context: StatusContext): StatusValue | null {
   if (!currentTurn(context) || context.turn === null) return null;
   const usage = context.turn.usage;
@@ -93,7 +102,7 @@ export const STATUS_ITEMS = [
   { id: 'turn_cost', title: 'statusItems.items.turn_cost', places: everyPlace, place: 'bar', shown: false, read: (c: StatusContext) => cost(c, 'turn') },
   { id: 'thread_cost', title: 'statusItems.items.thread_cost', places: everyPlace, place: 'bar', shown: false, read: (c: StatusContext) => cost(c, 'thread') },
   { id: 'context', title: 'statusItems.items.context', places: everyPlace, place: 'bar', shown: true,
-    read: (c: StatusContext): StatusValue | null => { const used = c.turn?.context?.used ?? c.thread.usage?.context_used, window = c.turn?.context?.window ?? c.thread.usage?.context_window; return used === null || used === undefined || window === null || window === undefined || window <= 0 ? null : { text: c.t('statusItems.context', { value: `${c.turn?.context?.count === 'orch' || c.turn?.context?.count === 'estimated' ? '≈' : ''}${formatPercent(used / window, c.locale)}` }), details: [{ name: c.t('resourceFacts.context'), value: `${formatTokens(used, c.locale)} / ${formatTokens(window, c.locale)}` }] }; } },
+    read: contextFill },
   { id: 'provider_window', title: 'statusItems.items.provider_window', places: everyPlace, place: 'bar', shown: true,
     read: (c: StatusContext): StatusValue | null => { if (c.provider === undefined) return null; const hint = providerHint(c.provider, c, 'window'); return hint.text === '' ? null : { text: hint.text, warning: hint.warning, subject: { kind: 'provider', provider: c.provider } }; } },
   { id: 'provider_running', title: 'statusItems.items.provider_running', places: everyPlace, place: 'bar', shown: false,
