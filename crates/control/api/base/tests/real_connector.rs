@@ -1396,6 +1396,7 @@ impl Cluster {
             .publish(
                 &Stream::Machine,
                 &Event::MachineFacts(MachineFacts {
+                    server_update: None,
                     data_directory: None,
                     gateway: None,
                     role_management: None,

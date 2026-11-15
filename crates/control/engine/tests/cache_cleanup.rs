@@ -1594,6 +1594,7 @@ async fn a_failed_common_purge_stays_purge_only_and_its_retry_keeps_the_original
     });
     record.until = before.volumes_purge_at.map(Time::new);
     let plan = CleanupPlan {
+        effects: None,
         id: new_id(),
         expires_at: Time::new(now + chrono::Duration::minutes(15)),
         confirmation_name: record.name.clone(),

@@ -2026,6 +2026,70 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "AdminServerUpdateGet",
+    "method": "GET",
+    "path": "/admin/server-update",
+    "title": "Reads the current server release, native update condition and retained job.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": false,
+        "operation": "AdminServerUpdateGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "AdminServerUpdateStart",
+    "method": "POST",
+    "path": "/admin/server-update",
+    "title": "Runs the selected release through the bundled node's existing host updater, or joins its open job.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": false,
+        "operation": "AdminServerUpdateStart",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "AdminSettingDelete",
     "method": "DELETE",
     "path": "/admin/settings/{key}",
@@ -24878,6 +24942,37 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "MachineGatewaySet",
+    "method": "PUT",
+    "path": "/machines/{machine_id}/gateway",
+    "title": "Saves the primary gateway choice on its actual machine; the native reply is durable before reconnect.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "MachineGatewaySet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "machine"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "machine_id",
+                "kind": "machine"
+              }
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "MachineGet",
     "method": "GET",
     "path": "/machines/{id}",
@@ -29632,7 +29727,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "operation_id": "MountDelete",
     "method": "DELETE",
     "path": "/mounts/{id}",
-    "title": "Deletes a mount that no scope enables.",
+    "title": "Deletes the definition through the common cleanup job, keeping data unless its displayed fate is confirmed.",
     "delegation": "business",
     "variants": [
       {
@@ -29644,12 +29739,319 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "manage",
             "resources": [
-              "mount"
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
             ],
             "target": {
-              "kind": "permission_object"
+              "kind": "resolved",
+              "value": "storage_namespace"
             },
             "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "storage_records"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "cleanup_destinations"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "cleanup_content"
+            },
+            "usage": "response_content"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "storage_names"
+            },
+            "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "MountDeletePreflight",
+    "method": "POST",
+    "path": "/mounts/{id}/delete-plan",
+    "title": "Previews removal of the definition, its next-start consequences and the fates of owned data.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "MountDeletePreflight",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "storage_namespace"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "storage_records"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "cleanup_destinations"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "cleanup_content"
+            },
+            "usage": "response_content"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "environment",
+              "provider",
+              "host",
+              "machine",
+              "mount",
+              "skill",
+              "template",
+              "agent",
+              "mcp_server",
+              "account",
+              "system",
+              "export",
+              "import",
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "storage_names"
+            },
+            "usage": "response_content"
           }
         ]
       }
@@ -42567,6 +42969,68 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "PublicAddressGet",
+    "method": "GET",
+    "path": "/admin/public-address",
+    "title": "Reads the revision and effective addresses in Management.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "PublicAddressGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "PublicAddressProofGet",
+    "method": "GET",
+    "path": "/public-address/proof",
+    "title": "Proves that this browser origin reaches the same installation without signing anyone in.",
+    "delegation": "public",
+    "variants": []
+  },
+  {
+    "operation_id": "PublicAddressUpdate",
+    "method": "PUT",
+    "path": "/admin/public-address",
+    "title": "Prepares the edge and publishes one current-revision address draft.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "PublicAddressUpdate",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "ReferencePreviewGet",
     "method": "GET",
     "path": "/references/preview",
@@ -42662,11 +43126,23 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "resources": [
               "provider",
               "agent",
-              "environment"
+              "environment",
+              "mcp_server"
             ],
             "target": {
               "kind": "resolved",
               "value": "requested_resources"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "environment"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "library_owned_environments"
             },
             "usage": "required"
           },

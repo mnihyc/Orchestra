@@ -1,0 +1,9 @@
+fmt
+clippy
+test -p orch-api-core --test hosts --test resource_groups --test registration_moves --test page_transfer_operation_scopes --test gateways --test accounts --test certificates
+test -p orchctl --test admin --test doctor --test kfix_deploy
+test -p orch-worker-core --lib
+test -p orch-worker-core --test outbox --test mail --test channel_setup
+web typecheck
+web lint
+web test -- tests/component/cleanup-plan.test.tsx tests/component/resource-impact.test.tsx tests/component/installation-records.test.tsx tests/component/system-banner-dismissal.test.tsx tests/unit/meta-admission-lifetime.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts
