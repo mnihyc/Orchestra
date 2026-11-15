@@ -322,6 +322,84 @@ async fn an_environment_takes_its_settings_from_a_project_or_topic_of_its_org_an
 }
 
 #[tokio::test]
+async fn a_directory_reports_its_recorded_attach_wait_without_borrowing_a_later_metadata_time() {
+    let world = world().await;
+    let (c, laptop) = setup(&world).await;
+    let made = register(
+        &world,
+        &c.admin,
+        laptop,
+        &body(c.acme, "Work", "/srv/ada/work"),
+    )
+    .await;
+    let attempted = world.now();
+    let eligible = attempted + chrono::Duration::seconds(30);
+    let receipt = json!({"last_attempt_at": attempted, "next_eligible_at": eligible,
+        "last_problem": "The directory is outside the allowed root", "revision": made.revision});
+    sqlx::query("UPDATE environments SET status='failed', facts=facts || jsonb_build_object('attach_retry',$2::jsonb), attach_retry_at=$3, updated_at=$4 WHERE id=$1")
+        .bind(made.base.id).bind(&receipt).bind(eligible).bind(eligible + chrono::Duration::hours(1))
+        .execute(&world.db.pool).await.unwrap();
+    let shown = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        serde_json::to_value(&shown).unwrap()["attach_retry"],
+        receipt
+    );
+    let refused = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&c.stranger.token)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::AuthzDenied);
+    name_person(
+        &world,
+        "environment",
+        made.base.id,
+        "environment.view",
+        c.stranger.id(),
+    )
+    .await;
+    let admitted = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&c.stranger.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        serde_json::to_value(&admitted).unwrap()["attach_retry"],
+        receipt
+    );
+    sqlx::query(
+        "UPDATE environments SET facts=facts-'attach_retry', attach_retry_at=NULL WHERE id=$1",
+    )
+    .bind(made.base.id)
+    .execute(&world.db.pool)
+    .await
+    .unwrap();
+    let missing = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        serde_json::to_value(&missing)
+            .unwrap()
+            .get("attach_retry")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn an_environment_is_read_by_whoever_holds_something_on_it_and_what_it_holds_is_the_managers()
 {
     let world = world().await;
@@ -896,6 +974,8 @@ async fn confirmed_directory_removal_settles_its_binding_and_forgets_only_the_re
     let query = |name: &str| EnvironmentDeleteQuery {
         confirm: name.to_owned(),
         at: None,
+        expected_keep_days: None,
+        expected_revision: None,
     };
     let wrong = world
         .app

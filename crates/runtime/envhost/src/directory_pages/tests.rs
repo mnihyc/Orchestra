@@ -215,14 +215,52 @@ async fn continuation_is_attachment_generation_mount_path_bound_and_actual_use_r
         "b"
     );
     rig.clock.advance(chrono::Duration::minutes(5));
-    assert!(matches!(
-        rig.read(rig.binding.clone(), Some(cursor), 1).await,
-        Err(HostError::Stale { .. })
-    ));
-    assert_eq!(rig.cache.ledger.used.load(Ordering::Acquire), 0);
+    let renewed = rig.read(rig.binding.clone(), Some(cursor), 1).await?;
+    assert_eq!(
+        renewed.entries[0].name, "b",
+        "idle renewal preserves continuation"
+    );
+    assert_eq!(renewed.revision, used.revision);
     assert_eq!(
         rig.read(rig.binding.clone(), None, 1).await?.entries[0].name,
         "a"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn directory_allowances_change_without_releasing_resources_that_are_still_in_use() -> Proof {
+    let rig = Rig::new()?;
+    let policy = orch_link_contract::commands::WorkspaceLimits {
+        directory_slots: 2,
+        directory_builds: 2,
+        directory_cache_bytes: 32768,
+        directory_page_bytes: 300,
+        directory_idle_secs: 900,
+        ..Default::default()
+    };
+    rig.cache.configure(rig.binding.environment, &policy);
+    assert_eq!(rig.cache.operations.available(), 2);
+    let held = rig.cache.build.clone().acquire_owned().await?;
+    rig.cache.configure(
+        rig.binding.environment,
+        &orch_link_contract::commands::WorkspaceLimits {
+            directory_builds: 1,
+            ..policy.clone()
+        },
+    );
+    assert_eq!(rig.cache.build.available_permits(), 0);
+    drop(held);
+    assert_eq!(rig.cache.build.available_permits(), 1);
+    for n in 0..12 {
+        std::fs::write(rig.root.join(format!("name-{n:02}")), b"")?;
+    }
+    let first = rig.read(rig.binding.clone(), None, 100_000).await?;
+    assert!(serde_json::to_vec(&first.entries)?.len() <= 300);
+    assert!(first.next_cursor.is_some());
+    assert_eq!(
+        first.expires_at.get(),
+        rig.clock.now() + chrono::Duration::seconds(900)
     );
     Ok(())
 }
@@ -377,7 +415,10 @@ fn entry(name: &str, payload: usize, at: Time) -> DirEntry {
 fn serialized_bytes_split_before_row_limit_and_merge_quota_includes_all_files() -> Proof {
     let rig = Rig::new()?;
     std::fs::create_dir_all(&rig.cache.directory)?;
-    assert_eq!(rig.cache.ledger.maximum, 1024 * 1024 * 1024);
+    assert_eq!(
+        rig.cache.ledger.maximum.load(Ordering::Acquire),
+        orch_link_contract::commands::WorkspaceLimits::default().directory_cache_bytes
+    );
     let cancel = CancellationToken::new();
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut builder = Builder {
@@ -443,7 +484,7 @@ fn pinned_and_intermediate_work_is_busy_instead_of_exceeding_one_host_quota() ->
     let cache = Arc::get_mut(&mut rig.cache).ok_or("cache unexpectedly shared")?;
     cache.ledger = Arc::new(Ledger {
         used: AtomicU64::new(0),
-        maximum: 128,
+        maximum: AtomicU64::new(128),
     });
     std::fs::create_dir_all(&cache.directory)?;
     let mut kept = Stored::new(cache)?;

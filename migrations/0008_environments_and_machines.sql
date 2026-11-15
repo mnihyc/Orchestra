@@ -98,6 +98,7 @@ CREATE TABLE commands (
     body jsonb NOT NULL,
     serial_key text,
     state text DEFAULT 'queued'::text NOT NULL,
+    key_phase smallint DEFAULT 0 NOT NULL CHECK (key_phase IN (0, 1, 2)),
     result jsonb,
     error jsonb,
     attempts integer DEFAULT 0 NOT NULL,
@@ -213,6 +214,7 @@ CREATE TABLE environments (
     unused_since timestamp with time zone,
     remove_at timestamp with time zone,
     attached_session timestamp with time zone,
+    attach_retry_at timestamp with time zone,
     revision bigint DEFAULT 1 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -250,6 +252,8 @@ CREATE INDEX environment_config_facts_idx ON environments USING gin (config json
 CREATE INDEX environment_mcp_membership_idx ON environments USING gin (((facts -> 'mcp_servers'::text)) jsonb_path_ops);
 
 CREATE INDEX environments_connected_idx ON environments USING btree (machine_id) WHERE ((placement = 'connected'::text) AND (deleted_at IS NULL));
+
+CREATE INDEX environments_attach_retry_idx ON environments USING btree (attach_retry_at, id) WHERE (placement = 'connected' AND status = 'failed' AND deleted_at IS NULL);
 
 CREATE INDEX environments_home_idx ON environments USING btree (home_node_id) WHERE (deleted_at IS NULL);
 
