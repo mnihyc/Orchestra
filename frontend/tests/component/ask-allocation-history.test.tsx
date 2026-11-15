@@ -46,12 +46,12 @@ vi.mock('@/api/threads', async (original) => ({ ...await original<typeof Threads
   draftQuery: (id: string) => ({ queryKey: ['allocation-draft', id], queryFn: () => Promise.resolve(null) }),
   saveDraft: (_id: string, content: Parameters<typeof ThreadsApi.saveDraft>[1]) => Promise.resolve(threadDraft(content)),
 }));
-vi.mock('@/features/access/AdminMode', () => ({ useAdminMode: () => ({ data: { as_admin: false } }), AdminModeEnableAction: () => null }));
+vi.mock('@/features/access/AdminMode', async (loadOriginal) => ({ ...await loadOriginal<object>(), useAdminMode: () => ({ data: { as_admin: false } }), AdminModeEnableAction: () => null }));
 vi.mock('@/features/workbench/ViewWindow', () => ({ ViewWindow: ({ actions, children }: { actions: ReactNode; children: ReactNode }) => <section>{actions}{children}</section> }));
-vi.mock('@/features/workbench/views', () => ({ useViewShown: () => true }));
-vi.mock('@/shell/screen', () => ({ useCurrentHeading: () => ({ nodeId: ACME.fixLogin, title: 'Fix login' }) }));
+vi.mock('@/features/workbench/views', async (loadOriginal) => ({ ...await loadOriginal<object>(), useViewShown: () => true }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useCurrentHeading: () => ({ nodeId: ACME.fixLogin, title: 'Fix login' }) }));
 vi.mock('@/realtime/stores/tree', async (original) => ({ ...await original<typeof TreeStore>(), useNodePath: () => ({ orgId: ACME.org }) }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn(), openHelpReading: vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn(), openHelpReading: vi.fn() }));
 vi.mock('@/features/people/NamedChip', () => ({ KnownNodeChip: () => <span>Organization</span>, TypedChip: () => <span>Organization</span> }));
 vi.mock('@/features/composer/Composer', () => ({ Composer: ({ ask }: { ask: AskComposerProps }) => <AskComposer {...ask} /> }));
 vi.mock('@/features/composer/Attachments', () => ({ AttachButton: () => null, AttachmentChips: () => null, UploadChips: () => null }));

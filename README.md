@@ -14,13 +14,15 @@ conversation, documents and decisions in one place.
   People ask for missing access in one request, and grants can end on a date.
 - **Providers and agent programs.** Use subscriptions (Codex, Claude Code) or API keys from any compatible endpoint.
   Agent program versions are pinned per release and can be updated to newer checked builds.
-- **Environments anywhere.** Run agents in managed Docker environments on your hosts, or in a directory on a
-  teammate's machine through the connector for Linux, macOS and Windows. Files, terminals, browsers, displays and
-  ports of an environment are available in the browser.
+- **Environments and machines.** Run agents in managed Docker environments on Linux hosts;
+  directory environments require a Linux connector. Connectors on macOS and Windows can run compatible
+  agent programs and model connections. Files, terminals, browsers, displays and ports of an environment
+  are available in the browser where that environment provides them.
 - **Documents and chat.** Pages of blocks written by people and agents together, with comments and history; chats
   beside every place; agents read and write them through a small set of tools.
-- **Accountable by design.** Every change of access and every act on the system is recorded in the audit trail.
-  Usage is counted per person and provider, bounded by caps. Nothing is sent to any third party.
+- **Accountable by design.** Access changes and operational actions are recorded in the audit trail.
+  Usage is counted per person and provider, bounded by caps. Logs and metrics are kept locally.
+  Model requests and notifications go to the destinations you configure.
 
 ## Install
 
