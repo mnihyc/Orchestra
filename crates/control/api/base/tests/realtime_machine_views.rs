@@ -42,6 +42,7 @@ fn scripts(rig: &Rig) -> Seen {
             Ok(match command {
                 Command::WatchSet(_) => CommandResult::WatchSet(Empty {}),
                 Command::FsList(_) => CommandResult::FsList(FsListResult {
+                    facts: None,
                     entries: Vec::new(),
                     truncated: false,
                     watch_instance: None,
@@ -237,6 +238,7 @@ async fn a_visible_directory_sends_a_reset_then_deltas_seeds_its_current_entries
             unreachable!()
         };
         Ok(CommandResult::FsList(FsListResult {
+            facts: None,
             entries: vec![serde_json::from_value(listed.clone()).unwrap()],
             truncated: false,
             watch_instance: body.watch_instance,
@@ -320,6 +322,7 @@ async fn a_paged_watch_exposes_its_http_cursor_and_invalidates_changes_outside_t
             unreachable!()
         };
         Ok(CommandResult::FsList(FsListResult {
+            facts: None,
             entries: vec![serde_json::from_value(listed.clone()).unwrap()],
             truncated: true,
             watch_instance: body.watch_instance,
@@ -407,6 +410,7 @@ async fn failed_directory_activation_is_scoped_and_retries_only_for_fresh_demand
             ));
         }
         Ok(CommandResult::FsList(FsListResult {
+            facts: None,
             entries: Vec::new(),
             truncated: false,
             watch_instance: body.watch_instance,
