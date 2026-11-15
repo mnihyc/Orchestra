@@ -260,7 +260,9 @@ pub struct ListCursor {
 
 /// What a list of the documents beside a node is asked for.
 #[derive(Debug, Clone, Copy)]
-pub struct ListWhere {
+pub struct ListWhere<'a> {
+    /// A literal title substring, before the page's cursor and allowance.
+    pub q: Option<&'a str>,
     /// The node.
     pub node: Id,
     /// Also the documents of the nodes below it.
@@ -278,13 +280,22 @@ pub struct ListWhere {
 /// The documents beside a node, the most recently changed first. A document
 /// whose node, or a node above it, is deleted is not here: it goes and comes
 /// back with its node.
-pub async fn list_beside(conn: &mut Conn, which: &ListWhere) -> Result<Vec<DocumentRow>, DbError> {
+pub async fn list_beside(
+    conn: &mut Conn,
+    which: &ListWhere<'_>,
+) -> Result<Vec<DocumentRow>, DbError> {
     // Keep a direct place read indexable even after PostgreSQL selects a generic plan.
     // The subtree form retains its native path reach and the same bound/cursor.
     let reach = if which.under {
         "$3 AND $1 = ANY(n.path)"
     } else {
         "NOT $3 AND d.node_id = $1"
+    };
+    // Separate statement shapes keep a supplied title filter usable by its trigram index.
+    let title = if which.q.is_some() {
+        "AND d.title ILIKE $8"
+    } else {
+        "AND $8::text IS NULL"
     };
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {DOCUMENT_COLUMNS}
@@ -294,6 +305,7 @@ pub async fn list_beside(conn: &mut Conn, which: &ListWhere) -> Result<Vec<Docum
             AND (d.deleted_at IS NOT NULL) = $2
             AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)
             AND ($4::uuid IS NULL OR (d.updated_at, d.id) < ($5, $4))
+            {title}
           ORDER BY d.updated_at DESC, d.id DESC
           LIMIT $6 OFFSET $7"
     )))
@@ -304,6 +316,7 @@ pub async fn list_beside(conn: &mut Conn, which: &ListWhere) -> Result<Vec<Docum
     .bind(which.after.map(|cursor| cursor.at))
     .bind(which.limit)
     .bind(which.offset)
+    .bind(which.q.map(super::search::substring))
     .fetch_all(conn)
     .await?)
 }
@@ -328,19 +341,27 @@ pub async fn names_beside(
     under: bool,
     offset: i64,
     limit: i64,
+    q: Option<&str>,
 ) -> Result<Vec<DocumentNameRow>, DbError> {
-    Ok(sqlx::query_as(
+    let title = if q.is_some() {
+        "AND d.title ILIKE $5"
+    } else {
+        "AND $5::text IS NULL"
+    };
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT d.id, d.node_id, d.owner_id, d.title
            FROM documents d JOIN nodes n ON n.id = d.node_id
           WHERE ($2 AND $1 = ANY(n.path) OR NOT $2 AND d.node_id = $1)
             AND d.deleted_at IS NULL
             AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)
-          ORDER BY d.title, d.id OFFSET $3 LIMIT $4",
-    )
+            {title}
+          ORDER BY d.title, d.id OFFSET $3 LIMIT $4"
+    )))
     .bind(node)
     .bind(under)
     .bind(offset)
     .bind(limit)
+    .bind(q.map(super::search::substring))
     .fetch_all(conn)
     .await?)
 }
@@ -1609,6 +1630,7 @@ mod tests {
         let now = clock::start();
         let here = place(&mut conn, now).await;
         let list = |node, under, deleted| ListWhere {
+            q: None,
             node,
             under,
             deleted,
@@ -1673,6 +1695,7 @@ mod tests {
             made.push(id);
         }
         let page = |after| ListWhere {
+            q: None,
             node: here.topic,
             under: false,
             deleted: false,
@@ -1714,6 +1737,7 @@ mod tests {
             .await
             .unwrap();
         let list = ListWhere {
+            q: None,
             node: here.topic,
             under: false,
             deleted: false,
@@ -1753,6 +1777,7 @@ mod tests {
             "once"
         );
         let deleted = ListWhere {
+            q: None,
             node: here.topic,
             under: false,
             deleted: true,

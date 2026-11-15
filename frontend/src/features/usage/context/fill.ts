@@ -42,6 +42,14 @@ export interface Ring {
   tone: ContextTone;
 }
 
+/** The tokens the harness said fill the context where it named no window to measure them against; `null` where it reported no size, or where a window makes it a ring. */
+export function usedAlone(usage: Thread['usage']): number | null {
+  if (usage === null) return null;
+  const used = usage.context_used ?? null;
+  const window = usage.context_window ?? null;
+  return used === null || (window !== null && window > 0) ? null : used;
+}
+
 export function ringOf(usage: Thread['usage']): Ring | null {
   if (usage === null) return null;
   const used = usage.context_used ?? null;
