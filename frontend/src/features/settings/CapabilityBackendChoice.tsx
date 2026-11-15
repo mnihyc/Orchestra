@@ -134,3 +134,10 @@ function BackendName({ reader, provider, place, capability, backend }: { reader:
     {chosen !== undefined && <><span>· {route(chosen)} · {chosen.offering_name}</span>{!chosen.eligible && <span className="text-text-muted">· {reason(chosen)}</span>}</>}
   </span>;
 }
+
+/** An explicit model member uses the same exact installed backend control as delegated work. */
+export function ExactBackendChoice({ place, value, onChange, label }: { place: string; value: BackendRef | null; onChange: (value: BackendRef) => void; label: string }) {
+  const reader = useStore(client.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
+  return <BackendChoice reader={reader} place={place} capability="summary" title={label} multi={false} selected={value} onSelected={onChange}
+    shape={{ type: 'text', maxLength: null, pattern: null }} value={value} onChange={() => undefined} label={label} />;
+}

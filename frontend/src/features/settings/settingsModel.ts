@@ -169,7 +169,7 @@ export function provenanceOf(setting: Pick<ResolvedSetting, 'own' | 'source' | '
   if (setting.own !== null) return { kind: 'here', locked: setting.own.locked };
   const { scope, node } = setting.source;
   if (scope === 'default' || scope === 'environment') return { kind: 'default', scope };
-  if (scope === 'environment_own' || scope === 'provider_own' || scope === 'host_own') return { kind: 'here', locked: false };
+  if (scope === 'environment_own' || scope === 'provider_own' || scope === 'host_own' || scope === 'pool_own') return { kind: 'here', locked: false };
   return { kind: 'inherited', scope, place: node?.name ?? null };
 }
 

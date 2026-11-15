@@ -293,3 +293,14 @@ authority from a thread that happens to use it. Read
 [settings and usage](settings-and-usage.md#limits) for limits on its work.
 
 A readable resource keeps its applicable management actions visible. Without Manage, the action stays disabled and names that requirement; opening or copying its link still works. State-specific actions and deletion reviews keep their existing checks.
+
+
+<a id="pools"></a>
+
+## Pools
+
+A pool is a configured group chosen as one model, provider, environment or host. Make it from the existing group and choose its policy. A disabled draft stays available to inspect and edit. Enable and Lend members are separate explicit choices.
+
+Pool Use alone grants no member Use. Lending also needs the member's Through pools consent and its giver's current sharing rights. Models, services, efforts, arrangements and places must fit one complete allowance. An inherited private cut or lock applies to lending too. A hidden member stays hidden unless its member-side entry permits names.
+
+The chosen member, policy and skipped reasons appear where the choice happens. A pool does not move a thread's environment or create another retry engine. Call recovery owns what happens after a failure; an uncertain admitted request retains its original member and receipt.

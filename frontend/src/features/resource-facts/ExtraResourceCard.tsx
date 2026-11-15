@@ -20,8 +20,8 @@ import { StatusDot } from '@/ui/StatusDot';
 import { ResourceChip } from './ResourceFacts';
 import type { ResourceSubject } from './facts';
 
-type Subject = Extract<ResourceSubject, { kind: 'mount' | 'mcp_server' | 'template' | 'agent' | 'skill' }>;
-const HEAD = { mount: 'mount', mcp_server: 'mcp-server', template: 'template', agent: 'agent', skill: 'skill' };
+type Subject = Extract<ResourceSubject, { kind: 'mount' | 'mcp_server' | 'template' | 'agent' | 'skill' | 'pool' }>;
+const HEAD = { mount: 'mount', mcp_server: 'mcp-server', template: 'template', agent: 'agent', skill: 'skill', pool: 'pool' };
 
 function identity(subject: Subject) {
   switch (subject.kind) {
@@ -29,6 +29,7 @@ function identity(subject: Subject) {
     case 'mcp_server': return subject.server;
     case 'template': return subject.template;
     case 'agent': return subject.agent;
+    case 'pool': return subject.pool;
     case 'skill': return subject.skill;
   }
 }
@@ -46,6 +47,7 @@ export default function ExtraResourceCard({ subject }: { subject: Subject }) {
       case 'mcp_server': return { ...await ok(api.GET('/mcp-servers/{id}', { params })) };
       case 'template': return { ...await ok(api.GET('/templates/{id}', { params })) };
       case 'agent': return { ...await ok(api.GET('/agents/{id}', { params })) };
+      case 'pool': return { ...await ok(api.GET('/pools/{id}', { params })) };
       case 'skill': return { ...await ok(api.GET('/skills/{id}', { params })) };
     }
   } });
@@ -80,7 +82,7 @@ export default function ExtraResourceCard({ subject }: { subject: Subject }) {
       rows = [
         { name: t('resourceFacts.kind'), value: template.kind === undefined ? t('usagePerf.dash') : t(`templates.kind.${template.kind}`) },
         { name: t('resourceFacts.image'), value: source.kind === 'image' ? source.reference : t(`templates.source.${source.kind === 'none' ? 'none' : source.kind === 'build' ? 'build' : 'archive'}`) },
-        ...(source.kind === 'image' && typeof digest === 'string' && digest !== '' ? [{ name: t('resourceFacts.imageDigest'), value: digest }] : []),
+        ...(source.kind === 'image' && typeof digest === 'string' && digest !== '' ? [{ name: t('resourceFacts.imagePinned'), value: t('resourceFacts.yes') }] : []),
         { name: t('resourceFacts.usedByLabel'), value: count(template.units) },
       ]; break;
     }
@@ -94,6 +96,10 @@ export default function ExtraResourceCard({ subject }: { subject: Subject }) {
         { name: t('resourceFacts.provider'), value: providers.length === 0 ? t('usagePerf.dash') : <div className="flex flex-wrap gap-1">{providers.map((provider) => <ResourceChip key={provider.id} subject={{ kind: 'provider', provider }} hint={false} />)}</div> },
         { name: t('resourceFacts.models'), value: models.length === 0 ? t('usagePerf.dash') : <div className="flex flex-wrap gap-1">{models.map((model) => <ResourceChip key={`${model.provider_id ?? providers[0]?.id}:${model.model_name}`} subject={{ kind: 'model', model, providerId: model.provider_id ?? providers[0]?.id ?? '' }} hint={false} />)}</div> },
       ]; break;
+    }
+    case 'pool': {
+      const pool={...subject.pool,...query.data};
+      rows=[{name:t('pools.kind'),value:pool.kind === undefined ? t('usagePerf.dash') : t(`pools.kinds.${pool.kind}`)}, {name:t('pools.policy.label'),value:pool.policy == null ? t('pools.policy.choose') : t(`pools.policy.${pool.policy.type}`)}, {name:t('pools.enabled'),value:t(pool.enabled === true ? 'pools.on' : 'pools.off')}];break;
     }
     case 'skill': {
       const skill = { ...subject.skill, ...query.data };

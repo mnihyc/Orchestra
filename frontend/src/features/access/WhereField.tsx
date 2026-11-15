@@ -5,10 +5,11 @@
  * object can no longer be read is shown as gone and is kept or removed like any other: it never blocks saving.
  */
 import { useQuery } from '@tanstack/react-query';
-import { Box, Laptop, Server, X } from 'lucide-react';
+import { Box, Laptop, Layers3, Server, X } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { poolsQuery } from '@/api/pools';
 import { environmentsQuery } from '@/api/environments';
 import { hostsQuery, machinesQuery } from '@/api/resources';
 import { resourceChoice, ResourceChip } from '@/features/resource-facts/ResourceFacts';
@@ -21,15 +22,15 @@ import type { SelectOption } from '@/ui/Select';
 type Kind = WhereName['kind'];
 
 /** The kinds of place a name may be of, in the order the picker lists them. */
-const KINDS: readonly Kind[] = ['environment', 'host', 'machine'];
-const ICONS = { environment: Box, host: Server, machine: Laptop } as const;
+const KINDS: readonly Kind[] = ['environment', 'host', 'machine', 'environment_pool', 'host_pool'];
+const ICONS = { environment: Box, host: Server, machine: Laptop, environment_pool: Layers3, host_pool: Layers3 } as const;
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /** The names a stored value holds: the members that read as a kind and an identifier, in the order they were written. */
 export function whereNames(value: unknown): WhereName[] {
   if (!Array.isArray(value)) return [];
-  return value.flatMap((item: unknown) => isRecord(item) && typeof item.id === 'string' && (item.kind === 'environment' || item.kind === 'host' || item.kind === 'machine') ? [{ kind: item.kind, id: item.id } satisfies WhereName] : []);
+  return value.flatMap((item: unknown) => isRecord(item) && typeof item.id === 'string' && (item.kind === 'environment' || item.kind === 'host' || item.kind === 'machine' || item.kind === 'environment_pool' || item.kind === 'host_pool') ? [{ kind: item.kind, id: item.id } satisfies WhereName] : []);
 }
 
 const sameName = (one: WhereName, other: WhereName) => one.kind === other.kind && one.id === other.id;
@@ -41,13 +42,15 @@ function useKnown(wanted: readonly WhereName[], open: boolean) {
   const environments = useQuery({ ...environmentsQuery(null), enabled: need('environment') });
   const hosts = useQuery({ ...hostsQuery(null), enabled: need('host') });
   const machines = useQuery({ ...machinesQuery, enabled: need('machine') });
+  const pools = useQuery({ ...poolsQuery, enabled: open || need('environment_pool') || need('host_pool') });
   const names = new Map<string, string>();
+  for (const row of pools.data ?? []) if (row.kind === 'environment' || row.kind === 'host') names.set(encode({ kind: row.kind === 'environment' ? 'environment_pool' : 'host_pool', id: row.id }), row.name);
   for (const row of environments.data ?? []) names.set(encode({ kind: 'environment', id: row.id }), row.name);
   for (const row of hosts.data ?? []) names.set(encode({ kind: 'host', id: row.id }), row.name);
   for (const row of machines.data ?? []) names.set(encode({ kind: 'machine', id: row.id }), row.name);
   // A list that was not asked for is idle and pending; it neither loads nor fails.
-  const asked = [environments, hosts, machines].filter((query) => query.fetchStatus !== 'idle' || query.status !== 'pending');
-  return { names, environments, hosts, machines, loading: asked.some((query) => query.isPending), failed: asked.some((query) => query.isError) };
+  const asked = [environments, hosts, machines, pools].filter((query) => query.fetchStatus !== 'idle' || query.status !== 'pending');
+  return { names, environments, hosts, machines, pools, loading: asked.some((query) => query.isPending), failed: asked.some((query) => query.isError) };
 }
 type Known = ReturnType<typeof useKnown>;
 
@@ -92,12 +95,13 @@ export function WhereField({ label, value, onChange, disabled = false }: WhereFi
     const group = t(`access.options.whereKinds.${kind}`);
     if (kind === 'environment') return (known.environments.data ?? []).filter((row) => !taken(row.id)).map((row): SelectOption<string> => ({ value: encode({ kind, id: row.id }), name: row.name, group, ...resourceChoice({ kind: 'environment', environment: row }) }));
     if (kind === 'host') return (known.hosts.data ?? []).filter((row) => !taken(row.id)).map((row): SelectOption<string> => ({ value: encode({ kind, id: row.id }), name: row.name, group, ...resourceChoice({ kind: 'host', host: row }) }));
+    if (kind === 'environment_pool' || kind === 'host_pool') return (known.pools.data ?? []).filter((row) => row.kind === (kind === 'environment_pool' ? 'environment' : 'host') && !taken(row.id)).map((row): SelectOption<string> => ({ value: encode({ kind, id: row.id }), name: row.name, group }));
     return (known.machines.data ?? []).filter((row) => !taken(row.id)).map((row): SelectOption<string> => ({ value: encode({ kind, id: row.id }), name: row.name, group, resource: { kind: 'machine' as const, id: row.id, data: row } }));
   });
   const add = (chosen: string) => {
     const [kind, ...rest] = chosen.split(':');
     const id = rest.join(':');
-    if ((kind === 'environment' || kind === 'host' || kind === 'machine') && id !== '') onChange([...value, { kind, id }]);
+    if ((kind === 'environment' || kind === 'host' || kind === 'machine' || kind === 'environment_pool' || kind === 'host_pool') && id !== '') onChange([...value, { kind, id }]);
   };
   return (
     <fieldset className="flex min-w-0 flex-col gap-2" data-where-field>

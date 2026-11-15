@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-provider-contract --lib
+test -p orch-access-contract --lib
+test -p orch-settings-contract --lib
+test -p orch-authz --test resources --test pages --test giving --test use_where
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test resource_groups --test typed_resource_operations --test everything_resources --test everything_operation_scopes

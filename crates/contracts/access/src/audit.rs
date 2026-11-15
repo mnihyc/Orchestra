@@ -378,12 +378,16 @@ audit_actions! {
         McpDeleted = "mcp.deleted", line, "An MCP server was deleted.";
         McpImported = "mcp.imported", line, "An MCP server was imported from the harness configuration of a machine.";
         McpRestarted = "mcp.restarted", line, "One environment MCP server was restarted with its failure count cleared.";
+        PoolCreated = "pool.created", line, "A resource pool was added.";
+        PoolUpdated = "pool.updated", line, "A resource pool was changed.";
+        PoolMemberUpdated = "pool.member_updated", line, "A pool member was changed.";
         SkillCreated = "skill.created", line, "A skill was added.";
         SkillDisabled = "skill.disabled", line, "A skill was disabled.";
         SkillEnabled = "skill.enabled", line, "A skill was enabled.";
         SkillDeleted = "skill.deleted", line, "A skill was deleted.";
         SkillVersionMade = "skill.version_made", line, "A version of a skill was made: imported, updated from where it came from, uploaded or published from its draft.";
         EnvironmentExecChanged = "environment.exec_changed", line, "What an environment's exec node offers was changed, or whether its agents get Orch's own tools.";
+        ResourcePoolLendingChanged = "resource.pool_lending_changed", line, "Lending a resource through pools was changed.";
         ResourceTransferred = "resource.transferred", line, "The first owner of a resource changed.";
         ResourceHomeChanged = "resource.home_changed", line, "A resource's sharing and settings home changed.";
         ResourceTagsChanged = "resource.tags_changed", line, "The display tags of a resource changed.";
@@ -508,6 +512,7 @@ impl AuditAction {
             | Self::InputScheduleCreated
             | Self::ScheduleCreatedByAgent
             | Self::McpCreated
+            | Self::PoolCreated
             | Self::SkillCreated
             | Self::MountCreated
             | Self::NodeCreated
@@ -562,6 +567,8 @@ impl AuditAction {
             | Self::McpDisabled
             | Self::McpEnabled
             | Self::McpUpdated
+            | Self::PoolUpdated
+            | Self::PoolMemberUpdated
             | Self::SkillDisabled
             | Self::SkillEnabled
             | Self::SkillVersionMade
@@ -580,6 +587,7 @@ impl AuditAction {
             | Self::ProviderUpdated
             | Self::ProviderSourcesChanged
             | Self::ResourceTagsChanged
+            | Self::ResourcePoolLendingChanged
             | Self::SettingsReset
             | Self::SettingsUpdated
             | Self::SystemSettingsUpdated
@@ -813,6 +821,7 @@ impl AuditAction {
             | Self::ResourceTransferred
             | Self::ResourceHomeChanged
             | Self::ResourceTagsChanged
+            | Self::ResourcePoolLendingChanged
             | Self::ShareFileDownloaded
             | Self::StorageCleaned => None,
             // An invitation to make an org is about the person it was given to: no org exists yet.

@@ -31,6 +31,7 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
   UNION ALL SELECT 'template', id, name, home_id, org_id, owner_id, created_at, updated_at, CASE WHEN enabled THEN 'enabled' ELSE 'disabled' END, NULL, NULL FROM env_templates WHERE deleted_at IS NULL
   UNION ALL SELECT 'mount', id, name, home_id, org_id, owner_id, created_at, updated_at, CASE WHEN enabled THEN 'enabled' ELSE 'disabled' END, NULL, NULL FROM mounts WHERE deleted_at IS NULL
   UNION ALL SELECT 'skill', id, name, home_id, org_id, owner_id, created_at, updated_at, CASE WHEN enabled THEN 'enabled' ELSE 'disabled' END, NULL, NULL FROM skills WHERE deleted_at IS NULL
+  UNION ALL SELECT 'pool', id, name, home_id, org_id, owner_id, created_at, updated_at, CASE WHEN (definition->>'enabled')::boolean THEN 'enabled' ELSE 'disabled' END, NULL, NULL FROM pools WHERE deleted_at IS NULL
 ), inventory AS NOT MATERIALIZED (
   SELECT kind,id,name,parent_id,path,org_id,created_by,owner_id,created_at,last_activity,state,size_bytes,takes,"grant" FROM node_rows
   UNION ALL
@@ -210,7 +211,7 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
         SELECT tag_id FROM node_tags WHERE node_id=CASE WHEN i.kind IN ('org','project','topic','thread') THEN i.id::uuid END
         UNION ALL
         SELECT tag_id FROM resource_tags WHERE resource_kind=i.kind
-          AND resource_id=CASE WHEN i.kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill') THEN i.id::uuid END
+          AND resource_id=CASE WHEN i.kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill','pool') THEN i.id::uuid END
       ) tt JOIN tags tag ON tag.id=tt.tag_id JOIN nodes place ON place.id=tag.node_id
      WHERE COALESCE((i."grant"->>'view')::boolean, false)
   ), '[]'::jsonb) END tags,
@@ -235,7 +236,7 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
       SELECT tag_id FROM node_tags WHERE node_id=CASE WHEN i.kind IN ('org','project','topic','thread') THEN i.id::uuid END
       UNION ALL
       SELECT tag_id FROM resource_tags WHERE resource_kind=i.kind
-        AND resource_id=CASE WHEN i.kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill') THEN i.id::uuid END
+        AND resource_id=CASE WHEN i.kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill','pool') THEN i.id::uuid END
     ) tt JOIN tags t ON t.id=tt.tag_id)
   END ELSE CASE WHEN $12 = 'name' AND (i."grant"->>'named')::boolean THEN lower(i.name) END END sort_key
   FROM (SELECT * FROM filtered UNION ALL SELECT * FROM groups) i

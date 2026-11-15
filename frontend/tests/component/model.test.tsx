@@ -3,6 +3,7 @@ import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
+import { i18n } from '@/i18n';
 
 import { ContextChoice } from '@/features/composer/ContextChoice';
 import { type ContextState, type SpeedOrAccess, statesOf } from '@/features/composer/modelState';
@@ -12,6 +13,11 @@ import type { ModelParameters, ProviderModel, ProviderRef, ThreadParameters } fr
 
 import { show } from './support';
 import { MODEL_ESTIMATE } from '../doubles/fixtures';
+
+const poolCalls = vi.hoisted(() => ({ create: vi.fn<(body: import('@/generated/api-types').PoolCreateBody, key: string) => Promise<import('@/generated/api-types').PoolReceipt>>(), update: vi.fn() }));
+vi.mock('@/api/pools', () => ({ createPool: poolCalls.create, updatePool: poolCalls.update, poolsKey: ['pools'], readPoolAfterWrite: vi.fn(() => Promise.resolve()) }));
+vi.mock('@/features/resources/HomePicker', () => ({ HomePicker: ({ value, onChange }: { value: string; onChange: (value: string) => void }) =>
+  <input aria-label="Pool home" value={value} onChange={(event) => onChange(event.target.value)} /> }));
 
 const PROVIDER = { address: 'acme.ada', harness_kind: 'codex', id: 'p1', kind: 'subscription', name: 'Team Pro', placement: 'managed', status: 'ready' } as ProviderRef;
 
@@ -157,11 +163,11 @@ describe('the speed of a thread', () => {
 describe('the access program of a thread', () => {
   it('reads None until somebody chooses a program, and names what a choice comes to', () => {
     const { unmount } = show(<AccessChoice state={access(SOL)} writable chooser={null} onChoose={() => undefined} />);
-    expect(screen.getByRole('combobox', { name: 'Access' })).toHaveTextContent('None');
+    expect(screen.getByRole('combobox', { name: 'Access' })).toHaveDisplayValue('None');
     expect(screen.getByText('None: no access program is asked for.')).toBeInTheDocument();
     unmount();
     show(<AccessChoice state={access(SOL, { cyber_access_program: 'Daybreak Blue' })} writable chooser={null} onChoose={() => undefined} />);
-    expect(screen.getByRole('combobox', { name: 'Access' })).toHaveTextContent('Daybreak Blue');
+    expect(screen.getByRole('combobox', { name: 'Access' })).toHaveDisplayValue('Daybreak Blue');
     expect(screen.getByText('Daybreak Blue: this thread\'s turns ask for that access program.')).toBeInTheDocument();
   });
 });
@@ -226,4 +232,29 @@ describe('the context of a thread', () => {
     expect(screen.queryByLabelText('Another size, in tokens')).not.toBeInTheDocument();
     expect(screen.getByText('Web decides this for its threads, so it cannot be changed here.')).toBeInTheDocument();
   });
+});
+
+
+it('makes a live model-group pool only after its policy and enabled state are chosen', async () => {
+  poolCalls.create.mockReset();
+  poolCalls.create.mockResolvedValue({ projection: 'receipt', id: 'pool-1', revision: 1 });
+  show(<GroupStrip provider={PROVIDER} models={[model('a', ['small'])]} manage />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: i18n.t('pools.makeFrom', { name: 'small' }) }));
+  const dialog = screen.getByRole('dialog', { name: i18n.t('pools.new') });
+  expect(poolCalls.create).not.toHaveBeenCalled();
+  const name = within(dialog).getByRole('textbox', { name: i18n.t('pools.name') });
+  await user.clear(name); await user.type(name, 'Cheap models');
+  await user.type(within(dialog).getByRole('textbox', { name: 'Pool home' }), 'home-root');
+  await user.click(within(dialog).getByRole('combobox', { name: i18n.t('pools.policy.label') }));
+  await user.click(screen.getByRole('option', { name: i18n.t('pools.policy.ordered') }));
+  const enabled = within(dialog).getByRole('checkbox', { name: i18n.t('pools.enabled') });
+  expect(enabled).not.toBeChecked(); await user.click(enabled);
+  await user.click(within(dialog).getByRole('button', { name: i18n.t('pools.create') }));
+  expect(poolCalls.create).toHaveBeenCalledOnce();
+  const sent = poolCalls.create.mock.calls[0]?.[0];
+  expect(sent?.home_id).toBe('home-root');
+  expect(sent?.name).toBe('Cheap models');
+  expect(sent?.definition).toMatchObject({ kind: 'model', enabled: true, policy: { type: 'ordered' } });
+  expect(sent?.definition.members[0]?.rule).toEqual({ type: 'provider_models', provider_id: PROVIDER.id, group: 'small' });
 });

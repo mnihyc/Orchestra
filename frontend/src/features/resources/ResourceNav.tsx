@@ -6,7 +6,7 @@
  */
 import { useViewLocation } from '@/features/workbench/pageContext';
 import { Link, useNavigate } from '@tanstack/react-router';
-import { Bot, Box, Boxes, Cpu, GraduationCap, Laptop, Plug, PlugZap, Server, type LucideIcon } from 'lucide-react';
+import { Bot, Box, Boxes, Cpu, GraduationCap, Laptop, Layers3, Plug, PlugZap, Server, type LucideIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { ResourceKind } from '@/features/resources/trail';
@@ -14,6 +14,7 @@ import { useSettingsSidebarPresence } from '@/features/settings/sidebarPresence'
 import { FoldingStrip } from '@/ui/FoldingStrip';
 
 export const KINDS = [
+  { to: '/resources/pools', name: 'pools', icon: Layers3 },
   { to: '/resources/providers', name: 'providers', icon: PlugZap },
   { to: '/resources/agents', name: 'agents', icon: Bot },
   { to: '/resources/machines', name: 'machines', icon: Laptop },
