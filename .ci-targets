@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-engine --test background_wake -- instruction_refresh_waits_for_live_work_without_replacing_its_session_generation
+test -p orch-engine --test forks -- a_completed_handoff_records_the_actual_carried_suffix_and_full_transcript_after_settings_change
+test -p orch-engine --test forks -- an_omitted_transcript_cannot_be_reported_as_complete_or_open_the_replacement_session
+test -p orch-engine --test forks -- notes_are_carried_independently_of_workspace_files_and_a_target_that_appears_after_preview_is_kept

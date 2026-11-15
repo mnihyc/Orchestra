@@ -289,3 +289,106 @@ async fn archived_age_deletes_recoverably_settles_pending_work_and_a_restart_doe
         "restoring starts no queued work"
     );
 }
+
+#[tokio::test]
+async fn archive_review_reports_the_native_policy_and_eligibility_without_rewriting_an_older_assessment()
+ {
+    use orch_api_contract::nodes::NodeArchivePreview;
+    let s = Scene::new().await;
+    s.rig.engine.stop();
+    let id = topic(&s, "Wait for the actual boundary", false).await;
+    old(&s, &[id], 2).await;
+    policy(&s, s.tree.org.base.id, "retention.archive_idle_days", 3).await;
+    let before = s
+        .rig
+        .world
+        .app
+        .call(NodeArchivePreview, &[&id])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let first = serde_json::to_value(before).unwrap();
+    assert_eq!(first["retention"]["archive"]["days"], 3);
+    assert_eq!(first["retention"]["archive"]["source"], "org");
+    assert_eq!(first["retention"]["archive"]["eligible_at"]["state"], "at");
+    assert_eq!(
+        first["retention"]["delete"]["eligible_at"]["state"],
+        "not_applicable"
+    );
+    assert_eq!(s.rig.engine.run_retention().await.unwrap().archived, 0);
+    policy(&s, s.tree.org.base.id, "retention.archive_idle_days", 1).await;
+    let after = s
+        .rig
+        .world
+        .app
+        .call(NodeArchivePreview, &[&id])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        serde_json::to_value(after).unwrap()["retention"]["archive"]["days"],
+        1
+    );
+    assert_eq!(
+        first["retention"]["archive"]["days"], 3,
+        "a later policy does not rewrite the reviewed observation"
+    );
+    assert_eq!(s.rig.engine.run_retention().await.unwrap().archived, 1);
+}
+
+#[tokio::test]
+async fn a_retained_dependency_holds_physical_cleanup_without_moving_the_recorded_restoration_cutoff()
+ {
+    use orch_api_contract::nodes::DeletedInspectionQuery;
+    let s = Scene::new().await;
+    s.rig.engine.stop();
+    let id = topic(&s, "Recoverable until its recorded day", false).await;
+    let now = s.rig.world.now();
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    orch_db::queries::hierarchy::archive(&mut conn, id, s.ada.id(), now - Duration::days(3))
+        .await
+        .unwrap();
+    drop(conn);
+    policy(&s, id, "retention.delete_archived_days", 1).await;
+    assert_eq!(s.rig.engine.run_retention().await.unwrap().deleted, 1);
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    sqlx::query("UPDATE environments SET home_id=$2 WHERE id=$1")
+        .bind(s.on.environment)
+        .bind(id)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let read = || {
+        s.rig
+            .world
+            .app
+            .call(NodeGet, &[&id])
+            .token(&s.ada.token)
+            .query(&DeletedInspectionQuery {
+                inspect_deleted: Some(true),
+            })
+    };
+    let before = serde_json::to_value(read().send().await.ok()).unwrap();
+    assert_eq!(before["inspection"]["cleanup_hold"]["held"], true);
+    let until = before["inspection"]["purge_at"].clone();
+    policy(&s, id, "retention.delete_archived_days", 100).await;
+    let after = serde_json::to_value(read().send().await.ok()).unwrap();
+    assert_eq!(after["inspection"]["purge_at"], until);
+    assert_eq!(after["inspection"]["cleanup_hold"]["held"], true);
+    let denied = s
+        .rig
+        .world
+        .app
+        .call(NodeGet, &[&id])
+        .token(&s.cai.token)
+        .query(&DeletedInspectionQuery {
+            inspect_deleted: Some(true),
+        })
+        .send()
+        .await;
+    assert!(!denied.status.is_success());
+    assert!(!String::from_utf8_lossy(&denied.raw).contains("cleanup_hold"));
+}
