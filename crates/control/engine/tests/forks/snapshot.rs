@@ -39,20 +39,35 @@ pub(super) async fn uploaded(
     let mut entries = Vec::new();
     let mut registered = Vec::new();
     let mut uploaded_bytes = 0;
-    for (name, bytes) in [
-        ("a.txt", b"source-a0\n".as_slice()),
-        ("b.txt", b"source-b0\n".as_slice()),
-        ("c.txt", b"source-c0\n".as_slice()),
-    ] {
+    let note = physical_root.and_then(|root| {
+        std::fs::read(std::path::Path::new(root).join(".orch/memory/MEMORY.md")).ok()
+    });
+    let mut fixture_files = if prefix == ".orch/memory" {
+        note.map(|bytes| vec![("MEMORY.md".to_owned(), bytes)])
+            .unwrap_or_default()
+    } else {
+        let mut files = vec![
+            ("a.txt".to_owned(), b"source-a0\n".to_vec()),
+            ("b.txt".to_owned(), b"source-b0\n".to_vec()),
+            ("c.txt".to_owned(), b"source-c0\n".to_vec()),
+        ];
+        if prefix.is_empty()
+            && let Some(bytes) = note
+        {
+            files.push((".orch/memory/MEMORY.md".to_owned(), bytes));
+        }
+        files
+    };
+    for (name, bytes) in fixture_files.drain(..) {
         let path = if prefix.is_empty() {
-            name.to_owned()
+            name.clone()
         } else {
             format!("{prefix}/{name}")
         };
         if !matcher.matches(&path) {
             continue;
         }
-        let hash = Hash::of(bytes);
+        let hash = Hash::of(&bytes);
         let size =
             i64::try_from(bytes.len()).map_err(|_| refusal("the scripted file is too large"))?;
         let prior = store
@@ -66,7 +81,7 @@ pub(super) async fn uploaded(
             .put(
                 &hash,
                 Some(size),
-                orch_blob_contract::store::stream_of(vec![bytes.to_vec().into()]),
+                orch_blob_contract::store::stream_of(vec![bytes.into()]),
             )
             .await
             .map_err(|_| refusal("the scripted file upload failed"))?;

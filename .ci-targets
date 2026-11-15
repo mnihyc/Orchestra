@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test karchive_retention --test archive_plan
+test -p orch-api-core --test browsers -- retained_closed_browsers_are_paged_on_intent_even_after_the_environment_is_offline
+test -p orch-api-core --test kvnc_core -- retained_closed_displays_are_paged_and_searched_without_contacting_an_offline_environment
+test -p orch-api-core --test binding_options -- a_thread_created_without_model_or_approval_choices_uses_the_only_model_and_an_offered_mode
+test -p orch-api-core --test binding_options -- an_omitted_model_keeps_the_places_choice_and_does_not_replace_an_explicit_or_disallowed_choice

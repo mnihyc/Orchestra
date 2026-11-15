@@ -97,6 +97,16 @@ test('an edit is saved on the version that was read, and what is written lands o
   expect(await onDisk('web/src/app.ts')).toMatch(/^\/\/ edited\nimport \{ greet \}/);
 });
 
+test('a writable file stays editable after narrowing the screen and saves the complete text', async ({ page }) => {
+  await openApp(page);
+  await page.setViewportSize({ width: 400, height: 844 });
+  await expect(editor(page)).toHaveAttribute('contenteditable', 'true');
+  await typeAtStart(page, '// edited on a narrow screen\n');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.getByTestId('code-status')).not.toContainText('Unsaved');
+  expect(await onDisk('web/src/app.ts')).toMatch(/^\/\/ edited on a narrow screen\nimport \{ greet \}/);
+});
+
 test('a file that changed while it was being edited is shown and never overwritten: Compare, Keep mine and Take theirs', async ({ page }) => {
   await openApp(page);
   await typeAtStart(page, '// mine\n');
