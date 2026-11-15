@@ -2433,14 +2433,20 @@ impl Forking {
                 let previous =
                     fork_history::cut::summary_input(engine, &cut, &summary_budget).await?;
                 let mut previous_recovery = None;
+                let mut handoff_receipt = None;
                 let summary = loop {
                     job.check()?;
                     let made = crate::summaries::handoff_captured(
                         engine,
                         cut.thread_id,
-                        &previous,
+                        &previous.text,
                         job.id(),
                         &choice,
+                        Some(crate::summaries::HandoffCapture {
+                            cut: cut.id,
+                            input: &previous,
+                            receipt: &mut handoff_receipt,
+                        }),
                     )
                     .await;
                     if made.is_ok() {
@@ -2480,7 +2486,7 @@ impl Forking {
                             job,
                             &self.recipe,
                             "summary_result",
-                            &json!({"text":summary,"at":Time::new(job.now())}),
+                            &json!({"text":summary,"at":Time::new(job.now()),"handoff":handoff_receipt.as_ref().map(|observation| &observation.result)}),
                             true,
                         )
                         .await?;
@@ -2491,7 +2497,7 @@ impl Forking {
                             job,
                             &self.recipe,
                             "summary_skipped",
-                            &json!({"reason": "failed"}),
+                            &json!({"reason": "failed","handoff":handoff_receipt.as_ref().map(|observation| &observation.result)}),
                             true,
                         )
                         .await?;
@@ -2559,7 +2565,10 @@ impl Forking {
             carried.as_ref().map(|carried| (carried, carried_at)),
         );
         source::artifact(job, &self.recipe, "handoff_notice", &json!(notice), false).await?;
-        job.remember(&json!({"handoff_text":notice})).await?;
+        job.remember(
+            &json!({"handoff_text":notice,"handoff_result":cut.artifacts.get("summary_result").or_else(|| cut.artifacts.get("summary_skipped")).and_then(|result| result.get("handoff"))}),
+        )
+        .await?;
         let transcript_blob =
             serde_json::from_value(transcript_meta["blob"].clone()).map_err(EngineError::from)?;
         let transcript_size = transcript_bytes;
@@ -2879,7 +2888,11 @@ impl Engine {
             state: threads::turn_state::STARTING.to_owned(),
             input_id: Id::nil(),
             before_snapshot_id: None,
-            files_end_manifest: None,
+            files_changed: None,
+            files_changed_paths: None,
+            files_changed_complete: None,
+            recording_notice: None,
+            recording_indexing: None,
             end_manifest_blob: None,
             model: plan.to.model.clone(),
             effort: plan.to.effort.clone(),
@@ -2897,6 +2910,7 @@ impl Engine {
             waiting_since: None,
             waited_ms: 0,
             interrupted_by: None,
+            interrupted_at: None,
             command_cleanup: None,
             started_at: None,
             completed_at: None,
@@ -2905,6 +2919,7 @@ impl Engine {
             plan: false,
         };
         let input = threads::InputRow {
+            native_image_delivery: None,
             id: Id::nil(),
             thread_id,
             continuation_id: thread.active_continuation_id,
@@ -2984,6 +2999,7 @@ impl Engine {
             tools,
             capabilities,
             isolation,
+            mounts: crate::mounts::views(conn, environment.id, now).await?,
             browser_line: crate::tools::browser::preamble(conn, environment.id).await?,
             workspace_configuration: crate::trust::answer_for(
                 conn,
@@ -3003,6 +3019,7 @@ impl Engine {
             .capability_use_preview(
                 conn,
                 &crate::access::ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person: recipe.by,
                     node: thread_id,
                     provider: provider.id,
@@ -3407,7 +3424,7 @@ impl Forking {
         )
         .await
         .map_err(EngineError::from)?;
-        let report = self.final_report(opened);
+        let report = self.final_report(opened, remembered)?;
         if let Some(opened) = opened {
             orch_db::queries::machine_streams::bind_segment(
                 &mut *unit.conn,
@@ -3687,7 +3704,7 @@ impl Forking {
             .await
             .map_err(EngineError::from)?;
         }
-        let mut report = self.final_report(opened);
+        let mut report = self.final_report(opened, remembered)?;
         let keep_side = if source.side_of.is_some() {
             let queued:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM thread_inputs WHERE thread_id=$1 AND state IN ('pending','delivering'))")
                 .bind(source_id).fetch_one(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
@@ -3871,14 +3888,26 @@ impl Forking {
 
     /// The report that says how the history travelled: the harness's own where it gave one, else what the
     /// plan worked out for the method that was used.
-    fn final_report(&self, opened: Option<&Opened>) -> HistoryReport {
-        match opened {
+    fn final_report(
+        &self,
+        opened: Option<&Opened>,
+        remembered: &Json,
+    ) -> Result<HistoryReport, Stop> {
+        let mut report = match opened {
             Some(opened) => opened
                 .report
                 .clone()
                 .unwrap_or_else(|| fork_history::report(opened.method, &Selected::default(), None)),
             None => self.recipe.forkplan.history.report.clone(),
-        }
+        };
+        report.handoff = remembered
+            .get("handoff_result")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(EngineError::from)?;
+        Ok(report)
     }
 
     /// The verified handoff accompanies the next real input, including one released from a held queue.

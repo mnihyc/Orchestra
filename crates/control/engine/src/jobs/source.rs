@@ -12,12 +12,10 @@ use orch_authz::{Caller, CapturedOperation, Policy, Principal, TokenGrant};
 use orch_db::queries::jobs::{JobRow, NewJob, kind};
 use orch_db::{
     Conn,
-    queries::{environments, jobs as rows, source, storage, threads},
+    queries::{environments, jobs as rows, source, threads},
 };
 use orch_link_contract::commands::{FsMkdir, FsStat, Secret, SerialKey};
-use orch_link_contract::source::{
-    FsRecord, FsRecordResult, GitCommit, GitPrepare, GitPush, GitWorktree, RecordKind, RecordState,
-};
+use orch_link_contract::source::{GitCommit, GitPrepare, GitPush, GitWorktree};
 use orch_settings::{Place, get};
 use orch_settings_contract::registry::keys;
 use orch_types::{Id, Json, Time, new_id};
@@ -349,20 +347,6 @@ impl Engine {
             None
         };
         let action = if let Some(choice_tree) = worktree {
-            let record_days = get::<i64>(
-                &mut tx,
-                Place::Environment(environment),
-                keys::WORKSPACE_RECORD_DAYS,
-            )
-            .await?
-            .ok_or_else(|| EngineError::unreadable("recording days are unset"))?;
-            let max_bytes = get::<i64>(
-                &mut tx,
-                Place::Environment(environment),
-                keys::WORKSPACE_RECORD_MAX_BYTES,
-            )
-            .await?
-            .ok_or_else(|| EngineError::unreadable("recording bytes are unset"))?;
             Action::Worktree {
                 body: GitWorktree {
                     environment_id: environment,
@@ -371,8 +355,6 @@ impl Engine {
                     snapshot_id: None,
                 },
                 source: choice,
-                record_days,
-                max_bytes,
             }
         } else {
             Action::Prepare {
@@ -498,8 +480,6 @@ pub enum Action {
     Worktree {
         body: GitWorktree,
         source: RepositorySource,
-        record_days: i64,
-        max_bytes: i64,
     },
     Push {
         body: GitPush,
@@ -582,19 +562,6 @@ pub async fn begin_before(
             body.job_id = id;
             body.undo_snapshot_id = crate::ids::derived("restore.undo", &[id.as_bytes()]);
         }
-    }
-    if let Action::Worktree { body, .. } = &mut plan.action
-        && let Some(snapshot) = body.snapshot_id
-        && storage::snapshot(conn, snapshot)
-            .await?
-            .is_some_and(|row| row.state == "unavailable")
-    {
-        // No git.worktree command is issued after unavailable capture, so its branch
-        // and destination are still frozen but Retry may ask for a newly ready state.
-        body.snapshot_id = Some(crate::ids::derived(
-            "worktree.current-files.retry",
-            &[body.job_id.as_bytes(), id.as_bytes()],
-        ));
     }
     let mut value = serde_json::to_value(&plan)
         .map_err(|error| orch_db::DbError::Other(sqlx::Error::Decode(error.into())))?;
@@ -1509,26 +1476,8 @@ fn creator_body(plan: &Plan, job: Id, kind: &str, body: &Json) -> Result<bool, E
             }
             _ => return Ok(false),
         },
-        Action::Worktree {
-            body: worktree,
-            record_days,
-            max_bytes,
-            ..
-        } => match kind {
+        Action::Worktree { body: worktree, .. } => match kind {
             "git.worktree" => json!(worktree),
-            "fs.record" => {
-                let Some(snapshot_id) = worktree.snapshot_id else {
-                    return Ok(false);
-                };
-                json!(FsRecord {
-                    environment_id: plan.environment,
-                    snapshot_id,
-                    directory: worktree.choice.repository_dir.clone(),
-                    kind: RecordKind::Turn,
-                    record_days: *record_days,
-                    max_bytes: *max_bytes
-                })
-            }
             _ => return Ok(false),
         },
         _ => return Ok(false),
@@ -1666,7 +1615,24 @@ impl Preparing {
                 authority,
             ));
         }
-        job.command(command).await
+        // The thread that waits for this preparation is told which command it waits for, and what holds it
+        // up when other work stands in the machine's line before it.
+        let Some(thread) = self.plan.thread else {
+            return job.command(command).await;
+        };
+        let (id, kind) = (command.id, command.kind);
+        match self
+            .engine
+            .waiting_noted(thread, id, kind, None, job.command(command))
+            .await
+        {
+            crate::start_wait::Waited::Done(answer) => answer,
+            crate::start_wait::Waited::Tired => Err(Failure::new(
+                "timeout",
+                "The machine did not finish the operation before its deadline. Retry the job.",
+            )
+            .into()),
+        }
     }
 
     /// Pins the current source attempt after the caller has locked its authoritative job claim.
@@ -1933,132 +1899,7 @@ impl Preparing {
                 )
                 .await?
             }
-            Action::Worktree {
-                body,
-                record_days,
-                max_bytes,
-                ..
-            } => {
-                if body.job_id != job.id() && body.snapshot_id.is_some() {
-                    let mut conn = self.engine.db().acquire().await?;
-                    let saved = storage::snapshot(
-                        &mut conn,
-                        body.snapshot_id.ok_or_else(|| {
-                            Failure::new("internal", "the original worktree capture disappeared")
-                        })?,
-                    )
-                    .await?;
-                    drop(conn);
-                    if saved
-                        .is_some_and(|saved| matches!(saved.state.as_str(), "complete" | "expired"))
-                    {
-                        // Ask the original native identity first. A completed worktree can
-                        // return its frozen answer after capture expiry; no new capture is made.
-                        let result = self
-                            .command(
-                                job,
-                                Outgoing::new(
-                                    crate::ids::derived(
-                                        "git.worktree.retry",
-                                        &[body.job_id.as_bytes(), job.id().as_bytes()],
-                                    ),
-                                    self.plan.machine,
-                                    SerialKey::Environment(self.plan.environment),
-                                    body,
-                                )
-                                .map_err(EngineError::from)?,
-                            )
-                            .await?;
-                        job.remember(
-                            &json!({ "file_result": result, "file_source_attempt": self.plan }),
-                        )
-                        .await?;
-                        return Ok(Done::Finished);
-                    }
-                }
-                if let Some(snapshot) = body.snapshot_id {
-                    if *record_days <= 0 {
-                        return Err(Failure::new(
-                            "workspace.restore_unavailable",
-                            "From now needs a complete recorded current state; recording is off",
-                        )
-                        .into());
-                    }
-                    let thread = self
-                        .plan
-                        .thread
-                        .ok_or_else(|| Failure::new("internal", "the own attempt has no thread"))?;
-                    let mut tx = self.engine.db().begin().await?;
-                    source::begin_recorded(&mut tx, &storage::NewSnapshot { id: snapshot, thread_id: Some(thread), environment_id: self.plan.environment,
-                        env_generation: self.plan.generation, label: "Current files for own attempt", selection: &json!({ "include": [body.choice.repository_dir], "exclude": [] }),
-                        created_by: Some(self.plan.caller), at: job.now() }, &body.choice.repository_dir, "turn").await?;
-                    tx.commit().await.map_err(orch_db::DbError::from)?;
-                    let value = self
-                        .command(
-                            job,
-                            Outgoing::new(
-                                crate::ids::derived(
-                                    "worktree.record-current",
-                                    &[body.job_id.as_bytes(), job.id().as_bytes()],
-                                ),
-                                self.plan.machine,
-                                SerialKey::Environment(self.plan.environment),
-                                &FsRecord {
-                                    environment_id: self.plan.environment,
-                                    snapshot_id: snapshot,
-                                    directory: body.choice.repository_dir.clone(),
-                                    kind: RecordKind::Turn,
-                                    record_days: *record_days,
-                                    max_bytes: *max_bytes,
-                                },
-                            )
-                            .map_err(EngineError::from)?,
-                        )
-                        .await?;
-                    let recorded: FsRecordResult =
-                        serde_json::from_value(value).map_err(EngineError::from)?;
-                    if recorded.state != RecordState::Complete {
-                        return Err(Failure::new(
-                            "workspace.restore_unavailable",
-                            "complete current files could not be recorded; choose a commit",
-                        )
-                        .into());
-                    }
-                    let hash = recorded.manifest_blob.ok_or_else(|| {
-                        Failure::new("internal", "the recorded current manifest is missing")
-                    })?;
-                    let manifest = self.engine.read_manifest_checked(hash).await?;
-                    if manifest.header().generation != i64::from(self.plan.generation)
-                        || manifest
-                            .entries()
-                            .iter()
-                            .any(|entry| entry.kind == crate::manifest::EntryKind::Other)
-                    {
-                        return Err(Failure::new(
-                            "workspace.restore_unavailable",
-                            "the current file coverage is incomplete",
-                        )
-                        .into());
-                    }
-                    let size = self
-                        .engine
-                        .blobs()
-                        .ok_or_else(|| {
-                            Failure::new("internal", "the current manifest store is unavailable")
-                        })?
-                        .size(&hash)
-                        .await
-                        .map_err(EngineError::unreadable)?
-                        .ok_or_else(|| {
-                            Failure::new("internal", "the current manifest is unavailable")
-                        })?;
-                    let mut tx = self.engine.db().begin().await?;
-                    storage::register_blob(&mut tx, &hash, size, job.now()).await?;
-                    if source::finish_recorded(&mut tx, snapshot, &recorded, job.now()).await? {
-                        storage::pin_blobs(&mut tx, &[hash]).await?;
-                    }
-                    tx.commit().await.map_err(orch_db::DbError::from)?;
-                }
+            Action::Worktree { body, .. } => {
                 self.command(
                     job,
                     Outgoing::new(
@@ -2533,23 +2374,6 @@ pub async fn provision_files(
             &[job.id().as_bytes(), thread.as_bytes()],
         );
         let action = if let Some(choice) = worktree {
-            let mut conn = job.engine().db().acquire().await?;
-            let record_days = get::<i64>(
-                &mut conn,
-                Place::Environment(environment),
-                keys::WORKSPACE_RECORD_DAYS,
-            )
-            .await
-            .map_err(EngineError::from)?
-            .ok_or_else(|| EngineError::unreadable("recording days are unset"))?;
-            let max_bytes = get::<i64>(
-                &mut conn,
-                Place::Environment(environment),
-                keys::WORKSPACE_RECORD_MAX_BYTES,
-            )
-            .await
-            .map_err(EngineError::from)?
-            .ok_or_else(|| EngineError::unreadable("recording bytes are unset"))?;
             let snapshot_id = matches!(
                 choice.from,
                 orch_api_contract::source::WorktreeFrom::Now { .. }
@@ -2563,8 +2387,6 @@ pub async fn provision_files(
                     snapshot_id,
                 },
                 source: frozen,
-                record_days,
-                max_bytes,
             }
         } else {
             let mut conn = job.engine().db().acquire().await?;
@@ -2753,6 +2575,34 @@ pub(crate) async fn undo_provision_sources(job: &Job, why: &Stop) -> Result<(), 
     Ok(())
 }
 
+/// Why a preparation failed, as the thread's source says it: the code the failure carries when it is a plain
+/// code, which the page turns into words and the act that fits (the machine's own sentence is on the job);
+/// a refusal to write files is one reason whichever door refused; anything else is the general one.
+fn failure_reason(why: &Stop) -> String {
+    match why {
+        Stop::Failed(failure)
+            if matches!(
+                failure.code.as_str(),
+                "workspace.remote_write_disabled" | "policy.remote_write_disabled"
+            ) =>
+        {
+            "workspace.remote_write_disabled".to_owned()
+        }
+        Stop::Failed(failure)
+            if !failure.code.is_empty()
+                && failure.code.len() <= 64
+                && failure.code.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'_' | b'-')
+                }) =>
+        {
+            failure.code.clone()
+        }
+        _ => "workspace.source_failed".to_owned(),
+    }
+}
+
 #[async_trait]
 impl Phased for Preparing {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
@@ -2899,10 +2749,7 @@ impl Phased for Preparing {
                 let job_ref = reference(&owner);
                 let mut unit = Unit::new(&mut tx, job.now());
                 let info = SourceInfo { kind: if worktree.is_some() { SourceKind::Worktree } else if frozen.repository_url.is_some() { SourceKind::Repository } else { SourceKind::Directory }, directory: directory.clone(), repository_url: frozen.repository_url.clone(),
-                    branch: frozen.branch.clone(), head: None, state: SourceState::Failed, job: Some(job_ref), reason: Some(match why {
-                        Stop::Failed(failure) if matches!(failure.code.as_str(), "workspace.remote_write_disabled" | "policy.remote_write_disabled") => "workspace.remote_write_disabled",
-                        _ => "workspace.source_failed",
-                    }.to_owned()) };
+                    branch: frozen.branch.clone(), head: None, state: SourceState::Failed, job: Some(job_ref), reason: Some(failure_reason(why)) };
                 let seq = unit.stamp(thread).await?;
                 source::set_source(&mut *unit.conn, thread, &with_creator_origin(json!({ "info": info, "source": frozen, "prepare": true, "worktree": worktree,
                     "caller": self.plan.caller, "token": self.plan.token, "credential_home": row.source.as_ref().and_then(|source|source.get("credential_home")).cloned().unwrap_or_else(||json!(row.topic_id)),
@@ -2939,6 +2786,33 @@ mod publication_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_preparation_keeps_the_code_it_failed_with_for_the_page_to_explain() {
+        let failed = |code: &str| Stop::Failed(Failure::new(code, "a sentence of the machine"));
+        assert_eq!(failure_reason(&failed("timeout")), "timeout");
+        assert_eq!(failure_reason(&failed("not_found")), "not_found");
+        assert_eq!(
+            failure_reason(&failed("workspace.source_conflict")),
+            "workspace.source_conflict"
+        );
+        // A refusal to write files is one reason, whichever door refused.
+        for code in [
+            "policy.remote_write_disabled",
+            "workspace.remote_write_disabled",
+        ] {
+            assert_eq!(
+                failure_reason(&failed(code)),
+                "workspace.remote_write_disabled"
+            );
+        }
+        // Anything that is not a plain code, and anything that is not a failure, is the general reason.
+        for odd in ["", "Some Words: here", "a/path", &"x".repeat(65)] {
+            assert_eq!(failure_reason(&failed(odd)), "workspace.source_failed");
+        }
+        assert_eq!(failure_reason(&Stop::Cancelled), "workspace.source_failed");
+        assert_eq!(failure_reason(&Stop::Lost), "workspace.source_failed");
+    }
 
     #[tokio::test]
     #[allow(clippy::unwrap_used, reason = "a control fails by panicking")]
