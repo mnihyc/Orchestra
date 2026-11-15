@@ -288,12 +288,6 @@ impl Engine {
                     .await?
                 }
             };
-            if notify && audience.count > u64::from(crate::fork_plan::moving::NOTICE_LIMIT) {
-                return Err(PlanError::invalid(
-                    "notify",
-                    "the reviewed audience exceeds the explicit notice limit; choose not to notify",
-                ));
-            }
             orch_db::queries::jobs::merge_plan(&mut tx,job.id,&serde_json::json!({"thread_move_notice":crate::fork_plan::moving::Notice{notify,people:audience.people.clone()}}),self.inner.clock.now()).await?;
         }
         fork_rows::forget_preflight(&mut tx, prepared.preflight.id).await?;

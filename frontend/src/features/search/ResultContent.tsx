@@ -11,7 +11,9 @@ import { ITEM_KINDS } from '@/api/search';
 import { selectThreadContinuation } from '@/api/threadRead';
 import type { EditorApi } from '@/features/documents/Editor';
 import { useViewFind } from '@/features/search/ViewFind';
-import { Timeline, type TimelineHandle } from '@/features/timeline/Timeline';
+import { Timeline, type FollowState, type TimelineHandle } from '@/features/timeline/Timeline';
+import { StatusLine } from '@/features/timeline/StatusLine';
+import { FollowButton } from '@/features/thread/FollowButton';
 import { useTimelineWindowKey } from '@/features/timeline/windowKey';
 import { timelineUi } from '@/features/timeline/state';
 import type { PromptFocus, SelectPromptVersion } from '@/features/timeline/context';
@@ -111,6 +113,7 @@ function ThreadResultBody({ threadId, item, tabId, shown, continuationId = null,
   }, [read, tabId, threadId]);
   const root = useRef<HTMLDivElement>(null);
   const timeline = useRef<TimelineHandle>(null);
+  const [following, setFollowing] = useState<FollowState>({ atEnd: true, away: 0, ahead: false });
   useTabName(tabId, view.closed === null ? view.thread?.name : null, MessageSquareText, undefined, false, threadIconFacts(view.closed === null ? view.thread : undefined));
   const findHit = useCallback((hit: SearchHit) => {
     if (hit.kind !== 'item' || hit.thread.id !== threadId) return;
@@ -123,8 +126,11 @@ function ThreadResultBody({ threadId, item, tabId, shown, continuationId = null,
   if (view.error !== null && view.thread === null) return <ErrorState error={view.error} onRetry={() => reloadThread(read)} />;
   return <div ref={root} tabIndex={-1} className="flex h-full min-h-0 flex-col" data-result-thread={threadId}>
     <header className="flex shrink-0 items-center gap-2 border-b border-border p-2"><h2 className="min-w-0 flex-1 truncate font-semibold">{view.thread?.name}</h2><IconButton label={t('search.find.label')} icon={<Search aria-hidden />} onClick={find.show} /></header>
-    {find.bar}<div className="min-h-0 flex-1"><Timeline key={windowKey} ref={timeline} threadId={threadId} shown={shown} item={item ?? promptItem} empty={null} onVersionSelect={onVersionSelect} focusPrompt={focusPrompt} highlightLink={prompt === undefined} /></div>
+    {find.bar}<div className="relative min-h-0 flex-1"><Timeline key={windowKey} ref={timeline} threadId={threadId} shown={shown} item={item ?? promptItem} empty={null} onFollow={setFollowing} onVersionSelect={onVersionSelect} focusPrompt={focusPrompt} highlightLink={prompt === undefined} />
+      {(!following.atEnd || following.ahead) && <FollowButton away={following.away} onClick={() => timeline.current?.scrollToEnd()} />}
+    </div>
     {view.read?.selection !== undefined && view.read.selection !== null && <div className="shrink-0 px-2 pb-2"><ContinuationNotice key={windowKey} threadId={threadId} view={view} onSelect={onVersionSelect} /></div>}
     {view.inputs.size > 0 && <div className="shrink-0 px-2 pb-2"><QueueTray threadId={threadId} queued={queuedInputs(view)} sending={[]} readOnly /></div>}
+    <div className="shrink-0 px-4 pb-2"><StatusLine threadId={threadId} withStop /></div>
   </div>;
 }

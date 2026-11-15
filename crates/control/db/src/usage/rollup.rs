@@ -1239,7 +1239,26 @@ async fn turn_counts(conn: &mut Conn, read: &Read<'_>) -> Result<Vec<TurnCount>,
     Ok(query.build_query_as::<TurnCount>().fetch_all(conn).await?)
 }
 
-/// Exact-time request figures for short health windows, using the provider/time ledger index.
+/// Exact provider-health windows read timestamp prefixes folded with their source observations.
+pub async fn performance_window(
+    conn: &mut Conn,
+    from: DateTime<Utc>,
+    until: DateTime<Utc>,
+    filter: &Filter,
+) -> Result<super::performance::Sums, DbError> {
+    if let Some(provider) = filter.provider {
+        let root = Filter {
+            provider: Some(provider),
+            ..Filter::default()
+        };
+        if filter == &root {
+            return super::health_window::read(conn, provider, from, until).await;
+        }
+    }
+    Ok(window(conn, from, until, filter).await?.performance)
+}
+
+/// Exact-time figures for arbitrary attribution filters.
 pub async fn window(
     conn: &mut Conn,
     from: DateTime<Utc>,

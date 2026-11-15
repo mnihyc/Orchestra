@@ -40,11 +40,11 @@ export interface FileHead {
   brought: Brought;
 }
 
-export const headKey = (door: Door, path: string) => ['workspace-head', door.environmentId, path] as const;
+export const headKey = (door: Door, path: string, binding?: string | null) => ['workspace-head', door.environmentId, path, ...(binding === undefined ? [] : [binding])] as const;
 
-export const headQuery = (door: Door, path: string) =>
+export const headQuery = (door: Door, path: string, binding?: string | null) =>
   queryOptions({
-    queryKey: headKey(door, path),
+    queryKey: headKey(door, path, binding),
     queryFn: async ({ signal }): Promise<FileHead> => {
       const [stat, brought] = await Promise.all([statFile(door, path, signal), bringFile(door, path, signal)]);
       return { stat, brought };
@@ -57,25 +57,25 @@ export const headQuery = (door: Door, path: string) =>
   });
 
 /** Describes a file and brings its version; `reload` asks again. */
-export function useFileHead(door: Door, path: string) {
+export function useFileHead(door: Door, path: string, binding?: string | null) {
   const shown = useViewShown();
-  const query = useQuery({ ...headQuery(door, path), enabled: shown });
+  const query = useQuery({ ...headQuery(door, path, binding), enabled: shown && binding !== null });
   const client = useQueryClient();
   return {
-    head: query.data,
+    head: binding === null ? undefined : query.data,
     error: query.error,
     loading: query.isPending,
-    reload: () => invalidateHead(client, door, path),
+    reload: () => invalidateHead(client, door, path, binding),
   };
 }
 
 /** Says that a file is not what was read: its description is asked for again. */
-export async function invalidateHead(client: QueryClient, door: Door, path: string): Promise<void> {
-  await Promise.all([
-    client.invalidateQueries({ queryKey: headKey(door, path), exact: true }),
-    client.invalidateQueries({ predicate: (query) => query.queryKey[0] === 'file-preview'
-      && query.meta?.fileEnvironment === door.environmentId && query.meta.filePath === path }),
-  ]);
+export async function invalidateHead(client: QueryClient, door: Door, path: string, binding?: string | null): Promise<void> {
+  const queries = client.getQueryCache();
+  const heads = queries.findAll({ queryKey: headKey(door, path, binding), exact: binding !== undefined });
+  const previews = queries.findAll({ predicate: (query) => query.queryKey[0] === 'file-preview'
+    && query.meta?.fileEnvironment === door.environmentId && query.meta.filePath === path });
+  await Promise.all([...heads, ...previews].map((query) => client.invalidateQueries({ queryKey: query.queryKey, exact: true })));
 }
 
 /** The bytes of one version of a file, the first `limit` of them. */

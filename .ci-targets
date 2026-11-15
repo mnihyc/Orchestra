@@ -1,0 +1,9 @@
+fmt
+clippy
+test -p orch-db --lib -- queries::settings::tests::
+test -p orch-settings --test resolution --test matrix_inheritance --test folders
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test syncs --test threads_settings --test node_list_operation_scopes --test threads_read
+test -p orch-api-core --test forks -- side_native_scopes::
+test -p orch-engine --test call_recovery --test background_wake --test background_stop --test background_wake_native

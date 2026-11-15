@@ -1,4 +1,4 @@
-//! Per-session configuration, remote environment binding, the project root that puts `AGENTS.md` of the thread's directory on the harness's path, the servers of the home's own configuration switched off, its memories kept off, and a fork for a side thread.
+//! Per-session configuration, remote execution, native local tool definitions, isolated managed homes, instruction roots and forks.
 //!
 //! A session is a thread of the harness, and everything that belongs to it is stated when it is opened and
 //! again whenever it is opened anew, because the harness keeps nothing of it that Orch relies on. The home's
@@ -10,8 +10,8 @@
 //!   `ORCH_LLM_TOKEN`), or none
 //!   where the harness uses its own sign-in;
 //! * the **MCP servers** it is given, each at `/mcp/<session key>/<name>` with the token found in
-//!   `ORCH_MCP_TOKEN`, and the servers of the home's own configuration switched off, so that none is used
-//!   that nobody imported;
+//!   `ORCH_MCP_TOKEN`; a person's local home retains its native definitions, while managed homes and remote
+//!   executors isolate the delivered set;
 //! * instruction files use native discovery until a verified workspace root can be supplied;
 //! * the **review model**, which is the session's model, so that the harness's own review steps stay on it;
 //! * the **trust** of each directory from the workspace root to where the session works, where the workspace
@@ -27,7 +27,7 @@
 //! **environment** of the harness's naming: the connection to the environment's exec server at
 //! `/exec/<session key>`, named for the environment, its generation and the session, and used for every turn.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use orch_agent_contract::loopback::Loopback;
 use orch_agent_contract::session::{
@@ -80,6 +80,126 @@ pub fn instruction_chain(root: &str, cwd: &str) -> Result<Vec<std::path::PathBuf
     Ok(chain)
 }
 
+/// What is needed to refresh a native session only after its instruction files change.
+#[derive(Clone)]
+pub(crate) struct InstructionReload {
+    pub spec: Box<SessionSpec>,
+    pub paths: Vec<std::path::PathBuf>,
+    pub max_bytes: u64,
+    pub digest: Option<orch_types::Hash>,
+    /// A new native conversation has no resumable rollout until its first turn is accepted.
+    pub native_history: bool,
+}
+
+impl std::fmt::Debug for InstructionReload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstructionReload").finish_non_exhaustive()
+    }
+}
+
+/// A native home or another unobserved source stays private. Without a complete workspace-only list,
+/// native resume remains the way to load changes without asking Orch to read those private instructions.
+pub(crate) fn instruction_sources_are_local(opened: &Json, root: &str) -> bool {
+    opened
+        .get("instructionSources")
+        .and_then(Json::as_array)
+        .is_some_and(|sources| {
+            sources.iter().all(|source| {
+                source
+                    .as_str()
+                    .or_else(|| source.get("path").and_then(Json::as_str))
+                    .is_some_and(|path| std::path::Path::new(path).starts_with(root))
+            })
+        })
+}
+
+/// Only candidate files on the root-to-cwd chain are read, including absent overrides and configured fallbacks.
+/// Nothing walks the workspace or retains a manifest of its source files.
+pub(crate) fn instruction_paths(
+    root: &str,
+    cwd: &str,
+    fallbacks: &[String],
+) -> Result<Vec<std::path::PathBuf>, AdapterError> {
+    let mut names = vec!["AGENTS.override.md".to_owned(), "AGENTS.md".to_owned()];
+    for name in fallbacks {
+        let mut parts = std::path::Path::new(name).components();
+        if !name.contains('\0')
+            && matches!(parts.next(), Some(std::path::Component::Normal(_)))
+            && parts.next().is_none()
+            && !names.contains(name)
+        {
+            names.push(name.clone());
+        }
+    }
+    Ok(instruction_chain(root, cwd)?
+        .into_iter()
+        .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
+        .collect())
+}
+
+/// Hash the selected native instruction prefixes, so same-size edits are seen without reading an oversized file.
+/// The allowance comes from native configuration, not an Orch cap; blank files leave it for descendants.
+pub(crate) fn instruction_digest(
+    paths: &[std::path::PathBuf],
+    max_bytes: u64,
+) -> Result<orch_types::Hash, AdapterError> {
+    use std::io::Read as _;
+    let mut digest = orch_types::Hash::hasher();
+    let mut selected_directory = None;
+    let mut remaining = max_bytes;
+    for path in paths {
+        if remaining == 0 {
+            break;
+        }
+        if selected_directory.is_some() && path.parent() == selected_directory {
+            continue;
+        }
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.is_file() => {
+                selected_directory = path.parent();
+            }
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(AdapterError::HarnessError(format!(
+                    "an instruction file could not be checked: {error}"
+                )));
+            }
+        }
+        let file = std::fs::File::open(path).map_err(|error| {
+            AdapterError::HarnessError(format!("an instruction file could not be checked: {error}"))
+        })?;
+        let mut bytes = Vec::new();
+        file.take(remaining)
+            .read_to_end(&mut bytes)
+            .map_err(|error| {
+                AdapterError::HarnessError(format!(
+                    "an instruction file could not be checked: {error}"
+                ))
+            })?;
+        if String::from_utf8_lossy(&bytes).trim().is_empty() {
+            continue;
+        }
+        let name = path.to_string_lossy();
+        digest.update(&(name.len() as u64).to_le_bytes());
+        digest.update(name.as_bytes());
+        digest.update(orch_types::Hash::of(&bytes).as_bytes());
+        remaining = remaining.saturating_sub(bytes.len() as u64);
+    }
+    Ok(orch_types::Hash::finish(&digest))
+}
+
+pub(crate) async fn check_instruction_files(
+    paths: Vec<std::path::PathBuf>,
+    max_bytes: u64,
+) -> Result<orch_types::Hash, AdapterError> {
+    tokio::task::spawn_blocking(move || instruction_digest(&paths, max_bytes))
+        .await
+        .map_err(|error| {
+            AdapterError::HarnessError(format!("instruction-file checks did not finish: {error}"))
+        })?
+}
+
 /// What this Codex build reads of a project's instruction files together, at most, where its configuration sets no
 /// other bound (`project_doc_max_bytes`, 32 KiB): what lies beyond is cut, and the sizes the panel shows of it are
 /// derived from this bound.
@@ -105,9 +225,10 @@ pub fn reported_instruction_sources(
     home: Option<&std::path::Path>,
     workspace_root: &str,
     local: bool,
+    max_bytes: u64,
 ) -> Vec<orch_agent_contract::session::InstructionFile> {
     use orch_agent_contract::session::{InstructionEvidence, InstructionFile};
-    let mut left = PROJECT_DOC_BUDGET;
+    let mut left = max_bytes;
     opened
         .get("instructionSources")
         .and_then(Json::as_array)
@@ -654,6 +775,8 @@ pub struct OpenContext {
     /// The servers of the configuration the harness reads that the session switches off, each as the entry that
     /// does so ([`crate::discovery::switch_off_entries`]).
     pub switched_off: BTreeMap<String, Json>,
+    /// Native names retained by a local program in its person's own home.
+    pub native_mcp: BTreeSet<String>,
     /// The provider the harness uses when the session names none: the vendor's, or the one the person's own
     /// configuration says.
     pub default_provider: Option<String>,
@@ -741,6 +864,16 @@ pub fn open_plan(
         json!(parameters::sandbox_word(settings.sandbox_mode)),
     );
     let mut config = thread_config(spec, loopback, &context.switched_off)?;
+    if let Some(servers) = config.get_mut("mcp_servers").and_then(Json::as_object_mut) {
+        for name in &spec.mcp {
+            if context.native_mcp.contains(name)
+                && (name != orch_agent_contract::loopback::ORCH_SERVER
+                    || spec.settings.orch_tools.is_empty())
+            {
+                servers.remove(name);
+            }
+        }
+    }
     if let (Some(projects), Json::Object(members)) = (&context.projects, &mut config) {
         members.insert("projects".to_owned(), projects.clone());
     }
@@ -801,6 +934,125 @@ pub fn open_plan(
 mod tests {
     use super::*;
     use orch_agent_contract::descriptor::{ApprovalMode, ArrangementType, SandboxMode};
+
+    #[test]
+    fn edits_beyond_the_native_instruction_budget_do_not_reopen_the_session() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("nested");
+        std::fs::create_dir(&cwd).unwrap();
+        let paths =
+            super::instruction_paths(root.path().to_str().unwrap(), cwd.to_str().unwrap(), &[])
+                .unwrap();
+        std::fs::write(root.path().join("AGENTS.md"), "READ tail one").unwrap();
+        std::fs::write(cwd.join("AGENTS.md"), "child instructions").unwrap();
+        let first = super::instruction_digest(&paths, 4).unwrap();
+        std::fs::write(root.path().join("AGENTS.md"), "READ different tail").unwrap();
+        std::fs::write(cwd.join("AGENTS.md"), "changed ignored child").unwrap();
+        assert_eq!(super::instruction_digest(&paths, 4).unwrap(), first);
+        std::fs::write(root.path().join("AGENTS.md"), "NEXT different prefix").unwrap();
+        assert_ne!(super::instruction_digest(&paths, 4).unwrap(), first);
+        std::fs::write(root.path().join("AGENTS.md"), "").unwrap();
+        let child = super::instruction_digest(&paths, 4).unwrap();
+        std::fs::write(root.path().join("AGENTS.md"), "    ").unwrap();
+        assert_eq!(
+            super::instruction_digest(&paths, 4).unwrap(),
+            child,
+            "blank native instructions leave the budget for descendants"
+        );
+        assert_eq!(
+            super::instruction_digest(&paths, 0).unwrap(),
+            super::instruction_digest(&[], 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn native_instructions_outside_the_workspace_keep_the_programs_reload_without_reading_private_files()
+     {
+        assert!(super::instruction_sources_are_local(
+            &json!({"instructionSources":[]}),
+            "/workspace"
+        ));
+        assert!(super::instruction_sources_are_local(
+            &json!({"instructionSources":["/workspace/AGENTS.md", {"path":"/workspace/web/AGENTS.md"}]}),
+            "/workspace"
+        ));
+        assert!(!super::instruction_sources_are_local(
+            &json!({"instructionSources":["/native-home/AGENTS.md"]}),
+            "/workspace"
+        ));
+        assert!(!super::instruction_sources_are_local(
+            &json!({}),
+            "/workspace"
+        ));
+        assert!(!super::instruction_sources_are_local(
+            &json!({"instructionSources":[{"unknown":"source"}]}),
+            "/workspace"
+        ));
+    }
+
+    #[test]
+    fn unchanged_instruction_files_keep_the_session_while_new_overrides_and_fallbacks_refresh_it() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("nested");
+        std::fs::create_dir(&cwd).unwrap();
+        let paths = super::instruction_paths(
+            root.path().to_str().unwrap(),
+            cwd.to_str().unwrap(),
+            &["RULES.md".into()],
+        )
+        .unwrap();
+        let before = super::instruction_digest(&paths, super::PROJECT_DOC_BUDGET).unwrap();
+        std::fs::write(
+            cwd.join("unrelated.rs"),
+            "changes outside the instruction chain",
+        )
+        .unwrap();
+        assert_eq!(
+            super::instruction_digest(&paths, super::PROJECT_DOC_BUDGET).unwrap(),
+            before
+        );
+        std::fs::write(root.path().join("AGENTS.md"), "first").unwrap();
+        let first = super::instruction_digest(&paths, super::PROJECT_DOC_BUDGET).unwrap();
+        assert_ne!(first, before);
+        std::fs::write(root.path().join("AGENTS.md"), "other").unwrap();
+        assert_ne!(
+            super::instruction_digest(&paths, super::PROJECT_DOC_BUDGET).unwrap(),
+            first,
+            "same-length edits are detected by their bytes"
+        );
+        let changed = super::instruction_digest(&paths, super::PROJECT_DOC_BUDGET).unwrap();
+        std::fs::write(cwd.join("AGENTS.override.md"), "override").unwrap();
+        assert_ne!(
+            super::instruction_digest(&paths, super::PROJECT_DOC_BUDGET).unwrap(),
+            changed
+        );
+        let overridden = super::instruction_digest(&paths, super::PROJECT_DOC_BUDGET).unwrap();
+        std::fs::write(cwd.join("RULES.md"), "fallback").unwrap();
+        assert_eq!(
+            super::instruction_digest(&paths, super::PROJECT_DOC_BUDGET).unwrap(),
+            overridden,
+            "an inactive fallback does not reopen a session"
+        );
+        std::fs::rename(
+            cwd.join("AGENTS.override.md"),
+            cwd.join("previous-override.md"),
+        )
+        .unwrap();
+        let fallback = super::instruction_digest(&paths, super::PROJECT_DOC_BUDGET).unwrap();
+        assert_ne!(fallback, overridden);
+        std::fs::write(cwd.join("RULES.md"), "changed fallback").unwrap();
+        assert_ne!(
+            super::instruction_digest(&paths, super::PROJECT_DOC_BUDGET).unwrap(),
+            fallback
+        );
+        std::fs::write(cwd.join("AGENTS.md"), "preferred default").unwrap();
+        let preferred = super::instruction_digest(&paths, super::PROJECT_DOC_BUDGET).unwrap();
+        std::fs::write(cwd.join("RULES.md"), "ignored fallback edit").unwrap();
+        assert_eq!(
+            super::instruction_digest(&paths, super::PROJECT_DOC_BUDGET).unwrap(),
+            preferred
+        );
+    }
 
     #[test]
     fn resolved_native_switches_are_carried_without_reconstructing_a_route() {
@@ -1005,7 +1257,8 @@ mod tests {
             root.join("sub/AGENTS.md").display().to_string(),
         ] });
         let workspace = root.display().to_string();
-        let sources = reported_instruction_sources(&opened, Some(home), &workspace, true);
+        let sources =
+            reported_instruction_sources(&opened, Some(home), &workspace, true, PROJECT_DOC_BUDGET);
         assert_eq!(sources.len(), 3);
         assert!(
             sources[0].home && sources[0].path.is_none(),
@@ -1019,7 +1272,16 @@ mod tests {
             (Some(2 * 1024), Some(2 * 1024)),
             "the project budget is shared by the project's files"
         );
-        let elsewhere = reported_instruction_sources(&opened, Some(home), &workspace, false);
+        let shorter = reported_instruction_sources(&opened, Some(home), &workspace, true, 1024);
+        assert_eq!(shorter[1].loaded_bytes, Some(1024));
+        assert_eq!(shorter[2].loaded_bytes, Some(0));
+        let elsewhere = reported_instruction_sources(
+            &opened,
+            Some(home),
+            &workspace,
+            false,
+            PROJECT_DOC_BUDGET,
+        );
         assert_eq!(
             elsewhere[1].bytes, None,
             "a file of an environment elsewhere is not read here"
@@ -1047,6 +1309,7 @@ mod tests {
     fn spec(mode: SessionMode) -> SessionSpec {
         SessionSpec {
             settings: SessionSettings {
+                output_capture_bytes: 67_108_864,
                 native_model: None,
                 agent_id: id(1),
                 thread_id: id(2),
@@ -1073,6 +1336,7 @@ mod tests {
                 subagent_limits: Default::default(),
                 prompt_cache_ttl: None,
                 background_wake: true,
+                web_action_wait_secs: 120,
                 image_generation: None,
                 memory: None,
                 arrangement: ArrangementType::KeySeparated,
