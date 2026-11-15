@@ -83,6 +83,7 @@ impl Cache {
 /// Effective operator settings; the registry owns their defaults and validation.
 #[derive(Debug, Clone, Copy)]
 struct Limits {
+    defaults: [bool; 7],
     source: i64,
     pixels: u64,
     edge: u32,
@@ -127,7 +128,12 @@ impl Limits {
                 .and_then(|value| value.as_i64())
                 .ok_or_else(|| ApiError::internal("a preview setting has no integer default"))
         };
+        let defaults = std::array::from_fn(|index| {
+            snapshot.resolve(definitions[index]).source.scope
+                == orch_settings_contract::provenance::SourceScope::Default
+        });
         Ok(Self {
+            defaults,
             source: get(keys::FILES_PREVIEW_SOURCE_BYTES)?,
             pixels: u64::try_from(get(keys::FILES_PREVIEW_PIXELS)?).unwrap_or(u64::MAX),
             edge: u32::try_from(get(keys::FILES_PREVIEW_EDGE)?).unwrap_or(u32::MAX),
@@ -153,6 +159,9 @@ enum State {
 /// A preview is one bounded reply, including its static PNG when there is one.
 #[derive(Debug, Serialize)]
 struct Preview {
+    allowance: Option<orch_api_contract::workspace::PreviewAllowance>,
+    viewer_allowance: orch_api_contract::workspace::PreviewAllowance,
+    facts: Option<orch_api_contract::workspace::FileSourceFacts>,
     state: State,
     hash: Option<Hash>,
     size: i64,
@@ -223,8 +232,14 @@ async fn derived(
     limits: Limits,
 ) -> ApiResult<Bytes> {
     let key = format!(
-        "{hash}:{media_type}:{}:{}:{}:{}:{}:{}",
-        limits.source, limits.pixels, limits.edge, limits.bytes, limits.lines, limits.viewer
+        "{hash}:{media_type}:{}:{}:{}:{}:{}:{}:{:?}",
+        limits.source,
+        limits.pixels,
+        limits.edge,
+        limits.bytes,
+        limits.lines,
+        limits.viewer,
+        limits.defaults
     );
     // One decode at a time per store also bounds aggregate pixel allocation and coalesces same-hash requests.
     let mut cache = blobs.previews().lock_owned().await;
@@ -266,6 +281,12 @@ async fn make(
     limits: Limits,
 ) -> ApiResult<Preview> {
     let mut preview = Preview {
+        allowance: None,
+        viewer_allowance: limits.allowance(
+            orch_api_contract::workspace::PreviewAllowanceKind::ViewerBytes,
+            None,
+        ),
+        facts: None,
         state: State::Unavailable,
         hash: Some(hash),
         size,
@@ -282,6 +303,10 @@ async fn make(
     if media.starts_with("image/") {
         if size > limits.source {
             preview.state = State::TooLarge;
+            preview.allowance = Some(limits.allowance(
+                orch_api_contract::workspace::PreviewAllowanceKind::DecodedSourceBytes,
+                u64::try_from(size).ok(),
+            ));
             return Ok(preview);
         }
         let bytes = blobs
@@ -304,12 +329,23 @@ async fn make(
                     preview.width = Some(width);
                     preview.height = Some(height);
                 }
-                Err(too_large) => {
-                    preview.state = if too_large {
+                Err(refusal) => {
+                    preview.allowance = match refusal {
+                        Refusal::Pixels(actual) => Some(limits.allowance(
+                            orch_api_contract::workspace::PreviewAllowanceKind::Pixels,
+                            actual,
+                        )),
+                        Refusal::EncodedBytes(actual) => Some(limits.allowance(
+                            orch_api_contract::workspace::PreviewAllowanceKind::EncodedPreviewBytes,
+                            Some(actual),
+                        )),
+                        Refusal::Unavailable => None,
+                    };
+                    preview.state = if preview.allowance.is_some() {
                         State::TooLarge
                     } else {
                         State::Unavailable
-                    }
+                    };
                 }
             }
             preview
@@ -369,20 +405,80 @@ fn excerpt(bytes: &[u8], lines: usize, characters: usize) -> String {
         .join("\n")
 }
 
-/// The most original bytes a preview may ask a machine to bring to the store.
-pub async fn source_limit(ctx: &Ctx) -> ApiResult<i64> {
-    Ok(Limits::read(ctx).await?.source)
+/// The policy accepted before an owner-specific preview starts work.
+#[derive(Debug, Clone, Copy)]
+pub struct Policy(Limits);
+
+impl Policy {
+    /// Original bytes admitted before asking a machine for content.
+    #[must_use]
+    pub fn source_bytes(self) -> i64 {
+        self.0.source
+    }
 }
 
-/// A file can be described without downloading an original that cannot be previewed cheaply.
-pub async fn unavailable(
+/// Resolve the policy once; native fetch and any refusal use this same receipt.
+pub async fn policy(ctx: &Ctx) -> ApiResult<Policy> {
+    Ok(Policy(Limits::read(ctx).await?))
+}
+
+/// Owner-specific source facts are added outside the content-addressed derived cache.
+pub async fn serve_source(
     ctx: &Ctx,
+    hash: &Hash,
+    name: &str,
+    media_type: &str,
+    policy: Policy,
+    facts: Option<orch_api_contract::workspace::FileSourceFacts>,
+) -> ApiResult<Response> {
+    let size = ctx
+        .app
+        .blobs
+        .store()
+        .size(hash)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(ApiError::not_found)?;
+    let bytes = derived(
+        ctx.app.blobs.clone(),
+        *hash,
+        size,
+        name.to_owned(),
+        media_type.to_owned(),
+        policy.0,
+    )
+    .await?;
+    let mut preview: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(ApiError::internal)?;
+    preview["facts"] = serde_json::to_value(facts).map_err(ApiError::internal)?;
+    Ok(reply(Bytes::from(
+        serde_json::to_vec(&preview).map_err(ApiError::internal)?,
+    )))
+}
+
+/// A described original that cannot be decoded or brought cheaply keeps its accepted policy.
+pub async fn unavailable(
+    _ctx: &Ctx,
     size: i64,
     media_type: &str,
     is_text: bool,
     too_large: bool,
+    policy: Policy,
+    facts: Option<orch_api_contract::workspace::FileSourceFacts>,
 ) -> ApiResult<Response> {
+    let limits = policy.0;
     let preview = Preview {
+        allowance: too_large.then(|| {
+            limits.allowance(
+                orch_api_contract::workspace::PreviewAllowanceKind::DecodedSourceBytes,
+                u64::try_from(size).ok(),
+            )
+        }),
+        viewer_allowance: limits.allowance(
+            orch_api_contract::workspace::PreviewAllowanceKind::ViewerBytes,
+            None,
+        ),
+        facts,
         state: if too_large {
             State::TooLarge
         } else {
@@ -398,11 +494,51 @@ pub async fn unavailable(
         height: None,
         duration_seconds: None,
         entry_count: None,
-        viewer_bytes: Limits::read(ctx).await?.viewer,
+        viewer_bytes: limits.viewer,
     };
     Ok(reply(Bytes::from(
         serde_json::to_vec(&preview).map_err(ApiError::internal)?,
     )))
+}
+
+impl Limits {
+    fn allowance(
+        self,
+        kind: orch_api_contract::workspace::PreviewAllowanceKind,
+        actual_if_known: Option<u64>,
+    ) -> orch_api_contract::workspace::PreviewAllowance {
+        use orch_api_contract::workspace::PreviewAllowanceKind;
+        let (limit, index) = match kind {
+            PreviewAllowanceKind::DecodedSourceBytes => {
+                (u64::try_from(self.source).unwrap_or_default(), 0)
+            }
+            PreviewAllowanceKind::Pixels => (self.pixels, 1),
+            PreviewAllowanceKind::EncodedPreviewBytes => (self.bytes as u64, 3),
+            PreviewAllowanceKind::ViewerBytes => {
+                (u64::try_from(self.viewer).unwrap_or_default(), 6)
+            }
+        };
+        orch_api_contract::workspace::PreviewAllowance {
+            kind,
+            limit,
+            actual_if_known,
+            source: orch_api_contract::settings::SettingSource {
+                scope: if self.defaults[index] {
+                    orch_api_contract::settings::SettingScope::Default
+                } else {
+                    orch_api_contract::settings::SettingScope::System
+                },
+                node: None,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    Unavailable,
+    Pixels(Option<u64>),
+    EncodedBytes(u64),
 }
 
 /// A PCM WAV's fixed header includes the byte rate and data length.
@@ -411,26 +547,37 @@ const WAV_HEADER_BYTES: usize = 44;
 /// Floating-point RGBA has sixteen bytes per pixel; the decoder also enforces dimensions.
 const DECODE_BYTES_PER_PIXEL: u64 = 16;
 
-fn raster(bytes: &[u8], limits: Limits) -> Result<(Vec<u8>, u32, u32), bool> {
+fn raster(bytes: &[u8], limits: Limits) -> Result<(Vec<u8>, u32, u32), Refusal> {
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|_| false)?;
+        .map_err(|_| Refusal::Unavailable)?;
     let mut decode_limits = image::Limits::default();
     decode_limits.max_image_width = Some(u32::try_from(limits.pixels).unwrap_or(u32::MAX));
     decode_limits.max_image_height = decode_limits.max_image_width;
     decode_limits.max_alloc = Some(limits.pixels.saturating_mul(DECODE_BYTES_PER_PIXEL));
     reader.limits(decode_limits);
-    let mut decoder = reader
-        .into_decoder()
-        .map_err(|error| matches!(error, image::ImageError::Limits(_)))?;
+    let mut decoder = reader.into_decoder().map_err(|error| {
+        if matches!(error, image::ImageError::Limits(_)) {
+            Refusal::Pixels(None)
+        } else {
+            Refusal::Unavailable
+        }
+    })?;
     let (width, height) = decoder.dimensions();
     if u64::from(width).saturating_mul(u64::from(height)) > limits.pixels {
-        return Err(true);
+        return Err(Refusal::Pixels(Some(
+            u64::from(width).saturating_mul(u64::from(height)),
+        )));
     }
-    let orientation = decoder.orientation().map_err(|_| false)?;
+    let orientation = decoder.orientation().map_err(|_| Refusal::Unavailable)?;
     // GIF/WebP decode their first frame only; previews never animate.
-    let mut image = DynamicImage::from_decoder(decoder)
-        .map_err(|error| matches!(error, image::ImageError::Limits(_)))?;
+    let mut image = DynamicImage::from_decoder(decoder).map_err(|error| {
+        if matches!(error, image::ImageError::Limits(_)) {
+            Refusal::Pixels(None)
+        } else {
+            Refusal::Unavailable
+        }
+    })?;
     image.apply_orientation(orientation);
     let (width, height) = (image.width(), image.height());
     let edge = limits.edge.min(width.max(height));
@@ -438,24 +585,24 @@ fn raster(bytes: &[u8], limits: Limits) -> Result<(Vec<u8>, u32, u32), bool> {
     Ok((png, width, height))
 }
 
-fn encode(mut image: DynamicImage, maximum: usize) -> Result<Vec<u8>, bool> {
+fn encode(mut image: DynamicImage, maximum: usize) -> Result<Vec<u8>, Refusal> {
     loop {
         let mut png = Cursor::new(Vec::new());
         image
             .write_to(&mut png, ImageFormat::Png)
-            .map_err(|_| false)?;
+            .map_err(|_| Refusal::Unavailable)?;
         if png.get_ref().len() <= maximum {
             return Ok(png.into_inner());
         }
         if image.width() <= 1 && image.height() <= 1 {
-            return Err(true);
+            return Err(Refusal::EncodedBytes(png.get_ref().len() as u64));
         }
         // Halving bounds the retries logarithmically when the operator chooses a tiny byte budget.
         image = image.thumbnail((image.width() / 2).max(1), (image.height() / 2).max(1));
     }
 }
 
-fn svg(bytes: &[u8], limits: Limits) -> Result<(Vec<u8>, u32, u32), bool> {
+fn svg(bytes: &[u8], limits: Limits) -> Result<(Vec<u8>, u32, u32), Refusal> {
     let embedded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let seen_embedded = std::sync::Arc::clone(&embedded);
     let options = resvg::usvg::Options {
@@ -469,19 +616,23 @@ fn svg(bytes: &[u8], limits: Limits) -> Result<(Vec<u8>, u32, u32), bool> {
         ..Default::default()
     };
     // No network, filesystem images, fonts, scripts or embedded raster decoders are consulted.
-    let tree = resvg::usvg::Tree::from_data(bytes, &options).map_err(|_| false)?;
+    let tree = resvg::usvg::Tree::from_data(bytes, &options).map_err(|_| Refusal::Unavailable)?;
     // Embedded raster decoders need their own pixel admission. Until supported, report an unavailable preview
     // instead of returning a misleading blank thumbnail or letting the browser decode an unchecked original.
     if embedded.load(std::sync::atomic::Ordering::Relaxed) {
-        return Err(false);
+        return Err(Refusal::Unavailable);
     }
     let original = tree.size().to_int_size();
     if u64::from(original.width()).saturating_mul(u64::from(original.height())) > limits.pixels {
-        return Err(true);
+        return Err(Refusal::Pixels(Some(
+            u64::from(original.width()).saturating_mul(u64::from(original.height())),
+        )));
     }
     let edge = limits.edge.min(original.width().max(original.height()));
-    let fitted = original.scale_to(resvg::tiny_skia::IntSize::from_wh(edge, edge).ok_or(true)?);
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(fitted.width(), fitted.height()).ok_or(true)?;
+    let fitted = original
+        .scale_to(resvg::tiny_skia::IntSize::from_wh(edge, edge).ok_or(Refusal::Unavailable)?);
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(fitted.width(), fitted.height())
+        .ok_or(Refusal::Unavailable)?;
     let scale = fitted.width() as f32 / tree.size().width();
     resvg::render(
         &tree,
@@ -496,7 +647,8 @@ fn svg(bytes: &[u8], limits: Limits) -> Result<(Vec<u8>, u32, u32), bool> {
             [pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()]
         })
         .collect();
-    let image = image::RgbaImage::from_raw(fitted.width(), fitted.height(), rgba).ok_or(false)?;
+    let image = image::RgbaImage::from_raw(fitted.width(), fitted.height(), rgba)
+        .ok_or(Refusal::Unavailable)?;
     Ok((
         encode(DynamicImage::ImageRgba8(image), limits.bytes)?,
         original.width(),
@@ -559,8 +711,86 @@ pub mod tests {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn __api_run_a_refusal_keeps_its_particular_allowance_when_the_policy_later_changes()
+    {
+        let mut original = Cursor::new(Vec::new());
+        DynamicImage::new_rgb8(10, 10)
+            .write_to(&mut original, ImageFormat::Png)
+            .unwrap();
+        let bytes = original.into_inner();
+        let store = Blobs::in_memory();
+        let meta = store.put_bytes(Bytes::from(bytes)).await.unwrap();
+        let first = make(
+            &store,
+            meta.hash,
+            meta.size,
+            "image.png",
+            "image/png",
+            Limits {
+                source: 1,
+                ..limits()
+            },
+        )
+        .await
+        .unwrap();
+        let pixels = make(
+            &store,
+            meta.hash,
+            meta.size,
+            "image.png",
+            "image/png",
+            Limits {
+                pixels: 99,
+                ..limits()
+            },
+        )
+        .await
+        .unwrap();
+        let encoded = make(
+            &store,
+            meta.hash,
+            meta.size,
+            "image.png",
+            "image/png",
+            Limits {
+                bytes: 1,
+                ..limits()
+            },
+        )
+        .await
+        .unwrap();
+        let ready = make(
+            &store,
+            meta.hash,
+            meta.size,
+            "image.png",
+            "image/png",
+            limits(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(ready.state, State::Ready));
+        assert_eq!(
+            first.allowance.as_ref().unwrap().kind,
+            orch_api_contract::workspace::PreviewAllowanceKind::DecodedSourceBytes
+        );
+        assert_eq!(first.allowance.unwrap().limit, 1);
+        assert_eq!(
+            pixels.allowance.as_ref().unwrap().kind,
+            orch_api_contract::workspace::PreviewAllowanceKind::Pixels
+        );
+        assert_eq!(pixels.allowance.unwrap().actual_if_known, Some(100));
+        assert_eq!(
+            encoded.allowance.unwrap().kind,
+            orch_api_contract::workspace::PreviewAllowanceKind::EncodedPreviewBytes
+        );
+    }
+
     fn limits() -> Limits {
         Limits {
+            defaults: [true; 7],
             source: 1_048_576,
             pixels: 1_000_000,
             edge: 64,
@@ -677,7 +907,7 @@ pub mod tests {
                     ..limits()
                 }
             ),
-            Err(true)
+            Err(Refusal::Pixels(Some(10000)))
         );
     }
     #[cfg(any(test, feature = "test-support"))]
