@@ -10,7 +10,7 @@ const server = vi.hoisted(() => ({ read: vi.fn<(id: string) => Promise<{ id: str
 vi.mock('@/api/nodes', async (load) => ({ ...await load<object>(), nodeQuery: (id: string) => ({
   queryKey: ['node', id], queryFn: () => server.read(id),
 }) }));
-vi.mock('@/features/chat/open', () => ({ useOpenPath: () => server.open }));
+vi.mock('@/features/chat/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useOpenPath: () => server.open }));
 const def = { key: 'agent.instructions', class: 'parameter' } as const;
 const target = { kind: 'node', id: 'web' } as const;
 const source = { scope: 'org', node: { id: 'org-id', kind: 'org', name: 'Research', redacted: false } } as const;

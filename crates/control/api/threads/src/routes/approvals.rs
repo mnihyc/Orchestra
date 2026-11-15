@@ -347,6 +347,12 @@ async fn views_routed(
             _ => return Err(ApiError::internal("an approval nobody asked for")),
         };
         approvals.push(Approval {
+            delivery: row
+                .decision_delivery
+                .clone()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(ApiError::internal)?,
             id: row.id,
             request,
             state: match &shown {
