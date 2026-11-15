@@ -812,6 +812,7 @@ pub fn outgoing(
         .flatten();
     let owned = |key: &str| {
         calls::owned_option(key)
+            || crate::protocol::owned_members(protocol, "owned_fields").contains(&key)
             || native_session
                 .is_some_and(|session| session.owned_fields.iter().any(|field| field == key))
     };
@@ -822,6 +823,14 @@ pub fn outgoing(
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
     );
+    let owned_paths = crate::protocol::owned_members(protocol, "owned_paths");
+    for path in &owned_paths {
+        if let Some((parent, name)) = path.rsplit_once('/')
+            && let Some(object) = params.pointer_mut(parent).and_then(Json::as_object_mut)
+        {
+            object.remove(name);
+        }
+    }
     if model
         .native_tools
         .get(protocol)
@@ -849,13 +858,18 @@ pub fn outgoing(
             .ok_or("model options must be an object")?
             .retain(|field, _| session.parameter_fields.contains(field));
     }
-    let owned = Json::Object(
+    let mut owned = Json::Object(
         members
             .iter()
             .filter(|(key, _)| owned(key))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
     );
+    for path in owned_paths {
+        if let Some(value) = payload.pointer(path) {
+            put_owned_path(&mut owned, path, value.clone())?;
+        }
+    }
     let owned = serde_json::to_vec(&owned).map_err(|_| "model request cannot be encoded")?;
     let merged = apply(protocol, &owned, &params, false)?;
     let mut payload: Json =
@@ -1030,6 +1044,7 @@ fn has_effort(params: &Json) -> bool {
         "/reasoning_effort",
         "/reasoning/effort",
         "/output_config/effort",
+        "/generation_config/thinking_level",
     ]
     .iter()
     .any(|path| params.pointer(path).is_some())
@@ -1259,6 +1274,17 @@ pub fn apply(
     defaults: bool,
 ) -> Result<Vec<u8>, &'static str> {
     calls::completion_options(params)?;
+    if crate::protocol::owned_members(protocol, "owned_fields")
+        .iter()
+        .any(|field| params.get(*field).is_some())
+        || crate::protocol::owned_members(protocol, "owned_paths")
+            .iter()
+            .any(|path| params.pointer(path).is_some())
+    {
+        return Err(
+            "model options cannot replace routing, input, tools, retention or output bounds",
+        );
+    }
     let mut extra = params
         .as_object()
         .cloned()
@@ -1272,9 +1298,10 @@ pub fn apply(
         let effort = calls::requested_effort(params)?;
         extra.remove("effort");
         extra.remove("reasoning_effort");
-        for key in ["reasoning", "output_config"] {
+        for key in ["reasoning", "output_config", "generation_config"] {
             if let Some(Json::Object(nested)) = extra.get_mut(key) {
                 nested.remove("effort");
+                nested.remove("thinking_level");
                 if nested.is_empty() {
                     extra.remove(key);
                 }
@@ -1305,6 +1332,22 @@ pub fn apply(
         .ok_or("model request must be an object")?;
     overlay(members, extra, defaults);
     serde_json::to_vec(&payload).map_err(|_| "model request cannot be encoded")
+}
+
+fn put_owned_path(target: &mut Json, path: &str, value: Json) -> Result<(), &'static str> {
+    let mut parts = path.trim_start_matches('/').split('/').peekable();
+    let mut at = target;
+    while let Some(part) = parts.next() {
+        let object = at
+            .as_object_mut()
+            .ok_or("owned request fields must be objects")?;
+        if parts.peek().is_none() {
+            object.insert(part.to_owned(), value);
+            return Ok(());
+        }
+        at = object.entry(part).or_insert_with(|| json!({}));
+    }
+    Err("owned request paths cannot be empty")
 }
 
 /// Internal vectors use the protocol's float decoder. Raw relay requests keep their own encoding.

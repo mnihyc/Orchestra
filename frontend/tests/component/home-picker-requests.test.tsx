@@ -24,7 +24,7 @@ const readRoots=vi.fn(()=>Promise.resolve(roots));
 const readNode=vi.fn<(id:string)=>Promise<Org>>();
 const treeReply=():Nodes.TreeReply=>({nodes:[],hidden:[],seq:1,since:null,complete:true,next_cursor:null});
 // The real field hint/card remain mounted; only the separate guide reader/opener are outside this fixture.
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>()=>undefined}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>()=>undefined}));
 vi.mock('@/help',async(load)=>({...await load<typeof Help>(),useGuide:()=>undefined}));
 vi.mock('@/api/nodes',async(load)=>({...await load<typeof Nodes>(),
   orgsQuery:{queryKey:['home-roots'],staleTime:Infinity,initialData:()=>preloaded?roots:undefined,queryFn:()=>readRoots()},

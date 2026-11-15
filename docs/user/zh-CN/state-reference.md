@@ -26,6 +26,34 @@ summary: 线程、提供方或机器旁显示的每种状态的含义。
 | `state:ThreadDisplayState.idle` | 没有工作或未读结果需要状态图标。 |
 | `state:ThreadDisplayState.archived` | 线程或其上级位置已归档。 |
 
+### StopState
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:StopState.stopping` | 停止请求已接受，程序或线程当前的变更尚未完成停止。 |
+| `state:StopState.stopped` | 指定轮次已结束，或尚无轮次的准备过程已撤回。最终结果仍保留在线程中。 |
+
+### BlockedReason
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:BlockedReason.source_failed` | 源码准备失败。源码面板显示已记录的原因，并提供重新准备操作；等待中的消息会保留。 |
+
+### SessionReopenReason
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:SessionReopenReason.unknown` | 无法确认会话仍处于打开状态，例如服务器或程序已经重启。 |
+| `state:SessionReopenReason.instructions` | 此轮次开始前，常驻指令或程序自己的指令文件发生了变化。 |
+| `state:SessionReopenReason.limits` | 会话的子代理限制发生了变化。 |
+| `state:SessionReopenReason.configuration` | 工作目录或其他在打开会话时应用的选择发生了变化。 |
+| `state:SessionReopenReason.mcp` | 提供给会话的 MCP 服务器发生了变化。 |
+| `state:SessionReopenReason.tools` | 提供给会话的 Orch 工具发生了变化。 |
+| `state:SessionReopenReason.skills` | 提供给会话的技能发生了变化。 |
+| `state:SessionReopenReason.program_reloads` | 程序在打开会话时重新加载自己的上下文，此轮次需要执行该操作。 |
+| `state:SessionReopenReason.side_history` | 侧线程需要重新读取父线程的历史。 |
+| `state:MarkerKind.session_reopened` | 时间线记录轮次开始前一次必要的会话打开操作及其原因。 |
+
 ### PageState
 
 | 参考标识 | 含义 |
@@ -129,8 +157,8 @@ summary: 线程、提供方或机器旁显示的每种状态的含义。
 | 参考标识 | 含义 |
 | --- | --- |
 | `state:GoalStatus.active` | Orch 继续让线程朝此目标工作。 |
-| `state:GoalStatus.paused` | 有人暂停，或代理报告阻塞。 |
-| `state:GoalStatus.met` | 目标条件已满足。 |
+| `state:GoalStatus.paused` | 有人暂停、代理报告阻塞，或未经核实的完成报告需要人工决定。 |
+| `state:GoalStatus.met` | 独立检查确认目标已达成，或用户明确接受了相应证据。 |
 | `state:GoalStatus.stopped` | 未达成即停止：达到限制或无人可继续。 |
 | `state:GoalStatus.cleared` | 有人清除了目标。 |
 
@@ -139,8 +167,36 @@ summary: 线程、提供方或机器旁显示的每种状态的含义。
 | 参考标识 | 含义 |
 | --- | --- |
 | `state:GoalReportStatus.working` | 正在朝目标工作。 |
-| `state:GoalReportStatus.met` | 目标条件已满足。 |
+| `state:GoalReportStatus.met` | 代理报告目标条件已满足；仅凭此报告不会将目标标记为达成。 |
 | `state:GoalReportStatus.blocked` | 需要人工处理才能继续。 |
+
+### GoalReason
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:GoalReason.unchecked` | 完成报告缺少可用的独立检查。目标保持暂停，等待用户明确标记为达成或选择继续工作。 |
+
+### GoalOutcome
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:GoalOutcome.unchecked` | 保留报告及其证据，但尚未作出完成决定。检查模型未配置或不可用，都不会让它自动变为达成。 |
+
+### GoalCheckedBy
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:GoalCheckedBy.person` | 用户明确接受了未经核实的完成报告，审计中记录实际操作者。选择继续工作不会设置此值。 |
+
+### MarkerHarnessChanged
+
+这些值表示观察记录的 `change` 字段，不表示轮次结果。
+
+| 参考标识 | 含义 |
+| --- | --- |
+| `state:MarkerHarnessChanged.warning` | 原生程序的警告原文，每次发生都保留，并在普通对话中显示于折叠工作之外。警告本身不会让轮次失败。 |
+| `state:MarkerHarnessChanged.turn_diff` | 原生轮次最近报告的净文件更改。快照替代同一流内的各次工具编辑；空快照清除此流的净更改。 |
+| `state:MarkerHarnessChanged.turn_diff_unavailable` | Orch 无法读取某次原生差异更新。保留此前有效的更改文件，并显示说明，不会虚构替代结果。 |
 
 ### FirstStepsState
 

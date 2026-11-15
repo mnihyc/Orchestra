@@ -28,7 +28,7 @@ export const trailQuery = (scope: TraceScope, filters: TraceSearch) => infiniteQ
       : ok(api.GET('/nodes/{id}/audit', { params: { path: { id: scope.id }, query }, signal }));
   }, getNextPageParam: (page) => page.next_cursor,
   // Every direct visit rechecks authority before old content is shown.
-  staleTime: 0, gcTime: 0,
+  gcTime: 0,
 });
 
 /** Pending routes use the ordinary bearer and safe error shape, with the same token renewal as the typed client. */
@@ -64,9 +64,9 @@ export async function downloadTrail(scope: TraceScope, filters: TraceSearch, for
 }
 
 /** Removed environments of a home tree, filtered by each environment's current inspection guard. */
-export const keptEnvironmentsQuery = (node: string) => infiniteQueryOptions({ queryKey: ['trace-deleted', 'environments', node], initialPageParam: null as string | null, queryFn: ({ pageParam, signal }): Promise<{ items: DeletedEnvironment[]; next_cursor: string | null }> => ok(api.GET('/nodes/{id}/environments/deleted', { params: { path: { id: node }, query: { under: true, limit: TRAIL_PAGE_SIZE, ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal })), getNextPageParam: (page) => page.next_cursor, staleTime: 0, gcTime: 0 });
-export const keptDocumentsQuery = (node: string) => infiniteQueryOptions({ queryKey: ['trace-deleted', 'documents', node], initialPageParam: null as string | null, queryFn: ({ pageParam, signal }) => traceJson<{ items: KeptDocumentRef[]; next_cursor: string | null }>(`/nodes/${node}/documents?deleted=only&under=true&limit=${TRAIL_PAGE_SIZE}${pageParam === null ? '' : `&cursor=${pageParam}`}`, { signal }), getNextPageParam: (page) => page.next_cursor, staleTime: 0, gcTime: 0 });
-export const retainedEnvironmentQuery = (id: string) => queryOptions({ queryKey: ['deleted-inspection', 'environment', id], queryFn: ({ signal }): Promise<RetainedEnvironment> => ok(api.GET('/environments/{id}', { params: { path: { id }, query: { inspect_deleted: true } }, signal })), staleTime: 0, gcTime: 0 });
+export const keptEnvironmentsQuery = (node: string) => infiniteQueryOptions({ queryKey: ['trace-deleted', 'environments', node], initialPageParam: null as string | null, queryFn: ({ pageParam, signal }): Promise<{ items: DeletedEnvironment[]; next_cursor: string | null }> => ok(api.GET('/nodes/{id}/environments/deleted', { params: { path: { id: node }, query: { under: true, limit: TRAIL_PAGE_SIZE, ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal })), getNextPageParam: (page) => page.next_cursor, gcTime: 0 });
+export const keptDocumentsQuery = (node: string) => infiniteQueryOptions({ queryKey: ['trace-deleted', 'documents', node], initialPageParam: null as string | null, queryFn: ({ pageParam, signal }) => traceJson<{ items: KeptDocumentRef[]; next_cursor: string | null }>(`/nodes/${node}/documents?deleted=only&under=true&limit=${TRAIL_PAGE_SIZE}${pageParam === null ? '' : `&cursor=${pageParam}`}`, { signal }), getNextPageParam: (page) => page.next_cursor, gcTime: 0 });
+export const retainedEnvironmentQuery = (id: string) => queryOptions({ queryKey: ['deleted-inspection', 'environment', id], queryFn: ({ signal }): Promise<RetainedEnvironment> => ok(api.GET('/environments/{id}', { params: { path: { id }, query: { inspect_deleted: true } }, signal })), gcTime: 0 });
 /** The removal revision is independent of ordinary settings; it is captured by the current review. */
 export function restoreEnvironment(id: string, revision: number, key: string): Promise<Job> { return traceJson(`/environments/${id}/restore`, { method: 'POST', body: { expected_revision: revision }, key }); }
 /** An audit event can restore only its matching deletion, never the object's newer group. */
