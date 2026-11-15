@@ -1,3 +1,5 @@
+import { resourceImpactQuery } from '@/api/resource-impact';
+import { NotifyPeople } from '@/features/notifications/NotifyPeople';
 import { homeMoveEntries } from '@/features/duplicate/move';
 import { resourceDuplicateEntries } from '@/features/duplicate/target';
 import { CopySetupResult, mcpCopySetup } from '@/features/duplicate/CopySetup';
@@ -47,9 +49,13 @@ export function McpScreen({ id, tab, onTab }: { id: string; tab?: McpTab; onTab?
   const back = useResourceHeading('mcp', Plug, query.data?.name ?? t('common.loading'), query.data?.id);
   const [editing, setEditing] = useState(false);
   const [removing, setRemoving] = useState(false);
+  const [notifyChoice,setNotifyChoice]=useState<{review:string;value:boolean}|null>(null);
+  const impact=useQuery({...resourceImpactQuery({object:{kind:'mcp_server',id},model_id:null}),enabled:removing});
+  const notify=notifyChoice!==null&&notifyChoice.review===impact.data?.notification?.preview_id?notifyChoice.value:impact.data?.notification?.default_on??false;
+  const setNotify=(value:boolean)=>{const review=impact.data?.notification?.preview_id;if(review!==null&&review!==undefined)setNotifyChoice({review,value});};
   const [localTab, setLocalTab] = useState<McpTab>('overview');
   const reimport = useMutation({ mutationFn: () => reimportMcp(id) });
-  const remove = useMutation({ mutationFn: () => deleteMcp(id), onSuccess: () => { void navigate({ to: '/resources/mcp' }); } });
+  const remove = useMutation({ mutationFn: () => notify ? deleteMcp(id,{notify:true,...(impact.data?.notification?.preview_id===undefined||impact.data.notification.preview_id===null?{}:{notification_review:impact.data.notification.preview_id})}) : deleteMcp(id), onSuccess: () => { void navigate({ to: '/resources/mcp' }); } });
   if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={6} /> : <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
   const server = query.data;
   const entry = connection(readObject(JSON.stringify(server.spec)) ?? {});
@@ -98,6 +104,6 @@ export function McpScreen({ id, tab, onTab }: { id: string; tab?: McpTab; onTab?
       { value: 'access', label: t('agents.tabs.access'), panel: <ResourceAccess access={server.access} target={target} /> },
     ]} />
     {editing && <EditMcp server={server} onClose={() => setEditing(false)} />}
-    <ConfirmDialog admin={admin} open={removing} onOpenChange={setRemoving} title={t(server.imported === null ? 'resourceDetails.removeTitle' : 'mcpWords.forgetTitle', { name: server.name })} confirmLabel={t(server.imported === null ? 'resourceDetails.remove' : 'mcpWords.forget')} danger pending={remove.isPending} error={remove.error} onConfirm={() => remove.mutate()}>{t(server.imported === null ? 'resourceDetails.mcp.removeHelp' : 'resourceDetails.mcp.forgetHelp')}</ConfirmDialog>
+    <ConfirmDialog admin={admin} open={removing} onOpenChange={(open)=>{if(!open)setNotifyChoice(null);setRemoving(open);}} title={t(server.imported === null ? 'resourceDetails.removeTitle' : 'mcpWords.forgetTitle', { name: server.name })} confirmLabel={t(server.imported === null ? 'resourceDetails.remove' : 'mcpWords.forget')} danger footerStart={<NotifyPeople plan={impact.data?.notification} value={notify} onChange={setNotify} disabled={remove.isPending||impact.isFetching}/>} disabled={impact.isPending||impact.isError} pending={remove.isPending} error={remove.error??impact.error} onConfirm={() => remove.mutate()}>{t(server.imported === null ? 'resourceDetails.mcp.removeHelp' : 'resourceDetails.mcp.forgetHelp')}</ConfirmDialog>
   </Page>;
 }
