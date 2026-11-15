@@ -735,3 +735,35 @@ async fn an_admin_open_rechecks_current_mode_and_the_same_custody_after_the_actu
         assert_eq!(count, i64::from(change == "live"));
     }
 }
+
+#[tokio::test]
+async fn an_own_upload_name_search_finds_either_end_before_the_page_fills() {
+    let world = World::new().await;
+    let owner = places::person(&world, "named-uploads").await;
+    for index in 0..13 {
+        whole(
+            &world,
+            &owner,
+            &format!("file-{index:02}.png"),
+            format!("body {index}").as_bytes(),
+        )
+        .await;
+    }
+    for name in ["file-00.png", "file-12.png"] {
+        let page = world
+            .app
+            .call(MeUploadList, &[])
+            .token(&owner.token)
+            .query(&orch_api_contract::common::CollectionQuery {
+                q: Some(name.into()),
+                limit: Some(1),
+                cursor: None,
+            })
+            .send()
+            .await
+            .ok();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].name.as_deref(), Some(name));
+        assert!(page.next_cursor.is_none());
+    }
+}

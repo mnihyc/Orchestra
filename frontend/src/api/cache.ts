@@ -122,6 +122,28 @@ function overlay(before: Record<string, unknown>, row: Record<string, unknown>):
   return next;
 }
 
+/** The JSON type of a member: what tells one answer's shape from another's. */
+function memberType(value: unknown): string {
+  return value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+}
+
+/** Whether an object that carries a row's identifier is a view of that row, so that the row may be written over it.
+ *
+ * A row is found in the loaded data by its identifier alone, and other answers name the same thing in a shape of
+ * their own: a listing of what an agent reaches gives a thread a `path` of text, where the thread's own row has a
+ * `path` of references. Such an object belongs to its own answer and stays as the server gave it. A view of the row
+ * agrees with it on the type of every member both of them have, through the objects inside; a member that either
+ * side leaves empty decides nothing. */
+function viewOf(before: Record<string, unknown>, row: Record<string, unknown>): boolean {
+  return Object.keys(before).every((key) => {
+    if (!(key in row)) return true;
+    const old = before[key]; const value = row[key];
+    if (old === null || old === undefined || value === null || value === undefined) return true;
+    if (memberType(old) !== memberType(value)) return false;
+    return key === 'access' || !record(old) || !record(value) || viewOf(old, value);
+  });
+}
+
 /** References and node summaries may rename a thread, never overwrite its capabilities or binding. */
 function threadMetadata(before: Record<string, unknown>, row: Record<string, unknown>): Record<string, unknown> {
   if (row.redacted === true) return before;
@@ -169,9 +191,9 @@ function replace(before: unknown, change: RowChange['row'], thread?: Thread): un
       if (typeof before.state === 'string' && typeof state === 'string') next.state = state;
     } else next = before.kind === 'thread' && record(before.access)
       ? thread === undefined ? threadMetadata(before, change.value) : { ...thread }
-      : complete ? {...change.value} : overlay(before, change.value);
+      : complete ? {...change.value} : viewOf(before, change.value) ? overlay(before, change.value) : before;
     // References and inventory rows name the object kind; a rich provider/template DTO names its subtype.
-    if (typeof before.kind === 'string' && ((before.kind === change.kind && !complete) || ('my_access' in before && 'path' in before))) next.kind = before.kind;
+    if (next !== before && typeof before.kind === 'string' && ((before.kind === change.kind && !complete) || ('my_access' in before && 'path' in before))) next.kind = before.kind;
     // Everything wraps the native DTO in a tagged resource, with its own name/state columns.
     if (record(before.resource) && before.resource.kind === change.kind && change.partial !== true) {
       next = { ...next, resource: { ...before.resource, value: change.value } };

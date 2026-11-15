@@ -1,15 +1,16 @@
 /** One existing key form: explicit targets, resource filters and exact operation/action selections. */
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { tokenOperationsQuery } from '@/api/users';
-import type { NameKind } from '@/api/search';
+import { nameByIdQuery, type NameKind } from '@/api/search';
 import { NamePicker } from '@/features/search/NamePicker';
 import { CurrentDetailPage } from '@/features/resources/CurrentDetailPage';
 import type { ApiTokenInfo, KeyAction, KeyOperation, KeyRule, KeyTarget, KeyTargetKind, Operation } from '@/generated/api-types';
 import { Button } from '@/ui/Button';
 import { Checkbox } from '@/ui/Checkbox';
+import { CopyId } from '@/ui/CopyId';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
@@ -31,10 +32,17 @@ const NAME_KINDS: Partial<Record<KeyTargetKind, NameKind>> = {
 };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function useKeyTargetName(target: Pick<KeyTarget, 'kind' | 'id'>): string | null {
+  const kind = NAME_KINDS[target.kind], id = target.id ?? '';
+  const read = useQuery({ ...nameByIdQuery(kind ?? 'user', id), enabled: kind !== undefined && UUID.test(id) });
+  return read.isError ? null : read.data?.name ?? null;
+}
+
 export function KeyRuleSummary({ rule }: { rule: KeyRule }) {
   const { t } = useTranslation();
+  const name = useKeyTargetName(rule.target);
   return <div className="flex min-w-0 flex-col gap-1 text-sm">
-    <p className="wrap-anywhere"><span className="font-medium">{t(`operationKeys.kind.${rule.target.kind}`)}</span>{rule.target.id !== undefined && rule.target.id !== null && <> · <code>{rule.target.id}</code></>} · {t(`operationKeys.reach.${rule.target.reach}`)}</p>
+    <p className="flex flex-wrap items-center gap-x-1 wrap-anywhere"><span className="font-medium">{t(`operationKeys.kind.${rule.target.kind}`)}</span>{rule.target.id !== undefined && rule.target.id !== null && <> · <span>{name ?? t('operationKeys.unnamedTarget')}</span><CopyId value={rule.target.id} /></>} · {t(`operationKeys.reach.${rule.target.reach}`)}</p>
     <p className="text-text-muted">{rule.resources === undefined || rule.resources === null ? t('operationKeys.allResources') : rule.resources.length === 0 ? t('operationKeys.noResources') : rule.resources.map((kind) => t(`operationKeys.kind.${kind}`)).join(', ')}</p>
     <CurrentDetailPage count={rule.allow.length}>{(from, to) => <ul className="flex flex-col gap-1">{rule.allow.slice(from, to).map((item) => <li key={item.operation} className="wrap-anywhere"><code>{item.operation}</code> · {item.actions.map((action) => t(`operationKeys.action.${action}`)).join(', ')}</li>)}</ul>}</CurrentDetailPage>
   </div>;
@@ -92,10 +100,12 @@ export function KeyOperationChoice({ catalogue, resources, value, onChange }: {
 
 function KeyRuleEditor({ initial, accountId, onSave, onClose }: { initial: KeyRule | null; accountId: string; onSave: (rule: KeyRule) => void; onClose: () => void }) {
   const { t } = useTranslation();
+  const cache = useQueryClient();
   const catalogue = useQuery(tokenOperationsQuery);
   const [kind, setKind] = useState<KeyTargetKind>(initial?.target.kind ?? 'org');
   const [targetId, setTargetId] = useState(initial?.target.id ?? '');
-  const [targetName, setTargetName] = useState<string | null>(initial?.target.id ?? null);
+  const [targetName, setTargetName] = useState<string | null>(null);
+  const resolvedName = useKeyTargetName({ kind, id: targetId });
   const [reach, setReach] = useState<KeyTarget['reach']>(initial?.target.reach ?? 'self');
   const [resources, setResources] = useState<KeyTargetKind[]>(initial?.resources ?? []);
   const [allow, setAllow] = useState<KeyOperation[]>(initial?.allow ?? []);
@@ -114,7 +124,7 @@ function KeyRuleEditor({ initial, accountId, onSave, onClose }: { initial: KeyRu
       <Select label={t('operationKeys.targetKind')} value={kind} options={targets.map((value) => ({ value, label: t(`operationKeys.kind.${value}`) }))} onValueChange={(next) => { setKind(next); setTargetId(''); setTargetName(null); setReach('self'); }} />
       {kind === 'account' && <Button size="sm" onClick={() => { setTargetId(accountId); setTargetName(t('operationKeys.thisAccount')); }}>{t('operationKeys.thisAccount')}</Button>}
       {kind !== 'system' && (nameKind === undefined ? <Input label={t('operationKeys.targetId')} value={targetId} onChange={(event) => { setTargetId(event.target.value.trim()); setTargetName(null); }} hint={t('operationKeys.targetIdHint')} />
-        : <><NamePicker pickerKey="settings.KeyRules.operationKeys.target" key={kind} label={t('operationKeys.target')} kinds={[nameKind]} chosen={targetName ?? (targetId === '' ? null : targetId)} placeholder={t('operationKeys.findTarget')} nothing={t('operationKeys.noTargets')} onChoose={(hit) => { setTargetId(hit?.id ?? ''); setTargetName(hit?.name ?? null); }} />
+        : <><NamePicker pickerKey="settings.KeyRules.operationKeys.target" key={kind} label={t('operationKeys.target')} kinds={[nameKind]} chosen={targetName ?? resolvedName ?? (targetId === '' ? null : t('operationKeys.unnamedTarget'))} placeholder={t('operationKeys.findTarget')} nothing={t('operationKeys.noTargets')} onChoose={(hit) => { setTargetId(hit?.id ?? ''); setTargetName(hit?.name ?? null); if (hit !== null) cache.setQueryData(nameByIdQuery(hit.kind, hit.id).queryKey, hit); }} />
           <details className="text-sm"><summary>{t('operationKeys.byId')}</summary><Input label={t('operationKeys.targetId')} value={targetId} onChange={(event) => { setTargetId(event.target.value.trim()); setTargetName(null); }} hint={t('operationKeys.targetIdHint')} /></details></>)}
       {hasKeySubtree(kind) && <Select label={t('operationKeys.reachLabel')} value={reach} onValueChange={setReach} options={(['self', 'subtree'] as const).map((value) => ({ value, label: t(`operationKeys.reach.${value}`) }))} />}
       {kind === 'account' && reach === 'subtree' && <p className="text-sm text-text-muted">{t('operationKeys.accountSubtree')}</p>}
