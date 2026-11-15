@@ -14,7 +14,7 @@ pub struct RecordedUses;
 
 /// Freezes the acknowledged session membership before a turn can outlive a reload or reconnect.
 pub async fn capture_turn(conn: &mut Conn, turn: Id) -> Result<(), EngineError> {
-    sqlx::query("UPDATE turns t SET resource_delivery=(SELECT jsonb_agg(jsonb_build_object('name',m->'name','server_id',m->'server_id')) FROM commands c CROSS JOIN LATERAL jsonb_array_elements(COALESCE(c.body->'session',c.body)->'mcp') m WHERE c.id=(s.delivered_resources->>'command')::uuid) FROM segments s WHERE t.id=$1 AND s.id=t.segment_id AND t.resource_delivery IS NULL")
+    sqlx::query("UPDATE turns t SET resource_delivery=s.delivered_resources->'mcp_names' FROM segments s WHERE t.id=$1 AND s.id=t.segment_id AND t.resource_delivery IS NULL")
         .bind(turn).execute(conn).await.map_err(DbError::from)?;
     Ok(())
 }

@@ -1,8 +1,10 @@
 /** Built-in forks retain their real source identity, selected history and one creation intent. */
-import { act, cleanup, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as AskApi from '@/api/ask';
+import type * as Destinations from '@/api/copyDestinations';
+import type * as Places from '@/features/settings/PlacePicker';
 import { client } from '@/api/client';
 import { useImmediateFork } from '@/features/thread/ImmediateFork';
 import { ItemFrame } from '@/features/timeline/ItemActions';
@@ -20,7 +22,18 @@ vi.mock('@/api/ask', async (load) => ({ ...await load<typeof AskApi>(), keepAsk:
 vi.mock('@/api/forks', async (load) => ({ ...await load<object>(), planFork: calls.plan }));
 vi.mock('@/features/change/target', async (load) => ({ ...await load<object>(), openChange: calls.plan }));
 vi.mock('@/features/thread/forkNow', () => ({ useForkNow: () => ({ pending: false, start: calls.native }) }));
-vi.mock('@/features/settings/PlacePicker', () => ({ PlacePicker: () => null }));
+vi.mock('@/features/settings/PlacePicker',async(load)=>{
+  const actual=await load<typeof Places>();
+  const React=await import('react');
+  const other:Places.PickedPlace={id:'destination-topic',kind:'topic',rootOrgId:'destination-org',rootName:'Destination org',path:'Destination org / Topic',color:null,folder:false};
+  return {...actual,PlacePicker:(props:Places.PlacePickerProps)=>{
+    React.useEffect(()=>props.onCandidatesChange?.([other]),[props.onCandidatesChange]);
+    return <button disabled={(props.disabled??false)||props.rootOrgId!==undefined&&props.rootOrgId!=='destination-org'} onClick={()=>props.onChange(other)}>Choose destination org</button>;
+  }};
+});
+vi.mock('@/api/copyDestinations',async(load)=>({...await load<typeof Destinations>(),copyDestinationsQuery:(request:Destinations.CopyDestinationsRequest)=>({
+  queryKey:['builtin-copy-destinations',request],queryFn:()=>Promise.resolve({subject:request.subject,intent:request.intent,source_owned:true,destinations:request.destinations.map((destination)=>({destination,cross_root:true,outcome:{state:'allowed' as const}}))}),retry:false,
+})}));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useNavigate: () => calls.navigate }));
 
 let thread: Thread;
@@ -44,7 +57,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`opens the Private selected-hi
   const completed = turn('message-fork-turn', { ordinal: 1, inputId: 'message-fork-input', state: 'completed' });
   const item = { ...agentMessage('message-fork-answer', 'Fork this answer.', { turn: completed.id }), thread_id: thread.id, seq_created: 1, seq_updated: 1 };
   threadWriter.reset(thread.id, { thread, turns: [completed], items: [item] }, false);
-  const context: TimelineContext = { threadId: thread.id, threadName: thread.name, meId: thread.owner.id, detail: 'steps', recent: new Set(),
+  const context: TimelineContext = { threadId: thread.id, threadName: thread.name, meId: thread.owner.id, detail: 'normal',
     layout: 'one', setLayout: () => undefined, canInteract: true, canManage: true, live: true, lit: null, selection: NOT_PICKING };
   show(<TimelineContextValue.Provider value={context}><ItemFrame item={item} label={i18n.t('timeline.agent.menu')}><p>Fork this answer.</p></ItemFrame></TimelineContextValue.Provider>);
   await userEvent.click(screen.getByRole('button', { name: i18n.t('timeline.actions.more') }));
@@ -95,4 +108,19 @@ it('does not navigate a replacement reader after the original fork finishes', as
   await act(async () => { complete?.(reply); await Promise.resolve(); });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(calls.navigate).not.toHaveBeenCalled();
+});
+
+it.each(['en','zh-CN'] as const)('reviews the destination organization for a built-in copy and sends only its real topic in %s',async(locale)=>{
+  await setLocale(locale);show(<Entry/>);
+  await userEvent.click(screen.getByRole('button',{name:'Open fork'}));
+  const destination=await screen.findByRole('button',{name:'Choose destination org'});
+  expect(destination).toBeEnabled();await userEvent.click(destination);
+  const line=await screen.findByLabelText(i18n.t('ask.copyRoot'));
+  expect(within(line).getByText('Destination org')).toBeVisible();
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('change.menu.forkNow')}));
+  await waitFor(()=>expect(calls.keep).toHaveBeenCalledOnce());
+  const key=calls.keep.mock.calls[0]?.[2]?.key;
+  expect(key).toEqual(expect.any(String));
+  expect(calls.keep.mock.calls[0]).toEqual([thread.id,{topic_id:'destination-topic',project_id:null,title:null},{key,toTurn:1}]);
+  expect(calls.native).not.toHaveBeenCalled();expect(calls.plan).not.toHaveBeenCalled();
 });

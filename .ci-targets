@@ -1,0 +1,5 @@
+fmt
+clippy
+contracts
+test -p orch-engine --test resource_library --test source_uniform --test creator_source_authority --test updates
+test -p orch-api-core --test resource_facts --test resource_resume --test syncs

@@ -97,6 +97,60 @@ async fn command_task(
     task
 }
 
+#[tokio::test]
+async fn background_status_reads_running_and_current_lost_work_without_replaying_completed_tasks() {
+    use orch_link_contract::background::BackgroundTaskState;
+    let world = World::new().await;
+    let thread = world.thread("Long background history").await;
+    let (started, _) = world.running_turn(thread, "Keep the build visible").await;
+    let task = command_task(&world, thread, started.turn_id).await;
+    let mut tx = world.pool.begin().await.unwrap();
+    let row = orch_db::queries::threads::thread(&mut tx, thread)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("INSERT INTO items(id,thread_id,segment_id,turn_id,continuation_id,kind,status,payload,native_ref,seq_created,seq_updated) SELECT md5('old-background-'||n)::uuid,i.thread_id,i.segment_id,i.turn_id,i.continuation_id,i.kind,'completed',jsonb_set(i.payload,'{background_tasks}',jsonb_build_object('finished',jsonb_build_object('task',jsonb_set($2::jsonb,'{state}','\"completed\"'),'self_waking',true))), 'old-background-'||n,n+4000,n+4000 FROM items i CROSS JOIN generate_series(1,1000) AS n WHERE i.thread_id=$1 AND i.native_ref='background-command'")
+        .bind(thread).bind(serde_json::to_value(&task).unwrap()).execute(&mut *tx).await.unwrap();
+    let mut lost = task;
+    lost.id = "lost-task".into();
+    lost.state = BackgroundTaskState::Lost;
+    sqlx::query("UPDATE items SET payload=jsonb_set(payload,'{background_tasks}',(payload->'background_tasks')||jsonb_build_object('lost',jsonb_build_object('task',$2::jsonb,'lost_at',$3::jsonb,'self_waking',true))) WHERE thread_id=$1 AND native_ref='background-command'")
+        .bind(thread).bind(serde_json::to_value(&lost).unwrap()).bind(serde_json::to_value(world.clock.time()).unwrap()).execute(&mut *tx).await.unwrap();
+    let reads = "SELECT COALESCE(sum(seq_tup_read+idx_tup_fetch),0)::bigint FROM pg_stat_xact_user_tables WHERE relid='items'::regclass";
+    let before: i64 = sqlx::query_scalar(reads).fetch_one(&mut *tx).await.unwrap();
+    let status = orch_engine::background_wake::status(&mut tx, &row, &[], false)
+        .await
+        .unwrap();
+    let after: i64 = sqlx::query_scalar(reads).fetch_one(&mut *tx).await.unwrap();
+    assert_eq!(
+        status.tasks.len(),
+        2,
+        "a mixed item supplies each live or current lost task exactly once"
+    );
+    assert_eq!(
+        status
+            .tasks
+            .iter()
+            .filter(|task| task.state == BackgroundTaskState::Running)
+            .count(),
+        1
+    );
+    assert_eq!(
+        status
+            .tasks
+            .iter()
+            .filter(|task| task.state == BackgroundTaskState::Lost)
+            .count(),
+        1
+    );
+    assert!(
+        after - before <= 3,
+        "background status reread {} historical item rows",
+        after - before
+    );
+    tx.rollback().await.unwrap();
+}
+
 async fn native_finished(
     world: &World,
     thread: orch_types::Id,
@@ -691,6 +745,7 @@ async fn a_lost_session_records_the_loss_and_never_revives_a_task_from_late_hist
             thread,
             orch_link_contract::events::Event::SessionLost(
                 orch_link_contract::events::SessionLost {
+                    uncertain: false,
                     reason: "the native process ended".into(),
                 },
             ),
