@@ -1,0 +1,7 @@
+fmt
+contracts
+clippy
+test -p orch-config --lib
+test -p orch-config --test shipped --test gateways
+test -p orch-xtask
+test -p orch-node-core --lib -- machine_policy::tests::
