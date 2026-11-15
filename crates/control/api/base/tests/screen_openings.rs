@@ -23,7 +23,7 @@ use orch_api_contract::nodes::{
     OverviewPart,
 };
 use orch_api_contract::settings::NodeSettingList;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::access::{PageKey, testing::add_entry};
 use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
 use orch_types::{Id, new_id};
@@ -36,11 +36,12 @@ async fn overview_key(room: &Room, owner: Id, operation: &str) -> String {
     }))
     .unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     create_api_token_scoped(
         &mut *room.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: owner,
             name: "Native opening control",
             token_hash: &token_hash(&secret),

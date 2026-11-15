@@ -17,6 +17,8 @@
 //! hash and the size it was announced with, and an upload whose content is not what its hash says
 //! is thrown away with a refusal the machine acts on.
 
+mod relay;
+
 use crate::certificates::LinkFault;
 
 use crate::server::Peer;
@@ -170,6 +172,7 @@ pub fn routes() -> Router<App> {
             "/internal/link/blobs/{hash}",
             get(download).head(probe).put(upload),
         )
+        .merge(relay::routes())
 }
 
 // ---------------------------------------------------------------- who asks, and what for
@@ -187,6 +190,7 @@ struct Asker {
     machine: MachineRow,
     command: Named,
     command_id: Id,
+    content_transit: bool,
 }
 
 /// What a request is for.
@@ -230,6 +234,7 @@ async fn asker(app: &App, peer: &Peer, headers: &HeaderMap) -> Result<Asker, Lin
             machine,
             command: Named::Standing,
             command_id: command,
+            content_transit: false,
         });
     }
     let row = commands::command(&mut conn, command)
@@ -251,6 +256,7 @@ async fn asker(app: &App, peer: &Peer, headers: &HeaderMap) -> Result<Asker, Lin
             body: row.body,
         },
         command_id: command,
+        content_transit: row.content_transit,
     })
 }
 
@@ -294,6 +300,64 @@ pub fn __api_run_native_result_uploads_require_the_exact_capture_command_and_typ
 }
 
 impl Asker {
+    async fn register_content(
+        &self,
+        app: &App,
+        conn: &mut orch_db::Conn,
+        meta: &orch_blob_contract::range::BlobMeta,
+    ) -> Result<(), LinkFault> {
+        if self.content_transit {
+            app.blobs
+                .register_transit(conn, meta, app.clock.now())
+                .await
+        } else {
+            app.blobs.register(conn, meta, app.clock.now()).await
+        }
+        .map_err(|error| LinkFault::internal(&error))?;
+        Ok(())
+    }
+
+    /// The job whose transfer this command is a part of, if its body names one.
+    fn job(&self) -> Option<Id> {
+        let Named::Open { body, .. } = &self.command else {
+            return None;
+        };
+        body.get("job_id")
+            .or_else(|| body.pointer("/work/job_id"))
+            .and_then(Json::as_str)
+            .and_then(|text| text.parse().ok())
+    }
+
+    /// Holds `hashes` for the job of the command, if it has one, until the job ends: the machine of a transfer has
+    /// uploaded them, or been told the system holds them, and the job takes a pin of its own only when the machine
+    /// has answered. Another transfer that carries the same content may end in between.
+    async fn hold_for_job(
+        &self,
+        conn: &mut orch_db::Conn,
+        hashes: &[Hash],
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), LinkFault> {
+        let job = self.job();
+        if job.is_none() && !self.content_transit {
+            return Ok(());
+        }
+        if job.is_none()
+            && !storage::command_transfer_open(conn, self.command_id)
+                .await
+                .map_err(|error| LinkFault::internal(&error))?
+        {
+            return Err(LinkFault::new(
+                410,
+                "gone",
+                "the command's file transfer has ended",
+            ));
+        }
+        storage::pin_for_command(conn, self.command_id, job, hashes, at)
+            .await
+            .map_err(|e| LinkFault::internal(&e))?;
+        Ok(())
+    }
+
     async fn archives(&self, app: &App, hash: Hash) -> Result<Option<ArchiveDelivery>, LinkFault> {
         if matches!(
             &self.command,
@@ -352,7 +416,7 @@ impl Asker {
         if listed_hashes(body).contains(hash) {
             return Ok(true);
         }
-        if *kind != CommandKind::FsMaterialize {
+        if !writes_a_tree_down(*kind) {
             return Ok(false);
         }
         let Some(manifest) = body
@@ -369,6 +433,13 @@ impl Asker {
             .map_err(|e| LinkFault::internal(&e))?;
         Ok(files.contains(hash))
     }
+}
+
+/// Whether a command of this kind writes a tree down from a list it names in `manifest_blob`, and
+/// fetches every file of the list by its hash: a copy of a workspace, and the import of a data part
+/// that a machine move carries. Their bodies hold the list alone, so the files are those the list names.
+fn writes_a_tree_down(kind: CommandKind) -> bool {
+    matches!(kind, CommandKind::FsMaterialize | CommandKind::FsDataImport)
 }
 
 fn denied(wants: Wants) -> LinkFault {
@@ -470,19 +541,32 @@ async fn probe(
         return Err(denied(Wants::Probe));
     }
     let source = asker.archives(&app, hash).await?;
-    if let Some(size) = app
+    if let Some(existing) = app
         .blobs
         .store()
-        .size(&hash)
+        .existing(&hash)
         .await
         .map_err(|e| LinkFault::internal(&e))?
     {
+        let mut tx = app.db.begin().await.map_err(|e| LinkFault::internal(&e))?;
+        if asker.permits(Wants::Upload) {
+            asker.register_content(&app, &mut tx, &existing).await?;
+        } else {
+            app.blobs
+                .register_transit(&mut tx, &existing, app.clock.now())
+                .await
+                .map_err(|e| LinkFault::internal(&e))?;
+        }
+        asker
+            .hold_for_job(&mut tx, &[hash], app.clock.now())
+            .await?;
+        tx.commit().await.map_err(|e| LinkFault::internal(&e))?;
         return archive_response(
             source,
             progress_reply(
                 StatusCode::OK,
                 BlobProgress {
-                    received: size,
+                    received: existing.size,
                     complete: true,
                 },
             ),
@@ -543,16 +627,26 @@ async fn missing(
             "at most {MAX_MISSING_HASHES} hashes are asked about at once"
         )));
     }
-    let mut conn = app
-        .db
-        .acquire()
-        .await
-        .map_err(|e| LinkFault::internal(&e))?;
-    let absent = app
+    let mut conn = app.db.begin().await.map_err(|e| LinkFault::internal(&e))?;
+    let (absent, _publications) = app
         .blobs
-        .missing(&mut conn, &asked.hashes, app.clock.now())
+        .missing_protected(&mut conn, &asked.hashes, app.clock.now())
         .await
         .map_err(|e| LinkFault::internal(&e))?;
+    for publication in &_publications {
+        asker.register_content(&app, &mut conn, publication).await?;
+    }
+    // What the machine is told the system holds, it will not send: it is held for the command's job from now.
+    let held: Vec<Hash> = asked
+        .hashes
+        .iter()
+        .filter(|hash| !absent.contains(hash))
+        .copied()
+        .collect();
+    asker
+        .hold_for_job(&mut conn, &held, app.clock.now())
+        .await?;
+    conn.commit().await.map_err(|e| LinkFault::internal(&e))?;
     Ok(json_reply(&MissingReply { missing: absent }))
 }
 
@@ -656,26 +750,23 @@ async fn upload(
         .begin_transfer(asker.machine.id)
         .map_err(|error| LinkFault::new(429, "rate_limited", error.to_string()))?;
     // Content the store holds already needs nothing more, whatever piece this is.
-    if let Some(size) = app
+    if let Some(existing) = app
         .blobs
         .store()
-        .size(&hash)
+        .existing(&hash)
         .await
         .map_err(|e| failed(&e))?
     {
-        let mut conn = app.db.acquire().await.map_err(|e| failed(&e))?;
-        app.blobs
-            .register(
-                &mut conn,
-                orch_blob_contract::range::BlobMeta { hash, size },
-                app.clock.now(),
-            )
-            .await
-            .map_err(|e| failed(&e))?;
+        let mut conn = app.db.begin().await.map_err(|e| failed(&e))?;
+        asker.register_content(&app, &mut conn, &existing).await?;
+        asker
+            .hold_for_job(&mut conn, &[hash], app.clock.now())
+            .await?;
+        conn.commit().await.map_err(|e| failed(&e))?;
         return Ok(progress_reply(
             StatusCode::OK,
             BlobProgress {
-                received: size,
+                received: existing.size,
                 complete: true,
             },
         ));
@@ -706,9 +797,19 @@ async fn upload(
         if query.size < 0 || query.size > max {
             return Ok(refused_piece(ChunkRefusal::BlobTooLarge));
         }
-        storage::begin_upload(&mut tx, &hash, query.size, Some(asker.machine.id), now)
+        let retention = crate::cache::upload_retention(&mut tx)
             .await
             .map_err(|e| failed(&e))?;
+        storage::begin_upload(
+            &mut tx,
+            &hash,
+            query.size,
+            Some(asker.machine.id),
+            now,
+            retention,
+        )
+        .await
+        .map_err(|e| failed(&e))?;
         row = storage::lock_upload(&mut tx, &hash)
             .await
             .map_err(|e| failed(&e))?;
@@ -751,10 +852,8 @@ async fn upload(
     // The last piece: the whole is checked against the hash and the size it was announced with.
     match app.blobs.put_file(&part, hash, row.size).await {
         Ok(stored) => {
-            app.blobs
-                .register(&mut tx, stored.meta, now)
-                .await
-                .map_err(|e| failed(&e))?;
+            asker.register_content(&app, &mut tx, &stored.meta).await?;
+            asker.hold_for_job(&mut tx, &[hash], now).await?;
             storage::end_upload(&mut tx, &hash)
                 .await
                 .map_err(|e| failed(&e))?;

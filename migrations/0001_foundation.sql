@@ -937,6 +937,41 @@ BEGIN
 END
 $$;
 
+-- An index may not yet exist for an admitted imported message; its visible words still come from the source.
+CREATE FUNCTION public.orch_conversation_text(item_kind text, body jsonb, indexed_text text) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  written text;
+  visible text := '';
+  opening integer;
+  closing integer;
+BEGIN
+  IF indexed_text IS NOT NULL THEN
+    written := indexed_text;
+  ELSIF item_kind='user_message' AND body->>'source'='goal' THEN
+    written := COALESCE(body #>> '{goal,condition}','');
+  ELSIF item_kind='user_message' THEN
+    SELECT COALESCE(string_agg(COALESCE(part->>'text',part->>'inline_text',part->>'name',''),E'\n' ORDER BY ordinal),'') INTO written
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(body->'parts')='array' THEN body->'parts' ELSE '[]'::jsonb END) WITH ORDINALITY parts(part,ordinal);
+  ELSIF item_kind='error' THEN
+    written := COALESCE(body->>'message','');
+  ELSE
+    written := COALESCE(body->>'text','');
+  END IF;
+  LOOP
+    opening := strpos(written,'<orch>');
+    EXIT WHEN opening=0;
+    visible := visible || left(written,opening-1);
+    written := substr(written,opening+length('<orch>'));
+    closing := strpos(written,'</orch>');
+    IF closing=0 THEN RETURN visible; END IF;
+    written := substr(written,closing+length('</orch>'));
+  END LOOP;
+  RETURN visible || written;
+END
+$$;
+
 CREATE FUNCTION public.orch_item_internal_marker() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -1979,7 +2014,7 @@ BEGIN
     END IF;
     IF TG_OP <> 'DELETE' THEN
         IF NEW.blob IS NOT NULL AND NEW.expires_at IS NOT NULL THEN
-            UPDATE blobs SET pin_count = pin_count + 1 WHERE hash = NEW.blob;
+            UPDATE blobs SET pin_count = pin_count + 1, relay_only=false WHERE hash = NEW.blob;
         END IF;
         RETURN NEW;
     END IF;
@@ -2099,7 +2134,7 @@ BEGIN
     removed := CASE WHEN TG_OP IN ('DELETE','UPDATE') THEN OLD.blob END;
   END IF;
   IF added IS NOT NULL THEN
-    UPDATE blobs SET pin_count = pin_count + 1 WHERE hash = added;
+    UPDATE blobs SET pin_count = pin_count + 1, relay_only=false WHERE hash = added;
   END IF;
   IF removed IS NOT NULL THEN
     UPDATE blobs SET pin_count = pin_count - 1, last_access_at = GREATEST(last_access_at, now())
@@ -2232,7 +2267,7 @@ CREATE FUNCTION public.thread_history_blob_pin() RETURNS trigger
     AS $$
 BEGIN
   IF TG_OP='INSERT' THEN
-    UPDATE blobs SET pin_count=pin_count+1 WHERE hash=NEW.blob;
+    UPDATE blobs SET pin_count=pin_count+1,relay_only=false WHERE hash=NEW.blob;
     RETURN NEW;
   END IF;
   UPDATE blobs SET pin_count=pin_count-1,last_access_at=GREATEST(last_access_at,now())

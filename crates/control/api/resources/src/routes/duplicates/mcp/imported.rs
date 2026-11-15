@@ -162,6 +162,7 @@ impl effects::ApplyOwned for Presets {
                 .dispatcher()
                 .issue_stored_before(
                     StoredCommand {
+                        content_transit: false,
                         id: Some(outgoing.id),
                         machine: outgoing.machine,
                         kind: outgoing.kind.as_str().into(),
@@ -244,6 +245,7 @@ impl effects::ApplyOwned for Presets {
                     .dispatcher()
                     .issue_stored_before(
                         StoredCommand {
+                            content_transit: false,
                             id: Some(outgoing.id),
                             machine: outgoing.machine,
                             kind: outgoing.kind.as_str().into(),

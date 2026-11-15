@@ -15,7 +15,7 @@ use orch_api_contract::common::ErrorCode;
 use orch_api_contract::resources::{
     CreateProvider, MachineProviderCreate, MachineProviderCreateBody, ProviderCreate, Upstream,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::routes::resources::sealing::install_master_key;
 use orch_api_core::testing::RawReply;
 use orch_authz::ownership::{NewAccess, start_resource};
@@ -41,11 +41,12 @@ async fn key(world: &World, user: Id, rules: Vec<Json>) -> String {
     let policy: orch_access_contract::key_scope::KeyScope =
         serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(policy.validate().is_empty());
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Provider creator boundary",
             token_hash: &token_hash(&token),
@@ -66,7 +67,7 @@ async fn world() -> World {
 }
 fn api(home: Id, name: &str) -> CreateProvider {
     CreateProvider::Api {
-        runtime_machine_id: None,
+        runtime_location: None,
         key_machine_id: None,
         name: name.into(),
         home_id: home,
@@ -184,7 +185,9 @@ async fn agent(world: &World, by: &places::Who, home: Id, machine: Option<Id>) -
 }
 fn subscription(home: Id, agent: Id, runtime: Option<Id>) -> CreateProvider {
     CreateProvider::Subscription {
-        runtime_machine_id: runtime,
+        runtime_location: runtime.map(|machine_id| {
+            orch_api_contract::resources::ProviderConnectionLocation::Machine { machine_id }
+        }),
         key_machine_id: None,
         name: "Scoped native creator".into(),
         home_id: home,
@@ -359,12 +362,16 @@ async fn selected_directory_machines_keep_the_same_use_and_local_policy_checks()
     .await;
     let mut body = api(c.acme, "Scoped directory API");
     if let CreateProvider::Api {
-        runtime_machine_id,
+        runtime_location,
         key_machine_id,
         ..
     } = &mut body
     {
-        *runtime_machine_id = Some(machine);
+        *runtime_location = Some(
+            orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                machine_id: machine,
+            },
+        );
         *key_machine_id = Some(machine);
     }
     let id = receipt(
@@ -510,11 +517,12 @@ async fn machine_registration_requires_its_path_write_and_keeps_the_existing_hom
 async fn legacy_and_browser_creation_keep_their_original_full_wire_shape() {
     let world = world().await;
     let c = resources::company(&world).await;
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = new_api_token(issued_key_id);
     identity::create_api_token(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: c.boss.id(),
             name: "Legacy provider creation",
             token_hash: &token_hash(&token),
@@ -719,8 +727,8 @@ async fn creation_refusal_uses_the_current_key_mode_after_the_real_identity_wait
     resources::name_person(&world, "agent", profile, "agent.view", c.admin.id()).await;
     resources::name_person(&world, "machine", machine, "machine.use", c.admin.id()).await;
     for path_machine in [None, Some(machine)] {
-        let token = new_token(API_TOKEN_PREFIX);
         let token_id = new_id();
+        let token = new_api_token(token_id);
         identity::create_api_token(
             &mut *world.conn().await,
             &identity::NewApiToken {
@@ -896,13 +904,17 @@ async fn hosted_machine_creation_uses_the_canonical_host_subject_and_keeps_the_p
     // the actor is not the physical machine's owner.
     let mut ordinary = api(c.acme, "Ordinary hosted provider");
     if let CreateProvider::Api {
-        runtime_machine_id,
+        runtime_location,
         key_machine_id,
         api_key,
         ..
     } = &mut ordinary
     {
-        *runtime_machine_id = Some(machine);
+        *runtime_location = Some(
+            orch_api_contract::resources::ProviderConnectionLocation::Machine {
+                machine_id: machine,
+            },
+        );
         *key_machine_id = Some(machine);
         *api_key = None;
     }

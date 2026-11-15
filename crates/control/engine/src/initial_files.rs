@@ -1236,7 +1236,7 @@ pub async fn deliver(job: &Job, environment: Id, machine: Id) -> Result<Option<D
             .get("initial_files_pins")
             .is_some_and(Json::is_array)
         {
-            storage::pin_blobs(&mut tx, &hashes).await?;
+            let hashes = storage::pin_transfer_blobs(&mut tx, &hashes).await?;
             jobs::merge_plan(
                 &mut tx,
                 job.id(),
@@ -1293,22 +1293,28 @@ pub async fn deliver(job: &Job, environment: Id, machine: Id) -> Result<Option<D
     Ok(Some(Done::Finished))
 }
 
-/// Releases this job's individual temporary pins once, on commit or rollback of its fresh unit.
-pub(crate) async fn release(conn: &mut Conn, job: Id, now: Time) -> Result<(), EngineError> {
+/// Releases this job's individual temporary pins once, on commit or rollback of its fresh unit. What
+/// that freed is still to be removed from the store: the caller settles it after its transaction commits.
+pub(crate) async fn release(
+    conn: &mut Conn,
+    job: Id,
+    now: Time,
+) -> Result<Option<crate::transfers::Released>, EngineError> {
     let Some(row) = jobs::lock(conn, job).await? else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(value) = row
         .plan
         .get("initial_files_pins")
         .filter(|value| value.is_array())
     else {
-        return Ok(());
+        return Ok(None);
     };
     let hashes: Vec<Hash> = serde_json::from_value(value.clone())?;
-    storage::unpin_blobs(conn, &hashes, now.get()).await?;
+    let place = crate::transfers::place_of(row.environment_id, row.provider_id);
+    let released = crate::transfers::release_transfer(conn, place, &hashes, now.get()).await?;
     jobs::merge_plan(conn, job, &json!({"initial_files_pins":null}), now.get()).await?;
-    Ok(())
+    Ok(Some(released))
 }
 
 /// Live first-send identity/time export around the unchanged immutable copy validator.

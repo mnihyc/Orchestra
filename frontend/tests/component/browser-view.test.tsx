@@ -1,6 +1,6 @@
 /** The Browser view: open browsers before profiles, a watcher told who drives, watching that sends nothing, Drive on a socket of its own, keys given back by Ctrl+Alt+Esc, what a page asks shown to whoever drives, and each way of being off or of finding nothing. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -11,12 +11,13 @@ import type * as BrowserApi from '@/api/browsers';
 import type * as SocketModule from '@/features/browser/socket';
 import type { BrowserControlFrame, BrowserSocketState } from '@/features/browser/socket';
 import type { Browser, Environment, EnvironmentBrowsers } from '@/generated/api-types';
+import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 const made = vi.hoisted(() => ({ connections: [] as { control: boolean; sent: BrowserControlFrame[]; state: StoreApi<BrowserSocketState> }[], list: null as EnvironmentBrowsers | null }));
 
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="#">{children}</a> }));
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: ReactNode }) => <a href="#">{children}</a> }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
 vi.mock('@/api/browsers', async (original) => ({
   ...await original<typeof BrowserApi>(),
   browserKeys: { list: (id: string) => ['test-browsers', id] },
@@ -78,6 +79,21 @@ beforeEach(() => {
 });
 
 describe('the list and the one in front', () => {
+  for (const locale of ['en', 'zh-CN'] as const) it(`names the reported browser mode in its existing source line and leaves an unknown mode unsaid (${locale})`, async () => {
+    await setLocale(locale);
+    try {
+      made.list = list({ profiles: [], browsers: [browser('quiet', { preset: 'headless' }), browser('screen', { preset: 'window' }), browser('external', { origin: 'announced', preset: null })] });
+      draw(['browser.view']);
+      const rows = await screen.findByRole('list', { name: i18n.t('browser.list.label') });
+      expect(rows.querySelector('[data-browser-row="quiet"]')).toHaveTextContent(locale === 'en' ? 'Headless' : '无界面');
+      expect(rows.querySelector('[data-browser-row="screen"]')).toHaveTextContent(locale === 'en' ? 'Window' : '窗口');
+      const external = rows.querySelector('[data-browser-row="external"]');
+      expect(external).not.toHaveTextContent(locale === 'en' ? 'Headless' : '无界面');
+      expect(external).not.toHaveTextContent(locale === 'en' ? 'Window' : '窗口');
+      expect(within(rows).getAllByRole('listitem')).toHaveLength(3);
+    } finally { await setLocale('en'); }
+  });
+
   it('lists the thread agent\'s browser first, then the others, then the profiles none runs on, and tells a watcher who drives', async () => {
     draw(['browser.view']);
     const listed = await screen.findByRole('list', { name: 'Browsers and profiles' });

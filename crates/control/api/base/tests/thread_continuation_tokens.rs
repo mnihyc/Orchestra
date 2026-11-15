@@ -906,6 +906,7 @@ async fn native(
             }
             Ok(CommandResult::AgentStart(
                 orch_link_contract::commands::AgentStartResult {
+                    home: None,
                     reused: true,
                     harness_version: "1.0.0".into(),
                     descriptor: serde_json::from_value(descriptor.clone()).map_err(|error| {
@@ -1272,16 +1273,17 @@ async fn operation_key(
     operation: &str,
     actions: &[&str],
 ) -> Proof<String> {
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     let scope: orch_access_contract::key_scope::KeyScope = serde_json::from_value(
         json!({"rules":[{"target":{"kind":"thread","id":thread,"reach":"self"},"resources":["thread"],"allow":[{"operation":operation,"actions":actions}]}]}),
     )?;
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = orch_types::new_id();
+    let secret = new_api_token(issued_key_id);
     orch_db::queries::identity::create_api_token_scoped(
         &mut *scene.rig.world.conn().await,
         &orch_db::queries::identity::NewApiToken {
-            id: orch_types::new_id(),
+            id: issued_key_id,
             user_id: actor,
             name: "Native prompt transition",
             token_hash: &token_hash(&secret),
