@@ -1,6 +1,10 @@
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
+import { useScheduleListing } from './Listing';
 /** Human definitions are author-private; state controls keep native revisions and queued work intact. */
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useInfiniteQuery, useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
 import { ApiError, client } from '@/api/client';
@@ -23,7 +27,7 @@ import { Section } from '@/shell/Page';
 import { ScheduleEditor } from './Editor';
 import { ScheduleCancel } from './Schedules';
 
-export function HumanScheduleActions({ row, topic, controller, thread }: { row: InputSchedule; topic: string; controller: boolean; thread?: Thread }) {
+export function HumanScheduleActions({ row, topic, controller, thread, keep }: { row: InputSchedule; topic: string; controller: boolean; thread?: Thread; keep?: (row: InputSchedule, active: boolean) => void }) {
   const { t } = useTranslation();
   const cache = useQueryClient();
   const me = useQuery(meQuery);
@@ -42,6 +46,8 @@ export function HumanScheduleActions({ row, topic, controller, thread }: { row: 
   }, onError: (error) => {
     if (error instanceof ApiError && error.is('conflict.stale_revision')) { void cache.invalidateQueries({ queryKey: inputScheduleQuery(row.id).queryKey, exact: true }); void cache.invalidateQueries({ queryKey: topicSchedulesQuery(topic).queryKey, exact: true }); }
   } });
+  const cancelling = useIsMutating({ mutationKey: ['input-schedule-cancel', row.id, readerKey] }) > 0;
+  useEffect(() => keep?.(row, editing || change.isPending || change.isError || cancelling), [keep, row, editing, change.isPending, change.isError, cancelling]);
   const current = change.variables !== undefined && sameLibraryReader(change.variables.reader);
   const changed = current && change.isSuccess && change.variables.body.revision === row.revision;
   const setState = (state: 'active' | 'paused') => {
@@ -72,18 +78,26 @@ export function ScheduleHistory({ row }: { row: InputSchedule }) {
     {open && query.hasNextPage && <Button size="sm" pending={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>{t('operation.more')}</Button>}
   </details>;
 }
-export function TopicSchedules({ topic }: { topic: Topic }) {
+function TopicScheduleRows({ topic }: { topic: Topic }) {
   const { t } = useTranslation();
   const format = useFormatContext();
   useStore(client.session, (state) => JSON.stringify([state.userId, state.readerVersion]));
-  const query = useQuery(topicSchedulesQuery(topic.id));
+  const { query, pages, paged, rows, held, search } = useScheduleListing(topic.id);
   const controller = holds(topic.access, 'topic.interact');
   return <Section id="scheduled-inputs" title={t('sendLater.list')}>
-    {query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : query.data === undefined ? <SkeletonRows rows={3} /> : query.data.length === 0 ? <p className="text-sm text-text-muted">{t('sendLater.empty')}</p> : <Table label={t('sendLater.list')} rows={query.data} rowKey={(row) => row.id} columns={[
+    <CollectionSearch name={t('sendLater.list')} {...search} />
+    {query.isError && (!paged || !pages.isFetchNextPageError) ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : query.data === undefined ? <SkeletonRows rows={3} /> : rows.length === 0 ? <p className="text-sm text-text-muted">{t('sendLater.empty')}</p> : null}
+    {held.rows.length > 0 && <Table label={t('sendLater.list')} rows={held.rows} retainKeys={held.active} virtual rowClassName={(row) => held.visible.has(row.id) ? undefined : 'hidden'} className={rows.length === 0 ? 'hidden' : undefined} rowKey={(row) => row.id} columns={[
       { id: 'name', header: t('agentSchedules.name'), grow: true, cell: (row) => <div className="flex min-w-0 flex-col gap-1"><span className="wrap-anywhere">{row.name}</span><UserChip user={row.author} /><span className="text-sm text-text-muted">{row.destination.new_thread ? t('sendLater.newThread') : row.destination.thread?.name ?? t('access.place.hidden')}</span><ScheduleHistory row={row} /></div> },
       { id: 'next', header: t('agentSchedules.next'), from: 'sm', cell: (row) => row.next_run_at === null ? '–' : formatDateTime(row.next_run_at, { ...format, timeZone: row.timing.zone }) },
       { id: 'state', header: t('agentSchedules.state'), from: 'sm', cell: (row) => t(`agentSchedules.states.${row.state}`) },
-      { id: 'actions', header: t('sendLater.actions'), hideHeader: true, cell: (row) => <HumanScheduleActions row={row} topic={topic.id} controller={controller} /> },
+      { id: 'actions', header: t('sendLater.actions'), hideHeader: true, cell: (row) => <HumanScheduleActions row={row} topic={topic.id} controller={controller} keep={held.keep} /> },
     ]} />}
+    <Pagination hasMore={paged && pages.hasNextPage} loading={pages.isFetchingNextPage} error={paged && pages.isFetchNextPageError ? pages.error : null} onMore={() => void pages.fetchNextPage()} />
   </Section>;
+}
+
+export function TopicSchedules(props: { topic: Topic }) {
+  const { scope } = useCollectionSearch('topic-schedules:' + props.topic.id);
+  return <TopicScheduleRows key={scope} {...props} />;
 }

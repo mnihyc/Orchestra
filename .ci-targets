@@ -1,0 +1,2 @@
+test -p orch-api-core --test provider_models --test model_entries --test typed_resource_operations --test credential_collections --test group_list_scopes
+test -p orch-api-core --test provider_harness --test threads_adopt

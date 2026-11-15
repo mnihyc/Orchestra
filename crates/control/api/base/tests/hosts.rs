@@ -941,7 +941,7 @@ async fn host_fleet_environment_and_preflight_agree_on_updates_and_lists_read_to
             .token(&who.token)
             .query(&HostRuntimeListQuery::default());
         let before = Statements::now();
-        let rows = call.send().await.ok();
+        let rows = call.send().await.ok().items;
         (Statements::now() - before, rows)
     }
     let (few, current) = count(&world, &c.boss, host).await;
@@ -988,10 +988,12 @@ async fn host_fleet_environment_and_preflight_agree_on_updates_and_lists_read_to
         .query(&AdminRuntimeListQuery {
             host_id: Some(host),
             kind: None,
+            ..AdminRuntimeListQuery::default()
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         host_rows
             .iter()
@@ -1078,7 +1080,8 @@ async fn environment_and_host_runtime_pages_read_stored_state_without_inspection
         .query(&HostRuntimeListQuery::default())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(runtimes.iter().any(|row| row.id == runtime));
     assert_eq!(
         reads.load(Ordering::SeqCst),
@@ -1204,7 +1207,8 @@ async fn the_provider_page_and_host_and_fleet_count_the_same_runtime_changes() {
         .query(&HostRuntimeListQuery::default())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     let fleet = world
         .app
         .call(AdminRuntimeList, &[])
@@ -1212,10 +1216,12 @@ async fn the_provider_page_and_host_and_fleet_count_the_same_runtime_changes() {
         .query(&AdminRuntimeListQuery {
             host_id: Some(host),
             kind: None,
+            ..AdminRuntimeListQuery::default()
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         host_rows
             .iter()
