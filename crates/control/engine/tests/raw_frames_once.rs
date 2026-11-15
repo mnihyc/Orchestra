@@ -40,6 +40,8 @@ async fn a_frame_delivered_twice_is_kept_once_and_a_new_frame_with_the_same_json
     world.running_turn(thread, "Keep the frames").await;
     let segment = world.segment_of(thread).await;
     let frame = Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n: 7,
         direction: "in".to_owned(),
         payload: json!({ "method": "frame", "authorization": "private credential" }),
@@ -100,6 +102,8 @@ async fn a_reopened_session_starts_above_the_segment_cursor_after_all_frame_byte
     let (turn, _) = world.running_turn(thread, "First turn").await;
     let segment = world.segment_of(thread).await;
     let frame = Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n: 71,
         direction: "in".to_owned(),
         payload: json!({"frame": "old"}),

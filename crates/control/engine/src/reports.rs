@@ -37,8 +37,8 @@ impl Engine {
         for event in events {
             let decoded = match Event::decode(&event.kind, event.body.clone()) {
                 Ok(decoded) => decoded,
-                Err(error) => {
-                    tracing::warn!(%error, kind = %event.kind, "an event of a host does not read");
+                Err(_) => {
+                    tracing::warn!(%machine, sequence = event.seq, "a native host event could not be read and was skipped");
                     continue;
                 }
             };

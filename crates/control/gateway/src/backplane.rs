@@ -15,14 +15,19 @@
 //! back, tells it about every session it holds.
 
 use crate::Gateway;
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
+use orch_link::framing::{
+    LinkMeter, MessageAssembly, MessageSink, Refused, TransportError, backplane_queues, write_loop,
+};
 use orch_link::reconnect::Backoff;
 use orch_link_contract::backplane::{
     ApiHello, AuthQuery, AuthReply, BackplaneData, BackplaneFrame, GwHello, STATS_EVERY_SECS, Stats,
 };
-use orch_link_contract::frames::{self, Text};
+use orch_link_contract::frames::{self, PartFrame, Text};
 use orch_link_contract::session::CONNECT_TIMEOUT_SECS;
+use orch_link_contract::version::Limits;
 use orch_pki::tickets::TicketVerifier;
 use rustls::pki_types::ServerName;
 use std::collections::HashMap;
@@ -31,15 +36,24 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio::time::Instant;
 use tokio_rustls::TlsConnector;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_util::sync::CancellationToken;
 
-/// The most bytes of a message of the backplane. The same bound the link's
-/// own sockets have: a frame of a machine is at most a session's limit, and
-/// the wrapper around it is small.
-const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+/// The ordinary message allowance with its machine/session envelope. Paged values
+/// cross this socket through the same bounded parts and scheduler as machine sessions.
+fn ceiling(gateway: &Gateway) -> usize {
+    gateway
+        .inner
+        .api
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .limits
+        .backplane_bytes()
+}
 /// How long the system has to answer the gateway's first word.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// How many of the system's pings may go unheard before it is taken to be
@@ -60,7 +74,7 @@ enum Outbound {
 impl Outbound {
     fn observed_bytes(&self) -> Option<usize> {
         match self {
-            Self::Frame(frame) => frames::encode(frame.as_ref(), MAX_MESSAGE_BYTES)
+            Self::Frame(frame) => frames::encode(frame.as_ref(), usize::MAX)
                 .ok()
                 .map(|text| text.len()),
             Self::Data(bytes) => Some(bytes.len()),
@@ -229,10 +243,41 @@ impl BackplaneHandle {
 
 type Socket = tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<TcpStream>>;
 
-fn websocket_config() -> WebSocketConfig {
+struct GatewayBackplaneSink(futures::stream::SplitSink<Socket, Message>);
+
+#[async_trait]
+impl MessageSink for GatewayBackplaneSink {
+    async fn ready(&mut self) {
+        let _ = futures::future::poll_fn(|cx| {
+            futures::Sink::poll_ready(std::pin::Pin::new(&mut self.0), cx)
+        })
+        .await;
+    }
+    async fn send(&mut self, message: orch_link::framing::Message) -> Result<(), TransportError> {
+        let message = match message {
+            orch_link::framing::Message::Text(text) => Message::text(text),
+            orch_link::framing::Message::Binary(bytes) => Message::Binary(bytes),
+        };
+        self.0
+            .send(message)
+            .await
+            .map_err(|error| TransportError::Io(error.to_string()))
+    }
+    async fn ping(&mut self) -> Result<(), TransportError> {
+        self.0
+            .send(Message::Ping(Bytes::new()))
+            .await
+            .map_err(|error| TransportError::Io(error.to_string()))
+    }
+    async fn close(&mut self) {
+        let _ = self.0.close().await;
+    }
+}
+
+fn websocket_config(ceiling: usize) -> WebSocketConfig {
     WebSocketConfig::default()
-        .max_message_size(Some(MAX_MESSAGE_BYTES))
-        .max_frame_size(Some(MAX_MESSAGE_BYTES))
+        .max_message_size(Some(ceiling))
+        .max_frame_size(Some(ceiling))
 }
 
 /// Why the connection to the system could not be made or kept.
@@ -273,10 +318,13 @@ async fn dial(gateway: &Gateway) -> Result<Socket, Fault> {
             .connect(name, socket)
             .await
             .map_err(|error| Fault::Connect(format!("TLS: {error}")))?;
-        let (socket, _) =
-            tokio_tungstenite::client_async_with_config(request, tls, Some(websocket_config()))
-                .await
-                .map_err(|error| Fault::Connect(format!("WebSocket: {error}")))?;
+        let (socket, _) = tokio_tungstenite::client_async_with_config(
+            request,
+            tls,
+            Some(websocket_config(ceiling(gateway))),
+        )
+        .await
+        .map_err(|error| Fault::Connect(format!("WebSocket: {error}")))?;
         Ok(socket)
     };
     tokio::time::timeout(Duration::from_secs(u64::from(CONNECT_TIMEOUT_SECS)), work)
@@ -284,10 +332,8 @@ async fn dial(gateway: &Gateway) -> Result<Socket, Fault> {
         .map_err(|_| Fault::Connect("it took too long".to_owned()))?
 }
 
-fn text_of(frame: &BackplaneFrame) -> Option<Message> {
-    frames::encode(frame, MAX_MESSAGE_BYTES)
-        .ok()
-        .map(Message::text)
+fn text_of(frame: &BackplaneFrame, ceiling: usize) -> Option<Message> {
+    frames::encode(frame, ceiling).ok().map(Message::text)
 }
 
 /// Reads the system's first word and takes in what it says.
@@ -297,8 +343,8 @@ async fn greet(gateway: &Gateway, socket: &mut Socket) -> Result<(), Fault> {
         version: gateway.inner.settings.version.clone(),
         started_at: Some(gateway.inner.started_at),
     });
-    let message =
-        text_of(&hello).ok_or_else(|| Fault::Protocol("hello cannot be written".to_owned()))?;
+    let message = text_of(&hello, ceiling(gateway))
+        .ok_or_else(|| Fault::Protocol("hello cannot be written".to_owned()))?;
     socket
         .send(message)
         .await
@@ -307,8 +353,7 @@ async fn greet(gateway: &Gateway, socket: &mut Socket) -> Result<(), Fault> {
         loop {
             match socket.next().await {
                 Some(Ok(Message::Text(text))) => {
-                    return match frames::decode::<BackplaneFrame>(text.as_str(), MAX_MESSAGE_BYTES)
-                    {
+                    return match frames::decode::<BackplaneFrame>(text.as_str(), ceiling(gateway)) {
                         Ok(Text::Known(BackplaneFrame::ApiHello(hello))) => Ok(hello),
                         _ => Err(Fault::Protocol(
                             "the system did not begin with its hello".to_owned(),
@@ -339,13 +384,24 @@ fn take_in(gateway: &Gateway, hello: ApiHello) {
             .with(|relay| relay.set_verifier(verifier)),
         Err(error) => tracing::error!(%error, "the key tickets are checked with cannot be read"),
     }
-    let mut api = gateway
-        .inner
-        .api
-        .write()
-        .unwrap_or_else(PoisonError::into_inner);
-    api.limits = hello.limits;
-    api.versions = hello.versions;
+    let changed = {
+        let mut api = gateway
+            .inner
+            .api
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        api.limits = hello.limits;
+        api.versions = hello.versions;
+        gateway.inner.sessions.take_other_limits(hello.limits)
+    };
+    for (machine, entry) in changed {
+        tracing::info!(%machine, "the system changed the session limits; the machine will reconnect");
+        gateway
+            .inner
+            .relay
+            .with(|relay| relay.session_gone(machine, entry.session_id));
+        entry.sender.end();
+    }
 }
 
 /// Keeps the connection to the system for as long as the gateway runs.
@@ -378,7 +434,23 @@ async fn hold(gateway: &Gateway) -> Result<(), Fault> {
     let mut socket = dial(gateway).await?;
     greet(gateway, &mut socket).await?;
     tracing::info!("the backplane is up");
-    let (mut sink, mut source) = socket.split();
+    let (sink, mut source) = socket.split();
+    let limits = gateway.session_config().limits;
+    let (transport_out, transport_queues) = backplane_queues(limits);
+    let writer_ended = CancellationToken::new();
+    let transport_closed = writer_ended.clone();
+    let transport_writer = tokio::spawn(async move {
+        let result = write_loop(
+            Box::new(GatewayBackplaneSink(sink)),
+            transport_queues,
+            LinkMeter::new(),
+            limits.frame_bytes(),
+            transport_closed.clone(),
+        )
+        .await;
+        transport_closed.cancel();
+        result
+    });
     let (out, mut queued) = mpsc::unbounded_channel();
     #[cfg(feature = "test-observers")]
     let observed = orch_link::test_observers::QueueGauge::new("gateway.backplane");
@@ -412,41 +484,49 @@ async fn hold(gateway: &Gateway) -> Result<(), Fault> {
     gateway.inner.relay.with(|relay| relay.port_control(true));
     stats.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let dead_after = Duration::from_secs(u64::from(STATS_EVERY_SECS)) * DEAD_AFTER_BEATS;
+    let mut assembly = MessageAssembly::default();
     let ended: Result<(), Fault> = loop {
+        let read_until = assembly
+            .deadline(dead_after)
+            .unwrap_or_else(|| Instant::now() + dead_after);
         tokio::select! {
             () = gateway.inner.shutdown.cancelled() => break Ok(()),
-            message = tokio::time::timeout(dead_after, source.next()) => match message {
+            message = tokio::time::timeout_at(read_until, source.next()) => match message {
                 Err(_) => break Err(Fault::Connect("the system has been silent for too long".to_owned())),
                 Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => {
                     break Err(Fault::Connect("the system closed the connection".to_owned()));
                 }
-                Ok(Some(Ok(message))) => on_message(gateway, message),
+                Ok(Some(Ok(message))) => if let Err(error) = on_message(gateway, message, &mut assembly, limits) { break Err(error); },
             },
+            () = writer_ended.cancelled() => break Err(Fault::Connect("the connection failed".into())),
             outgoing = queued.recv() => {
                 let Some(outgoing) = outgoing else { break Ok(()) };
                 #[cfg(feature = "test-observers")]
                 let observed_send = observed.selected(outgoing.observed_bytes());
-                let message = match outgoing {
-                    Outbound::Frame(frame) => match text_of(&frame) {
-                        Some(message) => message,
-                        None => continue,
-                    },
-                    Outbound::Data(bytes) => Message::Binary(bytes),
+                let mut lease = None;
+                let receipt = match outgoing {
+                    Outbound::Frame(frame) => transport_out.backplane(frame.as_ref()),
+                    Outbound::Data(bytes) => transport_out.data_bytes_sent(bytes).map_err(Refused::from),
                     Outbound::Datagram(packet) => {
-                        let data=orch_link_contract::ports::BackplanePortDatagram {machine_id:packet.machine,datagram:packet.packet.frame.clone()};
-                        let Ok(bytes)=data.encode() else {continue;};
-                        if sink.send(Message::Binary(bytes)).await.is_err() {break Err(Fault::Connect("the connection failed".into()));}
-                        packet.packet.delivered();
-                        #[cfg(feature = "test-observers")]
-                        observed_send.complete();
-                        continue;
+                        let data = orch_link_contract::ports::BackplanePortDatagram { machine_id:packet.machine, datagram:packet.packet.frame.clone() };
+                        let Ok(bytes) = data.encode() else { continue; };
+                        lease = Some(packet.packet);
+                        transport_out.data_bytes_sent(bytes).map_err(Refused::from)
                     },
                 };
-                if sink.send(message).await.is_err() {
-                    break Err(Fault::Connect("the connection failed".to_owned()));
+                let receipt = match receipt {
+                    Ok(receipt) => receipt,
+                    Err(error) => { tracing::error!(%error, "a frame for the system could not be queued"); continue; }
+                };
+                if lease.is_some() || cfg!(feature = "test-observers") {
+                    tokio::spawn(async move {
+                        if receipt.await.is_ok() {
+                            if let Some(packet) = lease { packet.delivered(); }
+                            #[cfg(feature = "test-observers")]
+                            observed_send.complete();
+                        }
+                    });
                 }
-                #[cfg(feature = "test-observers")]
-                observed_send.complete();
             }
             _ = stats.tick() => {
                 gateway.inner.sessions.sample_round_trips();
@@ -466,15 +546,41 @@ async fn hold(gateway: &Gateway) -> Result<(), Fault> {
     };
     gateway.inner.backplane.lost();
     gateway.inner.relay.with(|relay| relay.port_control(false));
-    let _ = sink.close().await;
+    writer_ended.cancel();
+    let _ = transport_writer.await;
     tracing::info!("the backplane is down");
     ended
 }
 
-fn on_message(gateway: &Gateway, message: Message) {
+fn on_message(
+    gateway: &Gateway,
+    message: Message,
+    assembly: &mut MessageAssembly,
+    limits: Limits,
+) -> Result<(), Fault> {
     match message {
+        Message::Binary(bytes) if bytes.first().is_some_and(|kind| PartFrame::is_kind(*kind)) => {
+            let text = assembly
+                .take_backplane(bytes, limits, Instant::now())
+                .map_err(|error| Fault::Protocol(error.to_string()))?;
+            if let Some(text) = text {
+                let frame = match frames::decode::<BackplaneFrame>(&text, usize::MAX)
+                    .map_err(|error| Fault::Protocol(error.to_string()))?
+                {
+                    Text::Known(frame) if text.len() <= ceiling(gateway) || frame.is_paged() => {
+                        frame
+                    }
+                    _ => {
+                        return Err(Fault::Protocol(
+                            "this backplane frame does not use pages".into(),
+                        ));
+                    }
+                };
+                on_frame(gateway, frame);
+            }
+        }
         Message::Text(text) => {
-            match frames::decode::<BackplaneFrame>(text.as_str(), MAX_MESSAGE_BYTES) {
+            match frames::decode::<BackplaneFrame>(text.as_str(), ceiling(gateway)) {
                 Ok(Text::Known(frame)) => on_frame(gateway, frame),
                 Ok(Text::Unknown(kind)) => {
                     tracing::debug!(kind, "a frame of an unknown type was passed over");
@@ -504,6 +610,7 @@ fn on_message(gateway: &Gateway, message: Message) {
         },
         Message::Ping(_) | Message::Pong(_) | Message::Frame(_) | Message::Close(_) => {}
     }
+    Ok(())
 }
 
 fn on_frame(gateway: &Gateway, frame: BackplaneFrame) {

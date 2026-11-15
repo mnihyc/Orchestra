@@ -30,6 +30,8 @@ const KEY: [u8; 32] = [7; 32];
 
 fn frame(direction: &str, payload: Value) -> Event {
     Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n: 0,
         direction: direction.to_owned(),
         payload,
