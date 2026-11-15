@@ -1,0 +1,2 @@
+test -p orch-db --lib -- queries::identity::tests::
+test -p orch-api-core --test accounts --test session_others --test error_words

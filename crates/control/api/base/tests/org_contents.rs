@@ -1408,6 +1408,7 @@ async fn thread_document_and_chat_activity_reach_the_tree_inventory_and_finder_w
         .call(OrgTreeGet, &[&root])
         .token(&reader.token)
         .query(&OrgTreeGetQuery {
+            parent_id: None,
             since: Some(before.seq),
             ..Default::default()
         })
