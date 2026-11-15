@@ -38,7 +38,11 @@ use orch_db::Conn;
 
 use orch_realtime_contract::document_tree::DocumentTreeData;
 
+use base64::Engine as _;
+use orch_api_contract::nodes::OrgTreeGetQuery;
 use orch_realtime_contract::document_tree::DocumentTreeView;
+use orch_realtime_contract::document_tree::HierarchyWindow;
+use std::collections::BTreeMap;
 
 use orch_realtime_contract::feeds::Feed;
 
@@ -54,11 +58,140 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct State {
     root: Id,
-    fingerprint: Hash,
+    fingerprints: std::collections::HashMap<String, Hash>,
 }
 
-fn identity(view: &DocumentTreeView) -> Id {
+/// Connection-owned selectors are separate from rich projected state, which is discarded on reauthentication.
+#[derive(Debug, Default)]
+pub(crate) struct HierarchyWindows {
+    queries: BTreeMap<u64, (Id, OrgTreeGetQuery)>,
+    pending: Option<(u64, Id, Vec<u8>)>,
+}
+
+impl HierarchyWindows {
+    fn receive(
+        &mut self,
+        change: HierarchyWindow,
+    ) -> Result<Option<(u64, Id, OrgTreeGetQuery)>, ()> {
+        let window = change.window();
+        match change {
+            HierarchyWindow::Remove { .. } => {
+                self.queries.remove(&window);
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|(id, _, _)| *id == window)
+                {
+                    self.pending = None;
+                }
+                Ok(None)
+            }
+            HierarchyWindow::Query {
+                root,
+                data,
+                complete,
+                ..
+            } => {
+                let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(data)
+                    .map_err(|_| ())?;
+                self.pending
+                    .get_or_insert_with(|| (window, root, Vec::new()));
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|(id, at, _)| *id != window || *at != root)
+                {
+                    self.pending = Some((window, root, Vec::new()));
+                }
+                let (_, _, bytes) = self.pending.as_mut().ok_or(())?;
+                // Match the existing native JSON request representation rather than imposing a page-count limit.
+                if bytes.len().saturating_add(decoded.len())
+                    > orch_api_contract::common::MAX_JSON_BYTES
+                {
+                    self.pending = None;
+                    self.queries.remove(&window);
+                    return Err(());
+                }
+                bytes.extend(decoded);
+                if !complete {
+                    return Ok(None);
+                }
+                let (_, _, bytes) = self.pending.take().ok_or(())?;
+                let query: OrgTreeGetQuery = serde_json::from_slice(&bytes).map_err(|_| ())?;
+                if !orch_realtime_contract::document_tree::bounded_hierarchy_query(&query) {
+                    return Err(());
+                }
+                self.queries.insert(window, (root, query.clone()));
+                Ok(Some((window, root, query)))
+            }
+        }
+    }
+}
+
+/// Page registration neither replaces the root subscription nor consumes another live slot.
+pub(crate) async fn update_window(
+    inner: &Arc<Inner>,
+    sub: &Arc<Subscription>,
+    st: &mut SubState,
+    change: HierarchyWindow,
+) -> Result<(), Fail> {
+    let window = change.window();
+    if let Some(state) = st.document_tree.as_mut() {
+        state.fingerprints.remove(&window.to_string());
+    }
+    match st.hierarchy.receive(change) {
+        Ok(Some(page)) => {
+            let Feed::DocumentTree(view) = sub.feed() else {
+                return Ok(());
+            };
+            current_view(inner, sub, st, view, Some(page)).await
+        }
+        Ok(None) => Ok(()),
+        Err(()) => {
+            st.hierarchy.pending = None;
+            st.hierarchy.queries.remove(&window);
+            send_problem(inner, sub, st, window, ErrorCode::RequestInvalid).await
+        }
+    }
+}
+
+async fn send_problem(
+    inner: &Arc<Inner>,
+    sub: &Arc<Subscription>,
+    st: &mut SubState,
+    window: u64,
+    code: ErrorCode,
+) -> Result<(), Fail> {
+    let Some(_identity) = super::watches::delivery_guard(inner, sub.connection()).await? else {
+        return Ok(());
+    };
+    let epoch = super::sync::read_epoch(inner).await?;
+    if !inner.recheck(sub, st, epoch).await? {
+        return Ok(());
+    }
+    let data = serde_json::to_value(DocumentTreeData::Hierarchy {
+        window,
+        problem: Some(code),
+        hierarchy: Box::new(orch_api_contract::nodes::OrgTreeGetReply {
+            page_size: None,
+            feed: None,
+            ancestors: Vec::new(),
+            settings: None,
+            seq: 0,
+            since: None,
+            complete: true,
+            next_cursor: None,
+            nodes: Vec::new(),
+        }),
+    })
+    .map_err(Fail::other)?;
+    super::ephemeral::send(sub, &data)
+}
+
+fn identity(view: &DocumentTreeView) -> Option<Id> {
     match view {
+        DocumentTreeView::Hierarchy { .. } => None,
         DocumentTreeView::Directory {
             at: DocumentDirectory::NodeDocs(id) | DocumentDirectory::Container(id),
             ..
@@ -66,7 +199,7 @@ fn identity(view: &DocumentTreeView) -> Id {
         | DocumentTreeView::Entry {
             item: DocumentTreeItem::Document(id) | DocumentTreeItem::Container(id),
             ..
-        } => *id,
+        } => Some(*id),
     }
 }
 
@@ -75,11 +208,13 @@ async fn context(
     principal: &Principal,
     authed: crate::middleware::authentication::Authed,
     view: &DocumentTreeView,
+    root: Option<Id>,
 ) -> Result<Option<Ctx>, Fail> {
     let Some(app) = inner.app() else {
         return Ok(None);
     };
     let route = match view {
+        DocumentTreeView::Hierarchy { .. } => orch_api_contract::nodes::OrgTreeGet::ROUTE,
         DocumentTreeView::Directory { .. } => {
             orch_api_contract::document_tree::DocumentTreeList::ROUTE
         }
@@ -87,8 +222,11 @@ async fn context(
             orch_api_contract::document_tree::DocumentTreeEntryGet::ROUTE
         }
     };
+    let Some(at) = root.or_else(|| identity(view)) else {
+        return Ok(None);
+    };
     Ok(Some(
-        Ctx::for_tool(app, Caller::User(Arc::new(authed)), route, identity(view))
+        Ctx::for_tool(app, Caller::User(Arc::new(authed)), route, at)
             .with_admitted_caller(principal.caller().clone())
             .map_err(Fail::other)?,
     ))
@@ -113,10 +251,14 @@ pub(crate) async fn decide(
     else {
         return Ok(Access::Forbidden);
     };
-    let Some(ctx) = context(inner, &principal, authed, view).await? else {
+    if matches!(view, DocumentTreeView::Hierarchy { .. }) {
+        return Ok(Access::Allowed);
+    }
+    let Some(ctx) = context(inner, &principal, authed, view, None).await? else {
         return Ok(Access::NotFound);
     };
     let result = match view {
+        DocumentTreeView::Hierarchy { .. } => return Ok(Access::Allowed),
         DocumentTreeView::Directory {
             at: DocumentDirectory::NodeDocs(node),
             ..
@@ -170,7 +312,9 @@ pub(crate) async fn decide(
                         DocumentTreeItem::Document(_) => "document",
                         DocumentTreeItem::Container(_) => "container",
                     },
-                    identity(view),
+                    match item {
+                        DocumentTreeItem::Document(id) | DocumentTreeItem::Container(id) => *id,
+                    },
                     *inspect_deleted,
                 )),
                 _ => None,
@@ -219,8 +363,47 @@ async fn read(
     conn: &mut Conn,
     principal: &Principal,
     view: &DocumentTreeView,
+    page: Option<&(u64, Id, OrgTreeGetQuery)>,
 ) -> Result<Current, ApiError> {
     match view {
+        DocumentTreeView::Hierarchy { .. } => {
+            let (window, root, query) =
+                page.ok_or_else(|| ApiError::internal("a hierarchy view needs its page"))?;
+            let cut = metadata::cut(conn, principal, *root, ctx.now.into()).await?;
+            let (hierarchy, problem) =
+                match crate::routes::nodes::tree::hierarchy_metadata(ctx, conn, principal, query)
+                    .await
+                {
+                    Ok(value) => (value, None),
+                    Err(error) => {
+                        let seq = 0;
+                        (
+                            orch_api_contract::nodes::OrgTreeGetReply {
+                                page_size: None,
+                                feed: None,
+                                ancestors: Vec::new(),
+                                settings: None,
+                                seq,
+                                since: None,
+                                complete: true,
+                                next_cursor: None,
+                                nodes: Vec::new(),
+                            },
+                            Some(error.code()),
+                        )
+                    }
+                };
+            Ok(Current {
+                data: DocumentTreeData::Hierarchy {
+                    window: *window,
+                    problem,
+                    hierarchy: Box::new(hierarchy),
+                },
+                cut,
+                inspections: Vec::new(),
+            })
+        }
+
         DocumentTreeView::Directory {
             at,
             deleted,
@@ -287,6 +470,19 @@ async fn read(
 
 fn fingerprint(data: &Json) -> Result<Hash, Fail> {
     let mut semantic = data.clone();
+    if let Some(hierarchy) = semantic.get_mut("hierarchy").and_then(Json::as_object_mut) {
+        hierarchy.remove("feed");
+        hierarchy.remove("seq");
+        if let Some(cursor) = hierarchy.get_mut("next_cursor")
+            && let Some(text) = cursor.as_str()
+        {
+            let mut parts = text.split('|').map(str::to_owned).collect::<Vec<_>>();
+            if parts.len() == 5 {
+                parts[2] = "current".to_owned();
+                *cursor = Json::String(parts.join("|"));
+            }
+        }
+    }
     if let Some(directory) = semantic.get_mut("directory") {
         // AEAD nonces rotate even when candidate progress is identical. Their bytes are not a change.
         if let Some(cursor) = directory.get_mut("next_cursor")
@@ -314,12 +510,46 @@ pub(crate) async fn current(
     sub: &Arc<Subscription>,
     st: &mut SubState,
 ) -> Result<(), Fail> {
+    current_for_root(inner, sub, st, None).await
+}
+
+async fn current_for_root(
+    inner: &Arc<Inner>,
+    sub: &Arc<Subscription>,
+    st: &mut SubState,
+    changed_root: Option<Id>,
+) -> Result<(), Fail> {
     if !st.open {
         return Ok(());
     }
     let Feed::DocumentTree(view) = sub.feed() else {
         return Ok(());
     };
+    if matches!(view, DocumentTreeView::Hierarchy { .. }) {
+        for (window, (root, query)) in st.hierarchy.queries.clone() {
+            if !st.open {
+                break;
+            }
+            if changed_root.is_none_or(|at| at == root) {
+                current_view(inner, sub, st, view, Some((window, root, query))).await?;
+            }
+        }
+    } else {
+        current_view(inner, sub, st, view, None).await?;
+    }
+    Ok(())
+}
+
+async fn current_view(
+    inner: &Arc<Inner>,
+    sub: &Arc<Subscription>,
+    st: &mut SubState,
+    view: &DocumentTreeView,
+    page: Option<(u64, Id, OrgTreeGetQuery)>,
+) -> Result<(), Fail> {
+    let key = page
+        .as_ref()
+        .map_or_else(String::new, |(window, _, _)| window.to_string());
     let Some(_identity) = super::watches::delivery_guard(inner, sub.connection()).await? else {
         return Ok(());
     };
@@ -332,13 +562,27 @@ pub(crate) async fn current(
     else {
         return Ok(());
     };
-    let Some(ctx) = context(inner, &principal, authed, view).await? else {
+    let Some(ctx) = context(
+        inner,
+        &principal,
+        authed,
+        view,
+        page.as_ref().map(|(_, root, _)| *root),
+    )
+    .await?
+    else {
         return Ok(());
     };
-    let loaded = read(&ctx, &mut tx, &principal, view).await;
+    let loaded = read(&ctx, &mut tx, &principal, view, page.as_ref()).await;
     tx.commit().await.map_err(Fail::other)?;
     let loaded = match loaded {
         Ok(loaded) => loaded,
+        Err(error) if page.is_some() => {
+            if let Some((window, _, _)) = page {
+                return send_problem(inner, sub, st, window, error.code()).await;
+            }
+            return Ok(());
+        }
         Err(error) if matches!(error.problem.status, 403 | 404 | 410) => {
             let access =
                 super::subscriptions::decide_for(inner, sub.connection(), sub.feed()).await?;
@@ -381,7 +625,7 @@ pub(crate) async fn current(
     if st
         .document_tree
         .as_ref()
-        .is_some_and(|state| state.root == loaded.cut.root && state.fingerprint == hash)
+        .is_some_and(|state| state.fingerprints.get(&key) == Some(&hash))
     {
         return Ok(());
     }
@@ -413,10 +657,12 @@ pub(crate) async fn current(
         return Ok(());
     }
     super::ephemeral::send(sub, &data)?;
-    st.document_tree = Some(State {
+    let mut state = st.document_tree.take().unwrap_or_else(|| State {
         root: loaded.cut.root,
-        fingerprint: hash,
+        fingerprints: std::collections::HashMap::new(),
     });
+    state.fingerprints.insert(key, hash);
+    st.document_tree = Some(state);
     Ok(())
 }
 
@@ -424,14 +670,37 @@ pub(crate) async fn current(
 pub(crate) async fn refresh(inner: &Arc<Inner>, root: Option<Id>) -> Result<(), Fail> {
     for sub in inner.ephemeral.document_tree_subscribers() {
         let mut st = sub.state.lock().await;
-        if root.is_some_and(|root| {
-            st.document_tree
-                .as_ref()
-                .is_some_and(|state| state.root != root)
-        }) {
+        let hierarchy = matches!(
+            sub.feed(),
+            Feed::DocumentTree(DocumentTreeView::Hierarchy { .. })
+        );
+        if !hierarchy
+            && root.is_some_and(|root| {
+                st.document_tree
+                    .as_ref()
+                    .is_some_and(|state| state.root != root)
+            })
+        {
             continue;
         }
-        current(inner, &sub, &mut st).await?;
+        current_for_root(inner, &sub, &mut st, root).await?;
+    }
+    Ok(())
+}
+
+/// Personal state wakes are coalesced and never poll idle document directories or other people's trees.
+pub(crate) async fn refresh_reader(inner: &Arc<Inner>, user: Id) -> Result<(), Fail> {
+    for sub in inner.ephemeral.document_tree_subscribers() {
+        if sub.connection().user != user
+            || !matches!(
+                sub.feed(),
+                Feed::DocumentTree(DocumentTreeView::Hierarchy { .. })
+            )
+        {
+            continue;
+        }
+        let mut state = sub.state.lock().await;
+        current(inner, &sub, &mut state).await?;
     }
     Ok(())
 }

@@ -112,7 +112,7 @@ use orch_api_contract::nodes::TopicUpdate;
 
 use orch_api_contract::nodes::TopicUpdateBody;
 
-use orch_api_contract::nodes::TreeChat;
+use orch_api_contract::nodes::TreeNodeChat;
 
 use orch_api_contract::nodes::TreeNode;
 
@@ -150,6 +150,8 @@ use serde::de::DeserializeOwned;
 
 use serde_json::json;
 
+use std::collections::BTreeMap;
+
 use std::collections::BTreeSet;
 
 use std::collections::HashMap;
@@ -179,12 +181,159 @@ async fn org_tree(ctx: Ctx, query: OrgTreeGetQuery, (): ()) -> ApiResult<OrgTree
     native::selected_read::<scope::Tree>(ctx, query, ()).await
 }
 
+/// Resolve names and ordinary authority before a row can become a search or continuation witness.
+async fn window_rows(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    caller: &Caller,
+    rows: Vec<hierarchy::TreeRow>,
+    text: Option<&str>,
+) -> ApiResult<(
+    Vec<hierarchy::TreeRow>,
+    Vec<orch_access_contract::key_scope::KeyResolvedTarget>,
+)> {
+    if rows.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let graph =
+        orch_authz::engine::Graph::load(conn, &rows.iter().map(|row| row.id).collect::<Vec<_>>())
+            .await
+            .map_err(ApiError::internal)?;
+    let mut ids = BTreeSet::new();
+    for row in &rows {
+        ids.insert(row.id);
+        if let Some(node) = graph.get(row.id) {
+            ids.extend(node.path.iter().copied());
+        }
+    }
+    let mut targets = BTreeMap::new();
+    for id in ids {
+        if let Some(target) = orch_engine::operation_scope::targets::from_node_identity(&graph, id)
+            && scope::permits(
+                ctx,
+                caller,
+                &sources::TREE,
+                Source::Results,
+                target.object.kind,
+                &target,
+            )?
+        {
+            targets.insert(id, target);
+        }
+    }
+    let primary = scope::collection(Source::Results, targets.values().cloned().collect());
+    let plan = native::bind_known(ctx, &sources::TREE, &[primary])?;
+    let principal = native::preparation_principal(ctx, conn, caller, &plan).await?;
+    let needle = text.filter(|text| !text.is_empty()).map(str::to_lowercase);
+    let checked = if needle.is_some() {
+        targets.keys().copied().collect::<Vec<_>>()
+    } else {
+        rows.iter()
+            .filter(|row| targets.contains_key(&row.id))
+            .map(|row| row.id)
+            .collect::<Vec<_>>()
+    };
+    let readable = access::holding(
+        conn,
+        &principal,
+        &checked,
+        PermissionName::OfNode(NodePermission::View),
+        Act::Use,
+        Policy::default(),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    let inspected = access::holding(
+        conn,
+        &principal,
+        &checked,
+        PermissionName::Exact(Permission::AccessManage),
+        Act::Use,
+        Policy::default(),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    let names = readable
+        .into_iter()
+        .chain(inspected)
+        .map(|row| (row.id, row.name))
+        .collect::<HashMap<_, _>>();
+    let mut selected = Vec::new();
+    let mut selected_targets = Vec::new();
+    for row in rows {
+        if row.deleted || !names.contains_key(&row.id) {
+            continue;
+        }
+        let Some(target) = targets.remove(&row.id) else {
+            continue;
+        };
+        if let Some(needle) = &needle {
+            let path = graph
+                .get(row.id)
+                .into_iter()
+                .flat_map(|node| node.path.iter())
+                .filter_map(|id| names.get(id).map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" / ");
+            if !path.to_lowercase().contains(needle) {
+                continue;
+            }
+        }
+        selected.push(row);
+        selected_targets.push(target);
+    }
+    Ok((selected, selected_targets))
+}
+
+/// Revealing ancestry requires current access to its target, not only to some ancestors.
+async fn require_path_target(ctx: &Ctx, conn: &mut Conn, caller: &Caller, id: Id) -> ApiResult<()> {
+    let graph = orch_authz::engine::Graph::load(conn, &[id])
+        .await
+        .map_err(ApiError::internal)?;
+    let target = orch_engine::operation_scope::targets::from_node_identity(&graph, id)
+        .ok_or_else(ApiError::not_found)?;
+    if !scope::permits(
+        ctx,
+        caller,
+        &sources::TREE,
+        Source::Results,
+        target.object.kind,
+        &target,
+    )? {
+        return Err(ApiError::not_found());
+    }
+    let primary = scope::collection(Source::Results, vec![target]);
+    let plan = native::bind_known(ctx, &sources::TREE, &[primary])?;
+    let principal = native::preparation_principal(ctx, conn, caller, &plan).await?;
+    for permission in [
+        PermissionName::OfNode(NodePermission::View),
+        PermissionName::Exact(Permission::AccessManage),
+    ] {
+        if !access::holding(
+            conn,
+            &principal,
+            &[id],
+            permission,
+            Act::Use,
+            Policy::default(),
+        )
+        .await
+        .map_err(ApiError::internal)?
+        .is_empty()
+        {
+            return Ok(());
+        }
+    }
+    Err(ApiError::not_found())
+}
+
 /// One native producer for ordinary and bounded full/incremental tree openings.
 pub(super) async fn org_tree_in(
     ctx: &Ctx,
     conn: &mut Conn,
     caller: &Caller,
     query: &OrgTreeGetQuery,
+    opening: bool,
 ) -> ApiResult<(PreparedTree, Vec<native::Facts<Source>>)> {
     let root = ctx.id("id")?;
     let (place, kind) = placed(conn, root).await?;
@@ -194,20 +343,85 @@ pub(super) async fn org_tree_in(
     if kind != NodeKind::Org || !is_root || place.org != root {
         return Err(ApiError::not_found());
     }
-    if query.since.is_some() && (query.cursor.is_some() || query.limit.is_some()) {
+    let scoped = query.parent_id.is_some()
+        || query.path_to.is_some()
+        || query.q.is_some()
+        || query.kind.is_some()
+        || query.below_id.is_some();
+    for id in [query.parent_id, query.path_to, query.below_id]
+        .into_iter()
+        .flatten()
+    {
+        let (at, _) = placed(conn, id).await?;
+        if at.org != root {
+            return Err(ApiError::not_found());
+        }
+    }
+    if query.since.is_some() && (query.cursor.is_some() || query.limit.is_some() || scoped) {
         return Err(invalid(
             "since",
-            "cannot be combined with a full-load cursor or limit",
+            "cannot be combined with a snapshot selector",
         ));
     }
-    let limit = query.limit.map_or(TREE_SYNC_MAX_CHANGES, i64::from);
-    if !(1..=TREE_SYNC_MAX_CHANGES).contains(&limit) {
-        return Err(invalid("limit", "must be between 1 and 5000"));
+    if query.path_to.is_some()
+        && (query.parent_id.is_some()
+            || query.q.is_some()
+            || query.kind.is_some()
+            || query.below_id.is_some()
+            || query.cursor.is_some())
+    {
+        return Err(invalid(
+            "path_to",
+            "cannot be combined with a directory or search",
+        ));
     }
+    let path = if let Some(id) = query.path_to {
+        Box::pin(require_path_target(ctx, conn, caller, id)).await?;
+        Some(
+            hierarchy::node(conn, id)
+                .await?
+                .ok_or_else(ApiError::not_found)?
+                .path,
+        )
+    } else {
+        None
+    };
+    let limit = if let Some(limit) = query.limit {
+        i64::from(limit)
+    } else if scoped {
+        let parent = query.parent_id.unwrap_or(root);
+        orch_settings::get::<i64>(
+            conn,
+            orch_settings::Place::Node(parent),
+            orch_settings_contract::registry::keys::NAVIGATION_TREE_PAGE_SIZE,
+        )
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::internal("the hierarchy page size has no value"))?
+    } else {
+        TREE_SYNC_MAX_CHANGES
+    };
+    if limit < 1 {
+        return Err(invalid("limit", "must be positive"));
+    }
+    let branch = orch_types::Hash::of(
+        &serde_json::to_vec(&(
+            query.parent_id,
+            query.path_to,
+            &query.q,
+            query.kind,
+            query.below_id,
+        ))
+        .map_err(ApiError::internal)?,
+    )
+    .to_string();
     let (seq, after) = if let Some(cursor) = query.cursor.as_deref() {
         let bad = || invalid("cursor", "is not a cursor of this tree");
         let parts: Vec<&str> = cursor.split('|').collect();
-        if parts.len() != 4 || parts[0] != root.to_string() || parts[1] != caller.user().to_string()
+        if parts.len() != 5
+            || parts[0] != root.to_string()
+            || parts[1] != caller.user().to_string()
+            || parts[3] != branch
         {
             return Err(bad());
         }
@@ -215,7 +429,7 @@ pub(super) async fn org_tree_in(
         if seq < 0 {
             return Err(bad());
         }
-        (seq, Some(parts[3].parse::<Id>().map_err(|_| bad())?))
+        (seq, Some(parts[4].parse::<Id>().map_err(|_| bad())?))
     } else {
         (hierarchy::tree_seq(conn, root).await?, None)
     };
@@ -227,6 +441,9 @@ pub(super) async fn org_tree_in(
                 PreparedTree {
                     reply: OrgTreeGetReply {
                         settings: None,
+                        ancestors: Vec::new(),
+                        feed: None,
+                        page_size: None,
                         seq,
                         since: query.since,
                         complete: false,
@@ -237,11 +454,13 @@ pub(super) async fn org_tree_in(
                     visible: BTreeSet::new(),
                     hidden: BTreeSet::new(),
                     docs: BTreeSet::new(),
+                    groups: BTreeSet::new(),
                 },
                 vec![
                     scope::collection(Source::Results, Vec::new()),
                     scope::collection(Source::Names, Vec::new()),
                     scope::collection(Source::Settings, Vec::new()),
+                    scope::collection(Source::Groups, Vec::new()),
                 ],
             ));
         }
@@ -252,40 +471,134 @@ pub(super) async fn org_tree_in(
         let mut selected = Vec::new();
         let mut position = after;
         'pages: loop {
-            let batch = hierarchy::tree_page(conn, root, position, limit + 1).await?;
+            let kind = match query.kind {
+                Some(NodeKind::Org) => Some("org"),
+                Some(NodeKind::Project) => Some("project"),
+                Some(NodeKind::Topic) => Some("topic"),
+                Some(NodeKind::Thread) => Some("thread"),
+                None => None,
+            };
+            let batch = hierarchy::tree_window(
+                conn,
+                root,
+                query.parent_id,
+                position,
+                if path.is_some() {
+                    i64::MAX
+                } else {
+                    limit.saturating_add(1)
+                },
+                &hierarchy::TreeSelector {
+                    text: query.q.as_deref(),
+                    kind,
+                    below: query.below_id,
+                    ids: path.as_deref(),
+                },
+            )
+            .await?;
             let exhausted = i64::try_from(batch.len()).unwrap_or(i64::MAX) <= limit;
             if let Some(last) = batch.last() {
                 position = Some(last.id);
             }
-            let (batch, targets) = scope::selected_rows(ctx, conn, caller, batch).await?;
+            let (batch, targets) =
+                Box::pin(window_rows(ctx, conn, caller, batch, query.q.as_deref())).await?;
             for (row, target) in batch.into_iter().zip(targets) {
                 selected.push(row);
                 selected_targets.push(target);
-                if i64::try_from(selected.len()).unwrap_or(i64::MAX) > limit {
+                if path.is_none() && i64::try_from(selected.len()).unwrap_or(i64::MAX) > limit {
                     break 'pages;
                 }
             }
-            if exhausted {
+            if exhausted || path.is_some() {
                 break;
             }
         }
         selected
     };
+    let next_cursor = if query.since.is_none()
+        && path.is_none()
+        && i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit
+    {
+        rows.truncate(usize::try_from(limit).unwrap_or(0));
+        rows.last()
+            .map(|row| format!("{root}|{}|{seq}|{branch}|{}", caller.user(), row.id))
+    } else {
+        None
+    };
+    let result_ids = rows.iter().map(|row| row.id).collect::<HashSet<_>>();
+    if scoped && path.is_none() {
+        let ids = rows
+            .iter()
+            .map(|row| row.id)
+            .chain(query.parent_id)
+            .collect::<Vec<_>>();
+        let ancestors = hierarchy::with_ancestors(conn, &ids)
+            .await?
+            .into_iter()
+            .filter(|row| !result_ids.contains(&row.id))
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
+        let native = hierarchy::tree_window(
+            conn,
+            root,
+            None,
+            None,
+            i64::MAX,
+            &hierarchy::TreeSelector {
+                ids: Some(&ancestors),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let (ancestors, targets) = scope::selected_rows(ctx, conn, caller, native).await?;
+        rows.extend(ancestors);
+        selected_targets.extend(targets);
+    }
+    let fold_parents = if scoped && path.is_none() {
+        result_ids
+            .iter()
+            .copied()
+            .chain(query.parent_id.filter(|_| query.cursor.is_none()))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let folded = super::tree_fold::prepare(
+        ctx,
+        conn,
+        caller,
+        super::tree_fold::Read {
+            root,
+            parents: &fold_parents,
+            limit,
+            opening,
+        },
+        &rows,
+    )
+    .await?;
+    let mut selected_ids = selected_targets
+        .iter()
+        .filter_map(|target| target.object.id)
+        .collect::<BTreeSet<_>>();
+    for (id, target) in folded.nodes {
+        if selected_ids.insert(id) {
+            selected_targets.push(target);
+        }
+    }
     let all_ids = selected_targets
         .iter()
-        .filter_map(|t| t.object.id)
+        .filter_map(|target| target.object.id)
         .collect::<BTreeSet<_>>();
     let primary = scope::collection(Source::Results, selected_targets);
-    let plan = native::bind_known(ctx, &sources::TREE, std::slice::from_ref(&primary))?;
+    let group_facts =
+        scope::collection(Source::Groups, folded.group_targets.into_values().collect());
+    let plan = native::bind_known(ctx, &sources::TREE, &[primary.clone(), group_facts.clone()])?;
     let principal = native::preparation_principal(ctx, conn, caller, &plan).await?;
-    let next_cursor =
-        if query.since.is_none() && i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit {
-            rows.truncate(usize::try_from(limit).unwrap_or(0));
-            rows.last()
-                .map(|row| format!("{root}|{}|{seq}|{}", caller.user(), row.id))
-        } else {
-            None
-        };
+    let fold_visible = folded.visible;
+    let folds = folded.folds;
+    let groups = folded.groups;
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
     let readable_docs = super::tree_docs::readable(conn, &principal, &ids)
         .await
@@ -325,7 +638,7 @@ pub(super) async fn org_tree_in(
         .values()
         .filter_map(|each| each.admin_access.and_then(|reach| reach.place.node()))
         .collect();
-    let prepared_settings = if query.since.is_none() && query.cursor.is_none() {
+    let prepared_settings = if !scoped && query.since.is_none() && query.cursor.is_none() {
         let target = targets::node(conn, root).await?;
         if scope::permits(
             ctx,
@@ -385,11 +698,12 @@ pub(super) async fn org_tree_in(
         scope::names(ctx, conn, &principal, caller, &sources::TREE, wanted).await?;
     let admin_refs = names.qualified_refs(conn, &principal, &admin_ids).await?;
     let hidden_ids = hidden.keys().copied().collect::<BTreeSet<_>>();
-    let visible = rows
+    let mut visible = rows
         .iter()
         .filter(|row| !row.deleted && listed.contains_key(&row.id))
         .map(|row| row.id)
         .collect::<BTreeSet<_>>();
+    visible.extend(fold_visible);
     let docs = readable_docs
         .iter()
         .filter(|id| visible.contains(id))
@@ -422,7 +736,7 @@ pub(super) async fn org_tree_in(
     )
     .await
     .map_err(ApiError::internal)?;
-    let nodes = rows
+    let nodes: Vec<Listed<TreeNode>> = rows
         .into_iter()
         .filter_map(|row| {
             let kind = node_kind(&row.kind)?;
@@ -435,6 +749,7 @@ pub(super) async fn org_tree_in(
                 return query.since.map(|_| Listed::visible(gone(&row, kind)));
             };
             Some(Listed::visible(TreeNode {
+                folded: folds.remove(&row.id),
                 activity_at: Some(orch_types::Time::new(row.activity_at)),
                 admin_access: each
                     .admin_access
@@ -480,13 +795,34 @@ pub(super) async fn org_tree_in(
                 thread: (kind == NodeKind::Thread)
                     .then(|| thread_of(&row, waiting.get(&row.id), displays.get(&row.id)))
                     .flatten(),
-                chat: TreeChat {
+                chat: TreeNodeChat {
                     id: row.chat_id.unwrap_or_else(Id::nil),
-                    seq: row.chat_seq,
+                    seq: row
+                        .chat_id
+                        .filter(|id| groups.contains(id))
+                        .map(|_| row.chat_seq),
                 },
             }))
         })
         .collect();
+    let (mut nodes, ancestors): (Vec<_>, Vec<_>) = nodes.into_iter().partition(|row| match row {
+        Listed::Visible(row) => result_ids.contains(&row.content.id),
+        Listed::Hidden(row) => result_ids.contains(&row.id),
+    });
+    if let Some(path) = &path {
+        nodes.sort_by_key(|row| {
+            path.iter().position(|id| match row {
+                Listed::Visible(row) => *id == row.content.id,
+                Listed::Hidden(row) => *id == row.id,
+            })
+        });
+    }
+    let feed = scoped.then(|| {
+        orch_realtime_contract::feeds::Feed::DocumentTree(
+            orch_realtime_contract::document_tree::DocumentTreeView::Hierarchy {},
+        )
+        .to_string()
+    });
     let (settings, settings_facts) = match prepared_settings {
         Some((prepared, target)) => (
             Some(
@@ -503,6 +839,9 @@ pub(super) async fn org_tree_in(
         PreparedTree {
             reply: OrgTreeGetReply {
                 settings,
+                ancestors,
+                feed,
+                page_size: query.since.is_none().then_some(limit),
                 seq,
                 since: query.since,
                 complete: next_cursor.is_none(),
@@ -513,8 +852,9 @@ pub(super) async fn org_tree_in(
             visible,
             hidden: hidden_ids,
             docs,
+            groups,
         },
-        vec![primary, name_facts, settings_facts],
+        vec![primary, name_facts, settings_facts, group_facts],
     ))
 }
 
@@ -605,6 +945,7 @@ orch_api_base::__api_bind_a30b746301!();
 /// is marked deleted, with nothing else of it.
 fn gone(row: &hierarchy::TreeRow, kind: NodeKind) -> TreeNode {
     TreeNode {
+        folded: None,
         activity_at: None,
         admin_access: None,
         participating: false,
@@ -623,9 +964,9 @@ fn gone(row: &hierarchy::TreeRow, kind: NodeKind) -> TreeNode {
         tree_seq: row.tree_seq,
         topic: None,
         thread: None,
-        chat: TreeChat {
+        chat: TreeNodeChat {
             id: row.chat_id.unwrap_or_else(Id::nil),
-            seq: 0,
+            seq: None,
         },
     }
 }
@@ -1409,3 +1750,17 @@ async fn check_tags(conn: &mut orch_db::Conn, topic: Id, tags: &[Id]) -> ApiResu
         .collect();
     super::tags::check(conn, Some(topic), tags, &carried).await
 }
+
+/// Live hierarchy pages use the same admitted native read as their HTTP opening.
+pub(crate) async fn hierarchy_metadata(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &orch_authz::Principal,
+    query: &OrgTreeGetQuery,
+) -> ApiResult<OrgTreeGetReply> {
+    Ok(org_tree_in(ctx, conn, principal.caller(), query, false)
+        .await?
+        .0
+        .reply)
+}
+orch_api_base::__api_bind_eb1fd91e22!();
