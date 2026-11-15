@@ -937,6 +937,41 @@ BEGIN
 END
 $$;
 
+-- An index may not yet exist for an admitted imported message; its visible words still come from the source.
+CREATE FUNCTION public.orch_conversation_text(item_kind text, body jsonb, indexed_text text) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  written text;
+  visible text := '';
+  opening integer;
+  closing integer;
+BEGIN
+  IF indexed_text IS NOT NULL THEN
+    written := indexed_text;
+  ELSIF item_kind='user_message' AND body->>'source'='goal' THEN
+    written := COALESCE(body #>> '{goal,condition}','');
+  ELSIF item_kind='user_message' THEN
+    SELECT COALESCE(string_agg(COALESCE(part->>'text',part->>'inline_text',part->>'name',''),E'\n' ORDER BY ordinal),'') INTO written
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(body->'parts')='array' THEN body->'parts' ELSE '[]'::jsonb END) WITH ORDINALITY parts(part,ordinal);
+  ELSIF item_kind='error' THEN
+    written := COALESCE(body->>'message','');
+  ELSE
+    written := COALESCE(body->>'text','');
+  END IF;
+  LOOP
+    opening := strpos(written,'<orch>');
+    EXIT WHEN opening=0;
+    visible := visible || left(written,opening-1);
+    written := substr(written,opening+length('<orch>'));
+    closing := strpos(written,'</orch>');
+    IF closing=0 THEN RETURN visible; END IF;
+    written := substr(written,closing+length('</orch>'));
+  END LOOP;
+  RETURN visible || written;
+END
+$$;
+
 CREATE FUNCTION public.orch_item_internal_marker() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -2066,7 +2101,9 @@ CREATE FUNCTION public.provider_trial_ended() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    UPDATE providers SET credential_trial_input_id = NULL, credential_trial_turn_id = NULL
+    UPDATE providers SET credential_trial_input_id = NULL, credential_trial_turn_id = NULL,
+      credential_trial_receipt = CASE WHEN credential_trial_receipt IS NULL THEN NULL
+        ELSE credential_trial_receipt || jsonb_build_object('state','consumed','at',NEW.completed_at) END
       WHERE credential_trial_turn_id = NEW.id;
     RETURN NEW;
 END;
@@ -2077,6 +2114,11 @@ CREATE FUNCTION public.provider_trial_recovered() RETURNS trigger
     AS $$
 BEGIN
     IF NEW.status <> 'error' THEN
+        IF OLD.credential_trial_input_id IS NOT NULL AND NEW.credential_trial_receipt IS NOT NULL THEN
+            NEW.credential_trial_receipt := NEW.credential_trial_receipt || jsonb_build_object(
+              'state',CASE WHEN OLD.credential_trial_turn_id IS NULL THEN 'not_reserved' ELSE 'consumed' END,
+              'at',NEW.updated_at);
+        END IF;
         NEW.credential_trial_input_id := NULL;
         NEW.credential_trial_turn_id := NULL;
     END IF;

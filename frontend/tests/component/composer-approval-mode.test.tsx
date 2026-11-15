@@ -1,5 +1,6 @@
 /** The composer uses only offered native modes, writes the displayed revision, and refuses an unseen competing choice. */
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient } from '@tanstack/react-query';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, expect, it, vi } from 'vitest';
 
@@ -7,6 +8,8 @@ import { ApiError } from '@/api/client';
 import type * as SettingsApi from '@/api/settings';
 import type * as ThreadsApi from '@/api/threads';
 import { ApprovalModePicker } from '@/features/composer/ApprovalMode';
+import { i18n, setLocale } from '@/i18n';
+import { offeredChoice } from '@/i18n/choices';
 import type { NodeSettingSetBody, ResolvedSetting, Thread, ThreadParameters } from '@/generated/api-types';
 import { show } from './support';
 import { nativeModeSetting, modeParameters } from '../doubles/mode-controls';
@@ -17,11 +20,39 @@ vi.mock('@/api/threads', async (importOriginal) => ({ ...await importOriginal<ty
   parametersQuery: (id: string) => ({ queryKey: ['thread-parameters', id], queryFn: () => { server.parameterReads(); return Promise.resolve(server.parameters); }, staleTime: Infinity }),
   setThreadSetting: (id: string, key: string, body: NodeSettingSetBody) => server.write(id, key, body),
 }));
-vi.mock('@/realtime/live', () => ({ refreshThread: vi.fn() }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), refreshThread: vi.fn() }));
 
 const row = (value: string, revision: number) => nativeModeSetting('approval.mode', value, revision);
 const parameters = modeParameters;
 const thread = { id: 'thread-1', archived: false, side_of: null, binding: { provider: { id: 'provider-1' } }, owner: { display_name: 'Ada' }, access: { permissions: ['thread.manage'] } } as Thread;
+
+it.each(['en', 'zh-CN'] as const)('keeps the declared Auto choice unavailable when reviewer access changes in %s', async (locale) => {
+  await setLocale(locale);
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const declarations = [
+    { mode: 'on_request', available: true, reason: null, requirement: null },
+    { mode: 'auto', available: true, reason: null, requirement: null },
+  ];
+  server.parameters = Object.assign(parameters('on_request'), { approval_modes: ['on_request', 'auto'], approval_choices: declarations });
+  const view = show(<ApprovalModePicker thread={thread} />, cache);
+  try {
+    const name = (mode: string) => offeredChoice(i18n.t, 'approvalMode', mode)?.name ?? mode;
+    await userEvent.click(await screen.findByRole('button', { name: i18n.t('composer.mode.label', { mode: name('on_request') }) }));
+    const picker = await screen.findByRole('dialog', { name: i18n.t('composer.mode.title') });
+    const auto = await within(picker).findByRole('button', { name: name('auto') });
+    expect(auto).toBeEnabled();
+    act(() => { cache.setQueryData(['thread-parameters', thread.id], {
+      ...server.parameters, approval_modes: ['on_request'], approval_choices: [declarations[0], {
+        mode: 'auto', available: false, reason: 'reviewer_access_required', requirement: 'reviewer_use',
+      }],
+    }); });
+    await waitFor(() => expect(auto).toBeDisabled());
+    expect(auto).toHaveAccessibleDescription(i18n.t('composer.approvalUnavailable.reviewerAccess'));
+    expect(picker).toHaveTextContent(i18n.t('composer.approvalRequirements.reviewerUse'));
+    await userEvent.click(auto);
+    expect(server.write).not.toHaveBeenCalled();
+  } finally { view.unmount(); cache.clear(); await setLocale('en'); }
+});
 
 beforeEach(() => {
   server.write.mockReset();

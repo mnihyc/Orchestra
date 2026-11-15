@@ -6,8 +6,9 @@ import { ApiError, ReceiptAcknowledged, invitationIssuerAuthorityLost } from '@/
 import type { TranslationKey } from '@/i18n';
 import { apiErrorSentence, hasErrorSentence } from '@/i18n/errors';
 import { useAppearance } from '@/lib/appearance';
-import { NetworkError } from '@/lib/requests';
-import { formatTimeOfDay } from '@/lib/time';
+import { NetworkError, networkFailureDetails } from '@/lib/requests';
+import { formatSpan, formatTimeOfDay } from '@/lib/time';
+import { formatNumber } from '@/lib/format';
 import nativeAliases from '@/i18n/error-aliases.json';
 
 export interface ErrorText {
@@ -36,6 +37,14 @@ function sentence(code: string, t: TFunction, locale: string): string | null {
   return hasErrorSentence(key,locale) ? t(key as TranslationKey) : null;
 }
 
+/** What a refused Ask says: the API names the reason it refused for, and the catalogue gives its sentence in the reader's language. */
+function refusalSentence(error: ApiError, t: TFunction, locale: string): string | null {
+  const reason = error.problem.reason;
+  if (error.status !== 403 || typeof reason !== 'string') return null;
+  const key = `errors.ask.${reason}`;
+  return hasErrorSentence(key, locale) ? t(key as TranslationKey) : null;
+}
+
 /** Puts an error into words. `t` is the catalogue; the time of a "try again at" is said in `context`. */
 export function errorText(
   error: unknown,
@@ -48,8 +57,8 @@ export function errorText(
   };
   if (error instanceof ApiError) {
     const at = error.retryAt === null ? null : formatTimeOfDay(error.retryAt, context);
-    const message = invitationIssuerAuthorityLost(error) ? t('auth.invite.issuerAuthorityLost')
-      : error.code === 'rate_limited' && at !== null ? t('errorsAt.rate_limited', { time: at }) : apiErrorSentence(error.code, error.status, t, context.locale);
+    const message = refusalSentence(error, t, context.locale) ?? (invitationIssuerAuthorityLost(error) ? t('auth.invite.issuerAuthorityLost')
+      : error.code === 'rate_limited' && at !== null ? t('errorsAt.rate_limited', { time: at }) : apiErrorSentence(error.code, error.status, t, context.locale));
     return {
       message,
       code: error.code,
@@ -60,8 +69,16 @@ export function errorText(
     };
   }
   if (error instanceof NetworkError) {
+    const details = networkFailureDetails(error);
+    let message = t(`network.${error.failure}`);
+    if (details !== null && error.failure === 'silent') {
+      const duration = details.limitMs < 1_000 ? formatNumber(details.limitMs, context.locale, { style: 'unit', unit: 'millisecond', unitDisplay: 'narrow' }) : formatSpan(details.limitMs, context);
+      message = t(details.responseStarted ? 'ui.error.silenceBody' : 'ui.error.silenceResponse', { duration });
+    } else if (details !== null && error.failure === 'failed') {
+      message = t(details.responseStarted ? 'ui.error.networkBody' : 'ui.error.networkResponse');
+    }
     return {
-      message: t(`network.${error.failure}`),
+      message,
       code: `network.${error.failure}`,
       requestId: null,
       status: error.status,
@@ -69,6 +86,9 @@ export function errorText(
     };
   }
   if (typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string') {
+    if (error.code === 'too_many_subscriptions') return {
+      message: t('ui.error.subscriptionCapacity'), code: error.code, requestId: null, status: null, retryable: true,
+    };
     const nativeDetails = 'details' in error && typeof error.details === 'object' && error.details !== null ? error.details : null;
     const reason = 'reason' in error && typeof error.reason === 'string' ? error.reason
       : nativeDetails !== null && 'reason' in nativeDetails && typeof nativeDetails.reason === 'string' ? nativeDetails.reason : null;
