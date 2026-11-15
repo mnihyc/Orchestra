@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-engine --test updates -- a_mount_change_stays_pending_through_a_same_unit_restart_and_clears_after_the_real_update_applies_it
+test -p orch-engine --test agent_history -- --nocapture
