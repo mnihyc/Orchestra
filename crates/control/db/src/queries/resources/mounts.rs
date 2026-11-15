@@ -287,7 +287,7 @@ pub async fn on_machine(
           (COALESCE(m.facts->'environment_descriptor'->'data_storage'->>'made_by_orch' IN ('volume','directory'),false)
            OR EXISTS (SELECT 1 FROM jsonb_each(COALESCE(h.drivers,'{}'::jsonb)) driver
                        WHERE driver.value->'data_storage'->>'made_by_orch' IN ('volume','directory'))) AS makes_data,
-          COALESCE(m.facts->'mount_sizes','[]'::jsonb) AS sizes,
+          COALESCE(h.mount_sizes,'[]'::jsonb) AS sizes,
           COALESCE((SELECT jsonb_agg(to_jsonb(candidate) ORDER BY candidate.name,candidate.id)
             FROM (SELECT x.id,x.name,x.target,l.kind,l.source,l.storage,l.data_kind
               FROM mounts x LEFT JOIN mount_locations l ON l.mount_id=x.id AND l.machine_id=m.id
@@ -308,14 +308,11 @@ pub async fn on_machine(
 
 /// Retains exact-location size reports from an admitted host report without adding a probe to a page read.
 pub async fn record_sizes(conn: &mut Conn, host: Id, sizes: &Json) -> Result<(), DbError> {
-    sqlx::query(
-        "UPDATE machines m SET facts=jsonb_set(m.facts,'{mount_sizes}',$2,true)
-        FROM hosts h WHERE h.id=$1 AND h.machine_id=m.id",
-    )
-    .bind(host)
-    .bind(sizes)
-    .execute(conn)
-    .await?;
+    sqlx::query("UPDATE hosts SET mount_sizes=$2 WHERE id=$1")
+        .bind(host)
+        .bind(sizes)
+        .execute(conn)
+        .await?;
     Ok(())
 }
 

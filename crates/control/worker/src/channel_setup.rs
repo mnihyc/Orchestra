@@ -364,6 +364,9 @@ pub async fn send_sample(
     };
     let config = config_of_channel(conn, tools.master, channel).await?;
     let notification = [sample(tools.surroundings, &channel.name, now)];
+    let addresses =
+        orch_db::queries::public_addresses::read(conn, &tools.surroundings.address_seed, now)
+            .await?;
     let message = match render::render(
         orch_types::new_id(),
         &Rendering {
@@ -374,7 +377,7 @@ pub async fn send_sample(
             notifications: &notification,
             places: &[],
             org_name: &tools.surroundings.system_name,
-            public_url: &tools.surroundings.public_url,
+            public_url: &addresses.addresses.public_url,
         },
     ) {
         Ok(message) => message,

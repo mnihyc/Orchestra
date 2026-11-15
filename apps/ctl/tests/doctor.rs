@@ -365,6 +365,11 @@ async fn the_node_is_waited_for_until_there_is_a_first_administrator_and_then_it
             .await
             .unwrap();
     host_of(&test, machine, "bundled").await;
+    sqlx::query("UPDATE hosts SET bundled_with_server=true WHERE machine_id=$1")
+        .bind(machine)
+        .execute(&test.pool)
+        .await
+        .unwrap();
     let offline = run_doctor(arguments.clone(), environment.clone()).await;
     assert_eq!(offline.status, 1);
     assert!(offline.line("node").contains("no host has a session"));
@@ -373,6 +378,8 @@ async fn the_node_is_waited_for_until_there_is_a_first_administrator_and_then_it
     let online = run_doctor(arguments, environment).await;
     assert_eq!(online.status, 0, "{:#?}", online.lines);
     assert!(online.says("node", "ok"), "{}", online.line("node"));
+    assert!(online.line("node").contains("installed with the server"));
+    assert!(online.line("node").contains("share its kernel"));
 }
 
 async fn host_of(test: &TestDb, machine: orch_types::Id, name: &str) {
@@ -719,4 +726,61 @@ async fn an_endpoint_that_cannot_be_reached_is_named_with_its_trust() {
     let line = ran.line("edge-endpoint-1");
     assert!(line.starts_with("FAIL"), "{line}");
     assert!(line.contains("wss://127.0.0.1:1 (public)"), "{line}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn doctor_reports_the_stored_address_apart_from_the_file_seed_and_probes_that_browser_origin()
+{
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::{Db, queries::public_addresses};
+    use orch_types::Clock;
+    let test = TestDb::fresh().await;
+    let files = tempfile::tempdir().unwrap();
+    let config = configuration(files.path(), "127.0.0.1:1");
+    std::fs::write(&config, format!("[system]\npublic_url = \"https://file-seed.invalid\"\n[database]\nmigrations_dir = \"{}\"\n", migrations_dir().display())).unwrap();
+    let address = serve_edge(Edge {
+        body_limit: 16 * 1024 * 1024,
+        headers: true,
+        ends_socket_after: None,
+    })
+    .await;
+    let chosen = format!("http://{address}");
+    let db = Db::from_pool(test.pool.clone());
+    let seed = PublicAddresses {
+        public_url: "https://file-seed.invalid".into(),
+        alternate_urls: Vec::new(),
+    };
+    let before = public_addresses::read(&mut db.acquire().await.unwrap(), &seed, SystemClock.now())
+        .await
+        .unwrap();
+    public_addresses::publish(
+        &mut db.acquire().await.unwrap(),
+        &PublicAddresses {
+            public_url: chosen.clone(),
+            alternate_urls: Vec::new(),
+        },
+        before.revision,
+        None,
+        SystemClock.now(),
+    )
+    .await
+    .unwrap();
+    let ran = run_doctor(
+        vec![
+            "--config".into(),
+            config.display().to_string(),
+            "--only".into(),
+            "config,public-address,edge-page,edge-api".into(),
+        ],
+        vec![("ORCH_DATABASE_URL".into(), test.url.clone())],
+    )
+    .await;
+    assert_eq!(ran.status, 0, "{:?}", ran.lines);
+    assert!(
+        ran.line("config").contains("file seed")
+            && ran.line("config").contains("https://file-seed.invalid")
+    );
+    assert!(ran.line("public-address").contains(&chosen));
+    assert!(ran.line("public-address").contains("revision"));
+    assert!(ran.says("edge-page", "ok") && ran.says("edge-api", "ok"));
 }

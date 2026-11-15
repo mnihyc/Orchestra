@@ -25,7 +25,7 @@ export const mountUsesQuery = (id: string) => queryOptions({ queryKey: ['mount-u
 export const createMcp = (body: McpServerCreateBody, key: string): Promise<McpServer> => ok(api.POST('/mcp-servers', { body, ...repeatable(key) }));
 export const updateMcp = (id: string, body: McpServerUpdateBody): Promise<McpServer> => ok(api.PATCH('/mcp-servers/{id}', { params: { path: { id } }, body }));
 export const reimportMcp = (id: string): Promise<McpServer> => ok(api.POST('/mcp-servers/{id}/reimport', { params: { path: { id } } }));
-export const deleteMcp = (id: string): Promise<void> => done(api.DELETE('/mcp-servers/{id}', { params: { path: { id } } }));
+export const deleteMcp = (id: string, notify?: boolean): Promise<void> => done(api.DELETE('/mcp-servers/{id}', { params: { path: { id }, ...(notify === undefined ? {} : { query: { notify } }) } }));
 export const createMount = (body: MountCreateBody, key: string): Promise<Mount> => ok(api.POST('/mounts', { body, ...repeatable(key) }));
 export const updateMount = (id: string, body: MountUpdateBody): Promise<Mount> => ok(api.PATCH('/mounts/{id}', { params: { path: { id } }, body }));
 export const deleteMount = (id: string): Promise<void> => done(api.DELETE('/mounts/{id}', { params: { path: { id } } }));
