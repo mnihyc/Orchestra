@@ -10,20 +10,20 @@
  * endpoint's own list names that is not listed yet, taken one by one or all at once; what they offer is
  * kept as offered and nothing is switched on by taking them.
  */
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery, type UseQueryResult } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
 import { ArrowRightLeft, Plus } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { acceptSuggestions, refreshProvider, updateModel } from '@/api/resources';
+import { acceptSuggestions, providerFactsModelsQuery, refreshProvider, updateModel } from '@/api/resources';
 import { formatContext } from '@/features/models/context';
 import { AddModelDialog, ModelEditorDialog } from '@/features/resources/providers/ModelEditor';
 import { ModelLifecycle } from '@/features/resources/providers/ModelLifecycle';
 import { useResourceEnable } from '@/features/storage/Enable';
 import { openChange } from '@/features/change/target';
 import { GroupChip, GroupStrip } from '@/features/resources/providers/Groups';
-import { modelUnavailableAt } from '@/features/resources/providers/plan';
+import { modelUnavailableAt, privateProvider } from '@/features/resources/providers/plan';
 import { detailState, modelsSource } from '@/features/resources/providers/details';
 import { SourceLine } from '@/features/resources/providers/ProviderUsageCard';
 import { programNameIn } from '@/features/resources/programNames';
@@ -36,10 +36,11 @@ import { adminSpec } from '@/ui/AdminAct';
 import { ActionIcon } from '@/ui/actions';
 import { Checkbox } from '@/ui/Checkbox';
 import { EmptyState } from '@/ui/EmptyState';
-import { ErrorAlert } from '@/ui/ErrorState';
+import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { IconButton } from '@/ui/IconButton';
 import { Input } from '@/ui/Input';
 import { Menu } from '@/ui/Menu';
+import { SkeletonRows } from '@/ui/Skeleton';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { Switch } from '@/ui/Switch';
 import { type Column, Table } from '@/ui/Table';
@@ -66,10 +67,10 @@ export function ModelsSourceState({ provider,reading=false }: { provider:Provide
   </div>;
 }
 
-/** Discovery reports an absence; the manager's existing enabled choice remains theirs. */
-export function ModelAvailability({ provider, name }: { provider: Provider; name: string }) {
+/** Discovery reports an absence; the manager's existing enabled choice remains theirs. `listing` is what the upstream last listed, once it is read. */
+export function ModelAvailability({ provider, name, listing }: { provider: Provider; name: string; listing: readonly ModelSuggestion[] | undefined }) {
   const { t } = useTranslation();
-  const at = modelUnavailableAt(provider, name);
+  const at = modelUnavailableAt(provider, name, listing);
   return at === null ? null : <p className="text-sm text-warning">{t('providerPlan.notOffered')} <RelativeTime at={at} /></p>;
 }
 
@@ -205,7 +206,7 @@ function EnabledSwitch({ provider, model, manage }: { provider: Provider; model:
   );
 }
 
-function Suggestions({ provider }: { provider: Provider }) {
+function Suggestions({ provider, listing }: { provider: Provider; listing: UseQueryResult<ModelSuggestion[]> }) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
   const state = detailState(provider,'models');
@@ -219,14 +220,16 @@ function Suggestions({ provider }: { provider: Provider }) {
     },
   });
   const listed = new Set(provider.models.map((model) => model.model_name));
-  const suggestions: ModelSuggestion[] = (provider.facts.models ?? []).filter((suggestion) => !listed.has(suggestion.model_name));
+  const suggestions: ModelSuggestion[] = (listing.data ?? []).filter((suggestion) => !listed.has(suggestion.model_name));
 
   return (
     <Section id="provider-suggestions" title={t('providers.models.suggestions')} lead={t('providers.models.suggestionsNote')}>
       <ModelsSourceState provider={provider} reading={refresh.isPending} />
       {state !== 'unsupported' && <Button admin={adminSpec(provider, 'provider.manage')} size="sm" className="self-start" pending={refresh.isPending} onClick={() => refresh.mutate()}>{t('providers.overview.refresh')}</Button>}
       {refresh.error !== null && <ErrorAlert error={refresh.error} />}
-      {state !== 'told' ? null : suggestions.length === 0 ? (
+      {state !== 'told' ? null : listing.data === undefined ? (
+        listing.isError ? <ErrorState compact title={t('providers.models.suggestionsReadFailure')} error={listing.error} retrying={listing.isRefetching} onRetry={() => void listing.refetch()} /> : <SkeletonRows read={listing} rows={3} />
+      ) : suggestions.length === 0 ? (
         <EmptyState compact title={t('providers.models.noSuggestions')} />
       ) : (
         <div className="flex flex-col gap-3">
@@ -247,7 +250,7 @@ function Suggestions({ provider }: { provider: Provider }) {
                         {suggestion.parameters.context_window !== undefined && suggestion.parameters.context_window !== null && (
                           <span className="text-sm text-text-muted">{t('providers.models.context', { size: formatContext(suggestion.parameters.context_window, locale) })}</span>
                         )}
-                        {offered.length > 0 && <span className="text-sm text-text-subtle">{t('models.list.offered', { list: offered.join(', ') })}</span>}
+                        {offered.length > 0 && <span className="text-sm text-text-subtle">{t('models.list.offers', { list: offered.join(', ') })}</span>}
                       </span>
                     }
                     checked={chosen.includes(suggestion.model_name)}
@@ -280,7 +283,9 @@ export function ProviderModels({ provider, manage }: { provider: Provider; manag
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<ProviderModel | null>(null);
   const [removing, setRemoving] = useState<ProviderModel | null>(null);
-  const observedModels = detailState(provider, 'models') === 'told' ? provider.facts.models : null;
+  // What the upstream listed is no part of the provider's view: it is read here, where there is a list to read.
+  const listing = useQuery({ ...providerFactsModelsQuery(provider.id, provider.facts.field_times.models ?? null), enabled: detailState(provider, 'models') === 'told' && !privateProvider(provider) });
+  const observedModels = detailState(provider, 'models') === 'told' ? listing.data : undefined;
   const observationsByName = new Map((observedModels ?? []).map((observed) => [observed.model_name, observed]));
   const columns: Column<ProviderModel>[] = [
     {
@@ -295,7 +300,7 @@ export function ProviderModels({ provider, manage }: { provider: Provider; manag
         return (
           <div className="flex min-w-0 flex-col gap-1">
             <DisplayName provider={provider} model={model} manage={manage} />
-            <ModelAvailability provider={provider} name={model.model_name} />
+            <ModelAvailability provider={provider} name={model.model_name} listing={listing.data} />
             <ModelSources current={model} observed={observationsByName.get(model.model_name)} at={provider.facts.field_times.models ?? null} />
             <ModelGroupProposal provider={provider} model={model} observed={observationsByName.get(model.model_name)} manage={manage} />
             {withoutRouting && model.display_name !== model.model_name && <code className="text-sm wrap-anywhere text-text-muted">{model.model_name}</code>}
@@ -348,7 +353,7 @@ export function ProviderModels({ provider, manage }: { provider: Provider; manag
           )}
         </div>
       </Section>
-      {manage && <Suggestions provider={provider} />}
+      {manage && <Suggestions provider={provider} listing={listing} />}
       {adding && <AddModelDialog provider={provider} onClose={() => setAdding(false)} />}
       {editing !== null && <ModelEditorDialog provider={provider} model={editing} onClose={() => setEditing(null)} />}
       {removing!==null && <ModelLifecycle key={removing.id} provider={provider} model={removing} kind="delete" onClose={()=>setRemoving(null)} />}

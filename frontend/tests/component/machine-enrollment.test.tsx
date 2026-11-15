@@ -17,9 +17,9 @@ const info=vi.hoisted(()=>({secure:true,public_url:'https://orch.example',config
 vi.mock('@/api/gateways', async (load) => ({ ...await load<typeof GatewayApi>(),
   gatewayCatalogueQuery: { queryKey: ['enrollment-gateway-catalogue'], queryFn: () => Promise.resolve({ revision: 'fixture', gateways: [{ id: 'asia', label: 'Asia tools', region: 'Asia', endpoints: [{ url: 'wss://asia.gateway.example.test', trust: 'pinned' as const }] }] }) },
 }));
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
-vi.mock('@tanstack/react-router',()=>({useNavigate:()=>vi.fn(),Link:({children}:{children:ReactNode})=><a href="#enrolled">{children}</a>}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),useNavigate:()=>vi.fn(),Link:({children}:{children:ReactNode})=><a href="#enrolled">{children}</a>}));
 vi.mock('@/features/resources/HomePicker',()=>({useHomeChoices:()=>({choices:[{id:'org',label:'Acme'}]}),HomePicker:({value,onChange}:Pick<HomePickerProps,'value'|'onChange'>)=><select aria-label="Home" value={value} onChange={(event)=>onChange(event.target.value)}><option value="">Personal</option><option value="org">Acme</option></select>}));
 vi.mock('@/api/resources',async(load)=>({...await load<typeof ResourcesApi>(),
   createMachineToken:vi.fn(),createHostToken:vi.fn(),
