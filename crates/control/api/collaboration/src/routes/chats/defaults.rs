@@ -322,7 +322,7 @@ pub(super) async fn prepare(
         "opening_registry",
         &registry_target,
     )? {
-        match crate::routes::settings::registry_definitions() {
+        match crate::routes::settings::registry_definitions(Some(&ctx.app.engine)) {
             Ok(registry) => (Some(Part::Ready(registry)), vec![registry_target]),
             Err(failed) => (
                 Some(Part::failed(ctx, conn, principal.caller(), failed).await),

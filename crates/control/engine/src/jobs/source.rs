@@ -6,18 +6,16 @@ use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::{ObjectKind, Permission};
 use orch_api_contract::nodes::{JobRef, JobState};
 use orch_api_contract::source::{
-    RepositorySource, SourceDestination, SourceInfo, SourceKind, SourceState,
+    RepositorySource, SourceDestination, SourceInfo, SourceKind, SourceState, WorkspaceFileEdit,
 };
 use orch_authz::{Caller, CapturedOperation, Policy, Principal, TokenGrant};
 use orch_db::queries::jobs::{JobRow, NewJob, kind};
 use orch_db::{
     Conn,
-    queries::{environments, jobs as rows, source, storage, threads},
+    queries::{environments, jobs as rows, source, threads},
 };
 use orch_link_contract::commands::{FsMkdir, FsStat, Secret, SerialKey};
-use orch_link_contract::source::{
-    FsRecord, FsRecordResult, GitCommit, GitPrepare, GitPush, GitWorktree, RecordKind, RecordState,
-};
+use orch_link_contract::source::{GitCommit, GitPrepare, GitPush, GitWorktree};
 use orch_settings::{Place, get};
 use orch_settings_contract::registry::keys;
 use orch_types::{Id, Json, Time, new_id};
@@ -29,19 +27,24 @@ use crate::{Engine, EngineError, commands::Outgoing, unit::Unit};
 
 pub mod operation;
 pub mod publication_authority;
+pub(crate) mod workspace_files;
 
 /// The ordering is shared by the API and automatic first-input preparation.
-pub const PHASES: [Phase; 4] = [
+pub const PHASES: [Phase; 5] = [
     Phase {
         name: "validate",
         weight: 5,
     },
     Phase {
         name: "apply",
-        weight: 85,
+        weight: 80,
     },
     Phase {
         name: "verify",
+        weight: 5,
+    },
+    Phase {
+        name: "files",
         weight: 5,
     },
     Phase {
@@ -215,6 +218,16 @@ pub fn preparation_pending(
     worktree || (prepare.unwrap_or(true) && (repository || !running || prepare == Some(true)))
 }
 
+/// The source and one-shot file choices saved together by thread creation.
+pub struct CreationChoice<'a> {
+    /// Whether the selected repository is prepared.
+    pub prepare: Option<bool>,
+    /// An explicitly chosen worktree of that source.
+    pub worktree: Option<&'a orch_api_contract::source::WorktreeChoice>,
+    /// Conditional file edits to apply before the first input.
+    pub workspace_edits: &'a [WorkspaceFileEdit],
+}
+
 /// Stores the creation choice before its first input, without contacting a machine.
 pub async fn freeze(
     unit: &mut Unit<'_>,
@@ -222,13 +235,22 @@ pub async fn freeze(
     thread: Id,
     environment: Id,
     directory: &str,
-    prepare: Option<bool>,
-    worktree: Option<&orch_api_contract::source::WorktreeChoice>,
+    choice: CreationChoice<'_>,
 ) -> Result<(), EngineError> {
+    let CreationChoice {
+        prepare,
+        worktree,
+        workspace_edits,
+    } = choice;
+    workspace_files::validate(workspace_edits).map_err(EngineError::unreadable)?;
     let env = environments::thread_engine::environment(&mut *unit.conn, environment)
         .await?
         .ok_or_else(|| EngineError::unreadable("the source environment disappeared"))?;
-    let frozen = resolved(&mut *unit.conn, thread).await?;
+    let frozen = if prepare == Some(false) && worktree.is_none() {
+        RepositorySource::default()
+    } else {
+        resolved(&mut *unit.conn, thread).await?
+    };
     let preparing = preparation_pending(
         prepare,
         worktree.is_some(),
@@ -247,7 +269,7 @@ pub async fn freeze(
         repository_url: preparing.then(|| frozen.repository_url.clone()).flatten(),
         branch: preparing.then(|| frozen.branch.clone()).flatten(),
         head: None,
-        state: if preparing {
+        state: if preparing || !workspace_edits.is_empty() {
             SourceState::Pending
         } else {
             SourceState::Ready
@@ -284,6 +306,9 @@ pub async fn freeze(
         )
     }) {
         value["creator_environment_generation"] = json!(env.generation);
+    }
+    if !workspace_edits.is_empty() {
+        value["workspace_edits"] = json!(workspace_edits);
     }
     source::set_source(&mut *unit.conn, thread, &value, seq).await?;
     Ok(())
@@ -349,20 +374,6 @@ impl Engine {
             None
         };
         let action = if let Some(choice_tree) = worktree {
-            let record_days = get::<i64>(
-                &mut tx,
-                Place::Environment(environment),
-                keys::WORKSPACE_RECORD_DAYS,
-            )
-            .await?
-            .ok_or_else(|| EngineError::unreadable("recording days are unset"))?;
-            let max_bytes = get::<i64>(
-                &mut tx,
-                Place::Environment(environment),
-                keys::WORKSPACE_RECORD_MAX_BYTES,
-            )
-            .await?
-            .ok_or_else(|| EngineError::unreadable("recording bytes are unset"))?;
             Action::Worktree {
                 body: GitWorktree {
                     environment_id: environment,
@@ -371,8 +382,6 @@ impl Engine {
                     snapshot_id: None,
                 },
                 source: choice,
-                record_days,
-                max_bytes,
             }
         } else {
             Action::Prepare {
@@ -399,6 +408,12 @@ impl Engine {
                 .and_then(|value| serde_json::from_value(value).ok()),
             creator_origin: creator_origin(frozen)?,
             scheduled_input: scheduled_input(frozen)?,
+            workspace_edits: staged_edits(frozen)?,
+            prepared_source: frozen
+                .get("prepared_source")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()?,
             action,
         };
         begin(&mut tx, plan, self.inner.clock.now())
@@ -424,7 +439,37 @@ pub struct Plan {
     /// Actual accepted scheduled input; its stored authority retains every independent origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled_input: Option<Id>,
+    /// The accepted one-shot file edits, never inserted into model instructions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_edits: Vec<WorkspaceFileEdit>,
+    /// Source work already completed by first environment activation; file edits follow init.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_source: Option<SourceInfo>,
     pub action: Action,
+}
+
+pub fn staged_edits(value: &Json) -> Result<Vec<WorkspaceFileEdit>, EngineError> {
+    value
+        .get("workspace_edits")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map(|value| value.unwrap_or_default())
+        .map_err(Into::into)
+}
+
+pub fn validate_workspace_edits(edits: &[WorkspaceFileEdit]) -> Result<(), &'static str> {
+    workspace_files::validate(edits)
+}
+
+pub fn workspace_edit_revision(
+    thread: &threads::ThreadRow,
+    generation: i32,
+    edits: &[WorkspaceFileEdit],
+) -> Result<orch_types::Hash, EngineError> {
+    crate::jobs::command_identity::hash(
+        &json!({"thread":thread.node_id,"environment":thread.environment_id,"generation":generation,"directory":thread.workspace_dir,"source":thread.source.as_ref().and_then(|value|value.get("source")),"worktree":thread.source.as_ref().and_then(|value|value.get("worktree")),"edits":edits}),
+    )
 }
 
 // An absent historical origin keeps its existing path. A present invalid origin never becomes
@@ -453,6 +498,16 @@ fn with_creator_origin(
     input: Option<Id>,
     previous: Option<&Json>,
 ) -> Json {
+    for field in ["workspace_edits", "prepared_source"] {
+        if value.get(field).is_none()
+            && let Some(saved) = value
+                .get("native_plan")
+                .and_then(|plan| plan.get(field))
+                .cloned()
+        {
+            value[field] = saved;
+        }
+    }
     if let Some(origin) = origin {
         value["creator_origin"] = json!(origin);
     }
@@ -498,8 +553,6 @@ pub enum Action {
     Worktree {
         body: GitWorktree,
         source: RepositorySource,
-        record_days: i64,
-        max_bytes: i64,
     },
     Push {
         body: GitPush,
@@ -582,19 +635,6 @@ pub async fn begin_before(
             body.job_id = id;
             body.undo_snapshot_id = crate::ids::derived("restore.undo", &[id.as_bytes()]);
         }
-    }
-    if let Action::Worktree { body, .. } = &mut plan.action
-        && let Some(snapshot) = body.snapshot_id
-        && storage::snapshot(conn, snapshot)
-            .await?
-            .is_some_and(|row| row.state == "unavailable")
-    {
-        // No git.worktree command is issued after unavailable capture, so its branch
-        // and destination are still frozen but Retry may ask for a newly ready state.
-        body.snapshot_id = Some(crate::ids::derived(
-            "worktree.current-files.retry",
-            &[body.job_id.as_bytes(), id.as_bytes()],
-        ));
     }
     let mut value = serde_json::to_value(&plan)
         .map_err(|error| orch_db::DbError::Other(sqlx::Error::Decode(error.into())))?;
@@ -898,13 +938,14 @@ pub async fn check(job: &Job, plan: &Plan) -> Result<(), Stop> {
 }
 
 fn requires_write(plan: &Plan) -> bool {
-    !matches!(
-        plan.action,
-        Action::Prepare {
-            destination: SourceDestination::MissingDirectory,
-            ..
-        }
-    )
+    !plan.workspace_edits.is_empty()
+        || !matches!(
+            plan.action,
+            Action::Prepare {
+                destination: SourceDestination::MissingDirectory,
+                ..
+            }
+        )
 }
 
 // The initial files run before running publication. Only that provisioning job can use its
@@ -1296,6 +1337,9 @@ pub async fn creator_command_authorized(
         // evidence cannot be lent to an older, still unacknowledged command.
         return Ok(false);
     }
+    if kind == "fs.write" && native.get("body") != Some(body) {
+        return Ok(false);
+    }
     let plan: Plan = serde_json::from_value(native.get("plan").cloned().unwrap_or(Json::Null))?;
     if plan.creator_origin.is_none() && plan.scheduled_input.is_none() {
         return Ok(false);
@@ -1476,6 +1520,9 @@ pub async fn creator_command_current_callers(
 }
 
 fn creator_body(plan: &Plan, job: Id, kind: &str, body: &Json) -> Result<bool, EngineError> {
+    if kind == "fs.write" {
+        return workspace_files::command_matches(plan, job, body);
+    }
     let expected = match &plan.action {
         Action::Prepare {
             directory,
@@ -1509,26 +1556,8 @@ fn creator_body(plan: &Plan, job: Id, kind: &str, body: &Json) -> Result<bool, E
             }
             _ => return Ok(false),
         },
-        Action::Worktree {
-            body: worktree,
-            record_days,
-            max_bytes,
-            ..
-        } => match kind {
+        Action::Worktree { body: worktree, .. } => match kind {
             "git.worktree" => json!(worktree),
-            "fs.record" => {
-                let Some(snapshot_id) = worktree.snapshot_id else {
-                    return Ok(false);
-                };
-                json!(FsRecord {
-                    environment_id: plan.environment,
-                    snapshot_id,
-                    directory: worktree.choice.repository_dir.clone(),
-                    kind: RecordKind::Turn,
-                    record_days: *record_days,
-                    max_bytes: *max_bytes
-                })
-            }
             _ => return Ok(false),
         },
         _ => return Ok(false),
@@ -1569,6 +1598,7 @@ pub(crate) async fn lock_attempt_at(
         || value.get("worktree").filter(|value| !value.is_null())
             != worktree.map(|choice| json!(choice)).as_ref()
         || value.get("native_plan") != Some(&native_plan)
+        || staged_edits(value)? != plan.workspace_edits
     {
         return Ok(None);
     }
@@ -1627,6 +1657,7 @@ impl Preparing {
     /// Keep the original source recipe attached to the exact job command before the ordinary
     /// job runner records active_command and makes it visible to the durable dispatcher.
     async fn command(&self, job: &Job, command: Outgoing) -> Result<Json, Stop> {
+        let mut command = job.prepare_command(command).await?;
         if self.plan.creator_origin.is_some() || self.plan.scheduled_input.is_some() {
             check_with_write(
                 job,
@@ -1651,14 +1682,13 @@ impl Preparing {
                 &mut tx,
                 job.id(),
                 &json!({"creator_command": {
-                    "id": command.id, "plan": self.plan, "runtime": self.provisioning_runtime,
+                    "id": command.id, "plan": self.plan, "runtime": self.provisioning_runtime,"body":command.body,
                 }}),
                 job.now(),
             )
             .await?;
             tx.commit().await.map_err(orch_db::DbError::from)?;
         }
-        let mut command = job.prepare_command(command).await?;
         if let Some(origin) = &self.operation {
             let row = job.row().await?;
             let authority = operation::SourceCommand::capture(&row, origin, &command)?;
@@ -1666,7 +1696,24 @@ impl Preparing {
                 authority,
             ));
         }
-        job.command(command).await
+        // The thread that waits for this preparation is told which command it waits for, and what holds it
+        // up when other work stands in the machine's line before it.
+        let Some(thread) = self.plan.thread else {
+            return job.command(command).await;
+        };
+        let (id, kind) = (command.id, command.kind);
+        match self
+            .engine
+            .waiting_noted(thread, id, kind, None, job.command(command))
+            .await
+        {
+            crate::start_wait::Waited::Done(answer) => answer,
+            crate::start_wait::Waited::Tired => Err(Failure::new(
+                "timeout",
+                "The machine did not finish the operation before its deadline. Retry the job.",
+            )
+            .into()),
+        }
     }
 
     /// Pins the current source attempt after the caller has locked its authoritative job claim.
@@ -1783,6 +1830,11 @@ impl Preparing {
                 self.provisioning_runtime,
             )
             .await?;
+        }
+        if let Some(prepared) = &self.plan.prepared_source {
+            job.remember(&json!({"file_result":prepared,"file_source_attempt":self.plan}))
+                .await?;
+            return Ok(Done::Finished);
         }
         let mut result = match &self.plan.action {
             Action::Prepare {
@@ -1933,132 +1985,7 @@ impl Preparing {
                 )
                 .await?
             }
-            Action::Worktree {
-                body,
-                record_days,
-                max_bytes,
-                ..
-            } => {
-                if body.job_id != job.id() && body.snapshot_id.is_some() {
-                    let mut conn = self.engine.db().acquire().await?;
-                    let saved = storage::snapshot(
-                        &mut conn,
-                        body.snapshot_id.ok_or_else(|| {
-                            Failure::new("internal", "the original worktree capture disappeared")
-                        })?,
-                    )
-                    .await?;
-                    drop(conn);
-                    if saved
-                        .is_some_and(|saved| matches!(saved.state.as_str(), "complete" | "expired"))
-                    {
-                        // Ask the original native identity first. A completed worktree can
-                        // return its frozen answer after capture expiry; no new capture is made.
-                        let result = self
-                            .command(
-                                job,
-                                Outgoing::new(
-                                    crate::ids::derived(
-                                        "git.worktree.retry",
-                                        &[body.job_id.as_bytes(), job.id().as_bytes()],
-                                    ),
-                                    self.plan.machine,
-                                    SerialKey::Environment(self.plan.environment),
-                                    body,
-                                )
-                                .map_err(EngineError::from)?,
-                            )
-                            .await?;
-                        job.remember(
-                            &json!({ "file_result": result, "file_source_attempt": self.plan }),
-                        )
-                        .await?;
-                        return Ok(Done::Finished);
-                    }
-                }
-                if let Some(snapshot) = body.snapshot_id {
-                    if *record_days <= 0 {
-                        return Err(Failure::new(
-                            "workspace.restore_unavailable",
-                            "From now needs a complete recorded current state; recording is off",
-                        )
-                        .into());
-                    }
-                    let thread = self
-                        .plan
-                        .thread
-                        .ok_or_else(|| Failure::new("internal", "the own attempt has no thread"))?;
-                    let mut tx = self.engine.db().begin().await?;
-                    source::begin_recorded(&mut tx, &storage::NewSnapshot { id: snapshot, thread_id: Some(thread), environment_id: self.plan.environment,
-                        env_generation: self.plan.generation, label: "Current files for own attempt", selection: &json!({ "include": [body.choice.repository_dir], "exclude": [] }),
-                        created_by: Some(self.plan.caller), at: job.now() }, &body.choice.repository_dir, "turn").await?;
-                    tx.commit().await.map_err(orch_db::DbError::from)?;
-                    let value = self
-                        .command(
-                            job,
-                            Outgoing::new(
-                                crate::ids::derived(
-                                    "worktree.record-current",
-                                    &[body.job_id.as_bytes(), job.id().as_bytes()],
-                                ),
-                                self.plan.machine,
-                                SerialKey::Environment(self.plan.environment),
-                                &FsRecord {
-                                    environment_id: self.plan.environment,
-                                    snapshot_id: snapshot,
-                                    directory: body.choice.repository_dir.clone(),
-                                    kind: RecordKind::Turn,
-                                    record_days: *record_days,
-                                    max_bytes: *max_bytes,
-                                },
-                            )
-                            .map_err(EngineError::from)?,
-                        )
-                        .await?;
-                    let recorded: FsRecordResult =
-                        serde_json::from_value(value).map_err(EngineError::from)?;
-                    if recorded.state != RecordState::Complete {
-                        return Err(Failure::new(
-                            "workspace.restore_unavailable",
-                            "complete current files could not be recorded; choose a commit",
-                        )
-                        .into());
-                    }
-                    let hash = recorded.manifest_blob.ok_or_else(|| {
-                        Failure::new("internal", "the recorded current manifest is missing")
-                    })?;
-                    let manifest = self.engine.read_manifest_checked(hash).await?;
-                    if manifest.header().generation != i64::from(self.plan.generation)
-                        || manifest
-                            .entries()
-                            .iter()
-                            .any(|entry| entry.kind == crate::manifest::EntryKind::Other)
-                    {
-                        return Err(Failure::new(
-                            "workspace.restore_unavailable",
-                            "the current file coverage is incomplete",
-                        )
-                        .into());
-                    }
-                    let size = self
-                        .engine
-                        .blobs()
-                        .ok_or_else(|| {
-                            Failure::new("internal", "the current manifest store is unavailable")
-                        })?
-                        .size(&hash)
-                        .await
-                        .map_err(EngineError::unreadable)?
-                        .ok_or_else(|| {
-                            Failure::new("internal", "the current manifest is unavailable")
-                        })?;
-                    let mut tx = self.engine.db().begin().await?;
-                    storage::register_blob(&mut tx, &hash, size, job.now()).await?;
-                    if source::finish_recorded(&mut tx, snapshot, &recorded, job.now()).await? {
-                        storage::pin_blobs(&mut tx, &[hash]).await?;
-                    }
-                    tx.commit().await.map_err(orch_db::DbError::from)?;
-                }
+            Action::Worktree { body, .. } => {
                 self.command(
                     job,
                     Outgoing::new(
@@ -2185,19 +2112,28 @@ impl Preparing {
                 Action::Worktree { body, .. } => Some(&body.choice),
                 _ => None,
             };
-            source::set_source(
-                &mut *unit.conn,
-                thread,
-                &with_creator_origin(
-                    json!({ "info": info, "source": frozen, "prepare": true, "worktree": worktree,
-                "caller": self.plan.caller, "token": self.plan.token, "native_plan": self.plan }),
-                    self.plan.creator_origin.as_ref(),
-                    self.plan.scheduled_input,
-                    row.source.as_ref(),
-                ),
-                seq,
-            )
-            .await?;
+            let wait_for_files =
+                self.provisioning_runtime.is_some() && !self.plan.workspace_edits.is_empty();
+            let prepared = info.clone();
+            if wait_for_files {
+                info.state = SourceState::Pending;
+            }
+            let mut consumed_plan = self.plan.clone();
+            if !wait_for_files {
+                consumed_plan.workspace_edits.clear();
+                consumed_plan.prepared_source = None;
+            }
+            let mut next_source = with_creator_origin(
+                json!({ "info": info, "source": frozen, "prepare": true, "worktree": worktree,
+                    "caller": self.plan.caller, "token": self.plan.token, "native_plan": consumed_plan }),
+                self.plan.creator_origin.as_ref(),
+                self.plan.scheduled_input,
+                row.source.as_ref(),
+            );
+            if wait_for_files {
+                next_source["prepared_source"] = json!(prepared);
+            }
+            source::set_source(&mut *unit.conn, thread, &next_source, seq).await?;
             if let Some(segment) = row.current_segment_id {
                 let by = crate::views::user_ref_json(&mut *unit.conn, self.plan.caller).await?;
                 crate::ingest::add_marker(&mut unit, thread, segment, None,
@@ -2405,7 +2341,10 @@ pub(crate) async fn publish_creator_generation(
         };
         if current.environment_id != Some(environment)
             || current.workspace_dir != info.directory
-            || !matches!(info.state, SourceState::Ready)
+            || !(info.state == SourceState::Ready
+                || info.state == SourceState::Pending
+                    && value.get("prepared_source").is_some()
+                    && !staged_edits(value)?.is_empty())
         {
             continue;
         }
@@ -2533,23 +2472,6 @@ pub async fn provision_files(
             &[job.id().as_bytes(), thread.as_bytes()],
         );
         let action = if let Some(choice) = worktree {
-            let mut conn = job.engine().db().acquire().await?;
-            let record_days = get::<i64>(
-                &mut conn,
-                Place::Environment(environment),
-                keys::WORKSPACE_RECORD_DAYS,
-            )
-            .await
-            .map_err(EngineError::from)?
-            .ok_or_else(|| EngineError::unreadable("recording days are unset"))?;
-            let max_bytes = get::<i64>(
-                &mut conn,
-                Place::Environment(environment),
-                keys::WORKSPACE_RECORD_MAX_BYTES,
-            )
-            .await
-            .map_err(EngineError::from)?
-            .ok_or_else(|| EngineError::unreadable("recording bytes are unset"))?;
             let snapshot_id = matches!(
                 choice.from,
                 orch_api_contract::source::WorktreeFrom::Now { .. }
@@ -2563,8 +2485,6 @@ pub async fn provision_files(
                     snapshot_id,
                 },
                 source: frozen,
-                record_days,
-                max_bytes,
             }
         } else {
             let mut conn = job.engine().db().acquire().await?;
@@ -2597,6 +2517,8 @@ pub async fn provision_files(
                     .and_then(|value| serde_json::from_value(value).ok()),
                 creator_origin: creator_origin(value)?,
                 scheduled_input: scheduled_input(value)?,
+                workspace_edits: staged_edits(value)?,
+                prepared_source: None,
                 action,
             },
         };
@@ -2753,6 +2675,34 @@ pub(crate) async fn undo_provision_sources(job: &Job, why: &Stop) -> Result<(), 
     Ok(())
 }
 
+/// Why a preparation failed, as the thread's source says it: the code the failure carries when it is a plain
+/// code, which the page turns into words and the act that fits (the machine's own sentence is on the job);
+/// a refusal to write files is one reason whichever door refused; anything else is the general one.
+fn failure_reason(why: &Stop) -> String {
+    match why {
+        Stop::Failed(failure)
+            if matches!(
+                failure.code.as_str(),
+                "workspace.remote_write_disabled" | "policy.remote_write_disabled"
+            ) =>
+        {
+            "workspace.remote_write_disabled".to_owned()
+        }
+        Stop::Failed(failure)
+            if !failure.code.is_empty()
+                && failure.code.len() <= 64
+                && failure.code.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'_' | b'-')
+                }) =>
+        {
+            failure.code.clone()
+        }
+        _ => "workspace.source_failed".to_owned(),
+    }
+}
+
 #[async_trait]
 impl Phased for Preparing {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
@@ -2766,6 +2716,7 @@ impl Phased for Preparing {
                 check(job, &self.plan).await?;
                 Ok(Done::Finished)
             }
+            "files" => workspace_files::apply(self, job).await,
             "commit" => self.commit(job).await,
             _ => Err(Failure::new(
                 "internal",
@@ -2794,6 +2745,16 @@ impl Phased for Preparing {
         };
         let why = &stored_reason;
         let mut retry_plan = self.plan.clone();
+        let keep_workspace = job
+            .plan()
+            .await
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("workspace_file_review_keep")
+                    .and_then(Json::as_bool)
+            })
+            .unwrap_or(false);
         let mut cleanup = None;
         if let Action::Prepare {
             directory,
@@ -2803,6 +2764,7 @@ impl Phased for Preparing {
             ..
         } = &self.plan.action
             && let Some(url) = &source.repository_url
+            && !keep_workspace
         {
             let cleaned = async {
                 let original = GitPrepare {
@@ -2842,7 +2804,9 @@ impl Phased for Preparing {
             }
             cleanup = Some(cleaned);
         }
-        if let Action::Worktree { body, .. } = &self.plan.action {
+        if let Action::Worktree { body, .. } = &self.plan.action
+            && !keep_workspace
+        {
             let cleaned = async {
                 let command = Outgoing::new(
                     crate::ids::derived(
@@ -2892,6 +2856,9 @@ impl Phased for Preparing {
                 } else { row.source.as_ref().and_then(|source| source.get("native_result")) };
                 let native_result = if cleanup.as_ref().is_some_and(|result| result.as_ref().is_ok_and(|result| result.removed)) { Json::Null }
                     else { retained.cloned().unwrap_or(Json::Null) };
+                if keep_workspace && !native_result.is_null() {
+                    retry_plan.prepared_source=serde_json::from_value(native_result.clone()).ok();
+                }
                 let native_started = !cleanup.as_ref().is_some_and(|result| result.as_ref().is_ok_and(|result| result.removed))
                     && (owner.plan.get("file_prepare_started") == Some(&json!(self.plan))
                         || native_result.get("kind").and_then(Json::as_str).is_some_and(|kind| matches!(kind, "repository" | "worktree"))
@@ -2899,10 +2866,7 @@ impl Phased for Preparing {
                 let job_ref = reference(&owner);
                 let mut unit = Unit::new(&mut tx, job.now());
                 let info = SourceInfo { kind: if worktree.is_some() { SourceKind::Worktree } else if frozen.repository_url.is_some() { SourceKind::Repository } else { SourceKind::Directory }, directory: directory.clone(), repository_url: frozen.repository_url.clone(),
-                    branch: frozen.branch.clone(), head: None, state: SourceState::Failed, job: Some(job_ref), reason: Some(match why {
-                        Stop::Failed(failure) if matches!(failure.code.as_str(), "workspace.remote_write_disabled" | "policy.remote_write_disabled") => "workspace.remote_write_disabled",
-                        _ => "workspace.source_failed",
-                    }.to_owned()) };
+                    branch: frozen.branch.clone(), head: None, state: SourceState::Failed, job: Some(job_ref), reason: Some(failure_reason(why)) };
                 let seq = unit.stamp(thread).await?;
                 source::set_source(&mut *unit.conn, thread, &with_creator_origin(json!({ "info": info, "source": frozen, "prepare": true, "worktree": worktree,
                     "caller": self.plan.caller, "token": self.plan.token, "credential_home": row.source.as_ref().and_then(|source|source.get("credential_home")).cloned().unwrap_or_else(||json!(row.topic_id)),
@@ -2940,6 +2904,33 @@ mod publication_tests;
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_failed_preparation_keeps_the_code_it_failed_with_for_the_page_to_explain() {
+        let failed = |code: &str| Stop::Failed(Failure::new(code, "a sentence of the machine"));
+        assert_eq!(failure_reason(&failed("timeout")), "timeout");
+        assert_eq!(failure_reason(&failed("not_found")), "not_found");
+        assert_eq!(
+            failure_reason(&failed("workspace.source_conflict")),
+            "workspace.source_conflict"
+        );
+        // A refusal to write files is one reason, whichever door refused.
+        for code in [
+            "policy.remote_write_disabled",
+            "workspace.remote_write_disabled",
+        ] {
+            assert_eq!(
+                failure_reason(&failed(code)),
+                "workspace.remote_write_disabled"
+            );
+        }
+        // Anything that is not a plain code, and anything that is not a failure, is the general reason.
+        for odd in ["", "Some Words: here", "a/path", &"x".repeat(65)] {
+            assert_eq!(failure_reason(&failed(odd)), "workspace.source_failed");
+        }
+        assert_eq!(failure_reason(&Stop::Cancelled), "workspace.source_failed");
+        assert_eq!(failure_reason(&Stop::Lost), "workspace.source_failed");
+    }
+
     #[tokio::test]
     #[allow(clippy::unwrap_used, reason = "a control fails by panicking")]
     async fn an_existing_environment_generation_is_frozen_before_the_source_plan_is_built() {
@@ -2973,8 +2964,11 @@ mod tests {
                 thread,
                 world.environment,
                 "web",
-                Some(true),
-                None,
+                CreationChoice {
+                    prepare: Some(true),
+                    worktree: None,
+                    workspace_edits: &[],
+                },
             )
             .await
             .unwrap();

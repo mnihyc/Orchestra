@@ -1,0 +1,9 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test resource_library --test turns
+test -p orch-api-core --test resource_facts --test resource_resume --test syncs --test kmounts_mcp --test mcp_reader_scopes
+test -p orch-adapter-codex --lib
+test -p orch-adapter-claude-code --lib
