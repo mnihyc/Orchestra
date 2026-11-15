@@ -1,17 +1,18 @@
-//! File version and on-demand hash cache; live-only mode for a tree too large to index.
+//! File versions and on-demand hashes, with bounded coverage for large trees.
 //!
 //! The index remembers, for every path of the workspace, what a listing needs: what it is, its
 //! size, its modification time and its permission bits. It is built by one walk and kept current
-//! from the paths the watcher reports, and from a full walk again when watching falls short. A
-//! tree that holds more entries than the limit is not indexed at all: the index then says it is
-//! [`IndexState::Live`], keeps nothing, and every listing is read from the disk when asked.
+//! from the paths the watcher reports, and from a full walk again when watching falls short.
+//! Without whole-tree coverage, [`IndexState::Live`] retains a bounded working set, updated by
+//! native changes and visible directory pages. Listings and continuing searches can read the
+//! workspace directly; retained entries are hints rather than a promise of complete coverage.
 //!
 //! Hashes are not in the index. They are computed when a file is fetched or snapshotted and
 //! remembered by the [`HashCache`], which trusts a hash only while the file is the very version it
 //! was computed for: same file, same size, same modification time and same change time, so a
 //! program that writes new content and sets the modification time back is not believed.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -22,7 +23,7 @@ use crate::error::Result;
 use crate::ignore::IgnoreRules;
 use crate::paths::{Locate, RelPath, Workspace};
 use crate::platform::{Identity, Kind, Meta};
-use crate::walk::{Flow, walk};
+use crate::walk::{Flow, walk, walk_streamed};
 
 /// How many hashes the cache remembers. A hash is 32 bytes and a path about as many again; a
 /// million entries is under a hundred megabytes, which is also far more files than a person's
@@ -30,8 +31,11 @@ use crate::walk::{Flow, walk};
 /// the cost of keeping a smarter structure.
 pub const HASH_CACHE_MAX_ENTRIES: usize = 1_000_000;
 
-/// A scan gets ten seconds: larger walks are too expensive to repeat for interactive work.
-pub const DEFAULT_SCAN_MAX: Duration = Duration::from_secs(10);
+/// Standalone readers use the same shipped scan slice; served environments supply resolved settings.
+#[must_use]
+pub fn default_scan_max() -> Duration {
+    Duration::from_secs(orch_link_contract::commands::WorkspaceLimits::default().index_scan_secs)
+}
 
 /// Hashes of files, valid while the file is the version they were computed for.
 #[derive(Debug, Default)]
@@ -119,7 +123,7 @@ pub struct IndexEntry {
 }
 
 impl IndexEntry {
-    fn of(meta: &Meta, link_target: Option<String>) -> Self {
+    pub(crate) fn of(meta: &Meta, link_target: Option<String>) -> Self {
         Self {
             kind: meta.kind,
             size: if meta.is_file() { meta.size } else { 0 },
@@ -144,6 +148,8 @@ pub enum LiveReason {
     Watches,
     /// A single scan exceeded the configured time budget.
     ScanTime,
+    /// Some workspace metadata or exclusion rules could not be read.
+    Unreadable,
 }
 
 /// Whether the index is kept.
@@ -151,7 +157,7 @@ pub enum LiveReason {
 pub enum IndexState {
     /// Every path is in the index.
     Full,
-    /// Nothing is kept, for the reason given.
+    /// A bounded working set is kept without whole-tree coverage, for the reason given.
     Live(LiveReason),
 }
 
@@ -190,6 +196,7 @@ impl IndexState {
             Self::Live(LiveReason::TooManyEntries { .. }) => Some(IndexReason::Entries),
             Self::Live(LiveReason::Watches) => Some(IndexReason::Watches),
             Self::Live(LiveReason::ScanTime) => Some(IndexReason::ScanTime),
+            Self::Live(LiveReason::Unreadable) => Some(IndexReason::Unreadable),
         }
     }
 }
@@ -198,16 +205,78 @@ impl IndexState {
 struct Inner {
     state: IndexState,
     entries: BTreeMap<String, IndexEntry>,
+    ages: BTreeMap<String, u64>,
+    oldest: BTreeMap<u64, String>,
+    age: u64,
     dirty: bool,
     ready: bool,
+    journal_ready: bool,
     revision: u64,
     known_since: u64,
-    changes: VecDeque<(u64, RelPath)>,
+    changes: BTreeMap<RelPath, u64>,
+    change_order: BTreeMap<u64, RelPath>,
+}
+
+impl Inner {
+    fn remember(&mut self, path: String, entry: IndexEntry, maximum: u64) -> bool {
+        let changed = self.entries.insert(path.clone(), entry.clone()).as_ref() != Some(&entry);
+        if let Some(age) = self.ages.remove(&path) {
+            self.oldest.remove(&age);
+        }
+        // Exhausting the ordinal is a representation limit, not ordinary cache pressure.
+        if self.age == u64::MAX {
+            self.ages.clear();
+            self.oldest.clear();
+            self.age = 0;
+            for path in self.entries.keys() {
+                self.age += 1;
+                self.ages.insert(path.clone(), self.age);
+                self.oldest.insert(self.age, path.clone());
+            }
+        }
+        self.age += 1;
+        self.ages.insert(path.clone(), self.age);
+        self.oldest.insert(self.age, path);
+        while self.entries.len() as u64 > maximum {
+            if self.state.is_full() {
+                self.state = IndexState::Live(LiveReason::TooManyEntries { limit: maximum });
+                self.ready = false;
+            }
+            if let Some((_, path)) = self.oldest.pop_first() {
+                self.ages.remove(&path);
+                self.entries.remove(&path);
+            }
+        }
+        changed
+    }
+
+    fn remove(&mut self, path: &str) -> bool {
+        if let Some(age) = self.ages.remove(path) {
+            self.oldest.remove(&age);
+        }
+        self.entries.remove(path).is_some()
+    }
+
+    fn advance(&mut self) -> Option<u64> {
+        let Some(revision) = self.revision.checked_add(1) else {
+            self.state = IndexState::Live(LiveReason::Watches);
+            self.changes.clear();
+            self.change_order.clear();
+            self.ready = false;
+            self.journal_ready = false;
+            self.dirty = false;
+            return None;
+        };
+        self.revision = revision;
+        Some(revision)
+    }
 }
 
 /// The index of one workspace.
 #[derive(Debug)]
 pub struct Index {
+    #[cfg(test)]
+    pub(crate) hint_clones: std::sync::atomic::AtomicUsize,
     max_entries: u64,
     scan_max: Duration,
     scan: Mutex<()>,
@@ -228,7 +297,7 @@ impl Index {
     /// `max_entries` entries.
     #[must_use]
     pub fn new(requested: IndexMode, max_entries: u64) -> Self {
-        Self::with_scan_limit(requested, max_entries, DEFAULT_SCAN_MAX)
+        Self::with_scan_limit(requested, max_entries, default_scan_max())
     }
 
     /// An index bounded by both entry count and the duration of one full scan.
@@ -239,17 +308,24 @@ impl Index {
             IndexMode::Live => IndexState::Live(LiveReason::Requested),
         };
         Self {
+            #[cfg(test)]
+            hint_clones: std::sync::atomic::AtomicUsize::new(0),
             max_entries,
             scan_max,
             scan: Mutex::new(()),
             inner: Mutex::new(Inner {
                 state,
                 entries: BTreeMap::new(),
+                ages: BTreeMap::new(),
+                oldest: BTreeMap::new(),
+                age: 0,
                 dirty: false,
                 ready: false,
+                journal_ready: false,
                 revision: 0,
                 known_since: 0,
-                changes: VecDeque::new(),
+                changes: BTreeMap::new(),
+                change_order: BTreeMap::new(),
             }),
         }
     }
@@ -264,16 +340,38 @@ impl Index {
         self.inner().state
     }
 
-    /// Gives up whole-tree work and drops its memory, retaining the first reason.
+    /// Stops whole-tree work while retaining bounded metadata and the first coverage reason.
     pub fn give_up(&self, reason: LiveReason) {
         let mut inner = self.inner();
         if inner.state.is_full() {
             inner.state = IndexState::Live(reason);
-            inner.entries.clear();
-            inner.changes.clear();
             inner.dirty = false;
             inner.ready = false;
+            if matches!(reason, LiveReason::Watches | LiveReason::Unreadable) {
+                let _ = inner.advance();
+                inner.known_since = inner.revision;
+                inner.changes.clear();
+                inner.change_order.clear();
+                inner.journal_ready = false;
+            }
         }
+    }
+
+    /// Complete native coverage and complete metadata remain distinct from scoped observations.
+    #[must_use]
+    pub fn fully_observed(&self) -> bool {
+        let inner = self.inner();
+        inner.state.is_full() && inner.ready
+    }
+
+    /// Starts a new scoped interval after initial attachment or a known gap.
+    pub fn begin_changes(&self) -> Option<u64> {
+        let mut inner = self.inner();
+        if inner.revision == u64::MAX {
+            return None;
+        }
+        inner.journal_ready = true;
+        Some(inner.revision)
     }
 
     /// The watcher cursor a turn remembers before it starts.
@@ -282,45 +380,46 @@ impl Index {
         self.inner().revision
     }
 
-    /// Paths reported by the watcher since a cursor; none when events were lost or the tree is live.
+    /// Paths actually reported since a cursor; none across lost/evicted notices.
+    /// A live metadata window retains these scoped observations without promising complete coverage.
     /// This reads memory only, and never lists a directory or invokes git.
     #[must_use]
     pub fn changes_since(&self, cursor: u64) -> Option<Vec<RelPath>> {
         let inner = self.inner();
-        if !inner.state.is_full()
-            || !inner.ready
-            || cursor < inner.known_since
-            || cursor > inner.revision
-        {
+        if !inner.journal_ready || cursor < inner.known_since || cursor > inner.revision {
             return None;
         }
         if cursor == inner.revision {
             return Some(Vec::new());
         }
-        Some(
-            inner
-                .changes
-                .iter()
-                .filter(|(revision, _)| *revision > cursor)
-                .map(|(_, path)| path.clone())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
-        )
+        let mut paths: Vec<_> = inner
+            .change_order
+            .range((
+                std::ops::Bound::Excluded(cursor),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(|(_, path)| path.clone())
+            .collect();
+        paths.sort();
+        Some(paths)
     }
 
-    /// Records just the paths a watcher reported, bounded by the index's entry budget.
+    /// Records the last revision of each watcher path, bounded by distinct paths, not write rate.
+    /// The ordered revision index lets eviction cost logarithmic work too.
     pub fn observe(&self, paths: &[RelPath]) {
         let mut inner = self.inner();
-        if !inner.state.is_full() {
-            return;
-        }
+        inner.journal_ready = true;
         for path in paths {
-            inner.revision = inner.revision.saturating_add(1);
-            let revision = inner.revision;
-            inner.changes.push_back((revision, path.clone()));
+            let Some(revision) = inner.advance() else {
+                return;
+            };
+            if let Some(previous) = inner.changes.insert(path.clone(), revision) {
+                inner.change_order.remove(&previous);
+            }
+            inner.change_order.insert(revision, path.clone());
             while inner.changes.len() as u64 > self.max_entries {
-                if let Some((revision, _)) = inner.changes.pop_front() {
+                if let Some((revision, path)) = inner.change_order.pop_first() {
+                    inner.changes.remove(&path);
                     inner.known_since = revision;
                 }
             }
@@ -330,10 +429,14 @@ impl Index {
     /// Marks a gap in the event stream, so no turn is promised a complete list across it.
     pub fn lost_events(&self) {
         let mut inner = self.inner();
-        inner.revision = inner.revision.saturating_add(1);
+        if inner.advance().is_none() {
+            return;
+        }
         inner.known_since = inner.revision;
         inner.changes.clear();
+        inner.change_order.clear();
         inner.ready = false;
+        inner.journal_ready = false;
     }
 
     /// How many paths are in the index.
@@ -352,6 +455,28 @@ impl Index {
     #[must_use]
     pub fn get(&self, path: &RelPath) -> Option<IndexEntry> {
         self.inner().entries.get(path.as_str()).cloned()
+    }
+
+    /// What the index knows of everything strictly below `path`, in the order of the paths: the
+    /// cost is what lies there, not the size of the tree.
+    #[must_use]
+    pub fn below(&self, path: &RelPath) -> Vec<(RelPath, IndexEntry)> {
+        let inner = self.inner();
+        if path.is_root() {
+            return inner
+                .entries
+                .iter()
+                .map(|(path, entry)| (RelPath::from_walked(path.clone()), entry.clone()))
+                .collect();
+        }
+        // Everything below "a/b" sorts between "a/b/" and "a/b0" ('0' follows '/').
+        let from = format!("{}/", path.as_str());
+        let to = format!("{}0", path.as_str());
+        inner
+            .entries
+            .range(from..to)
+            .map(|(path, entry)| (RelPath::from_walked(path.clone()), entry.clone()))
+            .collect()
     }
 
     /// Every path of the index with what is known of it, in the order of the paths.
@@ -399,27 +524,37 @@ impl Index {
         let limit = self.max_entries;
         let began = Instant::now();
         let mut reason = None;
-        let outcome = walk(workspace, Some(rules), &RelPath::root(), &mut |entry| {
-            if began.elapsed() >= self.scan_max || !self.state().is_full() {
-                reason = Some(LiveReason::ScanTime);
-                return Flow::Stop;
-            }
-            found.insert(
-                entry.path.to_string(),
-                IndexEntry::of(&entry.meta, entry.link_target.clone()),
-            );
-            if found.len() as u64 > limit {
-                reason = Some(LiveReason::TooManyEntries { limit });
-                Flow::Stop
-            } else {
-                Flow::Continue
-            }
-        })?;
+        let outcome = walk_streamed(
+            workspace,
+            Some(rules),
+            &RelPath::root(),
+            &mut || began.elapsed() < self.scan_max && self.state().is_full(),
+            &mut |entry| {
+                if began.elapsed() >= self.scan_max || !self.state().is_full() {
+                    reason = Some(LiveReason::ScanTime);
+                    return Flow::Stop;
+                }
+                found.insert(
+                    entry.path.to_string(),
+                    IndexEntry::of(&entry.meta, entry.link_target.clone()),
+                );
+                if found.len() as u64 > limit {
+                    reason = Some(LiveReason::TooManyEntries { limit });
+                    Flow::Stop
+                } else {
+                    Flow::Continue
+                }
+            },
+        )?;
         if began.elapsed() >= self.scan_max && reason.is_none() {
             reason = Some(LiveReason::ScanTime);
         }
         if outcome.stopped || reason.is_some() {
             self.give_up(reason.unwrap_or(LiveReason::ScanTime));
+            let mut inner = self.inner();
+            for (path, entry) in found {
+                inner.remember(path, entry, self.max_entries);
+            }
             return Ok(ScanOutcome {
                 changed: true,
                 went_live: true,
@@ -435,8 +570,14 @@ impl Index {
         }
         let changed = inner.entries != found;
         inner.ready = outcome.unreadable.is_empty();
+        inner.journal_ready = true;
         if changed {
-            inner.entries = found;
+            inner.entries.clear();
+            inner.ages.clear();
+            inner.oldest.clear();
+            for (path, entry) in found {
+                inner.remember(path, entry, self.max_entries);
+            }
             inner.dirty = true;
         }
         Ok(ScanOutcome {
@@ -454,12 +595,7 @@ impl Index {
         rules: &Arc<IgnoreRules>,
         paths: &[RelPath],
     ) -> Result<ScanOutcome> {
-        if !self.state().is_full() {
-            return Ok(ScanOutcome {
-                changed: false,
-                went_live: false,
-            });
-        }
+        let was_full = self.state().is_full();
         let mut changed = false;
         for path in paths {
             if path.is_root() {
@@ -468,31 +604,12 @@ impl Index {
             changed |= self.refresh_one(workspace, rules, path)?;
         }
         let mut inner = self.inner();
-        if !inner.state.is_full() {
-            return Ok(ScanOutcome {
-                changed: true,
-                went_live: true,
-            });
-        }
-        if inner.entries.len() as u64 > self.max_entries {
-            inner.state = IndexState::Live(LiveReason::TooManyEntries {
-                limit: self.max_entries,
-            });
-            inner.entries.clear();
-            inner.dirty = false;
-            inner.ready = false;
-            inner.changes.clear();
-            return Ok(ScanOutcome {
-                changed: true,
-                went_live: true,
-            });
-        }
         if changed {
             inner.dirty = true;
         }
         Ok(ScanOutcome {
             changed,
-            went_live: false,
+            went_live: was_full && !inner.state.is_full(),
         })
     }
 
@@ -522,10 +639,15 @@ impl Index {
             _ => None,
         };
         let entry = IndexEntry::of(&meta, link_target);
-        let previous = self.inner().entries.insert(path.to_string(), entry.clone());
-        // A change that leaves the entry as it was is not a change of the tree.
-        let mut changed = previous.as_ref() != Some(&entry);
-        if meta.is_dir() && previous.is_none() {
+        let (new, mut changed) = {
+            let mut inner = self.inner();
+            let new = !inner.entries.contains_key(path.as_str());
+            (
+                new,
+                inner.remember(path.to_string(), entry, self.max_entries),
+            )
+        };
+        if meta.is_dir() && new && self.state().is_full() {
             let mut added: Vec<(String, IndexEntry)> = Vec::new();
             let began = Instant::now();
             let held = self.len() as u64;
@@ -549,18 +671,91 @@ impl Index {
             })?;
             if let Some(reason) = reason {
                 self.give_up(reason);
-                return Ok(true);
             }
-            self.inner().entries.extend(added);
+            let mut inner = self.inner();
+            for (path, entry) in added {
+                inner.remember(path, entry, self.max_entries);
+            }
             changed = true;
         }
         Ok(changed)
     }
 
+    /// Finds the next recent candidate and reserves its storage before cloning it.
+    /// The index lock is released before visibility checks, output or backpressure waits.
+    pub(crate) fn matching_path_after<C>(
+        &self,
+        scope: &RelPath,
+        query: &str,
+        case_sensitive: bool,
+        after: Option<&RelPath>,
+        mut reserve: impl FnMut(usize) -> Result<C>,
+    ) -> Result<Option<(RelPath, C)>> {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let query = if case_sensitive {
+            query.to_owned()
+        } else {
+            query.to_lowercase()
+        };
+        let scope = scope.as_str();
+        let prefix = format!("{scope}/");
+        let lower = after.map_or(Included(scope), |path| Excluded(path.as_str()));
+        let inner = self.inner();
+        for (path, _) in inner.entries.range::<str, _>((lower, Unbounded)) {
+            if !scope.is_empty() && path.as_str() != scope && !path.starts_with(&prefix) {
+                if path.as_str() < prefix.as_str() {
+                    continue;
+                }
+                break;
+            }
+            if !(if case_sensitive {
+                path.contains(&query)
+            } else {
+                path.to_lowercase().contains(&query)
+            }) {
+                continue;
+            }
+            let charge = reserve(path.len() + std::mem::size_of::<RelPath>())?;
+            #[cfg(test)]
+            self.hint_clones
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(Some((RelPath::from_walked(path.clone()), charge)));
+        }
+        Ok(None)
+    }
+
+    /// Adds a visible directory page to the bounded live metadata window without a tree walk.
+    pub fn remember_page(&self, entries: &[orch_api_contract::workspace::DirEntry]) {
+        use orch_api_contract::workspace::DirEntryKind;
+        let mut inner = self.inner();
+        if inner.state.is_full() {
+            return;
+        }
+        for entry in entries {
+            let kind = match entry.kind {
+                DirEntryKind::File => Kind::File,
+                DirEntryKind::Dir => Kind::Dir,
+                DirEntryKind::Symlink => Kind::Symlink,
+                DirEntryKind::Other => Kind::Other,
+            };
+            inner.remember(
+                entry.path.clone(),
+                IndexEntry {
+                    kind,
+                    size: u64::try_from(entry.size).unwrap_or(0),
+                    mtime_ns: entry.mtime.get().timestamp_nanos_opt().unwrap_or(0),
+                    mode: entry.mode,
+                    link_target: entry.link_target.clone(),
+                },
+                self.max_entries,
+            );
+        }
+    }
+
     /// Removes `path` and everything under it; says whether anything was removed.
     fn remove_tree(&self, path: &RelPath) -> bool {
         let mut inner = self.inner();
-        let mut removed = inner.entries.remove(path.as_str()).is_some();
+        let mut removed = inner.remove(path.as_str());
         // Everything below "a/b" sorts between "a/b/" and "a/b0" ('0' follows '/').
         let from = format!("{}/", path.as_str());
         let to = format!("{}0", path.as_str());
@@ -571,7 +766,7 @@ impl Index {
             .collect();
         removed |= !below.is_empty();
         for key in below {
-            inner.entries.remove(&key);
+            inner.remove(&key);
         }
         removed
     }
@@ -681,7 +876,54 @@ mod tests {
     }
 
     #[test]
-    fn a_tree_above_the_entry_limit_is_not_indexed_and_the_index_says_it_is_live() {
+    fn repeated_writes_keep_a_turns_cursor_until_distinct_changed_paths_are_lost() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("code"), "before").unwrap();
+        let index = Index::new(IndexMode::Full, 2);
+        index.scan(&workspace(root.path()), &rules()).unwrap();
+        let before = index.revision();
+        for _ in 0..20 {
+            index.observe(&[path("code")]);
+        }
+        assert_eq!(
+            index.changes_since(before),
+            Some(vec![path("code")]),
+            "one busy file does not evict the only path a turn needs"
+        );
+        index.observe(&[path("second")]);
+        assert_eq!(
+            index.changes_since(before),
+            Some(vec![path("code"), path("second")])
+        );
+        index.observe(&[path("third")]);
+        assert!(
+            index.changes_since(before).is_none(),
+            "losing a distinct path leaves unknown coverage"
+        );
+    }
+
+    #[test]
+    fn exhausted_watcher_revisions_never_promise_an_empty_change_list() {
+        for lost in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let index = Index::new(IndexMode::Full, 2);
+            index.scan(&workspace(root.path()), &rules()).unwrap();
+            index.inner().revision = u64::MAX;
+            if lost {
+                index.lost_events();
+            } else {
+                index.observe(&[path("code")]);
+            }
+            assert!(index.changes_since(u64::MAX).is_none());
+            assert!(
+                !index.state().is_full(),
+                "another attachment must supply a new journal"
+            );
+        }
+    }
+
+    #[test]
+    fn a_large_tree_keeps_a_bounded_window_and_native_changes_refresh_it() {
         let root = tempfile::tempdir().unwrap();
         for n in 0..7 {
             std::fs::write(root.path().join(format!("f{n}")), "x").unwrap();
@@ -695,10 +937,36 @@ mod tests {
             IndexState::Live(LiveReason::TooManyEntries { limit: 5 })
         );
         assert_eq!(index.state().mode(), IndexMode::Live);
-        assert!(index.is_empty(), "a tree that is not indexed keeps nothing");
-        // And it stays so: nothing is kept or reported afterwards.
-        assert!(!index.refresh(&ws, &rules(), &[path("f1")]).unwrap().changed);
-        assert!(index.is_empty());
+        assert_eq!(index.len(), 5, "useful metadata survives partial coverage");
+        std::fs::write(root.path().join("recent"), "new contents").unwrap();
+        assert!(
+            index
+                .refresh(&ws, &rules(), &[path("recent")])
+                .unwrap()
+                .changed
+        );
+        assert_eq!(index.get(&path("recent")).unwrap().size, 12);
+        assert_eq!(index.len(), 5, "new paths evict old metadata incrementally");
+        std::fs::remove_file(root.path().join("recent")).unwrap();
+        index.refresh(&ws, &rules(), &[path("recent")]).unwrap();
+        assert!(index.get(&path("recent")).is_none());
+        assert!(
+            !index.state().is_full(),
+            "a window never claims whole coverage"
+        );
+    }
+
+    #[test]
+    fn losing_recursive_watches_keeps_metadata_but_never_promises_complete_coverage() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("code"), "kept").unwrap();
+        let ws = workspace(root.path());
+        let index = Index::new(IndexMode::Full, 5);
+        index.scan(&ws, &rules()).unwrap();
+        index.give_up(LiveReason::Watches);
+        assert_eq!(index.get(&path("code")).unwrap().size, 4);
+        assert!(!index.state().is_full());
+        assert!(index.changes_since(index.revision()).is_none());
     }
 
     #[test]
@@ -756,6 +1024,27 @@ mod tests {
     }
 
     #[test]
+    fn a_tiny_index_slice_stops_enumerating_a_wide_folder_before_collecting_its_siblings() {
+        let root = tempfile::tempdir().unwrap();
+        for number in 0..20_000 {
+            std::fs::write(root.path().join(format!("child-{number:05}")), b"").unwrap();
+        }
+        let ws = workspace(root.path());
+        let index = Index::new(IndexMode::Full, 3);
+        crate::walk::ENUMERATED_NAMES.with(|count| count.set(0));
+        let result = index.scan(&ws, &rules()).unwrap();
+        assert!(result.went_live);
+        assert_eq!(
+            index.state(),
+            IndexState::Live(LiveReason::TooManyEntries { limit: 3 })
+        );
+        assert!(
+            crate::walk::ENUMERATED_NAMES.with(std::cell::Cell::get) <= 4,
+            "the working slice is checked while names are read, before a sibling vector is allocated"
+        );
+    }
+
+    #[test]
     fn a_hash_is_believed_only_for_the_very_version_it_was_computed_for() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("f.txt");
@@ -793,5 +1082,31 @@ mod tests {
             None,
             "an unverifiable version never returns the earlier hash"
         );
+    }
+
+    #[test]
+    fn what_lies_below_a_path_is_read_without_the_rest_of_the_tree() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("a/b")).unwrap();
+        std::fs::create_dir_all(root.path().join("a0")).unwrap();
+        std::fs::write(root.path().join("a/one.txt"), "1").unwrap();
+        std::fs::write(root.path().join("a/b/two.txt"), "2").unwrap();
+        std::fs::write(root.path().join("a0/three.txt"), "3").unwrap();
+        std::fs::write(root.path().join("top.txt"), "t").unwrap();
+        let ws = workspace(root.path());
+        let index = Index::new(IndexMode::Full, 1000);
+        index.scan(&ws, &rules()).unwrap();
+        let below: Vec<String> = index
+            .below(&path("a"))
+            .into_iter()
+            .map(|(path, _)| path.to_string())
+            .collect();
+        assert_eq!(
+            below,
+            ["a/b", "a/b/two.txt", "a/one.txt"],
+            "a sibling that sorts right after the directory is not below it"
+        );
+        assert!(index.below(&path("a/one.txt")).is_empty());
+        assert_eq!(index.below(&RelPath::root()).len(), index.len());
     }
 }

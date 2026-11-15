@@ -7,6 +7,11 @@ its configuration. The complete defaults and field descriptions are in the
 [server configuration](../../crates/platform/config/src/server.rs) and the deployment's
 [example file](../../deploy/config/orch.toml).
 
+The bundled node's permissions live in `runtime/node/config.toml`, initialized from
+`config/node.toml` on first start. In that file, `[drivers.images] builds` permits
+Dockerfile builds together with unrestricted image and registry rules. See
+[driver policy](driver-policy.md#the-bundled-node) ([简体中文](zh-CN/driver-policy.md)).
+
 ## Runtime worker stacks
 
 ```toml
