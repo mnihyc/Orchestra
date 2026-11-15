@@ -48,6 +48,90 @@ const BATCH_PARALLEL_DEFAULT: i64 = 4;
 /// How many finished jobs of an environment its sync shows beside those that are not over.
 pub const RECENT_JOBS: i64 = 5;
 
+/// Project only the actual job's retained retry and lease decisions, without reading current defaults.
+#[must_use]
+pub fn lifecycle_wait(row: &JobRow) -> Option<orch_api_contract::workspace::JobLifecycleWait> {
+    use orch_api_contract::workspace::{JobLifecycleWait, JobWaitTime};
+    use orch_types::Time;
+    let saved = row.plan.get("lifecycle_wait");
+    let abort = row.plan.get("abort").filter(|value| !value.is_null());
+    if saved.is_none()
+        && abort.is_none()
+        && !matches!(
+            row.kind.as_str(),
+            kind::ENVIRONMENT_PROVISION
+                | kind::ENVIRONMENT_REMOVE
+                | kind::ENVIRONMENT_RECREATE
+                | kind::ENVIRONMENT_RESTART
+                | kind::ENVIRONMENT_MOVE
+                | kind::PROVIDER_PROVISION
+                | kind::PROVIDER_RECREATE
+        )
+    {
+        return None;
+    }
+    let runner = row.plan.get("runner");
+    let time = |value: Option<&Json>| {
+        value
+            .and_then(Json::as_str)
+            .and_then(|value| value.parse::<Time>().ok())
+    };
+    let recorded =
+        |value: Option<Time>| value.map_or(JobWaitTime::Unreported, |at| JobWaitTime::At { at });
+    let retry = saved.and_then(|value| value.get("retry_eligible_at"));
+    let retry_eligible_at = match retry {
+        _ if matches!(row.state.as_str(), state::CANCELLED | state::LOST) => {
+            JobWaitTime::NotApplicable
+        }
+        Some(Json::Null) => JobWaitTime::NotApplicable,
+        Some(value) => recorded(time(Some(value))),
+        None if abort.is_some() || row.state == state::FAILED => JobWaitTime::Unreported,
+        None => JobWaitTime::NotApplicable,
+    };
+    let lease_recoverable_at = if row.is_open() && row.state != state::QUEUED {
+        recorded(time(runner.and_then(|value| value.get("until"))))
+    } else {
+        JobWaitTime::NotApplicable
+    };
+    let attempted = time(saved.and_then(|value| value.get("last_attempt_at")))
+        .or_else(|| time(runner.and_then(|value| value.get("attempted_at"))));
+    let reason = saved
+        .and_then(|value| value.get("reason_code"))
+        .and_then(Json::as_str)
+        .or_else(|| {
+            abort
+                .and_then(|value| value.pointer("/failure/code"))
+                .and_then(Json::as_str)
+        });
+    Some(JobLifecycleWait {
+        phase: if abort.is_some() {
+            "cleanup".to_owned()
+        } else {
+            read_progress(row).0.phase
+        },
+        retry_eligible_at,
+        lease_recoverable_at,
+        last_attempt_at: if row.state == state::QUEUED {
+            JobWaitTime::NotApplicable
+        } else {
+            recorded(attempted)
+        },
+        reason: reason.map(orch_api_contract::messages::for_failure),
+        reason_code: reason.map(str::to_owned),
+        recovering: runner
+            .and_then(|value| {
+                value.get(if abort.is_some() {
+                    "cleanup_recovered"
+                } else {
+                    "recovered"
+                })
+            })
+            .and_then(Json::as_bool),
+        observed_at: time(runner.and_then(|value| value.get("observed_at")))
+            .max(time(saved.and_then(|value| value.get("observed_at")))),
+    })
+}
+
 // Content/capture work does not change anybody's authority. Lifecycle, retained
 // resource and capability jobs still declare the exclusive barrier before a phase.
 fn phase_scope(job_kind: &str) -> orch_db::queries::transaction_guard::Scope {
@@ -254,7 +338,6 @@ fn persistence_column(value: &str) -> Option<&'static str> {
         "error",
         "execution_revision",
         "executor",
-        "files_end_manifest",
         "id",
         "import_fidelity",
         "import_report",
@@ -1628,6 +1711,38 @@ impl Job {
         }
     }
 
+    /// A recovered phase honors its recorded retry boundary before admitting more native work.
+    async fn wait_for_retry(&self) -> Result<(), Stop> {
+        let row = self.row().await?;
+        let Some(value) = row
+            .plan
+            .pointer("/lifecycle_wait/retry_eligible_at")
+            .filter(|value| !value.is_null())
+        else {
+            return Ok(());
+        };
+        let until: orch_types::Time =
+            serde_json::from_value(value.clone()).map_err(EngineError::from)?;
+        if until.get() > self.now() {
+            let mut waiting = row.plan["lifecycle_wait"].clone();
+            waiting["waiting"] = Json::Bool(true);
+            self.amend_and_remember(Some(&json!({"lifecycle_wait":waiting})), |_, _| {})
+                .await?;
+        }
+        while until.get() > self.now() {
+            let remaining = (until.get() - self.now()).to_std().unwrap_or_default();
+            self.pause(remaining).await?;
+        }
+        let at = orch_types::Time::new(self.now());
+        self.amend_and_remember(
+            Some(&json!({"lifecycle_wait":{"retry_eligible_at":null,
+            "last_attempt_at":at,"observed_at":at,"waiting":false}})),
+            |_, _| {},
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Waits for `how_long`, ending early with the reason when the job is cancelled or lost.
     pub async fn pause(&self, how_long: Duration) -> Result<(), Stop> {
         let until = tokio::time::Instant::now() + how_long;
@@ -1664,11 +1779,15 @@ impl Job {
             let Ok(mut conn) = self.engine.inner.db.acquire().await else {
                 continue;
             };
+            let mut changed = false;
             if renewed.elapsed() >= renew_every {
                 let now = self.now();
                 let until = now + chrono::Duration::from_std(lease).unwrap_or_default();
                 match rows::claim(&mut conn, self.id, self.runner, until, now).await {
-                    Ok(true) => renewed = tokio::time::Instant::now(),
+                    Ok(true) => {
+                        renewed = tokio::time::Instant::now();
+                        changed = true;
+                    }
                     Ok(false) => {
                         self.flags.lost.store(true, Ordering::SeqCst);
                         return;
@@ -1680,6 +1799,10 @@ impl Job {
             }
             if let Ok(true) = rows::cancel_requested(&mut conn, self.id).await {
                 self.flags.cancelled.store(true, Ordering::SeqCst);
+            }
+            drop(conn);
+            if changed && let Err(error) = self.amend(|_, _| {}).await {
+                tracing::warn!(%error, job = %self.id, "the renewed job lease could not be published");
             }
         }
     }
@@ -2056,6 +2179,9 @@ impl Engine {
         if let Some(reason) = abort_reason(&row)? {
             return self.end_job(job, Some(phased.as_ref()), reason).await;
         }
+        if let Err(stop) = job.wait_for_retry().await {
+            return self.end_job(job, Some(phased.as_ref()), stop).await;
+        }
         let names: Vec<String> = read_progress(&row)
             .0
             .phases
@@ -2076,7 +2202,10 @@ impl Engine {
                 return self.end_job(job, Some(phased.as_ref()), stop).await;
             }
             let running = name.clone();
-            job.amend(move |progress, _| {
+            let at = job.now();
+            let attempt = json!({"lifecycle_wait":{"retry_eligible_at":null,
+                "last_attempt_at":orch_types::Time::new(at),"observed_at":orch_types::Time::new(at)}});
+            job.amend_and_remember(Some(&attempt), move |progress, _| {
                 progress.phase.clone_from(&running);
                 for phase in &mut progress.phases {
                     if phase.name == running {
@@ -2107,7 +2236,22 @@ impl Engine {
                     {
                         attempts += 1;
                         tracing::warn!(job = %job.id, phase = %name, message = %failure.message, "a phase failed on the system's side; it is asked again");
-                        tokio::time::sleep(self.inner.config.hosting.phase_retry_pause).await;
+                        let pause = self.inner.config.hosting.phase_retry_pause;
+                        let at = job.now();
+                        let eligible = chrono::Duration::from_std(pause)
+                            .ok()
+                            .and_then(|span| at.checked_add_signed(span))
+                            .ok_or_else(|| {
+                                EngineError::unreadable(
+                                    "the phase retry is outside the supported time range",
+                                )
+                            })?;
+                        job.remember(&json!({"lifecycle_wait":{"retry_eligible_at":orch_types::Time::new(eligible),
+                            "last_attempt_at":orch_types::Time::new(at),"reason_code":failure.code,
+                            "observed_at":orch_types::Time::new(at)}})).await?;
+                        if let Err(stop) = job.wait_for_retry().await {
+                            return self.end_job(job, Some(phased.as_ref()), stop).await;
+                        }
                     }
                     other => break other,
                 }

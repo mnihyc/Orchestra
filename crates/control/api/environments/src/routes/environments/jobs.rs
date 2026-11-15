@@ -219,6 +219,8 @@ pub(crate) async fn view_with_machine_sources(
         None
     };
     Ok(Job {
+        history_coverage: orch_engine::jobs::fork::history_coverage(row),
+        lifecycle_wait: orch_engine::jobs::runner::lifecycle_wait(row),
         call_recovery,
         id: row.id,
         kind: row.kind.clone(),

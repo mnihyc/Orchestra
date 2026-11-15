@@ -959,6 +959,7 @@ mod tests {
             environment_id: new_id(),
             snapshot_id: new_id(),
             directory: String::new(),
+            wait_for_indexing: true,
             kind: orch_link_contract::source::RecordKind::Turn,
             record_days: 1,
             max_bytes: 1024,
@@ -1218,12 +1219,12 @@ mod tests {
             "mode": "new", "native_session_ref": null, "archive": null, "history": null,
             "upto_turn_ordinal": null, "workspace_root": "/etc", "instruction_root_marker": false,
             "directory": "/etc", "cwd": "/etc", "mounts": [],
-            "model": "m", "effort": null, "params": {}, "approval_mode": "on_request",
+            "model": "m", "effort": null, "params": {}, "approval_mode": "on_request", "web_action_wait_secs": 120,
             "sandbox_mode": "workspace", "instructions": "", "memory": null,
             "arrangement": "together",
             "provider": { "path": "native", "provider_id": new_id() },
             "exec": { "executor": null, "environment_id": new_id(), "generation": 1 },
-            "mcp": [], "orch_tools": [], "raw_events": false
+            "mcp": [], "orch_tools": [], "output_capture_bytes":67108864, "raw_events": false
         }))
         .unwrap();
         let error = dispatcher
@@ -1232,6 +1233,95 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "policy.root_not_allowed");
         assert_eq!(role.seen.load(Ordering::SeqCst), 0, "the role never saw it");
+    }
+
+    struct QuietFileWork {
+        observed: Mutex<Vec<serde_json::Value>>,
+        joined: AtomicUsize,
+    }
+    #[async_trait]
+    impl RoleHandler for QuietFileWork {
+        fn role(&self) -> Role {
+            Role::Node
+        }
+        fn takes(&self) -> &'static [CommandKind] {
+            &[CommandKind::NodeMountMeasure]
+        }
+        async fn handle(&self, call: Call, _: Command) -> Result<CommandResult, CommandError> {
+            self.observed
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(call.work_deadline).unwrap());
+            call.context.cancel.cancelled().await;
+            self.joined.fetch_add(1, Ordering::SeqCst);
+            Err(CommandError::new(
+                ErrorCode::Conflict,
+                "stopped after cleanup",
+            ))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_filesystem_command_reports_the_same_captured_budget_that_cancels_and_joins_it()
+    {
+        use orch_link_contract::commands::{MountData, NodeMountMeasure, WorkReport};
+        let mut config = ConnectorConfig::default();
+        config.connector.roles = vec!["node".into()];
+        let mut dispatcher = dispatcher(config);
+        let at: chrono::DateTime<chrono::Utc> = "2026-11-15T10:00:00Z".parse().unwrap();
+        let clock = Arc::new(orch_types::ManualClock::new(at));
+        dispatcher.clock(clock.clone());
+        let work = Arc::new(QuietFileWork {
+            observed: Mutex::new(Vec::new()),
+            joined: AtomicUsize::new(0),
+        });
+        let role: Arc<dyn RoleHandler> = work.clone();
+        dispatcher.add(&role).unwrap();
+        let mount = new_id();
+        let error = dispatcher
+            .handle(
+                context(),
+                Command::NodeMountMeasure(NodeMountMeasure {
+                    driver: "test".into(),
+                    mount_id: mount,
+                    data: MountData::Volume {
+                        name: format!("orch-mount-{mount}"),
+                        storage: None,
+                    },
+                    work: Some(WorkReport {
+                        files_total: None,
+                        bytes_total: None,
+                        job_id: new_id(),
+                        phase: "measure".into(),
+                        timeout_secs: 1,
+                        timeout_policy: None,
+                    }),
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "timeout");
+        assert_eq!(
+            work.joined.load(Ordering::SeqCst),
+            1,
+            "the captured deadline still waits for native cleanup"
+        );
+        let captured = work.observed.lock().unwrap()[0].clone();
+        assert_eq!(
+            captured["accepted_at"],
+            serde_json::to_value(Time::new(at)).unwrap()
+        );
+        assert_eq!(
+            captured["at"],
+            serde_json::to_value(Time::new(at + chrono::Duration::seconds(1))).unwrap()
+        );
+        assert_eq!(captured["seconds"], 1);
+        clock.advance(chrono::Duration::hours(1));
+        assert_eq!(
+            work.observed.lock().unwrap()[0],
+            captured,
+            "a later clock or setting cannot rewrite the accepted budget"
+        );
     }
 
     #[tokio::test(start_paused = true)]
