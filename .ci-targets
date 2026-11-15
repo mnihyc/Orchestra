@@ -1,0 +1,5 @@
+test -p orch-api-core --lib
+test -p orch-api-core --test workspace_pages --test blob_housekeeping --test runtime_updates --test upload_inventory
+test -p orch-api-core --test workspace_connector --test threads_drive --test forks
+test -p orch-engine --test delivery
+test -p orch-engine --lib -- jobs::source::
