@@ -176,9 +176,22 @@ impl Use {
     /// The allowances that allow all of what is wanted together.
     #[must_use]
     pub fn allowing(&self, wanted: &options::Wanted<'_>) -> Vec<&Allowance> {
+        self.allowing_for(
+            wanted,
+            orch_access_contract::permissions::ProviderUsePurpose::Work,
+        )
+    }
+
+    /// The complete allowances that permit this use and its requested limits together.
+    #[must_use]
+    pub fn allowing_for(
+        &self,
+        wanted: &options::Wanted<'_>,
+        purpose: orch_access_contract::permissions::ProviderUsePurpose,
+    ) -> Vec<&Allowance> {
         self.each
             .iter()
-            .filter(|allowance| options::entry_allows(&allowance.provider, wanted))
+            .filter(|allowance| options::entry_allows_for(&allowance.provider, wanted, purpose))
             .collect()
     }
 
@@ -188,6 +201,18 @@ impl Use {
         self.each
             .iter()
             .any(|allowance| options::entry_allows(&allowance.provider, wanted))
+    }
+
+    /// Whether one complete allowance permits the specified use without borrowing limits from another.
+    #[must_use]
+    pub fn allows_for(
+        &self,
+        wanted: &options::Wanted<'_>,
+        purpose: orch_access_contract::permissions::ProviderUsePurpose,
+    ) -> bool {
+        self.each
+            .iter()
+            .any(|allowance| options::entry_allows_for(&allowance.provider, wanted, purpose))
     }
 
     /// The entry a turn that `allowing` allow is put down to: the nearest of them, and for a use
@@ -358,6 +383,7 @@ fn manage_of(kind: ResourceKind) -> Option<Permission> {
         ResourceKind::McpServer => Some(Permission::McpManage),
         ResourceKind::Mount => Some(Permission::MountManage),
         ResourceKind::Skill => Some(Permission::SkillManage),
+        ResourceKind::Pool => Some(Permission::PoolManage),
         ResourceKind::Environment => None,
     }
 }
@@ -875,6 +901,9 @@ async fn judge_provider(
         at,
     } = *judging;
     let wanted_options = MissingOptions {
+        purposes: Some(vec![
+            orch_access_contract::permissions::ProviderUsePurpose::Work,
+        ]),
         services: None,
         models: Some(vec![chosen.model.to_owned()]),
         efforts: chosen.effort.map(|effort| vec![effort.to_owned()]),
@@ -1028,29 +1057,46 @@ pub async fn place_of(conn: &mut Conn, environment: Id) -> Result<Whereabouts, E
         Some(machine) => orch_db::queries::environment_facts::machine_host(conn, machine).await?,
         None => None,
     };
-    Ok(Whereabouts {
-        environment: Some(environment),
-        host,
-        machine,
-    })
+    with_pool_locations(
+        conn,
+        Whereabouts {
+            pools: Vec::new(),
+            environment: Some(environment),
+            host,
+            machine,
+        },
+    )
+    .await
 }
 
 /// Where an environment that is to be made on the host `host` will be: on the host and on its machine.
 pub async fn place_of_host(conn: &mut Conn, host: Id) -> Result<Whereabouts, Error> {
-    Ok(Whereabouts {
-        environment: None,
-        host: Some(host),
-        machine: orch_db::queries::environment_facts::host_machine(conn, host).await?,
-    })
+    let machine = orch_db::queries::environment_facts::host_machine(conn, host).await?;
+    with_pool_locations(
+        conn,
+        Whereabouts {
+            pools: Vec::new(),
+            environment: None,
+            host: Some(host),
+            machine,
+        },
+    )
+    .await
 }
 
 /// Where an environment that is to be made as a directory of the machine `machine` will be.
 pub async fn place_of_machine(conn: &mut Conn, machine: Id) -> Result<Whereabouts, Error> {
-    Ok(Whereabouts {
-        environment: None,
-        host: orch_db::queries::environment_facts::machine_host(conn, machine).await?,
-        machine: Some(machine),
-    })
+    let host = orch_db::queries::environment_facts::machine_host(conn, machine).await?;
+    with_pool_locations(
+        conn,
+        Whereabouts {
+            pools: Vec::new(),
+            environment: None,
+            host,
+            machine: Some(machine),
+        },
+    )
+    .await
 }
 
 /// What a person comes to on a provider that is asked about alone, with no model, for work that
@@ -1678,4 +1724,34 @@ pub async fn check_binding_at(
         provider: verdict.grant,
         created,
     })))
+}
+
+async fn with_pool_locations(conn: &mut Conn, mut at: Whereabouts) -> Result<Whereabouts, Error> {
+    use orch_access_contract::whereabouts::{WhereKind, WhereName};
+    let batch =
+        orch_settings::get::<i64>(conn, orch_settings::Place::System, "pools.read_batch_size")
+            .await
+            .map_err(|error| Error::Stored(error.to_string()))?
+            .ok_or_else(|| Error::Stored("the pool read batch has no default".into()))?;
+    for (kind, leaf) in [
+        (
+            WhereKind::EnvironmentPool,
+            at.environment
+                .map(|id| orch_db::queries::pools::Leaf::Environment { id }),
+        ),
+        (
+            WhereKind::HostPool,
+            at.host.map(|id| orch_db::queries::pools::Leaf::Host { id }),
+        ),
+    ] {
+        if let Some(leaf) = leaf {
+            at.pools.extend(
+                orch_db::queries::pools::structural_pools(conn, &leaf, batch)
+                    .await?
+                    .into_iter()
+                    .map(|id| WhereName { kind, id }),
+            );
+        }
+    }
+    Ok(at)
 }

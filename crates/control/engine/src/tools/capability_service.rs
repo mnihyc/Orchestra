@@ -29,6 +29,7 @@ pub use accepted::{AcceptedCapabilityResult, CapabilityResultReceipt, NativeImag
 mod model;
 mod origin;
 mod recovery;
+pub(crate) use recovery::recovery_candidate_reason;
 mod recovery_binding;
 mod standalone;
 pub(crate) use origin::NativeSource;
@@ -269,6 +270,36 @@ async fn service_use(
 }
 
 impl ServiceCommand {
+    async fn admit_pool_choice(
+        &self,
+        conn: &mut Conn,
+        clock: &dyn Clock,
+    ) -> Result<bool, EngineError> {
+        let choice = if let Some(choice) = self
+            .recovery
+            .as_ref()
+            .and_then(recovery_binding::Binding::pool_choice)
+        {
+            Some(choice)
+        } else {
+            sqlx::query_scalar("SELECT id FROM pool_choices WHERE id=$1 AND target->>'type'='pool' AND source->>'kind'='call_recovery'")
+                .bind(self.command).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?
+        };
+        let Some(choice) = choice else {
+            return Ok(true);
+        };
+        crate::resource_choice::health::admit_choice(
+            conn,
+            choice,
+            self.command,
+            self.origin.place()?,
+            self.provider,
+            &self.offering,
+            self.backend.as_ref().map(|backend| &backend.reference),
+            clock.now(),
+        )
+        .await
+    }
     pub(crate) fn command_kind(&self) -> &'static str {
         match &self.model {
             Some(plan) if plan.complete => "provider.complete",
@@ -341,6 +372,14 @@ impl ServiceCommand {
             }
             return Ok(None);
         };
+        if self
+            .native()
+            .is_some_and(CommandAuthority::reads_before_fence)
+        {
+            // The native verifier has now fenced the source after its read. Keep the paid
+            // continuation's own rows in the same source-before-command order as ordinary work.
+            self.lock_source(conn).await?;
+        }
         if let Some(recovery) = &self.recovery
             && !recovery.current(conn, self).await?
         {
@@ -404,7 +443,12 @@ impl ServiceCommand {
             return Ok(None);
         }
         if self.model.is_some() {
-            return model::current(self, conn, command, clock, &origins).await;
+            let current = model::current(self, conn, command, clock, &origins).await?;
+            if current.is_some() && stored.is_none() && !self.admit_pool_choice(conn, clock).await?
+            {
+                return Ok(None);
+            }
+            return Ok(current);
         }
         let configs: BTreeMap<String, ServiceConfig> =
             serde_json::from_value(row.service_offerings)?;
@@ -472,6 +516,9 @@ impl ServiceCommand {
             if std::env::var_os("ORCH_TEST_SERVICE_TRACE").is_some() {
                 eprintln!("service_guard refusal 10");
             }
+            return Ok(None);
+        }
+        if stored.is_none() && !self.admit_pool_choice(conn, clock).await? {
             return Ok(None);
         }
         Ok(Some(origins.callers))
@@ -1190,6 +1237,23 @@ pub(crate) async fn reconcile(engine: &Engine, command: Id) -> Result<(), Engine
         deadline_at: retained.command.deadline_at,
     })? {
         return Err(EngineError::ToolCallIdentity);
+    }
+    if matches!(
+        retained.command.state.as_str(),
+        "succeeded" | "failed" | "cancelled" | "expired"
+    ) {
+        crate::resource_choice::health::outcome(
+            &mut tx,
+            command,
+            retained.command.state == "succeeded",
+            retained
+                .command
+                .error
+                .as_ref()
+                .and_then(|error| error.pointer("/details/failure")),
+            engine.inner.clock.now(),
+        )
+        .await?;
     }
     if evidence.model.is_some() {
         model::counted(engine, &mut tx, evidence, retained.command).await?;

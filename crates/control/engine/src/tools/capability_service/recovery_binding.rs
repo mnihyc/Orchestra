@@ -1,6 +1,7 @@
 //! Exact current call-rule attempt facts, conjunctive with the original tool authority.
 use super::*;
-use orch_provider_contract::calls::{Candidate, Purpose};
+use crate::calls::SelectedCandidate as Candidate;
+use orch_provider_contract::calls::Purpose;
 use orch_provider_contract::capabilities::BackendRef;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -15,6 +16,17 @@ pub(super) struct Binding {
     candidate: Option<Candidate>,
 }
 impl Binding {
+    pub(super) fn pool_choice(&self) -> Option<Id> {
+        self.candidate
+            .as_ref()
+            .filter(|candidate| {
+                matches!(
+                    candidate.intent.target,
+                    orch_provider_contract::pools::Target::Pool { .. }
+                )
+            })
+            .and_then(|candidate| candidate.choice_id)
+    }
     pub(super) fn capture(
         root: Id,
         configured: &selection::Selection,
@@ -106,7 +118,7 @@ impl Binding {
         if candidate != self.candidate {
             return Ok(false);
         }
-        Ok(crate::calls::Policy::load(conn, call.thread)
+        Ok(crate::calls::policy_for_recovery(conn, &row)
             .await?
             .rules
             .iter()

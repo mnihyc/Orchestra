@@ -29,7 +29,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const kind of ['switch', 'fo
     await page.goto(`/thread/${ACME.mainThread}`);
     await page.getByRole('button', {name: t(kind === 'switch' ? 'change.menu.switch' : 'duplicate.to'), exact: true}).click();
     const dialog = page.getByRole('dialog').filter({has: page.locator('[data-thread-change-pickers]')});
-    await expect(dialog.getByRole('combobox', {name: t('change.runs.provider'), exact: true})).toBeVisible();
+    await expect(dialog.getByRole('button', {name: new RegExp(`^${t('composer.model.chip')}`)})).toBeVisible();
     const where = dialog.getByRole('combobox', {name: t('change.where.label'), exact: true});
     await expect(where).toBeVisible();
     await expect(dialog.getByRole('button', {name: t(kind === 'switch' ? 'change.confirm.switch' : 'change.confirm.fork'), exact: true}))
@@ -70,9 +70,10 @@ for (const locale of ['en', 'zh-CN'] as const) test(`reviews an actual program s
     await dialog.getByRole('combobox', {name: label, exact: true}).click();
     await page.getByRole('option', {disabled: false}).first().click();
   };
-  await chooseFirst(t('change.runs.provider'));
-  await chooseFirst(t('change.runs.agent'));
-  await expect(dialog.getByRole('combobox', {name: t('change.runs.model'), exact: true})).toBeVisible();
+  // The provider is the model's: the first model that can be chosen chooses its provider, with the agent that goes with it.
+  await dialog.getByRole('button', {name: new RegExp(`^${t('composer.model.chip')}`)}).click();
+  await page.getByRole('menuitemradio').and(page.locator(':not([disabled])')).first().click();
+  await expect(dialog.getByRole('button', {name: new RegExp(`^${t('composer.row.agentName')}`)})).toBeVisible();
   await dialog.getByRole('combobox', {name: t('change.where.label'), exact: true}).click();
   await page.getByRole('option', {name: t('start.where.useExisting'), exact: true}).click();
   const preview = arrived(page.waitForResponse((response) => response.request().method() === 'POST'

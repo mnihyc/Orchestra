@@ -18,7 +18,7 @@ async fn a_configured_provider_failover_carries_the_interrupted_work_through_the
     )
     .await;
     let thread = rig.thread_with_history("Carry interrupted work").await;
-    rig.world.set(rig.world.topic,"calls.rules",json!([{"id":"fallback","when":{"kind":"model_refused"},"steps":[{"type":"failover","candidate":{"provider_id":rig.other_provider,"agent_id":rig.other_agent,"model":MODEL,"params":{}}},{"type":"wait","until":"person"}]}])).await;
+    rig.world.set(rig.world.topic,"calls.rules",json!([{"id":"fallback","when":{"kind":"model_refused"},"steps":[{"type":"failover","candidate":{"target":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":rig.other_provider,"offering":MODEL},"config":{}}}},"agent_id":rig.other_agent,"params":{}}},{"type":"wait","until":"person"}]}])).await;
     rig.say(thread, "Finish the work").await;
     let failed = rig.world.turn_start(thread, 1).await;
     rig.world
@@ -129,7 +129,7 @@ async fn stopping_recovery_during_a_switch_keeps_its_return_without_an_automatic
     let thread = rig
         .thread_with_history("Stop future recovery during a switch")
         .await;
-    rig.world.set(rig.world.topic,"calls.rules",json!([{"id":"fallback","when":{"kind":"model_refused"},"steps":[{"type":"failover","candidate":{"provider_id":rig.other_provider,"agent_id":rig.other_agent,"model":MODEL,"params":{}}},{"type":"wait","until":"person"}]}])).await;
+    rig.world.set(rig.world.topic,"calls.rules",json!([{"id":"fallback","when":{"kind":"model_refused"},"steps":[{"type":"failover","candidate":{"target":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":rig.other_provider,"offering":MODEL},"config":{}}}},"agent_id":rig.other_agent,"params":{}}},{"type":"wait","until":"person"}]}])).await;
     rig.say(thread, "Finish the work").await;
     let failed = rig.world.turn_start(thread, 1).await;
     rig.world

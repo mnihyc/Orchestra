@@ -9,14 +9,85 @@ use orch_access_contract::permissions::Permission;
 use orch_authz::Caller;
 use orch_db::queries::threads::{self, ThreadRow, TurnRow, thread_state};
 use orch_db::{Conn, DbError};
-use orch_provider_contract::calls::{Candidate, Cursor, Match, Purpose, Rule, Step, Until};
+use orch_provider_contract::calls::{
+    Candidate as Destination, Cursor, Match, Purpose, Rule, Step, Until,
+};
+use orch_provider_contract::{
+    capabilities::{BackendRef, OfferingRef},
+    pools::{Leaf, Target},
+};
 use orch_settings::Place;
 use orch_settings_contract::registry::keys;
 use orch_types::{Id, Json, Time};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+#[path = "calls/destinations.rs"]
+mod destinations;
 pub mod tool_pause;
+use destinations::add_pool_contribution;
+pub(crate) use destinations::{DestinationRequest, policy_for_recovery};
+
+/// The private actual outcome of a reviewed destination, retained beside its original intent.
+/// This is factual provenance; the native source and current Use still admit each effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectedCandidate {
+    pub intent: Destination,
+    pub choice_id: Option<Id>,
+    pub provider_id: Id,
+    pub model: String,
+    pub route: Option<BackendRef>,
+    pub agent_id: Option<Id>,
+    pub params: Json,
+    pub dimensions: Option<u32>,
+}
+impl SelectedCandidate {
+    fn from_leaf(
+        intent: &Destination,
+        leaf: &Leaf,
+        retained_model: &str,
+        retained_route: Option<&BackendRef>,
+        choice_id: Option<Id>,
+    ) -> Option<Self> {
+        let (provider_id, model, route) = match leaf {
+            Leaf::Model { backend } => {
+                let offering = backend.offering.as_ref()?;
+                if backend.route == "generation.model" {
+                    (offering.provider, offering.offering.clone(), None)
+                } else {
+                    (offering.provider, String::new(), Some(backend.clone()))
+                }
+            }
+            Leaf::Provider { id } if retained_route.is_some() => {
+                let mut route = retained_route?.clone();
+                route.offering.as_mut()?.provider = *id;
+                (*id, String::new(), Some(route))
+            }
+            Leaf::Provider { id } if !retained_model.is_empty() => {
+                (*id, retained_model.into(), None)
+            }
+            _ => return None,
+        };
+        let mut params = match leaf {
+            Leaf::Model { backend } if backend.route == "generation.model" => {
+                backend.config.as_object().cloned().unwrap_or_default()
+            }
+            _ => serde_json::Map::new(),
+        };
+        params.extend(intent.params.as_object()?.clone());
+        Some(Self {
+            intent: intent.clone(),
+            choice_id,
+            provider_id,
+            model,
+            route,
+            agent_id: intent.agent_id,
+            params: Json::Object(params),
+            dimensions: intent.dimensions,
+        })
+    }
+}
 
 /// The persisted recovery visible to a thread's readers.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -49,6 +120,8 @@ pub struct Recovery {
 pub struct Policy {
     /// First matching rule wins.
     pub rules: Vec<Rule>,
+    /// An authored or locked caller policy keeps precedence over a pool's reviewed contribution.
+    pub explicit_rules: bool,
     /// Automatic recoveries allowed in the rolling window.
     pub limit: i64,
     /// The rolling window's duration, in seconds.
@@ -87,6 +160,13 @@ impl Policy {
                 .ok_or_else(|| EngineError::unreadable("call recovery setting has no value"))
         };
         Ok(Self {
+            explicit_rules: {
+                let def = orch_settings_contract::registry::get(keys::CALLS_RULES)
+                    .ok_or_else(|| EngineError::unreadable("call recovery setting is missing"))?;
+                let resolved = snapshot.resolve(def);
+                resolved.source.scope != orch_settings_contract::SourceScope::Default
+                    || resolved.locked_by.is_some()
+            },
             rules: orch_provider_contract::calls::validate(&get(keys::CALLS_RULES)?)
                 .map_err(EngineError::unreadable)?,
             limit: get(keys::CALLS_REPEAT_LIMIT)?
@@ -152,6 +232,45 @@ pub async fn finish_service(
     Ok(())
 }
 
+/// The ordinary turn writer has locked and checked the exact current input/turn before this fence.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the current native input and actual execution identity remain separate"
+)]
+pub(crate) async fn admit_recovery_turn(
+    conn: &mut Conn,
+    node: Id,
+    input: Id,
+    turn: Id,
+    provider: Id,
+    model: &str,
+    now: DateTime<Utc>,
+) -> Result<bool, EngineError> {
+    let Some(row) = read(conn, node, Purpose::Agent)
+        .await?
+        .filter(|row| row.state == "running" && id(&row.context, "input_id") == Some(input))
+    else {
+        return Ok(true);
+    };
+    let Some(value) = row.context.get("candidate") else {
+        return Ok(true);
+    };
+    let candidate: SelectedCandidate = serde_json::from_value(value.clone())?;
+    if !matches!(candidate.intent.target, Target::Pool { .. }) {
+        return Ok(true);
+    }
+    if candidate.provider_id != provider || candidate.model != model {
+        return Ok(false);
+    }
+    let Some(choice) = candidate.choice_id else {
+        return Ok(false);
+    };
+    crate::resource_choice::health::admit_choice(
+        conn, choice, turn, node, provider, model, None, now,
+    )
+    .await
+}
+
 /// The selected identity of a safe-to-repeat auxiliary model request.
 pub struct ServiceCall<'a> {
     /// The place whose policy applies and whose guard is used.
@@ -179,7 +298,7 @@ pub enum ServicePlan {
         /// Stable across process loss for this attempt.
         call: Id,
         /// An explicitly configured compatible destination, if selected.
-        candidate: Option<Box<Candidate>>,
+        candidate: Option<Box<Destination>>,
     },
     /// No request may be sent until its stored due time or an explicit change.
     Paused,
@@ -209,7 +328,10 @@ pub async fn plan_service(
         let candidate = row
             .context
             .get("candidate")
-            .map(|value| serde_json::from_value::<Candidate>(value.clone()))
+            .map(|value| {
+                serde_json::from_value::<SelectedCandidate>(value.clone())
+                    .map(|candidate| candidate.intent)
+            })
             .transpose()?
             .or_else(|| match step(&row) {
                 Some(Step::Failover { candidate }) => Some(candidate),
@@ -222,7 +344,7 @@ pub async fn plan_service(
     }
     let same_choice = row.context["configured_provider"] == json!(call.provider)
         && row.context["configured_model"] == call.model;
-    let policy = Policy::load(conn, call.node).await?;
+    let policy = policy_for_recovery(conn, &row).await?;
     let retained = candidate_execution(&row.context, &row.context)
         .then(|| policy.rules.iter().find(|rule| json!(rule) == row.rule))
         .flatten();
@@ -285,11 +407,16 @@ pub async fn plan_service(
     }
     let mut candidate = None;
     if let Some(Step::Failover { candidate: next }) = step(&row) {
-        if next.route.is_some() && call.purpose.capability().is_none() {
+        if next
+            .backend()
+            .is_some_and(|backend| backend.route != "generation.model")
+            && call.purpose.capability().is_none()
+        {
             skip_step(conn, &row, "candidate_purpose", now).await?;
             return Ok(ServicePlan::Paused);
         }
         if call.purpose == Purpose::Embedding
+            && matches!(next.target, Target::Single { .. })
             && !call.dimensions.is_some_and(|dimensions| {
                 orch_provider_contract::calls::compatible_embedding(&next, call.model, dimensions)
             })
@@ -299,7 +426,7 @@ pub async fn plan_service(
         }
         candidate = Some(next);
     } else if let Some(value) = row.context.get("candidate") {
-        candidate = Some(serde_json::from_value(value.clone())?);
+        candidate = Some(serde_json::from_value::<SelectedCandidate>(value.clone())?.intent);
     }
     let attempt = if row.state == "running" {
         id(&row.context, "next_call").unwrap_or(call.root)
@@ -500,7 +627,7 @@ fn candidate_execution(previous: &Json, actual: &Json) -> bool {
     let Some(value) = previous.get("candidate") else {
         return false;
     };
-    let Ok(candidate) = serde_json::from_value::<Candidate>(value.clone()) else {
+    let Ok(candidate) = serde_json::from_value::<SelectedCandidate>(value.clone()) else {
         return false;
     };
     if actual["provider_id"] != json!(candidate.provider_id) {
@@ -571,7 +698,8 @@ async fn reserve_row(
     if !replan || context["failed_at"].as_str().is_none() {
         context["failed_at"] = json!(Time::new(now));
     }
-    let policy = Policy::load(conn, node).await?;
+    let mut policy = Policy::load(conn, node).await?;
+    add_pool_contribution(conn, &mut policy, purpose, reference, failure, &context).await?;
     let kind = failure["code"].as_str().unwrap_or("harness_error");
     let provider = context["provider_id"]
         .as_str()
@@ -614,7 +742,15 @@ async fn reserve_row(
         .map(|row| serde_json::from_value::<Cursor>(row.cursor.clone()))
         .transpose()?
         .unwrap_or_default();
-    let next = cursor.next(rule);
+    let repeat_pool = same.filter(|_|candidate_chain.is_some()).and_then(|previous|step(previous)).filter(|step|matches!(step, Step::Failover { candidate } if matches!(candidate.target,Target::Pool { .. })));
+    let next = if let Some(step) = repeat_pool {
+        cursor.attempt = cursor.attempt.checked_add(1).ok_or_else(|| {
+            EngineError::unreadable("the recovery attempt exceeds its integer representation")
+        })?;
+        Some((step, cursor.attempt))
+    } else {
+        cursor.next(rule)
+    };
     let mut action = next
         .as_ref()
         .map(|(step, attempt)| json!({"step":step,"attempt":attempt}));
@@ -810,10 +946,15 @@ pub fn presentation(row: &Recovery) -> Result<orch_api_contract::calls::CallReco
     let mut next = step(row);
     if let Some(Step::Failover { candidate }) = next.as_mut() {
         candidate.params = json!({});
-        if let Some(route) = candidate.route.as_mut() {
-            route.config = Json::Null;
-            route.offering = None;
-            route.extensions.clear();
+        if let Target::Single {
+            resource: Leaf::Model { backend },
+        } = &mut candidate.target
+        {
+            backend.config = Json::Null;
+            if backend.route != "generation.model" {
+                backend.offering = None;
+            }
+            backend.extensions.clear();
         }
     }
     Ok(orch_api_contract::calls::CallRecovery {
@@ -950,7 +1091,7 @@ pub(crate) async fn apply_override(
     {
         return Ok(());
     }
-    let candidate: Candidate = serde_json::from_value(value.clone())?;
+    let candidate: SelectedCandidate = serde_json::from_value(value.clone())?;
     settings.model = Some(candidate.model);
     if let Some(effort) = candidate.params.get("effort") {
         settings.effort = effort.as_str().map(str::to_owned);
@@ -973,6 +1114,7 @@ pub(crate) fn parameters_ready(
     opening: bool,
 ) -> bool {
     use orch_agent_contract::parameters::{ParameterApply, Resolution};
+    let features = descriptor.feature_values(&settings.features);
     params.as_object().is_some_and(|params| {
         params.iter().all(|(key, value)| {
             if key == "effort" {
@@ -992,7 +1134,7 @@ pub(crate) fn parameters_ready(
                 .is_some_and(|parameter| {
                     (parameter.apply == ParameterApply::NextTurn
                         || (opening && parameter.apply == ParameterApply::NewSession))
-                        && match parameter.resolve(context, &settings.features, Some(value)) {
+                        && match parameter.resolve(context, &features, Some(value)) {
                             Resolution::Send(sent) => sent == *value,
                             Resolution::SendNothing => value.is_null(),
                             _ => false,
@@ -1005,7 +1147,7 @@ pub(crate) fn parameters_ready(
 async fn candidate_parameters_ready(
     conn: &mut Conn,
     thread: &ThreadRow,
-    candidate: &Candidate,
+    candidate: &SelectedCandidate,
 ) -> Result<bool, EngineError> {
     use orch_agent_contract::{descriptor::Placement, parameters::Eligibility};
     use orch_db::queries::{
@@ -1074,7 +1216,7 @@ pub(crate) async fn switch_candidate(
     provider: Id,
     agent: Id,
     model: &str,
-) -> Result<Option<Candidate>, EngineError> {
+) -> Result<Option<SelectedCandidate>, EngineError> {
     let Some(row) = read(conn, node, Purpose::Agent)
         .await?
         .filter(|row| row.state == "switching" && row.context["returning"] != true)
@@ -1084,7 +1226,7 @@ pub(crate) async fn switch_candidate(
     let Some(value) = row.context.get("candidate") else {
         return Ok(None);
     };
-    let candidate: Candidate = serde_json::from_value(value.clone())?;
+    let candidate: SelectedCandidate = serde_json::from_value(value.clone())?;
     Ok((candidate.provider_id == provider
         && candidate.agent_id.is_none_or(|id| id == agent)
         && candidate.model == model)
@@ -1142,14 +1284,10 @@ pub(crate) async fn maybe_return_in(
         params = json!({});
     }
     params["effort"] = original["effort"].clone();
-    let candidate = Candidate {
-        route: None,
-        provider_id: provider,
-        model: original["model"].as_str().unwrap_or_default().to_owned(),
-        agent_id: id(&original, "agent_id"),
-        params,
-        dimensions: None,
-    };
+    let mut candidate =
+        Destination::model(provider, original["model"].as_str().unwrap_or_default());
+    candidate.agent_id = id(&original, "agent_id");
+    candidate.params = params;
     row.context["returning"] = json!(true);
     row.context["detail"] = json!("returning");
     row.context["author_id"] = json!(author);
@@ -1178,7 +1316,10 @@ async fn record_step_marker(
     if let Some(segment) = thread.current_segment_id {
         let model = if action == "skip" {
             step(row).and_then(|step| match step {
-                Step::Failover { candidate } => Some(candidate.model),
+                Step::Failover { candidate } => candidate
+                    .backend()
+                    .and_then(|backend| backend.offering.as_ref())
+                    .map(|offering| offering.offering.clone()),
                 _ => None,
             })
         } else {
@@ -1193,7 +1334,10 @@ async fn record_step_marker(
         };
         let provider = if action == "skip" {
             step(row).and_then(|step| match step {
-                Step::Failover { candidate } => Some(candidate.provider_id),
+                Step::Failover { candidate } => candidate
+                    .backend()
+                    .and_then(|backend| backend.offering.as_ref())
+                    .map(|offering| offering.provider),
                 _ => None,
             })
         } else {
@@ -1285,7 +1429,7 @@ impl Engine {
         thread: &ThreadRow,
         origin: &orch_db::queries::threads::InputRow,
         reference: Id,
-        candidate: Option<&Candidate>,
+        candidate: Option<&SelectedCandidate>,
     ) -> Result<Option<Id>, EngineError> {
         if origin.author_id.is_none()
             || origin.thread_id != thread.node_id
@@ -1639,7 +1783,7 @@ impl Engine {
                 return Ok(());
             }
             if row.context["manual_request"] != true {
-                let policy = Policy::load(unit.conn, node).await?;
+                let policy = policy_for_recovery(unit.conn, &row).await?;
                 let current = policy
                     .rules
                     .iter()
@@ -1765,6 +1909,42 @@ impl Engine {
             self.stop_recovery_in(&mut unit, &thread, &row, "author_lacks_interact")
                 .await?;
         } else if let Some(Step::Failover { candidate }) = step(&row) {
+            let attempt = crate::ids::derived(
+                "pool.recovery.choice",
+                &[row.reference.as_bytes(), row.cursor.to_string().as_bytes()],
+            );
+            let resolved = self
+                .resolve_recovery_candidate(
+                    unit.conn,
+                    &DestinationRequest {
+                        node,
+                        purpose: Purpose::Agent,
+                        root: node,
+                        attempt,
+                        retained_route: None,
+                    },
+                    serving.callers(),
+                    &candidate,
+                    row.context["model"].as_str().unwrap_or_default(),
+                )
+                .await?;
+            let Some(candidate) = resolved else {
+                if let Some(input) = id(&row.context, "input_id") {
+                    record_step_marker(
+                        &mut unit,
+                        &thread,
+                        &row,
+                        "skip",
+                        input,
+                        Some("pool_exhausted"),
+                    )
+                    .await?;
+                }
+                skip_step(unit.conn, &row, "pool_exhausted", now).await?;
+                let finished = unit.finish().await?;
+                self.commit(tx, finished).await?;
+                return Ok(());
+            };
             if !self
                 .input_candidate_allowed(
                     &mut *unit.conn,
@@ -1875,7 +2055,7 @@ impl Engine {
         conn: &mut Conn,
         node: Id,
         authority: &crate::inputs::InputCallers,
-        candidate: &Candidate,
+        candidate: &SelectedCandidate,
         purpose: Purpose,
     ) -> Result<bool, EngineError> {
         for caller in authority.callers() {
@@ -1895,7 +2075,7 @@ impl Engine {
         conn: &mut Conn,
         node: Id,
         caller: &Caller,
-        candidate: &Candidate,
+        candidate: &SelectedCandidate,
         purpose: Purpose,
     ) -> Result<bool, EngineError> {
         // Route IO is admitted by its capability's existing executor, never treated as a generation model.
@@ -1947,6 +2127,27 @@ impl Engine {
             .provider_use(
                 conn,
                 &ProviderUse {
+                    purpose: match purpose {
+                        Purpose::Agent => orch_access_contract::permissions::ProviderPurpose::Turn,
+                        Purpose::Summary => {
+                            orch_access_contract::permissions::ProviderPurpose::Summary
+                        }
+                        Purpose::Embedding => {
+                            orch_access_contract::permissions::ProviderPurpose::Embeddings
+                        }
+                        Purpose::Review => {
+                            orch_access_contract::permissions::ProviderPurpose::Review
+                        }
+                        Purpose::WebSearch => {
+                            orch_access_contract::permissions::ProviderPurpose::WebSearch
+                        }
+                        Purpose::PageFetch => {
+                            orch_access_contract::permissions::ProviderPurpose::PageFetch
+                        }
+                        Purpose::ImageGeneration => {
+                            orch_access_contract::permissions::ProviderPurpose::ImageGeneration
+                        }
+                    },
                     person: caller.user(),
                     node,
                     provider: candidate.provider_id,
@@ -1978,7 +2179,7 @@ impl Engine {
         unit: &mut Unit<'_>,
         thread: &ThreadRow,
         row: &mut Recovery,
-        candidate: &Candidate,
+        candidate: &SelectedCandidate,
     ) -> Result<(), EngineError> {
         if row.context.get("original").is_none() {
             let settings = crate::resolved::load(unit.conn, thread.node_id).await?;
@@ -2085,7 +2286,7 @@ impl Engine {
         };
         // A newly selected overlay is not active until this input is queued. Check its real destination here.
         let allowed = if let Some(candidate) = row.context.get("candidate") {
-            let candidate: Candidate = serde_json::from_value(candidate.clone())?;
+            let candidate: SelectedCandidate = serde_json::from_value(candidate.clone())?;
             self.input_candidate_allowed(
                 unit.conn,
                 thread.node_id,
@@ -2182,7 +2383,7 @@ impl Engine {
         node: Id,
         authority: crate::inputs::InputCallers,
         row: &Recovery,
-        candidate: &Candidate,
+        candidate: &SelectedCandidate,
     ) -> Result<(), EngineError> {
         let actor = authority.user();
         let captured = authority.captured().clone();

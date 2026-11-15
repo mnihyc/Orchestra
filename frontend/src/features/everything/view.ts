@@ -3,7 +3,7 @@ import type { EverythingDirection, EverythingKind, EverythingSort } from '@/gene
 import type { NavigationArrangement, RecentOrder } from '@/features/navigation/recent';
 import { readViewChoice } from '@/lib/viewChoices';
 
-export const EVERYTHING_KINDS: readonly EverythingKind[] = ['org', 'project', 'topic', 'thread', 'document', 'chat', 'environment', 'provider', 'agent', 'mcp_server', 'machine', 'host', 'mount', 'template', 'skill'];
+export const EVERYTHING_KINDS: readonly EverythingKind[] = ['org', 'project', 'topic', 'thread', 'document', 'chat', 'environment', 'provider', 'agent', 'mcp_server', 'machine', 'host', 'mount', 'template', 'skill', 'pool'];
 const SORTS: readonly EverythingSort[] = ['name', 'kind', 'created', 'created_by', 'owner', 'last_activity', 'opened', 'where', 'activity_by', 'state', 'size', 'my_access', 'tags'];
 export interface EverythingView {
   arrangement: NavigationArrangement;

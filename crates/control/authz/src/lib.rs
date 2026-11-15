@@ -62,6 +62,7 @@ pub mod options;
 pub mod orgs;
 pub mod ownership;
 pub mod pages;
+pub mod pools;
 pub mod previews;
 pub mod reach;
 pub mod requests;

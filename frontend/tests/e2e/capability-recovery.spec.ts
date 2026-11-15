@@ -8,7 +8,7 @@ const DOUBLE=`http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
 for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'] as const)for(const width of [1440,400]) {
   test(`capability recovery rule click path ${locale}/${theme}/${width}`,async({page,request},info)=>{
     await scenario();await page.setViewportSize({width,height:1000});await page.emulateMedia({colorScheme:theme,reducedMotion:'reduce'});
-    const candidate={provider_id:RUNS_ON.openAiKey,model:'',params:{},route:{route:'web_search.service-api',offering:{provider:RUNS_ON.openAiKey,offering:'public-search'},config:{}}};
+    const candidate={params:{},target:{type:'single',resource:{kind:'model',backend:{route:'web_search.service-api',offering:{provider:RUNS_ON.openAiKey,offering:'public-search'},config:{}}}}};
     const value=[{id:'web-fallback',when:{kind:'unavailable',purpose:'web_search'},steps:[{type:'failover',candidate},{type:'wait',until:'person'}]}];
     const seeded=await request.post(`${DOUBLE}/__double/day100/setting`,{data:{node:ACME.web,key:'calls.rules',value}});expect(seeded.ok()).toBe(true);
     const appearance=await request.post(`${DOUBLE}/__double/day100/appearance`,{data:{username:'ada',locale,theme}});expect(appearance.ok()).toBe(true);
