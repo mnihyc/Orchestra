@@ -1086,6 +1086,48 @@ async fn a_milestone_raised_to_the_topic_is_delivered_like_a_notice_with_its_own
 }
 
 #[tokio::test]
+async fn an_unavailable_steer_keeps_its_applied_fallback_after_the_profile_and_default_change() {
+    let world = a_world_whose_agent_takes_tools().await;
+    let sender = world.thread("Fallback sender").await;
+    let receiver = world.thread("Fallback receiver").await;
+    world.running_turn(receiver, "Keep running").await;
+    world
+        .set(world.topic, "broadcast.fallback", json!("next_turn"))
+        .await;
+    world.exec("UPDATE agents SET descriptor=jsonb_set(descriptor,'{capabilities,steer}','false'::jsonb)").await;
+    let sent = call(
+        &world,
+        sender,
+        OrchTool::Announce,
+        json!({"title":"Keep this delivery outcome"}),
+    )
+    .await;
+    assert_eq!(delivered(&sent)["queued"], 1);
+    let read = world.sync(receiver).await;
+    let input = read
+        .inputs
+        .iter()
+        .find(|input| input.source == orch_api_contract::threads::InputSource::Announcement)
+        .unwrap();
+    let recorded = serde_json::to_value(input).unwrap()["delivery_resolution"].clone();
+    assert_eq!(recorded["requested"], "steer");
+    assert_eq!(recorded["applied"], "queue");
+    assert_eq!(recorded["reason"], "steer_unavailable");
+    assert_eq!(recorded["source"]["kind"], "setting");
+    assert_eq!(recorded["source"]["value"], "next_turn");
+    world
+        .set(world.topic, "broadcast.fallback", json!("interrupt"))
+        .await;
+    world.exec("UPDATE agents SET descriptor=jsonb_set(descriptor,'{capabilities,steer}','true'::jsonb)").await;
+    let read = world.sync(receiver).await;
+    let kept = read.inputs.iter().find(|row| row.id == input.id).unwrap();
+    assert_eq!(
+        serde_json::to_value(kept).unwrap()["delivery_resolution"],
+        recorded
+    );
+}
+
+#[tokio::test]
 async fn an_announcement_reaches_a_thread_by_what_it_is_doing_and_what_the_topic_says() {
     let world = a_world_whose_agent_takes_tools().await;
     world

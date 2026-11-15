@@ -7,6 +7,8 @@ CREATE TABLE input_schedules (
     name text NOT NULL,
     target jsonb NOT NULL,
     content jsonb NOT NULL,
+    plan boolean NOT NULL,
+    delivery text NOT NULL,
     native_action jsonb,
     definition_authority jsonb,
     timing jsonb NOT NULL,
@@ -18,6 +20,7 @@ CREATE TABLE input_schedules (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone,
     CONSTRAINT input_schedules_name_check CHECK (((char_length(name) >= 1) AND (char_length(name) <= 80))),
+    CONSTRAINT input_schedules_delivery_check CHECK (delivery IN ('queue','steer','interrupt')),
     CONSTRAINT input_schedules_state_check CHECK ((state = ANY (ARRAY['active'::text, 'paused'::text, 'finished'::text, 'deleted'::text]))),
     CONSTRAINT input_schedules_pkey PRIMARY KEY (id),
     CONSTRAINT input_schedules_author_id_fkey FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -156,6 +159,7 @@ CREATE TABLE segments (
     native_session_ref text,
     background_wake boolean,
     session_configuration jsonb,
+    session_outcome jsonb,
     started_by uuid,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     ended_at timestamp with time zone,
@@ -271,6 +275,10 @@ CREATE TABLE approvals (
     decided_by uuid,
     decided_at timestamp with time zone,
     decision jsonb,
+    decision_settlement jsonb,
+    decision_delivered_at timestamp with time zone,
+    decision_delivery jsonb,
+    decision_delivery_sync boolean DEFAULT false NOT NULL,
     expires_at timestamp with time zone,
     requested_expires_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -285,6 +293,16 @@ CREATE TABLE approvals (
     CONSTRAINT approvals_requester_user_id_fkey FOREIGN KEY (requester_user_id) REFERENCES users(id)
 );
 
+CREATE INDEX approvals_settlement_due_idx ON approvals (thread_id, decided_at, id) WHERE decision_settlement IS NOT NULL;
+
+CREATE INDEX approvals_delivery_due_idx ON approvals (thread_id, decided_at, id)
+    WHERE kind='harness' AND state IN ('approved','answered','denied') AND decision_delivered_at IS NULL
+      AND thread_id IS NOT NULL AND native_ref IS NOT NULL AND decision IS NOT NULL;
+
+CREATE INDEX approvals_delivery_oldest_idx ON approvals (decided_at, id)
+    WHERE kind='harness' AND state IN ('approved','answered','denied') AND decision_delivered_at IS NULL
+      AND thread_id IS NOT NULL AND native_ref IS NOT NULL AND decision IS NOT NULL;
+
 CREATE INDEX approvals_agent_history_waiting_idx ON approvals USING btree (thread_id) WHERE (state = ANY (ARRAY['pending'::text, 'approved'::text]));
 
 CREATE INDEX approvals_item_idx ON approvals USING btree (item_id) WHERE (item_id IS NOT NULL);
@@ -296,6 +314,7 @@ CREATE UNIQUE INDEX approvals_one_open_chat_join ON approvals USING btree (objec
 CREATE UNIQUE INDEX approvals_one_open_source ON approvals USING btree (kind, object_id) WHERE ((state = 'pending'::text) AND (kind = ANY (ARRAY['plan'::text, 'input'::text])));
 
 CREATE INDEX approvals_pending_idx ON approvals USING btree (kind, node_id) WHERE (state = 'pending'::text);
+CREATE INDEX approvals_delivery_publication_idx ON approvals(thread_id,decided_at,id) WHERE decision_delivery_sync;
 
 CREATE INDEX approvals_thread_pending_idx ON approvals USING btree (thread_id) WHERE (state = 'pending'::text);
 
@@ -332,6 +351,7 @@ CREATE TABLE input_schedule_runs (
     input_id uuid,
     turn_id uuid,
     reason text,
+    outcome jsonb,
     topic_seq bigint NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     started_at timestamp with time zone,
@@ -390,6 +410,38 @@ CREATE INDEX items_execution_history_idx ON items USING btree (thread_id) WHERE 
 
 CREATE UNIQUE INDEX items_native_key ON items USING btree (segment_id, native_ref) WHERE (native_ref IS NOT NULL);
 
+-- Stream cursors and their displayed stretches commit together; full item rows are coalesced later.
+CREATE TABLE item_stream_parts (
+    item_id uuid NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    -- Provenance can outlive a purged session while its aliased item remains.
+    source_segment uuid NOT NULL,
+    field text NOT NULL CHECK (field IN ('text','summary','output')),
+    part_offset bigint NOT NULL CHECK (part_offset >= 0),
+    part_len bigint NOT NULL CHECK (part_len > 0),
+    data bytea NOT NULL,
+    captured_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    PRIMARY KEY (item_id, field, part_offset)
+);
+CREATE INDEX item_stream_parts_due_idx ON item_stream_parts (captured_at, item_id);
+
+-- Unfinished masking context is private ciphertext, never ordinary timeline text.
+CREATE TABLE item_redaction_holds (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    item_id uuid NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    field text NOT NULL CHECK (field IN ('text','summary','output')),
+    part_offset bigint NOT NULL CHECK (part_offset >= 0),
+    part_len bigint NOT NULL CHECK (part_len >= 0),
+    data bytea NOT NULL,
+    source_segment uuid NOT NULL
+);
+CREATE INDEX item_redaction_holds_item_idx ON item_redaction_holds (item_id, field, id);
+
+-- In-flight items retain their as-captured protection; rules contain private values and are encrypted.
+CREATE TABLE item_capture_masks (
+    item_id uuid PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+    rules bytea NOT NULL
+);
+
 CREATE INDEX items_parent_item_idx ON items USING btree (parent_item_id) WHERE (parent_item_id IS NOT NULL);
 
 CREATE INDEX items_pinned_idx ON items USING btree (thread_id, pinned_at) WHERE (pinned_at IS NOT NULL);
@@ -407,6 +459,18 @@ CREATE INDEX items_resource_resume_idx ON items USING btree (turn_id) WHERE ((ki
 CREATE INDEX items_resource_stop_idx ON items USING btree (((payload #>> '{data,object,id}'::text[])), ((payload #>> '{data,object,kind}'::text[])), turn_id) WHERE ((kind = 'marker'::text) AND ((payload ->> 'marker'::text) = 'resource_stopped'::text));
 
 CREATE INDEX items_search_idx ON items USING gin (thread_id, search_text gin_trgm_ops) WHERE (search_text IS NOT NULL);
+
+-- Message and child lists seek their own records without scanning command or output bodies.
+CREATE INDEX items_person_message_page_idx ON items (thread_id, continuation_id, seq_created DESC)
+    WHERE kind='user_message' AND stream='main' AND payload->>'source'='user';
+CREATE INDEX items_subagent_page_idx ON items (thread_id, continuation_id, seq_created DESC)
+    WHERE kind='tool_call' AND payload #>> '{tool,kind}'='subagent';
+CREATE INDEX items_agent_answer_turn_idx ON items (thread_id, turn_id, continuation_id, seq_created DESC)
+    WHERE kind='agent_message' AND stream='main';
+CREATE INDEX items_agent_final_turn_idx ON items (thread_id, turn_id, continuation_id, seq_created DESC)
+    WHERE kind='agent_message' AND stream='main' AND payload->>'phase'='final';
+CREATE INDEX items_file_change_turn_idx ON items (thread_id, turn_id, continuation_id, seq_created DESC)
+    WHERE kind='tool_call' AND payload #>> '{tool,kind}'='file_change';
 
 CREATE INDEX items_segment_marker_idx ON items USING btree (segment_id, ((payload ->> 'marker'::text)), seq_created) WHERE (kind = 'marker'::text);
 
@@ -515,6 +579,9 @@ CREATE TABLE threads (
     blocked_reason text,
     blocked_detail text,
     starting_step text,
+    starting_step_at timestamp with time zone,
+    starting_command text,
+    starting_behind text,
     agent_id uuid,
     provider_id uuid,
     arrangement text,
@@ -540,14 +607,15 @@ CREATE TABLE threads (
     CONSTRAINT threads_builtin_program_check CHECK (program IS NULL OR (agent_id IS NULL AND environment_id IS NULL AND program_root_org_id IS NOT NULL)),
     CONSTRAINT threads_ask_program_check CHECK (ask_root_org_id IS NULL OR (program IS NOT NULL AND program='orch')),
     CONSTRAINT threads_arrangement_check CHECK ((arrangement = ANY (ARRAY['separated'::text, 'key_separated'::text, 'credential_shared'::text, 'handed_over'::text, 'together'::text, 'control_plane'::text]))),
-    CONSTRAINT threads_blocked_reason_check CHECK ((blocked_reason = ANY (ARRAY['unbound'::text, 'agent_offline'::text, 'agent_disabled'::text, 'provider_unavailable'::text, 'provider_exhausted'::text, 'environment_unavailable'::text, 'binding_invalid'::text, 'provider_not_allowed'::text, 'model_not_set'::text, 'model_not_allowed'::text, 'quota_exceeded'::text, 'attachments'::text, 'workspace_trust'::text, 'switching'::text, 'error'::text]))),
+    CONSTRAINT threads_blocked_reason_check CHECK ((blocked_reason = ANY (ARRAY['unbound'::text, 'agent_offline'::text, 'agent_disabled'::text, 'provider_unavailable'::text, 'provider_exhausted'::text, 'environment_unavailable'::text, 'binding_invalid'::text, 'provider_not_allowed'::text, 'model_not_set'::text, 'model_not_allowed'::text, 'quota_exceeded'::text, 'attachments'::text, 'workspace_trust'::text, 'source_failed'::text, 'switching'::text, 'error'::text]))),
     CONSTRAINT threads_check CHECK (((state = 'blocked'::text) = (blocked_reason IS NOT NULL))),
     CONSTRAINT threads_check1 CHECK (((starting_step IS NULL) OR (state = 'starting'::text))),
     CONSTRAINT threads_check2 CHECK (((side_of IS NULL) OR (side_of <> node_id))),
     CONSTRAINT threads_execution_revision_check CHECK ((execution_revision > 0)),
     CONSTRAINT threads_pending_notice_preview_bounded CHECK (((jsonb_typeof(pending_notices) = 'array'::text) AND (jsonb_array_length(pending_notices) <= 64))),
     CONSTRAINT threads_side_reading_check CHECK ((side_reading = ANY (ARRAY['read_only'::text, 'approval_gated'::text, 'no_tools'::text]))),
-    CONSTRAINT threads_starting_step_check CHECK ((starting_step = ANY (ARRAY['environment'::text, 'source'::text, 'provider'::text, 'harness'::text, 'credential'::text, 'session'::text, 'files'::text, 'turn'::text]))),
+    CONSTRAINT threads_starting_step_check CHECK ((starting_step = ANY (ARRAY['environment'::text, 'source'::text, 'provider'::text, 'harness'::text, 'credential'::text, 'session'::text, 'recording'::text, 'files'::text, 'turn'::text]))),
+    CONSTRAINT threads_starting_work_check CHECK (starting_step IS NOT NULL OR (starting_step_at IS NULL AND starting_command IS NULL AND starting_behind IS NULL)),
     CONSTRAINT threads_state_check CHECK ((state = ANY (ARRAY['idle'::text, 'starting'::text, 'running'::text, 'waiting_approval'::text, 'blocked'::text]))),
     CONSTRAINT threads_pkey PRIMARY KEY (node_id),
     CONSTRAINT threads_agent_fk FOREIGN KEY (agent_id) REFERENCES agents(id),
@@ -558,6 +626,23 @@ CREATE TABLE threads (
     CONSTRAINT threads_side_of_fkey FOREIGN KEY (side_of) REFERENCES threads(node_id) ON DELETE CASCADE,
     CONSTRAINT threads_topic_id_fkey FOREIGN KEY (topic_id) REFERENCES nodes(id)
 );
+-- When a starting thread's step began, kept by the database for every writer: a step that changes starts its
+-- clock again and forgets the command and the wait noted for the step before; no step, nothing noted.
+CREATE FUNCTION orch_thread_starting_step() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.starting_step IS NULL THEN
+        NEW.starting_step_at := NULL;
+        NEW.starting_command := NULL;
+        NEW.starting_behind := NULL;
+    ELSIF OLD.starting_step IS DISTINCT FROM NEW.starting_step THEN
+        NEW.starting_step_at := now();
+        NEW.starting_command := NULL;
+        NEW.starting_behind := NULL;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER threads_starting_step BEFORE UPDATE OF starting_step ON threads FOR EACH ROW EXECUTE FUNCTION orch_thread_starting_step();
 
 CREATE INDEX thread_display_topic_page_idx ON threads USING btree (topic_id, node_id);
 
@@ -809,11 +894,10 @@ CREATE TABLE thread_goal_reports (
     outcome text,
     checked_by text,
     reason text,
-    attempts integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     decided_at timestamp with time zone,
-    CONSTRAINT thread_goal_reports_checked_by_check CHECK ((checked_by = ANY (ARRAY['helper'::text, 'agent'::text]))),
-    CONSTRAINT thread_goal_reports_outcome_check CHECK ((outcome = ANY (ARRAY['noted'::text, 'met'::text, 'not_yet'::text, 'blocked'::text]))),
+    CONSTRAINT thread_goal_reports_checked_by_check CHECK ((checked_by = ANY (ARRAY['helper'::text, 'person'::text]))),
+    CONSTRAINT thread_goal_reports_outcome_check CHECK ((outcome = ANY (ARRAY['noted'::text, 'met'::text, 'not_yet'::text, 'blocked'::text, 'unchecked'::text]))),
     CONSTRAINT thread_goal_reports_status_check CHECK ((status = ANY (ARRAY['working'::text, 'met'::text, 'blocked'::text]))),
     CONSTRAINT thread_goal_reports_pkey PRIMARY KEY (id),
     CONSTRAINT thread_goal_reports_thread_id_fkey FOREIGN KEY (thread_id) REFERENCES threads(node_id) ON DELETE CASCADE
@@ -856,7 +940,7 @@ CREATE TABLE thread_goals (
     CONSTRAINT thread_goals_max_minutes_check CHECK (((max_minutes IS NULL) OR (max_minutes >= 0))),
     CONSTRAINT thread_goals_max_turns_check CHECK (((max_turns IS NULL) OR (max_turns >= 0))),
     CONSTRAINT thread_goals_objective_check CHECK ((btrim(objective) <> ''::text)),
-    CONSTRAINT thread_goals_reason_check CHECK ((reason = ANY (ARRAY['person'::text, 'interrupted'::text, 'blocked'::text, 'failed'::text, 'turns'::text, 'minutes'::text, 'credits'::text, 'access'::text, 'archived'::text]))),
+    CONSTRAINT thread_goals_reason_check CHECK ((reason = ANY (ARRAY['person'::text, 'interrupted'::text, 'blocked'::text, 'failed'::text, 'turns'::text, 'minutes'::text, 'credits'::text, 'access'::text, 'archived'::text, 'unchecked'::text]))),
     CONSTRAINT thread_goals_retry_attempts_check CHECK ((retry_attempts >= 0)),
     CONSTRAINT thread_goals_status_check CHECK ((status = ANY (ARRAY['active'::text, 'paused'::text, 'met'::text, 'stopped'::text, 'cleared'::text]))),
     CONSTRAINT thread_goals_pkey PRIMARY KEY (id),
@@ -1101,12 +1185,16 @@ CREATE TABLE thread_inputs (
     thread_id uuid NOT NULL,
     author_id uuid,
     source text NOT NULL,
+    native_image_delivery jsonb,
+    native_image_delivery_command uuid,
     content jsonb NOT NULL,
     native_action jsonb,
     native_action_info jsonb,
     delivery text NOT NULL,
     state text DEFAULT 'pending'::text NOT NULL,
     state_detail text,
+    cancellation jsonb,
+    delivery_resolution jsonb,
     attachment_issues jsonb DEFAULT '[]'::jsonb NOT NULL,
     queue_held boolean DEFAULT false NOT NULL,
     named boolean DEFAULT false NOT NULL,
@@ -1176,6 +1264,9 @@ CREATE INDEX inputs_agent_history_waiting_idx ON thread_inputs USING btree (thre
 CREATE INDEX inputs_continuation_pending_idx ON thread_inputs USING btree (thread_id, continuation_id, "position") WHERE (state = 'pending'::text);
 
 CREATE INDEX inputs_continuation_updated_idx ON thread_inputs USING btree (thread_id, continuation_id, seq_updated);
+
+CREATE INDEX inputs_retained_history_idx ON thread_inputs (thread_id, continuation_id, seq_created, id)
+    WHERE source='user' AND state='cancelled';
 
 CREATE INDEX inputs_custody_waiting_idx ON thread_inputs USING btree (thread_id, continuation_id, created_at) INCLUDE (id) WHERE ((state = 'pending'::text) AND (NOT queue_held));
 
@@ -1327,6 +1418,14 @@ CREATE TABLE thread_reads (
 
 CREATE TRIGGER thread_read_continuation BEFORE INSERT ON thread_reads FOR EACH ROW EXECUTE FUNCTION thread_read_continuation();
 
+CREATE TABLE thread_queue_eligibility (
+    thread_id uuid PRIMARY KEY REFERENCES threads(node_id) ON DELETE CASCADE,
+    basis text NOT NULL,
+    queue_revision bigint NOT NULL,
+    state_seq bigint NOT NULL,
+    result jsonb NOT NULL
+);
+
 CREATE TABLE turns (
     id uuid NOT NULL,
     thread_id uuid NOT NULL,
@@ -1338,8 +1437,13 @@ CREATE TABLE turns (
     before_snapshot_id uuid,
     end_manifest_blob bytea,
     files_work_pending boolean DEFAULT false NOT NULL,
-    files_end_manifest jsonb,
+    files_changed integer CHECK (files_changed >= 0),
+    files_changed_paths jsonb,
+    files_changed_complete boolean,
+    recording_notice text,
+    recording_indexing jsonb,
     files_end_due boolean DEFAULT false NOT NULL,
+    files_end_sealed boolean DEFAULT false NOT NULL,
     model text NOT NULL,
     effort text,
     params jsonb DEFAULT '{}'::jsonb NOT NULL,
@@ -1352,7 +1456,10 @@ CREATE TABLE turns (
     offline_since timestamp with time zone,
     offline_machine_id uuid,
     offline_after_secs bigint,
+    offline_episode jsonb,
+    start_wait jsonb,
     interrupted_by uuid,
+    interrupted_at timestamp with time zone,
     background_wake_held boolean NOT NULL DEFAULT false,
     background_overlap boolean NOT NULL DEFAULT false,
     background_charge_to uuid REFERENCES users(id) ON DELETE SET NULL,
@@ -1429,6 +1536,35 @@ CREATE INDEX turns_unconfirmed_native_idx ON turns USING btree (thread_id, segme
 CREATE TRIGGER turns_continuation_owner BEFORE INSERT OR UPDATE OF continuation_id, thread_id, segment_id, input_id ON turns FOR EACH ROW EXECUTE FUNCTION thread_continuation_owner();
 
 CREATE TRIGGER turns_provider_trial_ended AFTER UPDATE OF state ON turns FOR EACH ROW WHEN ((new.state <> ALL (ARRAY['starting'::text, 'running'::text]))) EXECUTE FUNCTION provider_trial_ended();
+
+-- Acceptance is an enduring fact, separate from applying it and finishing its cancellation work.
+-- No reference or shared target key lets a thread writer delay another person's acknowledgement.
+CREATE TABLE thread_stops (
+    id uuid NOT NULL,
+    thread_id uuid NOT NULL,
+    turn_id uuid,
+    input_id uuid NOT NULL,
+    continuation_id uuid NOT NULL,
+    requested_by uuid NOT NULL,
+    requested_at timestamp with time zone NOT NULL,
+    applied_at timestamp with time zone,
+    cancel_preparation boolean NOT NULL DEFAULT false,
+    work_done_at timestamp with time zone,
+    CONSTRAINT thread_stops_pkey PRIMARY KEY (id)
+);
+
+-- Only admission and post-commit work update this counter; no thread-row transaction owns it.
+CREATE TABLE thread_stop_states (
+    thread_id uuid NOT NULL PRIMARY KEY,
+    version bigint NOT NULL,
+    requested_at timestamp with time zone NOT NULL
+);
+
+CREATE INDEX thread_stops_target_idx ON thread_stops USING btree (thread_id, input_id, requested_at, id);
+CREATE INDEX thread_stops_pending_idx ON thread_stops USING btree (thread_id, requested_at, id)
+    WHERE work_done_at IS NULL;
+CREATE INDEX thread_stops_apply_idx ON thread_stops USING btree (thread_id, requested_at, id)
+    WHERE applied_at IS NULL;
 
 ALTER TABLE approvals ADD CONSTRAINT approvals_turn_id_fkey FOREIGN KEY (turn_id) REFERENCES turns(id);
 
@@ -1561,3 +1697,16 @@ BEGIN
 END
 $$;
 CREATE TRIGGER ask_files_release AFTER DELETE ON ask_files FOR EACH ROW EXECUTE FUNCTION orch_release_ask_file();
+
+
+-- Bounded capture metadata pages and their frozen references use these exact keys.
+CREATE INDEX segments_history_metadata_idx ON segments(thread_id,id);
+CREATE INDEX segments_history_metadata_text_idx ON segments(thread_id,(id::text));
+CREATE INDEX inputs_history_metadata_idx ON thread_inputs(thread_id,id);
+CREATE INDEX inputs_history_metadata_text_idx ON thread_inputs(thread_id,(id::text)) WHERE state='delivered';
+CREATE INDEX approvals_history_metadata_text_idx ON approvals((id::text));
+CREATE INDEX history_cut_turn_input_idx ON thread_history_cut_rows(cut_id,(body->>'input_id')) WHERE kind='turn';
+CREATE INDEX history_cut_turn_segment_idx ON thread_history_cut_rows(cut_id,(body->>'segment_id')) WHERE kind='turn';
+-- A turn's current net diff replaces its component edits in compact history facts.
+CREATE INDEX items_turn_diff_snapshot_idx ON public.items (turn_id, segment_id, seq_updated DESC)
+    WHERE kind='marker' AND stream='main' AND payload->>'marker'='harness_changed' AND payload #>> '{data,change}'='turn_diff';

@@ -2846,6 +2846,7 @@ impl Engine {
             _ => None,
         };
         let segment = threads::SegmentRow {
+            session_outcome: None,
             id: target_segment,
             thread_id,
             continuation_id: thread.active_continuation_id,
@@ -2872,6 +2873,8 @@ impl Engine {
         // that carry the model and the effort; the lease is one for a ticket that is never used, the first
         // turn opens the session again with its own.
         let turn = threads::TurnRow {
+            offline_episode: None,
+            start_wait: None,
             id: Id::nil(),
             thread_id,
             segment_id: target_segment,
@@ -2879,7 +2882,11 @@ impl Engine {
             state: threads::turn_state::STARTING.to_owned(),
             input_id: Id::nil(),
             before_snapshot_id: None,
-            files_end_manifest: None,
+            files_changed: None,
+            files_changed_paths: None,
+            files_changed_complete: None,
+            recording_notice: None,
+            recording_indexing: None,
             end_manifest_blob: None,
             model: plan.to.model.clone(),
             effort: plan.to.effort.clone(),
@@ -2897,6 +2904,7 @@ impl Engine {
             waiting_since: None,
             waited_ms: 0,
             interrupted_by: None,
+            interrupted_at: None,
             command_cleanup: None,
             started_at: None,
             completed_at: None,
@@ -2905,6 +2913,8 @@ impl Engine {
             plan: false,
         };
         let input = threads::InputRow {
+            delivery_resolution: None,
+            native_image_delivery: None,
             id: Id::nil(),
             thread_id,
             continuation_id: thread.active_continuation_id,
@@ -2915,6 +2925,7 @@ impl Engine {
             delivery: "queue".to_owned(),
             state: threads::input_state::PENDING.to_owned(),
             state_detail: None,
+            cancellation: None,
             limit_bypass: None,
             position: "0".to_owned(),
             turn_id: None,
@@ -2922,6 +2933,7 @@ impl Engine {
             created_at: now,
             delivered_at: None,
             cancelled_by: None,
+            seq_created: 0,
             seq_updated: 0,
             attachment_issues: json!([]),
             run_as: None,
@@ -2984,6 +2996,7 @@ impl Engine {
             tools,
             capabilities,
             isolation,
+            mounts: crate::mounts::views(conn, environment.id, now).await?,
             browser_line: crate::tools::browser::preamble(conn, environment.id).await?,
             workspace_configuration: crate::trust::answer_for(
                 conn,
@@ -3003,6 +3016,7 @@ impl Engine {
             .capability_use_preview(
                 conn,
                 &crate::access::ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person: recipe.by,
                     node: thread_id,
                     provider: provider.id,
