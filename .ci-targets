@@ -1,0 +1,8 @@
+fmt
+clippy
+test -p orch-engine --lib -- jobs::runner::tests::
+test -p orch-engine --test measurement_jobs -- native_source::the_restarted_native_worker_rechecks_the_original_key_before_issuing_a_count
+test -p orch-engine --test agent_history -- the_idle_setting_removes_at_seven_days_and_zero_keeps_the_native_history
+test -p orch-engine --test connected -- a_turn_waits_for_the_attach_of_its_directory_and_runs_when_it_is_up
+test -p orch-engine --test forks -- a_registered_root_alias_forks_its_selected_files_from_cached_and_live_listings
+test -p orch-engine --test lifecycle

@@ -644,6 +644,20 @@ async fn the_idle_setting_removes_at_seven_days_and_zero_keeps_the_native_histor
     clock.advance(chrono::Duration::days(7));
     world.engine().retain_agent_history().await.unwrap();
     assert!(removed.lock().unwrap().is_empty());
+    let sync = world.sync(thread).await;
+    let segments = serde_json::to_value(&sync.segments).unwrap();
+    let shown = segments
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == json!(segment))
+        .unwrap();
+    assert_eq!(shown["native_history"]["state"], "retained");
+    assert_eq!(
+        shown["native_history"]["idle_eligible_at"]["state"],
+        "not_applicable"
+    );
+    assert_eq!(shown["native_history"]["policy_source"], "thread");
     assert!(
         rows::get(&mut world.pool.acquire().await.unwrap(), segment)
             .await
@@ -664,6 +678,22 @@ async fn the_idle_setting_removes_at_seven_days_and_zero_keeps_the_native_histor
     assert_eq!(history.removed_at, Some(clock.now()));
     assert_eq!(history.bytes, Some(4096));
     assert!(history.claim.is_none());
+    let sync = world.sync(thread).await;
+    let segments = serde_json::to_value(&sync.segments).unwrap();
+    let shown = segments
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == json!(segment))
+        .unwrap();
+    assert_eq!(shown["native_history"]["state"], "removed");
+    assert!(shown["native_history"]["removed_at"].is_string());
+    assert!(
+        common::said(&world.sync(thread).await)
+            .join("\n")
+            .contains("copper key"),
+        "native cache removal does not erase the retained conversation"
+    );
     world.shutdown().await;
 }
 
