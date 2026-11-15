@@ -563,18 +563,36 @@ impl Provision {
             &environment.config,
         )
         .await?;
+        let pool = crate::resource_choice::host::retained(&mut tx, &owner, &environment).await?;
+        let admitted = plan
+            .get("admitted_host")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .map(serde_json::from_value::<Id>)
+            .transpose()
+            .map_err(EngineError::from)?;
         let named: Option<Id> = if let Some(recovery) = plan.get("recovery") {
             serde_json::from_value(recovery["host"].clone()).map_err(EngineError::from)?
         } else {
             match previous {
                 Some(host) => Some(host),
-                None => setting(
+                None if admitted.is_some() => admitted,
+                None => setting::<orch_provider_contract::pools::Target>(
                     &mut tx,
                     SettingsPlace::Environment(environment.id),
                     keys::ENV_HOST_ID,
                 )
                 .await
-                .map_err(EngineError::from)?,
+                .map_err(EngineError::from)?
+                .map(|target| {
+                    target.single_host().ok_or_else(|| {
+                        failed(
+                            "pool_choice_missing",
+                            "the new environment has no admitted host pool choice",
+                        )
+                    })
+                })
+                .transpose()?,
             }
         };
         let minutes_idle = setting::<i64>(
@@ -602,6 +620,22 @@ impl Provision {
                 host,
             )
             .await?
+        } else if let Some(pool) = &pool {
+            crate::resource_choice::host::current(
+                &mut tx,
+                &principal,
+                &owner,
+                &environment,
+                pool.host().ok_or_else(|| {
+                    failed(
+                        "pool_choice_missing",
+                        "the admitted pool member is not a host",
+                    )
+                })?,
+            )
+            .await?
+            .into_iter()
+            .collect()
         } else {
             places::host_places_for_environment(
                 &mut tx,
@@ -625,6 +659,7 @@ impl Provision {
                 &known,
                 template.id,
                 &wanted.mounts,
+                &pool.as_ref().map_or_else(Vec::new, |pool| pool.pools()),
                 &mut listed,
             )
             .await
@@ -643,6 +678,16 @@ impl Provision {
                 "no_capacity",
                 "The selected Use entry has no remaining environment capacity.",
             ));
+        }
+        if previous.is_none()
+            && let Some(created) = &chosen.created
+        {
+            orch_db::queries::environments::record_creation_entries(
+                &mut tx,
+                environment.id,
+                &created.pool_entries,
+            )
+            .await?;
         }
         let standalone_check = if crate::environment_creation::standalone(&owner) {
             creator_authority::selected(
@@ -1829,7 +1874,7 @@ impl Provision {
                     "Recovery files and history were not verified",
                 ));
             }
-            sqlx::query("UPDATE environments SET lost_at=NULL,lost_by=NULL,loss_missing=false,removal_phase=NULL,config=jsonb_set(config,'{env.host_id}',$2),revision=revision+1 WHERE id=$1").bind(current.id).bind(json!(recipe.host)).execute(&mut *tx).await.map_err(DbError::from)?;
+            sqlx::query("UPDATE environments SET lost_at=NULL,lost_by=NULL,loss_missing=false,removal_phase=NULL,config=jsonb_set(config,'{env.host_id}',$2),revision=revision+1 WHERE id=$1").bind(current.id).bind(json!(orch_provider_contract::pools::Target::host(recipe.host))).execute(&mut *tx).await.map_err(DbError::from)?;
             crate::recovery::commit_threads(
                 job,
                 &mut tx,

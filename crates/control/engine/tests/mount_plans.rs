@@ -92,7 +92,7 @@ async fn a_fork_to_a_new_environment_lists_readonly_shared_and_private_mounts_fr
     world.set(world.topic, "env.mounts", json!(choices)).await;
     let thread = world.thread("Mounted fork").await;
     bind(&world, thread, environment).await;
-    let request = serde_json::from_value(json!({"result":"new","history":{"mode":"none"},"environment":{"new":{"name":"New mounted","template_id":template,"host_id":host.id,"files":{"mode":"none"},"home":false,"private_views":false}}})).unwrap();
+    let request = serde_json::from_value(json!({"result":"new","history":{"mode":"none"},"environment":{"new":{"name":"New mounted","template_id":template,"host_id":orch_provider_contract::pools::Target::host(host.id),"files":{"mode":"none"},"home":false,"private_views":false}}})).unwrap();
     let draft = world
         .engine()
         .draft_fork(&Caller::session(world.ada), thread, &request)
@@ -807,7 +807,7 @@ async fn a_new_environment_takes_each_mounts_default_and_leaves_off_what_its_pla
     bind(&world, thread, environment).await;
     let request = |mounts: serde_json::Value| -> ForkRequest {
         serde_json::from_value(json!({"result":"new","history":{"mode":"none"},
-            "environment":{"new":{"name":"Fated","template_id":template,"host_id":host.id,"files":{"mode":"none"},"home":false,"private_views":false}},
+            "environment":{"new":{"name":"Fated","template_id":template,"host_id":orch_provider_contract::pools::Target::host(host.id),"files":{"mode":"none"},"home":false,"private_views":false}},
             "mounts":mounts}))
         .unwrap()
     };
@@ -991,7 +991,7 @@ async fn a_plan_says_which_mcp_servers_a_new_environment_keeps_and_which_stay_be
     let thread = world.thread("Servers fork").await;
     bind(&world, thread, environment).await;
     let request: ForkRequest = serde_json::from_value(json!({"result":"new","history":{"mode":"none"},
-        "environment":{"new":{"name":"With servers","template_id":template,"host_id":host.id,"files":{"mode":"none"},"home":false,"private_views":false}}}))
+        "environment":{"new":{"name":"With servers","template_id":template,"host_id":orch_provider_contract::pools::Target::host(host.id),"files":{"mode":"none"},"home":false,"private_views":false}}}))
     .unwrap();
     let draft = world
         .engine()

@@ -174,7 +174,7 @@ async fn recovery_maker_retains_the_same_lifecycle_source_on_its_real_new_provis
     let environment = ForkEnvironment::New {
         new: orch_api_contract::forks::ForkNewEnvironment {
             home_node_id: Some(w.s.tree.topic.base.id),
-            host_id: Some(Some(host)),
+            host_id: Some(Some(orch_provider_contract::pools::Target::host(host))),
             template_id: Some(template),
             files: Some(orch_api_contract::forks::FileSelection::Nothing),
             ..Default::default()

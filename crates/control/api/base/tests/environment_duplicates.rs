@@ -85,7 +85,7 @@ impl Scene {
                 name: Some("Source workspace".into()),
                 home_node_id: Some(company.acme),
                 template_id: Some(template),
-                host_id: Some(Some(host)),
+                host_id: Some(Some(orch_provider_contract::pools::Target::host(host))),
                 config: Some(json!({"env.variables":{"MODE":"copied"}})),
                 access: Some(NewEnvironmentAccess::OnlyMe),
                 ..Default::default()
@@ -699,7 +699,7 @@ async fn both_native_environment_placements_copy_to_another_org_and_recheck_its_
                 name: Some("Initial files obey copy policy".into()),
                 home_node_id: Some(destination),
                 template_id: Some(s.template),
-                host_id: Some(Some(s.host)),
+                host_id: Some(Some(orch_provider_contract::pools::Target::host(s.host))),
                 files: Some(
                     orch_api_contract::binding::NewEnvironmentFiles::FromEnvironment {
                         from_environment: s.source,

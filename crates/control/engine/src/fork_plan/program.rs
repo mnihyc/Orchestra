@@ -14,6 +14,7 @@ pub(super) struct Request<'a> {
     pub reach: Reach,
     pub own_batch: Option<Id>,
     pub agent_access: Option<binding::BirthAgentAccess>,
+    pub pool: Option<&'a crate::resource_choice::ProviderSelection>,
 }
 
 /// Actual selected execution, independent of a later default-model setting.
@@ -297,7 +298,17 @@ async fn model(
             "The destination provider is not ready",
         );
     }
-    if !input.principal.caller().permits(Permission::ProviderUse) {
+    if let Some(pool) = input.pool
+        && !pool.matches_request(id, Some(&model))
+    {
+        return Err(PlanError::invalid(
+            "to",
+            "the actual destination differs from the accepted pool member",
+        ));
+    }
+    if !(input.principal.caller().permits(Permission::ProviderUse)
+        || input.pool.is_some() && input.principal.caller().permits(Permission::PoolUse))
+    {
         blockers.add(
             code::ACCESS,
             "this credential does not include provider.use for the requested new binding",
@@ -308,6 +319,8 @@ async fn model(
         .provider_use(
             conn,
             &ProviderUse {
+                pool: input.pool,
+                purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                 person: input.principal.user(),
                 node: place,
                 provider: id,

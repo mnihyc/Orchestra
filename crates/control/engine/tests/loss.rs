@@ -1002,7 +1002,7 @@ async fn re_creating_a_lost_provider_checks_the_callers_own_host_use_instead_of_
         .execute(&mut *tx)
         .await
         .unwrap();
-    sqlx::query("UPDATE providers SET runtime_unavailable='Its runtime was declared lost',status='offline',runtime_config=runtime_config||jsonb_build_object('runtime.template_id',$2::uuid::text,'runtime.host_id',$3::uuid::text) WHERE id=$1").bind(world.provider).bind(template).bind(target.id).execute(&mut *tx).await.unwrap();
+    sqlx::query("UPDATE providers SET runtime_unavailable='Its runtime was declared lost',status='offline',runtime_config=runtime_config||jsonb_build_object('runtime.template_id',$2::uuid::text,'runtime.host_id',jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$3::uuid::text))) WHERE id=$1").bind(world.provider).bind(template).bind(target.id).execute(&mut *tx).await.unwrap();
     for (kind, id, permission) in [
         ("provider", world.provider, "provider.manage"),
         ("template", template, "template.use"),

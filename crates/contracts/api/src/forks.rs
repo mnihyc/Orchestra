@@ -250,15 +250,15 @@ pub struct ForkNewEnvironment {
     /// The template; what its home resolves when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_id: Option<Id>,
-    /// The host: what its home resolves when left out, and wherever there is
-    /// most room when `null`.
+    /// A canonical host or host-pool target; omission inherits its home and `null` explicitly
+    /// chooses Most room. The ordinary plan retains the actual admitted placement separately.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::common::absent_or_null"
     )]
-    #[schemars(with = "Option<Id>")]
-    pub host_id: Option<Option<Id>>,
+    #[schemars(with = "Option<orch_provider_contract::pools::Target>")]
+    pub host_id: Option<Option<orch_provider_contract::pools::Target>>,
     /// Values of its own for the keys whose scope is environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<Json>,

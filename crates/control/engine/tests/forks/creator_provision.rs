@@ -43,7 +43,7 @@ impl Child {
         request.environment = Some(ForkEnvironment::New {
             new: ForkNewEnvironment {
                 template_id: Some(template),
-                host_id: Some(Some(host.id)),
+                host_id: Some(Some(orch_provider_contract::pools::Target::host(host.id))),
                 files: Some(FileSelection::Nothing),
                 ..ForkNewEnvironment::default()
             },
@@ -203,11 +203,12 @@ impl Child {
             rig.world.clock.now(),
             checkpoint.principal(),
             &orch_engine::environments::Request {
+                identity: None,
                 owner: rig.world.ada,
                 name: Some("Native child"),
                 home: rig.world.topic,
                 template: Some(template),
-                host: Some(Some(host.id)),
+                host: Some(Some(orch_provider_contract::pools::Target::host(host.id))),
                 config: &json!({}),
             },
         )

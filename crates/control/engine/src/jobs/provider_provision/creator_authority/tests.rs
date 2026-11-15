@@ -340,7 +340,7 @@ impl Fixture {
         }
         sqlx::query("UPDATE providers SET machine_id=NULL,key_machine_id=NULL,status='needs_setup',runtime_config=$2 WHERE id=$1")
             .bind(world.provider)
-            .bind(json!({"runtime.template_id":template,"runtime.host_id":host}))
+            .bind(json!({"runtime.template_id":template,"runtime.host_id":orch_provider_contract::pools::Target::host(host)}))
             .execute(&mut *tx).await?;
         if physical {
             orch_db::queries::settings::delete_secret(

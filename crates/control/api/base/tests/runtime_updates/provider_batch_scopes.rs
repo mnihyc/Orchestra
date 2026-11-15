@@ -480,7 +480,7 @@ async fn a_manage_key_does_not_receive_live_host_labels_through_a_batch_plan() {
         &world,
         &team,
         orch_settings_contract::registry::keys::RUNTIME_HOST_ID,
-        json!(destination),
+        json!(orch_provider_contract::pools::Target::host(destination)),
     )
     .await;
     let rules = vec![
@@ -580,7 +580,7 @@ async fn a_changed_selected_host_invalidates_an_ordinary_saved_batch_before_any_
         &world,
         &team,
         orch_settings_contract::registry::keys::RUNTIME_HOST_ID,
-        json!(destination),
+        json!(orch_provider_contract::pools::Target::host(destination)),
     )
     .await;
     let (status, refused) = confirm(&world, &team.c.admin.token, id).await;
