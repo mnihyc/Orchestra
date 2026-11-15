@@ -39,7 +39,7 @@ export function JobProgress({ id, environmentId, onFinished }: { id: string; env
   const refreshed = useRef<string | null>(null);
   const finished = job.data !== undefined && !['queued', 'running'].includes(job.data.state);
   const restored = job.data?.kind === 'environment_restore' && job.data.state === 'succeeded';
-  const live = useQuery({ ...environmentQuery(environmentId), enabled: restored, staleTime: 0 });
+  const live = useQuery({ ...environmentQuery(environmentId), enabled: restored });
   useEffect(() => {
     if (!finished || refreshed.current === id) return;
     refreshed.current = id;

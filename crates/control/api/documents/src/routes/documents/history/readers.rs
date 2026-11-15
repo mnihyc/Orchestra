@@ -48,8 +48,6 @@ use orch_access_contract::key_scope::KeyTargetKind;
 
 use orch_access_contract::permissions::ObjectKind;
 
-use orch_api_contract::common::Page;
-
 use orch_api_contract::common::PageQuery;
 
 use orch_api_contract::document_sources as sources;
@@ -62,11 +60,11 @@ use orch_api_contract::documents::DocumentChanges;
 
 use orch_api_contract::documents::DocumentChangesGetQuery;
 
-use orch_api_contract::documents::DocumentVersion;
-
 use orch_api_contract::documents::DocumentVersionGetReply;
 
 use orch_api_contract::documents::DocumentVersionListQuery;
+
+use orch_api_contract::documents::{DocumentHistoryRetention, DocumentVersionListReply};
 
 use orch_api_contract::nodes::DeletedInspectionQuery;
 
@@ -91,6 +89,14 @@ use orch_documents::versions::Span;
 use orch_documents::versions::Writer;
 
 use orch_types::Id;
+
+use orch_types::Time;
+
+use orch_settings::{Place, Snapshot, Wanted};
+
+use orch_settings_contract::provenance::Source;
+
+use orch_settings_contract::registry::{self, keys};
 
 use std::collections::HashMap;
 
@@ -125,6 +131,7 @@ enum Rows {
         open: bool,
         versions: Vec<history::VersionRow>,
         next: Option<String>,
+        retention: Option<RetentionRows>,
     },
     Version {
         version: history::VersionRow,
@@ -143,7 +150,28 @@ enum Rows {
     },
 }
 
+struct RetentionRows {
+    oldest: Option<Time>,
+    versions: i64,
+    bytes: i64,
+    version_source: Source<Id>,
+    byte_source: Source<Id>,
+    measured_at: Time,
+}
+
 impl Rows {
+    fn source_nodes(&self) -> Vec<Id> {
+        match self {
+            Self::List {
+                retention: Some(retention),
+                ..
+            } => [retention.version_source.node, retention.byte_source.node]
+                .into_iter()
+                .flatten()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
     fn blocks(&self) -> &[BlockRow] {
         match self {
             Self::List { .. } => &[],
@@ -185,7 +213,7 @@ struct PreparedPage {
 }
 
 enum Reply {
-    List(Page<DocumentVersion>),
+    List(DocumentVersionListReply),
     Version(DocumentVersionGetReply),
     Changes(DocumentChanges),
 }
@@ -240,7 +268,7 @@ async fn prepare(
     orch_db::queries::trace::read_scope(&reads, async {
         let row = crate::routes::documents::live(conn, document).await?;
         let rows = match query {
-            Query::List(query) => list_rows(conn, &row, query).await?,
+            Query::List(query) => list_rows(conn, &row, query, Time::new(principal.now())).await?,
             Query::Version => version_rows(conn, document, version_number(ctx)?).await?,
             Query::Changes(query) => changes_rows(conn, &principal, &row, query).await?,
         };
@@ -250,6 +278,11 @@ async fn prepare(
             Writer::Agent { thread, .. } => Some(build::WrittenLabelSource::Node(*thread)),
             Writer::User(_) => None,
         }));
+        references.extend(
+            rows.source_nodes()
+                .into_iter()
+                .map(build::WrittenLabelSource::Node),
+        );
         let (names, references) =
             read_operation::prepare_references(conn, &principal, &mut plan, document, references)
                 .await?;
@@ -339,6 +372,7 @@ async fn list_rows(
     conn: &mut Conn,
     row: &DocumentRow,
     query: DocumentVersionListQuery,
+    measured_at: Time,
 ) -> ApiResult<Rows> {
     let paging = PageQuery {
         limit: query.limit,
@@ -377,6 +411,57 @@ async fn list_rows(
         open,
         versions: shown,
         next,
+        retention: retention_rows(conn, row, measured_at).await?,
+    })
+}
+
+async fn retention_rows(
+    conn: &mut Conn,
+    row: &DocumentRow,
+    measured_at: Time,
+) -> ApiResult<Option<RetentionRows>> {
+    let defs = [keys::DOCS_VERSIONS_KEPT, keys::DOCS_HISTORY_MAX_BYTES]
+        .into_iter()
+        .map(|key| {
+            registry::get(key)
+                .ok_or_else(|| ApiError::internal("a document retention setting is absent"))
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
+    let snapshot = match Snapshot::load(conn, Place::Node(row.node_id), Wanted::Keys(&defs)).await {
+        Ok(snapshot) => snapshot,
+        Err(orch_settings::Error::NotFound) => return Ok(None),
+        Err(error) => return Err(ApiError::internal(error)),
+    };
+    let versions = snapshot.resolve(defs[0]);
+    let bytes = snapshot.resolve(defs[1]);
+    let number = |value: &Option<orch_types::Json>| {
+        value
+            .as_ref()
+            .and_then(orch_types::Json::as_i64)
+            .ok_or_else(|| ApiError::internal("a document retention allowance is not a number"))
+    };
+    Ok(Some(RetentionRows {
+        oldest: history::oldest_restorable(conn, row.id)
+            .await?
+            .map(Time::new),
+        versions: number(&versions.value)?,
+        bytes: number(&bytes.value)?,
+        version_source: versions.source,
+        byte_source: bytes.source,
+        measured_at,
+    }))
+}
+
+fn retention_source(
+    source: &Source<Id>,
+    cast: &build::Cast,
+) -> ApiResult<orch_api_contract::settings::SettingSource> {
+    Ok(orch_api_contract::settings::SettingSource {
+        scope: serde_json::from_value(
+            serde_json::to_value(source.scope).map_err(ApiError::internal)?,
+        )
+        .map_err(ApiError::internal)?,
+        node: source.node.and_then(|id| cast.node(id)),
     })
 }
 
@@ -444,7 +529,7 @@ pub(super) async fn list_get(
     ctx: Ctx,
     _query: DocumentVersionListQuery,
     (): (),
-) -> ApiResult<Page<DocumentVersion>> {
+) -> ApiResult<DocumentVersionListReply> {
     match project(ctx).await? {
         Reply::List(page) => Ok(page),
         _ => Err(ApiError::internal("the version window changed kind")),
@@ -499,6 +584,9 @@ async fn project_snapshot(
     read_operation::same_inspection_info(ctx, prepared.inspection.as_ref())?;
     let mut wanted = build::Wanted::default();
     want_writers(&mut wanted, &prepared.writers);
+    for node in prepared.rows.source_nodes() {
+        wanted.node(node);
+    }
     let allowed = prepared
         .names
         .limited
@@ -521,15 +609,29 @@ async fn project_snapshot(
             open,
             versions,
             next,
+            retention,
         } => {
             let mut items = Vec::new();
             if *open {
                 items.extend(open_span(title, *bytes, *block_count, span, &cast));
             }
             items.extend(versions.iter().map(|row| entry(row, &cast)));
-            Reply::List(Page {
+            Reply::List(DocumentVersionListReply {
                 items,
                 next_cursor: next.clone(),
+                retention: retention
+                    .as_ref()
+                    .map(|retention| -> ApiResult<_> {
+                        Ok(DocumentHistoryRetention {
+                            global_oldest_restorable: retention.oldest,
+                            effective_version_allowance: retention.versions,
+                            byte_allowance: retention.bytes,
+                            version_source: retention_source(&retention.version_source, &cast)?,
+                            byte_source: retention_source(&retention.byte_source, &cast)?,
+                            measured_at: retention.measured_at,
+                        })
+                    })
+                    .transpose()?,
             })
         }
         Rows::Version { version, blocks } => Reply::Version(DocumentVersionGetReply {

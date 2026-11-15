@@ -92,6 +92,7 @@ CREATE INDEX search_generations_org_idx ON search_generations USING btree (org_i
 CREATE TABLE search_indexes (
     org_id uuid NOT NULL,
     administration jsonb,
+    retry jsonb,
     state text DEFAULT 'idle'::text NOT NULL,
     reason text,
     detail text,
