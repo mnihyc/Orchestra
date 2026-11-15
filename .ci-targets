@@ -1,0 +1,8 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-api-core --test provider_aux_reader_scopes --test resource_lists --test hosted_environments
+test -p orch-api-core --test imports
+test -p orch-db --test imports_storage --test released_migrations
+test -p orch-engine --lib -- imports::

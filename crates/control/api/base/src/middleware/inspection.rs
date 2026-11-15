@@ -549,7 +549,10 @@ pub async fn children_in(
         .transpose()?;
     let mut entries = Vec::new();
     loop {
-        let ids:Vec<Id>=sqlx::query_scalar("SELECT id FROM nodes WHERE parent_id=$1 AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT $3").bind(parent).bind(after).bind(i64::from(MAX_LIMIT)).fetch_all(&mut *conn).await.map_err(DbError::from)?;
+        let matching = orch_db::queries::search::matching_sql("name", "$4");
+        let ids: Vec<Id> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT id FROM nodes WHERE parent_id=$1 AND ($2::uuid IS NULL OR id>$2) AND {matching} ORDER BY id LIMIT $3")))
+            .bind(parent).bind(after).bind(i64::from(MAX_LIMIT)).bind(orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or("")).like_patterns())
+            .fetch_all(&mut *conn).await.map_err(DbError::from)?;
         if ids.is_empty() {
             break;
         }

@@ -2998,26 +2998,52 @@ async fn provider_refresh(ctx: Ctx, (): (), body: api::ProviderRefreshBody) -> A
     }
     let retry = body.retry == Some(true) && row.status == "error";
     let origin = crate::sign_in::origin(&ctx);
-    let refreshed = if retry {
-        ctx.app
-            .engine
-            .refresh_provider_for_retry_in(tx, &principal, &origin, id)
-            .await
-    } else {
-        ctx.app
-            .engine
-            .refresh_provider_in(tx, &principal, &origin, id)
-            .await
-    }
-    .map_err(ApiError::internal)?;
+    // The read is the engine's and goes on whether or not this connection stays: a page that gives up after thirty
+    // seconds of silence closes it, and a read that was dropped with it would store nothing and leave its lease standing.
+    // The request waits only for the facts: it answers as soon as they are read, with the provider as it now stands, and
+    // not at all longer than the engine's refresh wait where the facts read is itself slow. The model list is another
+    // source, read on by the same task under its own lease; it stores when it ends and keeps its own time limit.
+    let engine = ctx.app.engine.clone();
+    let reader = principal.clone();
+    let (facts_read, facts) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let refreshed = match if retry {
+            engine
+                .refresh_provider_for_retry_in(tx, &reader, &origin, id)
+                .await
+        } else {
+            engine.refresh_provider_in(tx, &reader, &origin, id).await
+        } {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                let _ = facts_read.send(Err(error));
+                return;
+            }
+        };
+        // Discovery is another independent source: its refusal must not erase freshly read plan or key facts, and
+        // nobody waits for it. It stores by itself when it ends, one read at a time.
+        let discover = unreachable_provider(&refreshed).is_none()
+            || (retry && matches!(refreshed, Refreshed::Failed(_)));
+        let _ = facts_read.send(Ok(refreshed));
+        if discover && let Err(error) = engine.discover_provider_models(id).await {
+            tracing::debug!(%id,%error,"the provider's model list could not be refreshed");
+        }
+    });
+    let refreshed = match tokio::time::timeout(ctx.app.engine.refresh_wait(), facts).await {
+        Ok(Ok(read)) => read.map_err(ApiError::internal)?,
+        Ok(Err(gone)) => return Err(ApiError::internal(gone)),
+        Err(_still_reading) => {
+            let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
+            provider_for(&mut tx, &principal, id, Permission::ProviderView).await?;
+            let shown = show(&ctx, &mut tx, &principal, id).await?;
+            tx.commit().await.map_err(DbError::from)?;
+            return Ok(shown);
+        }
+    };
     if let Some(refusal) = unreachable_provider(&refreshed)
         && (!retry || !matches!(refreshed, Refreshed::Failed(_)))
     {
         return Err(refusal);
-    }
-    // Discovery is another independent source: its refusal must not erase freshly read plan or key facts.
-    if let Err(error) = ctx.app.engine.discover_provider_models(id).await {
-        tracing::debug!(%id,%error,"the provider's model list could not be refreshed");
     }
     let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
     provider_for(&mut tx, &principal, id, Permission::ProviderView).await?;
@@ -3285,14 +3311,134 @@ async fn harness_restart(ctx: Ctx, (): (), (): ()) -> ApiResult<Provider> {
     show(&ctx, &mut conn, &principal, id).await
 }
 
-/// The conversations a harness already holds, where its adapter can say; the thread that adopted
-/// one is told with it.
-async fn harness_sessions(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<api::NativeSession>> {
+/// Captured observations stay with the requesting user and the current native configuration.
+async fn harness_session_scope(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    provider: Id,
+    agent: Id,
+) -> ApiResult<String> {
+    let epoch = orch_db::queries::provider_facts::credential_epoch(conn, provider, None)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let profile = queries::agents(conn, &[agent])
+        .await?
+        .pop()
+        .ok_or_else(ApiError::not_found)?;
+    let written = serde_json::to_vec(&(
+        ctx.user()?.id(),
+        provider,
+        agent,
+        epoch,
+        &profile.harness_kind,
+        profile.machine_id,
+        &profile.profile,
+        profile.disabled,
+    ))
+    .map_err(ApiError::internal)?;
+    Ok(orch_types::Hash::of(&written).to_string())
+}
+
+async fn harness_sessions(
+    ctx: Ctx,
+    query: api::NativeSessionListQuery,
+    (): (),
+) -> ApiResult<api::NativeSessionPage> {
+    orch_api_base::collection::limit(&query.collection())?;
     let id = ctx.id("id")?;
-    let agent = {
-        let mut conn = ctx.app.db.acquire().await?;
-        harness_of(&ctx, &mut conn, id).await?
+    let mut conn = ctx.app.db.acquire().await?;
+    let agent = harness_of(&ctx, &mut conn, id).await?;
+    let scope = harness_session_scope(&ctx, &mut conn, id, agent).await?;
+    let idle = setting::<u64>(
+        &mut conn,
+        Place::System,
+        keys::API_DISCOVERY_CACHE_IDLE_SECONDS,
+    )
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(|| ApiError::internal("the discovery expiry setting has no value"))?;
+    let budget = setting::<u64>(&mut conn, Place::System, keys::API_DISCOVERY_CACHE_BYTES)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::internal("the discovery cache setting has no value"))?;
+    drop(conn);
+    let idle = (idle > 0).then_some(std::time::Duration::from_secs(idle));
+    let captured = if let Some(source) = query.source {
+        ctx.app
+            .cache
+            .native_sessions()
+            .get(source, &scope, idle, std::time::Instant::now())
+            .ok_or_else(|| {
+                ApiError::invalid(
+                    "source",
+                    "the captured source expired or changed; read a fresh first page",
+                )
+            })?
+    } else {
+        if query.cursor.is_some() {
+            return Err(ApiError::invalid(
+                "source",
+                "continue the source returned by the first page",
+            ));
+        }
+        let sessions = discover_harness_sessions(&ctx, id, agent).await?;
+        ctx.app
+            .cache
+            .native_sessions()
+            .remember(
+                &scope,
+                sessions,
+                usize::try_from(budget).unwrap_or(usize::MAX),
+                idle,
+                std::time::Instant::now(),
+            )
+            .map_err(ApiError::internal)?
     };
+    let page = orch_api_base::collection::snapshot(
+        &query.collection(),
+        &format!("native-sessions:{}", captured.id),
+        captured.rows.iter().collect(),
+        |row: &&api::NativeSession| {
+            (
+                row.updated_at
+                    .map_or(i64::MAX, |at| at.unix_millis().saturating_neg()),
+                row.native_session_ref.clone(),
+            )
+        },
+        |row| {
+            format!(
+                "{} {}",
+                row.title.as_deref().unwrap_or(""),
+                row.cwd.as_deref().unwrap_or("")
+            )
+        },
+        false,
+    )?;
+    let mut sessions: Vec<api::NativeSession> = page.items.into_iter().cloned().collect();
+    let references: Vec<String> = sessions
+        .iter()
+        .map(|row| row.native_session_ref.clone())
+        .collect();
+    let mut conn = ctx.app.db.acquire().await?;
+    let adopted: HashMap<String, Id> = thread_rows::adopting_threads(&mut conn, &references)
+        .await?
+        .into_iter()
+        .collect();
+    for row in &mut sessions {
+        row.adopted_thread_id = adopted.get(&row.native_session_ref).copied();
+    }
+    Ok(api::NativeSessionPage {
+        items: sessions,
+        next_cursor: page.next_cursor,
+        source: captured.id,
+    })
+}
+
+async fn discover_harness_sessions(
+    ctx: &Ctx,
+    id: Id,
+    agent: Id,
+) -> ApiResult<Vec<api::NativeSession>> {
     let found = ctx
         .app
         .engine
@@ -3327,7 +3473,7 @@ async fn harness_sessions(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<api::Native
             ));
         }
     };
-    let mut sessions: Vec<api::NativeSession> = listed
+    let sessions: Vec<api::NativeSession> = listed
         .into_iter()
         .map(|each| {
             serde_json::from_value(each).map_err(|error| {
@@ -3335,18 +3481,6 @@ async fn harness_sessions(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<api::Native
             })
         })
         .collect::<ApiResult<_>>()?;
-    let references: Vec<String> = sessions
-        .iter()
-        .map(|each| each.native_session_ref.clone())
-        .collect();
-    let mut conn = ctx.app.db.acquire().await?;
-    let adopted: HashMap<String, Id> = thread_rows::adopting_threads(&mut conn, &references)
-        .await?
-        .into_iter()
-        .collect();
-    for each in &mut sessions {
-        each.adopted_thread_id = adopted.get(&each.native_session_ref).copied();
-    }
     Ok(sessions)
 }
 
