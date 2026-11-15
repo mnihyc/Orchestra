@@ -575,6 +575,7 @@ impl Engine {
                         row.id,
                         &program,
                         None,
+                        None,
                         &format!("history-removed:{command}"),
                     ),
                 )

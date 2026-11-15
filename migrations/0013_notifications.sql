@@ -276,3 +276,14 @@ CREATE TABLE subscriptions (
     CONSTRAINT subscriptions_node_id_fkey FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE,
     CONSTRAINT subscriptions_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+
+-- Recipient work owns only this private receipt; approval and thread writers never wait for its rows.
+CREATE TABLE approval_notification_settlements (
+    id uuid NOT NULL PRIMARY KEY,
+    approval_id uuid NOT NULL,
+    settled_at timestamp with time zone NOT NULL,
+    done_at timestamp with time zone
+);
+CREATE INDEX approval_notification_settlements_pending_idx
+    ON approval_notification_settlements USING btree (settled_at, id) WHERE done_at IS NULL;

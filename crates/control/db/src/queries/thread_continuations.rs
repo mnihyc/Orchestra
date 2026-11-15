@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use orch_types::{Hash, Id, Seq};
 
 pub mod reading;
+pub mod retained;
 
 pub const JOB_KIND: &str = "thread_continuation";
 

@@ -31,19 +31,41 @@ async fn the_default_keeps_the_native_turn_waiting_without_an_implicit_deadline(
     let kept = episode(&world, start.turn_id).await;
     assert_eq!(kept.after_secs, None);
     assert!(!kept.expired(clock.now() + chrono::Duration::days(365_000)));
+    let read = world.sync(thread).await;
+    let recorded = serde_json::to_value(
+        read.turns
+            .iter()
+            .find(|turn| turn.id == start.turn_id)
+            .unwrap(),
+    )
+    .unwrap()["offline_episode"]
+        .clone();
+    assert_eq!(recorded["deadline"]["kind"], "indefinite");
+    assert_eq!(recorded["began_at"], json!(Time::new(kept.since)));
+    assert_eq!(recorded["policy_source"], "default");
+    world.set(thread, DEADLINE, json!(10)).await;
+    world
+        .engine()
+        .machine_offline(world.machine_id)
+        .await
+        .unwrap();
+    world.restart_api().await;
     clock.advance(chrono::Duration::seconds(20));
     world.engine().kick();
     meanwhile(Duration::from_millis(200)).await;
     assert_eq!(world.turn_state(start.turn_id).await, "running");
-    assert!(
-        world
-            .sync(thread)
-            .await
-            .thread
-            .blocked
-            .unwrap()
-            .offline_deadline
-            .is_none()
+    let read = world.sync(thread).await;
+    let after = serde_json::to_value(
+        read.turns
+            .iter()
+            .find(|turn| turn.id == start.turn_id)
+            .unwrap(),
+    )
+    .unwrap()["offline_episode"]
+        .clone();
+    assert_eq!(
+        after, recorded,
+        "a later setting edit and a new API cannot invent a deadline for this captured outage"
     );
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -56,18 +78,19 @@ async fn a_retained_offline_deadline_ends_the_same_turn_once_through_the_native_
     world.machine.handler.hold(CommandKind::TurnInterrupt);
     away(&world, thread).await;
     let kept = episode(&world, start.turn_id).await;
-    let shown = world
-        .sync(thread)
-        .await
-        .thread
-        .blocked
-        .unwrap()
-        .offline_deadline
-        .unwrap();
-    assert_eq!(shown.turn_id, start.turn_id);
-    assert_eq!(shown.after_seconds, 10);
-    assert_eq!(shown.since, Time::new(kept.since));
-    assert_eq!(shown.at, kept.at().map(Time::new));
+    let read = world.sync(thread).await;
+    let shown = serde_json::to_value(
+        read.turns
+            .iter()
+            .find(|turn| turn.id == start.turn_id)
+            .unwrap(),
+    )
+    .unwrap()["offline_episode"]
+        .clone();
+    assert_eq!(shown["deadline"]["kind"], "finite");
+    assert_eq!(shown["deadline"]["after_seconds"], 10);
+    assert_eq!(shown["began_at"], json!(Time::new(kept.since)));
+    assert_eq!(shown["deadline"]["at"], json!(kept.at().map(Time::new)));
     clock.advance(chrono::Duration::seconds(5));
     // A changed setting affects the next outage; duplicate delivery does not reset this promise.
     world.set(thread, DEADLINE, json!(0)).await;
