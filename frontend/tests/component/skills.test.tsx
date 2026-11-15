@@ -10,7 +10,7 @@ import { ApiError } from '@/api/client';
 import type * as SkillsApi from '@/api/skills';
 import { SkillScreen } from '@/features/resources/skills/Skill';
 import { SkillsSettingChoice, SkillsSummary } from '@/features/settings/SkillsChoice';
-import type { ResourceAccess, Skill, SkillDraft, SkillVersion, SkillVersionInfo } from '@/generated/api-types';
+import type { FactTarget, ResourceAccess, ResourceImpact, Skill, SkillDraft, SkillVersion, SkillVersionInfo } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { ADA } from '../doubles/chat-rows';
 import { show } from './support';
@@ -35,7 +35,8 @@ const draft: SkillDraft = { info: draftInfo, files: [
 const texts: Record<string, string> = { 'SKILL.md': '---\nname: report-writer\ndescription: Writes reports.\n---\n', 'scripts/report.sh': '#!/bin/sh\necho report\n' };
 
 const current = vi.hoisted(() => ({ skill: undefined as unknown as Skill }));
-const calls = vi.hoisted(() => ({ put: vi.fn(), publish: vi.fn(), reimport: vi.fn(), update: vi.fn() }));
+const calls = vi.hoisted(() => ({ put: vi.fn(), publish: vi.fn(), reimport: vi.fn(), update: vi.fn(), impact:vi.fn<(target:FactTarget)=>Promise<ResourceImpact>>() }));
+vi.mock('@/api/resource-impact',()=>({resourceImpactQuery:(target:FactTarget)=>({queryKey:['skill-impact',target],queryFn:()=>calls.impact(target),retry:false})}));
 vi.mock('@/api/skills', async (load) => {
   const actual = await load<typeof SkillsApi>();
   return { ...actual,
@@ -54,7 +55,7 @@ vi.mock('@/ui/CodeView', () => ({ CodeView: ({ text, label, onChange, readOnly }
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), useNavigate: () => vi.fn(), useLocation: () => ({ pathname: '/resources/skills/skill', searchStr: '' }),
   Link: ({ children, className }: { children: ReactNode; className?: string }) => <a className={className}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/features/resources/ResourceAccess', () => ({ ResourceAccess: () => <p>access-page</p> }));
 vi.mock('@/shell/Page', async (load) => ({ ...await load<object>(), Page: ({ children }: { children: ReactNode }) => <main>{children}</main>,
@@ -65,7 +66,13 @@ function draw(content: ReactNode) {
   return show(<QueryClientProvider client={client}>{content}</QueryClientProvider>);
 }
 
-beforeEach(() => { vi.clearAllMocks(); current.skill = skill; });
+beforeEach(() => { vi.clearAllMocks(); current.skill = skill;
+  const empty={count:0,threads:0,visible:[],hidden:0,since:null};
+  calls.impact.mockResolvedValue({target:{object:{kind:'skill',id:skill.id},model_id:null},name:skill.name,stopping:false,application_complete:true,
+    applications:[{when:'before_next_turn',object_kind:'thread',count:3,visible:[],hidden:3,apply:null,apply_targets:[]}],
+    facts:{subject:{kind:'resource',object:{kind:'skill',id:skill.id}},as_of:'2026-10-22T00:00:00Z',dependents:[],dependents_complete:true,uses:null},
+    activity:{running:empty,waiting:empty,stopped:empty}});
+});
 afterEach(async () => { cleanup(); await setLocale('en'); });
 
 it.each(['en', 'zh-CN'] as const)('shows the latest version, where it came from and its files, with Update for a directory it was read from (%s)', async (locale) => {
@@ -78,6 +85,17 @@ it.each(['en', 'zh-CN'] as const)('shows the latest version, where it came from 
   expect(screen.getByText(i18n.t('resourceDetails.skill.fileCount', { count: 2 }), { exact: false })).toBeVisible();
   expect(await screen.findByRole('button', { name: /scripts\/report\.sh/ })).toBeVisible();
   expect(screen.getByRole('button', { name: i18n.t('resourceDetails.skill.reimport') })).toBeVisible();
+});
+
+it.each(['en','zh-CN'] as const)('reviews the native next-turn count before switching a skill off (%s)',async(locale)=>{
+  await setLocale(locale); calls.update.mockResolvedValue({...skill,enabled:false});
+  draw(<SkillScreen id="skill"/>);
+  await userEvent.click(await screen.findByRole('switch',{name:i18n.t('resourceDetails.on')}));
+  expect(calls.update).not.toHaveBeenCalled();
+  const dialog=await screen.findByRole('dialog');
+  expect(await within(dialog).findByText(locale==='en'?'Before the next turn · 3 threads':'下一轮开始前 · 3 个线程')).toBeVisible();
+  await userEvent.click(within(dialog).getByRole('button',{name:i18n.t('resources.act.disable')}));
+  await waitFor(()=>expect(calls.update).toHaveBeenCalledExactlyOnceWith(skill.id,{enabled:false,expected_revision:skill.revision}));
 });
 
 it('keeps the draft private and explains Update to whoever only sees the skill', async () => {

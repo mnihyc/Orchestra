@@ -8,28 +8,28 @@ beforeEach(() => localStorage.clear());
 
 describe('unsaved text', () => {
   it('is kept for its person alone, put back, and removed when it is saved or discarded', () => {
-    keepUnsaved('ada', 'env', 'web/a.ts', { base: 'h1', text: 'typed' }, 1_000);
-    expect(readUnsaved('ada', 'env', 'web/a.ts', 2_000)).toEqual({ base: 'h1', text: 'typed', at: 1_000 });
+    keepUnsaved('ada', 'env', 'web/a.ts', null, { base: 'h1', text: 'typed' }, 1_000);
+    expect(readUnsaved('ada', 'env', 'web/a.ts', null, 2_000)).toEqual({ base: 'h1', text: 'typed', at: 1_000 });
     // Another person at the same browser never sees it.
-    expect(readUnsaved('grace', 'env', 'web/a.ts', 2_000)).toBeNull();
+    expect(readUnsaved('grace', 'env', 'web/a.ts', null, 2_000)).toBeNull();
     expect(countUnsaved('ada', 2_000)).toBe(1);
-    forgetUnsaved('ada', 'env', 'web/a.ts');
-    expect(readUnsaved('ada', 'env', 'web/a.ts', 2_000)).toBeNull();
+    forgetUnsaved('ada', 'env', 'web/a.ts', null);
+    expect(readUnsaved('ada', 'env', 'web/a.ts', null, 2_000)).toBeNull();
   });
 
   it('is not kept beyond seven days, which is longer than a weekend away and short enough that forgotten text does not sit on a machine', () => {
-    keepUnsaved('ada', 'env', 'a.ts', { base: null, text: 'old' }, 0);
-    expect(readUnsaved('ada', 'env', 'a.ts', UNSAVED_KEPT_MS)).not.toBeNull();
+    keepUnsaved('ada', 'env', 'a.ts', null, { base: null, text: 'old' }, 0);
+    expect(readUnsaved('ada', 'env', 'a.ts', null, UNSAVED_KEPT_MS)).not.toBeNull();
     expect(countUnsaved('ada', UNSAVED_KEPT_MS + 1)).toBe(0);
-    expect(readUnsaved('ada', 'env', 'a.ts', UNSAVED_KEPT_MS + 1)).toBeNull();
+    expect(readUnsaved('ada', 'env', 'a.ts', null, UNSAVED_KEPT_MS + 1)).toBeNull();
     // Reading it found it too old, and it was removed.
     expect(localStorage.length).toBe(0);
   });
 
   it('of nobody signed in is not kept at all', () => {
-    keepUnsaved(null, 'env', 'a.ts', { base: null, text: 'x' });
+    keepUnsaved(null, 'env', 'a.ts', null, { base: null, text: 'x' });
     expect(localStorage.length).toBe(0);
-    expect(readUnsaved(null, 'env', 'a.ts')).toBeNull();
+    expect(readUnsaved(null, 'env', 'a.ts', null)).toBeNull();
   });
 });
 

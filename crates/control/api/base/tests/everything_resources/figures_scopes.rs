@@ -67,6 +67,171 @@ async fn impact(world: &World, token: &str, target: &FactTarget) -> RawReply {
         .send_bytes()
         .await
 }
+
+fn application<'a>(value: &'a Json, when: &str, kind: &str) -> &'a Json {
+    value["applications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["when"] == when && group["object_kind"] == kind)
+        .expect("the native application group must be present")
+}
+
+async fn delivered(scene: &rig::Scene, thread: Id, resources: Json) -> Id {
+    let segment = new_id();
+    let mut conn = scene.rig.world.conn().await;
+    sqlx::query("INSERT INTO segments(id,thread_id,ordinal,agent_id,provider_id,environment_id,env_generation,arrangement,credential_path,native_session_ref,seq_updated,continuation_id,delivered_resources) SELECT $1,t.node_id,COALESCE((SELECT max(ordinal) FROM segments WHERE thread_id=t.node_id),0)+1,t.agent_id,t.provider_id,t.environment_id,1,t.arrangement,'native','native-application-fixture',1,t.active_continuation_id,$3 FROM threads t WHERE t.node_id=$2")
+        .bind(segment).bind(thread).bind(resources).execute(&mut *conn).await.unwrap();
+    sqlx::query("UPDATE threads SET current_segment_id=$2 WHERE node_id=$1")
+        .bind(thread)
+        .bind(segment)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    segment
+}
+
+#[tokio::test]
+async fn tool_and_skill_changes_count_current_native_deliveries_once_and_keep_hidden_thread_names_private()
+ {
+    let scene = rig::Scene::without_supervisor().await;
+    let world = &scene.rig.world;
+    let first = scene.thread_by(&scene.ada, "First receiving thread").await;
+    let second = scene.thread_by(&scene.ada, "Second receiving thread").await;
+    let home = scene.tree.org.base.id;
+    let server = resource(world, &scene.ada, home, "mcp_server", "application-tools").await;
+    let (skill, version) =
+        super::library_people_scopes::skill_version(world, &scene.ada, home, "application-skill")
+            .await;
+    let resources = json!({"state":"open","mcp":[server],"skills":[version]});
+    delivered(&scene, first.base.id, resources.clone()).await;
+    let second_segment = delivered(&scene, second.base.id, resources).await;
+    for (kind, id) in [(ObjectKind::McpServer, server), (ObjectKind::Skill, skill)] {
+        let input = FactTarget {
+            object: ObjectRef { kind, id },
+            model_id: None,
+        };
+        let limited = key(
+            world,
+            scene.ada.id(),
+            vec![
+                rule("ResourceImpactRead", kind.as_str(), id, "self"),
+                rule("ResourceImpactRead", "thread", first.base.id, "self"),
+            ],
+        )
+        .await;
+        let value: Json = accepted(impact(world, &limited, &input).await);
+        assert_eq!(value["application_complete"], true);
+        let later = application(&value, "before_next_turn", "thread");
+        assert_eq!(later["count"], 2);
+        assert_eq!(later["hidden"], 1);
+        assert_eq!(later["visible"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            later["visible"][0]["object"]["id"],
+            first.base.id.to_string()
+        );
+        assert!(
+            !serde_json::to_string(&value)
+                .unwrap()
+                .contains("Second receiving thread")
+        );
+        if kind == ObjectKind::McpServer {
+            assert_eq!(application(&value, "now", "thread")["count"], 2);
+        }
+    }
+    sqlx::query("UPDATE segments SET delivered_resources=jsonb_set(delivered_resources,'{state}','\"closed\"') WHERE id=$1")
+        .bind(second_segment).execute(&world.db.pool).await.unwrap();
+    let input = FactTarget {
+        object: ObjectRef {
+            kind: ObjectKind::McpServer,
+            id: server,
+        },
+        model_id: None,
+    };
+    let value: Json = accepted(impact(world, &scene.ada.token, &input).await);
+    assert_eq!(application(&value, "now", "thread")["count"], 1);
+    assert_eq!(
+        application(&value, "before_next_turn", "thread")["count"],
+        1
+    );
+}
+
+#[tokio::test]
+async fn mount_and_template_changes_name_only_running_environments_with_unapplied_inputs() {
+    let scene = rig::Scene::without_supervisor().await;
+    let world = &scene.rig.world;
+    let home = scene.tree.org.base.id;
+    let mount = resource(world, &scene.ada, home, "mount", "application-mount").await;
+    let template = resource(world, &scene.ada, home, "template", "Application template").await;
+    let host = resource(world, &scene.ada, home, "host", "Application host").await;
+    let running = scene.on.environment;
+    let stopped = resource(
+        world,
+        &scene.ada,
+        home,
+        "environment",
+        "Already stopped environment",
+    )
+    .await;
+    for (id, state) in [(running, "running"), (stopped, "stopped")] {
+        sqlx::query("UPDATE environments SET status=$2,template_id=$3,facts=jsonb_set(facts,'{mounts}',$4) WHERE id=$1")
+            .bind(id).bind(state).bind(template).bind(json!([{"mount_id":mount,"state":"attached"}]))
+            .execute(&world.db.pool).await.unwrap();
+    }
+    // A live fact and a native volume are two observations of the same affected environment.
+    let runtime = new_id();
+    sqlx::query("INSERT INTO runtimes(id,kind,host_id,environment_id,unit_name,driver,template_id,spec_hash,state,volumes) VALUES($1,'environment',$2,$3,$4,'test',$5,decode(repeat('00',32),'hex'),'running',$6)")
+        .bind(runtime).bind(host).bind(running).bind(format!("application-{runtime}")).bind(template)
+        .bind(json!({(format!("over:{mount}")):"native-volume"})).execute(&world.db.pool).await.unwrap();
+    sqlx::query("INSERT INTO runtime_resource_inputs(runtime_id,template_fingerprint,mount_fingerprints,mount_command_at,mount_command_id,recorded_at) VALUES($1,$2,$3,$4,$5,$4)")
+        .bind(runtime).bind("1".repeat(64)).bind(json!({(mount.to_string()):"2".repeat(64)}))
+        .bind(world.now()).bind(new_id()).execute(&world.db.pool).await.unwrap();
+    for (kind, id) in [(ObjectKind::Mount, mount), (ObjectKind::Template, template)] {
+        let input = FactTarget {
+            object: ObjectRef { kind, id },
+            model_id: None,
+        };
+        let limited = key(
+            world,
+            scene.ada.id(),
+            vec![rule("ResourceImpactRead", kind.as_str(), id, "self")],
+        )
+        .await;
+        let value: Json = accepted(impact(world, &limited, &input).await);
+        let group = application(&value, "updated", "environment");
+        assert_eq!(group["count"], 1);
+        assert_eq!(group["hidden"], 1);
+        assert_eq!(group["visible"], json!([]));
+        let value: Json = accepted(impact(world, &scene.ada.token, &input).await);
+        let group = application(&value, "updated", "environment");
+        assert_eq!(group["count"], 1);
+        assert_eq!(group["visible"][0]["object"]["id"], running.to_string());
+        assert_eq!(group["hidden"], 0);
+        assert_eq!(group["apply"], "update");
+        assert!(
+            !serde_json::to_string(&value["applications"])
+                .unwrap()
+                .contains("Already stopped environment")
+        );
+    }
+    sqlx::query("DELETE FROM runtime_resource_inputs WHERE runtime_id=$1")
+        .bind(runtime)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let input = FactTarget {
+        object: ObjectRef {
+            kind: ObjectKind::Mount,
+            id: mount,
+        },
+        model_id: None,
+    };
+    let missing: Json = accepted(impact(world, &scene.ada.token, &input).await);
+    assert_eq!(
+        missing["application_complete"], false,
+        "missing applied facts are not zero pending work"
+    );
+}
 fn accepted<T: serde::de::DeserializeOwned>(reply: RawReply) -> T {
     assert_eq!(
         reply.status,
@@ -728,5 +893,67 @@ async fn resource_impact_publication_rechecks_the_original_model_qualified_bindi
             );
             assert!(current.thread_displays.contains_key(&thread.base.id));
         }
+    }
+}
+
+#[tokio::test]
+async fn a_resource_list_carries_sharing_only_from_homes_readable_in_that_same_inventory() {
+    let world = World::new().await;
+    let owner = person(&world, "sharing-inventory-reader").await;
+    let home = make_org(
+        &world,
+        &owner,
+        "Sharing inventory home",
+        "sharing-inventory-home",
+    )
+    .await
+    .base
+    .id;
+    let provider = resource(&world, &owner, home, "provider", "Listed with sharing").await;
+    let ask = EverythingListQuery {
+        resource_details: None,
+        resource_rows: Some(true),
+        limit: Some(20),
+        ..query("provider")
+    };
+    let ordinary = read(&world, &owner, &ask).await;
+    assert!(
+        ordinary
+            .items
+            .iter()
+            .filter_map(|row| row.sharing.as_ref())
+            .any(|summary| summary.rows.is_some())
+    );
+    for operation in ["NodeDefaultsGet", "EverythingList.mine"] {
+        let token = key(
+            &world,
+            owner.id(),
+            vec![
+                rule("EverythingList.mine", "provider", provider, "self"),
+                rule(operation, "org", home, "self"),
+            ],
+        )
+        .await;
+        let page: Page<EverythingRow> = accepted(
+            world
+                .app
+                .call(EverythingList, &[])
+                .token(&token)
+                .query(&ask)
+                .send_bytes()
+                .await,
+        );
+        assert_eq!(page.items.len(), 1);
+        assert!(page.items[0].resource_row.is_some() && page.items[0].resource.is_none());
+        let disclosed = page
+            .items
+            .iter()
+            .filter_map(|row| row.sharing.as_ref())
+            .any(|summary| summary.rows.is_some());
+        assert_eq!(
+            disclosed,
+            operation == "EverythingList.mine",
+            "another operation never lends its sharing read to the inventory"
+        );
     }
 }
