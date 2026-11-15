@@ -22,7 +22,9 @@ use orch_db::{
     Conn, DbError,
     queries::environments::workspace::{self, EnvironmentRow},
 };
-use orch_link_contract::commands::{CommandKind, FsFetch, FsStat, SerialKey};
+use orch_link_contract::commands::{
+    CommandKind, FsFetch, FsRelayDescribe, FsRelaySend, FsStat, SerialKey,
+};
 use orch_types::{Clock, Id, Time};
 use serde::{Deserialize, Serialize};
 
@@ -268,6 +270,39 @@ impl FileSource {
                 Ok(super::http_command_source::CommandEvidence::ReferenceFetch(
                     self.clone(),
                 ))
+            }
+            CommandKind::FsRelayDescribe => {
+                let body: FsRelayDescribe = serde_json::from_value(command.body.clone())?;
+                if body.environment_id != self.physical.environment
+                    || body.mount.is_some()
+                    || body.path != self.physical.path
+                {
+                    return Err(EngineError::unreadable(
+                        "the reference description changed its native source",
+                    ));
+                }
+                Ok(
+                    super::http_command_source::CommandEvidence::ReferenceRelayDescribe(
+                        self.clone(),
+                    ),
+                )
+            }
+            CommandKind::FsRelaySend => {
+                let body: FsRelaySend = serde_json::from_value(command.body.clone())?;
+                if body.environment_id != self.physical.environment
+                    || body.mount.is_some()
+                    || body.path != self.physical.path
+                    || body.offset != 0
+                    || body.len < 0
+                    || body.relay_id.is_nil()
+                    || body.idle_secs == 0
+                    || body.retry_ms == 0
+                {
+                    return Err(EngineError::unreadable(
+                        "the reference relay changed its native source",
+                    ));
+                }
+                Ok(super::http_command_source::CommandEvidence::ReferenceRelaySend(self.clone()))
             }
             _ => Err(EngineError::unreadable(
                 "the reference source cannot send that command",

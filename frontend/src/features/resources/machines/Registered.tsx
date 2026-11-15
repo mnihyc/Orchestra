@@ -8,7 +8,7 @@ import { EmptyState } from '@/ui/EmptyState';
 
 import { allowedRoots, readMachineFacts, registrableHarnesses } from '@/features/resources/machines/facts';
 import { DetailPages, DetailSections } from '@/features/resources/DetailSections';
-import { RegisterAgentDialog } from '@/features/resources/machines/RegisterAgent';
+import { RegisterAgentDialog,RegisterInstalledSignInDialog } from '@/features/resources/machines/RegisterAgent';
 import { RegisterEnvironmentDialog } from '@/features/resources/machines/RegisterEnvironment';
 import { AddProviderDialog } from '@/features/resources/providers/AddProvider';
 import type { Machine } from '@/generated/api-types';
@@ -20,7 +20,7 @@ import { PermissionGate } from '@/ui/PermissionGate';
 import { StatusDot } from '@/ui/StatusDot';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 
-type Registering = 'agent' | 'provider' | 'environment' | null;
+type Registering = 'agent' | 'provider' | 'environment' | 'subscription' | null;
 
 function Entries({ label, empty, children }: { label: string; empty: string; children: ReactNode[] }) {
   if (children.length === 0) return <EmptyState compact title={empty} />;
@@ -77,7 +77,7 @@ export function RegisteredHere({ machine }: { machine: Machine }) {
         id="registered-providers"
         title={t('machines.registered.providers')}
         lead={t('machines.registered.providersLead')}
-        action={act('provider', t('machines.registered.registerProvider'), why)}
+        action={<div className="flex flex-wrap items-center gap-2">{act('provider', t('machines.registered.registerProvider'), why)}{act('subscription',t('machineSignup.useInstalled'),why)}</div>}
       >
         <Entries label={t('machines.registered.providers')} empty={t('machines.registered.noProviders')}>
           {machine.providers.map((provider) => (
@@ -119,6 +119,7 @@ export function RegisteredHere({ machine }: { machine: Machine }) {
         </Entries>
       </Section> }]} />
 
+      {registering==='subscription' && <RegisterInstalledSignInDialog machineId={machine.id} onClose={()=>setRegistering(null)}/>}
       {registering === 'agent' && <RegisterAgentDialog machine={machine} open onClose={() => setRegistering(null)} />}
       {registering === 'provider' && <AddProviderDialog initialRuntimeMachine={machine.id} onClose={() => setRegistering(null)} />}
       {registering === 'environment' && <RegisterEnvironmentDialog machine={machine} open onClose={() => setRegistering(null)} />}

@@ -313,6 +313,15 @@ fn harness_permitted(facts: &Json, kind: &str) -> bool {
         })
 }
 
+fn discovery_program_available(machine: &MachinePlace, kind: &str, unit: bool) -> bool {
+    // A hosted unit can fetch a program its own policy explicitly declares.
+    // An absent policy does not declare a missing program.
+    machine_has_harness(machine, kind)
+        || (unit
+            && orch_db::queries::environment_facts::policy_in(&machine.facts).is_some()
+            && harness_permitted(&machine.facts, kind))
+}
+
 fn harness_problem(machine: Option<&MachinePlace>, kind: &str) -> Option<String> {
     let Some(machine) = machine else {
         return Some("The place where the harness would run has no machine.".to_owned());
@@ -603,13 +612,26 @@ fn same_machine(provider: &ProviderRow, environment: &EnvironmentRow) -> bool {
 /// The access the provider declares: its native harness and each protocol its endpoints or translators serve.
 #[must_use]
 pub fn serves(provider: &ProviderRow) -> Vec<Serves> {
+    let endpoints = provider
+        .protocols
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let protocols = if provider.kind == "api" {
+        orch_model_contract::translator::served_protocols(
+            &endpoints,
+            &orch_model_contract::translator::BUILTIN_ENDS,
+        )
+    } else {
+        provider.protocols.clone()
+    };
     provider
         .harness_kind
         .iter()
         .map(|harness| Serves::Native {
             harness: harness.clone(),
         })
-        .chain(provider.protocols.iter().map(|protocol| Serves::Forwarded {
+        .chain(protocols.iter().map(|protocol| Serves::Forwarded {
             protocol: protocol.clone(),
         }))
         .collect()
@@ -1009,6 +1031,11 @@ impl Engine {
         if !place.online || place.deleted_at.is_some() || place.status != "active" {
             return Ok(());
         }
+        // Managed units have no local policy. Their installed-harness report proves which programs
+        // they can run; an adapter alone does not prove that its required binary exists.
+        let unit = orch_db::queries::resources::hosting::host_running(&mut conn, machine)
+            .await?
+            .is_some();
         // A harness the machine could not run is asked again after a pause, not at every report of its
         // machine (several a minute): a repaired installation is noticed within it.
         let retry_before = self.inner.clock.now() - DISCOVERY_RETRY_AFTER;
@@ -1034,6 +1061,9 @@ impl Engine {
             if !place.roles.iter().any(|role| role == "agent") || !drives {
                 continue;
             }
+            if !discovery_program_available(&place, &profile.harness_kind, unit) {
+                continue;
+            }
             let key = harnesses::HarnessKey {
                 provider,
                 agent,
@@ -1055,6 +1085,7 @@ impl Engine {
                         agent,
                         machine,
                         &resources::HarnessReport {
+                            home: None,
                             status: harnesses::OFFLINE,
                             detail: None,
                             version: None,
@@ -1106,6 +1137,7 @@ impl Engine {
             key.agent,
             key.machine,
             &resources::HarnessReport {
+                home: None,
                 status: "error",
                 detail: Some(detail),
                 version: None,
@@ -1455,6 +1487,7 @@ impl Engine {
             .provider_use(
                 &mut *conn,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person,
                     node: new.topic,
                     provider: provider.id,
@@ -1958,11 +1991,15 @@ pub fn arrangements_of_policy<T: serde::de::DeserializeOwned>(
     policy: Option<&Json>,
 ) -> Option<Vec<T>> {
     let policy = policy.filter(|policy| !policy.is_null())?;
-    let listed = policy.get("provider.arrangements").and_then(Json::as_array);
+    // A policy that does not hold the key says nothing about it: a host's policy has no such key, and
+    // reading its absence as an empty list forbade every way of running on a credential kept in a
+    // container of that host.
+    let listed = policy
+        .get("provider.arrangements")
+        .and_then(Json::as_array)?;
     Some(
         listed
-            .into_iter()
-            .flatten()
+            .iter()
             .filter_map(|word| word.as_str().and_then(parse))
             .collect(),
     )
@@ -2113,9 +2150,14 @@ pub fn options_placed(
     let policy = policy_with_machine(facts, machine);
     let program = local_program(facts, place);
     let reported = program.and_then(|program| reported_program_agent_version(facts, program));
+    // A profile that speaks both formats keeps a direct endpoint before a converted one.
+    let mut descriptor = facts.descriptor.clone();
+    descriptor
+        .forwarded_protocols
+        .sort_by_key(|protocol| !facts.provider.protocols.contains(protocol));
     let mut all = if let Some(program) = program {
         machine_programs::candidates(
-            facts.descriptor,
+            &descriptor,
             &provider,
             place,
             &program.programs,
@@ -2123,7 +2165,7 @@ pub fn options_placed(
             &program.overrides,
         )
     } else {
-        arrangement::candidates(facts.descriptor, &provider, place)
+        arrangement::candidates(&descriptor, &provider, place)
     };
     all.sort_by_key(|(kind, _)| {
         policy
@@ -2153,7 +2195,11 @@ pub fn options_placed(
                 }
                 (candidate, _) => (candidate, None),
             };
-            let allowed = policy.permission.allows(kind).and_then(|()|if needs_copy {policy.permission.allows(ArrangementType::CredentialShared)} else {Ok(())});
+            let translated = candidate.as_ref().ok().and_then(|chosen| chosen.protocol.as_deref())
+                .is_some_and(|protocol| !facts.provider.protocols.iter().any(|direct| direct == protocol));
+            let allowed = policy.permission.allows(kind)
+                .and_then(|()| if translated && !facts.settings.translation_allowed { Err(arrangement::NotAllowedBy::Policy) } else { Ok(()) })
+                .and_then(|()|if needs_copy {policy.permission.allows(ArrangementType::CredentialShared)} else {Ok(())});
             let permitted = allowed.is_ok();
             let (arrangement, cannot) = match candidate {
                 Ok(found) => (Some(found), None),
@@ -2337,6 +2383,8 @@ pub async fn environment_offers(
 /// how it reaches the model, what leaves the provider, and who counts what it uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Isolation {
+    /// The selected translated model interfaces and their declared fidelity.
+    pub translation: Option<orch_provider_contract::models::ProtocolTranslation>,
     /// The arrangement type.
     pub kind: ArrangementType,
     /// Whether the harness runs where the provider's runtime is, and not in the environment.
@@ -2383,6 +2431,16 @@ pub fn isolation(
     let path = arrangement::credential_path(option.kind, native, holds_login);
     let form = found.and_then(|found| found.form.as_ref());
     Isolation {
+        translation: found
+            .and_then(|chosen| chosen.protocol.as_deref())
+            .and_then(|protocol| {
+                let endpoints = provider
+                    .protocols
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                orch_model_contract::translator::builtin_translation(protocol, &endpoints)
+            }),
         kind: option.kind,
         harness_with_provider: option.kind == ArrangementType::Separated,
         executor: found.and_then(|found| found.executor.clone()),
@@ -2988,6 +3046,7 @@ impl Engine {
                     .provider_use(
                         &mut *conn,
                         &ProviderUse {
+                            purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                             person: thread.owner_id,
                             node: thread_id,
                             provider: provider.id,
@@ -3382,6 +3441,7 @@ pub async fn select_rebind_with_access(
         .provider_use(
             &mut *conn,
             &ProviderUse {
+                purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                 person,
                 node: thread_id,
                 provider: provider.id,
@@ -3477,6 +3537,28 @@ pub async fn select_rebind_with_access(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_policy_without_the_arrangements_key_sets_no_limit_and_an_empty_list_allows_none() {
+        use serde_json::json;
+        let of = |policy: serde_json::Value| {
+            super::arrangements_of_policy::<ArrangementType>(Some(&policy))
+        };
+        // A host reports a policy of its own keys; it has none for a provider's arrangements.
+        assert_eq!(
+            of(json!({"ports": {"allowed": ["place"]}, "drivers": {}})),
+            None
+        );
+        assert_eq!(super::arrangements_of_policy::<ArrangementType>(None), None);
+        assert_eq!(of(json!({"provider.arrangements": []})), Some(Vec::new()));
+        assert_eq!(
+            of(json!({"provider.arrangements": ["separated", "key_separated"]})),
+            Some(vec![
+                ArrangementType::Separated,
+                ArrangementType::KeySeparated
+            ])
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -3499,6 +3581,48 @@ mod tests {
             .unwrap()
             .remove("needs_binary");
         assert!(!machine_has_harness(&machine, "custom"));
+    }
+
+    #[test]
+    fn descriptor_discovery_requires_an_installed_program_or_a_managed_units_declared_build() {
+        for unit in [false, true] {
+            let mut machine = MachinePlace {
+                id: Id::nil(),
+                roles: vec!["agent".into()],
+                status: "active".into(),
+                online: true,
+                placement: if unit { "managed" } else { "connected" }.into(),
+                owner_id: None,
+                deleted_at: None,
+                facts: json!({"adapters":[{"kind":"fake","needs_binary":true}],"harnesses":[],"policy":null}),
+            };
+            assert!(
+                !discovery_program_available(&machine, "fake", unit),
+                "an absent policy does not declare a missing program"
+            );
+            machine.facts["policy"] = json!({"agent.harnesses":[]});
+            assert!(!discovery_program_available(&machine, "fake", unit));
+            machine.facts["policy"]["agent.harnesses"] =
+                json!([{"kind":"fake","path":"/bin/fake"}]);
+            assert_eq!(
+                discovery_program_available(&machine, "fake", unit),
+                unit,
+                "only a managed unit can fetch its explicitly declared build"
+            );
+            machine.facts["harnesses"] = json!([{"kind":"fake","path":"/bin/fake"}]);
+            assert!(discovery_program_available(&machine, "fake", unit));
+            machine.facts["policy"]["agent.harnesses"] = json!([]);
+            assert!(!discovery_program_available(&machine, "fake", unit));
+            machine.facts["policy"] = Json::Null;
+            assert!(discovery_program_available(&machine, "fake", unit));
+            machine.facts["harnesses"] = json!([]);
+            machine.facts["adapters"][0]["needs_binary"] = json!(false);
+            machine.facts["policy"] = json!({"agent.harnesses":[]});
+            assert!(
+                discovery_program_available(&machine, "fake", unit),
+                "an adapter supplying its own program needs no installed binary"
+            );
+        }
     }
 
     #[test]

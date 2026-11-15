@@ -8,11 +8,12 @@
  */
 import { DndContext, type DragEndEvent, DragOverlay, KeyboardSensor, PointerSensor, useDraggable, useDroppable, useSensor, useSensors } from '@dnd-kit/core';
 import { useMutation } from '@tanstack/react-query';
+import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
 import { CircleCheck, MessageSquareText, type LucideIcon } from 'lucide-react';
 import { StateIcon } from '@/ui/StateChip';
 import { THREAD_URGENCY, isThreadUrgency } from '@/ui/ThreadState';
 import { NodeIcon } from '@/ui/NodeIcon';
-import { useState } from 'react';
+import { type CSSProperties, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 
@@ -31,6 +32,7 @@ import { holds } from '@/lib/permissions';
 import { formatNumber } from '@/lib/format';
 import { useErrorText } from '@/ui/errorText';
 import { RelativeTime } from '@/ui/RelativeTime';
+import { ScrollArea } from '@/ui/ScrollArea';
 import { toast } from '@/ui/Toast';
 
 export type BoardColumn = (typeof THREAD_URGENCY)[number] | 'idle' | 'done';
@@ -87,7 +89,10 @@ function CardFace({ topic, menu = true, showPaths = false }: { topic: Topic; men
   );
 }
 
-function Card({ topic, pending, canMove, showPaths }: { topic: Topic; pending: boolean; canMove: boolean; showPaths: boolean }) {
+function Card({ topic, pending, canMove, showPaths, index, count, measure, style }: {
+  topic: Topic; pending: boolean; canMove: boolean; showPaths: boolean;
+  index: number; count: number; measure?: ((element: HTMLLIElement | null) => void) | undefined; style?: CSSProperties | undefined;
+}) {
   // Waiting for the answer to a drag that was dropped, or to an act chosen from the card's own menu.
   const waiting = useIsPending(topic.id);
   const movable = canMove && holds(topic.access, 'topic.interact') && !topic.archived && !pending && !waiting;
@@ -97,7 +102,12 @@ function Card({ topic, pending, canMove, showPaths }: { topic: Topic; pending: b
   const { tabIndex, 'aria-roledescription': kind, 'aria-describedby': instructions } = drag.attributes;
   return (
     <li
-      ref={(node) => drag.setNodeRef(node)}
+      ref={(node) => { drag.setNodeRef(node); measure?.(node); }}
+      data-topic={topic.id}
+      data-index={index}
+      aria-posinset={index + 1}
+      aria-setsize={count}
+      style={style}
       tabIndex={movable ? tabIndex : undefined}
       aria-roledescription={movable ? kind : undefined}
       aria-describedby={movable ? instructions : undefined}
@@ -122,11 +132,31 @@ interface ColumnProps {
   canMove: boolean;
   /** The column of the card that is being carried, while one is. */
   dragging: BoardColumn | null;
+  carriedId: string | null;
 }
 
-function ColumnView({ column, topics, pendingIds, canMove, dragging, showPaths }: ColumnProps) {
+function ColumnView({ column, topics, pendingIds, canMove, dragging, carriedId, showPaths }: ColumnProps) {
   const { t, i18n } = useTranslation();
   const drop = useDroppable({ id: column });
+  const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
+  const [focused, setFocused] = useState<string | null>(null);
+  // A page remains ordinary flow; a long loaded column only mounts its visible cards.
+  const windowed = topics.length > 50;
+  const retained = [focused, carriedId].flatMap((id) => id === null ? [] : [topics.findIndex((topic) => topic.id === id)]).filter((index) => index >= 0);
+  // The measured library owns positions; active drag sources and keyboard focus remain mounted.
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const virtualizer = useVirtualizer({
+    count: topics.length,
+    enabled: windowed,
+    getScrollElement: () => scroller,
+    getItemKey: (index) => topics[index]?.id ?? index,
+    estimateSize: () => 180,
+    gap: 8,
+    overscan: 8,
+    initialRect: { width: 0, height: 384 },
+    rangeExtractor: (range) => [...new Set([...defaultRangeExtractor(range), ...retained])].sort((one, other) => one - other),
+  });
+  const cards = windowed ? virtualizer.getVirtualItems().map((item) => ({ index: item.index, top: item.start })) : topics.map((_, index) => ({ index, top: 0 }));
   const quiet = HEADINGS[column];
   const heading = column === 'done' ? t('places.board.done') : t(`state.${column}`);
   // While a card is carried the columns it can be dropped in say so, and the others step back.
@@ -150,11 +180,19 @@ function ColumnView({ column, topics, pendingIds, canMove, dragging, showPaths }
       {topics.length === 0 ? (
         <EmptyState compact title={t('places.board.emptyColumn', { state: heading })} />
       ) : (
-        <ul className="flex flex-col gap-2">
-          {topics.map((topic) => (
-            <Card key={topic.id} topic={topic} pending={pendingIds.has(topic.id)} canMove={canMove} showPaths={showPaths} />
-          ))}
-        </ul>
+        <ScrollArea ref={setScroller} className="max-h-96">
+          <ul aria-label={heading} className={windowed ? 'relative' : 'flex flex-col gap-2'} style={windowed ? { height: virtualizer.getTotalSize() } : undefined}
+            onFocusCapture={(event) => { const item = event.target.closest<HTMLLIElement>('li[data-topic]'); if (item !== null) setFocused(item.dataset.topic ?? null); }}
+            onBlurCapture={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setFocused(null); }}>
+            {cards.map(({ index, top }) => {
+              const topic = topics[index];
+              if (topic === undefined) return null;
+              return <Card key={topic.id} topic={topic} index={index} count={topics.length} pending={pendingIds.has(topic.id)} canMove={canMove} showPaths={showPaths}
+                measure={windowed ? virtualizer.measureElement : undefined}
+                style={windowed ? { position: 'absolute', top: 0, left: 0, width: '100%', transform: 'translateY(' + String(top) + 'px)' } : undefined} />;
+            })}
+          </ul>
+        </ScrollArea>
       )}
     </section>
   );
@@ -239,6 +277,7 @@ export function TopicBoard({ topics, canSetStatus, orgId: _orgId, showPaths = fa
             pendingIds={pendingIds}
             canMove={canSetStatus}
             dragging={carried === null ? null : columnOf(carried)}
+            carriedId={carried?.id ?? null}
             showPaths={showPaths}
           />
         ))}

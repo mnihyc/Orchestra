@@ -15,7 +15,7 @@ use futures::stream;
 use http::{Request, StatusCode};
 use orch_api_contract::auth::{AdminModeSetBody, MeAdminModeSet};
 use orch_api_contract::nodes::{Node, NodeUpdate, NodeUpdateBody, Project};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, new_token, token_hash};
 use orch_api_core::middleware::requests::ApiError;
 use orch_api_core::middleware::{authorization, transaction_guard};
 use orch_api_core::registry::{Ctx, Registry};
@@ -498,7 +498,7 @@ async fn current_token_revocation_expiry_scopes_and_subtree_bound_the_write() {
             "Outside",
         )
         .await;
-        scenario.writer.token = new_token(API_TOKEN_PREFIX);
+        scenario.writer.token = new_api_token(token);
         identity::create_api_token(
             &mut *scenario.world.conn().await,
             &NewApiToken {
@@ -733,7 +733,7 @@ async fn revocation_cannot_commit_between_the_guard_and_its_write() {
 async fn a_guard_waiting_for_revocation_reads_the_new_token_scopes() {
     let mut scenario = Scenario::new().await;
     let token = new_id();
-    scenario.writer.token = new_token(API_TOKEN_PREFIX);
+    scenario.writer.token = new_api_token(token);
     identity::create_api_token(
         &mut *scenario.world.conn().await,
         &NewApiToken {
@@ -1239,8 +1239,8 @@ async fn all_sixteen_guards_can_reach_their_write_before_any_commits() {
 async fn authenticating_the_same_api_token_does_not_wait_for_an_open_action() {
     let world = World::new().await;
     let mut who = person(&world, "tokenwriter").await;
-    who.token = new_token(API_TOKEN_PREFIX);
     let token = new_id();
+    who.token = new_api_token(token);
     identity::create_api_token(
         &mut *world.conn().await,
         &NewApiToken {
@@ -1262,7 +1262,7 @@ async fn authenticating_the_same_api_token_does_not_wait_for_an_open_action() {
     let hash = token_hash(&who.token);
     let now = world.now();
     let authenticate = tokio::spawn(async move {
-        identity::api_token_by_hash(&mut pool.acquire().await.unwrap(), &hash, now)
+        identity::api_token_by_identity(&mut pool.acquire().await.unwrap(), token, &hash, now)
             .await
             .unwrap()
             .unwrap()
@@ -1277,10 +1277,15 @@ async fn authenticating_the_same_api_token_does_not_wait_for_an_open_action() {
     // Once free, another authentication records last use as before.
     world.advance(Duration::seconds(1));
     let later = world.now();
-    identity::api_token_by_hash(&mut *world.conn().await, &token_hash(&who.token), later)
-        .await
-        .unwrap()
-        .unwrap();
+    identity::api_token_by_identity(
+        &mut *world.conn().await,
+        token,
+        &token_hash(&who.token),
+        later,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let last_used: chrono::DateTime<chrono::Utc> =
         sqlx::query_scalar("SELECT last_used_at FROM api_tokens WHERE id = $1")
             .bind(token)
@@ -1306,7 +1311,7 @@ async fn prepare_loss(scenario: &mut Scenario, loss: AuthorityLoss) -> Id {
         AuthorityLoss::ScopeNarrowed | AuthorityLoss::TokenExpired | AuthorityLoss::TokenRevoked
     ) {
         let token = new_id();
-        scenario.writer.token = new_token(API_TOKEN_PREFIX);
+        scenario.writer.token = new_api_token(token);
         identity::create_api_token(
             &mut *scenario.world.conn().await,
             &NewApiToken {

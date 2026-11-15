@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-api-contract --lib
+test -p orch-blob-contract --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test provider_runtime --test provider_homes --test provider_fact_reads --test environments --test ingest
+test -p orch-api-core --test providers --test provider_harness --test hosted_environments --test blob_housekeeping
+test -p orch-connector-core --lib
