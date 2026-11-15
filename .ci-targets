@@ -1,0 +1,4 @@
+test -p orch-node-core --lib
+test -p orch-node-core --test live_mounts
+test -p orch-engine --test resource_library
+test -p orch-api-core --test native_resource_family_scopes --test resource_resume
