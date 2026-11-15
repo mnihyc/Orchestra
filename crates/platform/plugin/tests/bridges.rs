@@ -1267,6 +1267,7 @@ fn upstream() -> UpstreamSide {
         base_url: "https://beta.example.com".into(),
         options: json!({ "region": "eu" }),
         credential: Some(Credential::new("sk-secret-key")),
+        model: None,
     }
 }
 

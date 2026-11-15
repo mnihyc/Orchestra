@@ -29,6 +29,7 @@
 #![forbid(unsafe_code)]
 
 pub mod approvals;
+mod copied_token;
 pub mod descriptor;
 pub mod discovery;
 pub mod events;
@@ -179,6 +180,7 @@ pub struct CodexAdapter {
     /// Exact lanes observed idle when the native client unsubscribed them.
     prefix_sources: std::collections::HashSet<orch_agent_contract::history::NativePrefixSource>,
     history_inventory: Option<(Id, Arc<native_history::Inventory>)>,
+    copied_credential: Option<(Id, Id, copied_token::Token)>,
 }
 
 impl std::fmt::Debug for CodexAdapter {
@@ -288,6 +290,7 @@ impl CodexAdapter {
             model_processes: HashMap::new(),
             prefix_sources: Default::default(),
             history_inventory: None,
+            copied_credential: None,
         }
     }
 
@@ -617,6 +620,21 @@ impl CodexAdapter {
             version: version.clone(),
             exit: Arc::clone(&exit),
             patience: self.patience,
+            native_result_wait: Duration::from_millis(
+                start
+                    .profile
+                    .config
+                    .get("native_result_wait_ms")
+                    .and_then(Json::as_u64)
+                    .unwrap_or(runtime::DEFAULT_NATIVE_RESULT_WAIT_MS),
+            ),
+            native_result_buffer_bytes: start
+                .profile
+                .config
+                .get("native_result_buffer_bytes")
+                .and_then(Json::as_u64)
+                .map(|bytes| usize::try_from(bytes).unwrap_or(usize::MAX))
+                .unwrap_or(runtime::DEFAULT_NATIVE_RESULT_BUFFER_BYTES),
         });
         if let Some(home) = harness_home.as_deref().filter(|_| managed) {
             let (method, expires_at) = provider::read_login_note(home);
@@ -624,6 +642,7 @@ impl CodexAdapter {
             shared.login.issued(provider::read_issued_at(home));
         }
         let pump = tokio::spawn(runtime::pump(Arc::clone(&shared), incoming));
+
         let _ = sink
             .emit(AdapterEvent::Status(
                 shared.status(HarnessState::Online, None),
@@ -829,6 +848,21 @@ impl CodexAdapter {
         let identity = self.prepare_model_process(&spec).await?;
         let (shared, running) = self.live_model(identity)?;
         let rpc = shared.rpc().clone();
+        if matches!(spec.provider, ProviderAccess::Shared { .. }) && !shared.has_current_copy() {
+            let _ = shared
+                .sink()
+                .session(
+                    spec.settings.thread_id,
+                    spec.settings.segment_id,
+                    SessionEvent::CredentialNeeded(orch_agent_contract::events::CredentialNeeded {
+                        reason: orch_agent_contract::credentials::CredentialNeed::Missing,
+                    }),
+                )
+                .await;
+            return Err(AdapterError::CredentialUnusable(
+                "The session needs a current access-token copy.".into(),
+            ));
+        }
         let mode = spec.settings.mode;
         if matches!(mode, SessionMode::Resume | SessionMode::Adopt)
             && let Some(native) = spec.settings.native_session_ref.as_deref()
@@ -1009,6 +1043,7 @@ impl CodexAdapter {
             directory: settings.directory.clone(),
         })
         .with_native_web_results(true)
+        .with_web_action_wait(Duration::from_secs(settings.web_action_wait_secs))
         .with_external_images(
             spec.exec.executor.is_some()
                 || settings.arrangement
@@ -1398,14 +1433,31 @@ impl AgentAdapter for CodexAdapter {
         {
             return Ok(running.started.clone());
         }
+        let copied = self
+            .copied_credential
+            .clone()
+            .filter(|(provider, agent, token)| {
+                *provider == start.provider_id
+                    && *agent == start.agent_id
+                    && token.expires > self.clock.time()
+            });
+        self.copied_credential = copied.clone();
         self.teardown().await;
         let running = self.launch(start, sink).await?;
         let started = running.started.clone();
         self.running = Some(running);
+        if let Some((_, _, token)) = copied {
+            let (shared, _) = self.live()?;
+            if let Err(error) = shared.install_copy(token).await {
+                self.teardown().await;
+                return Err(error);
+            }
+        }
         Ok(started)
     }
 
     async fn stop(&mut self) -> Result<(), AdapterError> {
+        self.copied_credential = None;
         self.teardown().await;
         Ok(())
     }
@@ -1650,6 +1702,7 @@ impl AgentAdapter for CodexAdapter {
             return Err(AdapterError::Unsupported("Auto is unavailable until its reviewer model has passed the integrator's real trial".to_owned()));
         }
         let (shared, _) = self.live_session(turn.thread_id)?;
+        shared.require_current_copy(turn.thread_id).await?;
         shared.with_session(turn.thread_id, |record| {
             // A configuration that appeared since the session was opened, an agent's own included, is refused
             // until somebody who manages the environment has answered for it.
@@ -1943,6 +1996,8 @@ impl AgentAdapter for CodexAdapter {
                     .get("loginId")
                     .and_then(Json::as_str)
                     .unwrap_or_default();
+                self.copied_credential = None;
+                shared.forget_copy().await;
                 shared
                     .login
                     .started(login_id, provider::method::DEVICE_CODE);
@@ -2009,6 +2064,7 @@ impl AgentAdapter for CodexAdapter {
                     return Err(error);
                 }
                 let _ = running;
+                self.copied_credential = None;
                 self.after_import(provider::method::AUTH_FILE).await
             }
             provider::method::ACCESS_TOKEN => {
@@ -2061,6 +2117,7 @@ impl AgentAdapter for CodexAdapter {
                         .await;
                     return Err(error);
                 }
+                self.copied_credential = None;
                 self.after_import(provider::method::ACCESS_TOKEN).await
             }
             other => Err(AdapterError::Other {
@@ -2102,6 +2159,8 @@ impl AgentAdapter for CodexAdapter {
             .call("account/logout", json!({}))
             .await
             .map_err(map_rpc)?;
+        self.copied_credential = None;
+        shared.forget_copy().await;
         shared.login.signed_out();
         let _ = shared
             .sink()
@@ -2123,6 +2182,27 @@ impl AgentAdapter for CodexAdapter {
             shared.clock().as_ref(),
         )
         .await
+    }
+
+    async fn issue_credential(
+        &mut self,
+        form: &str,
+    ) -> Result<orch_agent_contract::credentials::IssuedCredential, AdapterError> {
+        let (shared, running) = self.live()?;
+        let home = running.home.as_deref().ok_or(AdapterError::LoginRequired)?;
+        copied_token::issue(shared.rpc(), home, self.clock.as_ref(), form).await
+    }
+
+    async fn set_credential(
+        &mut self,
+        credential: orch_agent_contract::credentials::GivenCredential,
+    ) -> Result<(), AdapterError> {
+        let token = copied_token::Token::given(credential, self.clock.time())?;
+        let (shared, running) = self.live()?;
+        let purpose = (running.start.provider_id, running.start.agent_id);
+        shared.install_copy(token.clone()).await?;
+        self.copied_credential = Some((purpose.0, purpose.1, token));
+        Ok(())
     }
 
     async fn renew_provider_credential(&mut self) -> Result<ProviderFacts, AdapterError> {

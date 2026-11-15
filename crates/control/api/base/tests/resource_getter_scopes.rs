@@ -12,7 +12,7 @@ use http::StatusCode;
 use orch_access_contract::{decisions::ObjectRef, key_scope::KeyScope, permissions::ResourceKind};
 use orch_api_contract::directory::{GroupMemberAdd, OrgGroupCreate, OrgGroupCreateBody};
 use orch_api_contract::resources::{AgentGet, MachineGet, TemplateGet};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_authz::ownership::{NewAccess, start_resource};
 use orch_db::queries::identity::{self, NewApiToken};
@@ -309,7 +309,7 @@ async fn issue(world: &World, user: Id, rules: Option<Vec<Json>>) -> Key {
         Vec::new()
     };
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
@@ -1089,7 +1089,7 @@ async fn template_get_primary_is_already_supported_and_still_uses_current_home_b
 
 async fn restricted_legacy_key(world: &World, user: Id, permission: &str, node: Option<Id>) -> Key {
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {

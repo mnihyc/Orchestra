@@ -442,6 +442,12 @@ impl Engine {
         let Some(row) = keeper::start_row(&mut conn, provider).await? else {
             return Ok(Err(PlanError::NotKeyed));
         };
+        if (row.key_machine_id.is_none() || row.key_machine_id == row.machine_id)
+            && orch_db::queries::provider_connections::available(&mut conn, provider).await?
+                == Some(false)
+        {
+            return Ok(Err(PlanError::NoMachine));
+        }
         let secrets = keeper::secret_refs(&mut conn, provider).await?;
         Ok(plan_start(&row, &secrets))
     }
@@ -593,20 +599,17 @@ pub(crate) fn refreshed_transition(
     }
 }
 
-/// A refused provider's waiting threads name the provider and its recorded reason.
+/// What a refused provider's waiting threads say of it: the reason its manager recorded. The thread already names
+/// the provider, and an identifier is no part of what a person reads.
 pub(crate) fn unavailable_detail(provider: &ProviderRow) -> String {
-    if provider.status == "error" {
-        format!(
-            "Provider {} ({}): {}",
-            provider.name,
-            provider.id,
-            provider
-                .status_detail
-                .as_deref()
-                .unwrap_or("its credential was refused")
-        )
+    unavailable_words(&provider.status, provider.status_detail.as_deref())
+}
+
+fn unavailable_words(status: &str, recorded: Option<&str>) -> String {
+    if status == "error" {
+        recorded.unwrap_or("its credential was refused").to_owned()
     } else {
-        provider.status.clone()
+        status.to_owned()
     }
 }
 
@@ -2324,7 +2327,20 @@ impl Engine {
     async fn sync_provider_presence(&self) -> Result<(), EngineError> {
         let moves = {
             let mut conn = self.inner.db.acquire().await?;
-            keeper::sync_presence(&mut conn, self.inner.clock.now()).await?
+            orch_db::queries::provider_connections::synchronize(
+                &mut conn,
+                self.inner.clock.now(),
+                self.inner.config.sweep_batch,
+            )
+            .await?;
+            let restored = orch_db::queries::provider_connections::synchronize_presence(
+                &mut conn,
+                self.inner.clock.now(),
+            )
+            .await?;
+            let mut moves = keeper::sync_presence(&mut conn, self.inner.clock.now()).await?;
+            moves.back.extend(restored);
+            moves
         };
         for provider in moves.back {
             self.reevaluate_provider(provider).await?;
@@ -2482,6 +2498,17 @@ mod tests {
     use chrono::Utc;
     use orch_types::new_id;
     use serde_json::json;
+
+    #[test]
+    fn a_refused_provider_keeps_its_recorded_reason_or_uses_a_plain_fallback() {
+        let said = unavailable_words("error", Some("the key was revoked"));
+        assert_eq!(said, "the key was revoked");
+        assert_eq!(
+            unavailable_words("error", None),
+            "its credential was refused"
+        );
+        assert_eq!(unavailable_words("offline", Some("ignored")), "offline");
+    }
 
     fn row(key_machine: Option<Id>, machine: Option<Id>) -> StartRow {
         StartRow {

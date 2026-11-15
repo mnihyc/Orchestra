@@ -28,7 +28,11 @@ pub enum CommandEvidence {
     MountEnsure(super::mount_locations::SetSource),
     ReferenceStat(super::reference_preview::FileSource),
     ReferenceFetch(super::reference_preview::FileSource),
+    ReferenceRelayDescribe(super::reference_preview::FileSource),
+    ReferenceRelaySend(super::reference_preview::FileSource),
     FileMkdir(crate::commands::FileMkdirCommand),
+    UploadSession(super::upload_session::SessionSource),
+    UploadWrite(crate::jobs::workspace_upload::authority::CommandSource),
 }
 impl CommandEvidence {
     pub fn command_kind(&self) -> &'static str {
@@ -39,7 +43,11 @@ impl CommandEvidence {
             Self::MountEnsure(_) => "node.volume.ensure",
             Self::ReferenceStat(_) => "fs.stat",
             Self::ReferenceFetch(_) => "fs.fetch",
+            Self::ReferenceRelayDescribe(_) => "fs.relay.describe",
+            Self::ReferenceRelaySend(_) => "fs.relay.send",
             Self::FileMkdir(source) => source.command_kind(),
+            Self::UploadSession(source) => source.command_kind(),
+            Self::UploadWrite(source) => source.command_kind(),
         }
     }
     pub async fn lock_source(&self, conn: &mut Conn) -> Result<(), EngineError> {
@@ -48,10 +56,13 @@ impl CommandEvidence {
             Self::Skill(source) => source.lock_source(conn).await,
             Self::MountEnsure(source) => source.lock_source(conn).await,
             Self::MountRemove(source) => source.lock_source(conn).await,
-            Self::ReferenceStat(source) | Self::ReferenceFetch(source) => {
-                source.lock_source(conn).await
-            }
+            Self::ReferenceStat(source)
+            | Self::ReferenceFetch(source)
+            | Self::ReferenceRelayDescribe(source)
+            | Self::ReferenceRelaySend(source) => source.lock_source(conn).await,
             Self::FileMkdir(source) => source.lock_source(conn).await,
+            Self::UploadSession(source) => source.lock_source(conn).await,
+            Self::UploadWrite(source) => source.lock_source(conn).await,
         }
     }
     pub async fn current_issue_callers(
@@ -69,10 +80,13 @@ impl CommandEvidence {
             Self::Skill(source) => source.current_issue(conn, command, clock).await,
             Self::MountEnsure(source) => source.current(conn, clock).await,
             Self::MountRemove(source) => source.current(conn, clock).await,
-            Self::ReferenceStat(source) | Self::ReferenceFetch(source) => {
-                source.current(conn, clock).await
-            }
+            Self::ReferenceStat(source)
+            | Self::ReferenceFetch(source)
+            | Self::ReferenceRelayDescribe(source)
+            | Self::ReferenceRelaySend(source) => source.current(conn, clock).await,
             Self::FileMkdir(source) => source.current_issue(conn, command, clock).await,
+            Self::UploadSession(source) => source.current(conn, clock).await,
+            Self::UploadWrite(source) => source.current(conn, clock).await,
         }
     }
     pub async fn current_callers(
@@ -90,10 +104,13 @@ impl CommandEvidence {
             Self::Skill(source) => source.current_stored(conn, command, clock).await,
             Self::MountEnsure(source) => source.current(conn, clock).await,
             Self::MountRemove(source) => source.current(conn, clock).await,
-            Self::ReferenceStat(source) | Self::ReferenceFetch(source) => {
-                source.current(conn, clock).await
-            }
+            Self::ReferenceStat(source)
+            | Self::ReferenceFetch(source)
+            | Self::ReferenceRelayDescribe(source)
+            | Self::ReferenceRelaySend(source) => source.current(conn, clock).await,
             Self::FileMkdir(source) => source.current_stored(conn, command, clock).await,
+            Self::UploadSession(source) => source.current(conn, clock).await,
+            Self::UploadWrite(source) => source.current(conn, clock).await,
         }
     }
 }

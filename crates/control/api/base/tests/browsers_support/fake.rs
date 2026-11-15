@@ -95,8 +95,8 @@ impl Agent {
         adapter.start(start, sink).await.unwrap();
         let spec: SessionSpec = serde_json::from_value(json!({
             "agent_id":floor.scene.on.agent,"thread_id":thread,"segment_id":segment,
-                "mode":"new","native_session_ref":null,"upto_turn_ordinal":null,"directory":home.path().display().to_string(),"cwd":home.path().display().to_string(),
-                "mounts":[],"model":"fake-large","effort":null,"params":{},"approval_mode":"on_request","sandbox_mode":"workspace","instructions":"Browser test.",
+                "mode":"new","native_session_ref":null,"upto_turn_ordinal":null,"workspace_root":home.path().display().to_string(),"instruction_root_marker":false,"directory":home.path().display().to_string(),"cwd":home.path().display().to_string(),
+                "mounts":[],"model":"fake-large","effort":null,"params":{},"approval_mode":"on_request","web_action_wait_secs":120,"sandbox_mode":"workspace","instructions":"Browser test.",
                 "memory":null,"arrangement":"together","orch_tools":[],"raw_events":false,
             "session_key":"s".repeat(32),"archive":null,"history":null,"provider":{"path":"native","provider_id":floor.scene.on.provider},
             "exec":{"executor":null,"tool_set":null,"environment_id":floor.environment,"generation":1},"mcp":[]

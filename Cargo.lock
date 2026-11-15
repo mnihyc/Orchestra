@@ -4785,6 +4785,7 @@ dependencies = [
  "orch-realtime-contract",
  "orch-settings-contract",
  "orch-testkit",
+ "orch-translator-responses-messages",
  "orch-types",
  "rand 0.10.3",
  "ratatui",
@@ -5464,6 +5465,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -5913,6 +5915,17 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "orch-translator-responses-messages"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "orch-model-contract",
+ "orch-types",
+ "serde_json",
 ]
 
 [[package]]

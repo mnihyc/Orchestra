@@ -220,9 +220,11 @@ impl Store {
 impl Recordings for Store {
     async fn keep(
         &self,
+        _conn: &mut orch_db::Conn,
         _environment: Id,
         kept: BlobRef,
         mask: bool,
+        _at: chrono::DateTime<chrono::Utc>,
     ) -> Result<BlobRef, RecordingFault> {
         let raw = lock(&self.blobs)
             .get(&kept.hash)

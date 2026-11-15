@@ -242,9 +242,11 @@ pub async fn run(
         orch_identity_oidc::OidcKind::new().context("the client of the identity providers")?,
     ));
     // The ways out of the application that channels and destinations can be made from.
-    orch_api_core::routes::notifications::install_notifiers(
-        notifiers(&config, launch.secrets_dir).context("the notifiers")?,
-    );
+    let notifiers = notifiers(&config, launch.secrets_dir).context("the notifiers")?;
+    orch_worker_core::channel_setup::ensure_default_push(&db, &notifiers, clock.now())
+        .await
+        .context("setting up browser notifications")?;
+    orch_api_core::routes::notifications::install_notifiers(notifiers);
     let link = match &secrets {
         Some(secrets) => Link::new(LinkParts {
             db: db.clone(),
@@ -308,7 +310,6 @@ pub async fn run(
     // The last output of a person's shells is put away in it too, with the environment's secrets taken out.
     orch_api_core::recordings::install(
         blobs.store(),
-        db.clone(),
         secrets.as_ref().map(|each| each.master_key.clone()),
     );
     let cache = Cache::new(&config);

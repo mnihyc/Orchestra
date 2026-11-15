@@ -165,9 +165,9 @@ pub(super) struct Input {
     bytes: Sent,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Sent {
-    Direct(BlobMeta),
+    Direct(orch_blob_contract::store::Stored),
     Reference(Hash),
 }
 
@@ -176,9 +176,9 @@ impl Input {
         matches!(self.bytes, Sent::Direct(_))
     }
     fn hash(&self) -> Hash {
-        match self.bytes {
+        match &self.bytes {
             Sent::Direct(meta) => meta.hash,
-            Sent::Reference(hash) => hash,
+            Sent::Reference(hash) => *hash,
         }
     }
 }
@@ -417,15 +417,15 @@ impl native::effects::ApplyOwned for Attachment {
         Box::pin(async move {
             ctx.retain_source(value.witness.clone())?;
             let input = &value.input;
-            let meta = match input.bytes {
-                Sent::Direct(meta) => meta,
+            let meta = match &input.bytes {
+                Sent::Direct(meta) => meta.meta,
                 Sent::Reference(hash) => BlobMeta {
-                    hash,
+                    hash: *hash,
                     size: ctx
                         .app
                         .blobs
                         .store()
-                        .size(&hash)
+                        .size(hash)
                         .await
                         .map_err(ApiError::internal)?
                         .ok_or_else(ApiError::not_found)?,
@@ -467,11 +467,7 @@ impl native::effects::ApplyOwned for Attachment {
                 &current,
                 &mut tx,
                 guard.principal(),
-                &attachments::Taken {
-                    meta,
-                    name: input.name.clone(),
-                    supplied_bytes: input.direct(),
-                },
+                &attachments::Taken::protected(meta, input.name.clone(), input.direct()),
             )
             .await?;
             let owned: Option<String> = if let Some(path) = &input.replace {

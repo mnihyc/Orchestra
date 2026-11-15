@@ -101,7 +101,11 @@ pub fn mount(registry: &mut Registry) {
             crate::key_operations::native::selected::<blob_source::Blobs>,
             upload_get,
         )
-        .on(UploadSessionCreate, session_create)
+        .on_with_operation(
+            UploadSessionCreate,
+            crate::key_operations::native::effects::prepare::<uploads::Begin>,
+            session_create,
+        )
         .on_raw_query_with_optional_operation(
             UploadSessionPut,
             crate::key_operations::native::stored::<uploads::session_operation::Sessions, _, _>,
@@ -176,6 +180,7 @@ fn raw_creation() -> crate::middleware::idempotency::RawCreation<(), UploadedBlo
                     .ok_or_else(|| ApiError::internal("the supplied upload has no media type"))?
                     .to_owned();
                 let reply = UploadedBlob {
+                    relay: None,
                     blob,
                     size,
                     name,
@@ -252,10 +257,11 @@ async fn create(ctx: Ctx, (): (), body: Body) -> ApiResult<Response> {
         .store_stream(body.into_data_stream(), IMAGE_UPLOAD_MAX_BYTES)
         .await
         .map_err(uploads::stored_badly)?;
-    uploads::register_named(&ctx, meta, Some(&name), Some(&media_type)).await?;
+    uploads::register_named(&ctx, &meta, Some(&name), Some(&media_type)).await?;
     json_reply(
         StatusCode::OK,
         &UploadedBlob {
+            relay: None,
             blob: meta.hash,
             size: meta.size,
             media_type,
@@ -275,26 +281,18 @@ async fn session_create(
 
 /// Takes the next piece of an upload in pieces.
 async fn session_put(ctx: Ctx, query: UploadSessionPutQuery, body: Body) -> ApiResult<Response> {
-    let piece = axum::body::to_bytes(
-        body,
-        usize::try_from(uploads::chunk_bytes()).unwrap_or(usize::MAX) + 1,
-    )
-    .await
-    .map_err(|_| {
-        ApiError::new(
-            ErrorCode::RequestTooLarge,
-            "a piece carries at most four mebibytes",
-        )
-        .with("limit", uploads::chunk_bytes())
-    })?;
-    let reply = uploads::put_piece(&ctx, ctx.id("upload_id")?, query.offset, &piece).await?;
+    let reply = uploads::put_body(&ctx, ctx.id("upload_id")?, query.offset, body).await?;
     crate::key_operations::publication::receipt(&ctx, &reply)?;
     json_reply(StatusCode::OK, &reply)
 }
 
 /// Ends an upload in pieces.
-async fn session_complete(ctx: Ctx, (): (), (): ()) -> ApiResult<UploadedBlob> {
-    uploads::complete(&ctx, ctx.id("upload_id")?).await
+async fn session_complete(
+    ctx: Ctx,
+    (): (),
+    (): (),
+) -> ApiResult<orch_api_contract::threads::UploadSessionCompletion> {
+    uploads::complete_session(&ctx, ctx.id("upload_id")?).await
 }
 
 async fn session_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {

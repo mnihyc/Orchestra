@@ -1357,6 +1357,7 @@ impl CommandAuthority {
                 // only reapplies retained restrictions to its fresh, fully resolved native proof.
                 let serial = command.key.wire();
                 let proposed = orch_db::queries::link::NewCommand {
+                    content_transit: command.content_transit,
                     id: command.id,
                     machine_id: command.machine,
                     kind: command.kind.as_str(),

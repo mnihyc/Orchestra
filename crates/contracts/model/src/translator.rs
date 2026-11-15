@@ -96,6 +96,9 @@ pub struct UpstreamSide {
     /// Its options as the `to` side declares them.
     #[serde(default)]
     pub options: Json,
+    /// The selected model's captured option declarations and reported output limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<orch_provider_contract::models::ModelParameters>,
     /// The key, when the translator presents it itself.
     #[serde(default)]
     pub credential: Option<Credential>,
@@ -223,6 +226,16 @@ pub trait ProtocolTranslator: Send + Sync + 'static {
 
     /// A converter of the response stream, for one response.
     fn response_translator(&self) -> Box<dyn ResponseTranslator>;
+
+    /// One answer converter with this request's tool and route context. The default is stateless.
+    fn response_for(
+        &self,
+        _path: &str,
+        _body: &[u8],
+        _upstream: &UpstreamSide,
+    ) -> Result<Box<dyn ResponseTranslator>, TranslateError> {
+        Ok(self.response_translator())
+    }
 }
 
 /// The ends of a registered translator: the protocol the harness speaks and the one the upstream speaks.
@@ -350,6 +363,7 @@ mod tests {
             base_url: "https://beta.example.com".into(),
             options: Json::Null,
             credential: None,
+            model: None,
         };
         let request = t
             .translate_request("/chat", Bytes::from_static(b"ping ping"), &upstream)
@@ -396,6 +410,7 @@ mod tests {
                     base_url: String::new(),
                     options: Json::Null,
                     credential: None,
+                    model: None,
                 },
             )
             .unwrap();
