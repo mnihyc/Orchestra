@@ -537,3 +537,95 @@ async fn what_is_not_a_topic_has_no_topic_state() {
         ErrorCode::RequestInvalid
     );
 }
+
+#[tokio::test]
+async fn a_topic_page_keeps_each_threads_complete_native_projection_and_current_reader_boundaries()
+{
+    use orch_api_contract::threads::{ThreadSyncGet, ThreadSyncGetQuery};
+    let s = Scene::new().await;
+    let mut ids = Vec::new();
+    for number in 0..10 {
+        let id = s
+            .thread_by(&s.ada, &format!("Parallel conversation {number}"))
+            .await
+            .base
+            .id;
+        s.rig
+            .world
+            .set_at(
+                orch_settings::Target::Node(id),
+                "agent.memory",
+                json!(if number % 2 == 0 { "on" } else { "off" }),
+            )
+            .await;
+        s.rig
+            .world
+            .set_at(
+                orch_settings::Target::Node(id),
+                "agent.effort",
+                json!(if number % 2 == 0 { "low" } else { "high" }),
+            )
+            .await;
+        ids.push(id);
+    }
+    let private = private_thread(&s, &s.eve, "A private conversation outside this reader").await;
+    let mut tx = s.rig.db.pool().begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let now = orch_types::Time::new(s.rig.world.now());
+    let batch = orch_engine::views::thread_parts_many(&mut tx, &ids, Some(s.cai.id()), now)
+        .await
+        .unwrap();
+    for id in &ids {
+        let single = orch_engine::views::thread_parts(&mut tx, *id, Some(s.cai.id()), now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch[id], single, "every native field is retained for {id}");
+    }
+    tx.commit().await.unwrap();
+    for reader in [&s.ada, &s.cai] {
+        let page = sync_topic(&s, reader, None).await.ok();
+        let private_read = s
+            .rig
+            .world
+            .app
+            .call(ThreadSyncGet, &[&private])
+            .token(&reader.token)
+            .query(&ThreadSyncGetQuery::default())
+            .send()
+            .await;
+        let may_private = private_read.status.is_success();
+        if reader.id() == s.cai.id() {
+            assert!(
+                !may_private,
+                "the ordinary viewer cannot read the private thread"
+            );
+        }
+        assert_eq!(
+            page.threads.iter().any(|thread| thread.base.id == private),
+            may_private
+        );
+        assert_eq!(page.threads.len(), ids.len() + usize::from(may_private));
+        for shown in page.threads {
+            let direct = s
+                .rig
+                .world
+                .app
+                .call(ThreadSyncGet, &[&shown.base.id])
+                .token(&reader.token)
+                .query(&ThreadSyncGetQuery::default())
+                .send()
+                .await
+                .ok()
+                .thread;
+            assert_eq!(
+                serde_json::to_value(shown).unwrap(),
+                serde_json::to_value(direct).unwrap(),
+                "the topic uses full thread fields under this reader"
+            );
+        }
+    }
+}
