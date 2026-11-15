@@ -29,6 +29,179 @@ async fn world() -> (TestDb, Db) {
     (db, pool)
 }
 
+async fn same_health_window(
+    conn: &mut Conn,
+    provider: Id,
+    from: DateTime<Utc>,
+    until: DateTime<Utc>,
+) {
+    let filter = Filter {
+        provider: Some(provider),
+        ..Filter::default()
+    };
+    let expected = rollup::window(conn, from, until, &filter)
+        .await
+        .unwrap()
+        .performance;
+    let actual = rollup::performance_window(conn, from, until, &filter)
+        .await
+        .unwrap();
+    assert_eq!(
+        actual, expected,
+        "exact boundaries, error counts and percentile buckets stay the ledger's own"
+    );
+}
+
+#[tokio::test]
+async fn provider_health_keeps_negative_instants_and_the_last_microsecond_before_a_large_prefix_boundary()
+ {
+    let (_fixture, db) = world().await;
+    let mut tx = db.begin().await.unwrap();
+    let provider = new_id();
+    let boundary = DateTime::<Utc>::from_timestamp_micros(1_i64 << 56).unwrap();
+    let epoch = DateTime::<Utc>::from_timestamp_micros(0).unwrap();
+    for at in [
+        epoch - Duration::microseconds(1),
+        epoch,
+        boundary - Duration::microseconds(1),
+        boundary,
+    ] {
+        sqlx::query("INSERT INTO usage_events(id,change_seq,at,origin,scope,counted,org_id,project_id,topic_id,provider_id,model,outcome) VALUES($1,0,$2,'orch','request',false,$3,$4,$5,$6,'test-model','done')")
+            .bind(new_id()).bind(at).bind(new_id()).bind(new_id()).bind(new_id()).bind(provider).execute(&mut *tx).await.unwrap();
+    }
+    same_health_window(&mut tx, provider, epoch, boundary).await;
+    same_health_window(&mut tx, provider, epoch - Duration::seconds(1), epoch).await;
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_repeated_provider_health_read_does_not_replay_the_requests_in_its_window() {
+    let (_fixture, db) = world().await;
+    let mut tx = db.begin().await.unwrap();
+    let provider = new_id();
+    let now = Utc.with_ymd_and_hms(2026, 11, 15, 12, 0, 0).unwrap();
+    // Many requests at distinct instants distinguish a hot window read from a rate-sized scan.
+    sqlx::query("INSERT INTO usage_events(id,change_seq,at,origin,scope,counted,org_id,project_id,topic_id,provider_id,model,outcome,first_token_ms,speed_milli,generation_ms,streamed_output_tokens) SELECT md5('health-request-'||n)::uuid,0,$1::timestamptz-n*interval '1 millisecond','forwarder','request',false,$2,$3,$4,$5,'test-model',CASE WHEN n%5=0 THEN 'provider_busy' ELSE 'done' END,n*10,n*100,100,2 FROM generate_series(1,1000) AS n")
+        .bind(now).bind(new_id()).bind(new_id()).bind(new_id()).bind(provider).execute(&mut *tx).await.unwrap();
+    let from = now - Duration::minutes(15);
+    let until = now + Duration::microseconds(1);
+    same_health_window(&mut tx, provider, from, until).await;
+    let reads = "SELECT COALESCE(sum(seq_tup_read+idx_tup_fetch),0)::bigint FROM pg_stat_xact_user_tables WHERE relid='usage_events'::regclass";
+    let before: i64 = sqlx::query_scalar(reads).fetch_one(&mut *tx).await.unwrap();
+    let value = rollup::performance_window(
+        &mut tx,
+        from,
+        until,
+        &Filter {
+            provider: Some(provider),
+            ..Filter::default()
+        },
+    )
+    .await
+    .unwrap();
+    let after: i64 = sqlx::query_scalar(reads).fetch_one(&mut *tx).await.unwrap();
+    assert_eq!(value.requests, 1000);
+    assert_eq!(
+        after - before,
+        0,
+        "an unchanged window reread historical ledger rows"
+    );
+    sqlx::query(
+        "UPDATE usage_events SET first_token_ms=12000 WHERE id=md5('health-request-1')::uuid",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let before: i64 = sqlx::query_scalar(reads).fetch_one(&mut *tx).await.unwrap();
+    rollup::performance_window(
+        &mut tx,
+        from,
+        until,
+        &Filter {
+            provider: Some(provider),
+            ..Filter::default()
+        },
+    )
+    .await
+    .unwrap();
+    let after: i64 = sqlx::query_scalar(reads).fetch_one(&mut *tx).await.unwrap();
+    assert!(
+        after - before <= 1,
+        "one changed request replayed {} ledger rows",
+        after - before
+    );
+    tx.commit().await.unwrap();
+    let mut tx = db.begin().await.unwrap();
+    same_health_window(&mut tx, provider, now - Duration::milliseconds(500), until).await;
+    same_health_window(&mut tx, provider, from, until).await;
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_health_keeps_late_replacements_expiry_and_exact_time_boundaries_without_double_counting()
+ {
+    let (_fixture, db) = world().await;
+    let mut tx = db.begin().await.unwrap();
+    let provider = new_id();
+    let other = new_id();
+    let at = Utc.with_ymd_and_hms(2026, 11, 15, 12, 0, 0).unwrap();
+    let first = new_id();
+    let second = new_id();
+    for (id, who, when) in [
+        (first, provider, at),
+        (second, provider, at + Duration::microseconds(1)),
+        (new_id(), other, at),
+    ] {
+        sqlx::query("INSERT INTO usage_events(id,change_seq,at,origin,scope,counted,org_id,project_id,topic_id,provider_id,model,outcome,first_token_ms,speed_milli,generation_ms,streamed_output_tokens) VALUES($1,0,$2,'forwarder','request',false,$3,$4,$5,$6,'test-model','done',0,1000,100,2)")
+            .bind(id).bind(when).bind(new_id()).bind(new_id()).bind(new_id()).bind(who).execute(&mut *tx).await.unwrap();
+    }
+    same_health_window(&mut tx, provider, at, at + Duration::microseconds(1)).await;
+    same_health_window(&mut tx, provider, at, at + Duration::microseconds(2)).await;
+    sqlx::query("UPDATE usage_events SET outcome='provider_busy',first_token_ms=4000,speed_milli=NULL,measurement_states=$2 WHERE id=$1")
+        .bind(first).bind(json!({"reasoning_hidden":true,"speed_milli":{"state":"empty"}})).execute(&mut *tx).await.unwrap();
+    same_health_window(&mut tx, provider, at, at + Duration::microseconds(2)).await;
+    sqlx::query("UPDATE usage_events SET provider_id=$2,at=$3 WHERE id=$1")
+        .bind(second)
+        .bind(other)
+        .bind(at - Duration::microseconds(1))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    same_health_window(&mut tx, provider, at, at + Duration::microseconds(2)).await;
+    same_health_window(
+        &mut tx,
+        other,
+        at - Duration::seconds(1),
+        at + Duration::seconds(1),
+    )
+    .await;
+    let late = new_id();
+    sqlx::query("INSERT INTO usage_events(id,change_seq,at,origin,scope,counted,org_id,project_id,topic_id,provider_id,model,outcome) VALUES($1,0,$2,'orch','request',false,$3,$4,$5,$6,'test-model','done') ON CONFLICT DO NOTHING")
+        .bind(late).bind(at).bind(new_id()).bind(new_id()).bind(new_id()).bind(provider).execute(&mut *tx).await.unwrap();
+    same_health_window(&mut tx, provider, at, at + Duration::microseconds(2)).await;
+    sqlx::query("DELETE FROM usage_events WHERE id=$1")
+        .bind(first)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    same_health_window(&mut tx, provider, at, at + Duration::microseconds(2)).await;
+    same_health_window(
+        &mut tx,
+        provider,
+        at + Duration::seconds(1),
+        at + Duration::seconds(2),
+    )
+    .await;
+    same_health_window(
+        &mut tx,
+        provider,
+        at - Duration::seconds(1),
+        at + Duration::seconds(1),
+    )
+    .await;
+    tx.rollback().await.unwrap();
+}
+
 /// A small deterministic source of choices, so that a failing ledger can be made again.
 struct Dice(u64);
 
