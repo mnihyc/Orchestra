@@ -103,6 +103,7 @@ async fn a_local_import_is_filed_as_the_machine_owner_and_replay_makes_no_second
         }))
     });
     let request = McpImportAsk {
+        profile: None,
         request_id: new_id(),
         environment_id: environment,
         source: "fake".to_owned(),

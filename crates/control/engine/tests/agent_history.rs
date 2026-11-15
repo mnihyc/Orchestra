@@ -36,6 +36,7 @@ fn without_sweeps(config: &mut EngineConfig) {
 }
 
 async fn quiet() -> World {
+    terminal_diagnostics();
     World::from_setup(Setup {
         tune: Some(without_sweeps),
         ..Setup::default()
@@ -44,6 +45,7 @@ async fn quiet() -> World {
 }
 
 async fn quiet_with_clock(clock: Arc<dyn Clock>) -> World {
+    terminal_diagnostics();
     World::from_setup(Setup {
         clock: Some(clock),
         tune: Some(without_sweeps),
@@ -53,12 +55,71 @@ async fn quiet_with_clock(clock: Arc<dyn Clock>) -> World {
 }
 
 async fn quiet_observed() -> World {
+    terminal_diagnostics();
     World::from_setup(Setup {
         observed: true,
         tune: Some(without_sweeps),
         ..Setup::default()
     })
     .await
+}
+
+/// Capture only the existing safe terminal phase/category facts when an eventual barrier fails.
+fn terminal_diagnostics() {
+    struct Terminal;
+    impl tracing::Subscriber for Terminal {
+        fn enabled(&self, meta: &tracing::Metadata<'_>) -> bool {
+            meta.target() == "orch_engine::terminal_work"
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            #[derive(Default)]
+            struct Fields {
+                failed: bool,
+                values: Vec<String>,
+            }
+            impl tracing::field::Visit for Fields {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    if field.name() == "outcome" {
+                        self.failed = value == "error";
+                    }
+                    if matches!(
+                        field.name(),
+                        "thread" | "phase" | "outcome" | "error_class" | "sqlstate" | "stopped"
+                    ) {
+                        self.values.push(format!("{}={value}", field.name()));
+                    }
+                }
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if matches!(
+                        field.name(),
+                        "thread" | "phase" | "outcome" | "error_class" | "sqlstate" | "stopped"
+                    ) {
+                        self.values.push(format!("{}={value:?}", field.name()));
+                    }
+                }
+            }
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            if fields.failed {
+                eprintln!("Terminal follow-up {}", fields.values.join(" "));
+            }
+        }
+    }
+    static START: std::sync::Once = std::sync::Once::new();
+    START.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(Terminal);
+    });
 }
 
 fn serve_history(world: &World) -> Arc<Mutex<HashSet<String>>> {
@@ -261,6 +322,7 @@ fn serve_native_generations(world: &World, missing: bool) {
         }
         Ok(CommandResult::SessionOpen(
             orch_link_contract::commands::SessionOpenResult {
+                mcp: None,
                 native_session_ref: if resume {
                     body.native_session_ref.clone().unwrap()
                 } else {
@@ -957,6 +1019,7 @@ async fn retained_native_creation_and_open_receipts_protect_their_exact_child_hi
     let history = rows::get(&mut conn, segment).await.unwrap().unwrap();
     let opened = NativePrefixOpened {
         session: orch_agent_contract::session::SessionOpened {
+            mcp: None,
             native_session_ref: history.native_session_ref.clone(),
             resumed: false,
             import_report: None,
@@ -980,6 +1043,7 @@ async fn retained_native_creation_and_open_receipts_protect_their_exact_child_hi
     let created = serde_json::to_value(&opened).unwrap();
     let prefix = serde_json::to_value(&opened.prefix).unwrap();
     let resumed = orch_link_contract::commands::SessionOpenResult {
+        mcp: None,
         native_session_ref: history.native_session_ref.clone(),
         resumed: true,
         import_report: None,

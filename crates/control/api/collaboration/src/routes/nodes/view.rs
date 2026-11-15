@@ -764,6 +764,8 @@ async fn build_with_name_sources(
             .collect();
 
     let mut built = Vec::new();
+    let mut thread_bases = Vec::new();
+    let mut thread_positions = Vec::new();
     for id in wanted {
         let (Some(detail), Some(site)) = (details.get(&id), standing.sites.get(&id)) else {
             continue;
@@ -794,6 +796,12 @@ async fn build_with_name_sources(
             access,
             tags: tags_of(detail.id, &extras, &standing),
         };
+        if node_kind(&detail.kind) == Some(NodeKind::Thread) {
+            thread_positions.push((built.len(), id, viewable(&standing, site)));
+            thread_bases.push(common.base(ThreadKind::Thread));
+            built.push(None);
+            continue;
+        }
         let node = match node_kind(&detail.kind) {
             Some(NodeKind::Org) => org(common.base(OrgKind::Org), detail, &extras, name_sources),
             Some(NodeKind::Project) => Node::Project(Project {
@@ -802,26 +810,50 @@ async fn build_with_name_sources(
                 project_count: extras.project_counts.get(&id).copied().unwrap_or_default(),
             }),
             Some(NodeKind::Topic) => topic(common.base(TopicKind::Topic), detail, &extras),
-            Some(NodeKind::Thread) => Node::Thread(
-                // The generic node reader carries this branch even when showing an org.
-                // Its binding/input/environment futures must not enlarge every node request.
-                Box::pin(crate::routes::threads::view::thread_with_name_sources(
-                    conn,
-                    principal,
-                    common.base(ThreadKind::Thread),
-                    now,
-                    name_sources,
-                ))
-                .await?,
-            ),
-            None => continue,
+            _ => continue,
         };
-        built.push(Built {
+        built.push(Some(Built {
             node,
             viewable: viewable(&standing, site),
-        });
+        }));
     }
-    Ok(built)
+    if !thread_bases.is_empty() {
+        // The generic reader carries this future even for an org-only page.
+        // Keep the native thread projection behind the same boxed family boundary.
+        let threads = Box::pin(crate::routes::threads::view::threads_with_name_sources(
+            conn,
+            principal,
+            thread_bases,
+            now,
+            name_sources,
+        ))
+        .await?;
+        if threads.len() != thread_positions.len() {
+            return Err(ApiError::internal(
+                "the native thread page omitted a requested projection",
+            ));
+        }
+        for ((position, id, viewable), thread) in thread_positions.into_iter().zip(threads) {
+            if thread.base.id != id {
+                return Err(ApiError::internal(
+                    "the native thread page changed its order",
+                ));
+            }
+            let slot = built
+                .get_mut(position)
+                .ok_or_else(|| ApiError::internal("the native thread position disappeared"))?;
+            *slot = Some(Built {
+                node: Node::Thread(thread),
+                viewable,
+            });
+        }
+    }
+    built
+        .into_iter()
+        .map(|row| {
+            row.ok_or_else(|| ApiError::internal("the native node page has an unfinished thread"))
+        })
+        .collect()
 }
 
 /// The READMEs the nodes `ids` name that are still their own documents and that the caller may read, as a list
