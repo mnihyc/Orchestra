@@ -352,6 +352,13 @@ pub async fn allowed(
     target: LossTarget,
 ) -> Result<bool, LossError> {
     if let LossTarget::Machine { id } = target {
+        // A unit that a host runs is declared lost with its host or its environment, never alone.
+        if orch_db::queries::resources::hosting::host_running(conn, id)
+            .await?
+            .is_some()
+        {
+            return Ok(false);
+        }
         if orch_db::queries::resources::hosting::host_of_machine(conn, id)
             .await?
             .is_some()
