@@ -177,7 +177,10 @@ async fn an_idle_update_fence_holds_a_new_turn_out_and_a_running_approval_keeps_
     tokio::time::timeout(PATIENCE, async {
         loop {
             let progress = rig.controller.progress(id);
-            if matches!(progress, Some(Progress::Accepted)) {
+            if matches!(
+                progress,
+                Some(Progress::Accepted | Progress::Running | Progress::Released)
+            ) {
                 break;
             }
             assert!(
@@ -284,7 +287,7 @@ async fn switching_auto_off_while_a_build_is_staged_discards_it_without_installi
                 public_url: "https://orch.test".into(),
             },
             pin: "test".into(),
-            protocol_version: 1,
+            protocol_version: orch_link_contract::version::PROTOCOL_VERSION,
             enrolled_at: rig.clock.time(),
             managed: false,
         })
@@ -319,6 +322,7 @@ async fn switching_auto_off_while_a_build_is_staged_discards_it_without_installi
     tokio::pin!(updating);
     let grant = MachineUpdateNow {
         recommended: "2.0.0".into(),
+        automatic: true,
     };
     let granted = rig.send(&SerialKey::Machine, &grant);
     tokio::pin!(granted);
@@ -461,11 +465,15 @@ async fn a_connector_killed_in_the_middle_of_a_turn_says_on_its_return_what_beca
         .into_iter()
         .find(|e| e.kind == "session.lost")
         .unwrap();
+    assert_eq!(
+        lost.body["uncertain"], true,
+        "the synthetic adapter cannot reattach the admitted native turn"
+    );
     assert!(
         lost.body["reason"]
             .as_str()
             .unwrap()
-            .contains("turn was running")
+            .contains("unavailable")
     );
     for (place, event) in rig.applied(thread, segment).iter().enumerate() {
         assert_eq!(event.seq, place as i64 + 1);
@@ -1002,3 +1010,6 @@ async fn an_opening_the_system_gave_up_stops_fetching_and_removes_what_it_fetche
     assert!(matches!(ended, Progress::Succeeded(_)), "{ended:?}");
     rig.connector.unwrap().stop().await;
 }
+
+#[path = "agent_role/stop_during_command.rs"]
+mod stop_during_command;
