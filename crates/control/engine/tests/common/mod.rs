@@ -726,8 +726,7 @@ impl Commands for Process {
         before: Option<orch_engine::commands::BeforeCommand<'_>>,
     ) -> Result<(), CommandsError> {
         self.alive()?;
-        let mut issued = lock(&self.commands.issued);
-        if issued.contains_key(&command.id) {
+        if lock(&self.commands.issued).contains_key(&command.id) {
             if let Some(check) = before {
                 check().map_err(CommandsError::BeforeEffect)?;
             }
@@ -746,6 +745,32 @@ impl Commands for Process {
         };
         if let Some(check) = before {
             check().map_err(CommandsError::BeforeEffect)?;
+        }
+        {
+            let mut conn = self
+                .commands
+                .db
+                .acquire()
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+            link_queries::insert_command(
+                &mut conn,
+                &link_queries::NewCommand {
+                    id: cmd.id,
+                    machine_id: command.machine,
+                    kind: &cmd.kind,
+                    body: &cmd.body,
+                    serial_key: cmd.key.as_deref(),
+                    deadline_at: cmd.deadline.get(),
+                },
+                now,
+            )
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+        }
+        let mut issued = lock(&self.commands.issued);
+        if issued.contains_key(&command.id) {
+            return Ok(());
         }
         let handle = self
             .commands
@@ -2539,6 +2564,35 @@ impl World {
                 &event,
             )
             .await;
+    }
+
+    /// The physical opening already admitted by this world's actual session command.
+    pub async fn opening_of(&self, thread: Id) -> Id {
+        let segment = self.segment_of(thread).await;
+        let opening: String = sqlx::query_scalar(
+            "SELECT delivered_resources#>>'{tool_admission,opening_id}' FROM segments WHERE id=$1",
+        )
+        .bind(segment)
+        .fetch_one(self.pool.pool())
+        .await
+        .unwrap();
+        opening.parse().unwrap()
+    }
+
+    /// Waits for this session report's native cursor, including an intentionally ignored old report.
+    pub async fn say_session_taken_in(&self, thread: Id, event: Event) {
+        let segment = self.segment_of(thread).await;
+        let stream = Stream::Session {
+            thread_id: thread,
+            segment_id: segment,
+        }
+        .to_string();
+        let before = self.taken_in(&stream).await;
+        self.say(thread, event).await;
+        eventually("the session report to be consumed", || async {
+            self.taken_in(&stream).await > before
+        })
+        .await;
     }
 
     /// Opens the planned harness session before this world reports from a segment.

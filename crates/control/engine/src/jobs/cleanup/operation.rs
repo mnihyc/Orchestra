@@ -11,6 +11,7 @@ use orch_access_contract::{
     permissions::{NodePermission, PermissionName},
 };
 use orch_api_contract::{
+    mounts::{MountDelete, MountDeletePreflight},
     operation_sources::Declaration,
     routes::{Endpoint, Route},
     storage::{StorageCleanupCreate, StorageCleanupPreflight},
@@ -99,12 +100,23 @@ impl Request {
         recipe: &Recipe,
     ) -> Result<Self, EngineError> {
         let origin = Origin::capture(caller, session)?;
-        if origin.operation.operation() != declarations::CREATE.operation
-            || preview.as_ref().is_some_and(|preview| {
-                preview.operation.operation() != declarations::PREFLIGHT.operation
-                    || preview.operation.user() != caller.user()
-            })
-        {
+        let expected_preview = match origin.operation.operation() {
+            operation if operation == declarations::CREATE.operation => {
+                declarations::PREFLIGHT.operation
+            }
+            operation if operation == declarations::MOUNT_DELETE.operation => {
+                declarations::MOUNT_DELETE_PREFLIGHT.operation
+            }
+            _ => {
+                return Err(EngineError::unreadable(
+                    "the native cleanup operation changed",
+                ));
+            }
+        };
+        if preview.as_ref().is_some_and(|preview| {
+            preview.operation.operation() != expected_preview
+                || preview.operation.user() != caller.user()
+        }) {
             return Err(EngineError::unreadable(
                 "the native cleanup origins changed",
             ));
@@ -129,7 +141,7 @@ impl Request {
             && row.kind == KIND
             && row.created_by == Some(self.origin.operation.user())
             && self.recipe == row.plan["recipe"]
-            && self.origin.operation.operation() == declarations::CREATE.operation
+            && matches!(self.origin.operation.operation(), operation if operation == declarations::CREATE.operation || operation == declarations::MOUNT_DELETE.operation)
     }
 }
 /// The exact native source input of a current stage, independent of HTTP or worker transport.
@@ -147,6 +159,9 @@ pub struct Value {
 pub struct Creating;
 /// The saved preview stage, kept independent of confirmation.
 pub struct Previewing;
+/// Mount removal keeps its real canonical operation throughout retained physical work.
+pub struct Deleting;
+pub struct DeletePreview;
 
 async fn namespace(
     conn: &mut Conn,
@@ -609,6 +624,44 @@ macro_rules! stage {
 }
 stage!(Creating, StorageCleanupCreate, CREATE);
 stage!(Previewing, StorageCleanupPreflight, PREFLIGHT);
+stage!(Deleting, MountDelete, MOUNT_DELETE);
+stage!(DeletePreview, MountDeletePreflight, MOUNT_DELETE_PREFLIGHT);
+
+struct Current {
+    principal: Principal,
+    first_effect: continuing::FirstEffect,
+}
+
+async fn preview_frame<F: Source<Role = Role, Input = Input, Value = Value>>(
+    conn: &mut Conn,
+    clock: &dyn Clock,
+    checkpoint: &HttpOrigin,
+    sources: &sources::Sources,
+) -> Result<(Current, Option<Time>), EngineError> {
+    let frame = continuing::checkpoint::<F>(
+        conn,
+        clock,
+        checkpoint,
+        Input {
+            sources: sources.clone(),
+            work: None,
+        },
+    )
+    .await
+    .map_err(EngineError::unreadable)?;
+    let raw = frame
+        .http_origin()
+        .ok_or_else(|| EngineError::unreadable("the cleanup preview lost its HTTP checkpoint"))?
+        .until();
+    let parts = frame.into_parts();
+    Ok((
+        Current {
+            principal: parts.principal,
+            first_effect: parts.first_effect,
+        },
+        raw,
+    ))
+}
 
 /// Live raw credential minimum retained only until the owner's actual rollbackable commit.
 pub struct Deadline {
@@ -650,22 +703,12 @@ pub async fn check_preview(
             "the saved cleanup preview's original transport changed",
         ));
     }
-    let frame = continuing::checkpoint::<Previewing>(
-        conn,
-        clock,
-        checkpoint,
-        Input {
-            sources: sources.clone(),
-            work: None,
-        },
-    )
-    .await
-    .map_err(EngineError::unreadable)?;
-    let raw = frame
-        .http_origin()
-        .ok_or_else(|| EngineError::unreadable("the cleanup preview lost its HTTP checkpoint"))?
-        .until();
-    let parts = frame.into_parts();
+    let (parts, raw) =
+        if origin.operation.operation() == declarations::MOUNT_DELETE_PREFLIGHT.operation {
+            preview_frame::<DeletePreview>(conn, clock, checkpoint, sources).await?
+        } else {
+            preview_frame::<Previewing>(conn, clock, checkpoint, sources).await?
+        };
     let callers = vec![parts.principal.caller().clone()];
     parts
         .first_effect
@@ -724,7 +767,7 @@ pub(super) async fn principal(conn: &mut Conn, job: &Job, key: &str) -> Result<P
         return Ok(legacy(conn, &row, Time::new(job.now())).await?.0);
     };
     let (frame, _) = frame(conn, job.engine().inner.clock.as_ref(), &row, &request, key).await?;
-    Ok(frame.into_parts().principal)
+    Ok(frame.principal)
 }
 async fn frame(
     conn: &mut Conn,
@@ -732,14 +775,26 @@ async fn frame(
     row: &jobs::JobRow,
     request: &Request,
     key: &str,
-) -> Result<(continuing::Frame<Creating>, Option<Time>), Stop> {
+) -> Result<(Current, Option<Time>), Stop> {
     if !request.matches(row) {
         return Err(refused());
     }
     if let Some(preview) = &request.preview {
         check_preview(conn, clock, preview, &request.sources).await?;
     }
-    let frame = continuing::prepare::<Creating>(
+    if request.origin.operation.operation() == declarations::MOUNT_DELETE.operation {
+        current_frame::<Deleting>(conn, clock, request, key).await
+    } else {
+        current_frame::<Creating>(conn, clock, request, key).await
+    }
+}
+async fn current_frame<F: Source<Role = Role, Input = Input, Value = Value>>(
+    conn: &mut Conn,
+    clock: &dyn Clock,
+    request: &Request,
+    key: &str,
+) -> Result<(Current, Option<Time>), Stop> {
+    let frame = continuing::prepare::<F>(
         conn,
         clock,
         &request.origin.operation,
@@ -756,7 +811,14 @@ async fn frame(
         .await?
         .ok_or_else(refused)?;
     frame.check_deadline(clock).map_err(|_| refused())?;
-    Ok((frame, raw))
+    let parts = frame.into_parts();
+    Ok((
+        Current {
+            principal: parts.principal,
+            first_effect: parts.first_effect,
+        },
+        raw,
+    ))
 }
 /// Consume the actual original-operation first-effect cut on the native writer's still-open transaction.
 pub(super) async fn before_mutation(
@@ -778,7 +840,7 @@ pub(super) async fn before_mutation(
         Some(origin) => Some(check_preview(conn, clock, origin, &request.sources).await?),
         None => None,
     };
-    let parts = frame.into_parts();
+    let parts = frame;
     let mut callers = vec![parts.principal.caller().clone()];
     let mut raw = vec![raw];
     if let Some(preview) = preview {
@@ -1029,7 +1091,7 @@ impl Command {
                     .map(|(caller, raw)| (Some(caller), raw)),
             );
         }
-        let parts = frame.into_parts();
+        let parts = frame;
         parts
             .first_effect
             .check(clock)

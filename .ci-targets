@@ -1,0 +1,13 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test call_recovery --test cache_cleanup --test ingest --test failures --test foreign_machine_streams --test background_wake --test limits
+test -p orch-connector-core --lib
+test -p orch-connector-core --test agent_role
+test -p orch-api-core --test mcp_duplicates --test executor_ticket_build
+test -p orch-plugin --test adapter
+web typecheck
+web lint
+web test -- tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts

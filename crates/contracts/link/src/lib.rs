@@ -37,5 +37,6 @@ pub mod ports;
 pub mod session;
 pub mod source;
 pub mod streams;
+pub mod tool_sessions;
 pub mod tunnels;
 pub mod version;

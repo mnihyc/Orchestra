@@ -999,6 +999,30 @@ impl PolicyStore {
         self.state().config.clone()
     }
 
+    /// Keep gateway selection in the same locked configuration as policy, roles and programs.
+    pub fn change_gateway(
+        &self,
+        choice: &orch_link_contract::gateways::GatewayChoice,
+    ) -> Result<bool, PolicyFault> {
+        let mut state = self.state();
+        if state.config.connector.gateway == *choice {
+            return Ok(false);
+        }
+        let mut config = state.config.clone();
+        config.connector.gateway = choice.clone();
+        orch_config::loader::Validate::validate(&config)
+            .map_err(|error| PolicyFault::Config(error.to_string()))?;
+        let next = State {
+            config,
+            policy: state.policy.clone(),
+            active_roles: state.active_roles.clone(),
+        };
+        self.persist(&next)?;
+        *state = next;
+        self.changed.send_modify(|count| *count += 1);
+        Ok(true)
+    }
+
     /// The one file owns both policy provenance and runtime program registrations; a policy save
     /// cannot overwrite a newer registry. The kept/delegated key is rechecked under this same lock.
     pub fn change_program(
