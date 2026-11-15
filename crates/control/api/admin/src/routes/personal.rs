@@ -2,7 +2,7 @@
 //!
 //! Everything here acts on the caller and on nobody else. A favorite or a
 //! recent is a kind/id the caller may view; one they lost the right to is no
-//! longer listed. The interface state is kept under nine keys and no
+//! longer listed. The interface state is kept under its declared keys and no
 //! others, whole, and no value is larger than the limit; the last view of a
 //! project is also kept one project at a time, beside the others. Drafts and the
 //! chat states belong to the threads and the chats, and the read position
@@ -380,8 +380,24 @@ async fn state_set(ctx: Ctx, (): (), mut value: Json) -> ApiResult<()> {
     if known.is_none() {
         return Err(invalid(
             "key",
-            "is none of help, layouts, viewers, timeline, sidebar, project_views, keys, reactions and inbox",
+            "is none of help, layouts, viewers, timeline, interface, sidebar, project_views, keys, reactions and inbox",
         ));
+    }
+    if known == Some(PersonalStateKey::Interface) {
+        use orch_settings_contract::registry::{self, keys};
+        let choices = value
+            .as_object()
+            .ok_or_else(|| invalid("interface", "must be an object"))?;
+        for (field, setting) in [
+            ("kept_closed_tabs", keys::INTERFACE_KEPT_CLOSED_TABS),
+            ("progress_delay_ms", keys::INTERFACE_PROGRESS_DELAY_MS),
+            ("read_freshness_ms", keys::INTERFACE_READ_FRESHNESS_MS),
+        ] {
+            if let Some(choice) = choices.get(field) {
+                registry::validate(setting, choice)
+                    .map_err(|error| invalid(&format!("interface.{field}"), &error.to_string()))?;
+            }
+        }
     }
     // A person's keys are kept only as keys of actions there are, none of them meeting another's.
     if known == Some(PersonalStateKey::Keys) {
