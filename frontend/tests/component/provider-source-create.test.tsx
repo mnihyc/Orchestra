@@ -21,7 +21,7 @@ skipOverflowFallback();
 const guide = vi.hoisted(() => vi.fn());
 const navigate = vi.hoisted(() => vi.fn());
 const close = vi.hoisted(() => vi.fn());
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => guide }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => guide }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), useNavigate: () => navigate, Link: ({ children }: { children: ReactNode }) => <a href="#provider">{children}</a> }));
 vi.mock('@/api/machinePrograms',()=>({machineProgramsKey:(id:string)=>['programs',id],changeMachinePrograms:vi.fn(),
@@ -241,4 +241,12 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
     await user.click(button(t('providerCreation.create')));
     expect(createProvider).toHaveBeenCalledTimes(1);
   });
+});
+
+
+it.each(['en', 'zh-CN'] as const)('names the new resource before its other setup choices in %s', async (locale) => {
+  await setLocale(locale);
+  show(<AddProviderDialog onClose={vi.fn()} />);
+  const name = await screen.findByRole('textbox', { name: i18n.t('providers.add.name') });
+  expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],select')).toBe(name);
 });

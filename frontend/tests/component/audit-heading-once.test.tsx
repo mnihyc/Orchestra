@@ -7,13 +7,13 @@ import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { show } from './support';
 
-vi.mock('@tanstack/react-router', () => ({ useLocation: () => ({ pathname: '/admin/audit', search: {}, searchStr: '', hash: '' }), useNavigate: () => vi.fn(), useRouter: () => ({ history: { replace: vi.fn() } }) }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), useLocation: () => ({ pathname: '/admin/audit', search: {}, searchStr: '', hash: '' }), useNavigate: () => vi.fn(), useRouter: () => ({ history: { replace: vi.fn() } }) }));
 vi.mock('@/api/trace', async (original) => ({ ...await original<object>(),
   trailQuery: () => ({ queryKey: ['one-audit-heading'], initialPageParam: null, queryFn: () => Promise.resolve({ items: [], next_cursor: null }), getNextPageParam: () => undefined }),
   selectedPersonQuery: () => ({ queryKey: ['one-audit-person'], queryFn: () => Promise.resolve(null) }),
 }));
 vi.mock('@/features/trace/Filters', () => ({ TraceFilters: () => null }));
-vi.mock('@/lib/viewChoices', () => ({ useViewChoice: (_view: string, _key: string, value: unknown) => [value, vi.fn()] }));
+vi.mock('@/lib/viewChoices', async (loadOriginal) => ({ ...await loadOriginal<object>(), useViewChoice: (_view: string, _key: string, value: unknown) => [value, vi.fn()] }));
 const modes = [['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const;
 const appearance = useAppearance.getState();
 const previousTheme = document.documentElement.dataset.theme;
