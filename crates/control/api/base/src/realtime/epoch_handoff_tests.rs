@@ -390,7 +390,7 @@ async fn enroll(rig: &Rig, node: bool) -> Proof<(String, Id)> {
                     arch: Arch::X86_64,
                 },
                 connector_version: "1.0.0".to_owned(),
-                protocol_versions: vec![1],
+                protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
                 roles: vec![if node { Role::Node } else { Role::Agent }],
             },
             &orch_db::audit::Origin::default(),
@@ -2401,3 +2401,69 @@ pub fn __api_run_topic_sync_uses_the_same_selection_for_scoped_http_and_socket_c
 
 #[path = "native_feed_key_tests.rs"]
 pub mod native_feed_keys;
+
+#[cfg(any(test, feature = "test-support"))]
+async fn subscription_news_reloads_the_current_own_source_and_stops_when_view_is_withdrawn() -> Proof
+{
+    let rig = Rig::with_time_held().await;
+    let thread = rig.thread("Contribution source").await;
+    let (person, token) = rig.person("following-reader").await;
+    let role = rig.give(person, "viewer").await;
+    {
+        let mut conn = rig.pool.acquire().await?;
+        orch_db::queries::notifications::subscribers::follow(
+            &mut conn,
+            person,
+            thread,
+            rig.clock.now(),
+        )
+        .await?;
+    }
+    let reader = Reader::new(&rig, &token).await?;
+    let sub = reader.subscribe(Feed::User).await?;
+    let automatic: UserEvent = serde_json::from_value(
+        json!({"what":"subscription","node_id":thread,"level":"all","source":"auto"}),
+    )?;
+    {
+        let mut conn = rig.pool.acquire().await?;
+        orch_db::queries::hierarchy::put_subscription(
+            &mut conn,
+            person,
+            thread,
+            "all",
+            "manual",
+            rig.clock.now(),
+        )
+        .await?;
+    }
+    reader
+        .realtime
+        .inner
+        .personal_event(&sub, automatic.clone())
+        .await?;
+    let delivered = reader.next().await?;
+    assert_eq!(delivered["data"]["level"], "all");
+    assert_eq!(
+        delivered["data"]["source"], "manual",
+        "an older automatic hint cannot replace the committed explicit choice"
+    );
+    reader.empty();
+    rig.take(role).await;
+    reader.reset(&sub).await?;
+    assert_eq!(reader.next().await?["op"], "resync");
+    reader
+        .realtime
+        .inner
+        .personal_event(&sub, automatic)
+        .await?;
+    reader.empty();
+    reader.finish().await;
+    rig.server.stop().await;
+    Ok(())
+}
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn __api_run_subscription_news_reloads_the_current_own_source_and_stops_when_view_is_withdrawn()
+-> ::futures::future::LocalBoxFuture<'static, Proof> {
+    Box::pin(subscription_news_reloads_the_current_own_source_and_stops_when_view_is_withdrawn())
+}

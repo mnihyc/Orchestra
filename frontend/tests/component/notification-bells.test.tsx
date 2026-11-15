@@ -9,9 +9,11 @@ import type * as ExceptionsApi from '@/api/notificationExceptions';
 import type * as PeopleApi from '@/api/people';
 import { Bell } from '@/features/chat/Bell';
 import { DiscussionBell } from '@/features/people/DiscussionBell';
+import { attentionWriter } from '@/features/navigation/attention';
 import { SubscriptionBell } from '@/features/thread/SubscriptionBell';
 import type { Document as HeardDocument,NotificationExceptionChanged,Thread } from '@/generated/api-types';
 import { i18n,setLocale } from '@/i18n';
+import { tellUserEvent } from '@/realtime/stores/user';
 import { statesWriter,useChatState } from '@/realtime/stores/chat';
 import { threadViewOf,threadWriter,useThreadPart } from '@/realtime/stores/thread';
 import { chat,state } from '../doubles/chat-rows';
@@ -31,8 +33,8 @@ const room=chat();
 function ChatBell(){return <Bell chat={room} state={useChatState(room.id)}/>;}
 const accepted=(level:'all'|'important'|'off'|null):NotificationExceptionChanged=>({access:{...initial.access,subscription:level,effective_subscription:level ?? 'all'},exceptions:{items:[],next_cursor:null}});
 
-beforeEach(()=>{calls.change.mockReset();calls.chat.mockReset();calls.discussion.mockReset();threadWriter.evict(ID);statesWriter.clear();});
-afterEach(async()=>{cleanup();threadWriter.evict(ID);threadWriter.evict('another-notification-thread');statesWriter.clear();document.documentElement.removeAttribute('data-theme');await setLocale('en');});
+beforeEach(()=>{attentionWriter.clear();calls.change.mockReset();calls.chat.mockReset();calls.discussion.mockReset();threadWriter.evict(ID);statesWriter.clear();});
+afterEach(async()=>{attentionWriter.clear();cleanup();threadWriter.evict(ID);threadWriter.evict('another-notification-thread');statesWriter.clear();document.documentElement.removeAttribute('data-theme');await setLocale('en');});
 
 it('serializes native page-changing writes from separate open bells so an older page cannot arrive last',async()=>{
   const other='another-notification-thread';
@@ -171,4 +173,71 @@ it('keeps a refused discussion change in its anchored card and returns focus to 
   await user.keyboard('{Escape}');
   await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   await waitFor(() => expect(bell).toHaveFocus());
+});
+
+it.each(['en','zh-CN'] as const)('names automatic following from its admitted source and preserves a manual override (%s)',async(locale)=>{
+  await setLocale(locale);
+  attentionWriter.loadedAll([],[{node_id:ID,level:'all',source:'auto'}]);
+  threadWriter.reset(ID,{thread:{...structuredClone(initial),access:{...initial.access,subscription:'all',effective_subscription:'all'}}},false);
+  const user=userEvent.setup({delay:null});
+  show(<ThreadBell/>);
+  const bell=screen.getByRole('button',{name:i18n.t('thread.bell.label')});
+  expect(bell).toHaveTextContent(locale==='en'?'All · Auto':'全部 · 自动');
+  expect(bell).toHaveAccessibleDescription(locale==='en'?'Auto-followed because you contributed · All':'因参与而自动关注 · 全部');
+  await user.click(bell);
+  const reason=locale==='en'?'Auto-followed because you contributed · All':'因参与而自动关注 · 全部';
+  const description=screen.getByText(reason);
+  expect(description).toBeVisible();
+  expect(description.id).toBe(bell.getAttribute('aria-describedby'));
+  expect(document.getElementById(description.id)).toBe(description);
+  expect(bell).toHaveAccessibleDescription(reason);
+  calls.change.mockResolvedValue(accepted('important'));
+  await user.click(screen.getByRole('menuitemradio',{name:i18n.t('choiceCatalog.subscriptionLevel.important.name')}));
+  await waitFor(()=>expect(bell).toHaveAccessibleDescription(i18n.t('notificationBell.level.important')));
+  expect(bell).not.toHaveTextContent(locale==='en'?'Auto':'自动');
+  expect(calls.change).toHaveBeenCalledExactlyOnceWith(ID,'important',null);
+});
+
+it.each(['en','zh-CN'] as const)('honours choosing manual All while the current All was automatic (%s)',async(locale)=>{
+  await setLocale(locale);
+  attentionWriter.loadedAll([],[{node_id:ID,level:'all',source:'auto'}]);
+  threadWriter.reset(ID,{thread:{...structuredClone(initial),access:{...initial.access,subscription:'all',effective_subscription:'all'}}},false);
+  const user=userEvent.setup({delay:null});
+  show(<ThreadBell/>);
+  const bell=screen.getByRole('button',{name:i18n.t('thread.bell.label')});
+  await user.click(bell);
+  const all=screen.getByRole('menuitemradio',{name:i18n.t('choiceCatalog.subscriptionLevel.all.name')});
+  expect(all).toHaveAttribute('aria-checked','false');
+  calls.change.mockResolvedValue(accepted('all'));
+  await user.click(all);
+  await waitFor(()=>expect(calls.change).toHaveBeenCalledExactlyOnceWith(ID,'all',null));
+  await waitFor(()=>expect(bell).toHaveAccessibleDescription(i18n.t('notificationBell.level.all')));
+  expect(bell).not.toHaveTextContent(locale==='en'?'Auto':'自动');
+  await user.click(bell);
+  expect(screen.getByRole('menuitemradio',{name:i18n.t('choiceCatalog.subscriptionLevel.all.name')})).toHaveAttribute('aria-checked','true');
+  await user.click(screen.getByRole('menuitemradio',{name:i18n.t('choiceCatalog.subscriptionLevel.all.name')}));
+  expect(calls.change).toHaveBeenCalledTimes(1);
+});
+
+it.each(['en','zh-CN'] as const)('shows a first automatic follow from its admitted event without reloading the thread (%s)',async(locale)=>{
+  await setLocale(locale);
+  threadWriter.reset(ID,{thread:{...structuredClone(initial),access:{...initial.access,subscription:null,effective_subscription:'off',inherited_subscription:'off'}}},false);
+  show(<ThreadBell/>);
+  const bell=screen.getByRole('button',{name:i18n.t('thread.bell.label')});
+  act(()=>tellUserEvent('subscription',{node_id:ID,level:'all',source:'auto',effective_level:'all'}));
+  expect(bell).toHaveTextContent(locale==='en'?'All · Auto':'全部 · 自动');
+  expect(calls.change).not.toHaveBeenCalled();
+  act(()=>tellUserEvent('subscription',{node_id:ID,level:null,source:null,effective_level:'off'}));
+  expect(bell).toHaveTextContent(i18n.t('notificationBell.level.off'));
+  expect(bell).not.toHaveTextContent(locale==='en'?'Auto':'自动');
+});
+
+it('does not treat an unreported origin as an existing manual All choice',async()=>{
+  threadWriter.reset(ID,{thread:{...structuredClone(initial),access:{...initial.access,subscription:'all',effective_subscription:'all'}}},false);
+  const user=userEvent.setup({delay:null});
+  show(<ThreadBell/>);
+  await user.click(screen.getByRole('button',{name:i18n.t('thread.bell.label')}));
+  calls.change.mockResolvedValue(accepted('all'));
+  await user.click(screen.getByRole('menuitemradio',{name:i18n.t('choiceCatalog.subscriptionLevel.all.name')}));
+  await waitFor(()=>expect(calls.change).toHaveBeenCalledExactlyOnceWith(ID,'all',null));
 });

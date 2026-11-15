@@ -20,7 +20,7 @@ use orch_api_contract::common::SubscriptionLevel;
 use orch_api_contract::environment::{Environment, EnvironmentSyncJob};
 use orch_api_contract::everything::EverythingResource;
 use orch_api_contract::nodes::{Topic, TreeNode};
-use orch_api_contract::personal::{ChatState, Draft, PersonalStateKey};
+use orch_api_contract::personal::{ChatState, Draft, PersonalStateKey, SubscriptionSource};
 use orch_api_contract::processes::{ProcessInfo, ResourceSample};
 use orch_api_contract::resources::LoginState;
 use orch_api_contract::threads::{Item, RawEvent, Segment, Thread, ThreadInput, Turn};
@@ -702,6 +702,10 @@ pub enum UserEvent {
         node_id: Id,
         /// The level; `null` when they took their choice back.
         level: Option<SubscriptionLevel>,
+        /// The existing automatic or explicit origin; absent when the row was removed.
+        source: Option<SubscriptionSource>,
+        /// The current nearest own level, projected at delivery after the subject's View check.
+        effective_level: Option<SubscriptionLevel>,
     },
     /// This person's invitation to create an org changed; reread Meta as this caller.
     OrgCreation,

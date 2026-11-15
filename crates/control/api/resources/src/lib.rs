@@ -220,6 +220,8 @@ pub fn install_interfaces() {
 
     routes::resources::validation::__api_install_d2a05682ae();
 
+    routes::resources::validation::__api_install_ef3cd14b55();
+
     routes::resources::view::__api_install_9b9d72ac9f();
 
     routes::resources::view::__api_install_78f49040ef();
