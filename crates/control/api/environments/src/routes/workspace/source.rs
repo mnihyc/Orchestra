@@ -78,6 +78,11 @@ use orch_types::new_id;
 /// Binds the source and publication requests declared by the canonical API.
 pub fn mount(registry: &mut Registry) {
     registry
+        .on_snapshot_read_with_operation(
+            orch_api_contract::source::EnvironmentSourceEditsGet,
+            edits::operation,
+            edits::read,
+        )
         .on_with_operation(
             EnvironmentSourcePrepare,
             crate::key_operations::native::effects::prepare::<preparation::Prepare>,
@@ -202,6 +207,33 @@ pub(super) async fn prepare_native(
     let row = threads::thread(conn, body.thread_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    let previous_edits = row
+        .source
+        .as_ref()
+        .map(source::staged_edits)
+        .transpose()
+        .map_err(ApiError::engine)?
+        .unwrap_or_default();
+    let workspace_edits = if let Some(edits) = &body.workspace_edits {
+        source::validate_workspace_edits(edits)
+            .map_err(|why| ApiError::invalid("workspace_edits", why))?;
+        let revision = source::workspace_edit_revision(&row, door.env.generation, &previous_edits)
+            .map_err(ApiError::engine)?;
+        let own_replacement = ctx
+            .optional_retained_source::<preparation::WorkspaceReplacement>()?
+            .is_some_and(|applied| {
+                Some(applied.before) == body.workspace_edit_revision && applied.after == revision
+            });
+        if body.workspace_edit_revision != Some(revision) && !own_replacement {
+            return Err(ApiError::new(
+                ErrorCode::ConflictStaleRevision,
+                "The saved workspace file plan changed before it was replaced",
+            ));
+        }
+        edits.clone()
+    } else {
+        previous_edits
+    };
     let frozen: RepositorySource = match &body.source {
         Some(accepted) => {
             let current = source::resolved(conn, row.node_id)
@@ -232,22 +264,6 @@ pub(super) async fn prepare_native(
         .map_err(ApiError::internal)?
         .flatten();
     let action = if let Some(choice) = worktree {
-        let record_days = orch_settings::get::<i64>(
-            conn,
-            orch_settings::Place::Environment(environment),
-            orch_settings_contract::registry::keys::WORKSPACE_RECORD_DAYS,
-        )
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::internal("recording days are unset"))?;
-        let max_bytes = orch_settings::get::<i64>(
-            conn,
-            orch_settings::Place::Environment(environment),
-            orch_settings_contract::registry::keys::WORKSPACE_RECORD_MAX_BYTES,
-        )
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::internal("recording bytes are unset"))?;
         Action::Worktree {
             body: orch_link_contract::source::GitWorktree {
                 environment_id: environment,
@@ -256,8 +272,6 @@ pub(super) async fn prepare_native(
                 snapshot_id: None,
             },
             source: frozen,
-            record_days,
-            max_bytes,
         }
     } else {
         let credential = source::credential(conn, row.topic_id, &frozen)
@@ -350,6 +364,18 @@ pub(super) async fn prepare_native(
             .and_then(|grant| grant.token()),
         creator_origin: None,
         scheduled_input: None,
+        workspace_edits,
+        prepared_source: if body.source.is_none() {
+            row.source
+                .as_ref()
+                .and_then(|value| value.get("prepared_source"))
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(ApiError::internal)?
+        } else {
+            None
+        },
         action,
     };
     Ok((plan, door.env))
@@ -418,6 +444,8 @@ async fn commit(
             .and_then(|grant| grant.token()),
         creator_origin: None,
         scheduled_input: None,
+        workspace_edits: Vec::new(),
+        prepared_source: None,
         action: Action::Commit { body: command },
     };
     let origin =
@@ -494,6 +522,8 @@ async fn push(ctx: Ctx, query: ThroughThreadQuery, body: EnvironmentGitPushBody)
             .and_then(|grant| grant.token()),
         creator_origin: None,
         scheduled_input: None,
+        workspace_edits: Vec::new(),
+        prepared_source: None,
         action: Action::Push { body: command },
     };
     let origin =
@@ -503,3 +533,6 @@ async fn push(ctx: Ctx, query: ThroughThreadQuery, body: EnvironmentGitPushBody)
 
 #[path = "source/preparation.rs"]
 pub mod preparation;
+
+#[path = "source/edits.rs"]
+mod edits;

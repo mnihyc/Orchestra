@@ -60,7 +60,10 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await waitFor(() => expect(io.snapshots).toHaveBeenCalledWith(hit.id, null));
     const choose = screen.getByRole('button', { name: i18n.t('start.where.useFiles') }); expect(choose).toBeDisabled();
     await user.click(await screen.findByRole('combobox', { name: i18n.t('start.where.snapshot') }));
-    expect(screen.getByRole('option', { name: 'State bad' })).toHaveAttribute('data-disabled');
+    const incomplete = screen.getByRole('option', { name: 'State bad' });
+    expect(incomplete).toHaveAttribute('aria-disabled', 'true');
+    await user.click(incomplete);
+    expect(choose).toBeDisabled();
     await user.keyboard('{Escape}');
     await user.click(screen.getByRole('button', { name: i18n.t('ui.pagination.more') }));
     await waitFor(() => expect(io.snapshots).toHaveBeenCalledWith(hit.id, 'next'));
