@@ -40,7 +40,7 @@ use orch_types::Id;
 pub use provenance::SettingView;
 pub use resolver::{
     ProviderAt, Snapshot, Wanted, cleanup_at_hosts, get, get_at_nodes, get_at_providers, resolve,
-    resolve_all, snapshots_at_providers,
+    resolve_all, snapshots_at_nodes, snapshots_at_providers,
 };
 mod provider_runtime;
 pub use provider_runtime::{

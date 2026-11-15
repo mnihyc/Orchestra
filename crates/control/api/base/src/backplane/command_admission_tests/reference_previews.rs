@@ -69,6 +69,7 @@ impl CommandHandler for ReaderPeer {
                 }
                 Ok(CommandResult::FsStat(
                     orch_api_contract::workspace::FileStat {
+                        facts: None,
                         entry: orch_api_contract::workspace::DirEntry {
                             name: body.path.clone(),
                             path: body.path,
