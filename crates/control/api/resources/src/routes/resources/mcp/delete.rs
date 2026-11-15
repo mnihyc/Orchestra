@@ -242,6 +242,7 @@ async fn deliver(ctx: &Ctx, output: Output) -> std::collections::BTreeSet<Id> {
         let dispatcher = ctx.app.link.dispatcher();
         if dispatcher
             .issue_stored(crate::dispatch::StoredCommand {
+                content_transit: false,
                 id: Some(command.id),
                 machine: command.machine,
                 kind: command.kind.as_str().into(),

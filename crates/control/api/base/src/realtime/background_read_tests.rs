@@ -7,9 +7,7 @@ use crate::support::failure_trace::FailureTrace;
 
 use super::ephemeral;
 
-use crate::middleware::authentication::API_TOKEN_PREFIX;
-
-use crate::middleware::authentication::new_token;
+use crate::middleware::authentication::new_api_token;
 
 use crate::middleware::authentication::token_hash;
 
@@ -282,7 +280,7 @@ fn rules(thread: Id, provider: Id, provider_read: bool) -> Value {
 
 async fn scoped_key(rig: &Rig, thread: Id, expires: Option<Time>) -> Proof<(Id, String)> {
     let id = new_id();
-    let token = new_token(API_TOKEN_PREFIX);
+    let token = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *rig.pool.acquire().await?,
         &identity::NewApiToken {
@@ -306,11 +304,12 @@ async fn deadline(kind: &str, expire: bool) -> Proof {
     let token = match kind {
         "session" => rig.token_for(rig.ada, chrono::Duration::seconds(2)).await,
         "legacy" => {
-            let token = new_token(API_TOKEN_PREFIX);
+            let issued_key_id = new_id();
+            let token = new_api_token(issued_key_id);
             identity::create_api_token(
                 &mut *rig.pool.acquire().await?,
                 &identity::NewApiToken {
-                    id: new_id(),
+                    id: issued_key_id,
                     user_id: rig.ada,
                     name: "Legacy background reader deadline",
                     token_hash: &token_hash(&token),

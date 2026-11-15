@@ -800,7 +800,7 @@ pub(crate) async fn report_progress(
     Ok(())
 }
 
-fn preserve_creator_report(
+pub(super) fn preserve_creator_report(
     command: &mut Outgoing,
     retained: &crate::commands::RetainedCommand,
 ) -> Result<(), Stop> {
@@ -842,9 +842,15 @@ fn command_totals(
     plan: &Json,
     command: &Outgoing,
 ) -> Result<(Option<i64>, Option<i64>), EngineError> {
-    if command.kind == orch_link_contract::commands::CommandKind::FsWrite
-        && let Some(upload) = plan.get("workspace_upload")
-        && upload.pointer("/write/blob") == command.body.get("blob")
+    if matches!(
+        command.kind,
+        orch_link_contract::commands::CommandKind::FsWrite
+            | orch_link_contract::commands::CommandKind::FsRelayPrepare
+            | orch_link_contract::commands::CommandKind::FsRelayCommit
+    ) && let Some(upload) = plan.get("workspace_upload")
+        && (upload.pointer("/write/blob") == command.body.get("blob")
+            || upload.pointer("/write/blob") == command.body.get("hash")
+            || command.kind == orch_link_contract::commands::CommandKind::FsRelayPrepare)
     {
         return Ok((Some(1), upload["size"].as_i64()));
     }
@@ -1153,9 +1159,21 @@ impl Job {
     /// The native immutable work report and retained deadline, before original-source capture.
     pub async fn prepare_command(&self, mut command: Outgoing) -> Result<Outgoing, Stop> {
         use orch_link_contract::commands::{CommandKind, WorkReport};
+        let row = self.row().await?;
+        command.content_transit |= matches!(
+            row.kind.as_str(),
+            orch_db::queries::jobs::kind::ENVIRONMENT_PROVISION
+                | orch_db::queries::jobs::kind::ENVIRONMENT_RECREATE
+                | orch_db::queries::jobs::kind::ENVIRONMENT_MOVE
+                | orch_db::queries::jobs::kind::PROVIDER_RECREATE
+                | orch_db::queries::jobs::forks::THREAD_FORK
+        );
+
         if matches!(
             command.kind,
             CommandKind::FsWrite
+                | CommandKind::FsRelayPrepare
+                | CommandKind::FsRelayCommit
                 | CommandKind::NodeMountExport
                 | CommandKind::NodeMountImport
                 | CommandKind::NodeRuntimeVolumesExport
@@ -1166,7 +1184,6 @@ impl Job {
                 | CommandKind::FsDataImport
                 | CommandKind::FsRestore
         ) {
-            let row = self.row().await?;
             let (progress, _) = read_progress(&row);
             if command.body.get("work").is_none_or(Json::is_null) {
                 let timeout_secs = crate::jobs::measurement::setting(
@@ -1566,6 +1583,9 @@ impl Job {
         } else {
             None
         };
+        if respect_cancel {
+            super::workspace_upload::authority::decorate(self, &mut command).await?;
+        }
         let update_receipt = matches!(
             &command.authority,
             Some(crate::commands::CommandAuthority::UpdateJob(_))
@@ -1876,6 +1896,58 @@ impl Engine {
             self.kick();
         }
         Ok(asked)
+    }
+
+    /// Ends a job that a person has overruled, where it stands: it is cancelled and none of it is undone,
+    /// so that what the person asks instead takes over what it left. A job that has passed its commit is
+    /// finishing, and is not ended. Returns whether the job is over.
+    pub async fn overrule_job(&self, job: Id, by: Id, why: &str) -> Result<bool, EngineError> {
+        let mut tx = self.inner.db.begin().await?;
+        let Some(row) = rows::lock_cancellation(&mut tx, job).await? else {
+            return Ok(true);
+        };
+        if !row.is_open() {
+            return Ok(true);
+        }
+        if row.plan.get("committed").is_some() {
+            return Ok(false);
+        }
+        let now = self.inner.clock.now();
+        let (progress, log) = read_progress(&row);
+        let error = json!({
+            "code": "overruled",
+            "message": why,
+            "phase": progress.phase,
+            "undone": false,
+            "by": by,
+        });
+        let ended = rows::finish(
+            &mut tx,
+            job,
+            state::CANCELLED,
+            &stored(&progress, log.as_deref()),
+            None,
+            Some(&error),
+            now,
+        )
+        .await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        if ended {
+            tracing::warn!(%job, kind = %row.kind, provider = ?row.provider_id, phase = %progress.phase, %why, "a job was ended where it stood because a person overruled it");
+            if let Some(command) = row
+                .plan
+                .pointer("/active_command/id")
+                .and_then(Json::as_str)
+                .and_then(|value| value.parse::<Id>().ok())
+            {
+                let _ = self.inner.commands.cancel(command).await;
+            }
+            let closed = rows::job(&mut *self.db().acquire().await?, job).await?;
+            if let Some(closed) = closed {
+                self.after_job(&closed).await;
+            }
+        }
+        Ok(true)
     }
 
     /// Sends the accepted job cancellation to its active machine command without waiting for cleanup.
@@ -2338,6 +2410,9 @@ impl Engine {
     }
 
     async fn after_job_inner(&self, row: &JobRow) {
+        if let Err(error) = self.release_command_pins(row.id).await {
+            tracing::warn!(job = %row.id, %error, "what the commands of a job held for it waits for the sweep");
+        }
         self.after_volume_carry(row).await;
         self.after_mount_copies(row).await;
         if row.plan.get("recovery").is_some() {

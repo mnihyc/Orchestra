@@ -373,7 +373,7 @@ pub(crate) fn join_transcript(
 pub(crate) async fn put_file(
     engine: &Engine,
     path: &std::path::Path,
-) -> Result<(Hash, i64), EngineError> {
+) -> Result<orch_blob_contract::store::Stored, EngineError> {
     let owned = path.to_path_buf();
     let (hash, size) = tokio::task::spawn_blocking(move || {
         use std::io::Read as _;
@@ -409,8 +409,7 @@ pub(crate) async fn put_file(
     store
         .put(&hash, Some(size), content)
         .await
-        .map_err(EngineError::unreadable)?;
-    Ok((hash, size))
+        .map_err(EngineError::unreadable)
 }
 
 /// Puts a file of the scratch directory in the store as an artifact of a cut.
@@ -421,7 +420,8 @@ async fn keep_file(
     path: &std::path::Path,
     turns: i64,
 ) -> Result<TranscriptFile, EngineError> {
-    let (hash, size) = put_file(engine, path).await?;
+    let publication = put_file(engine, path).await?;
+    let (hash, size) = (publication.hash, publication.size);
     let mut tx = engine.db().begin().await?;
     storage::register_blob(&mut tx, &hash, size, engine.inner.clock.now()).await?;
     if !rows::keep_artifact(
@@ -621,7 +621,7 @@ pub(crate) async fn keep_bytes(
     let store = engine
         .blobs()
         .ok_or_else(|| EngineError::unreadable("The history content store is unavailable."))?;
-    store
+    let _publication = store
         .put(
             &hash,
             Some(size),

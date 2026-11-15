@@ -212,6 +212,7 @@ impl Commands for DispatchCommands {
         before: Option<orch_engine::commands::BeforeCommand<'_>>,
     ) -> Result<(), CommandsError> {
         let stored = StoredCommand {
+            content_transit: command.content_transit,
             authority: command.authority,
             id: Some(command.id),
             machine: command.machine,

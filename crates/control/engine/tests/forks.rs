@@ -88,6 +88,9 @@ struct Rig {
     exports: Arc<Mutex<Vec<Command>>>,
     /// The file commands the machine was given (`fs.snapshot` and `fs.materialize`), in order.
     files: Arc<Mutex<Vec<Command>>>,
+    /// The lists a unit was asked to write, read when it was asked: the copy's own content goes from the
+    /// server when the fork ends, so what a list named cannot be read afterwards.
+    written_lists: Arc<Mutex<Vec<(Hash, orch_engine::manifest::Manifest)>>>,
     native: Arc<Mutex<confirmed_source::NativePeer>>,
     open_refusals: Arc<Mutex<std::collections::VecDeque<CommandError>>>,
 }
@@ -287,6 +290,7 @@ impl Rig {
             other_provider,
             exports,
             files,
+            written_lists: Arc::new(Mutex::new(Vec::new())),
             native,
             open_refusals: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         };
@@ -1455,12 +1459,12 @@ async fn a_fork_is_its_makers_and_takes_the_history_and_the_source_goes_on_untou
                 title: format!("Sub-agent {name}"),
                 started_at: orch_types::Time::new(rig.world.clock.now()),
                 duration_ms: Some(10),
-                raw: RawCall {
+                raw: Some(RawCall {
                     name: "Task".to_owned(),
                     input: OutputRef::of("Check the redirect"),
                     output: Some(OutputRef::of("Checked")),
                     is_error: false,
-                },
+                }),
             })
             .unwrap();
             let parent_ref = format!("native-{source_segment}-task-{name}");
@@ -2007,8 +2011,20 @@ async fn fork_into_a_new_environment(
     let seen: Arc<Mutex<Vec<Command>>> = Arc::new(Mutex::new(Vec::new()));
     for kind in [CommandKind::FsMaterialize, CommandKind::FsRemove] {
         let (kept, answer) = (Arc::clone(&seen), answer.clone());
+        let (lists, engine) = (Arc::clone(&rig.written_lists), rig.world.engine().clone());
         unit.added.machine.handler.on(kind, move |command| {
             kept.lock().unwrap().push(command.clone());
+            if let Command::FsMaterialize(write) = command
+                && tokio::runtime::Handle::current().runtime_flavor()
+                    == tokio::runtime::RuntimeFlavor::MultiThread
+            {
+                let (hash, engine) = (write.manifest_blob, engine.clone());
+                if let Ok(list) = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(engine.read_manifest(&hash))
+                }) {
+                    lists.lock().unwrap().push((hash, list));
+                }
+            }
             match command {
                 Command::FsMaterialize(_) => answer.clone().map(|()| {
                     CommandResult::FsMaterialize(
@@ -2176,22 +2192,28 @@ async fn selected_files_into_a_new_environment(alias: bool, live: bool) {
         })
         .collect();
     assert!(!copied.is_empty());
-    for hash in copied {
-        let manifest = rig.world.engine().read_manifest(&hash).await.unwrap();
-        assert_eq!(manifest.header().root, "/workspace/web");
-        assert_eq!(
-            manifest
-                .entries()
+    {
+        let lists = rig.written_lists.lock().unwrap();
+        for hash in copied {
+            let (_, manifest) = lists
                 .iter()
-                .map(|entry| (entry.path.as_str(), entry.size, entry.hash))
-                .collect::<Vec<_>>(),
-            [
-                ("src/a.txt", 10, Some(Hash::of(b"source-a0\n"))),
-                ("src/b.txt", 10, Some(Hash::of(b"source-b0\n"))),
-                ("src/c.txt", 10, Some(Hash::of(b"source-c0\n"))),
-            ],
-            "the selected bytes retain their paths below the thread directory"
-        );
+                .find(|(read, _)| *read == hash)
+                .expect("the list the unit was asked to write was read when it was asked");
+            assert_eq!(manifest.header().root, "/workspace/web");
+            assert_eq!(
+                manifest
+                    .entries()
+                    .iter()
+                    .map(|entry| (entry.path.as_str(), entry.size, entry.hash))
+                    .collect::<Vec<_>>(),
+                [
+                    ("src/a.txt", 10, Some(Hash::of(b"source-a0\n"))),
+                    ("src/b.txt", 10, Some(Hash::of(b"source-b0\n"))),
+                    ("src/c.txt", 10, Some(Hash::of(b"source-c0\n"))),
+                ],
+                "the selected bytes retain their paths below the thread directory"
+            );
+        }
     }
     let source_environment: Id = rig
         .world

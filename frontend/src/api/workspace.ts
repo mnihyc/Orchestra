@@ -27,6 +27,7 @@ import type {
   FetchState,
   FileListSource,
   FileMatch,
+  FileRenameResult,
   FileStat,
   GitStatus,
   Job,
@@ -163,7 +164,7 @@ export function writeFile(door: Door, path: string, content: string | Uint8Array
 export interface UploadWriteAttempt { id: string; sent?: boolean; terminal?: boolean }
 
 /** A completed upload is a durable native job; an HTTP abort never substitutes for its stopped result. */
-export async function writeUploadedFile(door: Door, path: string, blob: string, expectedHash: string | null, signal: AbortSignal, uploadBatch?: string, report?: (work: UploadWork) => void, attempt: UploadWriteAttempt = { id: crypto.randomUUID() }): Promise<FileStat> {
+export async function writeUploadedFile(door: Door, path: string, blob: string, expectedHash: string | null, signal: AbortSignal, uploadBatch?: string, report?: (work: UploadWork) => void, attempt: UploadWriteAttempt = { id: crypto.randomUUID() }, relay?: string): Promise<FileStat> {
   signal.throwIfAborted();
   const reader = client.session.getState().readerVersion;
   const current = () => { if (client.session.getState().readerVersion !== reader) throw new DOMException('Upload reader changed', 'AbortError'); };
@@ -172,7 +173,7 @@ export async function writeUploadedFile(door: Door, path: string, blob: string, 
   // Creation must settle even when Cancel arrives before its reply; the durable identity is already known.
   const creation = ok(api.POST('/environments/{id}/files/uploads/{upload_id}/write', {
     params: { path: { ...pathOf(door), upload_id: attempt.id }, query: through(door) },
-    body: { path, blob, upload_batch: uploadBatch ?? attempt.id, ...(expectedHash === null ? {} : { expected_hash: expectedHash }) },
+    body: { path, blob, ...(relay === undefined ? {} : { relay }), upload_batch: uploadBatch ?? attempt.id, ...(expectedHash === null ? {} : { expected_hash: expectedHash }) },
     ...repeatable(attempt.id),
   }));
   let admissionRefused = false;
@@ -262,7 +263,7 @@ export async function makeDirectory(door: Door, path: string, key: string): Prom
 }
 
 /** Moves a file or a directory; it is also how one is renamed. */
-export function renameFile(door: Door, from: string, to: string): Promise<FileStat> {
+export function renameFile(door: Door, from: string, to: string): Promise<FileRenameResult> {
   return ok(api.POST('/environments/{id}/files/rename', { params: { path: pathOf(door), query: through(door) }, body: { from, to } }));
 }
 

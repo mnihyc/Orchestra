@@ -203,6 +203,7 @@ async fn revoked_first_wire(push: bool) -> Proof {
     tx.commit().await?;
     let id = command.id;
     let original = StoredCommand {
+        content_transit: false,
         authority: None,
         id: Some(id),
         machine: command.machine,

@@ -162,6 +162,26 @@ impl Dir {
         Ok(file)
     }
 
+    /// Opens an existing regular temporary file for resuming, without following a link.
+    pub fn open_update(&self, name: &OsStr) -> io::Result<File> {
+        plain(name)?;
+        let fd = rustix::fs::openat(
+            &self.fd,
+            name,
+            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io_error)?;
+        let file = File::from(fd);
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ));
+        }
+        Ok(file)
+    }
+
     /// Makes the file called `name`, which must not exist, and opens it for reading and writing
     /// with the permissions `mode` (as the process's umask lets them through). It is read back to
     /// be hashed before it is put in place.
