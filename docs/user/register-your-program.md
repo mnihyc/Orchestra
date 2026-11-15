@@ -93,3 +93,11 @@ In **Add agent → A program on a machine**, the first confirmed program fills t
 **Accounts** lists already registered subscription providers for that program on that machine, with each provider's reported state. Existing sign-ins are discovered through the connector's normal discovery path. A listed account does not prove a fresh login or grant Use. **No account reported** leaves that fact unknown; it does not say the machine has no sign-in. Open the account's card to inspect it.
 
 **Program supports** comes from a ready machine declaration where available, otherwise from the catalogue; **Machine allows** separately shows the machine's reported arrangement policy. **None** is an explicitly empty list, and **Not reported** means no list was supplied. **Arrangement → Automatic · From thread defaults** keeps the existing shared selector: at thread setup it considers the actual provider, environment, machine and access, puts the configured preferences first, and takes the first available and permitted arrangement. These profile facts do not select a capability route, copy a credential or enable a service. An explicit arrangement selected there remains the person's choice.
+
+Codex subscriptions can also use **Credential shared** when the provider owner
+allows copies and your Use entry includes that arrangement. Only the current
+access token is sent under the lease; its refresh token stays with the keeper.
+The program accepts and renews the copy in memory through its native interface,
+without writing a sign-in file in the environment. Each copy reports its own
+expiry. A new subscription still starts with Separated alone; sharing requires
+its existing grant and consent.

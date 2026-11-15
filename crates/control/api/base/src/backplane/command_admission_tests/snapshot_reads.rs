@@ -11,9 +11,7 @@ use orch_api_contract::workspace::SnapshotFileList;
 
 use orch_api_contract::workspace::SnapshotPathQuery;
 
-use orch_api_core::middleware::authentication::API_TOKEN_PREFIX;
-
-use orch_api_core::middleware::authentication::new_token;
+use orch_api_core::middleware::authentication::new_api_token;
 
 use orch_api_core::middleware::authentication::token_hash;
 
@@ -257,7 +255,7 @@ impl ReadFixture {
         sqlx::query("UPDATE snapshots SET kind='turn',storage='environment',directory='web',tree_ref='original-recorded-root',expires_at=$2 WHERE id=$1")
             .bind(snapshot).bind(transport.clock.now() + chrono::Duration::days(7)).execute(&mut *conn).await?;
         let token_id = new_id();
-        let token = new_token(API_TOKEN_PREFIX);
+        let token = new_api_token(token_id);
         let scopes = vec!["files.view".to_owned()];
         orch_authz::TokenGrant::from_stored(&scopes, None)?;
         identity::create_api_token_scoped(

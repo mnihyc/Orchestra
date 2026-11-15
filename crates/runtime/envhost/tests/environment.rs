@@ -102,6 +102,14 @@ async fn rig_with(
     files: &[(&str, &str)],
     tune: impl FnOnce(&mut HostSettings, &mut EnvAttach),
 ) -> Rig {
+    rig_with_clock(files, tune, Arc::new(SystemClock)).await
+}
+
+async fn rig_with_clock(
+    files: &[(&str, &str)],
+    tune: impl FnOnce(&mut HostSettings, &mut EnvAttach),
+    clock: Arc<dyn orch_types::Clock>,
+) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("ws");
     std::fs::create_dir_all(&root).unwrap();
@@ -117,7 +125,7 @@ async fn rig_with(
     let (reports, receiver) = Reports::channel(256);
     let host = EnvHost::new(
         settings,
-        Arc::new(SystemClock),
+        clock,
         reports,
         Arc::new(store.clone()),
         Vec::new(),
@@ -184,6 +192,7 @@ async fn a_unit_home_store_keeps_its_publication_lease_through_upload_and_refuse
         .fs_record_capture(
             &request,
             orch_types::new_id(),
+            until,
             until,
             tokio_util::sync::CancellationToken::new(),
         )
@@ -2936,4 +2945,238 @@ async fn the_state_of_a_repository_is_read_through_the_host() {
         .unwrap();
     assert!(diff.text.contains("+two"), "{}", diff.text);
     assert!(!diff.truncated);
+}
+
+#[tokio::test]
+async fn a_relay_upload_resumes_its_native_temp_and_a_conflict_keeps_it_for_the_persons_choice() {
+    use bytes::Bytes;
+    use orch_envhost::blobs::RelaySource;
+    use orch_link_contract::commands::{FsRelayCommit, FsRelayReceive};
+    struct Source {
+        cut: bool,
+    }
+    #[async_trait::async_trait]
+    impl RelaySource for Source {
+        async fn receive(&self, size: i64, target: &mut dyn BlobWriter) -> Result<(), BlobError> {
+            let held = target
+                .received()
+                .await
+                .map_err(|e| BlobError::Local(e.to_string()))?;
+            if self.cut {
+                assert_eq!(held, 0);
+                target
+                    .write(0, Bytes::from_static(b"abc"))
+                    .await
+                    .map_err(|e| BlobError::Local(e.to_string()))?;
+                return Err(BlobError::StoodStill);
+            }
+            assert_eq!(
+                (held, size),
+                (3, 6),
+                "the resumed command reads the actual destination prefix"
+            );
+            target
+                .write(3, Bytes::from_static(b"def"))
+                .await
+                .map_err(|e| BlobError::Local(e.to_string()))?;
+            Ok(())
+        }
+    }
+    let rig = rig(&[("target.txt", "original")]).await;
+    let receive = FsRelayReceive {
+        environment_id: rig.env,
+        path: "target.txt".into(),
+        session_id: orch_types::new_id(),
+        relay_id: orch_types::new_id(),
+        size: 6,
+        idle_secs: 120,
+        retry_ms: 250,
+        expires_at: orch_types::Time::new(chrono::Utc::now() + chrono::Duration::hours(24)),
+    };
+    assert!(
+        rig.host
+            .fs_relay_receive(&receive, &Source { cut: true })
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read(rig.root.join("target.txt")).unwrap(),
+        b"original"
+    );
+    let received = rig
+        .host
+        .fs_relay_receive(&receive, &Source { cut: false })
+        .await
+        .unwrap();
+    assert_eq!((received.hash, received.size), (Hash::of(b"abcdef"), 6));
+    std::fs::write(rig.root.join("target.txt"), b"new version").unwrap();
+    let mut commit = FsRelayCommit {
+        environment_id: rig.env,
+        receive_path: receive.path.clone(),
+        path: receive.path.clone(),
+        session_id: receive.session_id,
+        hash: received.hash,
+        size: received.size,
+        mode: None,
+        expected_hash: Some(ExpectedHash::Is(Hash::of(b"original"))),
+    };
+    assert!(matches!(
+        rig.host.fs_relay_commit(&commit).await,
+        Err(HostError::Stale { .. })
+    ));
+    assert_eq!(
+        std::fs::read(rig.root.join("target.txt")).unwrap(),
+        b"new version"
+    );
+    commit.path = "kept.txt".into();
+    commit.expected_hash = Some(ExpectedHash::Absent);
+    let done = rig.host.fs_relay_commit(&commit).await.unwrap();
+    assert_eq!(done.hash, Some(received.hash));
+    assert_eq!(std::fs::read(rig.root.join("kept.txt")).unwrap(), b"abcdef");
+    assert_eq!(
+        std::fs::read(rig.root.join("target.txt")).unwrap(),
+        b"new version"
+    );
+    assert!(
+        !rig.store.holds(&received.hash),
+        "a native relay stage uses no content store"
+    );
+}
+
+#[tokio::test]
+async fn a_relay_description_and_ranged_read_keep_no_copy_and_refuse_a_changed_source() {
+    use orch_envhost::blobs::{BlobReader, RelaySink};
+    use orch_link_contract::commands::{FsRelayDescribe, FsRelaySend};
+    struct Sink(std::sync::Mutex<Vec<u8>>);
+    #[async_trait::async_trait]
+    impl RelaySink for Sink {
+        async fn send(&self, size: i64, source: &mut dyn BlobReader) -> Result<(), BlobError> {
+            let mut at = 0;
+            while at < size {
+                let piece = source
+                    .read(at, (size - at).min(2))
+                    .await
+                    .map_err(|e| BlobError::Local(e.to_string()))?;
+                assert!(!piece.is_empty());
+                at += i64::try_from(piece.len()).unwrap();
+                self.0.lock().unwrap().extend_from_slice(&piece);
+            }
+            Ok(())
+        }
+    }
+    let rig = rig_with(&[("source.txt", "abcdefghij")], |settings, _| {
+        settings.limits.max_blob_bytes = 1
+    })
+    .await;
+    let described = rig
+        .host
+        .fs_relay_describe(&FsRelayDescribe {
+            environment_id: rig.env,
+            mount: None,
+            path: "source.txt".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(described.hash, Hash::of(b"abcdefghij"));
+    let read = FsRelaySend {
+        environment_id: rig.env,
+        mount: None,
+        path: "source.txt".into(),
+        hash: described.hash,
+        offset: 3,
+        len: 4,
+        relay_id: orch_types::new_id(),
+        idle_secs: 120,
+        retry_ms: 250,
+    };
+    let sink = Sink(std::sync::Mutex::new(Vec::new()));
+    rig.host.fs_relay_send(&read, &sink).await.unwrap();
+    assert_eq!(*sink.0.lock().unwrap(), b"defg");
+    assert!(
+        !rig.store.holds(&described.hash),
+        "a transit file is not copied into blob storage"
+    );
+    std::fs::write(rig.root.join("source.txt"), b"changed").unwrap();
+    let refused = Sink(std::sync::Mutex::new(Vec::new()));
+    assert!(rig.host.fs_relay_send(&read, &refused).await.is_err());
+    assert!(
+        refused.0.lock().unwrap().is_empty(),
+        "a changed source is refused before its first piece"
+    );
+}
+
+#[tokio::test]
+async fn a_committed_relay_replays_its_receipt_without_rewriting_a_later_edit_and_expired_temps_are_removed()
+ {
+    use bytes::Bytes;
+    use orch_envhost::blobs::RelaySource;
+    use orch_link_contract::commands::{FsRelayCommit, FsRelayReceive};
+    use orch_types::{Clock, ManualClock, Time};
+    struct Source;
+    #[async_trait::async_trait]
+    impl RelaySource for Source {
+        async fn receive(&self, _: i64, target: &mut dyn BlobWriter) -> Result<(), BlobError> {
+            target
+                .write(0, Bytes::from_static(b"new"))
+                .await
+                .map_err(|e| BlobError::Local(e.to_string()))
+        }
+    }
+    let clock = ManualClock::new(chrono::Utc::now());
+    let rig = rig_with_clock(&[], |_, _| {}, Arc::new(clock.clone())).await;
+    let expires = Time::new(clock.now() + chrono::Duration::hours(1));
+    let make = |name: &str| FsRelayReceive {
+        environment_id: rig.env,
+        path: name.into(),
+        session_id: orch_types::new_id(),
+        relay_id: orch_types::new_id(),
+        size: 3,
+        idle_secs: 120,
+        retry_ms: 250,
+        expires_at: expires,
+    };
+    let received = make("published.txt");
+    let payload = rig.host.fs_relay_receive(&received, &Source).await.unwrap();
+    let commit = FsRelayCommit {
+        environment_id: rig.env,
+        receive_path: received.path.clone(),
+        path: received.path.clone(),
+        session_id: received.session_id,
+        hash: payload.hash,
+        size: 3,
+        mode: None,
+        expected_hash: Some(ExpectedHash::Absent),
+    };
+    let first = rig.host.fs_relay_commit(&commit).await.unwrap();
+    std::fs::write(rig.root.join("published.txt"), b"a later edit").unwrap();
+    assert_eq!(
+        rig.host.fs_relay_commit(&commit).await.unwrap(),
+        first,
+        "a lost answer replays the accepted write instead of writing again"
+    );
+    assert_eq!(
+        std::fs::read(rig.root.join("published.txt")).unwrap(),
+        b"a later edit"
+    );
+    let abandoned = make("unfinished.txt");
+    rig.host
+        .fs_relay_receive(&abandoned, &Source)
+        .await
+        .unwrap();
+    let temporary = rig
+        .root
+        .join(format!(".orch-tmp-up-{}", abandoned.session_id.simple()));
+    assert!(temporary.exists());
+    clock.advance(chrono::Duration::hours(2));
+    rig.host.prune_file_relays().await;
+    assert!(
+        !temporary.exists(),
+        "the native upload expiry collects its temporary bytes"
+    );
+    assert!(!rig.root.join("unfinished.txt").exists());
+    assert_eq!(
+        std::fs::read(rig.root.join("published.txt")).unwrap(),
+        b"a later edit",
+        "cleanup cannot remove a committed destination"
+    );
 }

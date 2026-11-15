@@ -326,37 +326,20 @@ async fn pin_export(
     Ok(())
 }
 
-/// Releases exactly this fork's exported object pins after its native copy or terminal outcome.
+/// Releases exactly this fork's exported object pins after its native copy or terminal outcome, and
+/// those its live copy passes took, and removes from the server what nothing else holds.
 pub(crate) async fn release_pins(
     engine: &Engine,
     id: orch_types::Id,
-    now: chrono::DateTime<chrono::Utc>,
+    _now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), EngineError> {
-    let mut tx = engine.db().begin().await?;
-    let Some(row) = orch_db::queries::jobs::lock(&mut tx, id).await? else {
-        return Ok(());
-    };
-    if row
-        .plan
-        .get("fork_file_pins_released")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
-    {
-        return Ok(());
-    }
-    if let Some(pins) = row.plan.get("fork_file_pins") {
-        let pins: Vec<orch_types::Hash> = serde_json::from_value(pins.clone())?;
-        storage::unpin_blobs(&mut tx, &pins, now).await?;
-        orch_db::queries::jobs::merge_plan(
-            &mut tx,
+    engine
+        .release_held(
             id,
-            &json!({ "fork_file_pins_released": true }),
-            now,
+            &["fork_file_pins", "fork_live_pins"],
+            "fork_file_pins_released",
         )
-        .await?;
-    }
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(())
+        .await
 }
 
 /// Resolves only an explicitly chosen source act; ordinary forks make no extra native call.

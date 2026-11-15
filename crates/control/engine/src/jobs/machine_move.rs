@@ -2479,37 +2479,9 @@ impl Phased for Moving {
 impl Engine {
     /// Releases portable move pins once and then uses the common thread-hold release.
     pub(crate) async fn after_machine_move(&self, row: &jobs::JobRow) {
-        let released = async {
-            let mut tx = self.db().begin().await?;
-            let current = jobs::lock(&mut tx, row.id)
-                .await?
-                .ok_or_else(|| EngineError::unreadable("the terminal move disappeared"))?;
-            if current
-                .plan
-                .get("move_pins_released")
-                .and_then(Json::as_bool)
-                != Some(true)
-            {
-                let pins: Vec<Hash> = current
-                    .plan
-                    .get("move_pins")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()?
-                    .unwrap_or_default();
-                storage::unpin_blobs(&mut tx, &pins, self.inner.clock.now()).await?;
-                jobs::merge_plan(
-                    &mut tx,
-                    row.id,
-                    &json!({"move_pins_released":true}),
-                    self.inner.clock.now(),
-                )
-                .await?;
-            }
-            tx.commit().await.map_err(DbError::from)?;
-            Ok::<(), EngineError>(())
-        }
-        .await;
+        let released = self
+            .release_held(row.id, &["move_pins"], "move_pins_released")
+            .await;
         if let Err(error) = released {
             tracing::warn!(job=%row.id,%error,"portable move pins await retention recovery");
         }

@@ -13,7 +13,7 @@ use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::key_scope::KeyScope;
 use orch_access_contract::permissions::ObjectKind;
 use orch_api_contract::resources::MachineRevoke;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::token_hash;
 use orch_api_core::testing::RawReply;
 use orch_authz::ownership::{NewAccess, start_resource};
 use orch_db::queries::identity::{self, NewApiToken};
@@ -37,9 +37,10 @@ fn scope(rules: Vec<Json>) -> Json {
     json!(value)
 }
 async fn key(world: &World, user: Id, rules: Vec<Json>) -> Key {
+    let issued_key_id = new_id();
     let key = Key {
-        id: new_id(),
-        secret: new_token(API_TOKEN_PREFIX),
+        id: issued_key_id,
+        secret: orch_api_core::middleware::authentication::new_api_token(issued_key_id),
     };
     identity::create_api_token_scoped(
         &mut *world.conn().await,

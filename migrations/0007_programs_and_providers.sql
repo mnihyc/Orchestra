@@ -187,6 +187,7 @@ CREATE TABLE providers (
     protocols text[] DEFAULT '{}'::text[] NOT NULL,
     machine_id uuid,
     key_machine_id uuid,
+    connection_environment_id uuid,
     arrangements text[] NOT NULL,
     held_by_environment_id uuid,
     held_since timestamp with time zone,

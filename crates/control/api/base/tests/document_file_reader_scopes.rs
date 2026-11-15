@@ -20,7 +20,7 @@ use orch_api_contract::documents::{
     DocumentFileCreateQuery, DocumentFileDelete, DocumentFileGet, DocumentFileGetQuery,
 };
 use orch_api_contract::threads::FILENAME_HEADER;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_types::{Hash, Id, Json, new_id};
@@ -217,7 +217,7 @@ async fn key(s: &Scene, user: Id, rules: Option<Vec<Json>>) -> Key {
         Vec::new()
     };
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *s.desk.world.conn().await,
         &NewApiToken {

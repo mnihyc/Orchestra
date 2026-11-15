@@ -829,7 +829,18 @@ async fn a_batch_that_failed_before_a_session_started_never_claims_an_upload_suc
     assert_eq!(details["upload"]["files"], json!([]));
 }
 
+/// A site whose place chose to cache: what a person read or wrote stays on the server as a cached
+/// version, which is what most of these cases are about.
 async fn live_site() -> Site {
+    let site = relayed_site().await;
+    site.world
+        .set("storage.relay_transfers", json!(false))
+        .await;
+    site
+}
+
+/// A site as it is shipped: the place relays, and keeps no copy of a file that passes through.
+async fn relayed_site() -> Site {
     let mut site = Site::new().await;
     site.disk.put("web/src/main.rs", b"fn main() {}\n");
     site.disk.put("web/src/lib.rs", b"pub fn lib() {}\n");
@@ -838,6 +849,98 @@ async fn live_site() -> Site {
     site.disk.put("web/apple.txt", b"fruit\n");
     site.power_on();
     site
+}
+
+#[tokio::test]
+async fn a_file_saved_in_a_place_that_relays_is_on_the_machine_and_leaves_no_copy_on_the_server() {
+    let site = relayed_site().await;
+    let stat = ask::write(
+        &site,
+        &site.ada,
+        "web/src/new.rs",
+        Some("none"),
+        b"// saved by an editor\n",
+    )
+    .await
+    .ok();
+    let hash = stat.hash.unwrap();
+    assert_eq!(
+        site.disk.read("web/src/new.rs").unwrap(),
+        b"// saved by an editor\n"
+    );
+    let app = &site.app().app;
+    let mut conn = site.world.conn().await;
+    assert!(
+        orch_db::queries::storage::cached_below(&mut conn, site.environment, "web")
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing is cached for a place that relays"
+    );
+    assert!(
+        orch_db::queries::storage::blob(&mut conn, &hash)
+            .await
+            .unwrap()
+            .is_none(),
+        "the bytes the request brought went with the write, not a day after it"
+    );
+    assert!(app.blobs.store().size(&hash).await.unwrap().is_none());
+    let listed = ask::list(&site, &site.ada, "web/src", None).await.ok();
+    assert!(listed.entries.iter().all(|entry| !entry.cached));
+}
+
+#[tokio::test]
+async fn a_file_uploaded_in_a_place_that_relays_is_written_and_its_copy_goes_with_the_write() {
+    let site = relayed_site().await;
+    let bytes = b"a file from the files view";
+    let blob = browser_upload(&site, bytes).await;
+    let id = new_id();
+    site.app().app.engine.start();
+    site.app()
+        .call(EnvironmentUploadWrite, &[&site.environment, &id])
+        .token(&site.ada.token)
+        .query(&ThroughThreadQuery::default())
+        .body(&EnvironmentUploadWriteBody {
+            path: "web/uploaded.txt".into(),
+            blob,
+            expected_hash: Some("none".into()),
+            upload_batch: new_id(),
+        })
+        .send()
+        .await
+        .ok();
+    eventually("the upload is written", || async {
+        upload_job(&site, id).await.state == JobState::Succeeded
+    })
+    .await;
+    assert_eq!(site.disk.read("web/uploaded.txt").unwrap(), bytes);
+    let mut conn = site.world.conn().await;
+    assert!(
+        orch_db::queries::storage::cached_below(&mut conn, site.environment, "web")
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing is cached for a place that relays"
+    );
+    drop(conn);
+    eventually("the upload's copy leaves the server", || async {
+        let mut conn = site.world.conn().await;
+        orch_db::queries::storage::blob(&mut conn, &blob)
+            .await
+            .unwrap()
+            .is_none()
+    })
+    .await;
+    assert!(
+        site.app()
+            .app
+            .blobs
+            .store()
+            .size(&blob)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 // ---------------------------------------------------------------- listing
@@ -2146,7 +2249,8 @@ async fn a_file_is_renamed_and_so_is_a_directory_with_all_that_is_in_it() {
     let moved = ask::rename(&site, &site.ada, "web/README.md", "web/READ-ME.md")
         .await
         .ok();
-    assert_eq!(moved.entry.path, "web/READ-ME.md");
+    assert_eq!(moved.stat.entry.path, "web/READ-ME.md");
+    assert_eq!(moved.kept_entries, 0);
     assert!(!site.disk.exists("web/README.md"));
     assert_eq!(site.disk.read("web/READ-ME.md").unwrap(), b"# Web\n");
 
