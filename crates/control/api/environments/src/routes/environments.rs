@@ -445,6 +445,8 @@ pub(crate) async fn show_inventory_prepared(
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
     let activity = crate::routes::resources::view::environment_activity(conn, &ids).await?;
     let display_settings = &prepared.display_settings;
+    let maximum_keep_days =
+        i64::try_from(ctx.app.config.retention.soft_delete_days).unwrap_or(i64::MAX);
     let lifetimes: HashMap<_, _> = orch_db::queries::environments::temporary::among(conn, &ids)
         .await?
         .into_iter()
@@ -615,6 +617,12 @@ pub(crate) async fn show_inventory_prepared(
             Some(row.browser),
             Some(row.vnc),
         );
+        let unit = machine_facts
+            .get(&row.id)
+            .is_some_and(|machine| machine.makes_units());
+        let active = activity
+            .get(&row.id)
+            .is_some_and(|activity| activity.active_turns > 0);
         let view = Environment {
             provenance: orch_api_contract::resource_groups::ResourceProvenance {
                 origin_machine: machine_facts
@@ -761,7 +769,7 @@ pub(crate) async fn show_inventory_prepared(
                 row.machine_id
                     .and_then(|machine| connector_versions.get(&machine))
                     .map(String::as_str),
-                orch_engine::updates::CONNECTOR_MINIMUM,
+                ctx.app.link.connector_minimum(),
             ),
             remote_write: switches.remote_write,
             terminal: switches.terminal,
@@ -774,13 +782,26 @@ pub(crate) async fn show_inventory_prepared(
             manifest_at: row.manifest_at.map(Time::new),
             last_activity_at: row.last_activity_at.map(Time::new),
             idle_stop_at: display_settings
-                .idle_stop(
-                    &row,
-                    machine_facts
-                        .get(&row.id)
-                        .is_some_and(|machine| machine.makes_units()),
-                )?
+                .idle_stop(&row, unit, active)?
                 .map(Time::new),
+            idle_stop_deferred: display_settings.idle_deferred(&row, unit, active),
+            removal_keep_days: if unit {
+                display_settings
+                    .removed_keep_days
+                    .get(&row.id)
+                    .copied()
+                    .flatten()
+                    .and_then(|days| {
+                        orch_engine::environments::bounded_removed_keep_days(
+                            days,
+                            display_settings.default_removed.contains(&row.id),
+                            maximum_keep_days,
+                        )
+                        .ok()
+                    })
+            } else {
+                None
+            },
             unused_since: row.unused_since.map(Time::new),
             removal: if row.remove_at.is_some() || row.status == "removed" {
                 retained::present(ctx, conn, principal, row.id).await?
@@ -1390,6 +1411,34 @@ async fn delete(ctx: Ctx, query: api::EnvironmentDeleteQuery, (): ()) -> ApiResu
             "confirm",
             "the name of the environment, to be sure",
         ));
+    }
+    if query
+        .expected_revision
+        .is_some_and(|revision| revision != row.revision)
+    {
+        return Err(ApiError::new(
+            ErrorCode::ConflictStaleRevision,
+            "the environment changed after its removal was reviewed",
+        )
+        .with("current_revision", row.revision));
+    }
+    if let Some(expected) = query.expected_keep_days {
+        let current = ctx
+            .app
+            .engine
+            .environment_removed_keep_days(&mut tx, id, &row.config)
+            .await
+            .map_err(|error| match error {
+                orch_engine::EngineError::Unreadable(detail) => invalid("retention", &detail),
+                other => ApiError::internal(other),
+            })?;
+        if current != expected {
+            return Err(ApiError::new(
+                ErrorCode::ConflictStaleRevision,
+                "the recovery window changed after removal was reviewed",
+            )
+            .with("current_keep_days", current));
+        }
     }
     let settled = ctx
         .app

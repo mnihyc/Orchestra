@@ -896,6 +896,8 @@ async fn confirmed_directory_removal_settles_its_binding_and_forgets_only_the_re
     let query = |name: &str| EnvironmentDeleteQuery {
         confirm: name.to_owned(),
         at: None,
+        expected_keep_days: None,
+        expected_revision: None,
     };
     let wrong = world
         .app

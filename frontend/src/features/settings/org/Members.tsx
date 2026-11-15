@@ -255,7 +255,7 @@ export function Members({ org }: { org: Org }) {
   if (acting !== null && !(acting.act === 'role' ? mayChangeRole : acting.act === 'end' ? mayManage || acting.member.user.id === me : mayManage)) setActing(null);
   const list = useInfiniteQuery(membersQuery(org.id, { direct, q: settled }));
   const members = list.data?.pages.flatMap((page) => page.items) ?? [];
-  const held = useQuery({ ...suspensionsQuery(org.id), staleTime: 0, enabled: mayManage && members.some((member) => member.suspended) });
+  const held = useQuery({ ...suspensionsQuery(org.id), enabled: mayManage && members.some((member) => member.suspended) });
   const reasons = new Map<string, Suspension>((held.data ?? []).map((suspension) => [suspension.user.id, suspension]));
 
   const resume = useMutation({

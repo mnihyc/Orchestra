@@ -831,6 +831,8 @@ pub enum EnvironmentIndexReason {
     Watches,
     /// One scan took too long.
     ScanTime,
+    /// Some workspace metadata or exclusion rules could not be read.
+    Unreadable,
 }
 
 /// An environment. It belongs to a person, who may let others manage it; the threads that
@@ -941,8 +943,12 @@ pub struct Environment {
     pub manifest_at: Option<Time>,
     /// When something last happened in it.
     pub last_activity_at: Option<Time>,
-    /// When the idle timeout will stop it; `null` for never, or when it is not running.
+    /// When the idle timeout will stop it; null while work defers it, when off, or when not running.
     pub idle_stop_at: Option<Time>,
+    /// An enabled unit idle stop is currently held by active turns or native background work.
+    pub idle_stop_deferred: bool,
+    /// The current prospective owned-file recovery window; null for a non-unit or invalid policy. Accepted removal keeps its original frozen window separately.
+    pub removal_keep_days: Option<i64>,
     /// Since when no thread, other than archived ones, is bound to it.
     pub unused_since: Option<Time>,
     /// The retained-volume lifecycle and this reader's current actions.
@@ -1878,6 +1884,12 @@ pub struct EnvironmentDeleteQuery {
     /// When to remove it; now when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<Time>,
+    /// The recovery window reviewed by the caller; a changed policy refuses before effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_keep_days: Option<i64>,
+    /// The environment revision reviewed with its roots and name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<Revision>,
 }
 
 /// Asks for a plan to move reviewed environment data to another permitted machine.
