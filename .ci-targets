@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-agent-contract --lib
+test -p orch-adapter-claude-code --lib
+test -p orch-adapter-claude-code --test sessions -- a_program_model_turn_
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --lib
+test -p orch-engine --test resource_summaries
+test -p orch-api-core --test resource_summaries

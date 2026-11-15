@@ -2,10 +2,12 @@
 //!
 //! The configuration is the rest of auto.summarizer after its kind, with bounded activity defaults.
 
-use orch_link_contract::commands::{CompletionPurpose, ProviderComplete};
+use crate::completion::CompletionRequest;
+use orch_link_contract::commands::CompletionPurpose;
+use orch_provider_contract::capabilities::{BackendRef, OfferingRef};
 use orch_summarizer_contract::descriptor::{SummarizerDescriptor, SummaryField};
 use orch_summarizer_contract::summarizer::SummarizeError;
-use orch_types::{Id, Json};
+use orch_types::Json;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -26,10 +28,8 @@ const fn context_tokens() -> u32 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// The API provider whose key pays.
-    pub provider_id: Id,
-    /// Its offered model's routing name.
-    pub model_name: String,
+    /// Exact route, sign-in offering and adapter-owned placement references.
+    pub backend: BackendRef,
     /// Model request options in the selected endpoint's format; the host applies current model defaults.
     #[serde(default = "empty_params")]
     pub params: Json,
@@ -56,14 +56,10 @@ impl Config {
         system: String,
         input: String,
         max_output_tokens: i64,
-    ) -> ProviderComplete {
-        ProviderComplete {
-            model_parameters: None,
-            provider_id: self.provider_id,
+    ) -> CompletionRequest {
+        CompletionRequest {
+            backend: self.backend.clone(),
             purpose: CompletionPurpose::Summary,
-            // The host selects a protocol offered by this actual provider.
-            protocol: String::new(),
-            model_name: self.model_name.clone(),
             params: Some(self.params.clone()),
             system,
             input,
@@ -71,17 +67,26 @@ impl Config {
         }
     }
 
+    /// The model identity is a projection of the one selected backend, never another saved choice.
+    pub fn offering(&self) -> Result<&OfferingRef, SummarizeError> {
+        self.backend.offering.as_ref().ok_or_else(|| {
+            SummarizeError::Config("The summary backend needs a selected model offering.".into())
+        })
+    }
+
     /// Reads the schema's configuration and refuses an empty name or nonpositive budget.
     pub fn read(value: &Json) -> Result<Self, SummarizeError> {
         let config: Self = serde_json::from_value(value.clone()).map_err(|_| {
             SummarizeError::Config("the selected model configuration does not fit".to_owned())
         })?;
-        if config.model_name.trim().is_empty()
-            || config.max_output_tokens <= 0
-            || config.context_tokens == 0
-        {
+        config
+            .backend
+            .validate()
+            .map_err(|reason| SummarizeError::Config(reason.into()))?;
+        config.offering()?;
+        if config.max_output_tokens <= 0 || config.context_tokens == 0 {
             return Err(SummarizeError::Config(
-                "model name and token budgets must be nonempty and positive".to_owned(),
+                "backend offering and token budgets must be nonempty and positive".to_owned(),
             ));
         }
         if !config.params.is_object() {
@@ -97,11 +102,19 @@ impl Config {
 #[must_use]
 pub fn descriptor() -> SummarizerDescriptor {
     let mut schema = schemars::schema_for!(Config).to_value();
-    // Match Config::read's positive budgets and nonblank model name at the save boundary too.
+    // Match Config::read's positive budgets at the save boundary too.
     for name in ["max_output_tokens", "context_tokens"] {
         schema["properties"][name]["minimum"] = serde_json::json!(1);
     }
-    schema["properties"]["model_name"]["pattern"] = serde_json::json!("\\S");
+    schema["properties"]["backend"] = serde_json::json!({
+        "allOf":[
+            {"$ref":"#/$defs/BackendRef"},
+            {"type":"object","required":["route","offering"],"properties":{
+                "route":{"type":"string","pattern":"\\S"},
+                "offering":{"allOf":[{"$ref":"#/$defs/OfferingRef"},{"type":"object","properties":{"offering":{"type":"string","pattern":"\\S"}}}]}
+            }}
+        ]
+    });
     schema["properties"]["params"] = serde_json::json!({
         "type": "object",
         "additionalProperties": true,
@@ -128,9 +141,32 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn a_summary_keeps_its_selected_backend_placement_and_options() -> Result<(), SummarizeError> {
+        let backend = json!({
+            "route":"summary.delegation",
+            "offering":{"provider":orch_types::new_id(),"offering":"small"},
+            "config":{"environment_id":orch_types::new_id(),"helper_topic_id":orch_types::new_id()},
+            "x_revision":{"chosen":true}
+        });
+        let config = Config::read(&json!({"backend":backend,"params":{"effort":"low"}}))?;
+        let request = config.completion("Summarize.".into(), "Checked material.".into(), 120);
+        assert_eq!(serde_json::to_value(&request.backend).unwrap(), backend);
+        assert_eq!(request.params, Some(json!({"effort":"low"})));
+        assert!(matches!(
+            request.into_api(),
+            Err(SummarizeError::Skipped(_))
+        ));
+        assert!(
+            Config::read(&json!({"provider_id":orch_types::new_id(),"model_name":"small"}))
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn input_has_one_positive_token_default_and_output_is_unchanged() -> Result<(), SummarizeError>
     {
-        let value = json!({"provider_id":orch_types::new_id(),"model_name":"small"});
+        let value = json!({"backend":{"route":"summarizer-model.complete","offering":{"provider":orch_types::new_id(),"offering":"small"}}});
         let config = Config::read(&value)?;
         assert_eq!(config.context_tokens, 32_000);
         assert_eq!(config.max_output_tokens, 120);
@@ -146,10 +182,50 @@ mod tests {
             ("input_items", json!(50)),
             ("input_chars", json!(500)),
         ] {
-            let mut invalid = json!({"provider_id":orch_types::new_id(),"model_name":"small"});
+            let mut invalid = json!({"backend":{"route":"summarizer-model.complete","offering":{"provider":orch_types::new_id(),"offering":"small"}}});
             invalid[key] = value;
             assert!(Config::read(&invalid).is_err());
         }
+        Ok(())
+    }
+    #[test]
+    fn the_completion_port_keeps_its_exact_backend_before_choosing_a_transport()
+    -> Result<(), SummarizeError> {
+        let provider = orch_types::new_id();
+        let config = Config::read(
+            &json!({"backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":"small"}}}),
+        )?;
+        let request = config.completion(
+            "Summarize the supplied material.".into(),
+            "An accepted item.".into(),
+            120,
+        );
+        assert_eq!(request.backend.route, crate::capabilities::ROUTE);
+        let offering = request
+            .backend
+            .offering
+            .as_ref()
+            .ok_or_else(|| SummarizeError::Config("The expected offering is absent.".into()))?;
+        assert_eq!(offering.provider, provider);
+        assert_eq!(offering.offering, "small");
+        let api = request.into_api()?;
+        assert_eq!(api.provider_id, provider);
+        assert_eq!(api.model_name, "small");
+        Ok(())
+    }
+
+    #[test]
+    fn a_program_backend_cannot_fall_through_to_an_api_completion() -> Result<(), SummarizeError> {
+        let config = Config::read(
+            &json!({"backend":{"route":"summarizer-model.complete","offering":{"provider":orch_types::new_id(),"offering":"small"}}}),
+        )?;
+        let mut request = config.completion("Summarize.".into(), "Supplied material.".into(), 120);
+        request.backend.route = "summary.delegation".into();
+        request.backend.config = json!({"environment_id":orch_types::new_id()});
+        assert!(matches!(
+            request.into_api(),
+            Err(SummarizeError::Skipped(_))
+        ));
         Ok(())
     }
 }

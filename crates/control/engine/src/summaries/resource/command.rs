@@ -70,12 +70,12 @@ impl NativeSource for Source {
             {
                 return Err(Error::Refused);
             }
-            let selected = select_with_snapshot(
+            let selected = select_with_backend_snapshot(
                 conn,
                 caller,
                 work.target,
                 work.range,
-                Some(&work.model),
+                Some(&work.selected),
                 now,
                 Some(&work.source),
             )
@@ -185,7 +185,13 @@ impl Work {
         if let Some(http) = &self.http {
             http.lock_identity(conn).await?;
         }
-        lock_sources(conn, self.target, &self.refs, self.model.provider_id).await?;
+        lock_sources(
+            conn,
+            self.target,
+            &self.refs,
+            self.selected.offering()?.provider,
+        )
+        .await?;
         // Match the journal's cache-before-request publication order.
         sqlx::query("SELECT s.id FROM resource_summaries s JOIN resource_summary_requests r ON r.summary_id=s.id WHERE r.id=$1 FOR UPDATE OF s").bind(self.request).fetch_optional(&mut *conn).await.map_err(DbError::from)?.ok_or_else(refused)?;
         sqlx::query("SELECT id FROM resource_summary_requests WHERE id=$1 FOR UPDATE")
@@ -285,14 +291,16 @@ impl Authority {
         command: &Outgoing,
     ) -> Result<Self, EngineError> {
         if command.kind != CommandKind::ProviderComplete
-            || command.key != SerialKey::Provider(work.model.provider_id)
+            || command.key != SerialKey::Provider(work.selected.offering()?.provider)
         {
             return Err(refused());
         }
-        let endpoint =
-            orch_db::queries::semantic::endpoint_fingerprint(conn, work.model.provider_id)
-                .await?
-                .ok_or_else(refused)?;
+        let endpoint = orch_db::queries::semantic::endpoint_fingerprint(
+            conn,
+            work.selected.offering()?.provider,
+        )
+        .await?
+        .ok_or_else(refused)?;
         Ok(Self {
             work: Some(work),
             automatic: None,
@@ -352,7 +360,7 @@ impl Authority {
             return Ok(None);
         }
         let provider = match (&self.work, &self.automatic) {
-            (Some(work), None) => work.model.provider_id,
+            (Some(work), None) => work.selected.offering()?.provider,
             (None, Some(source)) => source.provider(),
             _ => return Ok(None),
         };
@@ -377,13 +385,17 @@ impl Authority {
         type StoredCall = (Id, Option<Id>, Option<Id>, Option<Id>);
         let call:Option<StoredCall>=sqlx::query_as("SELECT provider_id,person_id,issued_by,entry_id FROM summary_calls WHERE id=$1 AND purpose='summary' AND cancel_reason IS NULL").bind(id).fetch_optional(&mut *conn).await.map_err(DbError::from)?;
         if call.as_ref().map(|row| (row.0, row.1, row.2))
-            != Some((work.model.provider_id, Some(work.payer), work.issuer))
+            != Some((
+                work.selected.offering()?.provider,
+                Some(work.payer),
+                work.issuer,
+            ))
         {
             return Ok(None);
         }
         let request: ProviderComplete = serde_json::from_value(body.clone())?;
-        if request.provider_id != work.model.provider_id
-            || request.model_name != work.model.model
+        if request.provider_id != work.selected.offering()?.provider
+            || request.model_name != work.selected.offering()?.offering
             || request.purpose != orch_link_contract::commands::CompletionPurpose::Summary
         {
             return Ok(None);
@@ -410,9 +422,10 @@ impl Authority {
             Err(EngineError::BeforeEffect(_)) => return Ok(None),
             Err(error) => return Err(error),
         };
+        let configured = work.config.offering().map_err(EngineError::unreadable)?;
         if self.call != work.request
-            || request.provider_id != work.config.provider_id
-            || request.model_name != work.config.model_name
+            || request.provider_id != configured.provider
+            || request.model_name != configured.offering
         {
             let Some(recovery) = crate::calls::read_root(
                 conn,

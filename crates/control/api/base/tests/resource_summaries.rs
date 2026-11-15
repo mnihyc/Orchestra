@@ -277,11 +277,11 @@ async fn a_plain_reader_with_model_use_can_refresh_without_configuring_automatio
     assert_eq!(accepted.requested_by, Some(scene.cai.id()));
     assert_eq!(accepted.paying_user, Some(scene.cai.id()));
     assert_eq!(
-        accepted.accepted_source["model"]["provider_id"],
+        accepted.accepted_source["selection"]["backend"]["offering"]["provider"],
         json!(scene.on.provider)
     );
     assert_eq!(
-        accepted.accepted_source["model"]["model"],
+        accepted.accepted_source["selection"]["backend"]["offering"]["offering"],
         json!(rig::MODEL)
     );
     let configured: i64 =

@@ -69,7 +69,12 @@ impl Engine {
                     }
                 };
                 let parts = frame.into_parts();
-                let producer = json!({"kind":"model","provider_id":actual.provider_id,"model_name":actual.model_name});
+                let mut backend = work.config.backend.clone();
+                backend.offering = Some(orch_provider_contract::capabilities::OfferingRef {
+                    provider: actual.provider_id,
+                    offering: actual.model_name.clone(),
+                });
+                let producer = json!({"kind":"model","backend":backend});
                 let refs = serde_json::to_value(&work.refs)?;
                 parts
                     .first_effect
@@ -150,14 +155,13 @@ impl Engine {
                 .cloned()
                 .unwrap_or(Json::Null),
         )?;
-        let body: orch_api_contract::summaries::SummaryRefreshBody =
-            serde_json::from_value(request.arguments.clone())?;
-        let accepted_model = request
-            .accepted_source
-            .get("model")
-            .cloned()
-            .map(serde_json::from_value::<SummaryModelChoice>)
-            .transpose()?;
+        let selected_model: ModelSelection = serde_json::from_value(
+            request
+                .accepted_source
+                .get("selection")
+                .cloned()
+                .ok_or_else(refused)?,
+        )?;
         let payer = request.paying_user.ok_or_else(refused)?;
         let mut tx = self.db().begin().await?;
         orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
@@ -188,12 +192,12 @@ impl Engine {
         } else {
             Caller::session(payer).with_admin_mode(false)
         };
-        let selected = select_with_snapshot(
+        let selected = select_with_backend_snapshot(
             &mut tx,
             &caller,
             target,
             range,
-            body.model.as_ref().or(accepted_model.as_ref()),
+            Some(&selected_model),
             self.inner.clock.time(),
             request.accepted_source.get("snapshot"),
         )

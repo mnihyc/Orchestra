@@ -49,9 +49,7 @@ pub(crate) enum Checked {
 /// provider and a model.
 pub(crate) async fn available(conn: &mut orch_db::Conn, node: Id) -> Result<bool, EngineError> {
     Ok(choice(conn, node).await?.is_some_and(|chosen: Choice| {
-        chosen.kind == "model"
-            && chosen.config["provider_id"].is_string()
-            && chosen.config["model_name"].is_string()
+        chosen.kind == "model" && Config::read(&chosen.config).is_ok()
     }))
 }
 
@@ -174,6 +172,7 @@ pub(crate) async fn ask(
             "the summary model is not configured".to_owned(),
         ));
     };
+    let offering = config.offering().map_err(EngineError::unreadable)?;
     let system = config
         .prompts
         .get(PROMPT_KEY)
@@ -181,7 +180,7 @@ pub(crate) async fn ask(
         .unwrap_or(GOAL_CHECK)
         .to_owned();
     let budget =
-        super::budget::input_budget(&mut conn, thread, config.provider_id, &config.model_name)
+        super::budget::input_budget(&mut conn, thread, offering.provider, &offering.offering)
             .await?;
     let row = orch_db::queries::threads::thread(&mut conn, thread)
         .await?
