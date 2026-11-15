@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-db --lib
+test -p orch-db --test database_watch --test commit_epochs --test released_migrations
+test -p orch-engine --lib
+test -p orch-engine --test exports --test forks
+test -p orch-api-core --lib -- --skip routes::resources::models::tests::a_name_the_catalogue_lists_is_added_with_what_the_catalogue_says_under_what_was_written
+test -p orch-api-core --test ask --test provider_harness --test copy_out_ask
+test -p orch-worker-core --test upkeep
