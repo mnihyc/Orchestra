@@ -10,7 +10,7 @@ import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 const source = vi.hoisted(() => ({ reply: undefined as Reply | undefined, readFailures: 0, refresh: vi.fn(), ask: vi.fn() }));
-vi.mock('@/features/ask/open', () => ({ openAskWithDraft: source.ask }));
+vi.mock('@/features/ask/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAskWithDraft: source.ask }));
 vi.mock('@/api/summaries', async (original) => ({ ...await original<typeof Summaries>(),
   resourceSummaryQuery: (target: { kind: string; id: string }) => queryOptions({ queryKey: ['native-summary-case', target.kind, target.id], queryFn: () => {
     if (source.readFailures > 0) { source.readFailures -= 1; return Promise.reject(new Error('The free readback failed')); }
@@ -131,6 +131,38 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(source.refresh.mock.calls[0]?.[1]).toEqual(expect.any(String));
     await screen.findByText(i18n.t('summaryBox.state.updating'));
     expect(screen.getByText('A readable source paragraph.')).toBeVisible();
+  });
+  it(`says why a refresh failed in that reason's own sentence beside the paragraph it keeps (${locale})`, async () => {
+    await setLocale(locale);
+    source.reply = { ...initial(), state: 'failed', problem: { type: 'orch:error:provider.unavailable', code: 'provider.unavailable', status: 503, title: '',
+      detail: 'The machine that keeps the key of the provider is offline.', request_id: 'summary-read', reason: 'keeper_offline' } };
+    show(<ResourceSummary target={{ kind: 'document', id: 'doc' }} reference="/doc/doc" />);
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(i18n.t('summaryBox.failure.keeper_offline'));
+    expect(alert).toHaveTextContent(i18n.t('summaryBox.failure.kept'));
+    expect(alert).not.toHaveTextContent(i18n.t('errors.provider.unavailable'));
+    expect(screen.getByText('A readable source paragraph.')).toBeVisible();
+  });
+  it(`gives a refresh that found nothing new as a plain line and no error (${locale})`, async () => {
+    await setLocale(locale);
+    source.reply = { ...initial(), state: 'failed', text: null, producer: null, updated_at: null, problem: { type: 'orch:error:provider.unavailable', code: 'provider.unavailable', status: 503, title: '',
+      detail: 'There is nothing new to summarize.', request_id: 'summary-read', reason: 'nothing_new' } };
+    show(<ResourceSummary target={{ kind: 'document', id: 'doc' }} reference="/doc/doc" />);
+    expect(await screen.findByText(i18n.t('summaryBox.nothingNew.other'))).toBeVisible();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(i18n.t('summaryBox.state.failed'))).not.toBeInTheDocument();
+  });
+  it(`blocks Refresh of a catch-up whose range is empty and says why, under the name of what it covers (${locale})`, async () => {
+    await setLocale(locale);
+    source.reply = { ...initial(), target: { kind: 'chat', id: 'chat' }, state: 'empty', text: null, producer: null, updated_at: null };
+    show(<ResourceSummary target={{ kind: 'chat', id: 'chat' }} reference="/chat/chat" range={{ after: 6, through: 6 }} />);
+    expect(await screen.findByRole('heading', { name: i18n.t('summaryBox.catchUp') })).toBeVisible();
+    const refresh = screen.getByRole('button', { name: i18n.t('summaryBox.catchUpActions.refresh') });
+    expect(refresh).toHaveAttribute('aria-disabled', 'true');
+    await userEvent.click(refresh);
+    await userEvent.hover(refresh);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('summaryBox.nothingNew.chat'));
+    expect(source.refresh).not.toHaveBeenCalled();
   });
   it(`clears removed projected text even when the native cache revision did not change (${locale})`, async () => {
     await setLocale(locale); source.reply = initial();

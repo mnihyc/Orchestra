@@ -69,6 +69,8 @@ pub enum EverythingKind {
     Template,
     /// A skill.
     Skill,
+    /// A configured resource pool.
+    Pool,
     /// A navigational group, identified by its `group` member.
     Group,
 }
@@ -171,6 +173,11 @@ pub struct EverythingTakes {
 /// One visible thing, or a deliberately minimal path step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EverythingRow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sharing: Option<crate::resource_rows::ResourceSharing>,
+    /// The table projection, independently requested without a resource's full page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_row: Option<crate::resource_rows::ResourceListRow>,
     /// Existing resource home, origin and per-machine native judgements.
     /// Absent for non-resource/path-only rows; an empty judgement list grants no availability.
     #[serde(default, flatten)]
@@ -270,13 +277,16 @@ pub struct EverythingListQuery {
     /// Requires exactly one resource kind and parent=resources.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_details: Option<bool>,
+    /// Include each resource's compact table projection. Configuration and full reports belong to its own read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_rows: Option<bool>,
     /// A resource's own state, applied before the page limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_state: Option<String>,
     /// An agent's harness, applied before the page limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
-    /// A template's unit kind, or an environment's origin (machine/template).
+    /// A template's unit kind, an environment's origin, or a pool's member family.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_kind: Option<String>,
     /// Nested ownership, management, use and view of the selected resource kind.
@@ -352,11 +362,15 @@ pub enum EverythingResource {
     Mount(Box<crate::mounts::Mount>),
     /// A skill with its latest version.
     Skill(Box<crate::skills::Skill>),
+    /// A configured pool with separately protected member lists.
+    Pool(Box<crate::pools::Pool>),
 }
 
 /// Counts of the resource lists this caller may discover, including named permission pages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ResourceCounts {
+    /// Configured resource pools.
+    pub pools: i64,
     /// Providers.
     pub providers: i64,
     /// Agent profiles.
@@ -393,6 +407,7 @@ const INVENTORY_FAMILIES: &[orch_access_contract::key_scope::KeyTargetKind] = &[
     Object(K::McpServer),
     Object(K::Mount),
     Object(K::Skill),
+    Object(K::Pool),
 ];
 
 const INVENTORY_NAMES: [Facet; 6] = [
@@ -470,6 +485,7 @@ crate::endpoints! {
                 Object(K::McpServer),
                 Object(K::Mount),
                 Object(K::Skill),
+    Object(K::Pool),
             ],
             Target::ResolvedCollection("results"),
         );
