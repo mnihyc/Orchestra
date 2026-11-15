@@ -14,9 +14,9 @@ const reads = vi.hoisted(() => ({ catalogue: vi.fn<(environment: string | null) 
 vi.mock('@/api/resource-tools', async (load) => ({ ...await load<typeof Tools>(),
   mcpChoicesQuery: (environment: string | null) => ({ queryKey: ['mcp-choices-test', environment], queryFn: () => reads.catalogue(environment), staleTime: Infinity }),
 }));
-vi.mock('@/features/navigation/places', () => ({ PlaceLink: ({ children }: { children: React.ReactNode }) => <span>{children}</span> }));
+vi.mock('@/features/navigation/places', async (loadOriginal) => ({ ...await loadOriginal<object>(), PlaceLink: ({ children }: { children: React.ReactNode }) => <span>{children}</span> }));
 vi.mock('@/features/resources/machines/MachineLink', () => ({ MachineLink: ({ machine }: { machine: { name: string } }) => <span>{machine.name}</span> }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: vi.fn() }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: vi.fn() }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useLocation: () => ({ pathname: '/environment', searchStr: '' }), useNavigate: () => vi.fn() }));
 afterEach(async () => { cleanup(); vi.clearAllMocks(); localStorage.clear(); await setLocale('en'); });
 

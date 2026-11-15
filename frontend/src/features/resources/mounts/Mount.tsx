@@ -1,3 +1,5 @@
+import { resourceImpactQuery } from '@/api/resource-impact';
+import { NotifyPeople } from '@/features/notifications/NotifyPeople';
 import { homeMoveEntries } from '@/features/duplicate/move';
 import { resourceDuplicateEntries } from '@/features/duplicate/target';
 /** Mount overview, where it appears, whether its data may be written, used-by and sharing.
@@ -60,8 +62,12 @@ export function MountScreen({ id, tab, onTab }: { id: string; tab?: MountTab; on
   const back = useResourceHeading('mounts', Box, query.data?.name ?? t('common.loading'), query.data?.id);
   const [editing, setEditing] = useState(false);
   const [removing, setRemoving] = useState(false);
+  const [notifyChoice,setNotifyChoice]=useState<{review:string;value:boolean}|null>(null);
+  const impact=useQuery({...resourceImpactQuery({object:{kind:'mount',id},model_id:null}),enabled:removing});
+  const notify=notifyChoice!==null&&notifyChoice.review===impact.data?.notification?.preview_id?notifyChoice.value:impact.data?.notification?.default_on??false;
+  const setNotify=(value:boolean)=>{const review=impact.data?.notification?.preview_id;if(review!=null)setNotifyChoice({review,value});};
   const [localTab, setLocalTab] = useState<MountTab>('overview');
-  const remove = useMutation({ mutationFn: () => deleteMount(id), onSuccess: () => { void navigate({ to: '/resources/mounts' }); } });
+  const remove = useMutation({ mutationFn: () => notify ? deleteMount(id,{notify:true,...(impact.data?.notification?.preview_id==null?{}:{notification_review:impact.data.notification.preview_id})}) : deleteMount(id), onSuccess: () => { void navigate({ to: '/resources/mounts' }); } });
   if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={6} /> : <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
   const mount = query.data;
   const manage = holds(mount.access, 'mount.manage');
@@ -93,6 +99,6 @@ export function MountScreen({ id, tab, onTab }: { id: string; tab?: MountTab; on
     ]} />
     {editing && <EditMount mount={mount} onClose={() => setEditing(false)} />}
     {cleanup.dialogs}
-    <ConfirmDialog admin={adminSpec(mount, 'mount.manage')} open={removing} onOpenChange={setRemoving} title={t('resourceDetails.removeTitle', { name: mount.name })} confirmLabel={t('resourceDetails.remove')} danger pending={remove.isPending} error={remove.error} onConfirm={() => remove.mutate()}>{t('resourceDetails.mount.removeHelp')}</ConfirmDialog>
+    <ConfirmDialog admin={adminSpec(mount, 'mount.manage')} open={removing} onOpenChange={(open)=>{if(!open)setNotifyChoice(null);setRemoving(open);}} title={t('resourceDetails.removeTitle', { name: mount.name })} confirmLabel={t('resourceDetails.remove')} danger footerStart={<NotifyPeople plan={impact.data?.notification} value={notify} onChange={setNotify} disabled={remove.isPending||impact.isFetching}/>} disabled={impact.isPending||impact.isError} pending={remove.isPending} error={remove.error??impact.error} onConfirm={() => remove.mutate()}>{t('resourceDetails.mount.removeHelp')}</ConfirmDialog>
   </Page>;
 }
