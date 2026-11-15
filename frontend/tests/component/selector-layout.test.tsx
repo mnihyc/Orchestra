@@ -1,5 +1,5 @@
 /** Form choices retain visible consequences; compact toolbar choices keep hover/focus help. */
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -243,4 +243,24 @@ it('selects segments with arrows, skips disabled options, wraps and keeps a sele
   expect(screen.getByRole('radio', { name: 'Mine' })).toBeChecked();
   expect(changed).toHaveBeenCalledTimes(count);
   expect(screen.getByRole('radio', { name: 'Closed' })).toBeDisabled();
+});
+
+
+it('keeps rapid segment arrows on the focused choice before the next paint', () => {
+  function View() {
+    const [value, setValue] = useState('all');
+    return <SegmentedControl label="View" value={value} onValueChange={setValue} segments={[
+      { value: 'all', name: 'All' }, { value: 'closed', name: 'Closed', disabled: true }, { value: 'mine', name: 'Mine' },
+    ]} />;
+  }
+  show(<View />);
+  const all = screen.getByRole('radio', { name: 'All' });
+  const mine = screen.getByRole('radio', { name: 'Mine' });
+  act(() => all.focus());
+  fireEvent.keyDown(all, { key: 'ArrowRight' });
+  expect(mine).toHaveFocus(); expect(mine).toBeChecked();
+  fireEvent.keyDown(mine, { key: 'ArrowDown' });
+  expect(all).toHaveFocus(); expect(all).toBeChecked();
+  fireEvent.keyDown(all, { key: 'ArrowLeft' });
+  expect(mine).toHaveFocus(); expect(mine).toBeChecked();
 });

@@ -54,6 +54,16 @@ use std::sync::Mutex;
 
 pub(crate) use claims::Claims;
 
+pub(crate) mod history;
+tokio::task_local! { static ACTIVE_CLAIMS: Arc<Claims>; }
+
+pub(crate) async fn with_claims<T>(
+    claims: Arc<Claims>,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    ACTIVE_CLAIMS.scope(claims, work).await
+}
+
 pub use raw::RawCreation;
 
 pub use raw::RawFormat;

@@ -47,6 +47,7 @@ use axum::response::Response;
 use http::StatusCode;
 
 use orch_api_contract::auth::HealthGet;
+use orch_api_contract::auth::InterfaceDefaults;
 
 use orch_api_contract::auth::LinkTrust;
 
@@ -166,10 +167,16 @@ pub(crate) async fn on_connection(
     caller: Option<&crate::middleware::authentication::Authed>,
 ) -> ApiResult<Meta> {
     let policy = system_policy(conn).await?;
-    let defs: Vec<_> = [keys::SYSTEM_BANNER, keys::STORAGE_MAX_BLOB_BYTES]
-        .into_iter()
-        .filter_map(registry::get)
-        .collect();
+    let defs: Vec<_> = [
+        keys::SYSTEM_BANNER,
+        keys::STORAGE_MAX_BLOB_BYTES,
+        keys::INTERFACE_KEPT_CLOSED_TABS,
+        keys::INTERFACE_PROGRESS_DELAY_MS,
+        keys::INTERFACE_READ_FRESHNESS_MS,
+    ]
+    .into_iter()
+    .filter_map(registry::get)
+    .collect();
     let snapshot = Snapshot::load(conn, Place::System, Wanted::Keys(&defs))
         .await
         .map_err(ApiError::internal)?;
@@ -229,6 +236,14 @@ pub(crate) async fn on_connection(
             max_image_bytes: IMAGE_UPLOAD_MAX_BYTES,
             max_upload_bytes: max_upload.unwrap_or(i64::MAX),
         },
+        interface_defaults: InterfaceDefaults {
+            kept_closed_tabs: setting(&snapshot, keys::INTERFACE_KEPT_CLOSED_TABS)?
+                .unwrap_or_default(),
+            progress_delay_ms: setting(&snapshot, keys::INTERFACE_PROGRESS_DELAY_MS)?
+                .unwrap_or_default(),
+            read_freshness_ms: setting(&snapshot, keys::INTERFACE_READ_FRESHNESS_MS)?
+                .unwrap_or_default(),
+        },
     })
 }
 orch_api_base::__api_bind_f9d963c9b2!();
@@ -281,6 +296,9 @@ async fn setup(ctx: Ctx, (): (), body: SetupCreateBody) -> ApiResult<Answer<Setu
         },
     )
     .await?;
+    if crate::routes::notifications::push_public_key().is_some() {
+        orch_worker_core::channel_setup::ensure_system_push(&mut tx, user.id, ctx.now).await?;
+    }
     let how = json!({ "proofs": [SignInProof::Password], "setup": true });
     let opened = open_session(&ctx, &mut tx, &user, how).await?;
     orch_db::idempotency::creation::observe_account(&mut tx, user.id, "setup_account", 200).await?;

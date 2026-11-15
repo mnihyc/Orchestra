@@ -101,10 +101,30 @@ impl ScriptedHandler {
             .count()
     }
 
+    /// Waits for the named occurrence of a command kind to reach the real handler.
+    pub async fn started_kind(&self, kind: CommandKind, count: usize) {
+        loop {
+            let waiting = self.started.notified();
+            tokio::pin!(waiting);
+            let _ = waiting.as_mut().enable();
+            if lock(&self.executions)
+                .iter()
+                .filter(|run| run.kind == kind)
+                .count()
+                >= count
+            {
+                return;
+            }
+            waiting.await;
+        }
+    }
+
     /// Waits until a command has started.
     pub async fn started(&self, id: Id) {
         loop {
             let waiting = self.started.notified();
+            tokio::pin!(waiting);
+            let _ = waiting.as_mut().enable();
             if self.runs_of(id) > 0 {
                 return;
             }
@@ -128,11 +148,13 @@ impl CommandHandler for ScriptedHandler {
         self.started.notify_waiters();
         loop {
             let released = self.release.notified();
+            tokio::pin!(released);
+            let _ = released.as_mut().enable();
             if !lock(&self.hold).contains(&kind) {
                 break;
             }
             tokio::select! {
-                () = released => {}
+                () = &mut released => {}
                 () = context.cancel.cancelled() => {
                     return Err(CommandError::new(ErrorCode::Conflict, "cancelled while it ran"));
                 }
