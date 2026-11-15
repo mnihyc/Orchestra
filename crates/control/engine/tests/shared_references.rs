@@ -517,6 +517,7 @@ async fn relative_absolute_and_copied_workspace_paths_keep_one_identity_and_miss
                 return Err(CommandError::new(ErrorCode::NotFound, "missing"));
             }
             Ok(CommandResult::FsStat(FileStat {
+                facts: None,
                 entry: DirEntry {
                     name: "auth.rs".into(),
                     path: body.path.clone(),
@@ -634,6 +635,7 @@ async fn a_workspace_line_is_not_mistaken_for_a_shared_document_block_with_the_s
             };
             assert_eq!(body.path, expected);
             Ok(CommandResult::FsStat(FileStat {
+                facts: None,
                 entry: DirEntry {
                     name: "Rollout plan.md".into(),
                     path: body.path.clone(),

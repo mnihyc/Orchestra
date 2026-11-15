@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-engine --test updates
+test -p orch-engine --test agent_history -- an_unexpectedly_missing_session_carries_the_conversation_instead_of_starting_empty --exact --nocapture
