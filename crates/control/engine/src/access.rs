@@ -66,7 +66,9 @@ pub async fn resource_policies_among(
     .await?;
     let external =
         orch_settings::get_at_nodes::<bool>(conn, &homes, keys::SHARING_ALLOW_EXTERNAL).await?;
-    let system = if facts.iter().any(|row| row.home_id.is_none()) {
+    let holders =
+        orch_settings::get_at_nodes::<bool>(conn, &homes, keys::SHARING_ALLOW_HOLDERS).await?;
+    let (system, system_sharing) = if facts.iter().any(|row| row.home_id.is_none()) {
         let shared_subscriptions = orch_settings::get(
             conn,
             orch_settings::Place::System,
@@ -80,24 +82,60 @@ pub async fn resource_policies_among(
         )
         .await?
         .unwrap_or(false);
-        ResourcePolicy {
-            owners_name_outsiders,
-            shared_subscriptions,
-        }
-    } else {
-        ResourcePolicy::default()
-    };
-    let mut policies = Policies::everywhere(system);
-    for home in homes {
-        policies = policies.at_home(
-            home,
+        let holders_share = orch_settings::get::<bool>(
+            conn,
+            orch_settings::Place::System,
+            keys::SHARING_ALLOW_HOLDERS,
+        )
+        .await?
+        .unwrap_or(true);
+        (
             ResourcePolicy {
-                owners_name_outsiders: external.get(&home).copied().flatten().unwrap_or(false),
-                shared_subscriptions: sharing.get(&home).cloned().flatten(),
+                owners_name_outsiders,
+                shared_subscriptions,
             },
-        );
+            orch_authz::Policy {
+                owners_name_outsiders,
+                holders_share,
+            },
+        )
+    } else {
+        (ResourcePolicy::default(), orch_authz::Policy::default())
+    };
+    let mut policies = Policies::everywhere(system).with_sharing(None, system_sharing);
+    for home in homes {
+        let owners_name_outsiders = external.get(&home).copied().flatten().unwrap_or(false);
+        policies = policies
+            .at_home(
+                home,
+                ResourcePolicy {
+                    owners_name_outsiders,
+                    shared_subscriptions: sharing.get(&home).cloned().flatten(),
+                },
+            )
+            .with_sharing(
+                Some(home),
+                orch_authz::Policy {
+                    owners_name_outsiders,
+                    holders_share: holders.get(&home).copied().flatten().unwrap_or(true),
+                },
+            );
     }
     Ok(policies)
+}
+
+/// Every pool hop keeps its own current home policy beside the actual member's policy.
+pub async fn resource_policies_for_choice(
+    conn: &mut Conn,
+    resources: &[Id],
+    path: &[orch_access_contract::pools::PathMember],
+) -> Result<orch_authz::usable::Policies, crate::EngineError> {
+    let ids = resources
+        .iter()
+        .copied()
+        .chain(path.iter().map(|hop| hop.pool_id))
+        .collect::<std::collections::BTreeSet<_>>();
+    resource_policies_among(conn, &ids.into_iter().collect::<Vec<_>>()).await
 }
 
 /// Resolve a resource-page gift's existing sharing settings beside its ordinary use policy.
@@ -166,6 +204,10 @@ impl Answer {
 /// May a person run a provider, as a thread is set to use it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderUse<'a> {
+    /// The native producer's current pooled selection, repeated at its real first-effect fence.
+    pub pool: Option<&'a crate::resource_choice::ProviderSelection>,
+    /// The factual purpose of this use, shared with permission selection and accounting.
+    pub purpose: orch_access_contract::permissions::ProviderPurpose,
     /// The person: the author of an input, the thread's first owner for an
     /// input that has none, or whoever puts a thread on the provider.
     pub person: Id,

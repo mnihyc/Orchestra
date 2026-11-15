@@ -10,11 +10,12 @@ import {
   type BarId, type CloseScope, type Layout, LAYOUT_VERSION, makeGroup, makeTab, mapGroups,
   move, normalize, spatialMainGroups, tabsForClose, toggleBar, type Tab,
 } from '@/features/workbench/layout';
-import { type ClosedTab, loadWorkspace, saveWorkspace, type Workspace } from '@/features/workbench/persistence';
+import { boundedClosedHistory, retainedClosedTabs, type ClosedTab, loadWorkspace, saveWorkspace, type Workspace } from '@/features/workbench/persistence';
 import { viewOf } from '@/features/workbench/views';
 import type { ScreenKind } from '@/routes/-access';
 import { readViewChoice, writeViewChoice } from '@/lib/viewChoices';
-import { capturePresentations, restorePresentations } from './presentation';
+import { capturePresentations, prunePresentations, restorePresentations } from './presentation';
+import { DEFAULT_INTERFACE_READING } from '@/lib/interfaceReading';
 import { defaultStatus, type StatusArrangement } from '@/features/status-items/arrangement';
 import type { ChipPlace, ChipSize, ChipSizes } from '@/features/people/chipSizes';
 
@@ -40,6 +41,8 @@ function retainedMetadata(layout: Layout, before: Pick<WorkbenchState, 'named' |
 }
 
 interface WorkbenchState extends Workspace {
+  closedLimit: number;
+  setClosedLimit: (count: number) => void;
   chipSizes: ChipSizes;
   setChipSize: (place: ChipPlace, size: ChipSize) => void;
   statusItems: StatusArrangement;
@@ -77,10 +80,12 @@ interface WorkbenchState extends Workspace {
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 function saved(state: WorkbenchState): Workspace {
-  const { arrangement, layout, focusedGroup, focusedTab, focusedMainGroup, focusedMainTab, activeContent, focusMode, closedTabs } = state;
-  const owners = new Set([...allTabs(layout), ...closedTabs.map((entry) => entry.tab)].map((tab) => tab.id));
+  const { arrangement, layout, focusedGroup, focusedTab, focusedMainGroup, focusedMainTab, activeContent, focusMode, closedLimit } = state;
+  const closedTabs = boundedClosedHistory(layout, state.closedTabs, closedLimit);
+  const owners = new Set([...allTabs(layout), ...retainedClosedTabs(layout, closedTabs, closedLimit).map((entry) => entry.tab)].map((tab) => tab.id));
+  prunePresentations(owners);
   const titles = Object.fromEntries([...state.named].filter(([id]) => owners.has(id)).map(([id, name]) => [id, { title: name.title, ...(name.path === undefined ? {} : { path: name.path }) }]));
-  return { arrangement, layout, focusedGroup, focusedTab, focusedMainGroup, focusedMainTab, activeContent, focusMode, closedTabs, titles, statusItems: state.statusItems, chipSizes: state.chipSizes, presentations: capturePresentations(owners) };
+  return { arrangement, layout, focusedGroup, focusedTab, focusedMainGroup, focusedMainTab, activeContent, focusMode, closedTabs, closedLimit, titles, statusItems: state.statusItems, chipSizes: state.chipSizes, presentations: capturePresentations(owners) };
 }
 function keep(): void {
   clearTimeout(saveTimer);
@@ -141,7 +146,13 @@ function rememberBars(userId: string | null, layout: Layout): void {
 export const useWorkbench = create<WorkbenchState>((set, get) => ({
   userId: null, screen: 'page', arrangement: 'default', layout: EMPTY,
   dropped: false, focusedGroup: null, focusedTab: null, focusedMainGroup: null, focusedMainTab: null, activeContent: null, focusMode: false,
-  closedTabs: [], overlay: null, unsaved: new Set(), named: new Map(), pendingClose: null,
+  closedTabs: [], closedLimit: DEFAULT_INTERFACE_READING.kept_closed_tabs, overlay: null, unsaved: new Set(), named: new Map(), pendingClose: null,
+  setClosedLimit: (count) => {
+    const before = get();
+    if (!Number.isSafeInteger(count) || count < 0 || before.closedLimit === count) return;
+    set({ closedLimit: count, closedTabs: boundedClosedHistory(before.layout, before.closedTabs, count) });
+    get().flush();
+  },
   statusItems: defaultStatus(),
   chipSizes: {},
   setChipSize: (place, size) => { set((state) => ({ chipSizes: { ...state.chipSizes, [place]: size } })); keep(); },
@@ -154,7 +165,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       return;
     }
     before.flush();
-    const { kept, dropped } = loadWorkspace(userId, screen);
+    const { kept, dropped } = loadWorkspace(userId);
     restorePresentations(kept?.presentations);
     const arrangement = kept?.arrangement ?? arrangementOf(screen).name;
     const own = kept?.layout ?? shippedLayout(screen, arrangement);
@@ -170,7 +181,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const normalized = normalize(layout);
     const focus = focusAfter(normalized, { layout: normalized, focusedGroup: kept?.focusedGroup ?? null, focusedTab: kept?.focusedTab ?? null, focusedMainGroup: kept?.focusedMainGroup ?? null, focusedMainTab: kept?.focusedMainTab ?? null, activeContent: kept?.activeContent ?? null });
     set({ userId, screen, arrangement, layout: normalized, ...focus, focusMode: kept?.focusMode ?? false,
-      closedTabs: kept?.closedTabs ?? [], statusItems: kept?.statusItems ?? defaultStatus(), chipSizes: kept?.chipSizes ?? {}, dropped, overlay: null, named: new Map(Object.entries(kept?.titles ?? {}).map(([id, name]) => [id, { ...name, source: 'cache' as const }])), unsaved: new Set(), pendingClose: null });
+      closedTabs: kept?.closedTabs ?? [], closedLimit: kept?.closedLimit ?? DEFAULT_INTERFACE_READING.kept_closed_tabs, statusItems: kept?.statusItems ?? defaultStatus(), chipSizes: kept?.chipSizes ?? {}, dropped, overlay: null, named: new Map(Object.entries(kept?.titles ?? {}).map(([id, name]) => [id, { ...name, source: 'cache' as const }])), unsaved: new Set(), pendingClose: null });
     get().flush();
   },
   change: (change, focusedTab) => {
@@ -246,7 +257,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   close: (scope) => {
     const state = get(), ids = tabsForClose(state.layout, scope).map((tab) => tab.id);
     if (ids.length === 0) return;
-    if (ids.some((id) => state.unsaved.has(id))) { set({ pendingClose: ids }); return; }
+    // A side section that is not content closes by hiding: its view stays, with what is typed in it, so a close asks only about what it takes away.
+    const taken = ids.filter((id) => { const place = findTab(state.layout, id); return place?.container === undefined || isContentTab(place.tab); });
+    if (taken.some((id) => state.unsaved.has(id))) { set({ pendingClose: ids }); return; }
     state.finishClose(ids);
   },
   finishClose: (ids) => {
@@ -261,7 +274,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const layout = normalize(mapGroups(closeTabs(before.layout, new Set(ids)), (group, area) => area === 'left' || area === 'right'
       ? { ...group, tabs: group.tabs.filter((tab) => !closedContent.has(tab.id)) } : group));
     set({ layout, ...focusAfter(layout, before), ...retainedMetadata(layout, before),
-      closedTabs: [...before.closedTabs, ...closed], pendingClose: null });
+      closedTabs: boundedClosedHistory(layout, [...before.closedTabs, ...closed], before.closedLimit), pendingClose: null });
     get().flush();
   },
   cancelClose: () => set({ pendingClose: null }),
@@ -302,7 +315,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     get().flush();
     restorePresentations(undefined);
     set({ userId: null, layout: EMPTY, dropped: false, focusedGroup: null, focusedTab: null, focusedMainGroup: null, focusedMainTab: null, activeContent: null,
-      statusItems: defaultStatus(), chipSizes: {}, focusMode: false, closedTabs: [], overlay: null, unsaved: new Set(), named: new Map(), pendingClose: null });
+      statusItems: defaultStatus(), chipSizes: {}, focusMode: false, closedTabs: [], closedLimit: DEFAULT_INTERFACE_READING.kept_closed_tabs, overlay: null, unsaved: new Set(), named: new Map(), pendingClose: null });
   },
 }));
 

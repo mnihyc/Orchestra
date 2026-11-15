@@ -1239,11 +1239,12 @@ async fn native_hosted_creation_prepares_without_writes_and_checks_its_actual_fi
             world.clock.now(),
             &principal,
             &Request {
+                identity: None,
                 owner: world.ada,
                 name: Some("Prepared creation"),
                 home: world.root,
                 template: Some(template),
-                host: Some(Some(host.id)),
+                host: Some(Some(orch_provider_contract::pools::Target::host(host.id))),
                 config: &config,
             },
         )

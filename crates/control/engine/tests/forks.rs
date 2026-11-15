@@ -1250,6 +1250,46 @@ async fn a_running_turn_is_waited_for_and_the_switch_goes_on_when_it_ends() {
     assert_eq!(provider, rig.other_provider);
 }
 
+#[tokio::test]
+async fn a_switch_keeps_the_requested_wait_and_health_check_times_above_the_old_limits() {
+    let can = Can {
+        export_native: true,
+        import_native: true,
+        ..Can::default()
+    };
+    let rig = Rig::new(can, "fake", can).await;
+    let thread = rig.world.thread("Long check").await;
+    let request = ForkRequest {
+        options: Some(ChangeOptions {
+            wait_minutes: Some(1_441),
+            verify_timeout_secs: Some(3_601),
+            ..ChangeOptions::default()
+        }),
+        ..rig.to_other()
+    };
+    let plan = rig.plan(thread, &request).await;
+    assert_eq!(plan.options.wait_minutes, 1_441);
+    assert_eq!(plan.options.verify_timeout_secs, 3_601);
+    let mut shortest = request.clone();
+    shortest.options.as_mut().unwrap().verify_timeout_secs = Some(1);
+    assert_eq!(
+        rig.plan(thread, &shortest)
+            .await
+            .options
+            .verify_timeout_secs,
+        1
+    );
+    let mut outside_clock = request;
+    outside_clock.options.as_mut().unwrap().wait_minutes = Some(i64::MAX);
+    assert!(matches!(
+        rig.world
+            .engine()
+            .draft_fork(&rig.caller(), thread, &outside_clock)
+            .await,
+        Err(PlanError::Invalid { .. })
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_running_turn_is_interrupted_at_once_when_the_options_say_so_and_a_wait_that_runs_out_changes_nothing()
  {
@@ -1455,12 +1495,12 @@ async fn a_fork_is_its_makers_and_takes_the_history_and_the_source_goes_on_untou
                 title: format!("Sub-agent {name}"),
                 started_at: orch_types::Time::new(rig.world.clock.now()),
                 duration_ms: Some(10),
-                raw: RawCall {
+                raw: Some(RawCall {
                     name: "Task".to_owned(),
                     input: OutputRef::of("Check the redirect"),
                     output: Some(OutputRef::of("Checked")),
                     is_error: false,
-                },
+                }),
             })
             .unwrap();
             let parent_ref = format!("native-{source_segment}-task-{name}");
@@ -1983,7 +2023,7 @@ async fn fork_into_a_new_environment(
             ..ForkTo::default()
         }),
         environment: Some(ForkEnvironment::New {
-            new: ForkNewEnvironment {
+            new: Box::new(ForkNewEnvironment {
                 name: Some(name.to_owned()),
                 template_id: Some(template),
                 files: Some(FileSelection::Selection {
@@ -1991,7 +2031,7 @@ async fn fork_into_a_new_environment(
                     exclude: None,
                 }),
                 ..ForkNewEnvironment::default()
-            },
+            }),
         }),
         ..rig.fork()
     };
@@ -2306,7 +2346,7 @@ async fn a_switch_to_another_environment_keeps_the_session_moves_the_files_and_s
         let mut conn = rig.world.pool.acquire().await.unwrap();
         let changed = sqlx::query(
             "UPDATE environments SET template_id = $2,
-                    config = config || jsonb_build_object('env.host_id', $3::text)
+                    config = config || jsonb_build_object('env.host_id', jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$3::text)))
               WHERE id = $1 AND deleted_at IS NULL",
         )
         .bind(rig.world.environment)
@@ -3161,7 +3201,7 @@ fn shared_batch_request(
     ForkBatchPreflightBody {
         thread_ids: Some(sources),
         environment: Some(ForkEnvironment::New {
-            new: ForkNewEnvironment {
+            new: Box::new(ForkNewEnvironment {
                 name: Some(name.to_owned()),
                 template_id: Some(template),
                 files: Some(FileSelection::Selection {
@@ -3169,7 +3209,7 @@ fn shared_batch_request(
                     exclude: None,
                 }),
                 ..Default::default()
-            },
+            }),
         }),
         ..Default::default()
     }

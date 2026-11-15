@@ -709,13 +709,23 @@ impl ProviderProvision {
         if let Some(recipe) = &recovery {
             template.spec = recipe.definition.clone();
         }
-        let mut named: Option<Id> = setting(
+        let target: Option<orch_provider_contract::pools::Target> = setting(
             &mut tx,
             SettingsPlace::Provider(provider.id),
             keys::RUNTIME_HOST_ID,
         )
         .await
         .map_err(EngineError::from)?;
+        let mut named = target
+            .map(|target| {
+                target.single_host().ok_or_else(|| {
+                    failed(
+                        "pool_choice_missing",
+                        "the provider host pool has no admitted native selection",
+                    )
+                })
+            })
+            .transpose()?;
         if let Some(recipe) = &recovery {
             named = Some(recipe.host);
         }

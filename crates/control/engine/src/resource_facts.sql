@@ -65,10 +65,10 @@ WITH units AS (
     JOIN turns t ON t.skill_versions @> ARRAY[v.id] JOIN nodes n ON n.id=t.thread_id WHERE v.skill_id=ANY($1)
 ), scalar_keys(subject_kind,key) AS (VALUES
   ('provider','agent.default_provider_id'),('agent','agent.default_agent_id'),('environment','env.default_id'),
-  ('template','env.template_id'),('template','runtime.template_id'),('host','env.host_id'),('host','runtime.host_id')
+  ('template','env.template_id'),('template','runtime.template_id'),('host','env.host_id'),('host','runtime.host_id'),('pool','env.host_id'),('pool','runtime.host_id')
 ), explicit AS (
   SELECT k.subject_kind,w.id AS subject_id,n.kind,n.id,COALESCE(n.name,'System') AS name,'explicit'::text AS relation,NULL::timestamptz AS until
-    FROM unnest($1::uuid[]) w(id) CROSS JOIN scalar_keys k JOIN settings s ON s.key=k.key AND s.value @> to_jsonb(w.id::text)
+    FROM unnest($1::uuid[]) w(id) CROSS JOIN scalar_keys k JOIN settings s ON s.key=k.key AND s.value @> (CASE WHEN k.subject_kind='host' THEN jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',w.id::text)) WHEN k.subject_kind='pool' THEN jsonb_build_object('type','pool','id',w.id::text) ELSE to_jsonb(w.id::text) END)
     LEFT JOIN nodes n ON n.id=s.node_id WHERE n.deleted_at IS NULL
   UNION ALL SELECT 'mount',w.id,n.kind,n.id,COALESCE(n.name,'System'),'explicit',NULL FROM unnest($1::uuid[]) w(id)
     JOIN settings s ON s.key='env.mounts' AND s.value @> jsonb_build_object(w.id::text,true)
@@ -86,10 +86,10 @@ WITH units AS (
     LEFT JOIN nodes n ON n.id=s.node_id WHERE v.skill_id=ANY($1) AND n.deleted_at IS NULL
 ), own AS (
   SELECT k.subject_kind,w.id AS subject_id,'environment'::text AS kind,e.id,e.name,'explicit'::text AS relation,NULL::timestamptz AS until
-    FROM unnest($1::uuid[]) w(id) CROSS JOIN scalar_keys k JOIN environments e ON e.config @> jsonb_build_object(k.key,w.id::text)
+    FROM unnest($1::uuid[]) w(id) CROSS JOIN scalar_keys k JOIN environments e ON e.config @> jsonb_build_object(k.key,CASE WHEN k.subject_kind='host' THEN jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',w.id::text)) WHEN k.subject_kind='pool' THEN jsonb_build_object('type','pool','id',w.id::text) ELSE to_jsonb(w.id::text) END)
     WHERE e.deleted_at IS NULL
   UNION ALL SELECT k.subject_kind,w.id,'provider',p.id,p.name,'explicit',NULL
-    FROM unnest($1::uuid[]) w(id) CROSS JOIN scalar_keys k JOIN providers p ON p.runtime_config @> jsonb_build_object(k.key,w.id::text)
+    FROM unnest($1::uuid[]) w(id) CROSS JOIN scalar_keys k JOIN providers p ON p.runtime_config @> jsonb_build_object(k.key,CASE WHEN k.subject_kind='host' THEN jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',w.id::text)) WHEN k.subject_kind='pool' THEN jsonb_build_object('type','pool','id',w.id::text) ELSE to_jsonb(w.id::text) END)
     WHERE p.deleted_at IS NULL
   UNION ALL SELECT 'mount',w.id,'environment',e.id,e.name,'explicit',NULL FROM unnest($1::uuid[]) w(id)
     JOIN environments e ON e.config @> jsonb_build_object('env.mounts',jsonb_build_object(w.id::text,true))

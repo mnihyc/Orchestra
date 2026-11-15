@@ -233,6 +233,8 @@ impl Engine {
             .background_provider_use(
                 &mut tx,
                 &ProviderUse {
+                    pool: None,
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Embeddings,
                     person: writer,
                     node: org,
                     provider: provider.id,

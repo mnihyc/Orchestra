@@ -744,6 +744,7 @@ pub(crate) fn changes_authority(route: &Route) -> bool {
         "ChatMemberAdd" | "ChatMemberRemove" | "ChatAgentPostingSet" | "ChatPersonGrant" |
         // Shared resources, their home, availability and permission policies.
         "ProviderUpdate" | "ProviderDelete" |
+        "PoolDelete" | "PoolUpdate" | "PoolMemberPut" | "PoolMemberMetadata" | "PoolMemberDelete" | "PoolLendingPut" |
         "ProviderDisable" | "ProviderEnable" |
         // Credentials, their reported expiry and hosted availability can change what work may run.
         "ProviderKeySet" | "ProviderSecretSet" | "ProviderFactsOverridesSet" | "ProviderSourcesSet" |

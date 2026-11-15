@@ -87,12 +87,18 @@ async fn template_and_host(conn: &mut Conn, provider: Id) -> Result<(Id, Option<
     )
     .await?
     .unwrap_or(orch_db::seeds::PROVIDER_RUNTIME_TEMPLATE_ID);
-    let host = setting::<Id>(
+    let host = setting::<orch_provider_contract::pools::Target>(
         conn,
         SettingsPlace::Provider(provider),
         keys::RUNTIME_HOST_ID,
     )
-    .await?;
+    .await?
+    .map(|target| {
+        target.single_host().ok_or_else(|| {
+            EngineError::unreadable("the provider host pool has no admitted native selection")
+        })
+    })
+    .transpose()?;
     Ok((template, host))
 }
 
