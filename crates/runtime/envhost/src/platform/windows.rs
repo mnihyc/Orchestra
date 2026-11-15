@@ -292,6 +292,13 @@ impl Dir {
     }
 
     /// Windows cannot flush a directory by itself: what is written to its files is flushed with them.
+    /// An owned directory iterator; no sibling list is collected in memory.
+    pub fn names_stream(&self) -> io::Result<Box<dyn Iterator<Item = io::Result<OsString>>>> {
+        Ok(Box::new(
+            std::fs::read_dir(&self.path)?.map(|entry| entry.map(|entry| entry.file_name())),
+        ))
+    }
+
     /// Visits names without collecting a large directory; false stops the read immediately.
     pub fn visit_names(&self, visit: &mut dyn FnMut(&OsStr) -> bool) -> io::Result<bool> {
         for entry in std::fs::read_dir(&self.path)? {
