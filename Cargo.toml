@@ -221,6 +221,7 @@ toml = "1"                                                 # orch.toml and a con
 log = "0.4" # SQLx's warning level; already a transitive dependency.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "json", "chrono", "migrate", "ipnetwork", "derive"] }  # PostgreSQL
 regex = "1"                                                # name rules and an agent's search
+regex-syntax = "=0.8.11"                                  # reuse the locked regex parser for safe native-stream overlap
 unicode-segmentation = "1"                                 # the first letter of a name, as a person reads it (an avatar)
 globset = "0.4"                                            # model patterns and ignore rules
 base64 = "0.23"                                            # cursors, keys and tokens on the wire

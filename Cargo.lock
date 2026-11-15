@@ -3580,6 +3580,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
 ]
@@ -4620,6 +4621,7 @@ dependencies = [
  "orch-testkit",
  "orch-types",
  "regex",
+ "regex-syntax",
  "serde",
  "serde_json",
  "sqlx",
@@ -5464,6 +5466,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "url",
 ]
 
 [[package]]

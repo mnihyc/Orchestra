@@ -23,8 +23,23 @@ use orch_types::Json;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use orch_api_contract::settings::{WithheldChoice, WithheldParameter, WithheldReason};
+
 use crate::credentials::CredentialPath;
 use crate::descriptor::{Placement, ProviderKind};
+
+/// Each program supplies its own feature starts; an explicit place choice wins, including false.
+#[must_use]
+pub fn feature_values(
+    defaults: &BTreeMap<String, bool>,
+    settings: &BTreeMap<String, bool>,
+) -> BTreeMap<String, bool> {
+    defaults
+        .iter()
+        .chain(settings)
+        .map(|(key, value)| (key.clone(), *value))
+        .collect()
+}
 
 /// Where on a screen a parameter is put.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -472,6 +487,78 @@ impl ParameterDef {
                 || ctx.model.option_rule("native", &self.key) != Some(&Json::Bool(false)))
     }
 
+    /// Why it is not shown for `ctx`, or `None` where it is. What the thread's way of reaching the model
+    /// and its place decide is said before a feature that is off, since switching the feature on would
+    /// not make the parameter appear.
+    #[must_use]
+    pub fn withheld_reason(
+        &self,
+        ctx: &Eligibility,
+        features: &BTreeMap<String, bool>,
+    ) -> Option<WithheldReason> {
+        if !self.is_eligible(ctx) {
+            return Some(self.ineligible_because(ctx));
+        }
+        if !self.is_enabled(features) {
+            return Some(WithheldReason::Feature {
+                feature: self.feature.clone().unwrap_or_default(),
+            });
+        }
+        (!self.is_shown(ctx, features)).then_some(WithheldReason::Provider)
+    }
+
+    /// What it is in the thread's place that makes its condition fail: the first of the credential path,
+    /// the kind of environment and the kind of provider whose other value would have satisfied it; any
+    /// other part of the condition is named as such.
+    fn ineligible_because(&self, ctx: &Eligibility) -> WithheldReason {
+        let Some(condition) = &self.eligible_when else {
+            return WithheldReason::Condition;
+        };
+        let holds_with = |other: Eligibility| condition.holds(&other);
+        let other_path = [
+            CredentialPath::Native,
+            CredentialPath::Forwarded,
+            CredentialPath::Shared,
+            CredentialPath::Handover,
+        ]
+        .into_iter()
+        .filter(|path| *path != ctx.credential_path)
+        .any(|credential_path| {
+            holds_with(Eligibility {
+                credential_path,
+                ..ctx.clone()
+            })
+        });
+        if other_path {
+            return WithheldReason::Access;
+        }
+        let other_placement = [Placement::Managed, Placement::Connected]
+            .into_iter()
+            .filter(|placement| *placement != ctx.environment_placement)
+            .any(|environment_placement| {
+                holds_with(Eligibility {
+                    environment_placement,
+                    ..ctx.clone()
+                })
+            });
+        if other_placement {
+            return WithheldReason::Placement;
+        }
+        let other_kind = [ProviderKind::Subscription, ProviderKind::Api]
+            .into_iter()
+            .filter(|kind| *kind != ctx.provider_kind)
+            .any(|provider_kind| {
+                holds_with(Eligibility {
+                    provider_kind,
+                    ..ctx.clone()
+                })
+            });
+        if other_kind {
+            return WithheldReason::ProviderKind;
+        }
+        WithheldReason::Condition
+    }
+
     /// The choices it has for `model`: its fixed list, or the model's own.
     #[must_use]
     pub fn options_for(&self, model: &ModelParameters) -> Vec<ParameterOption> {
@@ -842,6 +929,72 @@ pub fn sendable(
     result
 }
 
+/// Whether `def` is the parameter that stands for one of the three choices a model's entry opens.
+fn stands_for(choice: WithheldChoice, def: &ParameterDef) -> bool {
+    match choice {
+        WithheldChoice::Speed => def.kind_of_thread() == Some(ThreadKind::ServiceTier),
+        WithheldChoice::Access => matches!(
+            def.options,
+            Some(ParameterOptions::FromModel {
+                from_model: ModelList::AccessPrograms
+            })
+        ),
+        WithheldChoice::Context => def.kind_of_thread() == Some(ThreadKind::Context),
+    }
+}
+
+/// The choices that the model's entry opened and that the thread cannot make, each with why.
+///
+/// Of the three a thread has (a speed beside the ordinary one, an access program, a context larger than
+/// the model's own window) each is listed that the entry has open and that none of `defs` shows. Where
+/// the adapter declares no parameter for it, the agent is the reason; where it declares one that is
+/// not shown, the first such parameter says why. A choice that is only offered, and not opened by a
+/// manager of the provider, is not listed: it is not the person's to ask for here.
+#[must_use]
+pub fn withheld(
+    defs: &[ParameterDef],
+    ctx: &Eligibility,
+    features: &BTreeMap<String, bool>,
+) -> Vec<WithheldParameter> {
+    let model = &ctx.model;
+    let mut withheld = Vec::new();
+    for choice in [
+        WithheldChoice::Speed,
+        WithheldChoice::Access,
+        WithheldChoice::Context,
+    ] {
+        let opened = match choice {
+            WithheldChoice::Speed => !model.service_tiers().is_empty(),
+            WithheldChoice::Access => !model.access_programs().is_empty(),
+            WithheldChoice::Context => model.context_open().is_some(),
+        };
+        if !opened {
+            continue;
+        }
+        let declared: Vec<&ParameterDef> =
+            defs.iter().filter(|def| stands_for(choice, def)).collect();
+        let Some(first) = declared.first() else {
+            withheld.push(WithheldParameter {
+                choice,
+                key: None,
+                reason: WithheldReason::Agent,
+            });
+            continue;
+        };
+        if declared.iter().any(|def| def.is_shown(ctx, features)) {
+            continue;
+        }
+        if let Some(reason) = first.withheld_reason(ctx, features) {
+            withheld.push(WithheldParameter {
+                choice,
+                key: Some(first.key.clone()),
+                reason,
+            });
+        }
+    }
+    withheld
+}
+
 /// What is wrong with a list of parameters.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParameterFault {
@@ -1075,6 +1228,92 @@ mod tests {
         assert!(
             !cyber().is_shown(&without, &features),
             "an access program that is only offered is not usable until a manager enables it"
+        );
+    }
+
+    #[test]
+    fn a_choice_the_managers_opened_and_the_thread_cannot_make_is_listed_with_its_reason() {
+        let on = BTreeMap::from([("codex.cyber_access".to_owned(), true)]);
+        let opened = context(json!({
+            "access_programs": ["daybreakBlue"], "service_tiers": [{ "id": "fast", "label": "Fast" }],
+            "context_window": 272_000, "context_max": 1_000_000
+        }));
+        let defs = [service_tier(), cyber(), context_def()];
+        assert!(
+            withheld(&defs, &opened, &on).is_empty(),
+            "all three are shown"
+        );
+
+        let program = |reason| WithheldParameter {
+            choice: WithheldChoice::Access,
+            key: Some("cyber_access_program".to_owned()),
+            reason,
+        };
+        // The switch of the feature is off.
+        assert_eq!(
+            withheld(&defs, &opened, &BTreeMap::new()),
+            [program(WithheldReason::Feature {
+                feature: "codex.cyber_access".to_owned()
+            })]
+        );
+        // The credential is not with the provider: that is said before the switch, which would not help.
+        let mut shared = opened.clone();
+        shared.credential_path = CredentialPath::Shared;
+        assert_eq!(
+            withheld(&defs, &shared, &BTreeMap::new()),
+            [program(WithheldReason::Access)]
+        );
+        // The agent declares no access program at all.
+        assert_eq!(
+            withheld(&[service_tier(), context_def()], &opened, &on),
+            [WithheldParameter {
+                choice: WithheldChoice::Access,
+                key: None,
+                reason: WithheldReason::Agent
+            }]
+        );
+        // A program that is only on offer is not opened, so there is nothing to say of it.
+        let offered = context(json!({ "offered": { "access_programs": ["daybreakBlue"] } }));
+        assert!(withheld(&defs, &offered, &BTreeMap::new()).is_empty());
+        // A speed and a context the agent does not declare are listed in the order of the controls.
+        assert_eq!(
+            withheld(&[cyber()], &opened, &on)
+                .iter()
+                .map(|one| one.choice)
+                .collect::<Vec<_>>(),
+            [WithheldChoice::Speed, WithheldChoice::Context]
+        );
+    }
+
+    #[test]
+    fn a_condition_that_fails_on_the_environment_or_the_provider_names_it() {
+        let mut speed = service_tier();
+        speed.eligible_when = Some(Condition::All(vec![
+            Condition::ModelHas(ModelFeature::ServiceTiers),
+            Condition::EnvironmentPlacement(Placement::Connected),
+        ]));
+        let ctx = context(json!({ "service_tiers": [{ "id": "fast", "label": "Fast" }] }));
+        let reason = |def: &ParameterDef, ctx: &Eligibility| {
+            withheld(std::slice::from_ref(def), ctx, &BTreeMap::new())
+                .first()
+                .map(|one| one.reason.clone())
+        };
+        assert_eq!(reason(&speed, &ctx), Some(WithheldReason::Placement));
+        speed.eligible_when = Some(Condition::All(vec![
+            Condition::ModelHas(ModelFeature::ServiceTiers),
+            Condition::ProviderKind(ProviderKind::Api),
+        ]));
+        assert_eq!(reason(&speed, &ctx), Some(WithheldReason::ProviderKind));
+        speed.eligible_when = Some(Condition::HarnessVersion(">=99".to_owned()));
+        assert_eq!(reason(&speed, &ctx), Some(WithheldReason::Condition));
+        // The provider's own rule for the model leaves the parameter out.
+        let ruled_out = context(json!({
+            "service_tiers": [{ "id": "fast", "label": "Fast" }],
+            "request_options": { "native": { "type": "object", "properties": { "service_tier": false } } }
+        }));
+        assert_eq!(
+            reason(&service_tier(), &ruled_out),
+            Some(WithheldReason::Provider)
         );
     }
 
