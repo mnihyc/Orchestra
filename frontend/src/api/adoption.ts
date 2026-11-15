@@ -20,7 +20,6 @@ export const adoptionPlanQuery = (topicId: string, body: ThreadAdoptBody) =>
     queryKey: ['adoption-plan', topicId, body] as const,
     queryFn: ({ signal }): Promise<AdoptPlan> =>
       ok(api.POST('/topics/{id}/threads/adopt/preview', { params: { path: { id: topicId } }, body, signal })),
-    staleTime: 0,
     retry: false,
   });
 
