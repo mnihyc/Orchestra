@@ -1,0 +1,6 @@
+test -p orch-api-core --lib
+test -p orch-api-core --test threads_drive
+test -p orch-api-core --test workspace_connector --test workspace_pages
+test -p orch-api-core --test workspace_source --test workspace_source_scopes
+test -p orch-api-core --test interactive_ticket_scopes --test api_surface_tickets
+test -p orch-api-core --test thread_history_pages
