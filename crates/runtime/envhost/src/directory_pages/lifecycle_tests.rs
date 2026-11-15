@@ -47,17 +47,16 @@ async fn an_extracted_page_proof_is_invalidated_before_eviction_makes_it_unreach
 }
 
 #[tokio::test]
-async fn lazy_expiry_invalidates_the_in_hand_proof_as_well_as_its_cursor() -> Proof {
+async fn an_idle_unchanged_directory_renews_its_cursor_without_invalidating_the_observation()
+-> Proof {
     let rig = Rig::new()?;
     let page = rig.read(None, 1).await?;
     let proof = page.proof();
     rig.clock.advance(chrono::Duration::minutes(5));
-    assert!(matches!(
-        rig.read(page.next_cursor.as_deref(), 1).await,
-        Err(HostError::Stale { .. })
-    ));
-    assert!(matches!(proof.validate(), Err(HostError::Stale { .. })));
-    assert_eq!(rig.cache.ledger.used.load(Ordering::Acquire), 0);
+    let renewed = rig.read(page.next_cursor.as_deref(), 1).await?;
+    assert_eq!(renewed.revision, page.revision);
+    assert!(!renewed.entries.is_empty());
+    proof.validate()?;
     Ok(())
 }
 
