@@ -16,7 +16,6 @@ import { openContent, type ContentHistory } from '@/features/workbench/contentNa
 import type { ViewProps } from '@/features/workbench/views';
 import { useViewShown } from '@/features/workbench/viewOpening';
 import { writeViewChoice } from '@/lib/viewChoices';
-import { useViewportShape } from '@/features/workbench/Narrow';
 import { Button } from '@/ui/Button';
 import { CopyButton } from '@/ui/CopyButton';
 import { EmptyState } from '@/ui/EmptyState';
@@ -185,13 +184,12 @@ export function FileTab({ tab }: ViewProps) {
 function FileBody({ tab, of, userId, access }: { tab: Tab; of: FileTabOf; userId: string | null; access: EnvironmentWorkspaceAccess }) {
   const { t } = useTranslation();
   const shown = useViewShown();
-  const small = useViewportShape() === 'small';
   const queryClient = useQueryClient();
   const { door } = access;
-  const { head, error, loading, reload } = useFileHead(door, of.path);
   const { environment } = useEnvironment(door.environmentId);
   const parent = parentOf(of.path);
   const binding = environment === undefined ? null : workspaceBinding(environment);
+  const { head, error, loading, reload } = useFileHead(door, of.path, binding);
   const { directories, capacity, tree } = useDirectoryTree(door, parent, binding);
   const directory = directories.get(directoryKey(door.environmentId, parent));
   const [override, setOverride] = useState<ViewerId | null>(null);
@@ -215,7 +213,7 @@ function FileBody({ tab, of, userId, access }: { tab: Tab; of: FileTabOf; userId
     observed.current = { binding, generation: directory.generation, stamp };
     if (before !== null && (before.binding !== binding || before.generation !== directory.generation)
       || entry !== undefined && (entry.mtime !== head.stat.mtime || entry.size !== head.stat.size)) {
-      void invalidateHead(queryClient, door, of.path);
+      void invalidateHead(queryClient, door, of.path, binding);
     }
   }, [binding, directory?.generation, directory?.page, directory?.invalidated, entry?.mtime, entry?.size, head?.stat.mtime, head?.stat.size, shown]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -240,8 +238,8 @@ function FileBody({ tab, of, userId, access }: { tab: Tab; of: FileTabOf; userId
   if (loading || head === undefined || viewer === null) return <SkeletonRows rows={8} />;
 
   const facts = factsOf(head.stat);
-  const reason: ReadOnlyReason | null = small ? { kind: 'small_screen' } : whyReadOnly(access.mayManage, environment, access.environment.name, directory?.asOf ?? null, viewer, head.stat.is_text);
-  const props: ViewerProps = { door, path: of.path, head, line: jump?.line ?? null, endLine: fileLine(of.endLine), lineRequest: jump?.nonce, tabId: tab.id, whyReadOnly: reason, thread: access.thread, openAs: setOverride };
+  const reason = whyReadOnly(access.mayManage, environment, access.environment.name, directory?.asOf ?? null, viewer, head.stat.is_text);
+  const props: ViewerProps = { door, path: of.path, head, workspaceBinding: binding, line: jump?.line ?? null, endLine: fileLine(of.endLine), lineRequest: jump?.nonce, tabId: tab.id, whyReadOnly: reason, thread: access.thread, openAs: setOverride };
   const choices = viewersFor(facts);
   const updatesPaused = capacity !== null || directory?.capacity !== undefined && directory.capacity !== null
     || directory?.watch === 'failed' || directory?.invalidated === true;
@@ -308,7 +306,7 @@ function FileBody({ tab, of, userId, access }: { tab: Tab; of: FileTabOf; userId
             fallback={(failure, retry) => <ErrorState compact className="h-full" error={failure} title={t('files.viewers.failed')} onRetry={retry} />}
           >
             <Suspense fallback={<SkeletonRows rows={8} />}>
-              <ViewerSlot viewer={viewer} props={props} />
+              <ViewerSlot key={binding} viewer={viewer} props={props} />
             </Suspense>
           </ErrorBoundary>
         </div>

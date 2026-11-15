@@ -1,0 +1,9 @@
+test -p orch-db --lib
+test -p orch-db --test usage_rollup --test usage_ledger --test usage_commit_scale
+test -p orch-api-core --test everything_resources --test resource_facts --test resource_resume --test mcp_delete_scopes --test native_resource_family_scopes
+test -p orch-engine --test updates --test resource_library --test skills
+test -p orch-api-core --test syncs --test threads_read --test threads_settings --test node_list_operation_scopes
+test -p orch-engine --test call_recovery --test background_wake --test background_stop --test background_wake_native
+test -p orch-api-core --test forks -- moving_routes::
+test -p orch-api-core --test loss -- recipient_scopes::
+test -p orch-engine --test context_fill --test usage_rows --test turns --test paste_delivery

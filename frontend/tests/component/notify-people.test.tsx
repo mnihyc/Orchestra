@@ -1,14 +1,16 @@
 /** Notify previews use the same people list as an avatar stack and expose only actual authorized recipients. */
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { expect, it, vi } from 'vitest';
 import { DetailCard } from '@/ui/DetailCard';
 import { UserChip } from '@/ui/UserChip';
 import { NotifyPeople } from '@/features/notifications/NotifyPeople';
 import { i18n } from '@/i18n';
+import { ApiError } from '@/api/client';
+import { QueryClient } from '@tanstack/react-query';
 import { show } from './support';
 const preview = vi.hoisted(() => vi.fn());
-vi.mock('@/api/loss', () => ({ moreOperationRecipients: preview }));
+vi.mock('@/api/loss', async (original) => ({ ...await original<object>(), moreOperationRecipients: preview }));
 vi.mock('@/features/profile/CardDetails', () => ({ CardDetails: ({ username }: { username: string }) => <p>Profile: {username}</p> }));
 
 const visible = { id: 'person', username: 'operator', display_name: 'Operator', kind: 'human' as const, avatar: { text: 'O', color: 2 } };
@@ -88,4 +90,31 @@ it('keeps a shared resource inspection present while its owner opens the same Pe
   await user.keyboard('{Escape}');
   expect(screen.queryByRole('dialog', { name: 'Operator' })).not.toBeInTheDocument();
   expect(screen.getByText('Owner details')).toBeVisible();
+});
+
+it('finds a recipient on a later page in the same people list without changing the notification choice',async()=>{
+  const first=Array.from({length:11},(_,at)=>({...visible,id:`early-${at}`,username:`early-${at}`,display_name:`Early ${at}`}));
+  const last={...visible,id:'later',username:'later-reader',display_name:'Later recipient'};
+  preview.mockImplementation((_id:string,cursor:string|undefined)=>Promise.resolve({total:12,hidden:0,people:{items:cursor===undefined?first:[last],next_cursor:cursor===undefined?'last-page':null}}));
+  const change=vi.fn(),user=userEvent.setup();
+  show(<NotifyPeople plan={{people:12,default_on:false,preview_id:'many-recipients'}} value={false} onChange={change}/>);
+  await user.click(screen.getByRole('button',{name:i18n.t('operation.notify',{count:12,number:'12'})}));
+  await user.type(await screen.findByRole('textbox',{name:i18n.t('operation.findPeople')}),'later');
+  expect(await screen.findByRole('button',{name:'Later recipient'})).toBeVisible();
+  expect(preview).toHaveBeenCalledWith('many-recipients','last-page',expect.any(AbortSignal));
+  expect(screen.queryByRole('button',{name:'Early 0'})).not.toBeInTheDocument();
+  expect(change).not.toHaveBeenCalled();
+});
+
+it('removes already shown recipient names when refreshing the current review is refused',async()=>{
+  const cache=new QueryClient({defaultOptions:{queries:{retry:false}}});
+  preview.mockResolvedValue({total:1,hidden:0,people:{items:[visible],next_cursor:null}});
+  const user=userEvent.setup();
+  show(<NotifyPeople plan={{people:1,default_on:false,preview_id:'narrowed-review'}} value={false} onChange={vi.fn()}/>,cache);
+  await user.click(screen.getByRole('button',{name:i18n.t('operation.notify',{count:1,number:'1'})}));
+  expect(await screen.findByRole('button',{name:'Operator'})).toBeVisible();
+  preview.mockRejectedValue(new ApiError({type:'about:blank',title:'Refused',status:403,code:'authz.denied',detail:'The source read was narrowed',request_id:'synthetic'},null));
+  await act(async()=>{await cache.invalidateQueries({queryKey:['operation-recipients','narrowed-review']});});
+  expect(await screen.findByRole('alert')).toBeVisible();
+  expect(screen.queryByRole('button',{name:'Operator'})).not.toBeInTheDocument();
 });
