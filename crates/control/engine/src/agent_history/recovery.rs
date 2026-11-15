@@ -252,9 +252,13 @@ impl Engine {
                         crate::summaries::handoff_captured(
                             self,
                             cut.thread_id,
-                            &previous,
+                            &previous.text,
                             cut.id,
                             &choice,
+                            Some(crate::summaries::HandoffCapture {
+                                cut: cut.id,
+                                input: &previous,
+                            }),
                         )
                         .await
                     }
