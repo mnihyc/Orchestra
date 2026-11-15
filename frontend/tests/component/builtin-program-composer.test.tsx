@@ -16,7 +16,7 @@ const calls = vi.hoisted(() => ({ send: vi.fn<typeof AskApi.sendAsk>(), sync: vi
 vi.mock('@/api/ask', async (load) => ({ ...await load<typeof AskApi>(), sendAsk: calls.send }));
 vi.mock('@/api/threads', async (load) => ({ ...await load<object>(), fetchThreadSync: calls.sync, interruptTurn: calls.stop }));
 vi.mock('@/api/threadRead', async (load) => ({ ...await load<object>(), captureThreadExecution: vi.fn(), threadAct: (_ref: unknown, execute: () => Promise<unknown>) => execute() }));
-vi.mock('@/realtime/threadReadContext', () => ({ useThreadReadRef: (id: string) => id }));
+vi.mock('@/realtime/threadReadContext', async (loadOriginal) => ({ ...await loadOriginal<object>(), useThreadReadRef: (id: string) => id }));
 vi.mock('@/realtime/stores/thread', async (load) => ({ ...await load<object>(), useThreadPart: () => null }));
 vi.mock('@/features/composer/AskComposer', () => ({ AskComposer: (props: AskComposerProps) => { calls.props = props; return <div data-question-thread={props.conversationId} />; } }));
 

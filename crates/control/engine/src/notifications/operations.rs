@@ -14,7 +14,6 @@ use orch_db::{
     },
 };
 use orch_types::{Id, Time};
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -33,50 +32,15 @@ pub async fn operation_default(
     .map_err(EngineError::from)?;
     match choice.as_deref() {
         Some("always") => Ok(true),
-        Some("never") => Ok(false),
-        Some("when_blocking") | None => Ok(blocking),
+        Some("never") | None => Ok(false),
+        Some("when_blocking") => Ok(blocking),
         _ => Err(EngineError::unreadable(
             "the operation notification default is not recognized",
         )),
     }
 }
 
-/// What one person needs to know of an operation, with no inaccessible thread names.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct OperationRecipient {
-    /// The affected person.
-    pub user: Id,
-    /// Environments they own or manage.
-    pub environments: BTreeSet<Id>,
-    /// Threads they own or may drive in these environments.
-    pub threads: BTreeSet<Id>,
-    /// Topic defaults they may replace.
-    pub defaults: BTreeSet<Id>,
-    /// Other resources they manage when the operation changes their availability.
-    #[serde(default)]
-    pub resources: BTreeSet<(String, Id)>,
-    /// Providers they own or manage.
-    pub providers: BTreeSet<Id>,
-}
-
-/// A confirmed notification choice, retained on every child job of the operation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct NotificationOperation {
-    /// The operation that groups all independent members.
-    pub id: Id,
-    /// The visible operation kind, such as lost, recover or host_delete.
-    pub kind: String,
-    /// The safe source name already visible through the affected resource.
-    pub name: String,
-    /// Whether the person explicitly selected notification.
-    pub notify: bool,
-    /// The destination of the grouped item.
-    pub path: String,
-    /// The resource named by the operation, for a recipient with no environment or provider.
-    pub subject: Option<(String, Id)>,
-    /// Each person appears once, however many resources named them.
-    pub recipients: Vec<OperationRecipient>,
-}
+pub use orch_person_notices::resource_operations::{NotificationOperation, OperationRecipient};
 
 /// Current owners, managers and thread owners, expanded under the operation's authority snapshot.
 pub async fn operation_audience(
@@ -303,6 +267,9 @@ pub async fn notify_operation(
     if !operation.notify {
         return Ok(());
     }
+    let mail_shared = orch_settings::get::<bool>(conn, orch_settings::Place::System, "mail.shared")
+        .await?
+        .unwrap_or(true);
     let receivers = rows::receivers(
         conn,
         &operation
@@ -330,65 +297,18 @@ pub async fn notify_operation(
         .iter()
         .filter(|person| receivers.contains(&person.user))
     {
-        let mut resources = person
-            .environments
-            .iter()
-            .map(|id| ("environment".into(), *id))
-            .chain(person.providers.iter().map(|id| ("provider".into(), *id)))
-            .collect::<Vec<_>>();
-        resources.extend(person.resources.iter().cloned());
-        if resources.is_empty() {
-            resources.extend(person.defaults.iter().map(|id| ("topic".into(), *id)));
-        }
-        if resources.is_empty() {
-            resources.extend(person.threads.iter().map(|id| ("thread".into(), *id)));
-        }
-        if resources.is_empty() {
-            resources.extend(operation.subject.clone());
-        }
-        let key = rows::group_key("resources", &resources);
-        let path = person
-            .environments
-            .iter()
-            .next()
-            .map(|id| format!("/resources/environments/{id}"))
-            .or_else(|| {
-                person
-                    .defaults
-                    .iter()
-                    .next()
-                    .map(|id| format!("/topic/{id}"))
-            })
-            .or_else(|| {
-                person
-                    .providers
-                    .iter()
-                    .next()
-                    .map(|id| format!("/resources/providers/{id}"))
-            })
-            .or_else(|| {
-                person
-                    .threads
-                    .iter()
-                    .next()
-                    .map(|id| format!("/thread/{id}"))
-            })
-            .or_else(|| {
-                person.resources.iter().next().map(|(kind, id)| {
-                    format!(
-                        "/resources/{}/{}",
-                        match kind.as_str() {
-                            "mcp_server" => "mcp",
-                            "mount" => "mounts",
-                            "host" => "hosts",
-                            "machine" => "machines",
-                            _ => "environments",
-                        },
-                        id
-                    )
-                })
-            })
-            .unwrap_or_else(|| operation.path.clone());
+        let Some(disclosure) = orch_person_notices::resource_operations::disclosure(
+            conn,
+            operation,
+            person,
+            Time::new(at),
+        )
+        .await?
+        else {
+            continue;
+        };
+        let key = rows::group_key("resources", &person.subjects(&operation.subject));
+        let path = disclosure.path;
         let default_lost = !person.defaults.is_empty()
             && (operation.kind == "lost"
                 || (operation.kind == "host_delete"
@@ -397,25 +317,35 @@ pub async fn notify_operation(
                         .iter()
                         .any(|topic| unavailable_defaults.contains(topic))));
         // A resource manager may know the work count without being able to read its threads.
-        let data = json!({"operation_kind":operation.kind,"name":operation.name,"state":state,"environment_ids":person.environments,"thread_count":person.threads.len(),"default_topics":person.defaults,"provider_ids":person.providers,"resource_ids":person.resources,"path":path,"loss":operation.kind=="lost","default_lost":default_lost,"at":Time::new(at)});
-        rows::publish(
-            conn,
-            operation.id,
-            &NewNotification {
-                user_id: person.user,
-                kind: "environment.attention",
-                node_id: None,
-                thread_id: None,
-                approval_id: None,
-                chat_id: None,
-                title: &format!("{}: {}", operation.name, operation.kind),
-                body: state,
-                data: &data,
-                dedupe_key: &key,
+        let data = json!({"operation_id":operation.id,"operation_version":1,"operation_roots":disclosure.roots,"operation_kind":operation.kind,"name":disclosure.name,"state":state,"environment_ids":person.environments,"thread_count":person.threads.len(),"default_topics":person.defaults,"provider_ids":person.providers,"resource_ids":person.resources,"path":path,"loss":operation.kind=="lost","default_lost":default_lost,"at":Time::new(at)});
+        let title = format!("{}: {}", disclosure.name, operation.kind);
+        let notice = NewNotification {
+            user_id: person.user,
+            kind: "environment.attention",
+            node_id: None,
+            thread_id: None,
+            approval_id: None,
+            chat_id: None,
+            title: &title,
+            body: state,
+            data: &data,
+            dedupe_key: &key,
+            at,
+        };
+        if let Some(written) = rows::publish(conn, operation.id, &notice).await? {
+            orch_db::queries::notifications::routes::tell_routes(
+                conn,
+                person.user,
+                &orch_db::queries::notifications::outbox::Snapshot::person_notice(
+                    Some(written.id),
+                    &notice,
+                ),
+                disclosure.roots.first().copied().flatten(),
+                mail_shared,
                 at,
-            },
-        )
-        .await?;
+            )
+            .await?;
+        }
     }
     Ok(())
 }

@@ -42,6 +42,8 @@ pub struct NewRawEvent<'a> {
 /// A frame, as stored.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct RawEventRow {
+    /// Native capture or masking completion revision, independent of the capture number.
+    pub change_id: i64,
     /// Its number in the segment.
     pub n: i64,
     /// When the machine reported it.
@@ -162,7 +164,7 @@ pub async fn newest(
     limit: i64,
 ) -> Result<Vec<RawEventRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT n, at, direction, payload FROM raw_events
+        "SELECT n, at, direction, payload, change_id FROM raw_events
           WHERE segment_id = $1 AND ($2::bigint IS NULL OR n < $2)
           ORDER BY n DESC LIMIT $3",
     )
@@ -171,6 +173,28 @@ pub async fn newest(
     .bind(limit)
     .fetch_all(conn)
     .await?)
+}
+
+/// Current captured or masking-completed revision of this segment.
+pub async fn last_change(conn: &mut Conn, segment: Id) -> Result<i64, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT COALESCE(max(change_id),0) FROM raw_events WHERE segment_id=$1")
+            .bind(segment)
+            .fetch_one(conn)
+            .await?,
+    )
+}
+
+/// Changed frames in commit order, including an earlier frame whose private text just ended.
+pub async fn changed(
+    conn: &mut Conn,
+    segment: Id,
+    after: i64,
+    through: i64,
+    limit: i64,
+) -> Result<Vec<RawEventRow>, DbError> {
+    Ok(sqlx::query_as("SELECT n,at,direction,payload,change_id FROM raw_events WHERE segment_id=$1 AND change_id>$2 AND change_id<=$3 ORDER BY change_id LIMIT $4")
+        .bind(segment).bind(after).bind(through).bind(limit).fetch_all(conn).await?)
 }
 
 /// Whether the segment holds a frame numbered below `n`.

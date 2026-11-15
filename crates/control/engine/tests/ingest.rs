@@ -252,6 +252,47 @@ async fn the_same_events_delivered_twice_change_nothing_the_second_time() {
     assert_eq!(world.turn_state(second.turn_id).await, "starting");
 }
 
+#[tokio::test]
+async fn a_recorded_sandbox_decision_keeps_its_applied_policy_after_later_machine_facts_change() {
+    let world = World::new().await;
+    let thread = world.thread("Recorded sandbox").await;
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Please do it"))
+        .await
+        .unwrap();
+    let turn = world.turn_start(thread, 0).await;
+    let segment = world.segment_of(thread).await;
+    let before = world.sync(thread).await;
+    assert!(before.turns[0].sandbox_resolution.is_none());
+    let expected = json!({
+        "requested":"open", "applied":"workspace", "governing_policy":"machine_policy",
+        "command_id":orch_types::new_id(), "at":world.clock.time(),
+    });
+    let mut body = expected.clone();
+    body["turn_id"] = json!(turn.turn_id);
+    let event = DeliveredEvent {
+        seq: 1,
+        at: world.clock.time(),
+        kind: "session.sandbox".into(),
+        body,
+    };
+    apply(&world, thread, segment, std::slice::from_ref(&event)).await;
+    sqlx::query("UPDATE machines SET facts=facts || $2 WHERE id=$1")
+        .bind(world.machine_id)
+        .bind(json!({"policy":{"agent.max_sandbox":"read_only"}}))
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    apply(&world, thread, segment, std::slice::from_ref(&event)).await;
+    let after = world.sync(thread).await;
+    assert_eq!(
+        after.turns[0].sandbox_resolution,
+        Some(serde_json::from_value(expected).unwrap())
+    );
+    world.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stretch_of_text_that_skips_ahead_is_left_for_the_completed_item() {
     let world = World::new().await;
