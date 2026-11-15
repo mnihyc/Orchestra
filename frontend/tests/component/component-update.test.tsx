@@ -1,22 +1,73 @@
 /** The same mark and action are used in a machine row, a node row and their page notices. */
-import { screen } from '@testing-library/react';
+import { cleanup, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe,expect,it,vi } from 'vitest';
+import { afterEach,describe,expect,it,vi } from 'vitest';
+import type * as Resources from '@/api/resources';
 import type { ComponentUpdate } from '@/generated/api-types';
-import { UpdateMark,UpdateNotice } from '@/features/resources/ComponentUpdate';
+import { UpdateMark,UpdateNotice,useComponentUpdateAct } from '@/features/resources/ComponentUpdate';
+import { updateMachineNow } from '@/api/resources';
+import { setLocale } from '@/i18n';
 import { show } from './support';
 
 // Guide navigation is covered by its own router tests; this fixture exercises the shared update controls.
 vi.mock('@/features/help/ArticleGuideLink',()=>({ArticleGuideLink:()=>null}));
+vi.mock('@/api/resources',async(load)=>({...await load<typeof Resources>(),updateMachineNow:vi.fn(),updateHostNow:vi.fn()}));
 
-const behind:ComponentUpdate = {running_version:'1.2.0',recommended_version:'1.3.0',behind:true,status:'current',detail:null,command:'orch-node update'};
+const behind:ComponentUpdate = {automatic:false,running_version:'1.2.0',recommended_version:'1.3.0',behind:true,status:'current',detail:null,command:'orch-node update'};
+afterEach(async()=>{cleanup();await setLocale('en');});
+
+for(const locale of ['en','zh-CN'] as const) for(const automatic of [false,true]) for(const status of ['queued','updating']) {
+  it(`distinguishes a waiting update from an installation in every shared control (${locale}/${automatic}/${status})`,async()=>{
+    await setLocale(locale);
+    const update={...behind,status,automatic};
+    const expected=locale==='en'
+      ? status==='queued' ? automatic?'Automatic update pending':'Update pending' : automatic?'Updating automatically':'Updating…'
+      : status==='queued' ? automatic?'等待自动更新':'等待更新' : automatic?'正在自动更新':'正在更新…';
+    function Controls() {
+      const act=useComponentUpdateAct();
+      return <><div data-testid="update-mark"><UpdateMark update={update} /></div><div data-testid="update-notice"><UpdateNotice update={update} action={act({kind:'machine',id:'state-machine',update,manage:true,online:true})} /></div></>;
+    }
+    show(<Controls />);
+    expect(within(screen.getByTestId('update-mark')).getByRole('status')).toHaveTextContent(expected);
+    expect(within(screen.getByTestId('update-notice')).getAllByText(expected).length).toBeGreaterThan(0);
+    const button=screen.getByRole('button',{name:automatic?(locale==='en'?'Update now':'立即更新'):expected});
+    if(automatic) expect(button).toBeEnabled(); else expect(button).toBeDisabled();
+  });
+}
 
 describe('physical component updates',()=>{
+  it('offers an explicit Update beside an automatic request that is still pending',async()=>{
+    const update={...behind,automatic:true,status:'queued'};
+    vi.mocked(updateMachineNow).mockResolvedValue({...update,automatic:false});
+    function Notice() {
+      const act=useComponentUpdateAct();
+      return <UpdateNotice update={update} action={act({kind:'machine',id:'auto-pending',update,manage:true,online:false})} />;
+    }
+    show(<Notice />);
+    expect(screen.getByText('Automatic update pending')).toBeVisible();
+    const button=screen.getByRole('button',{name:'Update now'});
+    expect(button).toBeEnabled();
+    await userEvent.setup().click(button);
+    expect(updateMachineNow).toHaveBeenCalledWith('auto-pending');
+  });
+  it('keeps explicit Update available while an old build cannot open its session',async()=>{
+    const update={...behind,status:'refused',detail:'Automatic updates are off; this build needs an update.'};
+    vi.mocked(updateMachineNow).mockResolvedValue({...behind,status:'queued'});
+    function Notice() {
+      const act=useComponentUpdateAct();
+      return <UpdateNotice update={update} action={act({kind:'machine',id:'fixture-machine',update,manage:true,online:false})} />;
+    }
+    show(<Notice />);
+    const button=screen.getByRole('button',{name:'Update now'});
+    expect(button).toBeEnabled();
+    await userEvent.setup().click(button);
+    expect(updateMachineNow).toHaveBeenCalledWith('fixture-machine');
+  });
   it('marks a behind row and removes the mark only when the reported version catches up',()=>{
     const view=show(<UpdateMark update={behind} />);
     expect(screen.getByText('Update available')).toBeInTheDocument();
     view.rerender(<UpdateMark update={{...behind,status:'queued'}} />);
-    expect(screen.getByRole('status')).toHaveTextContent('Updating…');
+    expect(screen.getByRole('status')).toHaveTextContent('Update pending');
     view.rerender(<UpdateMark update={{...behind,running_version:'1.3.0',behind:false,status:'current'}} />);
     expect(screen.queryByText('Update available')).not.toBeInTheDocument();
     expect(screen.queryByText('Updating…')).not.toBeInTheDocument();

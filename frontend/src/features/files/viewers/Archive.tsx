@@ -4,12 +4,12 @@
  * ever unpacked. A text or an image inside opens in its own viewer, read-only; an entry too large to
  * be read here, or one in an archive that asks for a password, is listed and not opened.
  */
-import { useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { ChevronRight, File as FileIcon, Folder, Link2 } from 'lucide-react';
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { archiveQuery, readArchiveEntry } from '@/api/workspace';
+import { archivePage, readArchiveEntry, workspaceKeys } from '@/api/workspace';
 import type { ArchiveEntry, ArchiveListing } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { formatBytes } from '@/lib/format';
@@ -17,6 +17,9 @@ import { cx } from '@/ui/cx';
 import { CodeView } from '@/ui/CodeView';
 import { ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
+import { Input } from '@/ui/Input';
+import { Button } from '@/ui/Button';
+import { useDebounced } from '@/lib/debounce';
 import { SkeletonRows } from '@/ui/Skeleton';
 
 import { extensionOf, languageOf } from '../languages';
@@ -33,6 +36,7 @@ interface Shared {
   encrypted: boolean;
   chosen: string | null;
   choose: (entry: string) => void;
+  info: (metadata: ArchiveListing) => void;
 }
 
 function Listing({ shared, inside, depth }: { shared: Shared; inside: string; depth: number }) {
@@ -40,15 +44,31 @@ function Listing({ shared, inside, depth }: { shared: Shared; inside: string; de
   const { locale } = useFormatContext();
   const provided = useFileSource();
   const source = provided?.workspace === undefined ? provided : null;
-  const listing = useQuery<ArchiveListing>(source === null ? archiveQuery(shared.door, shared.path, inside) : {
-    ...sourceQueryAuthority(source), queryKey: ['workspace-archive', source.url, shared.path, inside, ...sourceReaderKey(source)] as const, queryFn: ({ signal }) => sourceArchive(source, inside, signal), retry: false,
+  const [text, setText] = useState('');
+  const filter = useDebounced(text.trim());
+  const listing = useInfiniteQuery({
+    ...(source === null ? {} : sourceQueryAuthority(source)),
+    queryKey: [...workspaceKeys.archive(shared.door, shared.path, inside), 'pages', source?.url, filter, ...sourceReaderKey(source)],
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ signal, pageParam }) => {
+      const options = { ...(pageParam === undefined ? {} : { cursor: pageParam }), ...(filter === '' ? {} : { q: filter }) };
+      return source === null ? archivePage(shared.door, shared.path, inside, options, signal) : sourceArchive(source, inside, signal, options);
+    },
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+    retry: false,
   });
+  const first = listing.data?.pages[0];
+  const onInfo = shared.info;
+  useEffect(() => { if (depth === 0 && first !== undefined) onInfo(first); }, [depth, first, onInfo]);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   if (listing.error !== null) return <ErrorState compact error={listing.error} onRetry={() => void listing.refetch()} />;
   if (listing.data === undefined) return <SkeletonRows read={listing} rows={3} />;
-  const rows = listing.data.entries;
+  const rows = [...new Map(listing.data.pages.flatMap((page) => page.entries.map((entry) => [entry.path, entry] as const))).values()]
+    .sort((one, other) => Number(one.kind !== 'dir') - Number(other.kind !== 'dir') || one.path.localeCompare(other.path, locale));
   return (
-    <ul role={depth === 0 ? 'tree' : 'group'} aria-label={depth === 0 ? t('files.archive.label') : undefined}>
+    <div className={cx('flex min-h-0 flex-col', depth === 0 ? 'h-full' : 'max-h-80')}>
+    {(rows.length > 10 || listing.hasNextPage || text !== '') && <div className="shrink-0 px-2 py-1"><Input label={t('files.archive.filter')} hideLabel placeholder={t('files.archive.filter')} value={text} onChange={(event) => setText(event.target.value)} /></div>}
+    <ul className="min-h-0 flex-1 overflow-auto" role={depth === 0 ? 'tree' : 'group'} aria-label={depth === 0 ? t('files.archive.label') : undefined}>
       {rows.map((entry: ArchiveEntry) => {
         const name = baseName(entry.path);
         const isDir = entry.kind === 'dir';
@@ -77,8 +97,9 @@ function Listing({ shared, inside, depth }: { shared: Shared; inside: string; de
           </li>
         );
       })}
-      {listing.data.truncated && depth >= 0 && <li className="px-3 py-1 text-xs text-text-muted">{t('files.archive.truncated', { count: rows.length })}</li>}
     </ul>
+    {listing.hasNextPage && <Button size="sm" variant="ghost" pending={listing.isFetchingNextPage} onClick={() => void listing.fetchNextPage()}>{t('files.archive.more')}</Button>}
+    </div>
   );
 }
 
@@ -116,18 +137,15 @@ function Entry({ door, path, entry }: { door: ViewerProps['door']; path: string;
 
 export default function ArchiveViewer({ door, path, head }: ViewerProps) {
   const { t } = useTranslation();
-  const provided = useFileSource();
-  const source = provided?.workspace === undefined ? provided : null;
   const [chosen, setChosen] = useState<string | null>(null);
-  const top = useQuery<ArchiveListing>(source === null ? archiveQuery(door, path, '') : {
-    ...sourceQueryAuthority(source), queryKey: ['workspace-archive', source.url, path, '', ...sourceReaderKey(source)] as const, queryFn: ({ signal }) => sourceArchive(source, '', signal), retry: false,
-  });
-  const encrypted = top.data?.encrypted === true;
-  const shared: Shared = { door, path, encrypted, chosen, choose: (entry) => (encrypted ? undefined : setChosen(entry)) };
+  const [metadata, setMetadata] = useState<Pick<ArchiveListing, 'format' | 'compression' | 'encrypted'> | null>(null);
+  const info = useCallback((page: ArchiveListing) => setMetadata({ format: page.format, compression: page.compression, encrypted: page.encrypted }), []);
+  const encrypted = metadata?.encrypted === true;
+  const shared: Shared = { door, path, encrypted, chosen, choose: (entry) => (encrypted ? undefined : setChosen(entry)), info };
   return (
     <div className="@container flex h-full min-h-0 flex-col" data-viewer="archive">
       <div className="flex items-center gap-2 border-b border-border px-3 py-1 text-sm text-text-muted">
-        <span className="min-w-0 flex-1 truncate">{top.data === undefined ? head.stat.name : t('files.archive.kind', { format: top.data.format, compression: top.data.compression ?? t('files.archive.none') })}</span>
+        <span className="min-w-0 flex-1 truncate">{metadata === null ? head.stat.name : t('files.archive.kind', { format: metadata.format, compression: metadata.compression ?? t('files.archive.none') })}</span>
       </div>
       {encrypted && (
         <InlineAlert tone="warning" className="m-2">
@@ -135,7 +153,7 @@ export default function ArchiveViewer({ door, path, head }: ViewerProps) {
         </InlineAlert>
       )}
       <div className={cx('grid min-h-0 flex-1 gap-px bg-border', chosen === null ? 'grid-cols-1' : 'grid-cols-1 grid-rows-2 @3xl:grid-cols-2 @3xl:grid-rows-1')}>
-        <div className="min-h-0 overflow-auto bg-surface">
+        <div className="flex min-h-0 flex-col bg-surface">
           <Listing shared={shared} inside="" depth={0} />
         </div>
         {chosen !== null && (

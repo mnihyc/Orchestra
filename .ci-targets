@@ -1,0 +1,3 @@
+fmt
+test -p orch-connector-core --test agent_role
+test -p orch-api-core --lib -- backplane::rate_presence_tests::

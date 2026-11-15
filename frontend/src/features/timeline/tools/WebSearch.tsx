@@ -9,6 +9,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import type { Item } from '@/generated/api-types';
 import { isSafeHref } from '@/lib/markdown';
 import { webAction } from './webAction';
+import { nativeSearchAddressMasked } from '../masking';
 
 type SearchItem = Extract<Item, { kind: 'tool_call' }>;
 
@@ -23,9 +24,12 @@ export function WebSearchDisplay({ item }: { item: SearchItem }) {
     : action.type === 'other' ? null : <p className="text-sm text-text-muted">{t('timeline.web.noAddress')}</p>;
   return (
     <ul className="flex flex-col gap-1">
-      {results.map((result) => (
+      {results.map((result) => {
+        const index = tool.results.indexOf(result);
+        const hidden = nativeSearchAddressMasked(item.payload, index);
+        return (
         <li key={result.url} className="flex min-w-0 flex-col text-sm">
-          {isSafeHref(result.url) ? (
+          {!hidden && isSafeHref(result.url) ? (
             <a href={result.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent-text underline underline-offset-2">
               <span className="truncate">{result.title === '' ? result.url : result.title}</span>
               <ExternalLink aria-hidden />
@@ -35,8 +39,9 @@ export function WebSearchDisplay({ item }: { item: SearchItem }) {
             <span className="text-text">{result.title}</span>
           )}
           <span className="truncate text-xs text-text-subtle">{result.url}</span>
+          {hidden && <span className="text-xs text-text-subtle">{t('timeline.masking.address')}</span>}
         </li>
-      ))}
+      ); })}
     </ul>
   );
 }
