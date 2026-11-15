@@ -8,6 +8,9 @@
 mod places;
 mod support;
 
+#[path = "everything_scale/page_budgets.rs"]
+mod page_budgets;
+
 use orch_api_contract::everything::EVERYTHING_LIMIT_DEFAULT;
 use orch_authz::{Caller, Principal};
 use orch_db::queries::everything::{self, Query};

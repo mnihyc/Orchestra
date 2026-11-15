@@ -1,0 +1,2 @@
+fmt
+test -p orch-api-core --test everything_scale -- every_page_reads_the_same_bounded_rows_when_the_installation_grows_fourfold --nocapture
