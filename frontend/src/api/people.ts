@@ -9,15 +9,15 @@ export interface DocumentMentionPage { items: DocumentMentionCandidate[]; next_c
 interface MentionReply { data?: DocumentMentionPage; error?: unknown; response: Response }
 type MentionRead = (path: '/documents/{id}/mentions', options: { params: { path: { id: string }; query: { q: string; cursor?: string } }; signal?: AbortSignal }) => Promise<MentionReply>;
 export const documentReadersQuery = (id: string, q = '', cursor: string | null = null) => queryOptions({
-  queryKey: ['document-readers', id, q, cursor], retry: false, staleTime: 0, gcTime: 0,
+  queryKey: ['document-readers', id, q, cursor], retry: false, gcTime: 0,
   queryFn: ({ signal }): Promise<DocumentMentionPage> => ok((api.GET as unknown as MentionRead)('/documents/{id}/mentions', { params: { path: { id }, query: { q, ...(cursor === null ? {} : { cursor }) } }, signal })),
 });
 export const mentionChoicesQuery = (id: string, q = '') => queryOptions({
-  queryKey: ['chat-mentions', id, q], retry: false, staleTime: 0,
+  queryKey: ['chat-mentions', id, q], retry: false,
   queryFn: ({ signal }) => ok(api.GET('/chats/{id}/mentions', { params: { path: { id }, query: { q } }, signal })),
 });
 export const mentionAudienceQuery = (id: string, parts: ChatPart[], replyTo: string | null = null) => {
-  return queryOptions({ queryKey: ['chat-mention-audience', id, parts, replyTo], retry: false, staleTime: 0,
+  return queryOptions({ queryKey: ['chat-mention-audience', id, parts, replyTo], retry: false,
     queryFn: () => ok(api.POST('/chats/{id}/mentions/preview', { params: { path: { id } }, body: { parts, ...(replyTo === null ? {} : { reply_to: replyTo }) } })),
   });
 };

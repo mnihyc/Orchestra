@@ -244,7 +244,7 @@ export function ShareWithAgentsDialog({ target, page, open, onClose, initialReci
       const frozen = { ...body, client_id: actKey(body) } satisfies ShareWithAgents;
       return { body: frozen, preview: await previewShare(target, { kind: 'agents', share: frozen }) };
     },
-    enabled: open && whose.length > 0 && !nothing, retry: false, gcTime: 0, staleTime: 0,
+    enabled: open && whose.length > 0 && !nothing, retry: false, gcTime: 0,
   });
   const share = useMutation({
     mutationFn: async () => {
