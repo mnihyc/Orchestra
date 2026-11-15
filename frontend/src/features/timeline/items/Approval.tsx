@@ -22,6 +22,7 @@ import { useDecision } from '@/features/approvals/Decision';
 import { decisionReason } from '@/features/approvals/current';
 import { DecisionError } from '@/features/approvals/DecisionError';
 import { approvalTitle, ApprovalSubjectScope } from '@/features/approvals/Card';
+import { ApprovalDeliveryFacts, approvalDeliveryFragment } from '@/features/approvals/DeliveryFacts';
 import { approvalAtItem, approvalOutcome } from '@/features/approvals/current';
 import { approvalSnapshot } from '@/features/approvals/snapshot';
 import { AnswersForm, decisionOfOption, ElicitationForm, type HarnessApproval, OptionButtons, optionWords, planDecision, RequestBody } from '@/features/approvals/Harness';
@@ -80,6 +81,7 @@ function DecidedLine({ approval, lostTo, children }: { approval: Approval; lostT
           <span className="font-medium wrap-anywhere text-text">{approvalTitle(approval,t)}</span><span>{what}
           {approval.decided_automatically ? ` ${t('approvals.automatically')}` : approval.decided_by !== null ? ` ${t('approvals.by', { name: approval.decided_by.display_name })}` : ''}
           </span>{approval.decided_at !== null && <TimeOfDay at={approval.decided_at} />}
+          {approvalDeliveryFragment(approval,t) !== null && <span>{approvalDeliveryFragment(approval,t)}</span>}
         </span>
       </button>
       {lostTo !== null && (
@@ -87,7 +89,7 @@ function DecidedLine({ approval, lostTo, children }: { approval: Approval; lostT
           {t('approvals.alreadyAnswered', { name: lostTo.decided_by?.display_name ?? t('approvals.someoneElse') })}
         </p>
       )}
-      {open && children}
+      {open && <>{children}<ApprovalDeliveryFacts approval={approval} /></>}
     </div>
   );
 }

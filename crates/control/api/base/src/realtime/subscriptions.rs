@@ -141,6 +141,8 @@ pub struct SubState {
     pub(crate) thread_projection: Option<orch_api_contract::threads::ThreadContinuationProjection>,
     /// An execution-scope change stops this subscription until a newly scoped HTTP cut/subscription.
     pub(crate) thread_reset: bool,
+    /// The independent Stop version and canonical cut delivered to this exact reader.
+    pub(crate) thread_stop: Option<(i64, Seq)>,
     /// Highest raw number admitted to this exact segment source, seeded at subscription.
     pub(crate) raw_after: i64,
     /// Commit-ordered usage changes already projected for this connection (never sent to it).
@@ -245,6 +247,7 @@ impl Subscription {
             state: tokio::sync::Mutex::new(SubState {
                 thread_projection: None,
                 thread_reset: false,
+                thread_stop: None,
                 raw_after: 0,
                 usage_read: None,
                 health_read: None,
@@ -447,7 +450,7 @@ fn metric_kind(feed: &Feed) -> &'static str {
         | Feed::EnvTerminals(_)
         | Feed::EnvPorts(_)
         | Feed::EnvGit { .. } => "environment",
-        Feed::Resource { .. } => "resource",
+        Feed::Resource { .. } | Feed::ProviderRow(_) => "resource",
         Feed::Usage(_) => "usage",
         Feed::Job(_) | Feed::Fork(_) => "job",
     }
@@ -715,7 +718,9 @@ pub(crate) async fn decide(inner: &Inner, user: Id, feed: &Feed) -> Result<Acces
             }
             None => Ok(Access::NotFound),
         },
-        Feed::Resource { .. } => super::resources::decide(inner, user, feed).await,
+        Feed::Resource { .. } | Feed::ProviderRow(_) => {
+            super::resources::decide(inner, user, feed).await
+        }
         Feed::ThreadRaw(thread) => super::resources::raw_access(inner, user, *thread).await,
         // An environment's own feed is read by whoever may read the environment.
         Feed::Env(id) => super::environments::decide(inner, user, *id).await,
@@ -893,7 +898,8 @@ impl Inner {
                     }
                     // A Resource event replaces its complete recipient view. Its native
                     // projection/fingerprint, rather than an epoch alone, decides delivery.
-                    if !matches!(sub.feed(), Feed::Resource { .. }) && (!st.reload || purged.resync)
+                    if !matches!(sub.feed(), Feed::Resource { .. } | Feed::ProviderRow(_))
+                        && (!st.reload || purged.resync)
                     {
                         let text = ServerFrame::Resync(ResyncFrame {
                             id: sub.tag().id,
@@ -1209,6 +1215,7 @@ async fn inner_opened(
             environment_id: id, ..
         } => ("environment", *id),
         Feed::Resource { kind, id } => (kind.as_str(), *id),
+        Feed::ProviderRow(id) => ("provider", *id),
         Feed::User | Feed::Usage(_) | Feed::Job(_) | Feed::Fork(_) | Feed::DocumentTree(_) => {
             return Ok(());
         }
@@ -1360,6 +1367,9 @@ async fn begin(
     inner
         .deliver(sub, st, head.seq, &mut Cache::default())
         .await?;
+    if let Feed::Thread(thread) = feed {
+        super::thread_stops::changed(inner, *thread);
+    }
     Ok(true)
 }
 
