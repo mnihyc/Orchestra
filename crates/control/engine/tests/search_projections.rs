@@ -99,6 +99,54 @@ impl World {
 }
 
 #[tokio::test]
+async fn search_uses_the_chosen_text_allowance_for_live_items_and_rebuilds() {
+    let world = World::new().await;
+    let mut conn = world.db.pool.acquire().await.unwrap();
+    orch_db::queries::settings::put(
+        &mut conn,
+        None,
+        "search.text_chars",
+        &orch_db::queries::settings::Stored {
+            value: &json!(24_000),
+            locked: false,
+            by: Some(world.owner),
+            at: clock::start(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    let text = "界".repeat(20_010);
+    let item = world.item("agent_message", &json!({"text":text})).await;
+    assert_eq!(item.search_text.as_deref(), Some(text.as_str()));
+    let mut conn = world.db.pool.acquire().await.unwrap();
+    orch_db::queries::settings::put(
+        &mut conn,
+        None,
+        "search.text_chars",
+        &orch_db::queries::settings::Stored {
+            value: &json!(7),
+            locked: false,
+            by: Some(world.owner),
+            at: clock::start(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    projections::rebuild(&mut conn).await.unwrap();
+    assert_eq!(
+        threads::item(&mut conn, item.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .search_text,
+        Some("界".repeat(7))
+    );
+}
+
+#[tokio::test]
 async fn live_item_text_and_a_full_rebuild_agree_without_changing_attention_or_sequences() {
     let world = World::new().await;
     let item = world
