@@ -28,6 +28,8 @@ fn once(scene: &rig::Scene, target: InputScheduleTarget, minutes: i64) -> InputS
             text: "the author's private future prompt".to_owned(),
         }],
         native_action: None,
+        plan: false,
+        delivery: orch_api_contract::threads::Delivery::Queue,
         timing: InputTiming::Once {
             at: Time::new(scene.rig.world.now() + Duration::minutes(minutes)),
             zone: "UTC".to_owned(),
@@ -53,6 +55,135 @@ async fn offline(scene: &rig::Scene) {
         .execute(scene.rig.db.pool())
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn future_inputs_keep_the_authors_plan_and_delivery_choices() {
+    use orch_api_contract::threads::Delivery;
+    let scene = rig::Scene::new().await;
+    let thread = scene.thread().await;
+    offline(&scene).await;
+    sqlx::query("UPDATE agents SET descriptor=jsonb_set(descriptor,'{capabilities,plan_mode}','true'::jsonb) WHERE id=(SELECT agent_id FROM segments WHERE id=(SELECT current_segment_id FROM threads WHERE node_id=$1))")
+        .bind(thread.base.id).execute(scene.rig.db.pool()).await.unwrap();
+    for plan in [false, true] {
+        for delivery in [Delivery::Queue, Delivery::Steer, Delivery::Interrupt] {
+            let body = InputScheduleCreateBody {
+                plan,
+                delivery,
+                ..once(
+                    &scene,
+                    InputScheduleTarget::Thread {
+                        thread_id: thread.base.id,
+                    },
+                    2,
+                )
+            };
+            let created = scene
+                .rig
+                .world
+                .app
+                .call(TopicInputScheduleCreate, &[&scene.tree.topic.base.id])
+                .token(&scene.ada.token)
+                .body(&body)
+                .send()
+                .await
+                .ok()
+                .into_full()
+                .unwrap();
+            assert_eq!(created.plan, plan);
+            assert_eq!(created.delivery, delivery);
+            scene.rig.world.advance(Duration::minutes(3));
+            orch_api_core::input_schedules::run_due(&scene.rig.world.app.app)
+                .await
+                .unwrap();
+            let finished = get(&scene, created.id).await;
+            let input = finished
+                .last_run
+                .unwrap()
+                .input_id
+                .expect("the authored input is accepted");
+            let stored: (bool, String) =
+                sqlx::query_as("SELECT plan,delivery FROM thread_inputs WHERE id=$1")
+                    .bind(input)
+                    .fetch_one(scene.rig.db.pool())
+                    .await
+                    .unwrap();
+            assert_eq!(stored.0, plan);
+            assert_eq!(json!(stored.1), json!(delivery));
+        }
+    }
+}
+
+#[tokio::test]
+async fn editing_only_a_schedules_modes_keeps_the_authored_definition_and_revision_boundary() {
+    use orch_api_contract::threads::Delivery;
+    let scene = rig::Scene::new().await;
+    let thread = scene.thread().await;
+    offline(&scene).await;
+    let body = once(
+        &scene,
+        InputScheduleTarget::Thread {
+            thread_id: thread.base.id,
+        },
+        2,
+    );
+    let created = scene
+        .rig
+        .world
+        .app
+        .call(TopicInputScheduleCreate, &[&scene.tree.topic.base.id])
+        .token(&scene.ada.token)
+        .body(&body)
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    let change = InputScheduleUpdateBody {
+        revision: created.revision,
+        plan: Some(true),
+        delivery: Some(Delivery::Interrupt),
+        ..Default::default()
+    };
+    let denied = scene
+        .rig
+        .world
+        .app
+        .call(InputScheduleUpdate, &[&created.id])
+        .token(&scene.dan.token)
+        .body(&change)
+        .send()
+        .await
+        .problem();
+    assert_eq!(denied.code, ErrorCode::AuthzDenied);
+    sqlx::query("UPDATE agents SET descriptor=jsonb_set(descriptor,'{capabilities,plan_mode}','true'::jsonb) WHERE id=(SELECT agent_id FROM segments WHERE id=(SELECT current_segment_id FROM threads WHERE node_id=$1))")
+        .bind(thread.base.id).execute(scene.rig.db.pool()).await.unwrap();
+    let changed = scene
+        .rig
+        .world
+        .app
+        .call(InputScheduleUpdate, &[&created.id])
+        .token(&scene.ada.token)
+        .body(&change)
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    assert!(changed.plan);
+    assert_eq!(changed.delivery, Delivery::Interrupt);
+    assert_eq!(changed.definition.unwrap().content, body.content);
+    let stale = scene
+        .rig
+        .world
+        .app
+        .call(InputScheduleUpdate, &[&created.id])
+        .token(&scene.ada.token)
+        .body(&change)
+        .send()
+        .await
+        .problem();
+    assert_eq!(stale.code, ErrorCode::ConflictStaleRevision);
 }
 
 #[tokio::test]

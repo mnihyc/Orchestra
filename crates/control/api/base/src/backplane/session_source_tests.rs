@@ -83,6 +83,11 @@ impl Wire {
             .await;
     }
 
+    /// Whether nothing has been sent back to the machine yet.
+    pub(super) fn is_silent(&mut self) -> bool {
+        self.out.try_recv().is_err()
+    }
+
     pub(super) async fn ack(&mut self, stream: &Stream, seq: i64) {
         let outgoing = tokio::time::timeout(ACK_WAIT, self.out.recv())
             .await
@@ -158,6 +163,21 @@ impl Office {
             .execute(&mut *conn)
             .await
             .unwrap();
+        let environment = resources::access_fixtures::insert_environment(
+            &mut conn,
+            person,
+            Some(topic),
+            "Session workspace",
+            "connected",
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE environments SET machine_id=$2 WHERE id=$1")
+            .bind(environment)
+            .bind(owner)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
         threads::insert_segment(
             &mut conn,
             &threads::NewSegment {
@@ -165,7 +185,7 @@ impl Office {
                 thread_id: thread,
                 agent_id: new_id(),
                 provider_id: new_id(),
-                environment_id: new_id(),
+                environment_id: environment,
                 env_generation: 1,
                 arrangement: "together",
                 executor: None,
@@ -226,6 +246,8 @@ impl Office {
 
 fn raw() -> Event {
     Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n: 1,
         direction: "in".to_owned(),
         payload: json!({"message": "private session output"}),
