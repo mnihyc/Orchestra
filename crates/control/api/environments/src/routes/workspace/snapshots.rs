@@ -688,6 +688,7 @@ async fn file_list(ctx: Ctx, query: SnapshotPathQuery, (): ()) -> ApiResult<DirL
     let truncated = listing::cut(&mut entries);
     read.check().await?;
     Ok(DirListing {
+        facts: None,
         path,
         mount: None,
         source: orch_api_contract::forks::FilesSource::Cached,

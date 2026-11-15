@@ -476,6 +476,9 @@ pub enum ApproverScope {
 /// Something that waits for a decision, or was decided.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Approval {
+    /// Actual native delivery, distinct from the already committed decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<ApprovalDelivery>,
     /// The approval's identifier.
     pub id: Id,
     /// What it asks, written as `kind` and `request`.
@@ -519,6 +522,37 @@ pub struct Approval {
     pub expires_at: Option<Time>,
     /// When it was made.
     pub created_at: Time,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApprovalDelivery {
+    pub recipient_kind: ApprovalDeliveryRecipient,
+    pub state: ApprovalDeliveryState,
+    pub last_attempt_at: Option<Time>,
+    pub problem: Option<ApprovalDeliveryProblem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDeliveryRecipient {
+    NativeHarness,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDeliveryState {
+    Pending,
+    Applied,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDeliveryProblem {
+    Rejected,
+    TimedOut,
+    Cancelled,
+    DeliveryFailed,
 }
 
 /// The answer to a person's decision: the approval as it stands now and, for a port request, the

@@ -747,16 +747,15 @@ pub(crate) async fn save_first_turn(
             }
         }
     }
-    let old = link::command(&mut tx, command.id).await?;
-    let deadline = old.as_ref().map_or_else(
-        || {
-            Time::new(
-                engine.inner.clock.now()
-                    + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())),
-            )
-        },
-        |row| Time::new(row.deadline_at),
-    );
+    let deadline = engine
+        .keep_start_wait_in(
+            &mut tx,
+            side.node_id,
+            snap.turn.id,
+            command.id,
+            command.kind,
+        )
+        .await?;
     command.deadline = Some(deadline);
     let key = command.key.wire();
     link::insert_command(

@@ -47,7 +47,7 @@ use crate::unit::{Finished, Unit};
 use orch_access_contract::decisions::{Decision, Refusal};
 use orch_access_contract::permissions::Permission;
 use orch_agent_contract::credentials::CredentialPath;
-use orch_api_contract::threads::{ContentPart, Turn};
+use orch_api_contract::threads::{ContentPart, SessionReopenReason, Turn};
 use orch_authz::{Act, Caller, Principal, nodes};
 use orch_db::queries::approvals as approval_queries;
 use orch_db::queries::environments::thread_engine as environments;
@@ -64,6 +64,58 @@ use std::time::Duration;
 
 mod end_work;
 mod offline;
+mod start_wait;
+mod stops;
+
+pub use stops::Stopped;
+
+async fn native_image_policy(
+    conn: &mut orch_db::Conn,
+    thread: Id,
+) -> Result<
+    (
+        i64,
+        Option<orch_api_contract::settings::SettingSource>,
+        Json,
+    ),
+    EngineError,
+> {
+    let view = orch_settings::resolve(
+        conn,
+        orch_settings::Place::Node(thread),
+        orch_settings_contract::registry::keys::FILES_NATIVE_IMAGE_BYTES,
+    )
+    .await?;
+    let bytes = view
+        .value()
+        .and_then(Json::as_i64)
+        .ok_or_else(|| EngineError::unreadable("the native image size has no resolved value"))?;
+    let scope = view.resolved.source.scope;
+    let origin = serde_json::json!({"scope":scope,"node":view.resolved.source.node});
+    let source = match scope {
+        orch_settings_contract::provenance::SourceScope::Default => {
+            Some(orch_api_contract::settings::SettingScope::Default)
+        }
+        orch_settings_contract::provenance::SourceScope::System => {
+            Some(orch_api_contract::settings::SettingScope::System)
+        }
+        _ => None,
+    }
+    .map(|scope| orch_api_contract::settings::SettingSource { scope, node: None });
+    Ok((bytes, source, origin))
+}
+
+/// Private setting identity remains captured; the typed public receipt serves only safe references.
+fn capture_image_origin(receipt: Option<Json>, origin: &Json) -> Option<Json> {
+    receipt.map(|mut receipt| {
+        if let Some(images) = receipt.as_array_mut() {
+            for image in images {
+                image["source_record"] = origin.clone();
+            }
+        }
+        receipt
+    })
+}
 
 type TurnText = (instructions::InputText, Vec<ModelBlock>);
 
@@ -197,6 +249,12 @@ fn item_status(state: &str) -> &'static str {
         turn_state::INTERRUPTED => "cancelled",
         _ => "failed",
     }
+}
+
+struct SessionOpenObservation {
+    reason: Option<SessionReopenReason>,
+    verified_resume: bool,
+    publish_resume: bool,
 }
 
 impl Engine {
@@ -385,6 +443,11 @@ impl Engine {
             seq,
         )
         .await?;
+        // An empty Stop hold protects arrivals only while its turn is active. Existing held inputs
+        // still need Resume; when none remain a fresh message keeps its ordinary sending behavior.
+        if thread.queue_held {
+            threads::clear_empty_queue_hold(unit.conn, thread_id, seq).await?;
+        }
         threads::mark_activity(&mut *unit.conn, thread_id, seq, now).await?;
         if let Some(environment) = thread.environment_id {
             environments::touch_activity(&mut *unit.conn, environment, now).await?;
@@ -566,12 +629,13 @@ impl Engine {
                 if snap.turn.interrupted_by.is_some() {
                     return Ok(());
                 }
+                let captured_wait =
+                    start_wait::Receipt::of(&snap.turn, ids::turn_start(snap.turn.id, attempt))?;
                 // Admission and link adoption are separate commits. A process
                 // can stop between them while the machine link stays up.
                 if info.stage == Stage::Queued {
-                    let due = info.issued_at
-                        + chrono::Duration::from_std(self.inner.config.start_timeout)
-                            .unwrap_or_else(|_| chrono::Duration::zero());
+                    let due = captured_wait
+                        .due(orch_api_contract::threads::ThreadStartWaitStage::Acceptance);
                     if self.inner.clock.now() >= due {
                         self.inner
                             .commands
@@ -598,10 +662,7 @@ impl Engine {
                 let outcome = match info.outcome {
                     Some(outcome) => outcome,
                     None => {
-                        let due = info.issued_at
-                            + chrono::Duration::from_std(self.inner.config.start_timeout)
-                                .unwrap_or_else(|_| chrono::Duration::zero());
-                        let left = (due - self.inner.clock.now()).to_std().unwrap_or_default();
+                        let left = captured_wait.remaining(self.inner.clock.now());
                         match tokio::time::timeout(
                             left,
                             self.inner
@@ -637,17 +698,34 @@ impl Engine {
                     self.forget_notices_said(&snap).await;
                     self.forget_cut_said(&snap).await;
                     let now = self.inner.clock.now();
-                    if now >= self.started_due(info.issued_at)
-                        && !self.still_hearing_start(
-                            snap.key.machine,
-                            thread_id,
-                            snap.segment.id,
-                            info.issued_at,
-                            now,
-                        )
+                    let hearing = self.still_hearing_start(
+                        snap.key.machine,
+                        thread_id,
+                        snap.segment.id,
+                        &captured_wait,
+                        now,
+                    );
+                    if now
+                        >= captured_wait
+                            .due(orch_api_contract::threads::ThreadStartWaitStage::Start)
+                        && !hearing
                     {
                         return self.fail_start_as(&snap, never_began()).await;
                     }
+                    self.observe_start_wait(
+                        &snap,
+                        ids::turn_start(snap.turn.id, attempt),
+                        if hearing
+                            && now
+                                >= captured_wait
+                                    .due(orch_api_contract::threads::ThreadStartWaitStage::Start)
+                        {
+                            orch_api_contract::threads::ThreadStartWaitStage::Events
+                        } else {
+                            orch_api_contract::threads::ThreadStartWaitStage::Start
+                        },
+                    )
+                    .await?;
                     return Ok(());
                 }
                 if matches!(&outcome, Outcome::Failed(_)) && snap.input.native_action.is_some() {
@@ -688,9 +766,17 @@ impl Engine {
             if !self.harness_is_online(snap.key).await? {
                 self.set_step(thread_id, "harness").await?;
             }
-            let started = self
-                .ensure_harness(snap.key, &snap.agent, ids::agent_start(snap.turn.id))
-                .await?;
+            let Some(started) = self
+                .ensure_harness_for_turn(
+                    snap.key,
+                    &snap.agent,
+                    ids::agent_start(snap.turn.id),
+                    snap.turn.id,
+                )
+                .await?
+            else {
+                return Ok(());
+            };
             if let HarnessStarted::Failed(outcome) = started {
                 let mut failure = classify(&outcome);
                 // A first refused receipt must keep the binding reason of later preflights,
@@ -778,25 +864,44 @@ impl Engine {
                 self.defer_background_refresh(&snap).await?;
                 return Ok(());
             }
-            let open = !background_running
-                && native_wake.is_none()
-                && {
-                    let sessions = lock(&self.inner.sessions);
-                    snap.segment.native_session_ref.is_none()
-                    || side_unverified
-                    || !sessions.is_open(snap.segment.id, snap.key)
-                    || sessions.instructions_changed(snap.segment.id, &snap.instructions().text)
-                    || sessions.subagent_limits_changed(snap.segment.id, snap.settings.subagent_limits)
-                    || sessions.configuration_changed(snap.segment.id,&configuration)
-                    || sessions.mcp_changed(snap.segment.id, mcp_revision)
-                    || sessions.orch_tools_changed(snap.segment.id, orch_tools_revision)
-                    || sessions.skills_changed(snap.segment.id, &skills_fingerprint)
+            // Whether the session is opened, and why where it had been opened before: a person is told, on the thread,
+            // that a session was opened again and for what.
+            let first = snap.segment.native_session_ref.is_none();
+            let reason = if background_running || native_wake.is_some() {
+                None
+            } else {
+                let sessions = lock(&self.inner.sessions);
+                if side_unverified {
+                    Some(SessionReopenReason::SideHistory)
+                } else if !sessions.is_open(snap.segment.id, snap.key) {
+                    Some(SessionReopenReason::Unknown)
+                } else if sessions.instructions_changed(snap.segment.id, &snap.instructions().text)
+                {
+                    Some(SessionReopenReason::Instructions)
+                } else if sessions
+                    .subagent_limits_changed(snap.segment.id, snap.settings.subagent_limits)
+                {
+                    Some(SessionReopenReason::Limits)
+                } else if sessions.configuration_changed(snap.segment.id, &configuration) {
+                    Some(SessionReopenReason::Configuration)
+                } else if sessions.mcp_changed(snap.segment.id, mcp_revision) {
+                    Some(SessionReopenReason::Mcp)
+                } else if sessions.orch_tools_changed(snap.segment.id, orch_tools_revision) {
+                    Some(SessionReopenReason::Tools)
+                } else if sessions.skills_changed(snap.segment.id, &skills_fingerprint) {
+                    Some(SessionReopenReason::Skills)
+                } else if snap.descriptor.capabilities.session_reload
+                    == orch_agent_contract::descriptor::SessionReload::Turn
+                    && snap.thread.executor.is_none()
+                {
                     // A program that keeps a directory's files while its session is open takes up changes only
                     // when the session is opened again.
-                    || (snap.descriptor.capabilities.session_reload
-                        == orch_agent_contract::descriptor::SessionReload::Turn
-                        && snap.thread.executor.is_none())
-                };
+                    Some(SessionReopenReason::ProgramReloads)
+                } else {
+                    None
+                }
+            };
+            let open = !background_running && native_wake.is_none() && (first || reason.is_some());
             if open {
                 self.set_step(thread_id, "session").await?;
                 // A session that exists already (a person began it by hand) is opened as one that was adopted
@@ -856,7 +961,7 @@ impl Engine {
                             path: orch_agent_contract::session::INSTRUCTION_ROOT_MARKER.to_owned(),
                         },
                     )?;
-                    match crate::commands::run(self.inner.commands.as_ref(), marker).await? {
+                    match self.run_noted(thread_id, marker).await? {
                         Outcome::Succeeded(_) => body.instruction_root_marker = true,
                         Outcome::Failed(ref failure)
                             if failure.code == "policy.remote_write_disabled" => {}
@@ -974,6 +1079,20 @@ impl Engine {
                 match outcome {
                     Outcome::Succeeded(result) => {
                         let result: SessionOpenResult = serde_json::from_value(result)?;
+                        if mode == SessionMode::Resume && !recovering_history && !result.resumed {
+                            if repairs >= SESSION_REPAIRS {
+                                return self.fail_start(&snap, &Outcome::Failed(
+                                    orch_link_contract::commands::CommandError::new(ErrorCode::SessionNotFound, "The native program did not resume the retained conversation."),
+                                )).await;
+                            }
+                            repairs += 1;
+                            let closed = self.close_missing_agent_history(&snap).await?;
+                            if !matches!(closed, Outcome::Succeeded(_)) {
+                                return self.fail_start(&snap, &closed).await;
+                            }
+                            self.lose_segment(&snap).await?;
+                            continue;
+                        }
                         // What an adopted session held before was read from its harness when it was adopted and is
                         // on the thread already, from the session before Orch: nothing is asked of it again here.
                         self.record_session_open(
@@ -981,6 +1100,16 @@ impl Engine {
                             &result.native_session_ref,
                             &result.instruction_sources,
                             result.approval_reviewer.as_ref(),
+                            SessionOpenObservation {
+                                reason: reason.filter(|reason| {
+                                    !first && *reason != SessionReopenReason::ProgramReloads
+                                }),
+                                verified_resume: mode == SessionMode::Resume
+                                    && result.resumed
+                                    && !recovering_history,
+                                publish_resume: first
+                                    || reason != Some(SessionReopenReason::ProgramReloads),
+                            },
                         )
                         .await?;
                         sqlx::query("UPDATE segments SET background_wake=$2,session_configuration=$3 WHERE id=$1")
@@ -1102,6 +1231,7 @@ impl Engine {
             // A concurrent retry uses the first prepared page, and exact lane checks still apply.
             self.scope_agent_history_notices(&mut snap).await?;
             let (text, blocks) = self.turn_text(&snap, &placement).await?;
+            let image_delivery = text.image_delivery.clone();
             let body = TurnStart {
                 native_model: snap.native_model.clone(),
                 native_wake,
@@ -1188,14 +1318,27 @@ impl Engine {
                 }
                 Err(error) => return Err(error),
             };
-            let Some(command) = self.admit_turn_start(&snap, command).await? else {
+            let Some((command, captured_wait)) = self
+                .admit_turn_start(&snap, command, image_delivery.as_ref())
+                .await?
+            else {
                 self.settle_model_input(thread_id, record, Sent::Unknown)
                     .await;
                 return Ok(());
             };
+            // The engine can give up before the transport lifetime ends, including a zero wait.
+            // Neither first dispatch nor recovery may adopt an already expired admission.
+            if self.inner.clock.now()
+                >= captured_wait.due(orch_api_contract::threads::ThreadStartWaitStage::Acceptance)
+            {
+                self.inner.commands.cancel(id).await?;
+                self.settle_model_input(thread_id, record, Sent::Unknown)
+                    .await;
+                return self.fail_start(&snap, &Outcome::Expired).await;
+            }
             self.inner.commands.issue(command).await?;
             let waited = tokio::time::timeout(
-                self.inner.config.start_timeout,
+                captured_wait.remaining(self.inner.clock.now()),
                 self.inner.commands.wait(id),
             )
             .await;
@@ -1213,6 +1356,12 @@ impl Engine {
                     Outcome::Succeeded(_) => {
                         self.forget_notices_said(&snap).await;
                         self.forget_cut_said(&snap).await;
+                        self.observe_start_wait(
+                            &snap,
+                            id,
+                            orch_api_contract::threads::ThreadStartWaitStage::Start,
+                        )
+                        .await?;
                         return Ok(());
                     }
                     Outcome::Failed(_) if snap.input.native_action.is_some() => {
@@ -1318,9 +1467,12 @@ impl Engine {
                 "the retained turn start has another recipient",
             ));
         }
-        let due = row.created_at
-            + chrono::Duration::from_std(self.inner.config.start_timeout)
-                .unwrap_or_else(|_| chrono::Duration::zero());
+        let due = start_wait::Receipt::of(
+            turn.as_ref()
+                .ok_or_else(|| EngineError::unreadable("the admitted turn disappeared"))?,
+            id,
+        )?
+        .due(orch_api_contract::threads::ThreadStartWaitStage::Acceptance);
         let command = Outgoing {
             authority: None,
             id,
@@ -1345,11 +1497,28 @@ impl Engine {
         &self,
         snap: &StartSnapshot,
         mut command: Outgoing,
-    ) -> Result<Option<Outgoing>, EngineError> {
+        image_delivery: Option<&Json>,
+    ) -> Result<Option<(Outgoing, start_wait::Receipt)>, EngineError> {
         let mut tx = self.db().begin().await?;
         let Some(thread) = threads::lock(&mut tx, snap.thread.node_id).await? else {
             return Ok(None);
         };
+        // A Stop that is open is carried out first, and the start is looked at again as it stands after it.
+        let stopped = {
+            let mut unit = Unit::new(&mut tx, self.inner.clock.now());
+            let applied = self
+                .apply_open_stops_in(&mut unit, snap.thread.node_id)
+                .await?;
+            if applied.carried_out {
+                Some(unit.finish().await?)
+            } else {
+                None
+            }
+        };
+        if let Some(finished) = stopped {
+            self.commit(tx, finished).await?;
+            return Ok(None);
+        }
         let turn = threads::turn(&mut tx, snap.turn.id).await?;
         let input = threads::input(&mut tx, snap.input.id).await?;
         if thread.current_turn_id != Some(snap.turn.id)
@@ -1367,13 +1536,18 @@ impl Engine {
             return Ok(None);
         }
         let old = orch_db::queries::link::command(&mut tx, command.id).await?;
+        let captured_wait = if old.is_some() {
+            start_wait::Receipt::of(
+                turn.as_ref()
+                    .ok_or_else(|| EngineError::unreadable("the admitted turn disappeared"))?,
+                command.id,
+            )?
+        } else {
+            self.capture_start_wait_in(&mut tx, thread.node_id, command.id, self.inner.clock.now())
+                .await?
+        };
         let deadline = old.as_ref().map_or_else(
-            || {
-                Time::new(
-                    self.inner.clock.now()
-                        + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())),
-                )
-            },
+            || Time::new(captured_wait.dispatch_due(command.kind)),
             |row| Time::new(row.deadline_at),
         );
         command.deadline = Some(deadline);
@@ -1403,8 +1577,31 @@ impl Engine {
                 "the admitted turn start changed identity",
             ));
         }
-        tx.commit().await.map_err(orch_db::DbError::from)?;
-        Ok(Some(command))
+        let finished = {
+            let mut unit = Unit::new(&mut tx, self.inner.clock.now());
+            if old.is_none() {
+                if let Some(receipt) = image_delivery {
+                    threads::keep_native_image_delivery(
+                        unit.conn,
+                        snap.input.id,
+                        command.id,
+                        receipt,
+                    )
+                    .await?;
+                }
+                let seq = unit.stamp(thread.node_id).await?;
+                sqlx::query("UPDATE turns SET start_wait=$2, seq_updated=$3 WHERE id=$1")
+                    .bind(snap.turn.id)
+                    .bind(serde_json::to_value(&captured_wait)?)
+                    .bind(seq)
+                    .execute(&mut *unit.conn)
+                    .await
+                    .map_err(orch_db::DbError::from)?;
+            }
+            unit.finish().await?
+        };
+        self.commit(tx, finished).await?;
+        Ok(Some((command, captured_wait)))
     }
 
     /// Rechecks the loaded selector before file delivery; a changed mapping preserves the waiting input.
@@ -1541,7 +1738,7 @@ impl Engine {
                 path,
             },
         )?;
-        let outcome = crate::commands::run(self.inner.commands.as_ref(), command).await?;
+        let outcome = self.run_noted(snap.thread.node_id, command).await?;
         if !matches!(outcome, Outcome::Succeeded(_)) {
             tracing::info!(thread = %snap.thread.node_id, ?outcome, "the directory of the thread could not be made; the turn goes on");
         }
@@ -1565,21 +1762,14 @@ impl Engine {
         placement: &crate::delivery::Placement,
     ) -> Result<(instructions::InputText, Vec<ModelBlock>), EngineError> {
         let content: Vec<ContentPart> = serde_json::from_value(snap.input.content.clone())?;
-        let (content, native_image_bytes) = {
+        let (content, native_image_bytes, native_image_source, native_image_origin) = {
             let mut conn = self.inner.db.acquire().await?;
             let content = self
                 .copied_content_for_agent(&mut conn, snap.thread.node_id, &content)
                 .await?;
-            let bytes = orch_settings::get::<i64>(
-                &mut conn,
-                orch_settings::Place::Node(snap.thread.node_id),
-                orch_settings_contract::registry::keys::FILES_NATIVE_IMAGE_BYTES,
-            )
-            .await?
-            .ok_or_else(|| {
-                EngineError::unreadable("the native image size has no resolved value")
-            })?;
-            (content, bytes)
+            let (bytes, source, origin) =
+                native_image_policy(&mut conn, snap.thread.node_id).await?;
+            (content, bytes, source, origin)
         };
         let parameters = snap.model_parameters()?;
         let images_pass = snap.descriptor.capabilities.input_images && parameters.takes_images();
@@ -1603,6 +1793,17 @@ impl Engine {
                 directory: &directory,
                 placement,
             },
+        );
+        text.image_delivery = capture_image_origin(
+            instructions::image_delivery_receipt(
+                &content,
+                images_pass,
+                native_image_bytes,
+                placement,
+                native_image_source,
+                self.inner.clock.time(),
+            ),
+            &native_image_origin,
         );
         let mut blocks: Vec<ModelBlock> = Vec::new();
         // Where the agent is goes first of all (T3): whole with a session's first input and after a compaction, and
@@ -1772,6 +1973,7 @@ impl Engine {
         native_ref: &str,
         reported: &[orch_agent_contract::session::InstructionFile],
         reviewer: Option<&orch_agent_contract::review::ApprovalReviewer>,
+        observation: SessionOpenObservation,
     ) -> Result<(), EngineError> {
         let mut tx = self.inner.db.begin().await?;
         let finished = {
@@ -1797,6 +1999,40 @@ impl Engine {
                 let seq = unit.stamp(snap.thread.node_id).await?;
                 threads::set_native_session_ref(&mut *unit.conn, snap.segment.id, native_ref, seq)
                     .await?;
+                let pending_reconstruction: bool = sqlx::query_scalar("SELECT agent_history_recovery IS NOT NULL AND agent_history_recovery->>'done' IS DISTINCT FROM 'true' FROM segments WHERE id=$1")
+                    .bind(snap.segment.id).fetch_one(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+                let verified =
+                    (observation.verified_resume && !pending_reconstruction).then(|| {
+                        orch_api_contract::threads::NativeSessionOutcome {
+                        kind: orch_api_contract::threads::NativeSessionOutcomeKind::VerifiedResume,
+                        reason: observation.reason,
+                        carried_method: None,
+                        coverage: orch_api_contract::threads::NativeSessionCoverage {
+                            recorded_turns:
+                                orch_api_contract::threads::SessionHistoryCoverage::NotApplicable,
+                            transcript_file:
+                                orch_api_contract::threads::SessionHistoryCoverage::NotApplicable,
+                        },
+                        at: Time::new(unit.now()),
+                    }
+                    });
+                sqlx::query("UPDATE segments SET session_outcome=$2 WHERE id=$1")
+                    .bind(snap.segment.id)
+                    .bind(verified.as_ref().map(serde_json::to_value).transpose()?)
+                    .execute(&mut *unit.conn)
+                    .await
+                    .map_err(orch_db::DbError::from)?;
+                if observation.reason.is_some()
+                    || (observation.publish_resume && verified.is_some())
+                {
+                    Self::note_session_reopened_in(
+                        &mut unit,
+                        snap,
+                        observation.reason.unwrap_or(SessionReopenReason::Unknown),
+                        verified,
+                    )
+                    .await?;
+                }
                 // What the session was opened with, source by source: what the agent reads, for its readers.
                 let current: Json =
                     sqlx::query_scalar("SELECT instruction_sources FROM segments WHERE id=$1")
@@ -1835,6 +2071,27 @@ impl Engine {
         opened.opened(snap.segment.id, snap.thread.node_id, snap.key);
         opened.instructions_requested(snap.segment.id, &snap.instructions().text);
         opened.subagent_limits_requested(snap.segment.id, snap.settings.subagent_limits);
+        Ok(())
+    }
+
+    /// Says on the thread that this turn opens the session again, and why: a line of its history, once for the turn.
+    async fn note_session_reopened_in(
+        unit: &mut Unit<'_>,
+        snap: &StartSnapshot,
+        reason: SessionReopenReason,
+        outcome: Option<orch_api_contract::threads::NativeSessionOutcome>,
+    ) -> Result<(), EngineError> {
+        let thread_id = snap.thread.node_id;
+        let payload = json!({ "marker": "session_reopened", "data": { "reason": reason, "outcome":outcome } });
+        ingest::add_marker(
+            unit,
+            thread_id,
+            snap.segment.id,
+            Some(snap.turn.id),
+            &payload,
+            &format!("session_reopened:{}", snap.turn.id),
+        )
+        .await?;
         Ok(())
     }
 
@@ -2037,12 +2294,7 @@ impl Engine {
             thread_id: thread,
             turn_id: turn,
         };
-        let command = Outgoing::new(
-            ids::turn_interrupt(turn),
-            machine,
-            SerialKey::Thread(thread),
-            &body,
-        );
+        let command = Outgoing::new(ids::turn_interrupt(turn), machine, SerialKey::None, &body);
         match command {
             Ok(command) => {
                 if let Err(error) = self.inner.commands.issue(command).await {
@@ -2168,21 +2420,13 @@ impl Engine {
             return Ok(());
         }
         let machine = facts.machine;
-        let (content, native_image_bytes) = {
+        let (content, native_image_bytes, native_image_source, native_image_origin) = {
             let mut conn = self.inner.db.acquire().await?;
             let content = self
                 .copied_content_for_agent(&mut conn, thread_id, &facts.content)
                 .await?;
-            let bytes = orch_settings::get::<i64>(
-                &mut conn,
-                orch_settings::Place::Node(thread_id),
-                orch_settings_contract::registry::keys::FILES_NATIVE_IMAGE_BYTES,
-            )
-            .await?
-            .ok_or_else(|| {
-                EngineError::unreadable("the native image size has no resolved value")
-            })?;
-            (content, bytes)
+            let (bytes, source, origin) = native_image_policy(&mut conn, thread_id).await?;
+            (content, bytes, source, origin)
         };
         // What changed of where the agent is since it was last told goes with the steer too, first of all.
         let place = {
@@ -2201,7 +2445,7 @@ impl Engine {
             }
             None => false,
         };
-        let text = instructions::input_text(
+        let mut text = instructions::input_text(
             &content,
             facts.name.as_deref(),
             &InputRules {
@@ -2217,6 +2461,17 @@ impl Engine {
                 directory: &facts.directory,
                 placement: &placement,
             },
+        );
+        text.image_delivery = capture_image_origin(
+            instructions::image_delivery_receipt(
+                &content,
+                images_pass,
+                native_image_bytes,
+                &placement,
+                native_image_source,
+                self.inner.clock.time(),
+            ),
+            &native_image_origin,
         );
         let named = facts.attribute && facts.name.is_some();
         let changed = place.as_ref().and_then(|snap| {
@@ -2238,6 +2493,7 @@ impl Engine {
             ));
         }
         blocks.push(ModelBlock::new("input", "input", text.text));
+        let image_delivery = text.image_delivery.clone();
         let body = TurnSteer {
             thread_id,
             turn_id: turn.id,
@@ -2278,13 +2534,63 @@ impl Engine {
             )
             .await?;
         let id = ids::turn_steer(input.id);
-        self.inner
-            .commands
-            .issue(
-                Outgoing::new(id, machine, SerialKey::Thread(thread_id), &body)?
-                    .with_authority(crate::commands::CommandAuthority::input_steer(input.id)),
+        let mut command = Outgoing::new(id, machine, SerialKey::Thread(thread_id), &body)?
+            .with_authority(crate::commands::CommandAuthority::input_steer(input.id));
+        if let Some(receipt) = image_delivery.as_ref() {
+            let mut tx = self.db().begin().await?;
+            let Some(thread) = threads::lock(&mut tx, thread_id).await? else {
+                return Ok(());
+            };
+            let current = threads::input(&mut tx, input.id).await?;
+            if thread.current_turn_id != Some(turn.id)
+                || current.as_ref().is_none_or(|input| {
+                    input.state != input_state::DELIVERING || input.turn_id != Some(turn.id)
+                })
+            {
+                return Ok(());
+            }
+            let old = orch_db::queries::link::command(&mut tx, id).await?;
+            let deadline = old.as_ref().map_or_else(
+                || {
+                    self.inner.clock.now()
+                        + chrono::Duration::seconds(i64::from(command.kind.deadline_secs()))
+                },
+                |row| row.deadline_at,
+            );
+            command.deadline = Some(Time::new(deadline));
+            let key = command.key.wire();
+            orch_db::queries::link::insert_command(
+                &mut tx,
+                &orch_db::queries::link::NewCommand {
+                    id,
+                    machine_id: machine,
+                    kind: command.kind.as_str(),
+                    body: &command.body,
+                    serial_key: key.as_deref(),
+                    deadline_at: deadline,
+                },
+                self.inner.clock.now(),
             )
             .await?;
+            let retained = orch_db::queries::link::command(&mut tx, id)
+                .await?
+                .ok_or_else(|| EngineError::unreadable("the admitted steer disappeared"))?;
+            if retained.machine_id != machine
+                || retained.kind != command.kind.as_str()
+                || retained.serial_key() != key.as_deref()
+            {
+                return Err(EngineError::unreadable(
+                    "the admitted steer changed identity",
+                ));
+            }
+            // Replay uses the first admitted body even when a policy changed while it waited.
+            command.body = retained.body;
+            if old.is_none() {
+                threads::keep_native_image_delivery(&mut tx, input.id, id, receipt).await?;
+            }
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+        }
+        self.inner.commands.issue(command).await?;
         let outcome = self.inner.commands.wait(id).await?;
         self.settle_model_input(thread_id, record, sent_of(&outcome))
             .await;
@@ -2323,15 +2629,20 @@ impl Engine {
         };
         let settings = crate::resolved::load(conn, thread.node_id).await?;
         let content: Vec<ContentPart> = serde_json::from_value(input.content.clone())?;
-        let content = self.prepare_pastes(conn, thread, &content).await?;
+        let content = self.load_pastes(conn, thread, &content).await?;
+        let content = self.prepare_pastes(conn, thread, &content).await?.content;
         let stored = serde_json::to_value(&content)?;
         if stored != input.content {
-            sqlx::query("UPDATE thread_inputs SET content=$2 WHERE id=$1")
+            let changed = sqlx::query("UPDATE thread_inputs SET content=$2 WHERE id=$1 AND content=$3 AND state='delivering'")
                 .bind(input.id)
                 .bind(stored)
+                .bind(&input.content)
                 .execute(&mut *conn)
                 .await
                 .map_err(orch_db::DbError::from)?;
+            if changed.rows_affected() == 0 {
+                return Ok(None);
+            }
         }
         let author = match input.author_id {
             Some(author) => threads::people(conn, &[author]).await?.into_iter().next(),
@@ -2546,119 +2857,20 @@ impl Engine {
 
     // ------------------------------------------------------------ interrupting
 
-    /// Stops the turn `turn_id` of a thread for a person who may drive it.
-    /// A turn the harness has not yet taken is ended on the spot; one it
-    /// runs is asked to stop, and ended by the engine if it does not within
-    /// the wait that is configured.
+    /// Stops the turn `turn_id` of a thread for a person who may drive it. A turn the harness has not yet
+    /// taken is ended on the spot; one it runs is asked to stop, and ended by the engine if it does not within
+    /// the wait that is configured. The Stop is recorded at once and carried out under the thread's row as soon
+    /// as it is free: see [`Engine::stop_thread`].
     pub async fn interrupt(
         &self,
         caller: &Caller,
         thread_id: Id,
         turn_id: Id,
     ) -> Result<Turn, InterruptError> {
-        let mut tx = self.inner.db.begin().await?;
-        let now = self.inner.clock.now();
-        let principal = Principal::load(&mut tx, caller.clone(), Time::new(now)).await?;
-        self.interrupt_guarded(tx, principal, thread_id, turn_id)
-            .await
-    }
-
-    /// As [`Engine::interrupt`], in the transaction of the API's action guard: `principal` was loaded in `tx`
-    /// by that check once the request had come, before any thread was locked, and its caller and its time
-    /// are the ones that stop the turn and hold what waits.
-    pub async fn interrupt_guarded(
-        &self,
-        mut tx: orch_db::Tx,
-        principal: Principal,
-        thread_id: Id,
-        turn_id: Id,
-    ) -> Result<Turn, InterruptError> {
-        let caller = principal.caller().clone();
-        let now = principal.now().get();
-        let (finished, turn) = {
-            let mut unit = Unit::new(&mut tx, now);
-            let Some(thread) = threads::lock(&mut *unit.conn, thread_id).await? else {
-                return Err(InterruptError::NotFound);
-            };
-            match nodes::check(
-                &mut *unit.conn,
-                &principal,
-                thread_id,
-                Permission::ThreadInteract,
-                Act::Use,
-                orch_authz::Policy::default(),
-            )
+        self.stop_thread(caller, thread_id, Some(turn_id))
             .await?
-            {
-                Decision::Allowed { .. } => {}
-                Decision::Refused(refusal) => {
-                    return Err(InterruptError::Denied(Box::new(refusal)));
-                }
-            }
-            let turn = threads::turn(&mut *unit.conn, turn_id)
-                .await?
-                .filter(|turn| turn.thread_id == thread_id)
-                .ok_or(InterruptError::NotFound)?;
-            let owner = threads::segment(unit.conn, turn.segment_id)
-                .await?
-                .ok_or(InterruptError::NotFound)?
-                .continuation_id;
-            if owner != thread.active_continuation_id {
-                return Err(InterruptError::NotRunning {
-                    current_turn_id: thread.current_turn_id,
-                });
-            }
-            if !turn.is_active() {
-                // A Stop of the turn that has just ended, with nothing newer begun, still holds what waits
-                // and answers that turn as it ended; one of an older turn, or while another runs, changes
-                // nothing and names the turn that stands.
-                let current = threads::active_turn(&mut *unit.conn, thread_id).await?;
-                let latest = threads::latest_turn(&mut *unit.conn, thread_id).await?;
-                if current.is_some() || latest.as_ref().map(|latest| latest.id) != Some(turn.id) {
-                    return Err(InterruptError::NotRunning {
-                        current_turn_id: current.map(|current| current.id),
-                    });
-                }
-                self.hold_queue(&mut unit, &thread, caller.user()).await?;
-                self.hold_background_wakes(&mut unit, &thread, turn.id)
-                    .await?;
-                let finished = unit.finish().await?;
-                self.commit(tx, finished).await?;
-                let mut conn = self.inner.db.acquire().await?;
-                let people = crate::views::People::load(&mut conn, turn.interrupted_by).await?;
-                return Ok(crate::views::turn_view(&turn, "", &people)?);
-            }
-            // Stop holds what waits before the harness is asked to stop, in this transaction.
-            self.hold_queue(&mut unit, &thread, caller.user()).await?;
-            self.hold_background_wakes(&mut unit, &thread, turn.id)
-                .await?;
-            let seq = unit.stamp(thread_id).await?;
-            // What cut the turn, for the line its next input is told (T8): a person's Stop.
-            threads::set_interrupt_cause(&mut *unit.conn, turn.id, "person").await?;
-            if threads::mark_interrupted_by(&mut *unit.conn, turn.id, caller.user(), seq).await? {
-                crate::audit_facts::person(
-                    &mut *unit.conn,
-                    caller.user(),
-                    thread_id,
-                    orch_db::audit::name!("turn.interrupted"),
-                    serde_json::json!({"turn":turn.id}),
-                    now,
-                )
-                .await?;
-            }
-            unit.wake(thread_id);
-            let _ = thread;
-            (unit.finish().await?, turn)
-        };
-        self.commit(tx, finished).await?;
-        self.drive_interrupt_turn(thread_id, &turn).await?;
-        let mut conn = self.inner.db.acquire().await?;
-        let row = threads::turn(&mut conn, turn_id)
-            .await?
-            .ok_or(InterruptError::NotFound)?;
-        let people = crate::views::People::load(&mut conn, row.interrupted_by).await?;
-        let display = String::new();
-        Ok(crate::views::turn_view(&row, &display, &people)?)
+            .turn
+            .ok_or(InterruptError::NotFound)
     }
 
     /// Sends the interrupt of a turn that was asked to stop, or ends it where
@@ -2998,7 +3210,8 @@ impl Engine {
                     .map_err(orch_db::DbError::from)?;
             if online == Some(true) {
                 let seq = unit.stamp(thread.node_id).await?;
-                threads::offline::clear(unit.conn, turn).await?;
+                let at = unit.now();
+                threads::offline::clear(unit.conn, turn, at, seq).await?;
                 sqlx::query("UPDATE threads SET seq_state=$2 WHERE node_id=$1")
                     .bind(thread.node_id)
                     .bind(seq)
@@ -3045,37 +3258,56 @@ impl Engine {
 
     // Construct each concrete phase inside this factory so reconciliation stores only its boxed interface.
     fn reconciliation_phase<'a, F>(
-        make: impl FnOnce() -> F,
+        &'a self,
+        make: impl FnOnce() -> F + Send + 'a,
     ) -> futures::future::BoxFuture<'a, Result<(), EngineError>>
     where
         F: std::future::Future<Output = Result<(), EngineError>> + Send + 'a,
     {
-        Box::pin(make())
+        Box::pin(async move {
+            if self.is_stopped() {
+                return Ok(());
+            }
+            make().await
+        })
     }
 
     /// Looks at a thread and does what is outstanding for it.
     pub(crate) async fn reconcile(&self, thread_id: Id) -> Result<(), EngineError> {
-        if let Err(error) = Self::reconciliation_phase(|| self.drive_turn_end_work(thread_id)).await
+        if let Err(error) = self
+            .reconciliation_phase(|| self.drive_turn_end_work(thread_id))
+            .await
         {
             // Accounting/notification trouble must not prevent a previously closed
             // lease from being retired on its native keeper. Both remain durable.
-            Self::reconciliation_phase(|| self.drive_lease_closes(thread_id)).await?;
+            self.reconciliation_phase(|| self.drive_lease_closes(thread_id))
+                .await?;
             return Err(error);
         }
-        // The end of the last turn first: the next one waits for it.
-        Self::reconciliation_phase(|| self.drive_end_observation(thread_id)).await?;
+        // Seal the last native observation; complete publication continues independently.
+        self.reconciliation_phase(|| self.drive_end_observation(thread_id))
+            .await?;
         // A configured final outage deadline precedes any further start/delivery work.
-        Self::reconciliation_phase(|| self.drive_offline_deadline(thread_id)).await?;
+        self.reconciliation_phase(|| self.drive_offline_deadline(thread_id))
+            .await?;
         // The goal of the thread, if it has one, counts what the turn used and queues the next turn.
-        Self::reconciliation_phase(|| self.drive_goal(thread_id)).await?;
-        Self::reconciliation_phase(|| self.recheck_waiting(thread_id)).await?;
-        self.drive_preparation(thread_id).await?;
+        self.reconciliation_phase(|| self.drive_goal(thread_id))
+            .await?;
+        self.reconciliation_phase(|| self.recheck_waiting(thread_id))
+            .await?;
+        self.reconciliation_phase(|| self.drive_preparation(thread_id))
+            .await?;
         // A start includes the whole session setup; reconciliation should not hold it inline on the worker stack.
-        Self::reconciliation_phase(|| self.drive_start(thread_id)).await?;
-        Self::reconciliation_phase(|| self.drive_steers(thread_id)).await?;
-        Self::reconciliation_phase(|| self.drive_interrupt(thread_id)).await?;
-        Self::reconciliation_phase(|| self.drive_approvals(thread_id)).await?;
-        Self::reconciliation_phase(|| self.drive_lease_closes(thread_id)).await?;
+        self.reconciliation_phase(|| self.drive_start(thread_id))
+            .await?;
+        self.reconciliation_phase(|| self.drive_steers(thread_id))
+            .await?;
+        self.reconciliation_phase(|| self.drive_interrupt(thread_id))
+            .await?;
+        self.reconciliation_phase(|| self.drive_approvals(thread_id))
+            .await?;
+        self.reconciliation_phase(|| self.drive_lease_closes(thread_id))
+            .await?;
         Ok(())
     }
 
@@ -3094,12 +3326,12 @@ impl Engine {
                     // when nothing waits any more: it is then idle, unless the cause
                     // is the thread's own (its binding, its place) and still there.
                     thread_state::BLOCKED => {
-                        let recovered_source = row.blocked_reason.as_deref() == Some("error")
-                            && row.blocked_detail.as_deref()
-                                == Some(crate::preparation::SOURCE_FAILED)
-                            && crate::source::ready(&row)?;
-                        (row.blocked_reason.as_deref() != Some("error") || recovered_source)
-                            && row.current_turn_id.is_none()
+                        let may_clear = match row.blocked_reason.as_deref() {
+                            Some("error") => false,
+                            Some("source_failed") => crate::source::ready(&row)?,
+                            _ => true,
+                        };
+                        may_clear && row.current_turn_id.is_none()
                     }
                     _ => false,
                 },
@@ -3360,33 +3592,20 @@ pub fn never_began() -> StartFailure {
 }
 
 impl Engine {
-    /// When a turn whose `turn.start` was issued at `issued_at` and answered must have begun: the latest moment
-    /// the command could have been answered, and the wait for `turn.started` after it.
-    fn started_due(
-        &self,
-        issued_at: chrono::DateTime<chrono::Utc>,
-    ) -> chrono::DateTime<chrono::Utc> {
-        let config = &self.inner.config;
-        let wait = config.start_timeout.saturating_add(config.started_wait);
-        issued_at + chrono::Duration::from_std(wait).unwrap_or_else(|_| chrono::Duration::zero())
-    }
-
     /// Whether a turn whose start is due is waited for still, because the system has not taken in all that
     /// the machine of its harness said on its session (C-turns): its `turn.started` may be among it. Under
     /// load a hundred sessions' events were taken in a minute and more after they came, and turns their
     /// harness had begun at once were given up as never begun, their threads blocked. The wait ends all the
-    /// same ten waits for `turn.started` past the due time: a session that far behind is stuck, not busy.
+    /// same after its captured event-ingestion grace: a session that far behind is stuck, not busy.
     fn still_hearing_start(
         &self,
         machine: Id,
         thread_id: Id,
         segment_id: Id,
-        issued_at: chrono::DateTime<chrono::Utc>,
+        captured: &start_wait::Receipt,
         now: chrono::DateTime<chrono::Utc>,
     ) -> bool {
-        let longest = chrono::Duration::from_std(self.inner.config.started_wait.saturating_mul(10))
-            .unwrap_or_else(|_| chrono::Duration::zero());
-        now < self.started_due(issued_at) + longest
+        now < captured.due(orch_api_contract::threads::ThreadStartWaitStage::Events)
             && self.inner.commands.hears_behind(
                 machine,
                 &orch_link_contract::streams::Stream::Session {

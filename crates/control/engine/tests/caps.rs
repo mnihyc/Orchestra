@@ -360,7 +360,7 @@ async fn a_shared_cap_whose_room_is_used_up_blocks_the_thread_says_which_and_a_c
     world.wait_state(thread, "idle").await;
 
     used(&world, thread, Some(world.ada), 1).await;
-    send(&world, world.ada, thread, "Second").await;
+    let queued = send(&world, world.ada, thread, "Second").await;
     world.wait_blocked(thread, "quota_exceeded").await;
     let detail = told(&world, thread).await;
     assert!(
@@ -371,6 +371,22 @@ async fn a_shared_cap_whose_room_is_used_up_blocks_the_thread_says_which_and_a_c
     );
     meanwhile(Wait::from_millis(300)).await;
     assert_eq!(world.turn_starts(thread).len(), 1);
+    world.engine().stop();
+    let observed = serde_json::to_value(world.sync(thread).await.thread.queue).unwrap();
+    assert_eq!(observed["eligibility"]["state"], "selected");
+    assert_eq!(
+        observed["eligibility"]["input_ref"],
+        queued.input.id.to_string()
+    );
+    assert_eq!(
+        observed["eligibility"]["safe_author"]["id"],
+        world.ada.to_string()
+    );
+    assert_eq!(
+        observed["eligibility"]["safe_authority"]["id"],
+        world.ada.to_string()
+    );
+    assert_eq!(observed["eligibility"]["blocking_reason"], "quota_exceeded");
 
     // Raising it takes effect at the next pre-flight.
     sqlx::query("UPDATE usage_caps SET amount = 5000, revision = revision + 1 WHERE id = $1")
@@ -378,6 +394,12 @@ async fn a_shared_cap_whose_room_is_used_up_blocks_the_thread_says_which_and_a_c
         .execute(world.pool.pool())
         .await
         .unwrap();
+    let stale = serde_json::to_value(world.sync(thread).await.thread.queue).unwrap();
+    assert_eq!(
+        stale["eligibility"]["state"], "unreported",
+        "reading never re-runs admission after a cap change"
+    );
+    world.restart_api().await;
     world.engine().room_may_have_been_made();
     let second = world.turn_start(thread, 1).await;
     assert_eq!(common::words_after_where(&second.text), "Second");
@@ -570,6 +592,13 @@ async fn a_persons_own_cap_holds_their_input_while_a_teammates_goes_ahead_and_it
     assert_eq!(
         (state.as_str(), detail.as_deref()),
         ("pending", Some("cap_reached"))
+    );
+    // The initial hold can change admission dependencies; an actual recheck publishes their settled verdict.
+    world.engine().preflight(thread).await.unwrap();
+    let none = serde_json::to_value(world.sync(thread).await.thread.queue).unwrap();
+    assert_eq!(
+        none["eligibility"]["state"], "none",
+        "a held first row is not a forecast of who can run"
     );
 
     // A teammate's input is not stopped by it.
@@ -835,6 +864,74 @@ async fn a_running_turn_is_stopped_when_a_report_of_its_usage_shows_the_cap_reac
     // Nothing is queued again; the next input meets the cap.
     send(&world, world.ada, thread, "Again").await;
     world.wait_blocked(thread, "quota_exceeded").await;
+}
+
+/// The engine notes that it looked at a thread's caps when it looks, inside the transaction of the report, and
+/// acts on a cap that is reached after the grace, by a look of its own at what has been committed. A transaction
+/// that is rolled back and a report that is applied again (a conflict does that) leaves the note without the
+/// report: the look of the first try found the usage of before, the second try finds the thread looked at, and a
+/// turn whose reports end there runs past its cap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_report_applied_again_after_a_rolled_back_try_still_stops_the_turn_its_cap_covers() {
+    let clock = Arc::new(clock::manual());
+    let world = World::with_clock(clock.clone()).await;
+    let check_every = orch_engine::config::EngineConfig::default().cap_check;
+    world.set_config(|config| config.cap_check = check_every);
+    world.restart_api().await;
+    let thread = world.thread("Retried").await;
+    Cap::tokens(1_000).on(world.topic).make(&world).await;
+    let (start, _) = world.running_turn(thread, "Go").await;
+    world.say(thread, reported(start.turn_id, 400)).await;
+    common::eventually("the below-cap usage report to be committed", || async {
+        let reported: Option<i64> = world
+            .scalar(
+                "SELECT (usage->>'total_tokens')::bigint FROM turns WHERE id = $1",
+                start.turn_id,
+            )
+            .await;
+        reported == Some(400)
+    })
+    .await;
+    clock.advance(Duration::from_std(check_every).unwrap());
+    let event = reported(start.turn_id, 1_500);
+    let delivered = orch_link::streams::DeliveredEvent {
+        seq: 1_000,
+        at: orch_types::Time::new(world.clock.now()),
+        kind: event.kind().as_str().to_owned(),
+        body: event.body().unwrap(),
+    };
+    let stream = orch_link_contract::streams::Stream::Session {
+        thread_id: thread,
+        segment_id: world.segment_of(thread).await,
+    };
+    for attempt in 0..2 {
+        let mut tx = world.pool.begin().await.unwrap();
+        world
+            .engine()
+            .apply_stream_events(
+                &mut tx,
+                world.machine_id,
+                &stream,
+                std::slice::from_ref(&delivered),
+            )
+            .await
+            .unwrap();
+        if attempt == 0 {
+            tx.rollback().await.unwrap();
+            // The look at what is committed that the first try asked for has been made by now: it found 400.
+            meanwhile(Wait::from_millis(100)).await;
+        } else {
+            tx.commit().await.unwrap();
+        }
+    }
+    world.wait_turn(start.turn_id, "interrupted").await;
+    let code: String = world
+        .scalar(
+            "SELECT error->>'code' FROM turns WHERE id = $1",
+            start.turn_id,
+        )
+        .await;
+    assert_eq!(code, "cap_reached");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

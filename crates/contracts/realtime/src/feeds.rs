@@ -194,6 +194,8 @@ pub enum Feed {
         /// The resource.
         id: Id,
     },
+    /// The provider facts a visible thread draws, without the provider page's models or configuration.
+    ProviderRow(Id),
 }
 
 impl Feed {
@@ -223,7 +225,8 @@ impl Feed {
             | Self::EnvBrowsers(_)
             | Self::EnvDisplays(_)
             | Self::EnvDir { .. }
-            | Self::Resource { .. } => FeedKind::Ephemeral,
+            | Self::Resource { .. }
+            | Self::ProviderRow(_) => FeedKind::Ephemeral,
         }
     }
 
@@ -305,6 +308,7 @@ impl std::fmt::Display for Feed {
                 write!(f, "env:{environment_id}:dir:{}", PATH_CODING.encode(path))
             }
             Self::Resource { kind, id } => write!(f, "resource:{}:{id}", kind.as_str()),
+            Self::ProviderRow(id) => write!(f, "provider-row:{id}"),
         }
     }
 }
@@ -420,6 +424,7 @@ impl std::str::FromStr for Feed {
                     Some(_) => return Err(bad()),
                 }
             }
+            "provider-row" => Self::ProviderRow(id(parts.next())?),
             "resource" => {
                 let kind = parts.next().and_then(ResourceKind::parse).ok_or_else(bad)?;
                 Self::Resource {
@@ -469,6 +474,12 @@ impl JsonSchema for Feed {
 /// only when rows of its kind changed.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ThreadData {
+    /// Cancelled authored inputs entering the conversation, under the same current read projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_inputs: Option<Vec<orch_api_contract::threads::RetainedInput>>,
+    /// Continuations for retained groups that exceed this cut's response allowance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_inputs_next: Option<Vec<orch_api_contract::threads::RetainedInputContinuation>>,
     /// Exact read projection; a different follow-active scope requires replacement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection: Option<orch_api_contract::threads::ThreadContinuationProjection>,
@@ -820,6 +831,16 @@ pub enum ResourceEvent {
     },
 }
 
+/// Current authorized first-paint facts, never a full provider-page DTO.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "what", rename_all = "snake_case")]
+pub enum ProviderRowEvent {
+    Changed {
+        /// None withdraws the old facts after their native View authority is lost.
+        provider: Option<Box<orch_api_contract::settings::ThreadProvider>>,
+    },
+}
+
 const fn view_not_revoked(value: &bool) -> bool {
     !*value
 }
@@ -851,6 +872,9 @@ pub struct DirectoryWatchError {
 /// What changed among the direct children of a watched directory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DirData {
+    /// Captured native source facts, not reconstructed by the reader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<orch_api_contract::workspace::FileSourceFacts>,
     /// A failed activation is not an empty successful directory or an offline machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<DirectoryWatchError>,
@@ -997,6 +1021,8 @@ pub struct RawData {
 /// What an `event` frame carries, by the feed it is of.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventData {
+    /// Accepted Stop state advances independently of the ordinary thread cursor.
+    ThreadStopping(orch_api_contract::threads::ThreadStopping),
     /// Current person-authorized document-directory or entry metadata.
     DocumentTree(crate::document_tree::DocumentTreeData),
     /// A job's current visible progress/result.
@@ -1033,6 +1059,7 @@ pub enum EventData {
     Background(orch_api_contract::background::ThreadBackground),
     /// Of a resource's.
     Resource(ResourceEvent),
+    ProviderRow(ProviderRowEvent),
 }
 
 impl EventData {
@@ -1051,6 +1078,7 @@ impl EventData {
             Feed::Usage(scope) if scope.ends_with(":health") => read(data).map(Self::UsageHealth),
             Feed::Usage(_) => read(data).map(Self::Usage),
             Feed::User => read(data).map(Self::User),
+            Feed::Thread(_) => read(data).map(Self::ThreadStopping),
             Feed::Chat(_) | Feed::Doc(_) => read(data).map(Self::Typing),
             Feed::EnvStats(_) => read(data).map(Self::Stats),
             Feed::EnvProcs(_) => read(data).map(Self::Procs),
@@ -1063,7 +1091,8 @@ impl EventData {
             Feed::ThreadRaw(_) => read(data).map(Self::Raw),
             Feed::ThreadBackground(_) => read(data).map(Self::Background),
             Feed::Resource { .. } => read(data).map(Self::Resource),
-            Feed::Thread(_) | Feed::Topic(_) | Feed::Org(_) | Feed::Env(_) => {
+            Feed::ProviderRow(_) => read(data).map(Self::ProviderRow),
+            Feed::Topic(_) | Feed::Org(_) | Feed::Env(_) => {
                 Err(DataError::NotCarried(feed.to_string()))
             }
         }
@@ -1072,6 +1101,7 @@ impl EventData {
     /// The data as the JSON object an `event` frame carries.
     pub fn to_object(&self) -> Result<Map<String, Json>, DataError> {
         match self {
+            Self::ThreadStopping(data) => object_of(data),
             Self::DocumentTree(data) => object_of(data),
             Self::Job(data) => object_of(data),
             Self::Fork(data) => object_of(data),
@@ -1090,6 +1120,7 @@ impl EventData {
             Self::Raw(data) => object_of(data),
             Self::Background(data) => object_of(data),
             Self::Resource(data) => object_of(data),
+            Self::ProviderRow(data) => object_of(data),
         }
     }
 }
@@ -1272,6 +1303,7 @@ mod tests {
             (Feed::ThreadGit(id()), format!("thread:{A}:git")),
             (Feed::Job(id()), format!("job:{A}")),
             (Feed::Fork(id()), format!("fork:{A}")),
+            (Feed::ProviderRow(id()), format!("provider-row:{A}")),
             (Feed::Topic(id()), format!("topic:{A}")),
             (Feed::Org(id()), format!("org:{A}")),
             (Feed::User, "user".to_owned()),
@@ -1875,6 +1907,20 @@ mod tests {
     }
 
     #[test]
+    fn a_provider_row_withdraws_only_its_authorized_first_screen_facts() {
+        let feed = Feed::ProviderRow(id());
+        assert_eq!(feed.kind(), FeedKind::Ephemeral);
+        let data = json!({"what":"changed","provider":null});
+        let read = EventData::decode(&feed, data.clone()).unwrap();
+        assert!(matches!(
+            &read,
+            EventData::ProviderRow(ProviderRowEvent::Changed { provider: None })
+        ));
+        assert_eq!(Json::Object(read.to_object().unwrap()), data);
+        assert!(EventData::decode(&feed, json!({"what":"login","state":{}})).is_err());
+    }
+
+    #[test]
     fn a_resource_says_that_it_changed_and_a_provider_how_its_sign_in_goes() {
         let events = [
             json!({ "what": "changed" }),
@@ -1894,8 +1940,17 @@ mod tests {
         }
         assert!(matches!(
             EventData::decode(&Feed::Thread(id()), json!({})),
-            Err(DataError::NotCarried(_))
+            Err(DataError::Shape(_))
         ));
+    }
+
+    #[test]
+    fn accepted_stopping_reaches_a_thread_without_an_ordinary_sequence_change() {
+        let value =
+            json!({"version":1,"requested_at":AT,"pending":true,"thread_seq":42,"state_seq":40});
+        let read = EventData::decode(&Feed::Thread(id()), value.clone()).unwrap();
+        assert!(matches!(read, EventData::ThreadStopping(_)));
+        assert_eq!(Json::Object(read.to_object().unwrap()), value);
     }
 
     #[test]

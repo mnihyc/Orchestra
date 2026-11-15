@@ -7,6 +7,7 @@
  * number returned by the same authorized HTTP sync. A reconnect resumes that number; only a
  * server-declared unrepairable gap reads that one environment's sync again.
  */
+import { READ_NOW } from '@/api/freshness';
 import { type QueryClient, useQueryClient } from '@tanstack/react-query';
 import { useEffect } from 'react';
 
@@ -49,7 +50,7 @@ export function useEnvironmentFeed(environmentId: string | null): void {
           // Only a server-declared gap needs an exact snapshot. Ordinary reconnects replay the cursor.
           if (repairing) return;
           repairing = true;
-          void client.query({ ...environmentQuery(environmentId), staleTime: 0 }).then(() => {
+          void client.query({ ...environmentQuery(environmentId), ...READ_NOW }).then(() => {
             if (!active) return;
             subscription?.unsubscribe(); subscription = follow();
           }, () => undefined).finally(() => { repairing = false; });
