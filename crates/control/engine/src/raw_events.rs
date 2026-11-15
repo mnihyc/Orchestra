@@ -16,8 +16,8 @@
 //! write them (`{ "name": "X_TOKEN", "value": "…" }`), and for `X_TOKEN=…` in a text, as a command
 //! line or a list of variables writes it. A frame whose secrets
 //! cannot be opened (the key that opens them is not installed, or they do not open) is dropped,
-//! never written unmasked. A frame larger than [`FRAME_MAX_BYTES`] is kept as a note of its size
-//! and its start, and a segment keeps at most [`SEGMENT_MAX_FRAMES`] of them.
+//! never written unmasked. The resolved frame allowance decides when a size note and prefix are
+//! kept instead; each native session keeps its configured newest captured frames.
 //!
 //! What is listed is masked once more with what is known when it is listed: a secret that was put
 //! in after a frame was kept does not show in it. Where the secrets cannot be opened then, the
@@ -28,32 +28,33 @@
 
 use crate::error::EngineError;
 use chrono::{DateTime, Utc};
-use orch_api_contract::threads::{RawDirection, RawEvent};
+use orch_api_contract::settings::{SettingScope, SettingSource};
+use orch_api_contract::threads::{
+    RawCaptureLimits, RawCaptureOmissionCause, RawDirection, RawEvent, RawRetention,
+};
 use orch_chat::redaction::{Pattern, Redactor};
 use orch_db::Conn;
-use orch_db::queries::raw_events::{self as rows, FROM_HARNESS, NewRawEvent, TO_HARNESS};
+use orch_db::queries::raw_events::{
+    self as rows, CaptureObservation, FROM_HARNESS, NewRawEvent, TO_HARNESS,
+};
 use orch_db::queries::threads::ThreadRow;
 use orch_db::secrets::MasterKey;
 use orch_link_contract::events::RawFrame;
 use orch_settings::secrets::{self, Owner};
-use orch_settings::{Place, get as setting};
-use orch_settings_contract::registry::keys;
+use orch_settings::{Place, Snapshot, Wanted, get as setting};
+use orch_settings_contract::provenance::SourceScope;
+use orch_settings_contract::registry::{self, keys};
 use orch_types::{Id, Json, Time};
 use std::sync::OnceLock;
 
-/// The most bytes of text of one frame that are kept whole: a frame can carry a file, and a
-/// diagnostic is for reading what was asked and answered, not for keeping what was sent. A page of
-/// the list holds up to [`PAGE_MAX`] frames, so this is also what keeps a reply to a size that a
-/// client can take (500 frames of this size are 32 MiB at the very worst; the link carries no
-/// event larger than 256 KiB, so a larger frame never arrives to be kept).
-pub const FRAME_MAX_BYTES: usize = 64 * 1024;
+/// Shipped complete-frame threshold; the system's diagnostic setting supplies the actual value.
+pub const DEFAULT_FRAME_BYTES: usize = 64 * 1024;
 
-/// How much of the start of a frame that was too large is kept, so that it can still be told what it was.
-pub const FRAME_HEAD_BYTES: usize = 4 * 1024;
+/// Shipped prefix allowance for a size note; the actual allowance is resolved with the capture.
+pub const DEFAULT_FRAME_HEAD_BYTES: usize = 4 * 1024;
 
-/// The most frames one segment keeps, newest first, so a harness that talks without end cannot
-/// fill the table for the days of its retention and recent faults remain visible.
-pub const SEGMENT_MAX_FRAMES: i64 = 20_000;
+/// Shipped newest-frame allowance; each capture uses the resolved system setting.
+pub const DEFAULT_FRAMES_PER_SEGMENT: i64 = 20_000;
 
 /// How long frames are kept where the setting says nothing: the shipped figure.
 pub const DEFAULT_RETENTION_DAYS: i64 = 14;
@@ -100,7 +101,7 @@ pub fn install_master_key(key: MasterKey) -> bool {
     MASTER_KEY.set(key).is_ok()
 }
 
-fn master_key() -> Result<&'static MasterKey, String> {
+pub(crate) fn master_key() -> Result<&'static MasterKey, String> {
     MASTER_KEY
         .get()
         .ok_or_else(|| "the key that opens secrets is not installed".to_owned())
@@ -122,8 +123,104 @@ pub struct Keeper {
     segment: Id,
     topic: Id,
     environment: Option<Id>,
-    retention_days: Option<i64>,
+    policy: Option<CapturePolicy>,
     masking: Option<Masking>,
+}
+
+#[derive(Debug)]
+struct CapturePolicy {
+    days: i64,
+    limits: RawCaptureLimits,
+}
+
+fn capture_source(scope: SourceScope) -> Result<SettingSource, EngineError> {
+    let scope = match scope {
+        SourceScope::Default => SettingScope::Default,
+        SourceScope::System => SettingScope::System,
+        _ => {
+            return Err(EngineError::unreadable(
+                "a system capture setting has a different source scope",
+            ));
+        }
+    };
+    Ok(SettingSource { scope, node: None })
+}
+
+async fn capture_policy(
+    conn: &mut Conn,
+    n: i64,
+    at: DateTime<Utc>,
+) -> Result<CapturePolicy, EngineError> {
+    let defs = [
+        keys::DIAGNOSTICS_RETENTION_DAYS,
+        keys::DIAGNOSTICS_FRAME_BYTES,
+        keys::DIAGNOSTICS_FRAME_HEAD_BYTES,
+        keys::DIAGNOSTICS_FRAMES_PER_SEGMENT,
+    ]
+    .into_iter()
+    .map(|key| {
+        registry::get(key)
+            .ok_or_else(|| EngineError::unreadable("a capture setting is not registered"))
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    let snapshot = Snapshot::load(conn, Place::System, Wanted::Keys(&defs))
+        .await
+        .map_err(|error| EngineError::unreadable(error.to_string()))?;
+    let resolve = |index: usize| -> Result<(i64, SettingSource), EngineError> {
+        let value = snapshot.resolve(defs[index]);
+        let number = value
+            .value
+            .as_ref()
+            .and_then(Json::as_i64)
+            .ok_or_else(|| EngineError::unreadable("a capture setting has no numeric value"))?;
+        Ok((number, capture_source(value.source.scope)?))
+    };
+    let (days, _) = resolve(0)?;
+    let (frame_bytes, frame_source) = resolve(1)?;
+    let (head_bytes, head_source) = resolve(2)?;
+    let (frames_per_segment, frames_source) = resolve(3)?;
+    Ok(CapturePolicy {
+        days,
+        limits: RawCaptureLimits {
+            native_n: n,
+            captured_at: Time::new(at),
+            frame_bytes,
+            head_bytes,
+            frames_per_segment,
+            frame_source,
+            head_source,
+            frames_source,
+        },
+    })
+}
+
+async fn omit_frame(
+    conn: &mut Conn,
+    segment: Id,
+    frame: &RawFrame,
+    at: DateTime<Utc>,
+    limits: RawCaptureLimits,
+    cause: RawCaptureOmissionCause,
+) -> Result<(), EngineError> {
+    rows::append(
+        conn,
+        &NewRawEvent {
+            segment,
+            n: frame.n,
+            at,
+            direction: direction_of(&frame.direction).0,
+            payload: &[],
+            at_most: limits.frames_per_segment,
+            capture: Some(CaptureObservation {
+                limits,
+                omitted: Some(cause),
+                oversized: false,
+                truncated: false,
+            }),
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 impl Keeper {
@@ -136,7 +233,7 @@ impl Keeper {
             segment,
             topic: row.topic_id,
             environment: row.environment_id,
-            retention_days: None,
+            policy: None,
             masking: None,
         }
     }
@@ -157,25 +254,48 @@ impl Keeper {
         frame: &RawFrame,
         at: DateTime<Utc>,
     ) -> Result<(), EngineError> {
-        let days = match self.retention_days {
-            Some(days) => days,
-            None => {
-                let days = setting::<i64>(conn, Place::System, keys::DIAGNOSTICS_RETENTION_DAYS)
-                    .await
-                    .map_err(|error| EngineError::unreadable(error.to_string()))?
-                    .unwrap_or(DEFAULT_RETENTION_DAYS);
-                self.retention_days = Some(days);
-                days
-            }
-        };
-        if days <= 0 {
+        if self.policy.is_none() {
+            self.policy = Some(capture_policy(conn, frame.n, at).await?);
+        }
+        let policy = self
+            .policy
+            .as_ref()
+            .ok_or_else(|| EngineError::unreadable("the capture policy was not resolved"))?;
+        let days = policy.days;
+        let mut limits = policy.limits.clone();
+        limits.native_n = frame.n;
+        limits.captured_at = Time::new(at);
+        if days <= 0 || limits.frames_per_segment == 0 {
+            omit_frame(
+                conn,
+                self.segment,
+                frame,
+                at,
+                limits,
+                RawCaptureOmissionCause::CaptureOff,
+            )
+            .await?;
             return Ok(());
         }
         let Masking::Ready(redactor) = self.masking(conn).await? else {
             tracing::warn!(thread = %self.thread, "a frame of a harness was dropped: what masks it could not be made");
+            omit_frame(
+                conn,
+                self.segment,
+                frame,
+                at,
+                limits,
+                RawCaptureOmissionCause::MaskingUnavailable,
+            )
+            .await?;
             return Ok(());
         };
-        let (direction, payload) = packed(frame, redactor);
+        let (direction, payload, oversized, truncated) = packed(
+            frame,
+            redactor,
+            usize::try_from(limits.frame_bytes).unwrap_or(usize::MAX),
+            usize::try_from(limits.head_bytes).unwrap_or(usize::MAX),
+        );
         rows::append(
             conn,
             &NewRawEvent {
@@ -184,7 +304,13 @@ impl Keeper {
                 at,
                 direction,
                 payload: &payload,
-                at_most: SEGMENT_MAX_FRAMES,
+                at_most: limits.frames_per_segment,
+                capture: Some(CaptureObservation {
+                    limits,
+                    omitted: None,
+                    oversized,
+                    truncated,
+                }),
             },
         )
         .await?;
@@ -416,7 +542,7 @@ fn is_secret_pair(members: &serde_json::Map<String, Json>) -> bool {
 /// Masks every text of a JSON value, every name of a member, the value of every member that is
 /// named like a secret, the value of a pair whose name says it is one, and the value of every
 /// `NAME=value` in a text whose name says so.
-fn mask_value(value: &mut Json, redactor: &Redactor) {
+pub(crate) fn mask_value(value: &mut Json, redactor: &Redactor) {
     match value {
         Json::String(text) => *text = mask_assignments(&redactor.mask(text)),
         Json::Array(items) => {
@@ -484,7 +610,12 @@ fn head_of(text: &str, bytes: usize) -> &str {
 }
 
 /// A frame as it is stored: its direction and the compressed text of its masked JSON.
-fn packed(frame: &RawFrame, redactor: &Redactor) -> (&'static str, Vec<u8>) {
+fn packed(
+    frame: &RawFrame,
+    redactor: &Redactor,
+    frame_bytes: usize,
+    head_bytes: usize,
+) -> (&'static str, Vec<u8>, bool, bool) {
     let (direction, foreign) = direction_of(&frame.direction);
     let mut payload = frame.payload.clone();
     mask_value(&mut payload, redactor);
@@ -495,18 +626,20 @@ fn packed(frame: &RawFrame, redactor: &Redactor) -> (&'static str, Vec<u8>) {
         });
     }
     let mut text = payload.to_string();
-    if text.len() > FRAME_MAX_BYTES {
+    let oversized = text.len() > frame_bytes;
+    let truncated = oversized && head_of(&text, head_bytes).len() < text.len();
+    if oversized {
         text = serde_json::json!({
-            "truncated": true,
+            "truncated": truncated,
             "bytes": text.len(),
-            "head": head_of(&text, FRAME_HEAD_BYTES),
+            "head": head_of(&text, head_bytes),
         })
         .to_string();
     }
     // Compressing text in memory does not fail; a frame that would not compress is kept as it is.
     let compressed = zstd::encode_all(text.as_bytes(), COMPRESSION_LEVEL)
         .unwrap_or_else(|_| text.clone().into_bytes());
-    (direction, compressed)
+    (direction, compressed, oversized, truncated)
 }
 
 /// The JSON a stored frame holds.
@@ -565,6 +698,26 @@ pub async fn page(
         });
     }
     Ok(RawPage { events, has_older })
+}
+
+/// Current policy is read separately from captured decisions and never rewrites their limits or causes.
+pub async fn retention(conn: &mut Conn, at: DateTime<Utc>) -> Result<RawRetention, EngineError> {
+    let def = registry::get(keys::DIAGNOSTICS_RETENTION_DAYS)
+        .ok_or_else(|| EngineError::unreadable("diagnostic retention is not registered"))?;
+    let snapshot = Snapshot::load(conn, Place::System, Wanted::Keys(&[def]))
+        .await
+        .map_err(|error| EngineError::unreadable(error.to_string()))?;
+    let value = snapshot.resolve(def);
+    let days = value
+        .value
+        .as_ref()
+        .and_then(Json::as_i64)
+        .ok_or_else(|| EngineError::unreadable("diagnostic retention has no numeric value"))?;
+    Ok(RawRetention {
+        days,
+        source: capture_source(value.source.scope)?,
+        measured_at: Time::new(at),
+    })
 }
 
 #[cfg(test)]
@@ -684,14 +837,17 @@ mod tests {
         assert_eq!(direction_of("In"), (FROM_HARNESS, false));
         assert_eq!(direction_of("to_harness"), (TO_HARNESS, false));
         assert_eq!(direction_of("connector"), (FROM_HARNESS, true));
-        let (direction, bytes) = packed(
+        let (direction, bytes, oversized, _) = packed(
             &RawFrame {
                 n: 1,
                 direction: "connector".to_owned(),
                 payload: json!({ "policy": "x" }),
             },
             &Redactor::none(),
+            DEFAULT_FRAME_BYTES,
+            DEFAULT_FRAME_HEAD_BYTES,
         );
+        assert!(!oversized);
         assert_eq!(direction, FROM_HARNESS);
         assert_eq!(
             unpacked(&bytes).unwrap(),
@@ -701,33 +857,65 @@ mod tests {
 
     #[test]
     fn a_frame_larger_than_may_be_kept_is_kept_as_a_note_of_its_size_and_start() {
-        let big = "é".repeat(FRAME_MAX_BYTES);
-        let (_, bytes) = packed(
+        let big = "é".repeat(DEFAULT_FRAME_BYTES);
+        let (_, bytes, oversized, _) = packed(
             &RawFrame {
                 n: 1,
                 direction: "out".to_owned(),
                 payload: json!({ "file": big }),
             },
             &Redactor::none(),
+            DEFAULT_FRAME_BYTES,
+            DEFAULT_FRAME_HEAD_BYTES,
         );
+        assert!(oversized);
         let kept = unpacked(&bytes).unwrap();
         assert_eq!(kept["truncated"], true);
-        assert!(kept["bytes"].as_u64().unwrap() > FRAME_MAX_BYTES as u64);
+        assert!(kept["bytes"].as_u64().unwrap() > DEFAULT_FRAME_BYTES as u64);
         let head = kept["head"].as_str().unwrap();
-        assert!(head.len() <= FRAME_HEAD_BYTES && head.starts_with("{\"file\":\"é"));
+        assert!(head.len() <= DEFAULT_FRAME_HEAD_BYTES && head.starts_with("{\"file\":\"é"));
     }
 
     #[test]
     fn what_is_packed_is_unpacked_to_the_same_json() {
         let payload = json!({ "a": [1, 2, { "b": null }], "c": "text" });
-        let (_, bytes) = packed(
+        let (_, bytes, oversized, _) = packed(
             &RawFrame {
                 n: 1,
                 direction: "in".to_owned(),
                 payload: payload.clone(),
             },
             &Redactor::none(),
+            DEFAULT_FRAME_BYTES,
+            DEFAULT_FRAME_HEAD_BYTES,
         );
+        assert!(!oversized);
         assert_eq!(unpacked(&bytes).unwrap(), payload);
+    }
+
+    #[test]
+    fn capture_uses_the_resolved_allowance_and_never_guesses_oversize_from_native_payload_words() {
+        let frame = RawFrame {
+            n: 1,
+            direction: "in".to_owned(),
+            payload: json!({"truncated":true,"head":"ordinary native fields","text":"x".repeat(DEFAULT_FRAME_BYTES + 1)}),
+        };
+        let (_, bytes, oversized, shortened) = packed(
+            &frame,
+            &Redactor::none(),
+            DEFAULT_FRAME_BYTES * 2,
+            DEFAULT_FRAME_HEAD_BYTES,
+        );
+        assert!(!oversized);
+        assert!(!shortened);
+        assert_eq!(unpacked(&bytes).unwrap(), frame.payload);
+        let (_, bytes, oversized, shortened) = packed(&frame, &Redactor::none(), 0, 0);
+        assert!(oversized);
+        assert!(shortened);
+        assert_eq!(unpacked(&bytes).unwrap()["head"], "");
+        let (_, bytes, oversized, shortened) = packed(&frame, &Redactor::none(), 1, usize::MAX);
+        assert!(oversized);
+        assert!(!shortened);
+        assert_eq!(unpacked(&bytes).unwrap()["truncated"], false);
     }
 }
