@@ -10,7 +10,7 @@ import { snapshot } from '../unit/continuation-fixtures';
 import { executionDisplay } from '../doubles/thread-display';
 import { show } from './support';
 
-vi.mock('@/features/change/target', () => ({ openChange: vi.fn() }));
+vi.mock('@/features/change/target', async (loadOriginal) => ({ ...await loadOriginal<object>(), openChange: vi.fn() }));
 afterEach(async () => { cleanup(); useAppearance.setState({ locale: 'en' }); await setLocale('en'); });
 const turn = '00000000-0000-0000-0000-000000000201';
 const since = '2026-11-08T00:00:00Z';
@@ -44,4 +44,14 @@ it('describes an unrepresentable calendar deadline without imposing a UI policy 
   const context = { locale: 'en', timeZone: useAppearance.getState().timeZone };
   show(<BlockedBanner thread={native} onProceed={vi.fn()} />);
   expect(screen.getByText(i18n.t('thread.blocked.offlineDeadlineBeyondCalendar', { since: formatDateTime(since, context) }))).toBeVisible();
+});
+
+it.each(['en', 'zh-CN'] as const)('says queued work waits for native end confirmation after a forced Stop in %s', async (locale) => {
+  await setLocale(locale);
+  const native: Thread = { ...thread(), current_turn_id: null, pending_inputs: 1,
+    blocked: { reason: 'error', sandbox: null, detail: "native_turn_still_running: the native turn's end is not known; fresh work waits for its actual completion" } };
+  const view = show(<BlockedBanner thread={native} onProceed={vi.fn()} />);
+  expect(screen.getByText(locale === 'en' ? 'Native turn end unconfirmed · queued work waits' : '原生轮次尚未确认结束 · 排队消息继续等待')).toBeVisible();
+  expect(view.container.querySelector('[data-blocked]')).not.toHaveTextContent('native_turn_still_running');
+  expect(view.container.querySelector('[data-blocked]')).not.toHaveTextContent(i18n.t('thread.blocked.error', { detail: '' }));
 });
