@@ -761,7 +761,7 @@ pub(crate) async fn show_inventory_prepared(
                 row.machine_id
                     .and_then(|machine| connector_versions.get(&machine))
                     .map(String::as_str),
-                orch_engine::updates::CONNECTOR_MINIMUM,
+                ctx.app.link.connector_minimum(),
             ),
             remote_write: switches.remote_write,
             terminal: switches.terminal,

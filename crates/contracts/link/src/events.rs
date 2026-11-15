@@ -102,6 +102,8 @@ macro_rules! event_kinds {
 }
 
 event_kinds! {
+    /// Current output storage health, which must pass even when the authoritative spool is full.
+    SpoolStatus = "spool.status", Ephemeral, [Machine];
     /// A session is open in its harness.
     SessionOpened = "session.opened", Durable, [Session];
     /// Instruction source metadata refreshed by the harness, without a model request.
@@ -375,6 +377,8 @@ payloads! {
     /// A measurement that is worthless when it is late: its kind with
     /// its body.
     Report {
+        /// Authoritative output storage health, independent of its durable event queue.
+        SpoolStatus(orch_api_contract::resources::SpoolStatus) = "spool.status";
         /// What an environment used at one moment.
         StatsSample(foreign::ResourceSample) = "stats.sample";
         /// The processes of an environment at one moment.
@@ -447,6 +451,7 @@ impl Eph {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOpened {
     /// The harness's own name for the conversation.
+    #[schemars(extend("x-native-reference" = true))]
     pub native_session_ref: String,
     /// Whether it is a conversation the harness already held.
     pub resumed: bool,
@@ -462,6 +467,8 @@ pub struct SessionTitle {
 /// The body of `session.lost`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionLost {
+    /// The native outcome is unavailable, rather than confirmed lost. Preserve admitted work without retry.
+    pub uncertain: bool,
     /// Why.
     pub reason: String,
 }
@@ -472,6 +479,7 @@ pub struct TurnStarted {
     /// The turn.
     pub turn_id: Id,
     /// The harness's own name for it; `null` where it has none.
+    #[schemars(extend("x-native-reference" = true))]
     pub native_turn_ref: Option<String>,
 }
 
@@ -598,8 +606,7 @@ pub struct ItemCompleted {
     pub status: foreign::ItemStatus,
     /// What it holds for good.
     pub payload: foreign::ItemPayload,
-    /// The whole output of a command, where it is too long for the
-    /// payload.
+    /// Retained command output bytes; the payload declares their original interval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_blob: Option<BlobRef>,
 }
@@ -621,6 +628,7 @@ pub struct ApprovalRequested {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ApprovalClosed {
     /// The request the harness withdrew.
+    #[schemars(extend("x-native-reference" = true))]
     pub request_ref: String,
 }
 
@@ -860,6 +868,12 @@ pub struct CredentialNeeded {
 /// The body of `raw.frame`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RawFrame {
+    /// Incremental text continuity declared by the native protocol adapter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub text: Vec<orch_agent_contract::events::NativeTraceText>,
+    /// Whether the remaining text is complete, rather than an unclassified fragment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub text_complete: bool,
     /// The positive number assigned to this captured frame in its segment, unchanged on replay.
     #[serde(default)]
     pub n: i64,
@@ -1536,7 +1550,7 @@ mod tests {
         event("session.title", json!({ "title": "Fix the login" }));
         event(
             "session.lost",
-            json!({ "reason": "the harness was restarted" }),
+            json!({ "uncertain":false, "reason": "the harness was restarted" }),
         );
         event(
             "turn.started",

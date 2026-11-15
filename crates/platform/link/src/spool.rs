@@ -13,7 +13,7 @@
 //! one held. What it does keep, as a small mark, is how far numbering has
 //! got, so that a machine that starts again knows which of its events the
 //! system may already have seen. Events that were spooled and not yet sent
-//! have no number, and so can be dropped without leaving a hole.
+//! have no number yet, but remain authoritative and are retained until acknowledged.
 //!
 //! Raw frames have a separate segment number in their body, assigned before append. Its durable
 //! allocator is outside the segment files, so overflow, expiration and ACK never reuse a number.
@@ -22,17 +22,15 @@
 //! the stream only when nothing else waits anywhere, so that they never
 //! stand in front of an event that matters.
 //!
-//! **A full spool** frees space in this order and never otherwise: all
-//! diagnostics; then the item deltas that were spooled but not yet sent and
-//! whose item is completed in the same spool, because the completed item
-//! holds all of their text; then the oldest events of the fullest stream,
-//! and the system is told with a reset that they are gone. Events older than
-//! the age limit go the same way as the last.
+//! **Authoritative events wait for acknowledgement.** Neither age nor pressure discards them,
+//! including unsent deltas and their completed items. The configured byte/age allowances shed
+//! only waiting diagnostics. Their capture allocator survives shedding, so the next frame's
+//! original number exposes the gap; each discarded diagnostic is counted explicitly.
 //!
 //! The spool is plain, blocking file work and is owned by one task.
 
-use orch_link_contract::streams::{ResetReason, is_diagnostic};
-use orch_types::{Json, Seq, Time};
+use orch_link_contract::streams::is_diagnostic;
+use orch_types::{Id, Json, Seq, Time, new_id};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -61,9 +59,6 @@ const CURSOR_PAYLOAD_BYTES: usize = 1 + 8;
 /// The bytes of an event record before its kind: the type, the moment, and
 /// the length of the kind.
 const EVENT_FIXED_BYTES: usize = 1 + 8 + 2;
-/// The largest record the spool will read back, so that a damaged length
-/// cannot make it allocate the memory of the machine.
-const MAX_RECORD_BYTES: u32 = 64 * 1024 * 1024;
 /// Milliseconds in a second.
 const SECOND_MILLIS: i64 = 1_000;
 /// What a stream's directory name is followed by for its diagnostics.
@@ -83,11 +78,6 @@ const PROMOTION_STAGING_FILE: &str = "PROMOTION.new";
 const RAW_CURSORS_FILE: &str = "RAW_CURSORS";
 /// Publish a new allocator atomically after its contents have reached disk.
 const RAW_CURSORS_STAGING_FILE: &str = "RAW_CURSORS.new";
-/// The kind of event whose text grows.
-const DELTA_KIND: &str = "item.delta";
-/// The kind of event that completes an item.
-const COMPLETED_KIND: &str = "item.completed";
-
 /// Why the spool could not do what it was asked.
 #[derive(Debug, thiserror::Error)]
 pub enum SpoolError {
@@ -100,12 +90,12 @@ pub enum SpoolError {
         #[source]
         source: std::io::Error,
     },
-    /// A single event is larger than the spool may hold.
-    #[error("an event of {bytes} bytes does not fit a spool of {max}")]
+    /// The record cannot be represented by its 32-bit stored length/index.
+    #[error("a spool record of {bytes} bytes exceeds its representation of {max} bytes")]
     TooLarge {
         /// Its size.
         bytes: u64,
-        /// The spool's limit.
+        /// The record representation's limit.
         max: u64,
     },
     /// The events asked for are not held.
@@ -128,9 +118,9 @@ fn io_error(path: &Path) -> impl FnOnce(std::io::Error) -> SpoolError + '_ {
 /// The limits of a spool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpoolOptions {
-    /// The most bytes it holds in all.
+    /// Waiting diagnostics give way above this allowance; authoritative events are retained.
     pub max_bytes: u64,
-    /// The oldest event it keeps.
+    /// Waiting diagnostics expire at this age; authoritative events wait for acknowledgement.
     pub max_age: Duration,
     /// The size of one segment file.
     pub segment_bytes: u64,
@@ -167,14 +157,6 @@ pub struct Numbered {
     pub event: SpoolEvent,
 }
 
-/// Which events of a kind relieve a full spool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Class {
-    Delta,
-    Completed,
-    Other,
-}
-
 /// Where an event lies, and what is needed to decide about it without
 /// reading it.
 #[derive(Debug, Clone)]
@@ -183,9 +165,6 @@ struct Entry {
     offset: u64,
     record_bytes: u32,
     at_millis: i64,
-    class: Class,
-    /// The item an event is about, for deltas and completions.
-    item: Option<Box<str>>,
 }
 
 #[derive(Debug)]
@@ -204,6 +183,9 @@ struct Log {
     /// The number the first held event has, when events have numbers.
     base: Seq,
     dirty: bool,
+    revision: Id,
+    /// A failed record must be cut back before another record can follow it.
+    rollback: Option<u64>,
     segment_bytes: u64,
 }
 
@@ -258,19 +240,6 @@ fn frame_record(payload: &[u8]) -> Vec<u8> {
     record
 }
 
-fn classify(event: &SpoolEvent) -> (Class, Option<Box<str>>) {
-    let class = match event.kind.as_str() {
-        DELTA_KIND => Class::Delta,
-        COMPLETED_KIND => Class::Completed,
-        _ => Class::Other,
-    };
-    let item = (class != Class::Other)
-        .then(|| event.body.get("native_ref").and_then(Json::as_str))
-        .flatten()
-        .map(Box::from);
-    (class, item)
-}
-
 /// What reading a segment found.
 struct Scanned {
     first_seq: Seq,
@@ -306,9 +275,7 @@ fn scan_segment(path: &Path, id: u64) -> Result<Option<Scanned>, SpoolError> {
             break;
         }
         let payload_len = u32::from_le_bytes(head[..4].try_into().unwrap_or([0; 4]));
-        if payload_len > MAX_RECORD_BYTES
-            || at + RECORD_HEAD_BYTES as u64 + u64::from(payload_len) > length
-        {
+        if at + RECORD_HEAD_BYTES as u64 + u64::from(payload_len) > length {
             damaged = true;
             break;
         }
@@ -317,7 +284,10 @@ fn scan_segment(path: &Path, id: u64) -> Result<Option<Scanned>, SpoolError> {
             damaged = true;
             break;
         }
-        let record_bytes = RECORD_HEAD_BYTES as u32 + payload_len;
+        let Some(record_bytes) = payload_len.checked_add(RECORD_HEAD_BYTES as u32) else {
+            damaged = true;
+            break;
+        };
         match payload.first() {
             Some(&RECORD_EVENT) => {
                 let Some(event) = decode_event(&payload) else {
@@ -328,14 +298,11 @@ fn scan_segment(path: &Path, id: u64) -> Result<Option<Scanned>, SpoolError> {
                     raw_last_n =
                         raw_last_n.max(event.body.get("n").and_then(Json::as_i64).unwrap_or(0));
                 }
-                let (class, item) = classify(&event);
                 entries.push(Entry {
                     segment: id,
                     offset: at,
                     record_bytes,
                     at_millis: event.at.unix_millis(),
-                    class,
-                    item,
                 });
             }
             Some(&RECORD_SENT) if payload.len() == CURSOR_PAYLOAD_BYTES => {
@@ -375,6 +342,8 @@ impl Log {
             entries: VecDeque::new(),
             base: 1,
             dirty: false,
+            revision: new_id(),
+            rollback: None,
             segment_bytes,
         }
     }
@@ -395,23 +364,25 @@ impl Log {
             writer.get_ref().sync_data().map_err(io_error(&self.dir))?;
         }
         std::fs::create_dir_all(&self.dir).map_err(io_error(&self.dir))?;
+        if let Some(parent) = self.dir.parent() {
+            sync_directory(parent)?;
+        }
         let id = self.next_segment_id();
         let path = self.dir.join(segment_name(id));
-        let file = OpenOptions::new()
-            .create_new(true)
-            .append(true)
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
             .open(&path)
             .map_err(io_error(&path))?;
-        let mut writer = BufWriter::new(file);
         let mut header = Vec::with_capacity(SEGMENT_HEADER_BYTES as usize);
         header.extend_from_slice(MAGIC);
         header.extend_from_slice(&first_seq.to_le_bytes());
-        writer.write_all(&header).map_err(io_error(&path))?;
-        writer.flush().map_err(io_error(&path))?;
+        // This id has no accepted records yet. A failed header can be rewritten at the
+        // same id, rather than leaving an orphan that makes every retry AlreadyExists.
+        file.write_all(&header).map_err(io_error(&path))?;
         // The new file has to be findable after a crash.
-        if let Ok(directory) = File::open(&self.dir) {
-            let _ = directory.sync_all();
-        }
+        sync_directory(&self.dir)?;
         self.segments.insert(
             id,
             Segment {
@@ -419,7 +390,7 @@ impl Log {
                 bytes: SEGMENT_HEADER_BYTES,
             },
         );
-        self.writer = Some((id, writer));
+        self.writer = Some((id, BufWriter::new(file)));
         Ok(())
     }
 
@@ -430,6 +401,7 @@ impl Log {
         record: &[u8],
         next_event_seq: Seq,
     ) -> Result<(u64, u64), SpoolError> {
+        self.rollback_tail()?;
         let needs_new = match self.writer.as_ref() {
             None => true,
             Some((id, _)) => {
@@ -451,29 +423,74 @@ impl Log {
             source: std::io::Error::other("the segment being written is not known"),
         })?;
         let offset = segment.bytes;
-        writer.write_all(record).map_err(io_error(&segment.path))?;
+        // Flush each whole record to the file, but batch durability separately. That
+        // makes a failed write's exact rollback boundary independent of other records.
+        let written = writer.write_all(record).and_then(|()| writer.flush());
+        if let Err(source) = written {
+            let path = segment.path.clone();
+            let id = *id;
+            let (_, writer) = self.writer.take().ok_or_else(|| SpoolError::Io {
+                path: path.display().to_string(),
+                source: std::io::Error::other("the failed writer was not retained"),
+            })?;
+            // into_parts never flushes a failed buffer again during Drop.
+            let (file, _) = writer.into_parts();
+            self.writer = Some((id, BufWriter::new(file)));
+            self.rollback = Some(offset);
+            let _ = self.rollback_tail();
+            return Err(io_error(&path)(source));
+        }
         segment.bytes += record.len() as u64;
         self.dirty = true;
+        self.revision = new_id();
         Ok((*id, offset))
     }
 
+    fn rollback_tail(&mut self) -> Result<(), SpoolError> {
+        let Some(offset) = self.rollback else {
+            return Ok(());
+        };
+        let Some((id, writer)) = self.writer.as_mut() else {
+            return Err(io_error(&self.dir)(std::io::Error::other(
+                "the failed record has no rollback writer",
+            )));
+        };
+        let path = self
+            .segments
+            .get(id)
+            .map_or(&self.dir, |segment| &segment.path);
+        writer.get_mut().set_len(offset).map_err(io_error(path))?;
+        writer
+            .get_mut()
+            .seek(SeekFrom::Start(offset))
+            .map_err(io_error(path))?;
+        self.rollback = None;
+        self.dirty = true;
+        self.revision = new_id();
+        Ok(())
+    }
+
     fn append_event(&mut self, event: &SpoolEvent) -> Result<(), SpoolError> {
-        let record = frame_record(&encode_event(event));
+        let payload = encode_event(event);
+        let total = payload.len().saturating_add(RECORD_HEAD_BYTES);
+        let record_bytes = u32::try_from(total).map_err(|_| SpoolError::TooLarge {
+            bytes: total as u64,
+            max: u64::from(u32::MAX),
+        })?;
+        let record = frame_record(&payload);
         let next_seq = self.base + self.entries.len() as Seq;
         let (segment, offset) = self.append_record(&record, next_seq)?;
-        let (class, item) = classify(event);
         self.entries.push_back(Entry {
             segment,
             offset,
-            record_bytes: u32::try_from(record.len()).unwrap_or(u32::MAX),
+            record_bytes,
             at_millis: event.at.unix_millis(),
-            class,
-            item,
         });
         Ok(())
     }
 
     fn flush(&mut self) -> Result<(), SpoolError> {
+        self.rollback_tail()?;
         if let Some((id, writer)) = self.writer.as_mut() {
             let path = self
                 .segments
@@ -490,7 +507,6 @@ impl Log {
             return Ok(None);
         }
         self.flush()?;
-        self.dirty = false;
         match self.writer.as_ref() {
             Some((_, writer)) => writer
                 .get_ref()
@@ -499,6 +515,14 @@ impl Log {
                 .map_err(io_error(&self.dir)),
             None => Ok(None),
         }
+    }
+
+    fn sync(&mut self) -> Result<(), SpoolError> {
+        if let Some(file) = self.sync_handle()? {
+            file.sync_all().map_err(io_error(&self.dir))?;
+        }
+        self.dirty = false;
+        Ok(())
     }
 
     fn read_entry(&self, entry: &Entry) -> Result<SpoolEvent, SpoolError> {
@@ -554,28 +578,13 @@ impl Log {
         Ok(())
     }
 
-    /// Deletes every segment and starts one that holds nothing but the
-    /// number the next event takes, so that the numbering is not lost.
-    fn reset_empty(&mut self) -> Result<(), SpoolError> {
-        self.entries.clear();
-        self.writer = None;
-        for (_, segment) in std::mem::take(&mut self.segments) {
-            std::fs::remove_file(&segment.path).map_err(io_error(&segment.path))?;
-        }
-        self.dirty = false;
-        let base = self.base;
-        self.open_new_segment(base)
-    }
-
     fn consume_diagnostics(&mut self, count: usize) -> Result<(), SpoolError> {
         let count = count.min(self.entries.len());
         let through = self.base + count as Seq - 1;
         let record = frame_record(&sent_payload(through));
         let next = self.base + self.entries.len() as Seq;
         self.append_record(&record, next)?;
-        if let Some(file) = self.sync_handle()? {
-            file.sync_all().map_err(io_error(&self.dir))?;
-        }
+        self.sync()?;
         if let Ok(directory) = File::open(&self.dir) {
             directory.sync_all().map_err(io_error(&self.dir))?;
         }
@@ -590,6 +599,7 @@ impl Log {
         }
         self.entries.clear();
         self.dirty = false;
+        self.rollback = None;
         let _ = std::fs::remove_dir(&self.dir);
         Ok(())
     }
@@ -602,24 +612,6 @@ pub enum Relief {
     Diagnostics {
         /// How many events.
         events: usize,
-    },
-    /// Item deltas whose item is completed were dropped.
-    SupersededDeltas {
-        /// How many events.
-        events: usize,
-    },
-    /// The oldest events of a stream were dropped, which the system has to be
-    /// told with a reset.
-    OldestEvents {
-        /// The stream.
-        stream: String,
-        /// The number of the last event dropped that had a number, if any
-        /// had.
-        numbered_through: Option<Seq>,
-        /// How many events were dropped, numbered or not.
-        events: usize,
-        /// Why.
-        reason: ResetReason,
     },
 }
 
@@ -673,9 +665,7 @@ impl StreamLog {
                 self.main.append_event(event)?;
             }
             // The copied frames must be durable before their original queue records are consumed.
-            if let Some(file) = self.main.sync_handle()? {
-                file.sync_all().map_err(io_error(&self.main.dir))?;
-            }
+            self.main.sync()?;
             if let Ok(directory) = File::open(&self.main.dir) {
                 directory.sync_all().map_err(io_error(&self.main.dir))?;
             }
@@ -692,9 +682,7 @@ impl StreamLog {
     fn promote(&mut self, count: usize) -> Result<(), SpoolError> {
         // Sync both the source and the earlier main-log tail before publishing the transfer's place.
         for log in [&mut self.main, &mut self.diagnostics] {
-            if let Some(file) = log.sync_handle()? {
-                file.sync_all().map_err(io_error(&log.dir))?;
-            }
+            log.sync()?;
             if let Ok(directory) = File::open(&log.dir) {
                 directory.sync_all().map_err(io_error(&log.dir))?;
             }
@@ -745,6 +733,37 @@ pub struct Spool {
     raw_cursors: BTreeMap<String, Seq>,
 }
 
+/// File handles and the exact append revisions whose durability they prove.
+#[derive(Debug)]
+pub struct SyncBatch {
+    files: Vec<File>,
+    receipts: Vec<(String, bool, Id)>,
+}
+impl SyncBatch {
+    /// Forces every file. A failure acknowledges none of the receipts.
+    pub fn force(&self) -> std::io::Result<()> {
+        for file in &self.files {
+            file.sync_all()?;
+        }
+        Ok(())
+    }
+    /// Whether this batch needs any filesystem work.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
+fn sync_directory(path: &Path) -> Result<(), SpoolError> {
+    #[cfg(unix)]
+    File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(io_error(path))?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// The directory name of a stream: its name, with the colons that some file
 /// systems refuse written as underscores. A stream name never holds an
 /// underscore, so the two are the same name.
@@ -781,6 +800,11 @@ impl Spool {
     ) -> Result<(Self, Recovery), SpoolError> {
         std::fs::create_dir_all(root).map_err(io_error(root))?;
         std::fs::create_dir_all(metadata_root).map_err(io_error(metadata_root))?;
+        for directory in [root, metadata_root] {
+            if let Some(parent) = directory.parent() {
+                sync_directory(parent)?;
+            }
+        }
         let raw_path = metadata_root.join(RAW_CURSORS_FILE);
         let raw_cursors = if raw_path.exists() {
             let file = File::open(&raw_path).map_err(io_error(&raw_path))?;
@@ -1095,9 +1119,8 @@ impl Spool {
         Ok(captured)
     }
 
-    /// Puts an event into the spool. A diagnostic waits in its queue; any
-    /// other event goes to the end of its stream. Space is freed first if it
-    /// is wanted, and what was given up is returned.
+    /// Puts authoritative events durably at the end of their stream. Only waiting
+    /// diagnostics use the lossy byte allowance; their discarded count is returned.
     pub fn append(&mut self, stream: &str, event: &SpoolEvent) -> Result<Vec<Relief>, SpoolError> {
         let captured;
         let event = if event.kind == "raw.frame" {
@@ -1106,173 +1129,54 @@ impl Spool {
         } else {
             event
         };
+        if !is_diagnostic(&event.kind) {
+            self.stream_mut(stream).main.append_event(event)?;
+            return Ok(Vec::new());
+        }
         let size = (RECORD_HEAD_BYTES
             + EVENT_FIXED_BYTES
             + event.kind.len()
             + event.body.to_string().len()) as u64;
-        if size > self.options.max_bytes {
+        if size > u64::from(u32::MAX) {
             return Err(SpoolError::TooLarge {
                 bytes: size,
-                max: self.options.max_bytes,
+                max: u64::from(u32::MAX),
             });
         }
         let mut relief = Vec::new();
-        if self.bytes() + size > self.options.max_bytes {
+        if self.diagnostic_bytes().saturating_add(size) > self.options.max_bytes {
             relief = self.make_room(size)?;
         }
-        let log = self.stream_mut(stream);
-        if is_diagnostic(&event.kind) {
-            log.diagnostics.append_event(event)?;
-        } else {
-            log.main.append_event(event)?;
+        if self.diagnostic_bytes().saturating_add(size) > self.options.max_bytes {
+            relief.push(Relief::Diagnostics { events: 1 });
+            return Ok(relief);
         }
+        self.stream_mut(stream).diagnostics.append_event(event)?;
         Ok(relief)
     }
 
-    /// Frees space until `needed` more bytes fit, in the order the protocol
-    /// says and in no other way.
+    /// Waiting diagnostics have a separate budget; native history is never scanned or shed for it.
     fn make_room(&mut self, needed: u64) -> Result<Vec<Relief>, SpoolError> {
-        let mut relief = Vec::new();
-        let fits = |spool: &Self| spool.bytes() + needed <= spool.options.max_bytes;
-
-        // What holds no event any more is not worth keeping.
-        for log in self.streams.values_mut() {
-            if log.main.entries.is_empty() && log.main.bytes() > SEGMENT_HEADER_BYTES {
-                log.main.reset_empty()?;
-            }
+        if self.diagnostic_bytes().saturating_add(needed) <= self.options.max_bytes {
+            return Ok(Vec::new());
         }
-        if fits(self) {
-            return Ok(relief);
-        }
-
-        // 1. Diagnostics.
         let mut dropped = 0;
         for log in self.streams.values_mut() {
             dropped += log.diagnostics.entries.len();
             log.diagnostics.discard_all()?;
         }
-        if dropped > 0 {
-            relief.push(Relief::Diagnostics { events: dropped });
-        }
-        if fits(self) {
-            return Ok(relief);
-        }
-
-        // 2. Deltas whose item is completed, among the events not yet sent.
-        let mut superseded = 0;
-        let names: Vec<String> = self.streams.keys().cloned().collect();
-        for name in &names {
-            superseded += self.compact_superseded_deltas(name)?;
-            if fits(self) {
-                break;
-            }
-        }
-        if superseded > 0 {
-            relief.push(Relief::SupersededDeltas { events: superseded });
-        }
-        if fits(self) {
-            return Ok(relief);
-        }
-
-        // 3. The oldest events of the fullest stream.
-        while !fits(self) {
-            let Some(fullest) = self
-                .streams
-                .iter()
-                .filter(|(_, log)| !log.main.entries.is_empty())
-                .max_by_key(|(_, log)| log.main.bytes())
-                .map(|(name, _)| name.clone())
-            else {
-                break;
-            };
-            let step = self.drop_oldest_segment(&fullest, ResetReason::SpoolOverflow)?;
-            let progressed = matches!(&step, Relief::OldestEvents { events, .. } if *events > 0);
-            relief.push(step);
-            if !progressed {
-                break;
-            }
-        }
-        Ok(relief)
-    }
-
-    /// Drops the events of the oldest segment of a stream.
-    fn drop_oldest_segment(
-        &mut self,
-        stream: &str,
-        reason: ResetReason,
-    ) -> Result<Relief, SpoolError> {
-        let Some(log) = self.streams.get_mut(stream) else {
-            return Ok(Relief::OldestEvents {
-                stream: stream.to_owned(),
-                numbered_through: None,
-                events: 0,
-                reason,
-            });
-        };
-        let oldest_segment = log.main.entries.front().map_or(0, |entry| entry.segment);
-        let count = log
-            .main
-            .entries
-            .iter()
-            .take_while(|entry| entry.segment == oldest_segment)
-            .count();
-        let first = log.main.base;
-        let last = first + count as Seq - 1;
-        let numbered = log.sent_through.min(last);
-        let numbered_through = (numbered >= first).then_some(numbered);
-        let numbered_count = usize::try_from((numbered - first + 1).max(0)).unwrap_or(0);
-        log.main.drop_front(count, numbered_count)?;
-        if log.main.entries.is_empty() {
-            // The segment dropped was the one being written, or the last: free
-            // it, and keep only the number the next event takes.
-            log.main.reset_empty()?;
-        }
-        // What was numbered and dropped is not numbered again; what never had
-        // a number takes the next.
-        log.sent_through = log.sent_through.max(log.main.base - 1);
-        Ok(Relief::OldestEvents {
-            stream: stream.to_owned(),
-            numbered_through,
-            events: count,
-            reason,
+        Ok(if dropped == 0 {
+            Vec::new()
+        } else {
+            vec![Relief::Diagnostics { events: dropped }]
         })
     }
 
-    /// Rewrites a stream's log without the deltas that have not been sent
-    /// and whose item is completed in the same log. Returns how many.
-    fn compact_superseded_deltas(&mut self, stream: &str) -> Result<usize, SpoolError> {
-        let Some(log) = self.streams.get_mut(stream) else {
-            return Ok(0);
-        };
-        let first_unsent = (log.sent_through - log.main.base + 1).max(0) as usize;
-        let completed: std::collections::HashSet<&str> = log
-            .main
-            .entries
-            .iter()
-            .skip(first_unsent)
-            .filter(|entry| entry.class == Class::Completed)
-            .filter_map(|entry| entry.item.as_deref())
-            .collect();
-        let doomed: Vec<bool> = log
-            .main
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(place, entry)| {
-                place >= first_unsent
-                    && entry.class == Class::Delta
-                    && entry
-                        .item
-                        .as_deref()
-                        .is_some_and(|item| completed.contains(item))
-            })
-            .collect();
-        let count = doomed.iter().filter(|doomed| **doomed).count();
-        if count == 0 {
-            return Ok(0);
-        }
-        self.rewrite_without(stream, &doomed, None)?;
-        Ok(count)
+    fn diagnostic_bytes(&self) -> u64 {
+        self.streams
+            .values()
+            .map(|log| log.diagnostics.bytes())
+            .sum()
     }
 
     /// Rewrites a stream's main log into fresh segments, leaving out the
@@ -1325,9 +1229,7 @@ impl Spool {
         let mark = frame_record(&sent_payload(sent_through));
         fresh.append_record(&mark, fresh.base + fresh.entries.len() as Seq)?;
         fresh.flush()?;
-        if let Some(handle) = fresh.sync_handle()? {
-            handle.sync_all().map_err(io_error(&staging))?;
-        }
+        fresh.sync()?;
         let whole = staging.join(WHOLE_MARK);
         File::create(&whole)
             .and_then(|file| file.sync_all())
@@ -1373,6 +1275,8 @@ impl Spool {
         log.main.base = fresh.base;
         log.sent_through = sent_through;
         log.main.dirty = false;
+        log.main.revision = new_id();
+        log.main.rollback = None;
         if let Some((&id, segment)) = log.main.segments.iter().next_back() {
             let file = OpenOptions::new()
                 .append(true)
@@ -1514,68 +1418,74 @@ impl Spool {
         Ok(count)
     }
 
-    /// Drops events older than the age limit, from the front of each stream.
+    /// Expires only waiting diagnostics, preserving all unacknowledged protocol events.
     pub fn expire(&mut self, now: Time) -> Result<Vec<Relief>, SpoolError> {
-        let horizon = now.unix_millis()
-            - i64::try_from(self.options.max_age.as_secs()).unwrap_or(i64::MAX / SECOND_MILLIS)
-                * SECOND_MILLIS;
-        let mut relief = Vec::new();
-        let names: Vec<String> = self.streams.keys().cloned().collect();
-        for name in names {
-            let Some(log) = self.streams.get_mut(&name) else {
-                continue;
-            };
+        let horizon = now.unix_millis().saturating_sub(
+            i64::try_from(self.options.max_age.as_secs())
+                .unwrap_or(i64::MAX / SECOND_MILLIS)
+                .saturating_mul(SECOND_MILLIS),
+        );
+        let mut dropped = 0;
+        for log in self.streams.values_mut() {
             let old = log
-                .main
-                .entries
-                .iter()
-                .take_while(|entry| entry.at_millis < horizon)
-                .count();
-            let old_diagnostics = log
                 .diagnostics
                 .entries
                 .iter()
                 .take_while(|entry| entry.at_millis < horizon)
                 .count();
-            if old_diagnostics > 0 {
-                log.diagnostics.consume_diagnostics(old_diagnostics)?;
-            }
             if old > 0 {
-                let first = log.main.base;
-                let last = first + old as Seq - 1;
-                let numbered = log.sent_through.min(last);
-                let numbered_through = (numbered >= first).then_some(numbered);
-                let numbered_count = usize::try_from((numbered - first + 1).max(0)).unwrap_or(0);
-                log.main.drop_front(old, numbered_count)?;
-                log.sent_through = log.sent_through.max(log.main.base - 1);
-                relief.push(Relief::OldestEvents {
-                    stream: name.clone(),
-                    numbered_through,
-                    events: old,
-                    reason: ResetReason::SpoolOverflow,
-                });
+                log.diagnostics.consume_diagnostics(old)?;
+                dropped += old;
             }
         }
-        Ok(relief)
+        Ok(if dropped == 0 {
+            Vec::new()
+        } else {
+            vec![Relief::Diagnostics { events: dropped }]
+        })
     }
 
     /// Writes what is buffered out and returns a handle on each file that has
     /// something to be forced to disk, which the caller syncs where blocking
     /// is fine.
-    pub fn flush_for_sync(&mut self) -> Result<Vec<File>, SpoolError> {
+    pub fn flush_for_sync(&mut self) -> Result<SyncBatch, SpoolError> {
         let mut handles = Vec::new();
-        for log in self.streams.values_mut() {
-            handles.extend(log.main.sync_handle()?);
-            handles.extend(log.diagnostics.sync_handle()?);
+        let mut receipts = Vec::new();
+        for (stream, log) in &mut self.streams {
+            for (diagnostic, log) in [(false, &mut log.main), (true, &mut log.diagnostics)] {
+                if let Some(file) = log.sync_handle()? {
+                    handles.push(file);
+                    receipts.push((stream.clone(), diagnostic, log.revision));
+                }
+            }
         }
-        Ok(handles)
+        Ok(SyncBatch {
+            files: handles,
+            receipts,
+        })
+    }
+
+    /// Acknowledges only unchanged revisions after every file in the batch was forced.
+    pub fn complete_sync(&mut self, batch: &SyncBatch) {
+        for (stream, diagnostic, revision) in &batch.receipts {
+            if let Some(log) = self.streams.get_mut(stream) {
+                let log = if *diagnostic {
+                    &mut log.diagnostics
+                } else {
+                    &mut log.main
+                };
+                if log.revision == *revision {
+                    log.dirty = false;
+                }
+            }
+        }
     }
 
     /// Writes what is buffered out and forces it to disk, here and now.
     pub fn sync(&mut self) -> Result<(), SpoolError> {
-        for handle in self.flush_for_sync()? {
-            handle.sync_data().map_err(io_error(&self.root))?;
-        }
+        let batch = self.flush_for_sync()?;
+        batch.force().map_err(io_error(&self.root))?;
+        self.complete_sync(&batch);
         Ok(())
     }
 
@@ -1594,6 +1504,9 @@ fn sent_payload(through: Seq) -> Vec<u8> {
     payload.extend_from_slice(&through.to_le_bytes());
     payload
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod io_failures;
 
 #[cfg(test)]
 mod raw_restarts {
