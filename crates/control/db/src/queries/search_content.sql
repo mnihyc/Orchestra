@@ -63,6 +63,7 @@ WITH __NODE_VISIBILITY__, __HISTORY__, readable_chats AS NOT MATERIALIZED (
      AND i.kind=ANY($9::text[]) AND i.kind<>'marker' AND r.body->>'search_text' IS NOT NULL AND __OLD_ITEM_MATCH__
      AND ($32::uuid[] IS NULL OR i.id=ANY($32))
      AND r.body->>'search_text' NOT LIKE '%<orch>%'
+     AND ($5::jsonb->'search_advanced'->>'stream' IS NULL OR i.stream=$5::jsonb->'search_advanced'->>'stream')
      AND ($12::uuid IS NULL OR i.author_id=$12)
      AND (($5::jsonb->'search_advanced'->>'date_field') IS NOT NULL OR $13::timestamptz IS NULL OR i.created_at >= $13) AND (($5::jsonb->'search_advanced'->>'date_field') IS NOT NULL OR $14::timestamptz IS NULL OR i.created_at <= $14)
      AND (NOT $21 OR orch_search_file_types(r.body->'payload') @> ARRAY['*/*'])

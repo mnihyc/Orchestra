@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-api-core --test forks -- batch_native_scopes::
+test -p orch-engine --test delivery

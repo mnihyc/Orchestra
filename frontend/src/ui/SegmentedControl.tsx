@@ -86,7 +86,8 @@ export function SegmentedControl<Value extends string>({
         event.preventDefault();event.stopPropagation();
         if (pending) return;
         if(segment.value!==value)onValueChange(segment.value);
-        requestAnimationFrame(()=>Array.from(group.current?.querySelectorAll<HTMLElement>('[data-segment-value]') ?? []).find((button)=>button.dataset.segmentValue===segment.value)?.focus());
+        // The next quick key must start from the choice just selected.
+        Array.from(group.current?.querySelectorAll<HTMLElement>('[data-segment-value]') ?? []).find((button)=>button.dataset.segmentValue===segment.value)?.focus();
       }}
       className={cx(
         'inline-flex max-w-full items-stretch gap-0.5 rounded-md bg-bg-muted p-0.5',
