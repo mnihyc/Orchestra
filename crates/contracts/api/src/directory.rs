@@ -19,10 +19,13 @@ use serde::{Deserialize, Serialize};
 use crate::access::Role;
 use crate::access::{Holder, HolderInput};
 use crate::auth::{ApiTokenCreateBody, ApiTokenInfo, TokenCreateResponse};
-use crate::common::{Page, Revision};
+use crate::common::{CollectionQuery, Page, Revision};
 use crate::nodes::{NodeRef, Tag};
 use crate::routes::Access::{Permission, Rule};
 use crate::users::UserRef;
+
+/// A page of groups whose complete visible fields have passed the current read.
+pub type GroupPage = Page<Group>;
 
 /// A group of people of one root org, kept by an org at any level.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -191,6 +194,31 @@ pub struct OrgGroupListQuery {
     /// Also the groups that the orgs inside it keep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub under: Option<bool>,
+    /// Words of the group's visible name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries in this page; 50 by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::common::query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// A continuation from this org, descendant choice and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+impl OrgGroupListQuery {
+    /// Its ordinary named collection page.
+    #[must_use]
+    pub fn collection(&self) -> CollectionQuery {
+        CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
 }
 
 /// Makes a group.
@@ -552,9 +580,9 @@ crate::endpoints! {
     /// Lifts a suspension, so that everything is as it was.
     OrgMemberResume: POST "/orgs/{id}/members/{user_id}/resume", Permission("members.manage"), none, none, none, 204;
     /// Lists everybody who is suspended in an org now.
-    OrgSuspensionList: GET "/orgs/{id}/suspensions", Permission("members.manage"), none, none, json Vec<Suspension>, 200;
+    OrgSuspensionList: GET "/orgs/{id}/suspensions", Permission("members.manage"), query CollectionQuery, none, json Page<Suspension>, 200;
     /// Lists the groups an org keeps.
-    OrgGroupList: GET "/orgs/{id}/groups", Permission("node.view"), query OrgGroupListQuery, none, json Vec<Group>, 200,
+    OrgGroupList: GET "/orgs/{id}/groups", Permission("node.view"), query OrgGroupListQuery, none, json GroupPage, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Identity(I::Group)], Target::ResolvedCollection("listed_groups")),
             Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("listed_group_orgs")),
@@ -563,7 +591,7 @@ crate::endpoints! {
             Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("listed_group_threads")),
         ]);
     /// The groups kept by the nearest org of a visible place, where that org is visible too.
-    NodeGroupList: GET "/nodes/{id}/groups", Permission("node.view"), none, none, json Vec<Group>, 200,
+    NodeGroupList: GET "/nodes/{id}/groups", Permission("node.view"), query CollectionQuery, none, json GroupPage, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Identity(I::Group)], Target::ResolvedCollection("listed_groups")),
             Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("listed_group_orgs")),
@@ -588,10 +616,10 @@ crate::endpoints! {
     GroupDelete: DELETE "/groups/{id}", Rule("members.manage on the org that keeps the group"), none, none, none, 204,
         operation Op::returning(Manage, &[Identity(I::Group)], Target::TypedPath { parameter: "id", kind: Identity(I::Group) });
     /// Lists the people in a group.
-    GroupMemberList: GET "/groups/{id}/members", Rule("node.view on the org that keeps the group"), none, none, json Vec<UserRef>, 200,
+    GroupMemberList: GET "/groups/{id}/members", Rule("node.view on the org that keeps the group"), query CollectionQuery, none, json Page<UserRef>, 200,
         operation Op::single(Read, &[Identity(I::Group)], Target::TypedPath { parameter: "id", kind: Identity(I::Group) });
     /// Direct members as holders, retaining nested groups and source places.
-    GroupHolderList: GET "/groups/{id}/holders", Rule("node.view on the org that keeps the group"), none, none, json Vec<Holder>, 200,
+    GroupHolderList: GET "/groups/{id}/holders", Rule("node.view on the org that keeps the group"), query CollectionQuery, none, json Page<Holder>, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Identity(I::Group)], Target::TypedPath { parameter: "id", kind: Identity(I::Group) }),
             Facet::required(Read, &[Identity(I::Group)], Target::ResolvedCollection("group_payloads")),
@@ -613,7 +641,7 @@ crate::endpoints! {
     GroupMemberRemove: DELETE "/groups/{id}/members/{user_id}", Rule("members.manage on the org that keeps the group"), none, none, none, 204,
         operation Op::returning(Manage, &[Identity(I::Group)], Target::TypedPath { parameter: "id", kind: Identity(I::Group) });
     /// Lists the service identities an org keeps.
-    OrgServiceAccountList: GET "/orgs/{id}/service-accounts", Permission("members.manage"), none, none, json Vec<ServiceAccount>, 200,
+    OrgServiceAccountList: GET "/orgs/{id}/service-accounts", Permission("members.manage"), query CollectionQuery, none, json Page<ServiceAccount>, 200,
         operation Op::single(
             Manage,
             &[Identity(I::Account)],
@@ -628,7 +656,7 @@ crate::endpoints! {
         operation Op::single(Manage, &[Identity(I::Account)], Target::TypedPath { parameter: "id", kind: Identity(I::Account) });
     /// Lists the tokens of a service identity.
     /// Reading the account collection requires its Read scope; each returned credential also needs this operation's own Read scope. Account self alone does not reveal its credentials.
-    ServiceAccountTokenList: GET "/service-accounts/{id}/tokens", Rule("members.manage on the org that keeps the service identity"), none, none, json Vec<ApiTokenInfo>, 200,
+    ServiceAccountTokenList: GET "/service-accounts/{id}/tokens", Rule("members.manage on the org that keeps the service identity"), query CollectionQuery, none, json Page<ApiTokenInfo>, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Identity(I::Key)], Target::TypedPath { parameter: "id", kind: Identity(I::Account) }),
             Facet::response_content(&[Identity(I::Key)], Target::ResolvedCollection("listed_keys")),
@@ -644,7 +672,7 @@ crate::endpoints! {
     ServiceAccountTokenDelete: DELETE "/service-accounts/{id}/tokens/{token_id}", Rule("members.manage on the org that keeps the service identity"), none, none, none, 204,
         operation Op::returning(Manage, &[Identity(I::Key)], Target::Resolved("service_owned_key"));
     /// Lists the tags of an org or a project and of the orgs above it.
-    NodeTagList: GET "/nodes/{id}/tags", Permission("node.view"), none, none, json Vec<Tag>, 200;
+    NodeTagList: GET "/nodes/{id}/tags", Permission("node.view"), query CollectionQuery, none, json Page<Tag>, 200;
     /// Defines a tag on an org or a project.
     NodeTagCreate: POST "/nodes/{id}/tags", Permission("node.manage"), none, json NodeTagCreateBody, json TagCreateResponse, 200,
         operation Op::receipt(&Op::returning(Manage,&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::Path("id")));

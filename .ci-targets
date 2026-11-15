@@ -1,0 +1,6 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-api-core --test admin_person_credentials --test admin_token_inventory
+test -p orch-db --test released_migrations

@@ -75,12 +75,14 @@ export interface TopicProps {
   topicId: string;
   tab: TopicTab;
   onTab: (tab: TopicTab) => void;
+  q?: string | undefined;
+  onThreadQuery?: ((query: string) => void) | undefined;
   /** The section of the Settings tab in view. */
   section: string;
   onSection: (section: TopicSection) => void;
 }
 
-export function Topic({ topicId, tab, onTab, section, onSection }: TopicProps) {
+export function Topic({ topicId, tab, onTab, section, onSection, q, onThreadQuery }: TopicProps) {
   const { t } = useTranslation();
   const focusedContent = useContentFocused();
   const userId = useStore(client.session, (state) => state.userId);
@@ -172,12 +174,12 @@ export function Topic({ topicId, tab, onTab, section, onSection }: TopicProps) {
         value={tab}
         onValueChange={onTab}
         tabs={[
-          { value: 'overview', label: t('places.topic.tabs.overview'), panel: <TopicOverview topic={data} place={place} /> },
+          { value: 'overview', label: t('places.topic.tabs.overview'), panel: <TopicOverview topic={data} place={place} q={q} onQuery={onThreadQuery} /> },
           {
             value: 'threads',
             label: t('places.topic.tabs.threads'),
             count: tree.loaded ? threadCount : undefined,
-            panel: <TopicThreads orgId={data.org_id} topicId={data.id} topic={place} allowed={canCreateIn('topic', data.access)} owner={data.owner} />,
+            panel: <TopicThreads orgId={data.org_id} topicId={data.id} topic={place} allowed={canCreateIn('topic', data.access)} owner={data.owner} q={q} onQuery={onThreadQuery} />,
           },
           { value: 'environments', label: t('places.topic.tabs.environments'), count: data.environments.length, panel: <TopicEnvironments topic={data} /> },
           { value: 'documents', label: t('places.topic.tabs.documents'), panel: <TopicDocuments topic={data} /> },

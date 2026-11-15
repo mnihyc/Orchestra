@@ -1,3 +1,5 @@
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
 /** The orgs that lie directly in this one, at whatever level: making one, its short name, how much each holds, and its own settings, which are these same sections; not shown for an org that holds none.
  *
  * A department is an org with its own members, groups, tags and policies, and departments of its own,
@@ -26,7 +28,8 @@ import { Table, type Column } from '@/ui/Table';
 
 export function Departments({ org }: { org: Org }) {
   const { t } = useTranslation();
-  const list = useInfiniteQuery(childrenQuery(org.id));
+  const search = useCollectionSearch('departments:' + org.id);
+  const list = useInfiniteQuery(childrenQuery(org.id, 'exclude', false, search.q, 'org'));
   const departments = (list.data?.pages.flatMap((page) => page.items) ?? []).filter((node): node is Org => node.kind === 'org');
   const may = holds(org.access, 'org.manage');
 
@@ -79,6 +82,7 @@ export function Departments({ org }: { org: Org }) {
         </PermissionGate>
       }
     >
+      <CollectionSearch name={t('settings.org.sectionNames.departments')} {...search} />
       {list.isPending ? (
         <SkeletonRows read={list} rows={3} />
       ) : list.isError && departments.length === 0 ? (
@@ -87,7 +91,7 @@ export function Departments({ org }: { org: Org }) {
         <EmptyState compact icon={<LayoutGrid aria-hidden />} title={t('departments.none', { name: org.name })} description={may ? t('departments.noneAbout') : undefined} />
       ) : (
         <div className="flex flex-col gap-2">
-          <Table label={t('departments.table', { name: org.name })} columns={columns} rows={departments} rowKey={(department) => department.id} />
+          <Table label={t('departments.table', { name: org.name })} columns={columns} rows={departments} rowKey={(department) => department.id} virtual />
           <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
         </div>
       )}

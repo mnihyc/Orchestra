@@ -5,6 +5,9 @@
  * revoked one by one. Whoever manages the members makes and removes them; removing one ends its tokens
  * and the roles and entries that named it, and the dialog says so before it asks.
  */
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { ScrollRegion } from '@/ui/ScrollRegion';
 import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query';
 import { Bot, KeyRound, Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
@@ -18,7 +21,8 @@ import {
   refuseOrgToken,
   revokeServiceToken,
   serviceAccountsQuery,
-  serviceTokensQuery,
+  serviceAccountsPageQuery,
+  serviceTokensPageQuery,
 } from '@/api/directory';
 import { takes } from '@/features/settings/refusals';
 import { type Returned, returnedToTokenForm, TokenForm, TokenMade } from '@/features/settings/TokenForm';
@@ -107,7 +111,9 @@ function Tokens({ account, onClose, returned }: { account: ServiceAccount; onClo
   const format = useFormatContext();
   const actKey = useActKey();
   const id = account.user.id;
-  const list = useQuery(serviceTokensQuery(id));
+  const search = useCollectionSearch("service-tokens:" + id);
+  const list = useInfiniteQuery(serviceTokensPageQuery(id, search.q));
+  const rows = list.data?.pages.flatMap((page) => page.items) ?? [];
   const [making, setMaking] = useState(returned !== null);
   const [made, setMade] = useState<TokenCreateResponse | null>(null);
   const [madeName, setMadeName] = useState('');
@@ -163,15 +169,16 @@ function Tokens({ account, onClose, returned }: { account: ServiceAccount; onClo
           </div>
         )}
         {made !== null && !making && <><TokenMade made={made} name={madeName} />{made.token === null && <div><Button variant="danger" pending={revoke.isPending} onClick={() => revoke.mutate('info' in made ? made.info.id : made.token_id, { onSuccess: () => { setMade(null); make.reset(); setMaking(true); } })}>{t('tokens.new.revokeAndAgain')}</Button></div>}</>}
+        <CollectionSearch name={t("tokens.table")} {...search} />
         {list.isPending ? (
           <SkeletonRows read={list} rows={2} />
-        ) : list.isError ? (
+        ) : list.isError && rows.length === 0 ? (
           <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
-        ) : list.data.length === 0 ? (
+        ) : rows.length === 0 ? (
           <EmptyState compact title={t('settings.service.noTokens')} />
         ) : (
-          <ul className={`${boxClasses} divide-y divide-border`}>
-            {list.data.map((token) => (
+          <ScrollRegion kind="table" label={t("tokens.table")} className="max-h-96 overflow-y-auto"><ul className={`${boxClasses} divide-y divide-border`}>
+            {rows.map((token) => (
               <li key={token.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2">
                 <KeyRound className="size-4 shrink-0 text-text-subtle" aria-hidden />
                 <span className="min-w-0 flex-1 basis-[min(100%,10rem)]">
@@ -185,8 +192,9 @@ function Tokens({ account, onClose, returned }: { account: ServiceAccount; onClo
                 </Button>
               </li>
             ))}
-          </ul>
+          </ul></ScrollRegion>
         )}
+        <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
       </div>
       {reviewing !== null && <Dialog open onOpenChange={(open) => !open && setReviewing(null)} title={t('operationKeys.reviewTitle', { name: reviewing.name })} size="lg" footer={<Button onClick={() => setReviewing(null)}>{t('common.close')}</Button>}><KeyScopeReview token={reviewing} /></Dialog>}
     </Dialog>
@@ -273,7 +281,9 @@ export function ServiceAccounts({ org }: { org: Org }) {
   const { t } = useTranslation();
   const may = holds(org.access, 'members.manage');
   const refusal = takes(t, 'members.manage', org.name, org.owner);
-  const list = useQuery({ ...serviceAccountsQuery(org.id), enabled: may });
+  const search = useCollectionSearch("service-accounts:" + org.id);
+  const list = useInfiniteQuery({ ...serviceAccountsPageQuery(org.id, search.q), enabled: may });
+  const rows = list.data?.pages.flatMap((page) => page.items) ?? [];
   const [making, setMaking] = useState(false);
   const [tokens, setTokens] = useState<ServiceAccount | null>(null);
   // Back from proving the linked sign-in again for a service token: its identity's tokens open as they were left.
@@ -282,7 +292,8 @@ export function ServiceAccounts({ org }: { org: Org }) {
     return back?.draft.serviceAccountId === undefined ? null : back;
   });
   const [closedReturn, setClosedReturn] = useState(false);
-  const returnedTo = returned === null ? undefined : list.data?.find((account) => account.user.id === returned.draft.serviceAccountId);
+  const recovered = useQuery({ ...serviceAccountsQuery(org.id), enabled: may && returned !== null });
+  const returnedTo = returned === null ? undefined : rows.find((account) => account.user.id === returned.draft.serviceAccountId) ?? recovered.data?.find((account) => account.user.id === returned.draft.serviceAccountId);
   const shownTokens = tokens ?? (returnedTo !== undefined && !closedReturn ? returnedTo : null);
   const [removing, setRemoving] = useState<ServiceAccount | null>(null);
   const remove = useMutation({
@@ -305,17 +316,18 @@ export function ServiceAccounts({ org }: { org: Org }) {
         </PermissionGate>
       }
     >
+      {may && <CollectionSearch name={t("settings.org.sectionNames.service-accounts")} {...search} />}
       {!may ? (
         <EmptyState compact icon={<Bot aria-hidden />} title={t('settings.service.readers', { name: org.name })} description={refusal} />
       ) : list.isPending ? (
         <SkeletonRows read={list} rows={2} />
-      ) : list.isError ? (
+      ) : list.isError && rows.length === 0 ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
-      ) : list.data.length === 0 ? (
+      ) : rows.length === 0 ? (
         <EmptyState compact icon={<Bot aria-hidden />} title={t('settings.service.none', { name: org.name })} description={t('settings.service.noneAbout')} />
       ) : (
-        <ul className={`${boxClasses} divide-y divide-border`} aria-label={t('settings.service.list', { name: org.name })}>
-          {list.data.map((account) => (
+        <ScrollRegion kind="table" label={t("settings.service.list", { name: org.name })} className="max-h-96 overflow-y-auto"><ul className={`${boxClasses} divide-y divide-border`} aria-label={t('settings.service.list', { name: org.name })}>
+          {rows.map((account) => (
             <li key={account.user.id} className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3">
               <span className="min-w-0 flex-1 basis-[min(100%,12rem)]">
                 <UserChip user={account.user} size={28} showUsername />
@@ -329,8 +341,9 @@ export function ServiceAccounts({ org }: { org: Org }) {
               </Button>
             </li>
           ))}
-        </ul>
+        </ul></ScrollRegion>
       )}
+      <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
       {making && <MakeAccount org={org} onClose={() => setMaking(false)} />}
       {shownTokens !== null && (
         <Tokens

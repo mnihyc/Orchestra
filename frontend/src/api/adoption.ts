@@ -1,18 +1,42 @@
 /** The sessions a harness already holds, what adopting one would do before anything does, and the adopting itself. */
-import { queryOptions } from '@tanstack/react-query';
+import { CancelledError, infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
-import { api, ok, repeatable } from '@/api/client';
-import type { AdoptPlan, Thread, ThreadAdoptBody, AdoptHistoryStatus } from '@/generated/api-types';
+import { ApiError, api, ok, repeatable } from '@/api/client';
+import type { AdoptPlan, Thread, ThreadAdoptBody, AdoptHistoryStatus, NativeSessionPage } from '@/generated/api-types';
 
 /** The sessions the harness of a provider and an agent profile holds, each with the thread that adopted it. */
-export const harnessSessionsQuery = (providerId: string, agentId: string) =>
-  queryOptions({
-    queryKey: ['harness-sessions', providerId, agentId] as const,
-    queryFn: ({ signal }) =>
-      ok(api.GET('/providers/{id}/harnesses/{agent_id}/sessions', { params: { path: { id: providerId, agent_id: agentId } }, signal })),
-    // A harness that cannot list its sessions says so once; asking again changes nothing.
-    retry: false,
-  });
+export const harnessSessionsKey = (providerId: string, agentId: string) => ['harness-sessions', providerId, agentId] as const;
+export interface NativeSessionRead {
+  view: string;
+  generation: number;
+  source: string | null;
+  captured: (source: string) => void;
+  expired: () => void;
+  refused: (error: unknown) => void;
+}
+interface NativeContinuation { source: string; cursor: string }
+export const harnessSessionsPageQuery = (providerId: string, agentId: string, q: string, read: NativeSessionRead) => infiniteQueryOptions({
+  queryKey: [...harnessSessionsKey(providerId, agentId), read.view, read.generation, q] as const,
+  initialPageParam: null as NativeContinuation | null,
+  queryFn: async ({ pageParam, signal }): Promise<NativeSessionPage> => {
+    const source = pageParam?.source ?? read.source;
+    try {
+      const page = await ok(api.GET('/providers/{id}/harnesses/{agent_id}/sessions', { params: {
+        path: { id: providerId, agent_id: agentId }, query: { q, limit: 50, ...(source === null ? {} : { source }), ...(pageParam === null ? {} : { cursor: pageParam.cursor }) },
+      }, signal }));
+      signal.throwIfAborted(); read.captured(page.source); return page;
+    } catch (error) {
+      signal.throwIfAborted();
+      if (error instanceof ApiError && error.is('request.invalid') && error.faults().some((fault) => fault.path === 'source')) {
+        read.expired(); throw new CancelledError({ silent: true });
+      }
+      if (error instanceof ApiError && [401, 403, 404].includes(error.status)) read.refused(error);
+      throw error;
+    }
+  },
+  getNextPageParam: (last) => last.next_cursor === null ? null : { source: last.source, cursor: last.next_cursor },
+  retry: false, retryOnMount: false, refetchOnMount: false,
+});
 
 /** What adopting the session into the topic would do: where it would stand, the model, the history it brings. */
 export const adoptionPlanQuery = (topicId: string, body: ThreadAdoptBody) =>
