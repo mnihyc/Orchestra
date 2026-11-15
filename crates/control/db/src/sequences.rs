@@ -28,6 +28,13 @@ use sqlx::postgres::{PgListener, PgPoolOptions};
 /// The channel on which a thread's changes are announced; its payload is
 /// `<thread id>:<sequence>`.
 pub const THREAD_CHANNEL: &str = "orch_thread";
+/// Independent accepted Stop state, announced without taking the thread sequence row.
+pub const THREAD_STOP_CHANNEL: &str = "orch_thread_stop";
+
+/// Publish only from admission or post-commit cancellation, never while holding the thread row.
+pub async fn notify_stop(conn: &mut Conn, thread: Id, version: Seq) -> Result<(), DbError> {
+    announce(conn, THREAD_STOP_CHANNEL, &payload(thread, version)).await
+}
 
 /// The next number of a thread's sequence, taken while the thread's row is
 /// locked until the transaction ends, so that numbers are given out in the
