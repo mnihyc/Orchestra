@@ -1,0 +1,5 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib -- --skip realtime::background_read_tests::
+test -p orch-api-core --test ports_core --test approvals

@@ -1490,9 +1490,80 @@ impl Arrangement {
     }
 }
 
+words! {
+    /// The work a provider entry may pay for, independent of its models and services.
+    #[derive(Default)]
+    pub enum UsagePurpose ("provider purpose") {
+        /// Ordinary agent turns.
+        #[default]
+        Turn = "turn",
+        /// Personal Ask questions.
+        Ask = "ask",
+        /// Summaries, including handoffs.
+        Summary = "summary",
+        /// Semantic indexing and search embeddings.
+        Embeddings = "embeddings",
+        /// Native permission reviews.
+        Review = "review",
+        /// Web search calls.
+        WebSearch = "web_search",
+        /// Page fetch calls.
+        PageFetch = "page_fetch",
+        /// Image generation calls.
+        ImageGeneration = "image_generation",
+    }
+}
+
+impl UsagePurpose {
+    /// The public grant distinguishes Ask from other paid work.
+    #[must_use]
+    pub const fn grant(self) -> ProviderUsePurpose {
+        match self {
+            Self::Ask => ProviderUsePurpose::Ask,
+            Self::Turn
+            | Self::Summary
+            | Self::Embeddings
+            | Self::Review
+            | Self::WebSearch
+            | Self::PageFetch
+            | Self::ImageGeneration => ProviderUsePurpose::Work,
+        }
+    }
+
+    /// Native work keeps its declared purpose; other declared agent tools remain turns.
+    #[must_use]
+    pub fn for_capability(capability: &str) -> Self {
+        match capability {
+            "turn" => Self::Turn,
+            "ask" => Self::Ask,
+            "summary" => Self::Summary,
+            "embeddings" => Self::Embeddings,
+            "review" => Self::Review,
+            "web_search" => Self::WebSearch,
+            "page_fetch" => Self::PageFetch,
+            "image_generation" => Self::ImageGeneration,
+            _ => Self::Turn,
+        }
+    }
+}
+
+words! {
+    /// The use an entry allows through a provider.
+    pub enum ProviderUsePurpose ("provider use purpose") {
+        /// Read-only Ask conversations.
+        #[schemars(extend("x-default-selected" = true))]
+        Ask = "ask",
+        /// Threads, summaries and other work.
+        #[schemars(extend("x-default-selected" = true))]
+        Work = "work",
+    }
+}
+
 /// A member of the options of an entry in the Use row of a provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryMember {
+    /// Which uses are allowed.
+    Purposes,
     /// The models.
     Models,
     /// The service offerings.
@@ -1512,6 +1583,9 @@ pub enum EntryMember {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderUse {
+    /// Which uses this entry allows. Left out, Ask and other work are both allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purposes: Option<Vec<ProviderUsePurpose>>,
     /// The models the holder may run, by name; left out, every enabled model
     /// of the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1638,6 +1712,7 @@ impl Options {
         };
         let parsed = match permission {
             Permission::ProviderUse => Self::ProviderUse(ProviderUse {
+                purposes: reader.words::<ProviderUsePurpose>("purposes"),
                 models: reader.texts("models"),
                 services: reader.texts("services"),
                 efforts: reader.texts("efforts"),
@@ -1863,6 +1938,7 @@ impl ProviderUse {
     #[must_use]
     pub fn or(&self, other: &Self) -> Self {
         Self {
+            purposes: either(self.purposes.as_ref(), other.purposes.as_ref()),
             models: either(self.models.as_ref(), other.models.as_ref()),
             services: either(self.services.as_ref(), other.services.as_ref()),
             efforts: either(self.efforts.as_ref(), other.efforts.as_ref()),
@@ -1878,6 +1954,12 @@ impl ProviderUse {
     #[must_use]
     pub fn allows_model(&self, model: &str) -> bool {
         allowed(self.models.as_ref(), model)
+    }
+
+    /// Whether this entry permits Ask or other work, before applying its remaining limits.
+    #[must_use]
+    pub fn allows_purpose(&self, purpose: ProviderUsePurpose) -> bool {
+        allowed(self.purposes.as_ref(), &purpose)
     }
 
     /// Whether the entry lets its holder run at `effort`.
@@ -1944,6 +2026,12 @@ impl ProviderUse {
             }
         }
         let mut beyond = Vec::new();
+        if ProviderUsePurpose::ALL
+            .iter()
+            .any(|purpose| self.allows_purpose(*purpose) && !other.allows_purpose(*purpose))
+        {
+            beyond.push(EntryMember::Purposes);
+        }
         if !names_within(self.models.as_ref(), other.models.as_ref()) {
             beyond.push(EntryMember::Models);
         }
@@ -2072,6 +2160,22 @@ mod tests {
 
     fn through(permission: Permission) -> Vec<Permission> {
         permission.held_through().collect()
+    }
+
+    #[test]
+    fn accounting_categories_keep_ask_separate_from_every_kind_of_other_work() {
+        assert_eq!(UsagePurpose::Ask.grant(), ProviderUsePurpose::Ask);
+        for purpose in [
+            UsagePurpose::Turn,
+            UsagePurpose::Summary,
+            UsagePurpose::Embeddings,
+            UsagePurpose::Review,
+            UsagePurpose::WebSearch,
+            UsagePurpose::PageFetch,
+            UsagePurpose::ImageGeneration,
+        ] {
+            assert_eq!(purpose.grant(), ProviderUsePurpose::Work);
+        }
     }
 
     #[test]
@@ -3000,6 +3104,7 @@ mod tests {
     #[test]
     fn several_entries_combine_permissively() {
         let one = ProviderUse {
+            purposes: None,
             models: Some(vec!["a".into()]),
             services: Some(vec!["search".into()]),
             efforts: Some(vec!["low".into()]),
@@ -3007,6 +3112,7 @@ mod tests {
             r#where: None,
         };
         let other = ProviderUse {
+            purposes: None,
             models: Some(vec!["b".into(), "a".into()]),
             services: Some(vec!["fetch".into()]),
             efforts: None,
@@ -3043,6 +3149,59 @@ mod tests {
             Options::ProviderUse(options) => options,
             other => panic!("the use of a provider takes options: {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_ask_only_entry_is_read_back_and_cannot_be_given_as_permission_for_other_work() {
+        let written = json!({"purposes":["ask"]});
+        let ask = provider_use(&written);
+        let work = provider_use(&json!({"purposes":["work"]}));
+        let all = provider_use(&json!({}));
+        let none = provider_use(&json!({"purposes":[]}));
+        assert_eq!(Options::ProviderUse(ask.clone()).to_json(), written);
+        assert!(ask.allows_purpose(ProviderUsePurpose::Ask));
+        assert!(!ask.allows_purpose(ProviderUsePurpose::Work));
+        assert!(ask.within(&all));
+        assert!(none.within(&ask));
+        assert_eq!(all.members_beyond(&ask), [EntryMember::Purposes]);
+        assert!(!work.within(&ask));
+        for purpose in ProviderUsePurpose::ALL {
+            assert!(all.allows_purpose(*purpose));
+            assert!(ask.or(&work).allows_purpose(*purpose));
+            assert!(!none.allows_purpose(*purpose));
+        }
+        assert!(Options::parse(P::ProviderUse, &json!({"purposes":["unknown"]})).is_err());
+    }
+
+    #[test]
+    fn the_provider_use_form_starts_with_both_uses_selected() {
+        let schema = P::ProviderUse.options_schema().unwrap();
+        let variants = schema["$defs"]
+            .as_object()
+            .unwrap()
+            .values()
+            .find_map(|def| {
+                def["oneOf"]
+                    .as_array()
+                    .filter(|variants| variants.iter().any(|variant| variant["const"] == "ask"))
+            })
+            .unwrap_or_else(|| panic!("the provider uses are in the schema: {schema}"));
+        for purpose in ProviderUsePurpose::ALL {
+            assert!(
+                variants
+                    .iter()
+                    .any(|variant| variant["const"] == purpose.as_str()
+                        && variant["x-default-selected"] == true)
+            );
+        }
+    }
+
+    #[test]
+    fn naming_every_provider_use_allows_the_same_grant_as_leaving_the_list_out() {
+        let omitted = provider_use(&json!({}));
+        let named = provider_use(&json!({"purposes":["ask","work"]}));
+        assert!(omitted.within(&named));
+        assert!(named.within(&omitted));
     }
 
     #[test]
