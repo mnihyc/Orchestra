@@ -294,6 +294,35 @@ pub fn __api_run_native_result_uploads_require_the_exact_capture_command_and_typ
 }
 
 impl Asker {
+    /// The job whose transfer this command is a part of, if its body names one.
+    fn job(&self) -> Option<Id> {
+        let Named::Open { body, .. } = &self.command else {
+            return None;
+        };
+        body.get("job_id")
+            .or_else(|| body.pointer("/work/job_id"))
+            .and_then(Json::as_str)
+            .and_then(|text| text.parse().ok())
+    }
+
+    /// Holds `hashes` for the job of the command, if it has one, until the job ends: the machine of a transfer has
+    /// uploaded them, or been told the system holds them, and the job takes a pin of its own only when the machine
+    /// has answered. Another transfer that carries the same content may end in between.
+    async fn hold_for_job(
+        &self,
+        conn: &mut orch_db::Conn,
+        hashes: &[Hash],
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), LinkFault> {
+        let Some(job) = self.job() else {
+            return Ok(());
+        };
+        storage::pin_for_command(conn, self.command_id, job, hashes, at)
+            .await
+            .map_err(|e| LinkFault::internal(&e))?;
+        Ok(())
+    }
+
     async fn archives(&self, app: &App, hash: Hash) -> Result<Option<ArchiveDelivery>, LinkFault> {
         if matches!(
             &self.command,
@@ -352,7 +381,7 @@ impl Asker {
         if listed_hashes(body).contains(hash) {
             return Ok(true);
         }
-        if *kind != CommandKind::FsMaterialize {
+        if !writes_a_tree_down(*kind) {
             return Ok(false);
         }
         let Some(manifest) = body
@@ -369,6 +398,13 @@ impl Asker {
             .map_err(|e| LinkFault::internal(&e))?;
         Ok(files.contains(hash))
     }
+}
+
+/// Whether a command of this kind writes a tree down from a list it names in `manifest_blob`, and
+/// fetches every file of the list by its hash: a copy of a workspace, and the import of a data part
+/// that a machine move carries. Their bodies hold the list alone, so the files are those the list names.
+fn writes_a_tree_down(kind: CommandKind) -> bool {
+    matches!(kind, CommandKind::FsMaterialize | CommandKind::FsDataImport)
 }
 
 fn denied(wants: Wants) -> LinkFault {
@@ -553,6 +589,16 @@ async fn missing(
         .missing(&mut conn, &asked.hashes, app.clock.now())
         .await
         .map_err(|e| LinkFault::internal(&e))?;
+    // What the machine is told the system holds, it will not send: it is held for the command's job from now.
+    let held: Vec<Hash> = asked
+        .hashes
+        .iter()
+        .filter(|hash| !absent.contains(hash))
+        .copied()
+        .collect();
+    asker
+        .hold_for_job(&mut conn, &held, app.clock.now())
+        .await?;
     Ok(json_reply(&MissingReply { missing: absent }))
 }
 
@@ -672,6 +718,9 @@ async fn upload(
             )
             .await
             .map_err(|e| failed(&e))?;
+        asker
+            .hold_for_job(&mut conn, &[hash], app.clock.now())
+            .await?;
         return Ok(progress_reply(
             StatusCode::OK,
             BlobProgress {
@@ -755,6 +804,7 @@ async fn upload(
                 .register(&mut tx, stored.meta, now)
                 .await
                 .map_err(|e| failed(&e))?;
+            asker.hold_for_job(&mut tx, &[hash], now).await?;
             storage::end_upload(&mut tx, &hash)
                 .await
                 .map_err(|e| failed(&e))?;

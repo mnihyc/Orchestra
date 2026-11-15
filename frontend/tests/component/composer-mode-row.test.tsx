@@ -37,16 +37,21 @@ function nativeThread(): Thread {
   ids.push(thread.id); threadWriter.reset(thread.id, { ...source, thread }, false); return thread;
 }
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
-  it(`keeps approval, sandbox and Plan together with actual defaults and one reader at ${locale}/${theme}/${width}`, async () => {
+  it(`keeps approval with the sandbox inside it, and Plan, with actual defaults and one reader at ${locale}/${theme}/${width}`, async () => {
     await setLocale(locale); useAppearance.setState({ locale, theme, resolvedTheme: theme }); document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark'); const thread = nativeThread();
     const view = show(<ViewCompactContext.Provider value={width === 400}><div style={{ width }}><ComposerControls thread={thread} attachment={<button>Attach</button>} delivery={<button>Send</button>} plan={<PlanSwitch on={false} defaulted onChange={() => undefined} />} /></div></ViewCompactContext.Provider>);
-    const sandbox = await screen.findByRole('button', { name: i18n.t('composer.confinement.label', { mode: i18n.t('choiceCatalog.sandboxLevel.workspace.name') }) });
-    expect(screen.getByRole('button', { name: i18n.t('composer.mode.label', { mode: i18n.t('composer.mode.labels.on_request') }) })).toBeVisible();
+    const approval = await screen.findByRole('button', { name: i18n.t('composer.mode.label', { mode: i18n.t('composer.mode.labels.on_request') }) });
+    expect(approval).toBeVisible();
     const order = Array.from(view.container.querySelectorAll<HTMLElement>('[data-composer-control]')).map((node) => node.dataset.composerControl);
-    expect(order.slice(order.indexOf('mode'), order.indexOf('mode') + 3)).toEqual(['mode', 'sandbox', 'plan']);
-    for (const key of ['composer.mode.placeDefault', 'composer.confinement.placeDefault', 'composer.plan.placeDefault'] as const) expect(screen.getByText(i18n.t(key))).toBeVisible();
+    // The sandbox is no control of the row: it is the second level of the approval list.
+    expect(order.slice(order.indexOf('mode'), order.indexOf('mode') + 2)).toEqual(['mode', 'plan']);
+    expect(order).not.toContain('sandbox');
+    for (const key of ['composer.mode.placeDefault', 'composer.plan.placeDefault'] as const) expect(screen.getByText(i18n.t(key))).toBeVisible();
     // A narrow cell cuts the note of a place default instead of letting it run past its button.
-    for (const key of ['composer.mode.placeDefault', 'composer.confinement.placeDefault'] as const) expect(screen.getByText(i18n.t(key))).toHaveClass('min-w-0', 'truncate');
+    expect(screen.getByText(i18n.t('composer.mode.placeDefault'))).toHaveClass('min-w-0', 'truncate');
+    await userEvent.click(approval);
+    const sandbox = await screen.findByRole('button', { name: i18n.t('composer.confinement.label', { mode: i18n.t('choiceCatalog.sandboxLevel.workspace.name') }) });
+    expect(screen.getByText(i18n.t('composer.confinement.placeDefault'))).toHaveClass('min-w-0', 'truncate');
     await userEvent.click(sandbox); const picker = screen.getByRole('dialog', { name: i18n.t('composer.confinement.title') });
     expect(within(picker).queryByRole('button', { name: i18n.t('choiceCatalog.sandboxLevel.open.name') })).toBeNull();
     const read = within(picker).getByRole('button', { name: i18n.t('choiceCatalog.sandboxLevel.read_only.name') });

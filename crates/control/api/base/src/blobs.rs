@@ -50,6 +50,8 @@ use orch_db::queries::storage;
 
 use orch_db::Conn;
 
+use orch_db::Db;
+
 use orch_db::DbError;
 
 use orch_link_contract::content::MAX_TRANSFERS_PER_MACHINE;
@@ -507,6 +509,32 @@ impl Blobs {
             .collect();
         storage::unpin_blobs(conn, &distinct, at).await?;
         Ok(())
+    }
+
+    /// Removes from the store the content a transfer through the server has ended with, if nothing else
+    /// wants it: no pin, no cached version of a file, no model input, and nobody has asked for it since
+    /// `at`, the moment the transfer ended. It is the end of a transfer whose content was never the
+    /// system's own (a template archive the machine has read, a recorded file that was read for a
+    /// person), where waiting out the grace would leave a copy on the server for a day. It never fails
+    /// the end of a transfer: what it cannot remove waits for the collection.
+    pub async fn forget_after_transfer(&self, db: &Db, hashes: &[Hash], at: DateTime<Utc>) {
+        let forgotten = async {
+            let mut conn = db.acquire().await?;
+            storage::forget_released_blobs(&mut conn, hashes, at).await
+        }
+        .await;
+        match forgotten {
+            Ok(forgotten) => {
+                for hash in forgotten {
+                    if let Err(error) = self.store().delete(&hash).await {
+                        tracing::warn!(%error, %hash, "content of a transfer that ended could not be removed");
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the content of a transfer that ended waits for the collection");
+            }
+        }
     }
 
     /// The hashes of the files a list of a tree names: what a download for a command that writes

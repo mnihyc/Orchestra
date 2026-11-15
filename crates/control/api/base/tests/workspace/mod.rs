@@ -926,11 +926,12 @@ impl Machine for Disk {
                 }
                 lock(&self.dirs).remove(&rename.from);
                 lock(&self.dirs).insert(rename.to.clone());
-                Self::json(
-                    &self
+                Self::json(&orch_api_contract::workspace::FileRenameResult {
+                    stat: self
                         .stat_of(&rename.to)
                         .unwrap_or_else(|| self.stat_of("").unwrap()),
-                )
+                    kept_entries: 0,
+                })
             }
             CommandKind::FsCopy => {
                 let copy: FsCopy = serde_json::from_value(body).map_err(bad)?;
@@ -1793,7 +1794,12 @@ pub mod ask {
     }
 
     /// A path renamed.
-    pub async fn rename(site: &Site, by: &Who, from: &str, to: &str) -> Reply<FileStat> {
+    pub async fn rename(
+        site: &Site,
+        by: &Who,
+        from: &str,
+        to: &str,
+    ) -> Reply<orch_api_contract::workspace::FileRenameResult> {
         site.app()
             .call(EnvironmentFileRename, &[&site.environment])
             .token(&by.token)

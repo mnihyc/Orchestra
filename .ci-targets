@@ -1,0 +1,8 @@
+fmt
+clippy
+contracts
+test -p orch-settings-contract --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test blob_housekeeping --test workspace_files --test template_import_scopes --test templates --test workspace_snapshots
+test -p orch-engine --test machine_moves --test environment_moves --test forks --test initial_files --test volume_carry

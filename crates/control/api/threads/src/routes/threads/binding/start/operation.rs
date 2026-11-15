@@ -195,7 +195,10 @@ impl native::Selected for Options {
                     let request = crate::routes::environments::places::prepare_request(
                         conn,
                         context.node.id,
-                        &orch_api_contract::environment::PlaceListQuery::default(),
+                        &orch_api_contract::environment::PlaceListQuery {
+                            template_id: query.template_id,
+                            ..Default::default()
+                        },
                     )
                     .await;
                     if let Ok(request) = request {

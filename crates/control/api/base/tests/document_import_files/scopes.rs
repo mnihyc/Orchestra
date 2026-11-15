@@ -8,10 +8,7 @@ use orch_api_contract::{
     },
     threads::FILENAME_HEADER,
 };
-use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
-    testing::RawReply,
-};
+use orch_api_core::{middleware::authentication::token_hash, testing::RawReply};
 use orch_blob_contract::{
     range::ByteRange,
     store::{BlobError, BlobRead, BlobStore, ByteStream, Stored},
@@ -47,9 +44,10 @@ fn scope(rules: Vec<Json>) -> Json {
     json!(value)
 }
 pub(super) async fn key(desk: &Desk, user: Id, rules: Vec<Json>) -> Key {
+    let issued_key_id = new_id();
     let key = Key {
-        id: new_id(),
-        secret: new_token(API_TOKEN_PREFIX),
+        id: issued_key_id,
+        secret: orch_api_core::middleware::authentication::new_api_token(issued_key_id),
     };
     identity::create_api_token_scoped(
         &mut *desk.world.conn().await,

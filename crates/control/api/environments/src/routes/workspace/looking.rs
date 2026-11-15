@@ -332,7 +332,14 @@ async fn archive_entry(
     drop(conn);
     let name = paths::name_of(&entry);
     let media = crate::media::media_type(name, &[]);
-    files::read_for(&ctx, &read.blob.hash, name, media, false).await
+    let served = files::read_for(&ctx, &read.blob.hash, name, media, false).await?;
+    // The entry the machine uploaded for this one viewing goes from the server once it has been sent, in
+    // a place that relays.
+    Ok(if files::relays(&ctx, door.env.id).await {
+        files::forget_when_sent(&ctx, read.blob.hash, served)
+    } else {
+        served
+    })
 }
 
 // ---------------------------------------------------------------- repositories

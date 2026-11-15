@@ -9,6 +9,7 @@ import { DescriptionField } from '@/features/documents/Document';
 import { DocumentRow } from '@/features/documents/DocumentRow';
 import type { DocumentRef } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
+import { NetworkError } from '@/lib/requests';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ describe: vi.fn<(...args: Parameters<typeof Documents.describeDocument>) => Promise<unknown>>() }));
@@ -53,6 +54,20 @@ it('a description somebody else wrote arrives where the field is not being writt
   view.rerender(<DescriptionField doc={{ id: 'doc-1', description: 'New from Bo' }} editable onEnter={vi.fn()} />);
   expect(screen.getByRole('textbox', { name: i18n.t('documents.page.descriptionLabel') })).toHaveValue('New from Bo');
   expect(calls.describe).not.toHaveBeenCalled();
+});
+
+it('keeps a failed description through remote updates and offers retry beside the field', async () => {
+  calls.describe.mockRejectedValueOnce(new NetworkError('offline'));
+  const view = show(<DescriptionField doc={{ id: 'doc-1', description: 'Original' }} editable onEnter={vi.fn()} />);
+  const field = screen.getByRole('textbox', { name: i18n.t('documents.page.descriptionLabel') });
+  fireEvent.change(field, { target: { value: 'My retained description' } });
+  expect(await screen.findByRole('alert', {}, { timeout: 2_000 })).toHaveTextContent(i18n.t('documents.page.descriptionFailed'));
+  view.rerender(<DescriptionField doc={{ id: 'doc-1', description: 'A teammate’s description' }} editable onEnter={vi.fn()} />);
+  expect(field).toHaveValue('My retained description');
+  fireEvent.click(screen.getByRole('button', { name: i18n.t('common.tryAgain') }));
+  await waitFor(() => expect(calls.describe).toHaveBeenCalledTimes(2));
+  expect(calls.describe.mock.calls).toEqual([['doc-1', 'My retained description'], ['doc-1', 'My retained description']]);
+  await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
 });
 
 it('a reader sees the description as written, and nothing where there is none', () => {

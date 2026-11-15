@@ -735,7 +735,14 @@ async fn file_content(ctx: Ctx, query: SnapshotPathQuery, _: Body) -> ApiResult<
     )
     .await;
     read.check().await?;
-    read.response(response?).await
+    let served = read.response(response?).await?;
+    // A recorded file the machine uploaded for this reading is the reading's own: it is removed from
+    // the server once it has been sent, if nothing else holds it.
+    Ok(if row.storage == "environment" {
+        files::forget_when_sent(&ctx, hash, served)
+    } else {
+        served
+    })
 }
 
 // ---------------------------------------------------------------- as one stream

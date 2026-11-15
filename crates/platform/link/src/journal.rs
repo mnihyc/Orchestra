@@ -100,8 +100,8 @@ impl Staged {
     /// Writes it down, durably: blocks while the disk is at work.
     pub fn write(&self) -> Result<(), JournalError> {
         #[cfg(test)]
-        if matches!(self.entry.step, Step::Done { .. })
-            && let Some(control) = &self.control
+        if let Some(control) = &self.control
+            && control.gates(&self.entry.step)
         {
             control.before(&self.entry)?;
         }
@@ -378,6 +378,8 @@ pub(crate) struct TestWrites {
     changed: std::sync::Condvar,
     failures: std::sync::atomic::AtomicUsize,
     hold_retry: bool,
+    /// Gate the first write of the command (the one that writes it down) instead of the one that ends it.
+    on_accept: bool,
     entered: tokio::sync::Semaphore,
 }
 
@@ -390,7 +392,22 @@ impl TestWrites {
             changed: std::sync::Condvar::new(),
             failures: std::sync::atomic::AtomicUsize::new(failures),
             hold_retry: false,
+            on_accept: false,
             entered: tokio::sync::Semaphore::new(0),
+        }
+    }
+
+    /// Gates the write that writes the command down, which is the first, instead of the write that ends it.
+    pub(crate) fn accepting(mut self) -> Self {
+        self.on_accept = true;
+        self
+    }
+
+    fn gates(&self, step: &Step) -> bool {
+        if self.on_accept {
+            matches!(step, Step::Accepted)
+        } else {
+            matches!(step, Step::Done { .. })
         }
     }
 

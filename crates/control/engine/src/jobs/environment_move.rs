@@ -1720,17 +1720,16 @@ impl Engine {
         if let Err(error) = self.cleanup_moved_image(row).await {
             tracing::warn!(job=%row.id,%error,"move image cleanup waits for the node sweep");
         }
-        if let Ok(pins) = serde_json::from_value::<Vec<Hash>>(row.plan["kept_image_pins"].clone())
-            && let Ok(mut conn) = self.db().acquire().await
-        {
-            let _ = storage::unpin_blobs(&mut conn, &pins, self.inner.clock.now()).await;
-        }
-        if let Ok(pins) = serde_json::from_value::<Vec<Hash>>(row.plan["move_pins"].clone())
-            && let Ok(mut conn) = self.db().acquire().await
-            && let Err(error) = storage::unpin_blobs(&mut conn, &pins, self.inner.clock.now()).await
-        {
-            tracing::warn!(%error,"the move's transient pins could not be released");
+        if let Err(error) = self.release_move_held(row.id).await {
+            tracing::warn!(job=%row.id,%error,"the move's transient pins could not be released");
         }
         self.after_recreate(row).await;
+    }
+
+    /// Lets go, once, of the files and the kept-image archive the move held in the store, and removes
+    /// from the server what nothing else holds. The startup sweep finishes a release a stopped process left.
+    pub(crate) async fn release_move_held(&self, job: Id) -> Result<(), EngineError> {
+        self.release_held(job, &["kept_image_pins", "move_pins"], "move_pins_released")
+            .await
     }
 }

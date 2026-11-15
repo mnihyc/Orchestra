@@ -50,6 +50,7 @@ pub mod outsiders;
 pub mod package;
 pub mod ports;
 pub mod profiles;
+pub mod provider_connections;
 pub mod provider_credits;
 pub mod provider_facts;
 pub mod provider_plan;

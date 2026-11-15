@@ -17,7 +17,7 @@ use orch_api_contract::common::ErrorCode;
 use orch_api_contract::resources::{
     ProviderDelete, ProviderGet, ProviderUpdate, ProviderUpdateBody,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_authz::ownership::{NewAccess, start_resource};
 use orch_db::queries::identity;
@@ -61,12 +61,13 @@ async fn key(world: &World, user: Id, provider: Id, allow: Json) -> String {
     }))
     .unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let hash = token_hash(&secret);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Provider CRUD operation control",
             token_hash: &hash,
@@ -517,12 +518,13 @@ async fn provider_delete_manage_only_keeps_the_static_gate_and_empty_receipt() {
 async fn legacy_manage_key(world: &World, user: Id) -> String {
     use orch_api_core::middleware::authentication::{Caller, Via, authenticate};
 
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let hash = token_hash(&secret);
     identity::create_api_token(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Legacy provider Manage compatibility",
             token_hash: &hash,
