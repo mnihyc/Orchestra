@@ -141,6 +141,8 @@ pub struct SubState {
     pub(crate) thread_projection: Option<orch_api_contract::threads::ThreadContinuationProjection>,
     /// An execution-scope change stops this subscription until a newly scoped HTTP cut/subscription.
     pub(crate) thread_reset: bool,
+    /// The independent Stop version and canonical cut delivered to this exact reader.
+    pub(crate) thread_stop: Option<(i64, Seq)>,
     /// Highest raw number admitted to this exact segment source, seeded at subscription.
     pub(crate) raw_after: i64,
     /// Commit-ordered usage changes already projected for this connection (never sent to it).
@@ -245,6 +247,7 @@ impl Subscription {
             state: tokio::sync::Mutex::new(SubState {
                 thread_projection: None,
                 thread_reset: false,
+                thread_stop: None,
                 raw_after: 0,
                 usage_read: None,
                 health_read: None,
@@ -1360,6 +1363,9 @@ async fn begin(
     inner
         .deliver(sub, st, head.seq, &mut Cache::default())
         .await?;
+    if let Feed::Thread(thread) = feed {
+        super::thread_stops::changed(inner, *thread);
+    }
     Ok(true)
 }
 

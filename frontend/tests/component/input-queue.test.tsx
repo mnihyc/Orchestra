@@ -25,7 +25,7 @@ import { deferred } from './deferred';
 const calls = vi.hoisted(() => ({ update: vi.fn<typeof ThreadsApi.updateInput>(), remove: vi.fn<typeof ThreadsApi.cancelInput>(), resume: vi.fn<typeof ThreadsApi.resumeQueue>() }));
 vi.mock('@/api/threads', async (original) => ({ ...await original<typeof ThreadsApi>(), updateInput: calls.update, cancelInput: calls.remove, resumeQueue: calls.resume }));
 const queueHelp = vi.hoisted(() => vi.fn());
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => queueHelp }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => queueHelp }));
 const THREAD = 'queue-thread';
 const READ = defaultThreadRead(THREAD);
 const ADA = userRef(me(1, 'ada', 'Ada Lovelace'));
@@ -596,4 +596,26 @@ it.each(['en', 'zh-CN'] as const)('keeps the next native message visible while a
   expect(row(1)).toHaveAttribute('data-queued', next.id);
   expect(calls.update).not.toHaveBeenCalled();
   expect(calls.remove).not.toHaveBeenCalled();
+});
+
+for (const [locale, theme] of [['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const) {
+  it.each(['cap_reached', 'owner_lacks_access', 'second_step_required', 'model_use_required'] as const)(`shows whose input waits and that eligible teammates pass until it resumes automatically for %s in ${locale}/${theme}`, async (detail) => {
+    await setLocale(locale); document.documentElement.setAttribute('data-theme', theme);
+    const native = snapshot().thread;
+    draw([input('held-author', 'Keep this authored input', '1', { author: GRACE, state_detail: detail, run_as: detail === 'cap_reached' ? ADA : null }), input('eligible', 'Another person can continue', '2')], { ...native, id: THREAD, owner: ADA });
+    const held = within(row(1));
+    expect(held.getByRole('button', { name: GRACE.display_name })).toBeVisible();
+    expect(held.getByText(locale === 'en' ? /other messages may pass.*resumes automatically/u : /其他消息可先行.*条件满足后自动继续/u)).toBeVisible();
+    if (detail === 'owner_lacks_access' || detail === 'cap_reached') expect(held.getByRole('button', { name: ADA.display_name })).toBeVisible();
+    expect(within(row(2)).getByText('Another person can continue')).toBeVisible();
+    expect(within(row(2)).queryByText(locale === 'en' ? /resumes automatically/u : /条件满足后自动继续/u)).toBeNull();
+    expect(calls.update).not.toHaveBeenCalled(); expect(calls.remove).not.toHaveBeenCalled(); expect(calls.resume).not.toHaveBeenCalled();
+  });
+}
+
+it.each(['en', 'zh-CN'] as const)('names the retained authority when an authorless input waits on its allowance in %s', async (locale) => {
+  await setLocale(locale);
+  draw([input('system-held', 'Automatic work waiting', '1', { author: null, source: 'system', state_detail: 'cap_reached' })], { ...snapshot().thread, id: THREAD, owner: ADA });
+  expect(within(row(1)).getByRole('button', { name: ADA.display_name })).toBeVisible();
+  expect(within(row(1)).getByText(locale === 'en' ? /other messages may pass.*resumes automatically/u : /其他消息可先行.*条件满足后自动继续/u)).toBeVisible();
 });
