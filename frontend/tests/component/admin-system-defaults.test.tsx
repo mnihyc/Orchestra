@@ -26,7 +26,7 @@ vi.mock('@/api/access', async (load) => ({ ...await load<typeof Access>(), readS
 }));
 vi.mock('@/api/auth', async (load) => ({ ...await load<typeof Auth>(), meQuery: { queryKey: ['me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada')) } }));
 vi.mock('@/api/nodes', async (load) => ({ ...await load<typeof Nodes>(), nodeQuery: (id: string) => ({ queryKey: ['node', id], queryFn: calls.node }) }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (value: { name?: string | null } | null) => value?.name ?? null }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabel: () => (value: { name?: string | null } | null) => value?.name ?? null }));
 
 function systemPage(): PermissionPage {
   const page = pageFor('org');

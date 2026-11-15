@@ -1,0 +1,8 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test threads_start_source --test thread_creator_initial_files_scopes --test workspace_source --test workspace_source_scopes --test workspace_snapshots
+test -p orch-engine --test creator_source_authority --test source_uniform --test provisioned_source
+test -p orch-envhost --lib -- files::

@@ -18,37 +18,30 @@ use orch_settings_contract::{
     provenance::{LockedBy, SourceScope},
     registry::{self, SettingDef, keys},
 };
-use orch_summarizer_contract::{
-    descriptor::split_setting,
-    summarizer::{SUMMARY_CHARS, SummaryLimits},
-};
-use orch_summarizer_model::descriptor::CONTEXT_TOKENS;
+use orch_summarizer_contract::{descriptor::split_setting, summarizer::SummaryLimits};
 use orch_types::{Hash, Id, Json};
 use serde::Deserialize;
 use serde_json::json;
 use std::{collections::BTreeSet, num::NonZeroU32};
 
-/// Thread activity keeps the ordinary shared trigger default.
-pub const THREAD_MIN_INTERVAL_SECS: u32 = 120;
-/// A topic aggregates many changing threads; fifteen minutes avoids repeating every child event.
-pub const TOPIC_MIN_INTERVAL_SECS: u32 = 900;
-/// Document edits arrive in bursts; five minutes lets a group of edits settle.
-pub const DOCUMENT_MIN_INTERVAL_SECS: u32 = 300;
-/// Chat messages arrive in runs; catch-up and title automation share a five-minute default.
-pub const CHAT_MIN_INTERVAL_SECS: u32 = 300;
 /// Eligible/running work follows at five seconds by default; future work waits until its due time.
 pub const FOLLOW_INTERVAL_SECS: u32 = 5;
 
-/// Shipped pacing only. Explicit per-kind and shared settings always take precedence.
-#[must_use]
-pub const fn default_min_interval(kind: SummaryKind) -> u32 {
-    match kind {
-        SummaryKind::Thread => THREAD_MIN_INTERVAL_SECS,
-        SummaryKind::Topic => TOPIC_MIN_INTERVAL_SECS,
-        SummaryKind::Document => DOCUMENT_MIN_INTERVAL_SECS,
-        SummaryKind::Chat | SummaryKind::ChatTitle => CHAT_MIN_INTERVAL_SECS,
-        SummaryKind::Help | SummaryKind::SearchResults => 0,
-    }
+/// What the registry ships for one generated target, read from the default of `summary.targets`. The settings page shows the same
+/// numbers as what a target starts from, so the page and this work take them from one place.
+fn shipped_options(
+    def: &SettingDef,
+    kind: SummaryKind,
+) -> Result<SummaryTargetOptions, EngineError> {
+    let targets: SummaryTargets =
+        serde_json::from_value(def.default_value().unwrap_or_else(|| json!({})))?;
+    Ok(targets.generated(kind).cloned().unwrap_or_default())
+}
+
+fn missing(what: &'static str) -> EngineError {
+    EngineError::unreadable(format!(
+        "the shipped summary targets name no {what} for this target"
+    ))
 }
 
 /// Private producer configuration selected by the existing auto.summarizer setting. No
@@ -196,10 +189,6 @@ pub async fn resolve(conn: &mut Conn, identity: &Identity) -> Result<Policy, Eng
     )?;
     let targets: SummaryTargets =
         serde_json::from_value(family.value.clone().unwrap_or_else(|| json!({})))?;
-    let mut options = targets
-        .generated(identity.target().kind())
-        .cloned()
-        .unwrap_or_default();
     let option_source = family
         .parts
         .iter()
@@ -210,6 +199,19 @@ pub async fn resolve(conn: &mut Conn, identity: &Identity) -> Result<Policy, Eng
                 .is_some()
         })
         .map(|part| part.source.clone());
+    // An entry no scope wrote is the registry's own: what is shipped (read below as the fallback), not a choice anyone made.
+    let chosen = option_source
+        .as_ref()
+        .is_some_and(|source| source.scope != SourceScope::Default);
+    let mut options = if chosen {
+        targets
+            .generated(identity.target().kind())
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        SummaryTargetOptions::default()
+    };
+    let shipped = shipped_options(defs[0], identity.target().kind())?;
     let mut options_writer =
         match option_source.filter(|source| source.scope != SourceScope::Default) {
             Some(source) => stored::row(conn, source.node, keys::SUMMARY_TARGETS)
@@ -266,31 +268,27 @@ pub async fn resolve(conn: &mut Conn, identity: &Identity) -> Result<Policy, Eng
         .or(shared
             .min_interval_secs
             .filter(|_| shared_is_set || matches!(identity.target(), SummaryTarget::Thread { .. })))
-        .unwrap_or(default_min_interval(identity.target().kind()));
-    let on = options
-        .on
-        .clone()
-        .unwrap_or_else(|| match identity.target() {
-            SummaryTarget::Thread { .. } => shared.on,
-            SummaryTarget::Topic { .. } => BTreeSet::from([SummaryTrigger::ChildChanged]),
-            SummaryTarget::Document { .. } => BTreeSet::from([SummaryTrigger::ContentChanged]),
-            // This is the automatic chat-rollup event. A person's unread catch-up stays an
-            // explicit original act and never consults this automatic-event predicate.
-            SummaryTarget::Chat { .. } | SummaryTarget::ChatTitle { .. } => {
-                BTreeSet::from([SummaryTrigger::MessagePosted])
-            }
-        });
+        .or(shipped.min_interval_secs)
+        .ok_or_else(|| missing("interval"))?;
+    // The chat events are the automatic chat-rollup event. A person's unread catch-up stays an
+    // explicit original act and never consults this automatic-event predicate.
+    let on = match options.on.clone() {
+        Some(on) => on,
+        None if matches!(identity.target(), SummaryTarget::Thread { .. }) => shared.on,
+        None => shipped.on.clone().ok_or_else(|| missing("events"))?,
+    };
+    let shipped_tokens = shipped
+        .context_tokens
+        .ok_or_else(|| missing("input size"))?
+        .get();
     let context_tokens = match options.context_tokens {
         Some(value) => value,
-        None => input_default(producer.as_ref(), "context_tokens", CONTEXT_TOKENS)?,
+        None => input_default(producer.as_ref(), "context_tokens", shipped_tokens)?,
     };
-    let default_output = if matches!(identity.target(), SummaryTarget::ChatTitle { .. }) {
-        SummaryLimits::for_field(orch_summarizer_contract::descriptor::SummaryField::Title, 0)
-            .max_chars
-    } else {
-        SUMMARY_CHARS
-    };
-    let output_chars = options.output_chars.unwrap_or(positive(default_output)?);
+    let output_chars = options
+        .output_chars
+        .or(shipped.output_chars)
+        .ok_or_else(|| missing("output size"))?;
     let fingerprint = Hash::of(&serde_json::to_vec(&json!({
         "target":identity.target(),"place":identity.place(),"options":options,"writer":options_writer,
         "own_revision":own_revision,"locked_by":locked_by,"events":on,"min_interval_secs":min_interval_secs,
