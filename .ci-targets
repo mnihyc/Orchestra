@@ -1,0 +1,8 @@
+fmt
+clippy
+contracts
+test -p orch-api-contract --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test admin_system --test exports_limits
+test -p orch-engine --test exports files_and_earlier_versions_go_in_when_they_are_asked_for_and_a_file_past_the_largest_is_left_out_and_counted -- --exact

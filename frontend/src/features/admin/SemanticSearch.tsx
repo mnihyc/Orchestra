@@ -65,9 +65,19 @@ function isReason(word: string): word is (typeof REASONS)[number] {
 }
 
 /** The model named and the length asked of it, as one label. */
-function modelLabel(org: SemanticSearchOrg, count: (value: number) => string): string {
+function modelLabel(org: Pick<SemanticSearchOrg, 'model_name' | 'dimensions'>, count: (value: number) => string): string {
   const parts = [org.model_name ?? '', org.dimensions === null ? '' : count(org.dimensions)];
   return parts.filter((part) => part !== '').join(' · ');
+}
+
+/** A changed choice does not replace the index that is still current. */
+function ModelValue({ org }: { org: SemanticSearchOrg }) {
+  const { t } = useTranslation();
+  const format = useFormats();
+  const selected = org.model_name === null ? t('admin.semantic.notSet') : modelLabel(org, format.count);
+  const current = org.active;
+  return <span className="break-all">{current !== null ? t('admin.semantic.modelComparison', { selected, current: modelLabel(current, format.count) })
+    : org.model_name === null ? '—' : selected}</span>;
 }
 
 /** How far an org's index got: the share of its tokens that have their vectors. */
@@ -111,13 +121,12 @@ function Progress({ org, inline = false }: { org: SemanticSearchOrg; inline?: bo
   const detail =
     org.pending_tokens === 0
       ? t('admin.semantic.done')
-      : org.seconds_left === null
-        ? t('admin.semantic.pending', { tokens: format.tokens(org.pending_tokens) })
-        : t('admin.semantic.left', { time: format.span(org.seconds_left) });
+      : t('admin.semantic.indexedOf', { indexed: format.tokens(org.tokens - org.pending_tokens), total: format.tokens(org.tokens) });
+  const left = org.pending_tokens > 0 && org.seconds_left !== null ? t('admin.semantic.left', { time: format.span(org.seconds_left) }) : null;
   return (
     <span className={inline ? 'flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1' : 'flex min-w-0 flex-col gap-1'}>
       <Meter value={progressOf(org)} label={t('admin.semantic.progress')} look="compact" neutral />
-      <span className="text-sm text-text-muted">{detail}</span>
+      <span className="text-sm text-text-muted">{detail}{left !== null && <> · {left}</>}</span>
     </span>
   );
 }
@@ -211,7 +220,6 @@ function TemplateUsed({ providerId }: { providerId: string | null }) {
 
 export function SemanticSearch() {
   const { t } = useTranslation();
-  const format = useFormats();
   // Follow the indexer's interval even while idle: a changed setting can begin work after this read.
   const overview = useQuery({
     ...semanticSearchQuery,
@@ -227,7 +235,7 @@ export function SemanticSearch() {
       <span className="flex flex-wrap items-center gap-2"><OrgName org={row.org} />
         {!shown.has(STATE_COLUMN) && <State org={row} />}</span>
       <TemplateUsed providerId={row.provider_id} />
-      {!shown.has(MODEL_COLUMN) && row.model_name !== null && <span className="break-all text-sm text-text-muted">{modelLabel(row, format.count)}</span>}
+      {!shown.has(MODEL_COLUMN) && (row.model_name !== null || row.active !== null) && <span className="text-sm text-text-muted"><ModelValue org={row} /></span>}
       {!shown.has(PROGRESS_COLUMN) && (row.tokens > 0 || providerPaused(row) || row.state === 'indexing') && <Progress org={row} inline />}
       {!shown.has(DISK_COLUMN) && row.used_bytes > 0 && <span className="text-sm text-text-muted"><Disk org={row} /></span>}
       {!shown.has(ACTIONS_COLUMN) && <Actions org={row} />}
@@ -238,12 +246,7 @@ export function SemanticSearch() {
       header: t('admin.semantic.model'),
       from: 'md',
       className: 'whitespace-normal',
-      cell: (row) =>
-        row.model_name === null ? (
-          <span className="text-text-muted">—</span>
-        ) : (
-          <span className="break-all">{modelLabel(row, format.count)}</span>
-        ),
+      cell: (row) => <ModelValue org={row} />,
     },
     { id: PROGRESS_COLUMN, header: t('admin.semantic.progress'), from: 'md', cell: (row) => <Progress org={row} /> },
     {
