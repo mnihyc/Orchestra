@@ -25,5 +25,5 @@ export async function acceptSubscription(cache: QueryClient, id: string, reply: 
   cache.setQueryData(['subscription-choice', id], reply.access.subscription);
   cache.setQueryData<Node>(nodeKey(id), (before) => before === undefined ? before : { ...before, access: reply.access });
   threadWriter.patch(id, (before) => ({ ...before, access: reply.access }));
-  attentionWriter.level(id, reply.access.subscription);
+  attentionWriter.level(id, reply.access.subscription, 'manual');
 }
