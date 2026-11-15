@@ -231,10 +231,11 @@ async fn service_use(
     caller: &Caller,
     thread: Id,
     provider: Id,
-    offering: &str,
-    groups: &[String],
+    offering: (&str, &[String]),
+    purpose: orch_access_contract::permissions::UsagePurpose,
     clock: &dyn Clock,
 ) -> Result<Option<Option<Id>>, EngineError> {
+    let (offering, groups) = offering;
     let principal = Principal::load(conn, caller.clone(), clock.time()).await?;
     let policies = crate::access::resource_policies(conn, provider).await?;
     let usable =
@@ -245,6 +246,7 @@ async fn service_use(
     // One entry has to allow the service, in the environment the thread works in.
     let place = crate::access::thread_place(conn, thread).await?;
     let allowing = granted.allowing(&orch_authz::options::Wanted {
+        purpose,
         service: Some((offering, groups)),
         at: place.as_ref(),
         ..orch_authz::options::Wanted::default()
@@ -341,6 +343,14 @@ impl ServiceCommand {
             }
             return Ok(None);
         };
+        if self
+            .native()
+            .is_some_and(CommandAuthority::reads_before_fence)
+        {
+            // The native verifier has now fenced the source after its read. Keep the paid
+            // continuation's own rows in the same source-before-command order as ordinary work.
+            self.lock_source(conn).await?;
+        }
         if let Some(recovery) = &self.recovery
             && !recovery.current(conn, self).await?
         {
@@ -421,8 +431,8 @@ impl ServiceCommand {
                 caller,
                 place,
                 self.provider,
-                &self.offering,
-                &self.groups,
+                (&self.offering, &self.groups),
+                orch_access_contract::permissions::UsagePurpose::for_capability(&self.capability),
                 clock,
             )
             .await?
@@ -961,8 +971,10 @@ impl Engine {
                             caller,
                             call.thread,
                             provider,
-                            offering,
-                            &selected.groups,
+                            (offering, &selected.groups),
+                            orch_access_contract::permissions::UsagePurpose::for_capability(
+                                capability,
+                            ),
                             self.inner.clock.as_ref(),
                         )
                         .await?
