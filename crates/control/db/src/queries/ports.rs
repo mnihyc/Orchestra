@@ -285,6 +285,16 @@ pub async fn effect(
         .bind(environment).bind(user).bind(thread).bind(hash).bind(now).fetch_optional(conn).await?)
 }
 
+/// The stored end of a refusal shared by the requests for one opening.
+pub async fn refused_until(conn: &mut Conn, opening: Id) -> Result<Option<DateTime<Utc>>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT max(refused_until) FROM port_open_requests WHERE opening_id=$1")
+            .bind(opening)
+            .fetch_one(conn)
+            .await?,
+    )
+}
+
 /// Adds a client fence to the one admission effect, without a second audience.
 pub async fn save_request(conn: &mut Conn, row: &Request) -> Result<(), DbError> {
     sqlx::query("INSERT INTO port_open_requests(environment_id,user_id,thread_id,client_id,request_hash,effect_hash,opening_id,refused_until,secret_response_taken,outcome_delivered,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")

@@ -57,18 +57,21 @@ export function containedThreadStates(rows: ReadonlyMap<string, TreeNode>): Read
   const held = contained.get(rows);
   if (held !== undefined) return held;
   const states = new Map<string, ThreadUrgencyState>();
-  for (const row of rows.values()) {
-    const state = cachedDisplay(row.thread)?.state;
-    if (row.deleted || row.archived || !isThreadUrgency(state)) continue;
-    const rank = THREAD_URGENCY.indexOf(state);
-    for (let id = row.parent_id; id !== null; id = rows.get(id)?.parent_id ?? null) {
-      const before = states.get(id);
-      // An equal or stronger mark has already reached this place's ancestors.
-      // This also ends a corrupt cycle without allocating one visited set per thread.
-      if (before !== undefined && THREAD_URGENCY.indexOf(before) <= rank) break;
-      states.set(id, state);
+  const mark=(id:string|null,state:ThreadUrgencyState)=>{
+    const rank=THREAD_URGENCY.indexOf(state);
+    for(;id!==null;id=rows.get(id)?.parent_id??null) {
+      const before=states.get(id);
+      if(before!==undefined&&THREAD_URGENCY.indexOf(before)<=rank)break;
+      states.set(id,state);
     }
+  };
+  for(const row of rows.values()) {
+    if(row.deleted||row.archived)continue;
+    const folded=row.folded?.urgency;
+    if(isThreadUrgency(folded))mark(row.id,folded);
+    const state=cachedDisplay(row.thread)?.state;
+    if(isThreadUrgency(state))mark(row.parent_id,state);
   }
-  contained.set(rows, states);
+  contained.set(rows,states);
   return states;
 }

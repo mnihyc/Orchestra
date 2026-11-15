@@ -41,7 +41,7 @@ pub mod origin {
 /// What a row measures: the words of the `scope` column.
 pub mod scope {
     /// A turn's total.
-    pub const TURN: &str = "turn";
+    pub const TURN: &str = orch_access_contract::permissions::UsagePurpose::Turn.as_str();
     /// One model request.
     pub const REQUEST: &str = "request";
 }
@@ -61,15 +61,16 @@ pub mod rate_source {
 /// What the purpose of a use was: the words of the `purpose` column.
 pub mod purpose {
     /// A turn of a thread.
-    pub const TURN: &str = "turn";
+    pub const TURN: &str = orch_access_contract::permissions::UsagePurpose::Turn.as_str();
     /// A summary Orch asked a model for itself.
-    pub const SUMMARY: &str = "summary";
+    pub const SUMMARY: &str = orch_access_contract::permissions::UsagePurpose::Summary.as_str();
     /// A harness permission review, reported apart from its ordinary turn totals.
-    pub const REVIEW: &str = "review";
+    pub const REVIEW: &str = orch_access_contract::permissions::UsagePurpose::Review.as_str();
     /// Vectors Orch asked a model for itself, of an org's text or of a query, for search by meaning.
-    pub const EMBEDDINGS: &str = "embeddings";
+    pub const EMBEDDINGS: &str =
+        orch_access_contract::permissions::UsagePurpose::Embeddings.as_str();
     /// A personal read-only question, attributed to the person asking.
-    pub const ASK: &str = "ask";
+    pub const ASK: &str = orch_access_contract::permissions::UsagePurpose::Ask.as_str();
 }
 
 /// Tokens by kind. Cached tokens and tokens written to a cache are parts of the input, reasoning tokens are
