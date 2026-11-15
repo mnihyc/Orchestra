@@ -10,14 +10,20 @@ import type { BackendRef, CapabilityBackendCandidate } from '@/generated/api-typ
 import { ResourceName } from '@/features/resource-facts/ResourceFacts';
 import { ProviderDefaultChoice } from '@/features/settings/ProviderChoice';
 import type { ValueControlProps } from '@/features/settings/ValueControl';
-import { backendCapabilities, changeBackend, selectedBackend } from './capabilityBackendValue';
+import { backendCapabilities, backendIdentity, changeBackend, selectedBackend } from './capabilityBackendValue';
 import { useDebounced } from '@/lib/debounce';
 import { ErrorState } from '@/ui/ErrorState';
 import { Pagination } from '@/ui/Pagination';
 import { ResourcePickerLookup } from '@/ui/ResourcePicker';
 
 const hidden = (error: unknown) => error instanceof ApiError && [401, 403, 404].includes(error.status);
-const identity = (backend: BackendRef) => JSON.stringify([backend.route, backend.offering?.provider, backend.offering?.offering]);
+const identity = backendIdentity;
+const sameOffering = (left: BackendRef, right: BackendRef): boolean => left.route === right.route
+  && left.offering?.provider === right.offering?.provider && left.offering?.offering === right.offering?.offering;
+/** A model-list row supplies a readable name; it does not replace retained placement options. */
+const currentChoice = (rows: CapabilityBackendCandidate[] | undefined, selected: BackendRef | null): CapabilityBackendCandidate | undefined => selected === null ? undefined
+  : rows?.find((row) => identity(row.backend) === identity(selected))
+    ?? rows?.find((row) => row.backend.config === null && sameOffering(row.backend, selected));
 
 function useWords() {
   const { t, i18n } = useTranslation();
@@ -42,6 +48,13 @@ export function CapabilityBackendChoice({ settingKey, target, ...props }: ValueC
   </div>;
 }
 
+/** A model consumer retains the same exact backend and uses this ordinary scoped supplier. */
+export function CapabilityOfferingChoice({ place, capability, ...props }: ValueControlProps & { place: string; capability: string }) {
+  const reader = useStore(client.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
+  return <BackendChoice {...props} key={`${reader}:${place}:${capability}`} reader={reader} place={place} capability={capability} title={props.label} multi={false}
+    selected={selectedBackend(props.value, capability)} onSelected={(backend) => { props.onEdited?.(); props.onChange(backend); }} />;
+}
+
 function BackendChoice({ reader, place, capability, title, multi, selected, onSelected, disabled = false, error }: ValueControlProps & {
   reader: string; place: string; capability: string; title: string; multi: boolean; selected: BackendRef | null; onSelected: (value: BackendRef) => void;
 }) {
@@ -60,7 +73,7 @@ function BackendChoice({ reader, place, capability, title, multi, selected, onSe
   const current = useQuery({ ...selectedCapabilityBackendQuery(reader, selectedProvider, place, capability, selected?.offering?.offering ?? ''), enabled: selectedProvider !== '' });
   const list = useInfiniteQuery({ ...capabilityBackendsQuery(reader, provider, place, capability, settled), enabled: open && provider !== '' && !disabled && !waiting });
   const rows = waiting || hidden(list.error) || list.isError && !list.isFetchNextPageError ? [] : [...new Map((list.data?.pages.flatMap((page) => page.items) ?? []).map((row) => [identity(row.backend), row])).values()];
-  const chosen = current.isError ? undefined : current.data?.items.find((row) => selected !== null && identity(row.backend) === identity(selected));
+  const chosen = current.isError ? undefined : currentChoice(current.data?.items, selected);
   const chosenLabel = provider !== selectedProvider || selected === null ? '' : chosen === undefined
     ? t(hidden(current.error) || current.isSuccess ? 'settings.compact.managed' : current.isPending ? 'common.loading' : 'capabilityBackend.unavailable')
     : `${route(chosen)} · ${chosen.offering_name}`;
@@ -98,7 +111,7 @@ function BackendChoice({ reader, place, capability, title, multi, selected, onSe
             const row = rows.find((row) => identity(row.backend) === option.value);
             if (row === undefined || !row.eligible || waiting || list.isFetching || disabled) return;
             setOpen(false); requested.current = ''; setTyped('');
-            onSelected(selected !== null && identity(selected) === identity(row.backend) ? selected : row.backend);
+            onSelected(selected !== null && sameOffering(selected, row.backend) && row.backend.config === null ? selected : row.backend);
           }} />
         {!open && current.isError && !hidden(current.error) && <ErrorState compact title={t('capabilityBackend.unavailable')} error={current.error} retrying={current.isFetching} onRetry={() => void current.refetch()} />}
         {chosen !== undefined && !chosen.eligible && provider === selectedProvider && <span className="text-xs text-text-muted">{reason(chosen)}</span>}
@@ -125,7 +138,7 @@ function BackendName({ reader, provider, place, capability, backend }: { reader:
   const { t, route, reason } = useWords();
   const account = useQuery(capabilityProviderQuery(reader, provider));
   const current = useQuery({ ...selectedCapabilityBackendQuery(reader, provider, place, capability, backend.offering?.offering ?? ''), enabled: place !== '' });
-  const chosen = current.isError ? undefined : current.data?.items.find((row) => identity(row.backend) === identity(backend));
+  const chosen = current.isError ? undefined : currentChoice(current.data?.items, backend);
   if (hidden(account.error) || account.data === null || hidden(current.error) || current.isSuccess && chosen === undefined) return <span className="text-text-muted">{t('settings.compact.managed')}</span>;
   if (account.isError || current.isError) return <ErrorState compact title={t('capabilityBackend.unavailable')} error={account.error ?? current.error} onRetry={() => { void account.refetch(); if (place !== '') void current.refetch(); }} />;
   if (account.data === undefined || place !== '' && chosen === undefined) return <span className="text-text-muted">{t('common.loading')}</span>;

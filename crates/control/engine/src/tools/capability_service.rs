@@ -577,7 +577,23 @@ impl Engine {
                 self.execute_web_model_service(sources, call, capability)
                     .await
             }
-            "program-session" => delegation::execute(self, call, capability).await,
+            "program-session" => {
+                let executor = delegation::executor::Executor::thread_tool(
+                    self, call, capability, sources, selected,
+                )
+                .await?;
+                let request = executor.request();
+                let mut executors = orch_provider_contract::capabilities::Executors::default();
+                executors
+                    .register("program-session", std::sync::Arc::new(executor))
+                    .map_err(EngineError::unreadable)?;
+                executors
+                    .execute(request)
+                    .await
+                    .map(serde_json::to_value)
+                    .map_err(delegation::executor::engine_error)?
+                    .map_err(EngineError::from)
+            }
             _ => Err(EngineError::unreadable(
                 "the selected capability executor is not installed",
             )),

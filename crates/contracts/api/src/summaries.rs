@@ -173,15 +173,13 @@ impl SummaryTarget {
     }
 }
 
-/// A person's optional API model choice, checked against current Use and allowed lists.
+/// A person's exact backend choice, checked against current source Use and allowed lists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SummaryModelChoice {
-    /// Actual provider identity.
-    pub provider_id: Id,
-    /// Its exact enabled model.
-    pub model: String,
-    /// Provider-bounded options in that model's existing interface.
+    /// The complete selected route, sign-in, model and adapter placement.
+    pub backend: orch_provider_contract::capabilities::BackendRef,
+    /// Options supported by that backend and bounded by its current grants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<Json>,
 }
@@ -524,6 +522,19 @@ pub struct SummarySnapshot {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_explicit_summary_choice_keeps_its_backend_placement_and_options() {
+        let backend = json!({
+            "route":"summary.delegation",
+            "offering":{"provider":"00000000-0000-0000-0000-000000000001","offering":"native-text"},
+            "config":{"environment_id":"00000000-0000-0000-0000-000000000002","helper_topic_id":"00000000-0000-0000-0000-000000000003"},
+            "x_selected":{"revision":"retained"}
+        });
+        let value = json!({"backend":backend,"params":{"effort":"low"}});
+        let selected: SummaryModelChoice = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(selected).unwrap(), value);
+    }
 
     #[test]
     fn batch_read_declares_its_own_collections_and_optional_provider_read_without_paid_write() {

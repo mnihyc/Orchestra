@@ -1,0 +1,9 @@
+fmt
+contracts
+test -p orch-db --test usage_ledger
+test -p orch-engine --lib -- tools::source::tests::image_services::delegation::
+test -p orch-api-core --test thread_read_tools
+test -p orch-engine --test model_inputs
+test -p orch-summarizer-model --test capabilities
+test -p orch-api-core --lib
+test -p orch-testkit --lib

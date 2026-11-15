@@ -14,24 +14,31 @@ pub(super) async fn context_tokens(
     conn: &mut orch_db::Conn,
     config: &orch_summarizer_model::descriptor::Config,
 ) -> Result<u32, EngineError> {
+    let offering = config.offering().map_err(EngineError::unreadable)?;
     let model = orch_db::queries::resources::thread_engine::model(
         conn,
-        config.provider_id,
-        &config.model_name,
+        offering.provider,
+        &offering.offering,
     )
     .await?
     .ok_or_else(|| EngineError::unreadable("the summary model is unavailable"))?;
-    let provider = orch_db::queries::resources::thread_engine::provider(conn, config.provider_id)
+    let provider = orch_db::queries::resources::thread_engine::provider(conn, offering.provider)
         .await?
         .ok_or_else(|| EngineError::unreadable("the summary provider is unavailable"))?;
-    let protocol = super::resource::completion_protocol(&provider.protocols)?.ok_or_else(|| {
-        EngineError::unreadable("the summary provider offers no generation interface")
-    })?;
+    let protocol = if config.backend.route == orch_summarizer_model::capabilities::ROUTE {
+        Some(
+            super::resource::completion_protocol(&provider.protocols)?.ok_or_else(|| {
+                EngineError::unreadable("the summary provider offers no generation interface")
+            })?,
+        )
+    } else {
+        None
+    };
     let parameters = orch_provider_contract::models::composed_model_parameters(
         &model.parameters,
         &model.groups,
         &model.option_layers,
-        Some(&protocol),
+        protocol.as_deref(),
     )
     .map_err(EngineError::unreadable)?;
     orch_summarizer_model::context::fit_window(
@@ -45,7 +52,7 @@ pub(super) async fn context_tokens(
 }
 
 /// The window taken for a model whose entry does not say: what every model that does this work has.
-pub(crate) const UNKNOWN_WINDOW_TOKENS: i64 = 32_000;
+const UNKNOWN_WINDOW_TOKENS: i64 = 32_000;
 
 /// The share the setting ships with, for a place where it does not read.
 pub(crate) const DEFAULT_SHARE: i64 = 50;
