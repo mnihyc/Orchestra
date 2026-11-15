@@ -10,6 +10,7 @@
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { ApiError, accepted, api, client, done, ok, repeatable } from '@/api/client';
+import { readAllPages } from '@/api/collection';
 import { ownerReadHeaders, withOwnerReadConfirmation } from '@/api/ownerReadConfirmation';
 import type {
   AccessRequestCreateBody,
@@ -183,16 +184,16 @@ export function currentPageOf(error: unknown): PermissionPage | null {
 export const PEOPLE_PAGE = 8;
 
 /** The people behind one holder of a page, a page at a time. `holder` is the form the API names (`role:<place>:<role>`, `group:<id>`, ...). */
-export const peopleQuery = (target: Pick<AccessTarget, 'kind' | 'id'>, holder: string) =>
+export const peopleQuery = (target: Pick<AccessTarget, 'kind' | 'id'>, holder: string, q = '') =>
   infiniteQueryOptions({
-    queryKey: ['page-people', pathOf(target.kind), target.id, holder] as const,
+    queryKey: ['page-people', pathOf(target.kind), target.id, holder, ...(q.trim() === '' ? [] : [q.trim()])] as const,
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }): Promise<PermissionPeopleListReply> =>
       ok(
         api.GET('/{object}/{id}/permissions/people', {
           params: {
             path: { object: pathOf(target.kind), id: target.id },
-            query: { holder, limit: PEOPLE_PAGE, ...(pageParam === null ? {} : { cursor: pageParam }) },
+            query: { holder, limit: PEOPLE_PAGE, ...(q.trim() === '' ? {} : { q: q.trim() }), ...(pageParam === null ? {} : { cursor: pageParam }) },
           },
           signal,
         }),
@@ -303,7 +304,7 @@ export const groupsQuery = (orgId: string) =>
   queryOptions({
     queryKey: ['groups', orgId] as const,
     queryFn: ({ signal }): Promise<Group[]> =>
-      ok(api.GET('/nodes/{id}/groups', { params: { path: { id: orgId } }, signal })),
+      readAllPages((cursor) => ok(api.GET('/nodes/{id}/groups', { params: { path: { id: orgId }, query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
 
 // ---------------------------------------------------------------- roles held in a place

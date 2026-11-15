@@ -1,4 +1,5 @@
 /** Machine discoveries keep their exact origin, native import right and committed receipt. */
+import { collectionQuery } from '@/api/collection';
 import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -14,13 +15,16 @@ import { show } from './support';
 
 const environment: EnvironmentRef = { id: 'environment-1', name: 'Workspace', address: 'workspace', placement: 'connected', status: 'running', owner: ADA, ports_exposed: false };
 const found: McpFound = { name: 'docs', source: 'codex', scope: 'project', directory: '/workspace/project', transport: 'stdio', imported: null };
-const snapshot: EnvironmentMcp = { applies: 'next_turn', found: [found], servers: [], import: { allowed: true, reason: null } };
+const snapshot: EnvironmentMcp = { next_cursor: null, applies: 'next_turn', found: [found], servers: [], import: { allowed: true, reason: null } };
 const calls = vi.hoisted(() => ({
-  read: vi.fn<() => Promise<EnvironmentMcp>>(), import: vi.fn<typeof Environments.importEnvironmentMcp>(), sameReader: vi.fn<() => boolean>(),
+  read: vi.fn<(q?: string) => Promise<EnvironmentMcp>>(), import: vi.fn<typeof Environments.importEnvironmentMcp>(), sameReader: vi.fn<() => boolean>(),
 }));
 vi.mock('@/api/resourceLibrary', async (original) => ({ ...await original<typeof Library>(), sameLibraryReader: () => calls.sameReader() }));
 vi.mock('@/api/environments', async (original) => ({ ...await original<typeof Environments>(),
-  environmentMcpQuery: (id: string) => ({ queryKey: ['environment-mcp', id], queryFn: calls.read }),
+  environmentMcpQuery: (id: string) => ({ queryKey: ['environment-mcp', id, 'complete'], queryFn: () => calls.read() }),
+  environmentMcpPageQuery: (id: string, collection: 'found' | 'servers', q: string) => collectionQuery(['environment-mcp', id, collection], q, async () => {
+    const reply = await calls.read(q); return { ...reply, items: collection === 'found' ? reply.found : reply.servers };
+  }),
   importEnvironmentMcp: (...args: Parameters<typeof Environments.importEnvironmentMcp>) => calls.import(...args),
 }));
 vi.mock('@/features/resource-facts/ResourceFacts', () => ({ ResourceChip: ({ subject }: { subject: { server: { name: string } } }) => <span>{subject.server.name}</span> }));
@@ -123,4 +127,18 @@ it('does not describe policy-suppressed discovery as an empty native configurati
   show(<FoundMcp environment={environment} />);
   expect(await screen.findByText(i18n.t('mcpImport.policyOff'))).toBeInTheDocument();
   expect(screen.queryByText(i18n.t('mcpImport.empty'))).toBeNull();
+});
+
+it('searches the native discovery catalogue for an origin after a thousand others', async () => {
+  const rows = Array.from({ length: 1001 }, (_, index) => ({ ...found, name: `tool-${index}` }));
+  calls.read.mockImplementation((q = '') => Promise.resolve({ ...snapshot, found: q === '' ? rows.slice(0, 50) : rows.filter((row) => row.name === q), next_cursor: q === '' ? 'more' : null }));
+  show(<FoundMcp environment={environment} />);
+  await screen.findByText('tool-0');
+  expect(screen.queryByText('tool-1000')).toBeNull();
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('searchbox'));
+  await user.paste('tool-1000');
+  expect(await screen.findByText('tool-1000')).toBeVisible();
+  expect(calls.read).toHaveBeenCalledWith('tool-1000');
+  expect(screen.getByRole('table', { name: i18n.t('mcpImport.found') }).closest('[role="region"]')).toHaveClass('max-h-96');
 });

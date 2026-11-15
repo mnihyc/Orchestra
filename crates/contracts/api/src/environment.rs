@@ -1120,10 +1120,54 @@ pub struct McpImportRight {
     pub reason: Option<McpImportReason>,
 }
 
+/// Which native environment catalogue this page continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentMcpCollection {
+    /// The configured server connections.
+    Servers,
+    /// The server definitions discovered by the native programs.
+    Found,
+}
+
+/// Search and continue one environment's MCP catalogue.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentMcpListQuery {
+    /// Servers by default, or discovered definitions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<EnvironmentMcpCollection>,
+    /// Words in the admitted visible name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Requested page size; any positive u32, defaulting to fifty.
+    #[serde(
+        default,
+        deserialize_with = "crate::common::query_u32",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub limit: Option<u32>,
+    /// The continuation returned for this collection and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl EnvironmentMcpListQuery {
+    /// Shared native search and continuation.
+    pub fn collection(&self) -> crate::common::CollectionQuery {
+        crate::common::CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
+}
+
 /// The MCP servers of one environment: those switched on for it and what became of each there,
 /// and those found in the harness configuration there that nobody imported yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentMcp {
+    /// Continuation of the selected catalogue, or null after its last row.
+    pub next_cursor: Option<String>,
     /// The servers switched on for it.
     pub servers: Vec<EnvironmentMcpServer>,
     /// When a change here reaches a thread that is at work.
@@ -2479,7 +2523,7 @@ crate::endpoints! {
     EnvironmentUpdate: PATCH "/environments/{id}", Rule("environment.manage, and for another home also node.interact on the new home"), none, json EnvironmentUpdateBody, json EnvironmentUpdateResponse, 200,
         operation Op::receipt(&Op::facets(&crate::environment_sources::UPDATE_FACETS));
     /// Lists the MCP servers of an environment and those found in the harness configuration there that nobody imported.
-    EnvironmentMcpGet: GET "/environments/{id}/mcp", Rule("any permission on the environment"), none, none, json EnvironmentMcp, 200,
+    EnvironmentMcpGet: GET "/environments/{id}/mcp", Rule("any permission on the environment"), query EnvironmentMcpListQuery, none, json EnvironmentMcp, 200,
         operation Op::facets(&crate::environment_sources::MCP_GET_FACETS);
     /// Imports an MCP server found in the harness configuration of an environment; the connector keeps a copy of its definition.
     EnvironmentMcpImportCreate: POST "/environments/{id}/mcp/imports", Rule("environment.manage; on a person's machine also being the machine's owner, or managing every environment of that machine once its owner handed the policy key for imports over"), none, json EnvironmentMcpImportCreateBody, json EnvironmentMcpCreateResponse, 201,

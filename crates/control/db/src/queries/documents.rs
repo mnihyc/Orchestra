@@ -261,6 +261,8 @@ pub struct ListCursor {
 /// What a list of the documents beside a node is asked for.
 #[derive(Debug, Clone, Copy)]
 pub struct ListWhere {
+    /// Visible-title search, independent of the current page.
+    pub q: Option<String>,
     /// The node.
     pub node: Id,
     /// Also the documents of the nodes below it.
@@ -286,6 +288,7 @@ pub async fn list_beside(conn: &mut Conn, which: &ListWhere) -> Result<Vec<Docum
     } else {
         "NOT $3 AND d.node_id = $1"
     };
+    let matching = super::search::matching_sql("d.title", "$8");
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {DOCUMENT_COLUMNS}
            FROM documents d
@@ -293,6 +296,7 @@ pub async fn list_beside(conn: &mut Conn, which: &ListWhere) -> Result<Vec<Docum
           WHERE ({reach})
             AND (d.deleted_at IS NOT NULL) = $2
             AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)
+            AND {matching}
             AND ($4::uuid IS NULL OR (d.updated_at, d.id) < ($5, $4))
           ORDER BY d.updated_at DESC, d.id DESC
           LIMIT $6 OFFSET $7"
@@ -304,6 +308,7 @@ pub async fn list_beside(conn: &mut Conn, which: &ListWhere) -> Result<Vec<Docum
     .bind(which.after.map(|cursor| cursor.at))
     .bind(which.limit)
     .bind(which.offset)
+    .bind(super::search::Query::parse(which.q.as_deref().unwrap_or("")).like_patterns())
     .fetch_all(conn)
     .await?)
 }
@@ -326,21 +331,24 @@ pub async fn names_beside(
     conn: &mut Conn,
     node: Id,
     under: bool,
+    q: &str,
     offset: i64,
     limit: i64,
 ) -> Result<Vec<DocumentNameRow>, DbError> {
-    Ok(sqlx::query_as(
+    let matching = super::search::matching_sql("d.title", "$5");
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT d.id, d.node_id, d.owner_id, d.title
            FROM documents d JOIN nodes n ON n.id = d.node_id
           WHERE ($2 AND $1 = ANY(n.path) OR NOT $2 AND d.node_id = $1)
-            AND d.deleted_at IS NULL
+            AND d.deleted_at IS NULL AND {matching}
             AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)
-          ORDER BY d.title, d.id OFFSET $3 LIMIT $4",
-    )
+          ORDER BY d.title, d.id OFFSET $3 LIMIT $4"
+    )))
     .bind(node)
     .bind(under)
     .bind(offset)
     .bind(limit)
+    .bind(super::search::Query::parse(q).like_patterns())
     .fetch_all(conn)
     .await?)
 }
@@ -1609,6 +1617,7 @@ mod tests {
         let now = clock::start();
         let here = place(&mut conn, now).await;
         let list = |node, under, deleted| ListWhere {
+            q: None,
             node,
             under,
             deleted,
@@ -1673,6 +1682,7 @@ mod tests {
             made.push(id);
         }
         let page = |after| ListWhere {
+            q: None,
             node: here.topic,
             under: false,
             deleted: false,
@@ -1714,6 +1724,7 @@ mod tests {
             .await
             .unwrap();
         let list = ListWhere {
+            q: None,
             node: here.topic,
             under: false,
             deleted: false,
@@ -1753,6 +1764,7 @@ mod tests {
             "once"
         );
         let deleted = ListWhere {
+            q: None,
             node: here.topic,
             under: false,
             deleted: true,
