@@ -466,6 +466,10 @@ impl LocalState {
             ),
             LinkStatus::Stopped => (false, None, "stopped".to_owned()),
         };
+        let storage = self.link.spool_status().borrow().clone();
+        let link = storage.reason().map_or(link.clone(), |reason| {
+            format!("{link}; {reason} ({} waiting)", storage.waiting_events)
+        });
         Status {
             connected,
             endpoint,

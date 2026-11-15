@@ -231,16 +231,18 @@ it('reads common provider settings for a directory runtime without inventing a u
   expect(server.read).toHaveBeenCalled();
 });
 
-it('shows the stopped start failure with bounded first lines and a link to the setting', async () => {
+it.each(['en','zh-CN'] as const)('labels bounded command output as a preview beside the stopped start failure in %s', async (locale) => {
+  await setLocale(locale);
   const detail = `after-start command cache exited with 7: first\n${Array.from({ length: 12 }, (_, index) => `output-${index + 1}`).join('\n')}`;
   const user=userEvent.setup();
   show(<UnitCommandFailure detail={detail} href="/resources/environments/unit?tab=settings#unit-after-up" />);
   expect(screen.getByText(i18n.t('ui.error.afterStart'),{exact:true})).toBeVisible();
+  expect(screen.getByText(locale==='en'?'Command output preview':'命令输出预览',{selector:'summary'})).toBeVisible();
   expect(screen.queryByText(/output-1/)).not.toBeInTheDocument();
   await user.click(screen.getByText(i18n.t('unitConfiguration.commandOutput'),{selector:'summary'}));
   expect(await screen.findByText(/output-9/)).toBeVisible();
   expect(screen.queryByText(/output-10/)).not.toBeInTheDocument();
-  expect(screen.getByRole('link', { name: 'Change commands after start' })).toHaveAttribute('href', '/resources/environments/unit?tab=settings#unit-after-up');
+  expect(screen.getByRole('link', { name: i18n.t('unitConfiguration.changeCommands') })).toHaveAttribute('href', '/resources/environments/unit?tab=settings#unit-after-up');
   await user.click(screen.getByRole('button',{name:i18n.t('ui.preview.showAll')}));
   expect(screen.getByText(/output-12/)).toBeVisible();
   await user.click(screen.getByRole('button',{name:i18n.t('ui.preview.showLess')}));
