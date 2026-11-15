@@ -52,6 +52,79 @@ async fn tree(world: &World) -> Tree {
 }
 
 #[tokio::test]
+async fn a_hierarchy_branch_pages_its_children_without_loading_other_branches() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let query: OrgTreeGetQuery =
+        serde_json::from_value(serde_json::json!({"parent_id":t.web,"limit":1})).unwrap();
+    let first = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.boss.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(first.readable().len(), 1);
+    assert_eq!(first.readable()[0].parent_id, Some(t.web));
+    let cursor = first
+        .next_cursor
+        .clone()
+        .expect("the other child has a continuation");
+    let second_query: OrgTreeGetQuery =
+        serde_json::from_value(serde_json::json!({"parent_id":t.web,"limit":1,"cursor":cursor}))
+            .unwrap();
+    let second = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.boss.token)
+        .query(&second_query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(second.seq, first.seq);
+    assert_eq!(second.readable().len(), 1);
+    assert_ne!(first.readable()[0].id, second.readable()[0].id);
+    assert_eq!(second.readable()[0].parent_id, Some(t.web));
+    assert!(second.complete);
+    let wrong: OrgTreeGetQuery =
+        serde_json::from_value(serde_json::json!({"parent_id":t.acme,"cursor":first.next_cursor}))
+            .unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(OrgTreeGet, &[&t.acme])
+            .token(&t.boss.token)
+            .query(&wrong)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::RequestInvalid
+    );
+}
+
+#[tokio::test]
+async fn a_tree_page_size_can_exceed_the_shipped_delta_threshold() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let query = OrgTreeGetQuery {
+        limit: Some(u32::try_from(TREE_SYNC_MAX_CHANGES + 1).unwrap()),
+        ..Default::default()
+    };
+    let reply = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.boss.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert!(reply.complete);
+    assert_eq!(reply.readable().len(), 5);
+}
+
+#[tokio::test]
 async fn a_tree_holds_every_node_the_caller_may_view_with_its_marks() {
     let world = World::new().await;
     let t = tree(&world).await;
@@ -161,6 +234,7 @@ async fn a_full_tree_pages_past_the_delta_bound_and_keeps_its_initial_sequence()
         .call(OrgTreeGet, &[&t.acme])
         .token(&t.dan.token)
         .query(&OrgTreeGetQuery {
+            parent_id: None,
             since: Some(seq),
             ..Default::default()
         })
@@ -300,6 +374,7 @@ async fn a_tree_since_a_sequence_holds_what_changed_and_marks_what_is_gone_from_
         .call(OrgTreeGet, &[&t.acme])
         .token(&t.dan.token)
         .query(&OrgTreeGetQuery {
+            parent_id: None,
             since: Some(first.seq),
             ..OrgTreeGetQuery::default()
         })
@@ -330,6 +405,7 @@ async fn a_tree_since_a_sequence_holds_what_changed_and_marks_what_is_gone_from_
         .call(OrgTreeGet, &[&t.acme])
         .token(&t.dan.token)
         .query(&OrgTreeGetQuery {
+            parent_id: None,
             since: Some(since.seq),
             ..OrgTreeGetQuery::default()
         })
@@ -1033,4 +1109,815 @@ async fn the_audit_trail_of_a_place_includes_what_is_below_it_and_is_for_its_aud
     .await
     .ok();
     assert!(none.items.is_empty());
+}
+
+#[tokio::test]
+async fn fifty_thousand_places_open_as_one_bounded_first_level_with_folded_facts() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    sqlx::query("INSERT INTO nodes(id,kind,parent_id,org_id,path,name,owner_id,created_by,created_at,updated_at)
+        SELECT id,'project',$1,$2,ARRAY[$2,$1,id], 'Nested ' || n,$3,$3,$4,$4
+        FROM (SELECT gen_random_uuid() id,n FROM generate_series(1,50000) n) made")
+        .bind(t.web).bind(t.acme).bind(t.boss.id()).bind(world.now())
+        .execute(&mut *world.conn().await).await.unwrap();
+    let reply = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(
+            &serde_json::from_value::<OrgTreeGetQuery>(serde_json::json!({"parent_id":t.acme}))
+                .unwrap(),
+        )
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        reply.readable().len(),
+        2,
+        "General and Web are the root's first level"
+    );
+    let wire = serde_json::to_value(&reply).unwrap();
+    let web = wire["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == serde_json::json!(t.web))
+        .unwrap();
+    assert_eq!(web["folded"]["has_children"], true);
+    assert!(serde_json::to_vec(&reply).unwrap().len() < 120_000);
+    assert!(reply.complete);
+}
+
+#[tokio::test]
+async fn a_deep_address_returns_its_ancestors_without_reading_siblings() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let mut parent = t.web;
+    let mut expected = vec![t.acme, t.web];
+    for index in 0..65 {
+        parent = world
+            .app
+            .call(orch_api_contract::nodes::ProjectChildCreate, &[&parent])
+            .token(&t.boss.token)
+            .body(&ProjectCreateBody {
+                name: format!("Folder {index}"),
+                description: None,
+                access: None,
+            })
+            .send()
+            .await
+            .ok()
+            .into_full()
+            .expect("the native folder creation returns its full project")
+            .base
+            .id;
+        expected.push(parent);
+    }
+    let reply = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(
+            &serde_json::from_value::<OrgTreeGetQuery>(serde_json::json!({"path_to":parent}))
+                .unwrap(),
+        )
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        reply
+            .readable()
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(!reply.readable().iter().any(|row| row.id == t.topics[1]));
+}
+
+#[tokio::test]
+async fn a_picker_search_finds_an_unopened_place_with_its_authorized_path() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let reply = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(
+            &serde_json::from_value::<OrgTreeGetQuery>(
+                serde_json::json!({"q":"Web / Billing","below_id":t.web,"kind":"topic","limit":1}),
+            )
+            .unwrap(),
+        )
+        .send()
+        .await
+        .ok();
+    assert_eq!(reply.readable().len(), 1);
+    assert_eq!(reply.readable()[0].name, "Billing");
+    let wire = serde_json::to_value(&reply).unwrap();
+    assert_eq!(wire["ancestors"].as_array().unwrap().len(), 2);
+}
+
+async fn deny_project_view(world: &World, tree: &Tree, id: Id) {
+    use orch_access_contract::permissions::Permission;
+    use orch_db::queries::access::{self, PageKey, RowWrite};
+    let mut conn = world.conn().await;
+    for permission in
+        std::iter::once(Permission::ProjectView).chain(Permission::ProjectView.held_through())
+    {
+        access::write_row(
+            &mut conn,
+            &RowWrite {
+                page: &PageKey::new("node", id, "live"),
+                profile: "any",
+                permission: permission.as_str(),
+                inherit: false,
+                locked: false,
+            },
+            Some(tree.boss.id()),
+            world.now(),
+        )
+        .await
+        .unwrap();
+    }
+    access::bump_epoch(&mut conn).await.unwrap();
+}
+
+async fn private_project(world: &World, tree: &Tree, name: &str) -> Id {
+    let id = make_project(world, &tree.boss, tree.acme, name)
+        .await
+        .base
+        .id;
+    deny_project_view(world, tree, id).await;
+    id
+}
+
+#[tokio::test]
+async fn private_name_guesses_never_create_ancestry_or_search_progress() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let first = private_project(&world, &t, "Private-only needle one").await;
+    let second = private_project(&world, &t, "Private-only needle two").await;
+    for text in ["Private-only", "Nothing can match this"] {
+        let query: OrgTreeGetQuery =
+            serde_json::from_value(serde_json::json!({"q":text,"kind":"project","limit":1}))
+                .unwrap();
+        let reply = world
+            .app
+            .call(OrgTreeGet, &[&t.acme])
+            .token(&t.dan.token)
+            .query(&query)
+            .send()
+            .await
+            .ok();
+        assert!(reply.nodes.is_empty());
+        assert!(
+            reply.ancestors.is_empty(),
+            "a hidden match does not reveal its association with a readable root"
+        );
+        assert!(reply.complete);
+        assert!(
+            reply.next_cursor.is_none(),
+            "a private candidate is not a public continuation witness"
+        );
+        let encoded = serde_json::to_string(&reply).unwrap();
+        assert!(!encoded.contains(&first.to_string()) && !encoded.contains(&second.to_string()));
+    }
+    let visible = make_project(&world, &t.boss, t.acme, "Visible needle")
+        .await
+        .base
+        .id;
+    let query: OrgTreeGetQuery =
+        serde_json::from_value(serde_json::json!({"q":"needle","kind":"project","limit":1}))
+            .unwrap();
+    let reply = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        reply
+            .readable()
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![visible]
+    );
+    assert!(
+        reply.complete && reply.next_cursor.is_none(),
+        "only a second admitted match can create another page"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_ancestor_name_never_makes_a_shared_child_match_a_search() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let hidden = private_project(&world, &t, "Private ancestor needle").await;
+    let child = world
+        .app
+        .call(orch_api_contract::nodes::ProjectChildCreate, &[&hidden])
+        .token(&t.boss.token)
+        .body(&ProjectCreateBody {
+            name: "Shared child".to_owned(),
+            description: None,
+            access: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap()
+        .base
+        .id;
+    access_rows::add_entry(
+        &mut *world.conn().await,
+        &orch_db::queries::access::PageKey::new("node", child, "live"),
+        "any",
+        "project.view",
+        ("user", Some(t.dan.id()), None),
+        None,
+        world.now(),
+    )
+    .await
+    .unwrap();
+    for (text, visible) in [("Private ancestor needle", false), ("Shared child", true)] {
+        let query: OrgTreeGetQuery =
+            serde_json::from_value(serde_json::json!({"q":text,"kind":"project","limit":1}))
+                .unwrap();
+        let reply = world
+            .app
+            .call(OrgTreeGet, &[&t.acme])
+            .token(&t.dan.token)
+            .query(&query)
+            .send()
+            .await
+            .ok();
+        assert_eq!(reply.readable().iter().any(|row| row.id == child), visible);
+        if !visible {
+            assert!(reply.ancestors.is_empty());
+        }
+        assert!(reply.complete && reply.next_cursor.is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_lost_target_does_not_reveal_new_ancestors_after_it_moves() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let target = make_project(&world, &t.boss, t.acme, "Previously readable")
+        .await
+        .base
+        .id;
+    let destination = make_project(&world, &t.boss, t.acme, "New readable parent")
+        .await
+        .base
+        .id;
+    let query: OrgTreeGetQuery =
+        serde_json::from_value(serde_json::json!({"path_to":target})).unwrap();
+    let seen = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert!(seen.readable().iter().any(|row| row.id == target));
+    deny_project_view(&world, &t, target).await;
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM nodes WHERE id=$1")
+        .bind(target)
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    let moved = world
+        .app
+        .call(orch_api_contract::nodes::ProjectMove, &[&target])
+        .token(&t.boss.token)
+        .body(&orch_api_contract::nodes::NodeMoveBody {
+            parent_id: destination,
+            expected_revision: revision,
+            preflight_id: None,
+        })
+        .send()
+        .await;
+    assert_eq!(moved.status, 200);
+    let denied = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(&query)
+        .send()
+        .await
+        .problem();
+    let absent = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(
+            &serde_json::from_value::<OrgTreeGetQuery>(serde_json::json!({"path_to":new_id()}))
+                .unwrap(),
+        )
+        .send()
+        .await
+        .problem();
+    assert_eq!((denied.status, denied.code), (absent.status, absent.code));
+    assert_eq!(denied.code, ErrorCode::NotFound);
+    assert!(
+        !serde_json::to_string(&denied)
+            .unwrap()
+            .contains(&destination.to_string())
+    );
+}
+
+#[tokio::test]
+async fn current_management_inspection_can_still_reveal_its_own_private_target_path() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let target = private_project(&world, &t, "Managed private place").await;
+    access_rows::add_entry(
+        &mut *world.conn().await,
+        &orch_db::queries::access::PageKey::new("node", target, "live"),
+        "any",
+        "access.manage",
+        ("user", Some(t.dan.id()), None),
+        None,
+        world.now(),
+    )
+    .await
+    .unwrap();
+    let query: OrgTreeGetQuery =
+        serde_json::from_value(serde_json::json!({"path_to":target})).unwrap();
+    let shown = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert!(shown.nodes.iter().any(
+        |row| matches!(row,orch_api_contract::common::Listed::Hidden(hidden) if hidden.id==target)
+    ));
+}
+
+#[tokio::test]
+async fn archived_chat_attention_is_kept_separate_from_the_unarchived_branch() {
+    use orch_api_contract::chats::{
+        ChatMentionTarget, ChatMessageCreate, ChatMessageCreateBody, ChatPart,
+    };
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let chat: Id = sqlx::query_scalar("SELECT id FROM chats WHERE node_id=$1")
+        .bind(t.topics[0])
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO chat_states(user_id,chat_id,level,engaged,last_read_seq) VALUES($1,$2,'all',true,0) ON CONFLICT(user_id,chat_id) DO UPDATE SET level='all',engaged=true,last_read_seq=0")
+        .bind(t.dan.id()).bind(chat).execute(&world.db.pool).await.unwrap();
+    let posted = world
+        .app
+        .call(ChatMessageCreate, &[&chat])
+        .token(&t.boss.token)
+        .body(&ChatMessageCreateBody {
+            parts: vec![
+                ChatPart::Text {
+                    text: "An unread mention before archive".to_owned(),
+                },
+                ChatPart::Mention {
+                    target: ChatMentionTarget::User { id: t.dan.id() },
+                },
+            ],
+            reply_to: None,
+            agent_review: None,
+            client_id: new_id().to_string(),
+        })
+        .send()
+        .await;
+    assert_eq!(posted.status, 201);
+    {
+        let mut conn = world.conn().await;
+        assert!(
+            hierarchy::archive(&mut conn, t.topics[0], t.boss.id(), world.now())
+                .await
+                .unwrap()
+        );
+        hierarchy::stamp(&mut conn, t.topics[0]).await.unwrap();
+    }
+    let query: OrgTreeGetQuery =
+        serde_json::from_value(serde_json::json!({"parent_id":t.acme})).unwrap();
+    let reply = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    let wire = serde_json::to_value(reply).unwrap();
+    let web = wire["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == serde_json::json!(t.web))
+        .unwrap();
+    assert_eq!(web["folded"]["unread"], false);
+    assert_eq!(web["folded"]["mentions"], 0);
+    assert_eq!(web["folded"]["has_children"], true);
+    assert_eq!(web["folded"]["archived"]["unread"], true);
+    assert_eq!(web["folded"]["archived"]["mentions"], 1);
+    assert_eq!(web["folded"]["archived"]["has_children"], true);
+}
+
+#[tokio::test]
+async fn a_quiet_subtree_can_grow_by_fifty_thousand_without_growing_a_first_level_read_or_its_refresh()
+ {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let query = OrgTreeGetQuery {
+        parent_id: Some(t.acme),
+        ..Default::default()
+    };
+    let opening = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    let sample = i64::from(
+        opening
+            .page_size
+            .expect("a branch publishes its native page default"),
+    ) + 1;
+    async fn quiet(world: &World, t: &Tree, first: i64, last: i64) {
+        sqlx::query("INSERT INTO nodes(id,kind,parent_id,org_id,path,name,owner_id,created_by,created_at,updated_at)
+            SELECT id,'project',$1,$2,ARRAY[$2,$1,id],'Quiet ' || n,$3,$3,$4,$4
+            FROM (SELECT ('ffffffff-ffff-4fff-8fff-' || lpad(to_hex(n),12,'0'))::uuid id,n
+                  FROM generate_series($5::bigint,$6::bigint) n) made")
+            .bind(t.web).bind(t.acme).bind(t.boss.id()).bind(world.now()).bind(first).bind(last)
+            .execute(&mut *world.conn().await).await.unwrap();
+    }
+    quiet(&world, &t, 1, sample).await;
+    let (small, small_rows) = support::Statements::measure_rows(
+        world
+            .app
+            .call(OrgTreeGet, &[&t.acme])
+            .token(&t.dan.token)
+            .query(&query)
+            .send(),
+    )
+    .await;
+    let small = small.ok();
+    assert!(
+        small_rows > 0,
+        "the measurement must observe actual returned database rows"
+    );
+    quiet(&world, &t, sample + 1, sample + 50_000).await;
+    let (large, large_rows) = support::Statements::measure_rows(
+        world
+            .app
+            .call(OrgTreeGet, &[&t.acme])
+            .token(&t.dan.token)
+            .query(&query)
+            .send(),
+    )
+    .await;
+    let large = large.ok();
+    assert_eq!(large.readable().len(), small.readable().len());
+    assert!(
+        large_rows <= small_rows,
+        "quiet descendants must add neither materialized nodes nor authorization work: {small_rows} -> {large_rows}"
+    );
+    let last: Id = sqlx::query_scalar("SELECT id FROM nodes WHERE name=$1")
+        .bind(format!("Quiet {}", sample + 50_000))
+        .fetch_one(&mut *world.conn().await)
+        .await
+        .unwrap();
+    let mut tx = world.db.pool.begin().await.unwrap();
+    sqlx::query("UPDATE nodes SET name='Changed far below the closed branch' WHERE id=$1")
+        .bind(last)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    orch_db::queries::hierarchy::stamp(&mut tx, last)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let (refreshed, refresh_rows) = support::Statements::measure_rows(
+        world
+            .app
+            .call(OrgTreeGet, &[&t.acme])
+            .token(&t.dan.token)
+            .query(&query)
+            .send(),
+    )
+    .await;
+    assert_eq!(refreshed.ok().readable().len(), small.readable().len());
+    assert!(
+        refresh_rows <= small_rows,
+        "a root refresh must keep the same bounded native read: {small_rows} -> {refresh_rows}"
+    );
+}
+
+#[tokio::test]
+async fn a_place_search_fills_its_first_page_with_places_instead_of_matching_threads() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let mut tx = world.db.pool.begin().await.unwrap();
+    for number in 1..=3 {
+        let id = Id::from_u128(0x0000_feed_0000_4000_8000_0000_0000_0000 + number);
+        assert!(
+            orch_db::queries::threads::insert_thread(
+                &mut tx,
+                id,
+                t.topics[0],
+                &format!("Needle thread {number}"),
+                t.boss.id(),
+                world.now()
+            )
+            .await
+            .unwrap()
+        );
+    }
+    tx.commit().await.unwrap();
+    let project = make_project(&world, &t.boss, t.acme, "Needle destination").await;
+    let ordinary = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.boss.token)
+        .query(&OrgTreeGetQuery {
+            q: Some("Needle".to_owned()),
+            limit: Some(2),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert!(
+        ordinary
+            .readable()
+            .iter()
+            .any(|node| node.kind == orch_api_contract::nodes::NodeKind::Thread),
+        "the earlier native thread matches must really be readable"
+    );
+    let query: OrgTreeGetQuery =
+        serde_json::from_value(serde_json::json!({"q":"Needle","limit":2,"include_threads":false}))
+            .unwrap();
+    let page = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.boss.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        page.readable()
+            .iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>(),
+        vec![project.base.id]
+    );
+    assert!(page.complete);
+    assert!(page.next_cursor.is_none());
+}
+
+#[tokio::test]
+async fn navigation_orders_the_first_screen_and_its_continuation_before_any_sibling_is_loaded() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let b = make_project(&world, &t.boss, t.acme, "Order 2")
+        .await
+        .base
+        .id;
+    let c = make_project(&world, &t.boss, t.acme, "Order 10")
+        .await
+        .base
+        .id;
+    let a = make_project(&world, &t.boss, t.acme, "Order 1")
+        .await
+        .base
+        .id;
+    for (id, minutes) in [(b, 3_i64), (c, 1), (a, 2)] {
+        sqlx::query("UPDATE nodes SET activity_at=$2 WHERE id=$1")
+            .bind(id)
+            .bind(world.now() + chrono::Duration::minutes(minutes))
+            .execute(&mut *world.conn().await)
+            .await
+            .unwrap();
+    }
+    for locale in ["en", "zh-CN"] {
+        for (by, wanted) in [
+            ("newest", vec![a, c, b]),
+            ("name", vec![a, b, c]),
+            ("changed", vec![b, a, c]),
+            ("custom", vec![c, b, a]),
+        ] {
+            let custom = std::collections::BTreeMap::from([(t.acme.to_string(), vec![c, b])]);
+            world
+                .set_at(
+                    orch_settings::Target::Node(t.acme),
+                    "navigation.order",
+                    serde_json::json!({"by":by,"custom":custom}),
+                )
+                .await;
+            let query:OrgTreeGetQuery=serde_json::from_value(serde_json::json!({"parent_id":t.acme,"q":"Order","sort":"navigation","locale":locale,"limit":2})).unwrap();
+            let first = world
+                .app
+                .call(OrgTreeGet, &[&t.acme])
+                .token(&t.dan.token)
+                .query(&query)
+                .send()
+                .await
+                .ok();
+            assert_eq!(
+                first
+                    .readable()
+                    .iter()
+                    .map(|row| row.id)
+                    .collect::<Vec<_>>(),
+                wanted[..2],
+                "{by} {locale}: first screen"
+            );
+            let next = OrgTreeGetQuery {
+                cursor: first.next_cursor.clone(),
+                ..query
+            };
+            assert!(next.cursor.is_some());
+            let rest = world
+                .app
+                .call(OrgTreeGet, &[&t.acme])
+                .token(&t.dan.token)
+                .query(&next)
+                .send()
+                .await
+                .ok();
+            assert_eq!(
+                rest.readable().iter().map(|row| row.id).collect::<Vec<_>>(),
+                wanted[2..],
+                "{by} {locale}: continuation"
+            );
+            assert!(rest.complete);
+            assert!(rest.next_cursor.is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn personal_navigation_order_wins_and_its_old_cursor_cannot_continue_another_order() {
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let a = make_project(&world, &t.boss, t.acme, "Personal A")
+        .await
+        .base
+        .id;
+    let b = make_project(&world, &t.boss, t.acme, "Personal B")
+        .await
+        .base
+        .id;
+    world
+        .set_at(
+            orch_settings::Target::Node(t.acme),
+            "navigation.order",
+            serde_json::json!({"by":"name"}),
+        )
+        .await;
+    let orders = std::collections::BTreeMap::from([(
+        t.acme.to_string(),
+        serde_json::json!({"by":"newest"}),
+    )]);
+    world
+        .app
+        .call(orch_api_contract::personal::MeStateSet, &[&"sidebar"])
+        .token(&t.dan.token)
+        .body(&serde_json::json!({"order":orders}))
+        .send()
+        .await
+        .ok();
+    let query: OrgTreeGetQuery = serde_json::from_value(
+        serde_json::json!({"parent_id":t.acme,"q":"Personal","sort":"navigation","limit":1}),
+    )
+    .unwrap();
+    let first = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(first.readable()[0].id, b);
+    assert_eq!(
+        first.ordering.as_ref().unwrap().by,
+        orch_api_contract::nodes::HierarchyOrderBy::Newest
+    );
+    let old = OrgTreeGetQuery {
+        cursor: first.next_cursor,
+        ..query.clone()
+    };
+    assert!(old.cursor.is_some());
+    world
+        .app
+        .call(orch_api_contract::personal::MeStateSet, &[&"sidebar"])
+        .token(&t.dan.token)
+        .body(&serde_json::json!({}))
+        .send()
+        .await
+        .ok();
+    let problem = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(&old)
+        .send()
+        .await
+        .problem();
+    assert_eq!(problem.status, 400);
+    let current = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(current.readable()[0].id, a);
+}
+
+#[tokio::test]
+async fn management_inspection_pages_never_publish_or_sort_by_private_work_times() {
+    use base64::Engine as _;
+    let world = World::new().await;
+    let t = tree(&world).await;
+    let a = private_project(&world, &t, "Inspect A").await;
+    let b = private_project(&world, &t, "Inspect B").await;
+    for (id, minutes) in [(a, 1), (b, 30)] {
+        access_rows::add_entry(
+            &mut *world.conn().await,
+            &orch_db::queries::access::PageKey::new("node", id, "live"),
+            "any",
+            "access.manage",
+            ("user", Some(t.dan.id()), None),
+            None,
+            world.now(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE nodes SET activity_at=$2 WHERE id=$1")
+            .bind(id)
+            .bind(world.now() + chrono::Duration::minutes(minutes))
+            .execute(&mut *world.conn().await)
+            .await
+            .unwrap();
+    }
+    orch_db::queries::access::bump_epoch(&mut *world.conn().await)
+        .await
+        .unwrap();
+    let query: OrgTreeGetQuery = serde_json::from_value(
+        serde_json::json!({"parent_id":t.acme,"q":"Inspect","sort":"changed","limit":1}),
+    )
+    .unwrap();
+    let first = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert!(matches!(&first.nodes[0],orch_api_contract::common::Listed::Hidden(row) if row.id==a));
+    let cursor = first.next_cursor.as_ref().unwrap();
+    let key: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(cursor.split('|').next_back().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(key["activity"].is_null());
+    assert_eq!(key["seq"], 0);
+    sqlx::query("UPDATE nodes SET activity_at=$2 WHERE id=$1")
+        .bind(a)
+        .bind(world.now() + chrono::Duration::minutes(60))
+        .execute(&mut *world.conn().await)
+        .await
+        .unwrap();
+    let next = OrgTreeGetQuery {
+        cursor: Some(cursor.clone()),
+        ..query
+    };
+    let rest = world
+        .app
+        .call(OrgTreeGet, &[&t.acme])
+        .token(&t.dan.token)
+        .query(&next)
+        .send()
+        .await
+        .ok();
+    assert!(matches!(&rest.nodes[0],orch_api_contract::common::Listed::Hidden(row) if row.id==b));
+    assert!(rest.complete);
 }
