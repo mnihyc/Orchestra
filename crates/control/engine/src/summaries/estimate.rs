@@ -2,7 +2,8 @@
 //!
 //! The call is not made yet and the conversation is not written, so the figures are estimates: the input is the
 //! newest turns in brief and an index line for each older one, as long as the conversation has material for, and never
-//! more than the place's share of the model's window (`summary.handoff_input_share`).
+//! more than the place's share of the model's window (`summary.handoff_input_share`). The output is what the request
+//! itself would ask for: the answer's allowance and, for a model that reasons, the room left for its reasoning.
 
 use super::budget::input_budget;
 use super::choice;
@@ -42,14 +43,34 @@ pub(crate) async fn handoff_estimate(
     else {
         return Ok(none);
     };
-    let budget = input_budget(conn, thread, config.provider_id, &config.model_name).await?;
+    // The output a request asks for is whatever the function that builds the request says: the visible answer's
+    // allowance and, for a model that reasons, the room it is left for its reasoning.
+    let reasoning = orch_summarizer_model::Reasoning {
+        reasons: super::budget::reasons(conn, &config).await?,
+        lowest_effort: None,
+    };
+    let output_tokens = config
+        .completion_with(
+            &reasoning,
+            String::new(),
+            String::new(),
+            config.answer_max_output_tokens,
+        )
+        .max_output_tokens;
+    let budget = input_budget(
+        conn,
+        thread,
+        config.provider_id,
+        &config.model_name,
+        output_tokens,
+    )
+    .await?;
     let wanted = turns
         .max(0)
         .saturating_mul(BRIEF_TURN_BYTES + INDEX_LINE_BYTES);
     let bytes = wanted.min(i64::try_from(budget.bytes).unwrap_or(i64::MAX));
     let input_tokens =
         (bytes / crate::fork_history::CARRY_BYTES_PER_TOKEN + FRAME_TOKENS).min(budget.tokens);
-    let output_tokens = config.max_output_tokens;
     let own = crate::caps::own_rate(conn, config.provider_id, &config.model_name).await?;
     let book = crate::rates::RateBook::load(conn, thread).await?;
     let tokens = orch_db::usage::ledger::Tokens {

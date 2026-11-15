@@ -469,6 +469,12 @@ impl JsonSchema for Feed {
 /// only when rows of its kind changed.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ThreadData {
+    /// Cancelled authored inputs entering the conversation, under the same current read projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_inputs: Option<Vec<orch_api_contract::threads::RetainedInput>>,
+    /// Continuations for retained groups that exceed this cut's response allowance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_inputs_next: Option<Vec<orch_api_contract::threads::RetainedInputContinuation>>,
     /// Exact read projection; a different follow-active scope requires replacement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection: Option<orch_api_contract::threads::ThreadContinuationProjection>,
@@ -997,6 +1003,8 @@ pub struct RawData {
 /// What an `event` frame carries, by the feed it is of.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventData {
+    /// Accepted Stop state advances independently of the ordinary thread cursor.
+    ThreadStopping(orch_api_contract::threads::ThreadStopping),
     /// Current person-authorized document-directory or entry metadata.
     DocumentTree(crate::document_tree::DocumentTreeData),
     /// A job's current visible progress/result.
@@ -1051,6 +1059,7 @@ impl EventData {
             Feed::Usage(scope) if scope.ends_with(":health") => read(data).map(Self::UsageHealth),
             Feed::Usage(_) => read(data).map(Self::Usage),
             Feed::User => read(data).map(Self::User),
+            Feed::Thread(_) => read(data).map(Self::ThreadStopping),
             Feed::Chat(_) | Feed::Doc(_) => read(data).map(Self::Typing),
             Feed::EnvStats(_) => read(data).map(Self::Stats),
             Feed::EnvProcs(_) => read(data).map(Self::Procs),
@@ -1063,7 +1072,7 @@ impl EventData {
             Feed::ThreadRaw(_) => read(data).map(Self::Raw),
             Feed::ThreadBackground(_) => read(data).map(Self::Background),
             Feed::Resource { .. } => read(data).map(Self::Resource),
-            Feed::Thread(_) | Feed::Topic(_) | Feed::Org(_) | Feed::Env(_) => {
+            Feed::Topic(_) | Feed::Org(_) | Feed::Env(_) => {
                 Err(DataError::NotCarried(feed.to_string()))
             }
         }
@@ -1072,6 +1081,7 @@ impl EventData {
     /// The data as the JSON object an `event` frame carries.
     pub fn to_object(&self) -> Result<Map<String, Json>, DataError> {
         match self {
+            Self::ThreadStopping(data) => object_of(data),
             Self::DocumentTree(data) => object_of(data),
             Self::Job(data) => object_of(data),
             Self::Fork(data) => object_of(data),
@@ -1894,8 +1904,17 @@ mod tests {
         }
         assert!(matches!(
             EventData::decode(&Feed::Thread(id()), json!({})),
-            Err(DataError::NotCarried(_))
+            Err(DataError::Shape(_))
         ));
+    }
+
+    #[test]
+    fn accepted_stopping_reaches_a_thread_without_an_ordinary_sequence_change() {
+        let value =
+            json!({"version":1,"requested_at":AT,"pending":true,"thread_seq":42,"state_seq":40});
+        let read = EventData::decode(&Feed::Thread(id()), value.clone()).unwrap();
+        assert!(matches!(read, EventData::ThreadStopping(_)));
+        assert_eq!(Json::Object(read.to_object().unwrap()), value);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use orch_access_contract::permissions::ObjectKind as K;
 use crate::common::{Page, PageQuery};
 use crate::nodes::{CreateThread, NodeRef};
 use crate::routes::Access::{Permission, Rule, User};
-use crate::threads::ContentPart;
+use crate::threads::{ContentPart, Delivery};
 use crate::users::UserRef;
 use orch_types::Json;
 use orch_types::{Id, Seq, Time};
@@ -185,6 +185,10 @@ pub struct InputSchedule {
     pub author: UserRef,
     /// Authored name.
     pub name: String,
+    /// Whether occurrences request a planning turn.
+    pub plan: bool,
+    /// The delivery choice reviewed by the author.
+    pub delivery: Delivery,
     /// Current redacted destination.
     pub destination: InputScheduleDestination,
     /// Author-only draft.
@@ -223,6 +227,38 @@ pub enum InputScheduleRunState {
     Skipped,
 }
 
+/// The decision made for a civil occurrence, independently of its input's later delivery state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InputScheduleOccurrenceReason {
+    /// An ordinary input was accepted.
+    Accepted,
+    /// The previous occurrence's input still waited.
+    PreviousInputPending,
+    /// The civil time did not exist in its captured zone.
+    NonexistentLocalTime,
+    /// The schedule's accepted allowance had ended.
+    ScheduleEnded,
+    /// Current admission refused the occurrence.
+    AdmissionFailed,
+}
+
+/// Immutable facts captured by the occurrence claim, never inferred from a later schedule edit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InputScheduleOccurrenceOutcome {
+    /// Why this occurrence was accepted or skipped.
+    pub reason_code: InputScheduleOccurrenceReason,
+    /// Earlier occurrences actually combined into the accepted input; zero for a skipped occurrence.
+    #[schemars(range(min = 0))]
+    pub coalesced_count: i64,
+    /// The original occurrence instant; absent for a nonexistent civil time.
+    pub scheduled_for: Option<Time>,
+    /// The accepted ordinary input, withheld when its destination is not currently readable.
+    pub accepted_input_ref: Option<Id>,
+    /// The zone in force when this occurrence was decided.
+    pub zone: String,
+}
+
 /// One safe occurrence outcome, with names subject to current View.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InputScheduleRun {
@@ -242,6 +278,9 @@ pub struct InputScheduleRun {
     pub turn_id: Option<Id>,
     /// Safe explanation without the prompt.
     pub reason: Option<String>,
+    /// The captured occurrence decision; absent means not reported, never a guessed success or skip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<InputScheduleOccurrenceOutcome>,
     /// Occurrence creation time.
     pub created_at: Time,
     /// Actual start, if any.
@@ -258,6 +297,10 @@ pub struct InputScheduleCreateBody {
     pub target: InputScheduleTarget,
     /// Frozen authored parts.
     pub content: Vec<ContentPart>,
+    /// Whether occurrences request a planning turn.
+    pub plan: bool,
+    /// Authored queue, steer or interrupt delivery, rechecked when due.
+    pub delivery: Delivery,
     /// Optional native selection.
     pub native_action: Option<NativeInvocation>,
     /// Explicit future timing.
@@ -276,6 +319,12 @@ pub struct InputScheduleUpdateBody {
     pub target: Option<InputScheduleTarget>,
     /// New frozen parts.
     pub content: Option<Vec<ContentPart>>,
+    /// A new planning choice; omission keeps the reviewed choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<bool>,
+    /// A new delivery choice; omission keeps the reviewed choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<Delivery>,
     /// Omitted preserves, null removes.
     #[serde(
         default,

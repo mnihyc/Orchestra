@@ -347,9 +347,83 @@ pub async fn decide(
     .execute(&mut *conn)
     .await?;
     if done.rows_affected() == 1 {
-        super::notifications::inbox::settle_approval(conn, id, at).await?;
+        super::notifications::inbox::defer_approval_settlement(conn, id, at).await?;
     }
     Ok(done.rows_affected() == 1)
+}
+
+/// Records a person's harness decision without taking the thread or recipients' rows.
+/// The saved binding also makes the remaining thread effects discoverable after a restart.
+pub async fn record_harness_decision(
+    conn: &mut Conn,
+    id: Id,
+    state: &str,
+    by: Id,
+    decision: &Json,
+    binding: &Json,
+    at: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    let changed = sqlx::query(
+        "UPDATE approvals SET state=$2, decided_by=$3, decision=$4, decision_settlement=$5,
+                              decided_at=$6, updated_at=$6
+          WHERE id=$1 AND kind='harness' AND state='pending'",
+    )
+    .bind(id)
+    .bind(state)
+    .bind(by)
+    .bind(decision)
+    .bind(binding)
+    .bind(at)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected()
+        == 1;
+    if changed {
+        super::notifications::inbox::defer_approval_settlement(conn, id, at).await?;
+    }
+    Ok(changed)
+}
+
+/// Threads with recorded decisions whose thread effects have not committed yet.
+pub async fn unsettled_threads(conn: &mut Conn, limit: i64) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT thread_id FROM approvals WHERE decision_settlement IS NOT NULL
+          AND thread_id IS NOT NULL GROUP BY thread_id ORDER BY min(decided_at),thread_id LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// Recorded decisions of one thread, including a decision the harness could not receive.
+pub async fn unsettled_of_thread(conn: &mut Conn, thread: Id) -> Result<Vec<ApprovalRow>, DbError> {
+    let sql = format!(
+        "{APPROVAL_SELECT} WHERE thread_id=$1 AND decision_settlement IS NOT NULL ORDER BY decided_at,id"
+    );
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(thread)
+        .fetch_all(conn)
+        .await?)
+}
+
+/// The binding saved with a decision; none once its remaining effects committed.
+pub async fn decision_settlement(conn: &mut Conn, id: Id) -> Result<Option<Json>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT decision_settlement FROM approvals WHERE id=$1")
+            .bind(id)
+            .fetch_optional(conn)
+            .await?
+            .flatten(),
+    )
+}
+
+/// Marks the thread effects complete in the same transaction as those effects.
+pub async fn finish_decision_settlement(conn: &mut Conn, id: Id) -> Result<(), DbError> {
+    sqlx::query("UPDATE approvals SET decision_settlement=NULL WHERE id=$1")
+        .bind(id)
+        .execute(conn)
+        .await?;
+    Ok(())
 }
 
 /// Cancels an approval that is pending (the harness withdrew it, or its turn
@@ -423,22 +497,31 @@ pub async fn count_pending_of_thread(conn: &mut Conn, thread: Id) -> Result<i64,
     .await?)
 }
 
-/// The approvals that were decided and not yet handed to their harness: what
-/// a restart between the decision and the command leaves.
-pub async fn decided_since(
+/// A committed decision stays due until its native command succeeds, regardless of outage duration.
+pub async fn decisions_to_deliver(
     conn: &mut Conn,
-    after: DateTime<Utc>,
+    thread: Option<Id>,
     limit: i64,
 ) -> Result<Vec<ApprovalRow>, DbError> {
     let sql = format!(
-        "{APPROVAL_SELECT} WHERE kind = 'harness' AND state IN ('approved', 'answered', 'denied') AND decided_at > $1
-           ORDER BY decided_at LIMIT $2"
+        "{APPROVAL_SELECT} WHERE kind='harness' AND state IN ('approved','answered','denied')
+           AND thread_id IS NOT NULL AND native_ref IS NOT NULL AND decision IS NOT NULL
+           AND EXISTS(SELECT 1 FROM threads WHERE threads.node_id=approvals.thread_id)
+           AND decision_delivered_at IS NULL AND ($1::uuid IS NULL OR thread_id=$1)
+           ORDER BY decided_at,id LIMIT $2"
     );
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
-        .bind(after)
+        .bind(thread)
         .bind(limit)
         .fetch_all(conn)
         .await?)
+}
+
+/// A native acknowledgement completes delivery without taking the thread or any recipient row.
+pub async fn decision_delivered(conn: &mut Conn, id: Id, at: DateTime<Utc>) -> Result<(), DbError> {
+    sqlx::query("UPDATE approvals SET decision_delivered_at=$2 WHERE id=$1 AND decision_delivered_at IS NULL")
+        .bind(id).bind(at).execute(conn).await?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------- what the routes of approvals read

@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-db --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --lib
+test -p orch-realtime-contract --lib
+test -p orch-api-contract --lib
+test -p orch-engine --test approvals --test preflight --test turns --test failures --test forks
+test -p orch-api-core --test input_schedules --test thread_opening_scopes --test realtime_threads --test thread_continuation_queues --test approvals

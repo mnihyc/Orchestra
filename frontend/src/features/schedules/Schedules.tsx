@@ -20,13 +20,14 @@ import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
-import { useErrorText } from '@/ui/errorText';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Table } from '@/ui/Table';
 import { Tooltip } from '@/ui/Tooltip';
 import { UserChip } from '@/ui/UserChip';
 import { HumanScheduleActions, ScheduleHistory } from './HumanSchedules';
+import { ScheduleModes } from './Editor';
 import { belongsToThread, isAgentSchedule } from './facts';
+import { ScheduleRunOutcome } from './RunOutcome';
 
 export const AGENT_SCHEDULE_SETTINGS = ['threads.agent_schedules', 'threads.agent_schedule_hours', 'threads.agent_schedule_runs'] as const;
 const WEEKDAYS = ['agentSchedules.weekdays.1', 'agentSchedules.weekdays.2', 'agentSchedules.weekdays.3', 'agentSchedules.weekdays.4', 'agentSchedules.weekdays.5', 'agentSchedules.weekdays.6', 'agentSchedules.weekdays.7'] as const;
@@ -38,9 +39,9 @@ function ScheduleTime({ at }: { at: string | null }) {
 
 function ScheduleOutcome({ row }: { row: InputSchedule }) {
   const { t } = useTranslation();
-  const describe = useErrorText();
   return <div className="flex min-w-0 flex-col items-start gap-1"><Badge>{t(`agentSchedules.states.${row.state}`)}</Badge>
-    {row.last_run !== null && <div className="flex min-w-0 flex-col gap-1 text-sm text-text-muted"><span>{t(`agentSchedules.outcomes.${row.last_run.state}`)}</span><ScheduleTime at={row.last_run.started_at ?? row.last_run.scheduled_for} />{row.last_run.reason !== null && <span>{describe(row.last_run.reason).message}</span>}</div>}
+    <ScheduleModes plan={row.plan} delivery={row.delivery} />
+    {row.last_run !== null && <div className="flex min-w-0 flex-col gap-1 text-sm text-text-muted"><ScheduleRunOutcome run={row.last_run} /><ScheduleTime at={row.last_run.started_at ?? row.last_run.scheduled_for} /></div>}
   </div>;
 }
 
@@ -131,7 +132,7 @@ export function ThreadSchedules({ thread, readOnly = false }: { thread: Thread; 
               <div className="flex min-w-0 flex-wrap items-center gap-1 text-sm text-text-muted">{isAgentSchedule(row, thread.id) && <span>{t('agentSchedules.agentFor')}</span>}<UserChip user={row.author} /></div>
               {row.timing.kind === 'cron' && <span className="text-sm text-text-muted"><code>{row.timing.expression}</code> · {row.timing.zone}</span>}
               {row.timing.kind === 'repeat' && <span className="text-sm text-text-muted">{t(`agentSchedules.repeat.${row.timing.frequency}`)}{row.timing.frequency === 'weekly' && ` ${new Intl.ListFormat(format.locale).format(row.timing.weekdays.map((day) => { const key = WEEKDAYS[day - 1]; return key === undefined ? '–' : t(key); }))}`} · {row.timing.time} · {row.timing.zone}</span>}
-              {(row.agent !== null && row.agent !== undefined) && isAgentSchedule(row, thread.id) && <div className="flex flex-wrap items-baseline gap-1 text-sm text-text-muted"><span>{t('agentSchedules.runs', { done: formatNumber(row.agent.runs, format.locale), total: formatNumber(row.agent.max_runs, format.locale) })}</span><span aria-hidden>·</span><span>{t('agentSchedules.until')}</span><ScheduleTime at={row.agent.until} /></div>}
+              {(row.agent !== null && row.agent !== undefined) && isAgentSchedule(row, thread.id) && <div className="flex flex-wrap items-baseline gap-1 text-sm text-text-muted"><span>{t('agentSchedules.runs', { done: formatNumber(row.agent.runs, format.locale), total: formatNumber(row.agent.max_runs, format.locale), remaining: formatNumber(row.state === 'finished' || row.state === 'deleted' ? 0 : Math.max(0, row.agent.max_runs - row.agent.runs), format.locale) })}</span><span aria-hidden>·</span><span>{t('agentSchedules.until')}</span><ScheduleTime at={row.agent.until} /></div>}
               {!shown.has('next') && <div className="flex min-w-0 flex-wrap items-baseline gap-1 text-sm text-text-muted"><span>{t('agentSchedules.next')}</span><ScheduleTime at={row.next_run_at} /></div>}
               {!shown.has('state') && <ScheduleOutcome row={row} />}<ScheduleHistory row={row} />
             </div> },

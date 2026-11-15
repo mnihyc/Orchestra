@@ -9,7 +9,7 @@ import { i18n, setLocale } from '@/i18n';
 import { failedStart } from './failed-start-fixtures';
 import { show } from './support';
 
-vi.mock('@tanstack/react-router', () => ({ Link: ({ to, params, search, children, className }: { to: string; params?: { id: string }; search?: { tab: string }; children: ReactNode; className?: string }) =>
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ to, params, search, children, className }: { to: string; params?: { id: string }; search?: { tab: string }; children: ReactNode; className?: string }) =>
   <a className={className} href={`${to.replace('$id', params?.id ?? '')}${search === undefined ? '' : `?tab=${search.tab}`}`}>{children}</a> }));
 const detail = (program = '0.164.0', agent = '0.165.0') => `Codex on Build machine is ${program}; this agent runs ${agent}. An environment manager can allow it on the environment's page.`;
 function blocked(raw = detail(), manages = false): Thread {
