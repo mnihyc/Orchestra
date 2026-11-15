@@ -277,7 +277,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -816,6 +816,7 @@ impl Rig {
                 .expect("a link without gateways can be made");
         let state = Arc::new(AppState {
             builtin_sources: old.builtin_sources.clone(),
+            metrics_listener_failed: old.metrics_listener_failed.clone(),
             host_ports: old.host_ports.clone(),
             db: db.clone(),
             config: Arc::clone(&old.config),

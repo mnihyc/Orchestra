@@ -397,7 +397,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -776,6 +776,7 @@ impl Server {
         realtime.listening().await;
         let app: App = Arc::new(AppState {
             builtin_sources: Arc::default(),
+            metrics_listener_failed: Default::default(),
             host_ports: Default::default(),
             db: db.clone(),
             config,
@@ -1188,6 +1189,7 @@ impl Rig {
             Link::detached(pool.clone(), Arc::clone(&clock), Arc::clone(&config)).unwrap();
         let app: App = Arc::new(AppState {
             builtin_sources: Arc::default(),
+            metrics_listener_failed: Default::default(),
             host_ports: Default::default(),
             db: pool.clone(),
             config,

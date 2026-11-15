@@ -1,3 +1,6 @@
+import { hostQuery } from '@/api/resources';
+import { currentResourceDetail, ResourceReadDialog, useCurrentResourceDetail } from '@/features/resources/ReadDialog';
+import { useQuery } from '@tanstack/react-query';
 import { homeMoveEntries } from '@/features/duplicate/move';
 /** What can be done with a host, from its row in the list and from its own page: pause it or resume it, open, edit, rename, copy its link and delete, each only where the reader may.
  *
@@ -20,7 +23,7 @@ import { openChange } from '@/features/change/target';
 import { type Act, type BulkAct, entriesOf, managedAct, keysOf, type ListActs, type RowActs, useBusy, useCopyLink, shareAct } from '@/features/resources/acts';
 import { EditHost } from '@/features/resources/hosts/Edit';
 import { RemoveHostDialog } from '@/features/resources/hosts/Remove';
-import type { Host } from '@/generated/api-types';
+import type { HostListRow as Host } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { toast } from '@/ui/Toast';
 import { adminSpec } from '@/ui/AdminAct';
@@ -44,7 +47,10 @@ export function useHostActs(options: { afterDelete?: () => void; onSettings?: (h
   const copyLink = useCopyLink();
   const { busy, track } = useBusy();
   const cleanup = useResourceCleanup();
-  const [asked, setAsked] = useState<Asked | null>(null);
+  const [requested, setAsked] = useState<Asked | null>(null);
+  const detail = useQuery({ ...hostQuery(requested?.host.id ?? ''), staleTime: (query) => currentResourceDetail(query.state.data, requested?.host) === undefined ? 0 : Infinity, enabled: requested !== null });
+  const fullDetail = useCurrentResourceDetail(detail, requested?.host);
+  const asked = requested === null || fullDetail === undefined ? null : { ...requested, host: fullDetail };
   const componentUpdate = useComponentUpdateAct();
   const editSettings = (host: Host) => {
     if (options.onSettings !== undefined) options.onSettings(host);
@@ -124,6 +130,7 @@ export function useHostActs(options: { afterDelete?: () => void; onSettings?: (h
 
   const dialogs = (
     <>
+      {requested !== null && asked === null && <ResourceReadDialog name={requested.host.name} read={detail} onClose={() => setAsked(null)} />}
       {cleanup.dialogs}
       {asked?.what === 'lost' && <DeclareLostDialog target={{ type: 'host', id: asked.host.id }} name={asked.host.name} onClose={() => setAsked(null)} />}
       {asked?.what === 'rename' && (

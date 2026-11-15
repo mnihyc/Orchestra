@@ -612,7 +612,7 @@ async fn machine_row(db: &Db, machine: Id, name: &str, roles: &[String]) {
             platform_os: "linux",
             platform_arch: "x86_64",
             connector_version: "0.1.0",
-            protocol_version: 1,
+            protocol_version: i32::try_from(orch_link_contract::version::PROTOCOL_VERSION).unwrap(),
             cert_serial: &serial,
             cert_fingerprint: &fingerprint,
             cert_not_after: Utc::now() + chrono::Duration::days(300),
@@ -698,6 +698,7 @@ impl Cluster {
             engine.clone(),
         )));
         let state = Arc::new(AppState {
+            metrics_listener_failed: old.metrics_listener_failed.clone(),
             host_ports: old.host_ports.clone(),
             builtin_sources: old.builtin_sources.clone(),
             db: db.clone(),
@@ -923,6 +924,7 @@ async fn recording_and_restore(root_alias: bool) {
                 environment_id: site.environment,
                 snapshot_id: snapshot,
                 directory: "web".into(),
+                wait_for_indexing: true,
                 kind: RecordKind::Turn,
                 record_days: days,
                 max_bytes,
@@ -1001,6 +1003,8 @@ async fn recording_and_restore(root_alias: bool) {
     // The original native result is good, but old server validation could freeze only a
     // generic unavailable fallback. Reading it must revalidate that original, never recapture.
     let fallback = FsRecordResult {
+        indexing: None,
+
         state: RecordState::Unavailable,
         tree_ref: None,
         repository_head: None,
@@ -1172,7 +1176,7 @@ async fn an_empty_full_index_reaches_the_server_and_file_name_search_answers_an_
         .await
         .ok();
     assert!(
-        matches!(answer, EnvironmentFileSearchReply::Names(entries) if entries.is_empty()),
+        matches!(answer, EnvironmentFileSearchReply::Names(page) if page.entries.is_empty()),
         "an indexed empty tree answers no matches, not a missing-list failure"
     );
 }
