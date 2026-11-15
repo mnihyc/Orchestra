@@ -682,6 +682,7 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(index, target)| MountSpec {
+                resource_id: None,
                 name: format!("mount-{index}"),
                 kind: MountKind::Volume,
                 source: format!("claim-{index}"),

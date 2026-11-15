@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-api-core --lib
+test -p orch-api-core --test ask --test copy_out_ask --test syncs
+test -p orch-engine --test resource_library
+test -p orch-engine --test agent_history -- --nocapture

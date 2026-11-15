@@ -407,6 +407,7 @@ pub fn descriptor(version: &str, as_root: bool) -> AgentDescriptor {
             }
             declared
         },
+        features: Default::default(),
         parameters: definitions(),
         text: text(),
         extensions: serde_json::from_value(serde_json::json!({
