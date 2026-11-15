@@ -103,6 +103,7 @@ impl CommandHandler for SkillPeer {
                 self.lists.fetch_add(1, Ordering::SeqCst);
                 self.pause().await;
                 Ok(CommandResult::FsList(FsListResult {
+                    facts: None,
                     entries: vec![DirEntry {
                         name: "SKILL.md".into(),
                         path: "skill/SKILL.md".into(),

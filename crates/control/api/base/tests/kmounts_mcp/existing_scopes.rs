@@ -92,6 +92,7 @@ impl Scene {
             .call(EnvironmentMcpImportCreate, &[&env])
             .token(&c.admin.token)
             .body(&EnvironmentMcpImportCreateBody {
+                origin: None,
                 source: "codex".into(),
                 scope: McpScope::User,
                 name: "search".into(),

@@ -1,0 +1,6 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test personal --test personal_native_scopes --test personal_state_scope
