@@ -479,7 +479,7 @@ impl Engine {
         Ok(rows::due_reads(conn, now, &schedules, limit).await?)
     }
 
-    /// Runs credential-expiry upkeep on the engine's clock, including the short-token notice rule.
+    /// Runs credential-expiry upkeep on the engine's clock with each provider's chosen notice interval.
     pub async fn watch_provider_credential_ends(&self) -> Result<(), EngineError> {
         self.watch_token_ends().await
     }

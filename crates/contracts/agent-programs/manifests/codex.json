@@ -278,6 +278,26 @@
         },
         {
           "name": "CommandExecutionRequestApprovalParams.proposedNetworkPolicyAmendments"
+        },
+        {
+          "name": "ThreadBackgroundTerminalsListResponse.data",
+          "capability": "background_commands"
+        },
+        {
+          "name": "ThreadBackgroundTerminal.itemId",
+          "capability": "background_commands"
+        },
+        {
+          "name": "ThreadBackgroundTerminal.processId",
+          "capability": "background_commands"
+        },
+        {
+          "name": "ThreadBackgroundTerminalsTerminateResponse.terminated",
+          "capability": "background_commands"
+        },
+        {
+          "name": "TurnSteerParams.clientUserMessageId",
+          "capability": "steer"
         }
       ]
     },
@@ -316,6 +336,10 @@
       {
         "name": "history.native_import",
         "feature": "import_native"
+      },
+      {
+        "name": "background_commands",
+        "feature": "background_commands"
       }
     ],
     "probes": [
@@ -326,6 +350,15 @@
         "name": "exec_command",
         "arguments": {
           "command": "cmd"
+        }
+      },
+      "background_command": {
+        "name": "exec_command",
+        "arguments": {
+          "command": "cmd"
+        },
+        "with": {
+          "yield_time_ms": 1000
         }
       },
       "ask_user": {

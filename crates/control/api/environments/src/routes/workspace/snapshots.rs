@@ -559,13 +559,24 @@ async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Snapshot> {
 
 // ---------------------------------------------------------------- what a snapshot holds
 
+struct RecordedRead {
+    result: orch_link_contract::source::FsRecordReadResult,
+    held: Option<orch_api_base::transit::CommandTransfer>,
+}
+impl std::ops::Deref for RecordedRead {
+    type Target = orch_link_contract::source::FsRecordReadResult;
+    fn deref(&self) -> &Self::Target {
+        &self.result
+    }
+}
+
 async fn recorded_read(
     ctx: &Ctx,
     row: &SnapshotRow,
     path: Option<String>,
     export: bool,
     read: &snapshot_read::Read,
-) -> ApiResult<orch_link_contract::source::FsRecordReadResult> {
+) -> ApiResult<RecordedRead> {
     use crate::thread_engine::DispatchCommands;
     use orch_engine::archive::snapshot_authority::SnapshotReadAuthority;
     use orch_engine::commands::{CommandAuthority, Commands, Outgoing};
@@ -595,7 +606,7 @@ async fn recorded_read(
                 .await?
                 .ok_or_else(ApiError::not_found)?;
             let machine = live::require_live(&ctx, &mut tx, &environment).await?;
-            let command = Outgoing::new(
+            let mut command = Outgoing::new(
                 orch_types::new_id(),
                 machine,
                 orch_link_contract::commands::SerialKey::None,
@@ -607,6 +618,24 @@ async fn recorded_read(
                 },
             )
             .map_err(ApiError::internal)?;
+            command.content_transit = orch_engine::transfers::relay_on(
+                &mut tx,
+                orch_settings::Place::Environment(source.row.environment_id),
+            )
+            .await;
+            let seconds = orch_settings::get::<i64>(
+                &mut tx,
+                orch_settings::Place::System,
+                orch_settings_contract::registry::keys::JOB_IO_TIMEOUT_SECS,
+            )
+            .await
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::internal("the recorded file IO allowance is missing"))?;
+            command.deadline = Some(orch_types::Time::new(
+                chrono::Duration::try_seconds(seconds)
+                    .and_then(|wait| ctx.app.clock.now().checked_add_signed(wait))
+                    .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+            ));
             let origin = SnapshotReadAuthority::capture(
                 principal.caller(),
                 &source.row,
@@ -631,6 +660,24 @@ async fn recorded_read(
         )
         .with("snapshot_id", row.id)
     };
+    let held = if command.content_transit {
+        Some(
+            ctx.app
+                .blobs
+                .command_transfer(
+                    ctx.app.db.clone(),
+                    Arc::clone(&ctx.app.clock),
+                    dispatcher.clone(),
+                    id,
+                    command.deadline.ok_or_else(|| {
+                        ApiError::internal("the recorded read has no captured deadline")
+                    })?,
+                )
+                .await?,
+        )
+    } else {
+        None
+    };
     DispatchCommands::new(dispatcher.clone())
         .issue(command)
         .await
@@ -645,7 +692,7 @@ async fn recorded_read(
     storage::register_blob(&mut conn, &result.blob, result.size, ctx.app.clock.now()).await?;
     drop(conn);
     read.check().await?;
-    Ok(result)
+    Ok(RecordedRead { result, held })
 }
 
 /// The list of a snapshot, if it has one.
@@ -714,6 +761,7 @@ async fn file_content(ctx: Ctx, query: SnapshotPathQuery, _: Body) -> ApiResult<
         .filter(|entry| entry.kind == EntryKind::File)
         .and_then(|entry| entry.hash)
         .ok_or_else(ApiError::not_found)?;
+    let mut held = None;
     if row.storage == "environment" {
         let pulled = recorded_read(&ctx, &row, Some(path.clone()), false, &read).await?;
         if pulled.blob != hash {
@@ -723,6 +771,7 @@ async fn file_content(ctx: Ctx, query: SnapshotPathQuery, _: Body) -> ApiResult<
             )
             .with("reason", "store_changed"));
         }
+        held = pulled.held;
     }
     let name = paths::name_of(&path);
     read.check().await?;
@@ -735,7 +784,11 @@ async fn file_content(ctx: Ctx, query: SnapshotPathQuery, _: Body) -> ApiResult<
     )
     .await;
     read.check().await?;
-    read.response(response?).await
+    let served = read.response(response?).await?;
+    Ok(match held {
+        Some(held) => held.response(served),
+        None => served,
+    })
 }
 
 // ---------------------------------------------------------------- as one stream
@@ -919,6 +972,7 @@ fn write_zip(
 async fn archive(ctx: Ctx, query: SnapshotArchiveGetQuery, _: Body) -> ApiResult<Response> {
     let (source, authority) = snapshot_read::open(&ctx, true).await?;
     let row = source.row;
+    let mut held = None;
     if row.storage == "environment" {
         let read = recorded_read(&ctx, &row, None, true, &authority).await?;
         if Some(read.blob) != row.manifest_blob {
@@ -928,6 +982,7 @@ async fn archive(ctx: Ctx, query: SnapshotArchiveGetQuery, _: Body) -> ApiResult
             )
             .with("reason", "store_changed"));
         }
+        held = read.held;
     }
     let tree = tree_of(&ctx, &row).await;
     authority.check().await?;
@@ -990,7 +1045,11 @@ async fn archive(ctx: Ctx, query: SnapshotArchiveGetQuery, _: Body) -> ApiResult
     )) {
         headers.insert(header::CONTENT_DISPOSITION, value);
     }
-    authority.response(response).await
+    let response = authority.response(response).await?;
+    Ok(match held {
+        Some(held) => held.response(response),
+        None => response,
+    })
 }
 
 #[path = "snapshots/creation.rs"]

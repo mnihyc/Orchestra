@@ -7,7 +7,7 @@
 //! * the exact pinned harness **0.167.2** is supported; newer versions are **untested** and older ones unsupported;
 //! * it can run in the environment itself (`key_separated`, `together`) or with its provider, reaching the
 //!   tools of the environment through its own executor (`separated`); it needs no copy of a credential to do
-//!   so, which is why it declares neither `credential_shared` nor `handed_over`;
+//!   so; an explicitly allowed access-token copy can also run beside its environment's tools;
 //! * its memory is one store for a whole home and is always off (`memory: home`);
 //! * a session is held to the MCP servers it is given (`mcp.strict`), though a changed set reaches a session
 //!   only when it is opened again (`mcp.reload` is not claimed);
@@ -222,6 +222,7 @@ pub fn arrangements() -> Vec<ArrangementEntry> {
             tool_sets: None,
         },
         plain(ArrangementType::KeySeparated),
+        plain(ArrangementType::CredentialShared),
         plain(ArrangementType::Together),
     ]
 }
@@ -251,7 +252,10 @@ pub fn descriptor(version: &str) -> AgentDescriptor {
         native_providers: Vec::new(),
         forwarded_protocols: vec![FORWARDED_PROTOCOL.to_owned()],
         direct_protocols: Vec::new(),
-        credentials: orch_agent_contract::credentials::CredentialSupport::default(),
+        credentials: orch_agent_contract::credentials::CredentialSupport {
+            issues:vec![orch_agent_contract::credentials::CredentialForm {form:crate::copied_token::FORM.into(),custody:orch_agent_contract::credentials::Custody::Shared,lifetime_secs:None,expires:true}],
+            accepts:vec![crate::copied_token::FORM.into()],
+        },
         runtime_template: None,
         approval_modes: vec![
             ApprovalMode::Ask,
@@ -279,7 +283,15 @@ pub fn descriptor(version: &str) -> AgentDescriptor {
         text: text(),
         extensions: serde_json::from_value(serde_json::json!({
             "x_capability_program": serde_json::from_str::<orch_types::Json>(include_str!("capability-program.json")).unwrap_or(orch_types::Json::Null),
-            "x_profile_parameters": crate::parameters::profile_parameters()
+            "x_profile_parameters": crate::parameters::profile_parameters(),
+            "x_turn_end_delays": {"version":1,"delays":[{
+                "pointer":"/native_result_wait_ms", "also_ms":0,
+                "default_ms":crate::runtime::DEFAULT_NATIVE_RESULT_WAIT_MS,
+                "default_setting":"agents.native_result_wait_ms",
+                "pending_buffer":{"pointer":"/native_result_buffer_bytes",
+                    "default_bytes":crate::runtime::DEFAULT_NATIVE_RESULT_BUFFER_BYTES,
+                    "default_setting":"agents.native_result_buffer_bytes"}
+            }]}
         })).unwrap_or_default(),
     }
 }

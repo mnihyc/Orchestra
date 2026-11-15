@@ -5,12 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '@/api/client';
 import { FileAttachment, FileChip } from '@/features/files/FileChip';
 import { FilePreview } from '@/features/files/FilePreview';
+import { Unavailable } from '@/features/files/Unavailable';
 import { blobSource, documentSource, sourceBytes, type FilePreview as Preview } from '@/features/files/source';
 import { FileChip as ChatFileChip } from '@/features/chat/Attachments';
 import { AttachmentChips } from '@/features/composer/Attachments';
 import { MessageFiles } from '@/features/files/MessageFiles';
 import { useWorkbench } from '@/features/workbench/store';
-import { i18n } from '@/i18n';
+import { currentLocale, i18n, setLocale } from '@/i18n';
 import { ContextMenu } from '@/ui/ContextMenu';
 import { show } from './support';
 
@@ -292,4 +293,19 @@ it('keeps a file row selection modifier and makes its native menu only when open
   await userEvent.click(screen.getByRole('menuitem', { name: 'Rename' }));
   expect(action).toHaveBeenCalledOnce();
   expect(calls.request).not.toHaveBeenCalled();
+});
+
+
+it.each(['en', 'zh-CN'] as const)('says a relayed file needs its source online without promising an older copy in %s', async (language) => {
+  const before = currentLocale();
+  try {
+    await setLocale(language);
+    show(<Unavailable reason="offline" />);
+    expect(screen.getByText(language === 'en'
+      ? 'Its environment is offline; this file is read directly from that environment.'
+      : '环境已离线；此文件直接从该环境读取。')).toBeVisible();
+    expect(screen.queryByText(i18n.t('files.unavailable.offlineHint'))).not.toBeInTheDocument();
+  } finally {
+    await setLocale(before);
+  }
 });
