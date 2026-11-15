@@ -526,6 +526,7 @@ error_codes! {
     ImportNothing = 409, "import.nothing", "There is nothing in it that you may bring here";
     ImportInvalid = 422, "import.invalid", "The source is not a package or files that can be imported";
     ImportUndone = 409, "import.undone", "The import was taken back already, or is being";
+    SummaryNothingNew = 409, "summary.nothing_new", "There is nothing new to summarize";
     Gone = 410, "gone", "It expired or was used";
     DocsTooLarge = 413, "docs.too_large", "The document would be too large";
     ShareTooLarge = 413, "share.too_large", "The copy would be too large";
@@ -555,6 +556,28 @@ impl std::fmt::Display for ErrorCode {
     }
 }
 
+/// The native reason a proven own browser session can no longer continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionEndCause {
+    /// Its recorded idle deadline passed.
+    Expired,
+    /// Its recorded revocation ended it.
+    Revoked,
+    /// Its person is unavailable; no unrecorded account-change instant is implied.
+    AccountUnavailable,
+}
+
+/// An observed end, attached only after matching this request's retained browser credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionEnd {
+    /// The actual native gate, without private identity or credential information.
+    pub cause: SessionEndCause,
+    /// The stored ending instant, when one exists; a later observation is never substituted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_if_known: Option<Time>,
+}
+
 /// An error, as it is answered: `application/problem+json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, thiserror::Error)]
 #[error("{code}: {detail}")]
@@ -572,6 +595,9 @@ pub struct Problem {
     pub detail: String,
     /// The request this answers, as in the `X-Request-Id` header.
     pub request_id: String,
+    /// A safe own-session observation; absent for unknown credentials and automation keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_end: Option<SessionEnd>,
     /// What the code adds, member by member.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Json>,
@@ -589,6 +615,7 @@ impl Problem {
             status: code.status(),
             detail: detail.into(),
             request_id: String::new(),
+            session_end: None,
             extra: serde_json::Map::new(),
         }
     }

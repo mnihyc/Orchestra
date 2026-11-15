@@ -128,6 +128,13 @@ impl ApiError {
         self
     }
 
+    /// Attach a native end only after an exact retained browser-session credential match.
+    #[must_use]
+    pub fn session_ended(mut self, fact: orch_api_contract::common::SessionEnd) -> Self {
+        self.problem.session_end = Some(fact);
+        self
+    }
+
     /// Says when the caller may try again.
     #[must_use]
     pub fn retry_after(mut self, seconds: u64) -> Self {
@@ -170,6 +177,9 @@ impl ApiError {
         let mut response = (status, body).into_response();
         let headers = response.headers_mut();
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(PROBLEM_JSON));
+        if problem.session_end.is_some() {
+            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        }
         if let Ok(value) = HeaderValue::from_str(request_id) {
             headers.insert(REQUEST_ID_HEADER, value);
         }
