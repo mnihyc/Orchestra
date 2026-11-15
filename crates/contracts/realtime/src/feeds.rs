@@ -384,6 +384,20 @@ impl std::str::FromStr for Feed {
                 {
                     return Err(bad());
                 }
+                if let crate::document_tree::DocumentTreeView::Hierarchy { queries, .. } = &view
+                    && (queries.is_empty()
+                        || queries.iter().any(|query| {
+                            query.since.is_some()
+                                || query.limit == Some(0)
+                                || query.parent_id.is_none()
+                                    && query.path_to.is_none()
+                                    && query.q.is_none()
+                                    && query.kind.is_none()
+                                    && query.below_id.is_none()
+                        }))
+                {
+                    return Err(bad());
+                }
                 Self::DocumentTree(view)
             }
             "thread" => {

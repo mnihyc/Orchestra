@@ -73,3 +73,11 @@ it('retains the confirmation and session list after a refused act so it can be t
   await user.click(within(confirm).getByRole('button', { name: 'Sign out other sessions' }));
   await waitFor(() => expect(calls.revoke).toHaveBeenCalledTimes(2));
 });
+
+it.each(['en','zh-CN'] as const)('names the sessions actual idle expiry in its existing source line in %s',async(locale)=>{
+  await setLocale(locale);show(<Security/>);
+  const browser=await screen.findByText('Chrome (Linux)'),row=browser.closest('li');
+  if(row===null)throw new Error('The session has its own row');
+  expect(row).toHaveTextContent(locale==='en'?'Idle expiry':'空闲到期');
+  expect(calls.list).toHaveBeenCalledTimes(1);
+});

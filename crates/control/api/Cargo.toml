@@ -476,6 +476,10 @@ name = "connected_program_versions"
 path = "base/tests/connected_program_versions.rs"
 
 [[test]]
+name = "container_units"
+path = "base/tests/container_units.rs"
+
+[[test]]
 name = "content"
 path = "base/tests/content.rs"
 

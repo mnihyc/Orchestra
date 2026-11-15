@@ -120,6 +120,7 @@ pub(crate) async fn head(inner: &Inner, org: Id, since: Option<Seq>) -> Result<O
 /// deleted, with nothing else of it.
 fn gone(row: &hierarchy::TreeRow, kind: NodeKind) -> TreeNode {
     TreeNode {
+        folded: None,
         activity_at: None,
         admin_access: None,
         participating: false,
@@ -268,6 +269,7 @@ pub(crate) async fn read(
                 return Some(Listed::visible(gone(&row, kind)));
             };
             Some(Listed::visible(TreeNode {
+                folded: None,
                 activity_at: Some(orch_types::Time::new(row.activity_at)),
                 admin_access: each
                     .admin_access

@@ -13,6 +13,14 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DocumentTreeView {
+    /// One open hierarchy level, one selector page, or one revealed ancestry path.
+    Hierarchy {
+        /// The actual root organization.
+        root: orch_types::Id,
+        /// Exact bounded selector; this view never accepts a whole-tree or delta read.
+        queries: Vec<orch_api_contract::nodes::OrgTreeGetQuery>,
+    },
+
     /// One requested directory page, or its flat retained document-ancestry inventory.
     Directory {
         /// Exact root/folder identity.
@@ -38,9 +46,19 @@ pub enum DocumentTreeView {
 }
 
 /// A current page/entry replacement. No historical row replay is claimed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum DocumentTreeData {
+    /// Replace one authorized hierarchy page; never replay a root's complete history.
+    Hierarchy {
+        /// The exact page replaced by this event, within the subscribed open branches.
+        query: Box<orch_api_contract::nodes::OrgTreeGetQuery>,
+        /// A part can become unavailable while the other open branches stay live.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        problem: Option<orch_api_contract::common::ErrorCode>,
+        hierarchy: Box<orch_api_contract::nodes::OrgTreeGetReply>,
+    },
+
     /// Replace only this subscribed page.
     Directory {
         /// The same projection as the HTTP list.
@@ -137,5 +155,20 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn sixty_five_open_hierarchy_branches_share_one_current_metadata_source() -> Proof {
+        let root = Id::from_u128(1);
+        let queries = (2..=66)
+            .map(|id| orch_api_contract::nodes::OrgTreeGetQuery {
+                parent_id: Some(Id::from_u128(id)),
+                ..Default::default()
+            })
+            .collect();
+        let feed = Feed::DocumentTree(DocumentTreeView::Hierarchy { root, queries });
+        assert_eq!(feed.to_string().parse::<Feed>()?, feed);
+        assert_eq!(feed.kind(), FeedKind::Ephemeral);
+        assert!(feed.sync_paths().is_empty());
+        Ok(())
     }
 }
