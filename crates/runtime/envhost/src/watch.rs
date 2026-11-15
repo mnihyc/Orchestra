@@ -327,7 +327,8 @@ impl Watcher {
 
     /// Stops watching `dir`.
     pub fn unwatch_dir(&self, dir: &Path) {
-        if self.recursive.load(Ordering::SeqCst) {
+        // The attached workspace's root observer outlives individual view subscriptions.
+        if (dir == self.root && self.admission.is_some()) || self.recursive.load(Ordering::SeqCst) {
             return;
         }
         if let Some(watcher) = self

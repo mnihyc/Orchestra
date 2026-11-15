@@ -229,15 +229,17 @@ pub fn mount(registry: &mut Registry) {
 
 /// A directory, live when its machine is there and from the last list of the tree otherwise.
 async fn list(ctx: Ctx, query: EnvironmentFileListQuery, (): ()) -> ApiResult<DirListing> {
+    let mut conn = ctx.app.db.acquire().await?;
+    let door = door::open(&ctx, &mut conn, query.thread).await?;
+    let policy = orch_engine::environments::workspace_limits(&mut conn, door.env.id)
+        .await
+        .map_err(ApiError::internal)?;
     let limit = query
         .limit
-        .unwrap_or(orch_link_contract::commands::FS_LIST_MAX_ENTRIES)
-        .min(orch_link_contract::commands::FS_LIST_MAX_ENTRIES);
+        .unwrap_or(u32::try_from(policy.directory_entries).unwrap_or(u32::MAX));
     if limit == 0 {
         return Err(ApiError::invalid("limit", "must be at least 1"));
     }
-    let mut conn = ctx.app.db.acquire().await?;
-    let door = door::open(&ctx, &mut conn, query.thread).await?;
     let path = paths::clean("path", &query.path, true)?;
     let mount = paths::mount("mount", query.mount.as_deref())?;
     let machine = live::machine_of(&ctx, &mut conn, &door.env).await?;
@@ -303,15 +305,14 @@ async fn list(ctx: Ctx, query: EnvironmentFileListQuery, (): ()) -> ApiResult<Di
                     failure.problem(Doing::Reading)
                 }
             })?;
-            if listed.entries.len() > orch_link_contract::commands::FS_LIST_MAX_ENTRIES as usize
-                || serde_json::to_vec(&listed)
-                    .map_err(ApiError::internal)?
-                    .len()
-                    > 2 * 1024 * 1024
+            if serde_json::to_vec(&listed)
+                .map_err(ApiError::internal)?
+                .len()
+                > 2 * 1024 * 1024
             {
                 return Err(ApiError::new(
                     ErrorCode::RequestTooLarge,
-                    "The connector's directory page exceeds its row or byte bound.",
+                    "The connector's directory page exceeds its byte allowance.",
                 ));
             }
             if listed.page.is_some()

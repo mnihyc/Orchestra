@@ -88,9 +88,21 @@ describe('the context ring', () => {
     expect(document.querySelector('[data-context-ring="red"]')).not.toBeNull();
   });
 
-  it('is absent where the harness reported no size of its prompt', () => {
+  it('shows the tokens alone where the harness named no window, and the share where it did', () => {
+    show(<ContextRing thread={threadWith(152_000, null, null)} />);
+    const ring = screen.getByRole('button', { name: /Show what fills the context \(Context 152k used; no window reported\)/ });
+    expect(ring).toHaveAttribute('data-context-ring', 'unmeasured');
+    expect(ring).toHaveTextContent('152k');
+    expect(ring).not.toHaveTextContent('%');
+  });
+
+  it('keeps unreported context inspectable without guessing its size', () => {
     show(<ContextRing thread={threadWith(null, null, null)} />);
-    expect(screen.queryByRole('button')).toBeNull();
+    const ring = screen.getByRole('button', { name: /Context window not reported/ });
+    expect(ring).toBeVisible();
+    expect(ring).toHaveAttribute('data-context-ring', 'unmeasured');
+    expect(ring).not.toHaveTextContent('0');
+    expect(ring).not.toHaveTextContent('%');
   });
 });
 
