@@ -36,12 +36,11 @@ fn described(payload: &Json, hash: &Hash) -> Option<Description> {
         ));
     }
     let call: ToolCallPayload = serde_json::from_value(payload.clone()).ok()?;
-    let name = if call.raw.input.blob.as_ref() == Some(hash) {
+    let raw = call.raw.as_ref();
+    let name = if raw.is_some_and(|raw| raw.input.blob.as_ref() == Some(hash)) {
         "tool-input.txt"
-    } else if call
-        .raw
-        .output
-        .as_ref()
+    } else if raw
+        .and_then(|raw| raw.output.as_ref())
         .and_then(|output| output.blob.as_ref())
         == Some(hash)
     {

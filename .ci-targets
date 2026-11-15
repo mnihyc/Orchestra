@@ -1,0 +1,13 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-connector-core --lib -- dispatch::tests::a_quiet_filesystem_command_reports_the_same_captured_budget_that_cancels_and_joins_it
+test -p orch-node-core --lib -- work::tests::
+test -p orch-node-core --test mount_copy_cancel --test mount_fingerprints
+test -p orch-engine --test measurement_jobs
+test -p orch-api-core --test machine_policy_scopes --test machines -- policy
+web typecheck
+web lint
+web test -- tests/component/live-work.test.tsx tests/component/machine-policy.test.tsx tests/component/configuration-application.test.tsx tests/component/environment-preparation.test.tsx tests/component/composer-controls.test.tsx tests/component/change-compact.test.tsx tests/component/environment-switch-words.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts
