@@ -12,7 +12,7 @@ use orch_db::{
     queries::{storage, threads},
 };
 use orch_link_contract::commands::{FsStat, GitStatus, SerialKey};
-use orch_types::{Time, new_id};
+use orch_types::{Hash, Time, new_id};
 use serde_json::json;
 
 use crate::{
@@ -505,17 +505,29 @@ pub(crate) async fn plan(
         if let Some(turn) = request.history.as_ref().and_then(|history| history.to_turn) {
             // A history ending after an agent answer needs exactly its saved end, rather than
             // the before-state of that turn or the files that happen to be there today.
-            let end: Option<(Option<orch_types::Json>, orch_types::Id, i32, Option<String>)> = sqlx::query_as(
-                "SELECT t.files_end_manifest, sg.environment_id, sg.env_generation, s.directory FROM turns t
+            type SavedEnd = (Option<Vec<u8>>, orch_types::Id, i32, Option<String>);
+            let end: Option<SavedEnd> = sqlx::query_as(
+                "SELECT t.end_manifest_blob, sg.environment_id, sg.env_generation, s.directory FROM turns t
                  JOIN segments sg ON sg.id = t.segment_id LEFT JOIN snapshots s ON s.id = t.before_snapshot_id
                  WHERE t.thread_id = $1 AND t.ordinal = $2 AND t.completed_at IS NOT NULL")
                 .bind(thread.node_id).bind(turn).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?;
-            if !end.is_some_and(|(end, environment, generation, directory)| {
-                end.as_ref() == Some(&crate::source::end_namespace(&manifest))
-                    && environment == row.environment_id
-                    && generation == row.env_generation
-                    && directory == row.directory
-            }) {
+            let matches = match end {
+                Some((Some(raw), environment, generation, directory))
+                    if environment == row.environment_id
+                        && generation == row.env_generation
+                        && directory == row.directory =>
+                {
+                    match Hash::from_slice(&raw) {
+                        Ok(hash) => {
+                            engine.read_end_namespace(hash).await.ok().as_ref()
+                                == Some(&crate::source::end_namespace(&manifest))
+                        }
+                        Err(_) => false,
+                    }
+                }
+                _ => false,
+            };
+            if !matches {
                 return Ok(Planned::blocked(
                     "workspace.restore_unavailable",
                     "no complete saved state equals the selected answer's end observation",
@@ -762,6 +774,7 @@ pub(crate) async fn copy(
                             environment_id: source_environment,
                             snapshot_id: snapshot,
                             directory: worktree.choice.repository_dir.clone(),
+                            wait_for_indexing: true,
                             kind: RecordKind::Turn,
                             record_days,
                             max_bytes,

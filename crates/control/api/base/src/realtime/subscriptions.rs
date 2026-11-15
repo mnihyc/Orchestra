@@ -151,6 +151,8 @@ pub struct SubState {
     pub(crate) resource_read: Option<orch_types::Hash>,
     /// The last session-personalized document metadata view; never a cross-reader rich cache.
     pub(crate) document_tree: Option<super::document_tree::State>,
+    /// The reader's page intent survives a same-reader credential refresh, but rich fingerprints do not.
+    pub(crate) hierarchy: super::document_tree::HierarchyWindows,
     /// How far rows were read and sent.
     pub(crate) cursor: SendCursor,
     /// The highest number whose rows were read for it.
@@ -250,6 +252,7 @@ impl Subscription {
                 health_read: None,
                 resource_read: None,
                 document_tree: None,
+                hierarchy: super::document_tree::HierarchyWindows::default(),
                 cursor: SendCursor::starting_at(0),
                 read: 0,
                 epoch: 0,
@@ -437,6 +440,9 @@ fn metric_kind(feed: &Feed) -> &'static str {
         Feed::Org(_) => "org",
         Feed::User => "user",
         Feed::Chat(_) => "chat",
+        Feed::DocumentTree(
+            orch_realtime_contract::document_tree::DocumentTreeView::Hierarchy { .. },
+        ) => "org",
         Feed::Doc(_) | Feed::DocumentTree(_) => "document",
         Feed::Env(_)
         | Feed::EnvStats(_)
@@ -980,6 +986,44 @@ pub(crate) async fn subscribe(
             return Ok(());
         }
     };
+    if let Some(window) = frame.window {
+        let Some(sub) = connection
+            .subscription(id)
+            .filter(|sub| sub.feed() == &feed)
+        else {
+            refuse(
+                connection,
+                id,
+                SocketErrorCode::NotFound,
+                "That metadata subscription is no longer open.",
+            );
+            return Ok(());
+        };
+        if !matches!(
+            feed,
+            Feed::DocumentTree(
+                orch_realtime_contract::document_tree::DocumentTreeView::Hierarchy { .. }
+            )
+        ) || frame.raw_segment_id.is_some()
+            || frame.continuation_id.is_some()
+            || frame.projection_revision.is_some()
+            || frame.since.is_some()
+            || frame.sub_streams.is_some()
+        {
+            refuse(
+                connection,
+                id,
+                SocketErrorCode::BadFeed,
+                "Page selectors belong only to current hierarchy metadata.",
+            );
+            return Ok(());
+        }
+        let mut st = sub.state.lock().await;
+        if st.open {
+            super::document_tree::update_window(inner, &sub, &mut st, window).await?;
+        }
+        return Ok(());
+    }
     let raw = matches!(feed, Feed::ThreadRaw(_));
     if raw
         && (frame.raw_segment_id.is_none()

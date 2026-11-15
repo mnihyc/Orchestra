@@ -238,6 +238,7 @@ export class World {
   displays: DisplaysWorld = new DisplaysWorld(this);
   trees = new Map<string, { seq: number; nodes: Map<string, TreeNode> }>();
   subscribers = new Map<string, Map<Subscriber, number>>();
+  hierarchyViews = new Map<Subscriber,Map<number,{feed:string;queries:Map<number,{root:string;query:Record<string,unknown>}>;pending:{window:number;root:string;bytes:Buffer}|null}>>();
   delayMs = 0;
   confirmAddresses = false;
   accessLifeMs = ACCESS_LIFE_MS;
@@ -1056,30 +1057,95 @@ export class World {
   }
 
   tree(person: Person, orgId: string, since: number | null, query = new URLSearchParams()): Answer {
-    const tree = this.trees.get(orgId);
-    if (tree === undefined || !this.orgsOf(person).some((org) => org.id === orgId)) return refuse(404, 'not_found', 'no such org');
-    // What the caller may see of it, each row with the documents beside it that they may read; a row that changed and is not theirs to see says only that it is gone.
-    if (since !== null && (query.has('cursor') || query.has('limit'))) return refuse(400, 'request.invalid', 'since cannot be combined with a full-load cursor or limit');
-    const limit = Number(query.get('limit') ?? 5000);
-    if (!Number.isInteger(limit) || limit < 1 || limit > 5000) return refuse(400, 'request.invalid', 'limit must be between 1 and 5000');
-    let seq = tree.seq;
-    let after: string | null = null;
-    const cursor = query.get('cursor');
-    if (cursor !== null) {
-      const parts = cursor.split('|');
-      if (parts.length !== 4 || parts[0] !== orgId || parts[1] !== person.me.id || !Number.isSafeInteger(Number(parts[2])) || Number(parts[2]) < 0 || parts[3] === undefined) return refuse(400, 'request.invalid', 'cursor is not of this tree');
-      seq = Number(parts[2]);
-      after = parts[3];
-    }
-    const candidates = [...tree.nodes.values()].filter((node) => since === null ? !node.deleted && (after === null || node.id > after) : node.tree_seq > since).sort((left, right) => left.id.localeCompare(right.id));
-    if (since !== null && candidates.length > 5000) return { status: 200, body: { seq, since, complete: false, nodes: [] } satisfies OrgTreeGetReply };
-    const page = since === null ? candidates.slice(0, limit) : candidates;
-    const last = page.at(-1);
-    const next_cursor = since === null && candidates.length > limit && last !== undefined ? `${orgId}|${person.me.id}|${seq}|${last.id}` : null;
-    const nodes = this.places.rowsFor(person, page, since);
-    // Every row the double gives is readable: it keeps no private place that its reader administers without viewing.
-    const body: OrgTreeGetReply = { nodes: nodes.map((node) => ({ ...node, content_hidden: false as const })), seq, since, complete: next_cursor === null, next_cursor };
-    return { status: 200, body };
+    const tree=this.trees.get(orgId);
+    if(tree===undefined||!this.orgsOf(person).some((org)=>org.id===orgId))return refuse(404,'not_found','no such org');
+    const parent=query.get('parent_id'),pathTo=query.get('path_to'),text=query.get('q'),kind=query.get('kind'),below=query.get('below_id');
+    const scoped=parent!==null||pathTo!==null||text!==null||kind!==null||below!==null;
+    if(since!==null&&(scoped||query.has('cursor')||query.has('limit')))return refuse(400,'request.invalid','since cannot be combined with a snapshot selector');
+    const limit=Number(query.get('limit')??(scoped?50:5000));
+    if(!Number.isSafeInteger(limit)||limit<1)return refuse(400,'request.invalid','limit must be positive');
+    const path=(id:string):TreeNode[]=>{
+      const rows:TreeNode[]=[],seen=new Set<string>();let at:string|null=id;
+      while(at!==null&&!seen.has(at)){seen.add(at);const row=tree.nodes.get(at);if(row===undefined)break;rows.unshift(row);at=row.parent_id;}
+      return rows;
+    };
+    const scope=Buffer.from(JSON.stringify([parent,pathTo,text,kind,below])).toString('base64url');
+    let seq=tree.seq,after:string|null=null;
+    const cursor=query.get('cursor');
+    if(cursor!==null){const parts=cursor.split('|');if(parts.length!==5||parts[0]!==orgId||parts[1]!==person.me.id||!Number.isSafeInteger(Number(parts[2]))||Number(parts[2])<0||parts[3]!==scope||parts[4]===undefined)return refuse(400,'request.invalid','cursor is not of this tree');seq=Number(parts[2]);after=parts[4];}
+    const all=this.places.rowsFor(person,[...tree.nodes.values()],null).filter((row)=>!row.deleted);
+    const allowed=new Set(all.map((row)=>row.id));
+    const candidates=[...tree.nodes.values()].filter((node)=>since===null?!node.deleted&&(after===null||node.id>after)&&allowed.has(node.id):node.tree_seq>since)
+      .filter((node)=>parent===null||node.parent_id===parent).filter((node)=>pathTo===null||path(pathTo).some((ancestor)=>ancestor.id===node.id))
+      .filter((node)=>kind===null||node.kind===kind).filter((node)=>below===null||path(node.id).some((ancestor)=>ancestor.id===below))
+      .filter((node)=>text===null||path(node.id).filter((ancestor)=>allowed.has(ancestor.id)).map((ancestor)=>ancestor.name).join(' / ').toLocaleLowerCase().includes(text.toLocaleLowerCase()))
+      .sort((a,b)=>pathTo===null?a.id.localeCompare(b.id):path(a.id).length-path(b.id).length);
+    if(since!==null&&candidates.length>5000)return {status:200,body:{seq,since,complete:false,nodes:[]} satisfies OrgTreeGetReply};
+    const page=since===null&&pathTo===null?candidates.slice(0,limit):candidates,last=page.at(-1);
+    const next_cursor=since===null&&pathTo===null&&candidates.length>limit&&last!==undefined?`${orgId}|${person.me.id}|${seq}|${scope}|${last.id}`:null;
+    const result=new Set(page.map((row)=>row.id));
+    const ancestorIds=new Set(scoped&&pathTo===null?[...page.flatMap((row)=>path(row.id).map((ancestor)=>ancestor.id)),...(parent===null?[]:path(parent).map((row)=>row.id))]:[]);
+    const priority:NonNullable<TreeNode['folded']>['urgency'][]=['waiting_approval','blocked','failed','running','queued','held','finished'];
+    const withFacts=(node:TreeNode):TreeNode=>{
+      if(!scoped)return node;
+      const inside=all.filter((child)=>child.id!==node.id&&path(child.id).some((ancestor)=>ancestor.id===node.id));
+      const states=inside.flatMap((child)=>child.thread===null?[]:[child.thread.display.state]);
+      const urgency=priority.find((state)=>state!==null&&states.includes(state));
+      const unread=inside.some((child)=>{
+        if(child.thread===null||child.archived)return false;
+        const held=this.threads.thread(person,child).my_last_read_seq??null;
+        return held!==null?child.thread.activity_seq>held:child.thread.activity_seq>0&&this.places.access(person,child.id).effective_subscription!=='off';
+      });
+      return {...node,folded:{children:inside.filter((child)=>child.parent_id===node.id).length,descendants:inside.length,unread,mentions:0,waiting:inside.reduce((sum,child)=>sum+(child.thread?.pending_approvals??0),0),urgency:urgency??null}};
+    };
+    const rows=this.places.rowsFor(person,page,since).map(withFacts);
+    const ancestors=all.filter((row)=>ancestorIds.has(row.id)&&!result.has(row.id)).map(withFacts);
+    const feed=scoped?`document-tree:${Buffer.from(JSON.stringify({kind:'hierarchy'})).toString('base64url')}`:undefined;
+    return {status:200,body:{nodes:rows.map((row)=>({...row,content_hidden:false as const})),ancestors:ancestors.map((row)=>({...row,content_hidden:false as const})),page_size:limit,...(feed===undefined?{}:{feed}),seq,since,complete:next_cursor===null,next_cursor} satisfies OrgTreeGetReply};
+  }
+
+  /** The same authorized pages answer a metadata subscription and its later tree changes. */
+  isHierarchy(feed:string):boolean {
+    if(!feed.startsWith('document-tree:'))return false;
+    let value:unknown;try{value=JSON.parse(Buffer.from(feed.slice('document-tree:'.length),'base64url').toString('utf8'));}catch{return false;}
+    return typeof value==='object'&&value!==null&&'kind' in value&&value.kind==='hierarchy';
+  }
+
+  hierarchySnapshot(person:Person,feed:string,queries:ReadonlyMap<number,{root:string;query:Record<string,unknown>}>):Record<string,unknown>[] {
+    if(!this.isHierarchy(feed))return [];
+    return [...queries].flatMap(([window,{root,query}])=>{
+      const selected=new URLSearchParams(Object.entries(query).filter(([,value])=>value!==null&&value!==undefined).map(([key,value])=>[key,String(value)]));
+      const reply=this.tree(person,root,null,selected);
+      if(reply.status!==200)return [];
+      return [{hierarchy:reply.body,window}];
+    });
+  }
+
+  openHierarchy(subscriber:Subscriber,id:number,feed:string):void {
+    const views=this.hierarchyViews.get(subscriber)??new Map();
+    views.set(id,{feed,queries:new Map(),pending:null});this.hierarchyViews.set(subscriber,views);
+  }
+
+  closeHierarchy(subscriber:Subscriber,id?:number):void {
+    if(id===undefined){this.hierarchyViews.delete(subscriber);return;}
+    this.hierarchyViews.get(subscriber)?.delete(id);
+  }
+
+  hierarchyWindow(subscriber:Subscriber,person:Person,id:number,feed:string,change:unknown):void {
+    const held=this.hierarchyViews.get(subscriber)?.get(id);
+    if(held?.feed!==feed||typeof change!=='object'||change===null||!('window' in change)||typeof change.window!=='number'||!('kind' in change))return;
+    const window=change.window;
+    if(change.kind==='remove'){held.queries.delete(window);if(held.pending?.window===window)held.pending=null;return;}
+    if(change.kind!=='query'||!('root' in change)||typeof change.root!=='string'||!('data' in change)||typeof change.data!=='string'||!('complete' in change))return;
+    const root=change.root;
+    const before=held.pending?.window===window&&held.pending.root===root?held.pending.bytes:Buffer.alloc(0);
+    const bytes=Buffer.concat([before,Buffer.from(change.data,'base64url')]);
+    held.pending={window,root,bytes};if(change.complete!==true)return;
+    held.pending=null;
+    const query:unknown=JSON.parse(bytes.toString('utf8'));
+    if(typeof query!=='object'||query===null)return;
+    held.queries.set(window,{root,query:query as Record<string,unknown>});
+    for(const data of this.hierarchySnapshot(person,feed,new Map([[window,{root,query:query as Record<string,unknown>} ]])))subscriber.send({op:'event',id,feed,data});
   }
 
   /**
@@ -1121,6 +1187,10 @@ export class World {
         const nodes = reader === undefined ? rows : this.places.rowsFor(reader, rows, prev);
         socket.send({ op: 'sync', id: sub, feed: `org:${orgId}`, prev, seq: tree.seq, data: { nodes } });
       }
+    }
+    if(!lose)for(const [socket,views] of this.hierarchyViews){
+      const reader=this.places.readerOf(socket);if(reader===undefined)continue;
+      for(const [id,view]of views)for(const data of this.hierarchySnapshot(reader,view.feed,view.queries))socket.send({op:'event',id,feed:view.feed,data});
     }
     return tree.seq;
   }

@@ -125,3 +125,15 @@ describe('where a visitor goes on to after signing in', () => {
     }
   });
 });
+
+
+it('uses the same closed branch facts with archived rows hidden or shown',()=>{
+  const folded={descendants:0,children:0,waiting:0,unread:false,mentions:0,urgency:null,
+    archived:{descendants:1,children:1,waiting:1,unread:true,mentions:2,urgency:'running' as const}};
+  const held=treeOf([node('root','org',null),node('web','project','root',{folded})]);
+  const off=buildRows(held,'root',new Set(),'en',{showArchived:false});
+  expect(off.find((row)=>row.id==='web')?.item).toMatchObject({unread:false,mentions:0,waiting:0,urgent:null});
+  const on=buildRows(held,'root',new Set(),'en',{showArchived:true});
+  expect(on.find((row)=>row.id==='web')?.item).toMatchObject({unread:true,mentions:2,waiting:1,urgent:'running'});
+  expect(on.find((row)=>row.id==='web')?.expandable).toBe(true);
+});
