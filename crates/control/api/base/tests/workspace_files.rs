@@ -829,7 +829,18 @@ async fn a_batch_that_failed_before_a_session_started_never_claims_an_upload_suc
     assert_eq!(details["upload"]["files"], json!([]));
 }
 
+/// A site whose place chose to cache: what a person read or wrote stays on the server as a cached
+/// version, which is what most of these cases are about.
 async fn live_site() -> Site {
+    let site = relayed_site().await;
+    site.world
+        .set("storage.relay_transfers", json!(false))
+        .await;
+    site
+}
+
+/// A site as it is shipped: the place relays, and keeps no copy of a file that passes through.
+async fn relayed_site() -> Site {
     let mut site = Site::new().await;
     site.disk.put("web/src/main.rs", b"fn main() {}\n");
     site.disk.put("web/src/lib.rs", b"pub fn lib() {}\n");
@@ -838,6 +849,104 @@ async fn live_site() -> Site {
     site.disk.put("web/apple.txt", b"fruit\n");
     site.power_on();
     site
+}
+
+#[tokio::test]
+async fn a_file_saved_in_a_place_that_relays_is_on_the_machine_and_leaves_no_copy_on_the_server() {
+    let site = relayed_site().await;
+    let stat = ask::write(
+        &site,
+        &site.ada,
+        "web/src/new.rs",
+        Some("none"),
+        b"// saved by an editor\n",
+    )
+    .await
+    .ok();
+    let hash = stat.hash.unwrap();
+    assert_eq!(
+        site.disk.read("web/src/new.rs").unwrap(),
+        b"// saved by an editor\n"
+    );
+    let app = &site.app().app;
+    let mut conn = site.world.conn().await;
+    assert!(
+        orch_db::queries::storage::cached_below(&mut conn, site.environment, "web")
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing is cached for a place that relays"
+    );
+    assert!(
+        orch_db::queries::storage::blob(&mut conn, &hash)
+            .await
+            .unwrap()
+            .is_none(),
+        "the bytes the request brought went with the write, not a day after it"
+    );
+    assert!(app.blobs.store().size(&hash).await.unwrap().is_none());
+    let listed = ask::list(&site, &site.ada, "web/src", None).await.ok();
+    assert!(listed.entries.iter().all(|entry| !entry.cached));
+}
+
+#[tokio::test]
+async fn a_retained_private_upload_can_supply_more_than_one_write_in_a_place_that_relays() {
+    let site = relayed_site().await;
+    let bytes = b"a file from the files view";
+    let blob = browser_upload(&site, bytes).await;
+    let id = new_id();
+    site.app().app.engine.start();
+    site.app()
+        .call(EnvironmentUploadWrite, &[&site.environment, &id])
+        .token(&site.ada.token)
+        .query(&ThroughThreadQuery::default())
+        .body(&EnvironmentUploadWriteBody {
+            path: "web/uploaded.txt".into(),
+            blob,
+            expected_hash: Some("none".into()),
+            upload_batch: new_id(),
+        })
+        .send()
+        .await
+        .ok();
+    eventually("the upload is written", || async {
+        upload_job(&site, id).await.state == JobState::Succeeded
+    })
+    .await;
+    assert_eq!(site.disk.read("web/uploaded.txt").unwrap(), bytes);
+    let mut conn = site.world.conn().await;
+    assert!(
+        orch_db::queries::storage::cached_below(&mut conn, site.environment, "web")
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing is cached for a place that relays"
+    );
+    drop(conn);
+    assert!(
+        site.app().app.blobs.store().exists(&blob).await.unwrap(),
+        "the person's retained upload still owns its reusable source"
+    );
+    let second = new_id();
+    site.app()
+        .call(EnvironmentUploadWrite, &[&site.environment, &second])
+        .token(&site.ada.token)
+        .query(&ThroughThreadQuery::default())
+        .body(&EnvironmentUploadWriteBody {
+            path: "web/a-second-copy.txt".into(),
+            blob,
+            expected_hash: Some("none".into()),
+            upload_batch: new_id(),
+        })
+        .send()
+        .await
+        .ok();
+    eventually(
+        "the same retained source supplies a second write",
+        || async { upload_job(&site, second).await.state == JobState::Succeeded },
+    )
+    .await;
+    assert_eq!(site.disk.read("web/a-second-copy.txt").unwrap(), bytes);
 }
 
 // ---------------------------------------------------------------- listing
@@ -2146,7 +2255,8 @@ async fn a_file_is_renamed_and_so_is_a_directory_with_all_that_is_in_it() {
     let moved = ask::rename(&site, &site.ada, "web/README.md", "web/READ-ME.md")
         .await
         .ok();
-    assert_eq!(moved.entry.path, "web/READ-ME.md");
+    assert_eq!(moved.stat.entry.path, "web/READ-ME.md");
+    assert_eq!(moved.kept_entries, 0);
     assert!(!site.disk.exists("web/README.md"));
     assert_eq!(site.disk.read("web/READ-ME.md").unwrap(), b"# Web\n");
 
@@ -2351,4 +2461,112 @@ async fn the_latest_list_of_the_tree_is_kept_pinned_and_the_one_it_replaces_is_l
     // The same list told again changes nothing.
     site.publish_manifest().await;
     assert_eq!(pins(second).await, 1);
+}
+
+#[tokio::test]
+async fn a_relayed_file_is_described_and_read_in_ranges_without_storing_a_copy_on_the_server() {
+    let site = relayed_site().await;
+    let bytes: Vec<u8> = (0..=255).cycle().take(1024 * 1024 + 37).collect();
+    site.disk.put("web/a-large-file.bin", &bytes);
+    let fetched = ask::fetch(&site, &site.ada, "web/a-large-file.bin", Some(5))
+        .await
+        .ok();
+    assert_eq!(fetched.state, FetchStatus::Ready);
+    assert_eq!(fetched.hash, Some(Hash::of(&bytes)));
+    let hash = fetched.hash.unwrap();
+    assert!(
+        site.app()
+            .app
+            .blobs
+            .store()
+            .size(&hash)
+            .await
+            .unwrap()
+            .is_none(),
+        "describing a file transfers no content to the store"
+    );
+    let read = ask::content(
+        &site,
+        &site.ada,
+        "web/a-large-file.bin",
+        &hash,
+        Some("bytes=65530-131077"),
+        false,
+    )
+    .await;
+    assert_eq!(read.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(read.body.as_ref(), &bytes[65530..131078]);
+    assert!(
+        site.app()
+            .app
+            .blobs
+            .store()
+            .size(&hash)
+            .await
+            .unwrap()
+            .is_none(),
+        "the native source and browser meet only in memory"
+    );
+    let mut conn = site.world.conn().await;
+    assert!(
+        orch_db::queries::storage::cached_below(&mut conn, site.environment, "web")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        orch_db::queries::storage::blob(&mut conn, &hash)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_relayed_preview_leaves_only_derived_bytes_and_an_offline_source_never_uses_an_owned_copy()
+ {
+    use orch_api_contract::workspace::{EnvironmentFilePreviewGet, EnvironmentFileStatQuery};
+    let site = relayed_site().await;
+    let bytes = b"first line\nsecond line\n";
+    site.disk.put("web/preview.txt", bytes);
+    let hash = Hash::of(bytes);
+    let shown = site
+        .app()
+        .call(EnvironmentFilePreviewGet, &[&site.environment])
+        .token(&site.ada.token)
+        .query(&EnvironmentFileStatQuery {
+            path: "web/preview.txt".to_owned(),
+            mount: None,
+            thread: Some(site.thread),
+        })
+        .send_bytes()
+        .await;
+    assert_eq!(shown.status, StatusCode::OK);
+    let value: Json = serde_json::from_slice(&shown.body).unwrap();
+    assert_eq!(value["state"], "ready");
+    assert!(value["text"].as_str().unwrap().starts_with("first line"));
+    assert!(
+        site.app()
+            .app
+            .blobs
+            .store()
+            .size(&hash)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // An independently owned attachment with the same hash never grants an offline workspace copy.
+    let _owned = site
+        .app()
+        .app
+        .blobs
+        .put_bytes(bytes::Bytes::copy_from_slice(bytes))
+        .await
+        .unwrap();
+    site.power_off().await;
+    let fetched = ask::fetch(&site, &site.ada, "web/preview.txt", None)
+        .await
+        .ok();
+    assert_eq!(fetched.state, FetchStatus::Unavailable);
+    assert_eq!(fetched.reason, Some(FetchUnavailable::Offline));
 }

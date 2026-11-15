@@ -206,6 +206,23 @@ impl Dir {
         Ok(file)
     }
 
+    /// Opens an existing regular temporary file for resuming, without following a link.
+    pub fn open_update(&self, name: &OsStr) -> io::Result<File> {
+        plain(name)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(self.path.join(name))?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ));
+        }
+        Ok(file)
+    }
+
     /// Makes the file called `name`, which must not exist, and opens it for reading and writing.
     /// Windows takes no permission bits at creation, so `mode` is not used.
     pub fn create_new(&self, name: &OsStr, _mode: u32) -> io::Result<File> {

@@ -7,7 +7,7 @@ summary: Group resource views by home, owner, machine or tag without changing ac
 
 # Organize resources by home and origin
 
-Resource groups are views of existing resource facts: Home, Owner, Machine and Tag. A display group does not create another resource or grant access. A resource's home holds its sharing policy; its machine of origin says where it came from or can run.
+Resource groups are views of existing resource facts: Home, Owner, Machine and Tag. A display group does not create another resource or grant access. A resource's home holds its sharing policy; its machine of origin says where it came from or can run. A container's machine is named by its host: a resource kept in one says **From the container on** and the host's name, and the containers of one host stand in one group.
 
 ## Where
 

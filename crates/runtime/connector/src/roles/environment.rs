@@ -113,6 +113,12 @@ const TAKES: &[CommandKind] = &[
     CommandKind::FsUnwatch,
     CommandKind::FsStat,
     CommandKind::FsFetch,
+    CommandKind::FsRelayDescribe,
+    CommandKind::FsRelaySend,
+    CommandKind::FsRelayReceive,
+    CommandKind::FsRelayPrepare,
+    CommandKind::FsRelayCommit,
+    CommandKind::FsRelayAbort,
     CommandKind::FsWrite,
     CommandKind::FsMkdir,
     CommandKind::FsRename,
@@ -1121,6 +1127,39 @@ impl EnvironmentRole {
             Command::FsFetch(body) => {
                 CommandResult::FsFetch(self.host.fs_fetch(&body, &blobs).await?)
             }
+            Command::FsRelayDescribe(body) => {
+                CommandResult::FsRelayDescribe(self.host.fs_relay_describe(&body).await?)
+            }
+            Command::FsRelaySend(body) => {
+                let relay = self.services.content.relay_for(
+                    id,
+                    body.relay_id,
+                    body.idle_secs,
+                    body.retry_ms,
+                );
+                self.host.fs_relay_send(&body, &relay).await?;
+                CommandResult::FsRelaySend(Empty {})
+            }
+            Command::FsRelayReceive(body) => {
+                let relay = self.services.content.relay_for(
+                    id,
+                    body.relay_id,
+                    body.idle_secs,
+                    body.retry_ms,
+                );
+                CommandResult::FsRelayReceive(self.host.fs_relay_receive(&body, &relay).await?)
+            }
+            Command::FsRelayPrepare(body) => {
+                self.host.fs_relay_prepare(&body).await?;
+                CommandResult::FsRelayPrepare(Empty {})
+            }
+            Command::FsRelayCommit(body) => {
+                CommandResult::FsRelayCommit(self.host.fs_relay_commit(&body).await?)
+            }
+            Command::FsRelayAbort(body) => {
+                self.host.fs_relay_abort(&body).await?;
+                CommandResult::FsRelayAbort(Empty {})
+            }
             Command::FsWrite(body) => {
                 if let Some(work) = &body.work {
                     let (progress, task) =
@@ -1424,12 +1463,15 @@ impl RoleHandler for EnvironmentRole {
                 "the recording deadline is invalid",
             )));
         };
+        // The command's own deadline is how long the files may take to be ready; the time it spent
+        // in the line of the environment is not counted in it.
         let captured = self
             .host
             .fs_record_capture(
                 &body,
                 call.context.id,
                 orch_types::Time::new(until),
+                call.context.deadline,
                 call.context.cancel,
             )
             .await;
@@ -1478,7 +1520,15 @@ impl RoleHandler for EnvironmentRole {
     }
 
     async fn handle(&self, call: Call, command: Command) -> Result<CommandResult, CommandError> {
-        orch_envhost::error::with_cancellation(call.context.cancel.clone(), async {
+        let relayed = matches!(
+            &command,
+            Command::FsRelayReceive(_) | Command::FsRelaySend(_)
+        );
+        let cancel = call.context.cancel.clone();
+        let allowance =
+            u64::try_from((call.context.deadline.get() - self.services.clock.now()).num_seconds())
+                .unwrap_or(1);
+        let operation = orch_envhost::error::with_cancellation(cancel.clone(), async {
             if crate::reconciliation::environments::Desired::retains(&command) {
                 let _action = self.lifecycle.lock().await;
                 let command = self.services.policy.gate(command)?.command;
@@ -1486,8 +1536,12 @@ impl RoleHandler for EnvironmentRole {
             } else {
                 self.carry_out(call.context.id, command).await
             }
-        })
-        .await
+        });
+        if relayed {
+            crate::content::stoppable(&cancel, allowance, operation).await
+        } else {
+            operation.await
+        }
     }
 
     fn contribute(&self, facts: &mut FactsDraft) {

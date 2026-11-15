@@ -4,11 +4,15 @@
     clippy::expect_used,
     reason = "a deciding case fails by panicking"
 )]
+#[path = "ask/admin_mode.rs"]
+mod admin_mode;
 #[path = "ask/backend_reserve.rs"]
 mod backend_reserve;
 #[path = "ask/context.rs"]
 mod context;
 mod places;
+#[path = "ask/refusals.rs"]
+mod refusals;
 mod rig;
 mod support;
 
@@ -574,17 +578,18 @@ async fn switching_a_running_builtin_interrupts_its_actual_turn_without_a_native
 
 async fn scoped_key(s: &Scene, scope: Json) -> String {
     use orch_access_contract::key_scope::KeyScope;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity;
     let scope: KeyScope = serde_json::from_value(scope).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let hash = token_hash(&secret);
     let encoded = json!(scope);
     identity::create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: s.ada.id(),
             name: "Ask operation fixture",
             token_hash: &hash,
@@ -605,9 +610,10 @@ async fn permission_key(s: &Scene, permissions: &[&str]) -> String {
 }
 
 async fn permission_key_for(s: &Scene, person: Id, permissions: &[&str]) -> String {
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity;
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let hash = token_hash(&secret);
     let scopes: Vec<String> = permissions
         .iter()
@@ -616,7 +622,7 @@ async fn permission_key_for(s: &Scene, person: Id, permissions: &[&str]) -> Stri
     identity::create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: person,
             name: "Ask permission ceiling fixture",
             token_hash: &hash,
@@ -1610,10 +1616,13 @@ async fn ask_model_options_include_native_constraints_without_provider_read_oper
         .unwrap();
     assert!(option.allowed, "{:?}", option.unavailable_reason);
     let schema = option.request_option_schema.as_ref().unwrap();
-    assert_eq!(
-        schema,
-        &option.model.as_ref().unwrap().option_constraints["openai-responses"]
-    );
+    // Ask declares its own read tools, so hosted web search is the one option it does not offer.
+    let mut offered = option.model.as_ref().unwrap().option_constraints["openai-responses"].clone();
+    offered["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("web_search");
+    assert_eq!(schema, &offered);
     assert!(orch_types::schema::validate(schema, &json!({"temperature":0.3})).is_ok());
     assert!(orch_types::schema::validate(schema, &json!({"temperature":0.8})).is_err());
     assert_eq!(schema["properties"]["temperature"]["maximum"], 0.5);
@@ -2691,7 +2700,7 @@ async fn conversation_files_are_private_without_an_environment() {
         .app
         .app
         .blobs
-        .register(&mut conn, meta, now)
+        .register(&mut conn, &meta, now)
         .await
         .unwrap();
     orch_db::queries::uploads::remember(&mut conn, s.cai.id(), &meta.hash, now)
@@ -3549,7 +3558,7 @@ async fn builtin_input_needs_the_original_keys_read_of_retained_history() {
     // 两者均应在调用模型前拒绝，写入权限不会授予历史对话的读取权限。
     use orch_access_contract::key_scope::KeyScope;
     use orch_api_contract::threads::{Delivery, ThreadInputCreate, ThreadInputCreateBody};
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity;
     let s = Scene::new().await;
     let provider = configured_provider(&s).await;
@@ -3594,13 +3603,14 @@ async fn builtin_input_needs_the_original_keys_read_of_retained_history() {
         }]}))
         .unwrap();
         assert!(scope.validate().is_empty());
-        let secret = new_token(API_TOKEN_PREFIX);
+        let issued_key_id = new_id();
+        let secret = new_api_token(issued_key_id);
         let hash = token_hash(&secret);
         let encoded = json!(scope);
         identity::create_api_token_scoped(
             &mut *s.rig.world.conn().await,
             &identity::NewApiToken {
-                id: new_id(),
+                id: issued_key_id,
                 user_id: s.ada.id(),
                 name: "Built-in input scope fixture",
                 token_hash: &hash,

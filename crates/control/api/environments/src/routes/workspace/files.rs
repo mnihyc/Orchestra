@@ -12,6 +12,8 @@
 //! own switch and the machine to be there. Each write, rename, copy and deletion is one audit row that
 //! names the path and never the content.
 
+mod relay;
+
 use super::door;
 
 use super::door::Door;
@@ -544,17 +546,24 @@ async fn stat(ctx: Ctx, query: EnvironmentFileStatQuery, (): ()) -> ApiResult<Fi
     let path = paths::clean("path", &query.path, true)?;
     let mount = paths::mount("mount", query.mount.as_deref())?;
     let machine = live::machine_of(&ctx, &mut conn, &door.env).await?;
+    let relayed =
+        orch_engine::transfers::relay_on(&mut conn, orch_settings::Place::Environment(door.env.id))
+            .await;
+    drop(conn);
     if let Some(machine) = machine {
         let mut found = live_stat(&ctx, &door, machine, &path, mount.as_deref())
             .await
             .map_err(|failure| failure.problem(Doing::Reading))?;
-        listing::mark_cached(
-            &mut conn,
-            door.env.id,
-            mount.as_deref(),
-            std::slice::from_mut(&mut found.entry),
-        )
-        .await?;
+        if !relayed {
+            let mut conn = ctx.app.db.acquire().await?;
+            listing::mark_cached(
+                &mut conn,
+                door.env.id,
+                mount.as_deref(),
+                std::slice::from_mut(&mut found.entry),
+            )
+            .await?;
+        }
         return Ok(found);
     }
     if mount.is_some() {
@@ -606,6 +615,45 @@ async fn preview_get(ctx: Ctx, query: EnvironmentFileStatQuery, _: Body) -> ApiR
     let key = paths::cache_key(mount.as_deref(), &path);
     let mut conn = ctx.app.db.acquire().await?;
     let door = door::open(&ctx, &mut conn, query.thread).await?;
+    if orch_engine::transfers::relay_on(&mut conn, orch_settings::Place::Environment(door.env.id))
+        .await
+    {
+        let machine = live::machine_of(&ctx, &mut conn, &door.env).await?;
+        drop(conn);
+        let Some(machine) = machine else {
+            return crate::previews::unavailable(
+                &ctx,
+                found.entry.size,
+                &found.media_type,
+                found.is_text,
+                false,
+            )
+            .await;
+        };
+        let hash = match found.hash {
+            Some(hash) => hash,
+            None => {
+                relay::describe(&ctx, &door, machine, &path, mount.clone())
+                    .await?
+                    .hash
+            }
+        };
+        return relay::preview(
+            &ctx,
+            door,
+            machine,
+            relay::File {
+                path,
+                mount,
+                version: BlobMeta {
+                    hash,
+                    size: found.entry.size,
+                },
+                media: found.media_type,
+            },
+        )
+        .await;
+    }
     let cached = storage::cached_version(
         &mut conn,
         door.env.id,
@@ -660,7 +708,7 @@ async fn preview_get(ctx: Ctx, query: EnvironmentFileStatQuery, _: Body) -> ApiR
             .blobs
             .register(
                 &mut conn,
-                BlobMeta {
+                &BlobMeta {
                     hash: fetched.hash,
                     size: fetched.size,
                 },
@@ -805,8 +853,15 @@ async fn fetch(
         query.wait.unwrap_or(0).min(FETCH_WAIT_MAX_SECONDS),
     ));
     let env = door.env.clone();
+    let relayed =
+        orch_engine::transfers::relay_on(&mut conn, orch_settings::Place::Environment(env.id))
+            .await;
     let machine = live::machine_of(&ctx, &mut conn, &env).await?;
     let key = paths::cache_key(mount.as_deref(), &path);
+    drop(conn);
+    if relayed && machine.is_none() {
+        return Ok(unavailable(FetchUnavailable::Offline));
+    }
 
     // 1. The version there is now: the machine's word, or the last list's.
     let seen = match machine {
@@ -839,19 +894,22 @@ async fn fetch(
     };
     let store = ctx.app.blobs.store();
 
-    // 2. The content of that very version is in the store.
-    if let Some(hash) = storage::cached_version(&mut conn, env.id, &key, size, mtime_ms).await?
-        && store.exists(&hash).await.map_err(ApiError::internal)?
-    {
-        storage::touch_blob(&mut conn, &hash, ctx.now).await?;
-        return Ok(ready(hash, size));
-    }
-    // The list of the tree knew the hash, and the store has that content.
-    if machine.is_none()
-        && let Some(hash) = listed_hash
-        && store.exists(&hash).await.map_err(ApiError::internal)?
-    {
-        return Ok(ready(hash, size));
+    if !relayed {
+        let mut conn = ctx.app.db.acquire().await?;
+        // 2. The content of that very version is in the store.
+        if let Some(hash) = storage::cached_version(&mut conn, env.id, &key, size, mtime_ms).await?
+            && store.exists(&hash).await.map_err(ApiError::internal)?
+        {
+            storage::touch_blob(&mut conn, &hash, ctx.now).await?;
+            return Ok(ready(hash, size));
+        }
+        // The list of the tree knew the hash, and the store has that content.
+        if machine.is_none()
+            && let Some(hash) = listed_hash
+            && store.exists(&hash).await.map_err(ApiError::internal)?
+        {
+            return Ok(ready(hash, size));
+        }
     }
 
     // 3. Offline, nothing more can be had.
@@ -859,15 +917,38 @@ async fn fetch(
         return Ok(unavailable(FetchUnavailable::OfflineNotCached));
     };
     // 4. A file larger than a blob may be is listed and cannot be read.
-    let max_bytes = crate::uploads::max_blob_bytes(&ctx.app).await?;
-    if size > max_bytes {
+    let max_bytes = if relayed {
+        0
+    } else {
+        crate::uploads::max_blob_bytes(&ctx.app).await?
+    };
+    if !relayed && size > max_bytes {
         return Ok(unavailable(FetchUnavailable::TooLarge));
     }
 
-    // 5. The machine is asked to upload it, once for each version.
+    if relayed && let Some(hash) = listed_hash {
+        return Ok(ready(hash, size));
+    }
+
+    // A relayed description computes the version on its source; cached mode uploads it.
     let dispatcher = ctx.app.link.dispatcher();
+    let allowance = if relayed {
+        let mut conn = ctx.app.db.acquire().await?;
+        orch_settings::get::<i64>(
+            &mut conn,
+            orch_settings::Place::System,
+            orch_settings_contract::registry::keys::JOB_IO_TIMEOUT_SECS,
+        )
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::internal("the file-work allowance is missing"))?
+    } else {
+        i64::from(CommandKind::FsFetch.deadline_secs())
+    };
     let deadline = Time::new(
-        ctx.now + ChronoDuration::seconds(i64::from(CommandKind::FsFetch.deadline_secs())),
+        ChronoDuration::try_seconds(allowance)
+            .and_then(|wait| ctx.app.clock.now().checked_add_signed(wait))
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC),
     );
     let mut last = FetchState {
         state: FetchStatus::Fetching,
@@ -877,34 +958,67 @@ async fn fetch(
         reason: None,
     };
     for _ in 0..FETCH_ATTEMPTS {
-        let id = live::id_to_ask(&dispatcher, |attempt| {
-            fetch_id(env.id, &key, size, mtime_ms, attempt)
+        let description_key = if relayed {
+            format!("relay:{key}")
+        } else {
+            key.clone()
+        };
+        let mut id = live::id_to_ask(&dispatcher, |attempt| {
+            fetch_id(env.id, &description_key, size, mtime_ms, attempt)
         })
         .await?;
+        if relayed
+            && dispatcher
+                .status(id)
+                .await
+                .map_err(ApiError::internal)?
+                .is_some_and(|row| row.is_over())
+        {
+            // Millisecond metadata cannot prove an unchanged file. Completed descriptions are
+            // reused only by the native stat's exact-identity hash cache, never by this weak key.
+            id = orch_types::new_id();
+        }
         if dispatcher
             .status(id)
             .await
             .map_err(ApiError::internal)?
             .is_none()
         {
-            dispatcher
-                .issue_as(
-                    id,
-                    machine,
-                    &SerialKey::None,
-                    deadline,
-                    &FsFetch {
-                        environment_id: env.id,
-                        mount: mount.clone(),
-                        path: path.clone(),
-                        // The time of last change is told to the millisecond, which is not what the
-                        // machine compares; it uploads the version it finds and says which.
-                        expect: None,
-                        max_bytes: Some(max_bytes),
-                    },
-                )
-                .await
-                .map_err(ApiError::internal)?;
+            if relayed {
+                dispatcher
+                    .issue_as(
+                        id,
+                        machine,
+                        &SerialKey::None,
+                        deadline,
+                        &orch_link_contract::commands::FsRelayDescribe {
+                            environment_id: env.id,
+                            mount: mount.clone(),
+                            path: path.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(ApiError::internal)?;
+            } else {
+                dispatcher
+                    .issue_as(
+                        id,
+                        machine,
+                        &SerialKey::None,
+                        deadline,
+                        &FsFetch {
+                            environment_id: env.id,
+                            mount: mount.clone(),
+                            path: path.clone(),
+                            // The time of last change is told to the millisecond, which is not what the
+                            // machine compares; it uploads the version it finds and says which.
+                            expect: None,
+                            max_bytes: Some(max_bytes),
+                        },
+                    )
+                    .await
+                    .map_err(ApiError::internal)?;
+            }
         }
         let outcome = if wait.is_zero() {
             let over = dispatcher
@@ -923,20 +1037,27 @@ async fn fetch(
                 Err(_) => None,
             }
         };
-        let received = storage::received_of_machine(
-            &mut conn,
-            machine,
-            size,
-            ctx.now - ChronoDuration::minutes(5),
-        )
-        .await?;
-        last.received = received;
+        last.received = if relayed {
+            None
+        } else {
+            let mut conn = ctx.app.db.acquire().await?;
+            storage::received_of_machine(
+                &mut conn,
+                machine,
+                size,
+                ctx.now - ChronoDuration::minutes(5),
+            )
+            .await?
+        };
         match outcome {
             None => return Ok(last),
             Some(CommandOutcome::Succeeded(result)) => {
                 let result: FsFetchResult =
                     serde_json::from_value(result).map_err(ApiError::internal)?;
-                record_fetched(&ctx, &mut conn, env.id, &key, &result).await?;
+                if !relayed {
+                    let mut conn = ctx.app.db.acquire().await?;
+                    record_fetched(&ctx, &mut conn, env.id, &key, &result).await?;
+                }
                 return Ok(ready(result.hash, result.size));
             }
             Some(CommandOutcome::Failed(error)) => match error.code.as_str() {
@@ -1151,6 +1272,58 @@ pub async fn read_for(
 }
 orch_api_base::__api_bind_223f89e0d4!();
 
+/// A response whose body, once sent or dropped, removes from the server the content it was made of,
+/// unless something else holds that content.
+pub(super) fn forget_when_sent(ctx: &Ctx, hash: orch_types::Hash, response: Response) -> Response {
+    use futures::StreamExt as _;
+    struct Forget {
+        blobs: crate::blobs::Blobs,
+        db: orch_db::Db,
+        clock: std::sync::Arc<dyn orch_types::Clock>,
+        hash: orch_types::Hash,
+    }
+    impl Drop for Forget {
+        fn drop(&mut self) {
+            let (blobs, db, hash, at) = (
+                self.blobs.clone(),
+                self.db.clone(),
+                self.hash,
+                self.clock.now(),
+            );
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move { blobs.forget_after_transfer(&db, &[hash], at).await });
+            }
+        }
+    }
+    let held = Forget {
+        blobs: ctx.app.blobs.clone(),
+        db: ctx.app.db.clone(),
+        clock: std::sync::Arc::clone(&ctx.app.clock),
+        hash,
+    };
+    let (parts, body) = response.into_parts();
+    let sent = body.into_data_stream().map(move |piece| {
+        let _held = &held;
+        piece
+    });
+    Response::from_parts(parts, Body::from_stream(sent))
+}
+
+/// Whether the environment's place relays file content through the server without keeping it
+/// (`storage.relay_transfers`).
+pub(super) async fn relays(ctx: &Ctx, environment: Id) -> bool {
+    match ctx.app.db.acquire().await {
+        Ok(mut conn) => {
+            orch_engine::transfers::relay_on(
+                &mut conn,
+                orch_settings::Place::Environment(environment),
+            )
+            .await
+        }
+        Err(_) => true,
+    }
+}
+
 /// The bytes of one version of a file, found by their hash.
 async fn content_get(
     ctx: Ctx,
@@ -1161,6 +1334,51 @@ async fn content_get(
     let door = door::open(&ctx, &mut conn, query.thread).await?;
     let path = paths::clean("path", &query.path, false)?;
     let mount = paths::mount("mount", query.mount.as_deref())?;
+    if orch_engine::transfers::relay_on(&mut conn, orch_settings::Place::Environment(door.env.id))
+        .await
+    {
+        let machine = live::require_live(&ctx, &mut conn, &door.env).await?;
+        drop(conn);
+        let found = live_stat(&ctx, &door, machine, &path, mount.as_deref())
+            .await
+            .map_err(|failure| failure.problem(Doing::Reading))?;
+        if found.entry.kind != DirEntryKind::File {
+            return Err(ApiError::not_found());
+        }
+        if query.preview == Some(true) {
+            return relay::preview(
+                &ctx,
+                door,
+                machine,
+                relay::File {
+                    path,
+                    mount,
+                    version: BlobMeta {
+                        hash: query.hash,
+                        size: found.entry.size,
+                    },
+                    media: found.media_type,
+                },
+            )
+            .await;
+        }
+        return relay::content(
+            &ctx,
+            door,
+            machine,
+            relay::File {
+                path,
+                mount,
+                version: BlobMeta {
+                    hash: query.hash,
+                    size: found.entry.size,
+                },
+                media: found.media_type,
+            },
+            query.download.unwrap_or(false),
+        )
+        .await;
+    }
     let key = paths::cache_key(mount.as_deref(), &path);
     // The hash has to belong to that path in this environment: it was cached for it, or the list of
     // the tree says that path has that content.
@@ -1274,23 +1492,21 @@ async fn content_put(
     let path = paths::clean("path", &query.path, false)?;
     let expected = expected_of(query.expected_hash.as_deref())?;
     drop(conn);
+    let relayed = relays(&ctx, door.env.id).await;
     if let Some(hash) = query.blob {
         let (mut tx, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
         crate::attachments::require(&mut tx, guard.principal(), &hash).await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
     }
     let meta = match query.blob {
-        Some(hash) => {
-            let size = ctx
-                .app
-                .blobs
-                .store()
-                .size(&hash)
-                .await
-                .map_err(ApiError::internal)?
-                .ok_or_else(ApiError::not_found)?;
-            BlobMeta { hash, size }
-        }
+        Some(hash) => ctx
+            .app
+            .blobs
+            .store()
+            .existing(&hash)
+            .await
+            .map_err(ApiError::internal)?
+            .ok_or_else(ApiError::not_found)?,
         None => ctx
             .app
             .blobs
@@ -1305,7 +1521,14 @@ async fn content_put(
     if query.blob.is_some() {
         crate::attachments::require(&mut tx, guard.principal(), &meta.hash).await?;
     }
-    ctx.app.blobs.register(&mut tx, meta, ctx.now).await?;
+    if relayed && query.blob.is_none() {
+        ctx.app
+            .blobs
+            .register_transit(&mut tx, &meta, ctx.now)
+            .await?;
+    } else {
+        ctx.app.blobs.register(&mut tx, &meta, ctx.now).await?;
+    }
     tx.commit().await.map_err(orch_db::DbError::from)?;
     let written = live::run(
         &ctx,
@@ -1321,6 +1544,15 @@ async fn content_put(
         },
     )
     .await;
+    // A place that relays keeps no copy of what an editor saved: the file is on the machine, and the
+    // bytes the request brought go from the server once the write has come to an end, whichever it was.
+    let meta = meta.into_meta();
+    if relayed && query.blob.is_none() {
+        ctx.app
+            .blobs
+            .forget_after_transfer(&ctx.app.db, &[meta.hash], ctx.app.clock.now())
+            .await;
+    }
     let stat = match written {
         Ok(found) => found,
         Err(Failure::Machine(error)) if error.code == "conflict" => {
@@ -1341,23 +1573,25 @@ async fn content_put(
     };
     let mut tx = ctx.app.db.begin().await?;
     let hash = stat.hash.unwrap_or(meta.hash);
-    storage::record_cached(
-        &mut tx,
-        door.env.id,
-        &CachedFile {
-            path: path.clone(),
-            size: stat.entry.size,
-            mtime_ns: stat
-                .entry
-                .mtime
-                .get()
-                .timestamp_millis()
-                .saturating_mul(NANOS_PER_MILLI),
-            hash,
-            cached_at: ctx.now,
-        },
-    )
-    .await?;
+    if !relayed {
+        storage::record_cached(
+            &mut tx,
+            door.env.id,
+            &CachedFile {
+                path: path.clone(),
+                size: stat.entry.size,
+                mtime_ns: stat
+                    .entry
+                    .mtime
+                    .get()
+                    .timestamp_millis()
+                    .saturating_mul(NANOS_PER_MILLI),
+                hash,
+                cached_at: ctx.now,
+            },
+        )
+        .await?;
+    }
     audited(
         &ctx,
         &mut tx,
@@ -1426,7 +1660,7 @@ async fn upload_write(
         .blobs
         .register(
             &mut tx,
-            BlobMeta {
+            &BlobMeta {
                 hash: body.blob,
                 size,
             },
@@ -1780,7 +2014,7 @@ async fn rename(
     ctx: Ctx,
     query: orch_api_contract::environment::ThroughThreadQuery,
     body: FileFromToBody,
-) -> ApiResult<FileStat> {
+) -> ApiResult<orch_api_contract::workspace::FileRenameResult> {
     let (from, to) = two_paths(&body)?;
     let mut conn = ctx.app.db.acquire().await?;
     let (door, machine) = writer(&ctx, &mut conn, query.thread).await?;
@@ -1797,7 +2031,7 @@ async fn rename(
     )
     .await
     .map_err(|failure| failure.problem(Doing::Renaming))?;
-    let stat = moved;
+    let stat = &moved.stat;
     let mut tx = ctx.app.db.begin().await?;
     storage::forget_cached_under(&mut tx, door.env.id, &from).await?;
     audited(
@@ -1806,13 +2040,13 @@ async fn rename(
         &door,
         orch_db::audit::action!(AuditAction::WorkspaceFileRenamed),
         &said(&ctx, &format!("renamed {from} to {to}"))?,
-        serde_json::json!({ "from": from, "to": to, "size": stat.entry.size, "hash": stat.hash }),
+        serde_json::json!({ "from": from, "to": to, "size": stat.entry.size, "hash": stat.hash, "kept_entries": moved.kept_entries }),
     )
     .await?;
     orch_db::queries::environments::thread_engine::touch_activity(&mut tx, door.env.id, ctx.now)
         .await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(stat)
+    Ok(moved)
 }
 
 /// Deletes a file, or a directory with what is in it.

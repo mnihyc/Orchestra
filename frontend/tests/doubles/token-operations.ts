@@ -40623,6 +40623,37 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
+    "operation_id": "ProviderFactsModelsGet",
+    "method": "GET",
+    "path": "/providers/{id}/facts/models",
+    "title": "Lists the models the provider's source last listed, as it kept them and not as the provider's own list; discovery suggests them and never adds one. Empty where no list was read; `facts_state.models` says why.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderFactsModelsGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "id",
+                "kind": "provider"
+              }
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "operation_id": "ProviderFactsOverridesSet",
     "method": "PUT",
     "path": "/providers/{id}/facts-overrides",
@@ -51184,6 +51215,51 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ThreadItemRawGet",
+    "method": "GET",
+    "path": "/threads/{id}/items/{item_id}/raw",
+    "title": "Reads a tool call exactly as its harness made it: its own name for the tool, its arguments and what came back. A thread's items leave this out.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ThreadItemRawGet.read",
+        "name": "read",
+        "selector": "inspect_deleted is not true",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      },
+      {
+        "legacy_tokens": true,
+        "operation": "ThreadItemRawGet.inspect_deleted",
+        "name": "inspect_deleted",
+        "selector": "inspect_deleted is true; apply the stored thread restoration rule",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
           }
         ]
       }

@@ -253,6 +253,7 @@ pub async fn issue(app: &App, machine: Id, kind: CommandKind, body: &Json) -> Id
     command_rows::insert_command(
         &mut conn,
         &command_rows::NewCommand {
+            content_transit: false,
             id,
             machine_id: machine,
             kind: kind.as_str(),
@@ -348,7 +349,7 @@ impl Depot {
         let mut conn = self.world.conn().await;
         self.app()
             .blobs
-            .register(&mut conn, meta, self.app().clock.now())
+            .register(&mut conn, &meta, self.app().clock.now())
             .await
             .unwrap();
         meta.hash
@@ -888,6 +889,64 @@ impl Machine for Disk {
                     .ok_or_else(|| Self::not_found(&stat.path))?;
                 Self::json(&found)
             }
+            CommandKind::FsRelayDescribe => {
+                let body: orch_link_contract::commands::FsRelayDescribe =
+                    serde_json::from_value(body).map_err(bad)?;
+                let file = lock(&self.files)
+                    .get(&body.path)
+                    .cloned()
+                    .ok_or_else(|| Self::not_found(&body.path))?;
+                Self::json(&FsFetchResult {
+                    hash: Hash::of(&file.bytes),
+                    size: i64::try_from(file.bytes.len()).unwrap(),
+                    mtime_ns: file.mtime_ns,
+                })
+            }
+            CommandKind::FsRelaySend => {
+                let body: orch_link_contract::commands::FsRelaySend =
+                    serde_json::from_value(body).map_err(bad)?;
+                let file = lock(&self.files)
+                    .get(&body.path)
+                    .cloned()
+                    .ok_or_else(|| Self::not_found(&body.path))?;
+                if Hash::of(&file.bytes) != body.hash {
+                    return Err(CommandError::new(
+                        ErrorCode::Changed,
+                        "the file is another content version",
+                    ));
+                }
+                let from = usize::try_from(body.offset)
+                    .map_err(|_| CommandError::new(ErrorCode::Unsupported, "negative offset"))?;
+                let len = usize::try_from(body.len)
+                    .map_err(|_| CommandError::new(ErrorCode::Unsupported, "negative range"))?;
+                let end = from
+                    .checked_add(len)
+                    .filter(|end| *end <= file.bytes.len())
+                    .ok_or_else(|| CommandError::new(ErrorCode::Unsupported, "invalid range"))?;
+                let mut offset = 0;
+                for piece in file.bytes[from..end].chunks(PIECE) {
+                    let request = self.content.request(
+                        Method::PUT,
+                        &format!(
+                            "/internal/link/blobs/relay/{}?offset={offset}",
+                            body.relay_id
+                        ),
+                        Some(self.machine),
+                        Some(id),
+                        &[],
+                        Bytes::copy_from_slice(piece),
+                    );
+                    let answer = self.content.send(request).await;
+                    if answer.status != StatusCode::OK {
+                        return Err(CommandError::new(
+                            ErrorCode::Internal,
+                            format!("the relay refused its piece: {}", answer.status),
+                        ));
+                    }
+                    offset = answer.received().unwrap();
+                }
+                Ok(json!({}))
+            }
             CommandKind::FsFetch => {
                 self.fetch(id, serde_json::from_value(body).map_err(bad)?)
                     .await
@@ -926,11 +985,12 @@ impl Machine for Disk {
                 }
                 lock(&self.dirs).remove(&rename.from);
                 lock(&self.dirs).insert(rename.to.clone());
-                Self::json(
-                    &self
+                Self::json(&orch_api_contract::workspace::FileRenameResult {
+                    stat: self
                         .stat_of(&rename.to)
                         .unwrap_or_else(|| self.stat_of("").unwrap()),
-                )
+                    kept_entries: 0,
+                })
             }
             CommandKind::FsCopy => {
                 let copy: FsCopy = serde_json::from_value(body).map_err(bad)?;
@@ -1793,7 +1853,12 @@ pub mod ask {
     }
 
     /// A path renamed.
-    pub async fn rename(site: &Site, by: &Who, from: &str, to: &str) -> Reply<FileStat> {
+    pub async fn rename(
+        site: &Site,
+        by: &Who,
+        from: &str,
+        to: &str,
+    ) -> Reply<orch_api_contract::workspace::FileRenameResult> {
         site.app()
             .call(EnvironmentFileRename, &[&site.environment])
             .token(&by.token)

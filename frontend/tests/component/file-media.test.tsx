@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '@/api/client';
 import { FileAttachment, FileChip } from '@/features/files/FileChip';
 import { FilePreview } from '@/features/files/FilePreview';
+import { Unavailable } from '@/features/files/Unavailable';
 import { blobSource, documentSource, sourceBytes, type FilePreview as Preview } from '@/features/files/source';
 import { FileChip as ChatFileChip } from '@/features/chat/Attachments';
 import { AttachmentChips } from '@/features/composer/Attachments';
@@ -292,4 +293,19 @@ it('keeps a file row selection modifier and makes its native menu only when open
   await userEvent.click(screen.getByRole('menuitem', { name: 'Rename' }));
   expect(action).toHaveBeenCalledOnce();
   expect(calls.request).not.toHaveBeenCalled();
+});
+
+
+it.each(['en', 'zh-CN'])('says a relayed file needs its source online without promising an older copy in %s', async (language) => {
+  const before = i18n.language;
+  try {
+    await i18n.changeLanguage(language);
+    show(<Unavailable reason="offline" />);
+    expect(screen.getByText(language === 'en'
+      ? 'Its environment is offline; this file is read directly from that environment.'
+      : '环境已离线；此文件直接从该环境读取。')).toBeVisible();
+    expect(screen.queryByText(i18n.t('files.unavailable.offlineHint'))).not.toBeInTheDocument();
+  } finally {
+    await i18n.changeLanguage(before);
+  }
 });

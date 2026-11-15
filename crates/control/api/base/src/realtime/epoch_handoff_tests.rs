@@ -2004,7 +2004,7 @@ pub fn __api_run_a_nodes_machine_feed_keeps_host_view_until_the_physical_machine
 #[cfg(any(test, feature = "test-support"))]
 async fn an_existing_scoped_key_authenticates_realtime_as_that_key_and_revocation_ends_it() -> Proof
 {
-    use crate::middleware::authentication::{self, API_TOKEN_PREFIX, Via, new_token, token_hash};
+    use crate::middleware::authentication::{self, Via, new_api_token, token_hash};
     use chrono::Duration as Span;
     use http::{HeaderMap, HeaderValue, header};
 
@@ -2012,8 +2012,8 @@ async fn an_existing_scoped_key_authenticates_realtime_as_that_key_and_revocatio
     // The same ordinary account owns both: the key's exact thread subtree is what separates them.
     let allowed = rig.thread("Allowed key read").await;
     let other = rig.thread("Outside key read").await;
-    let key = new_token(API_TOKEN_PREFIX);
     let key_id = new_id();
+    let key = new_api_token(key_id);
     let hash = token_hash(&key);
     let scopes = vec!["thread.view".to_owned()];
     {
@@ -2112,7 +2112,7 @@ pub fn __api_run_an_existing_scoped_key_authenticates_realtime_as_that_key_and_r
 #[cfg(any(test, feature = "test-support"))]
 async fn an_owner_read_key_observes_its_thread_but_does_not_inherit_raw_protocol_management()
 -> Proof {
-    use crate::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use crate::middleware::authentication::{new_api_token, token_hash};
     use chrono::Duration as Span;
     use orch_access_contract::key_scope::{
         KeyAction, KeyOperation, KeyReach, KeyRule, KeyScope, KeyTarget, KeyTargetKind,
@@ -2138,8 +2138,8 @@ async fn an_owner_read_key_observes_its_thread_but_does_not_inherit_raw_protocol
         constraints: Vec::new(),
         excluded_places: Vec::new(),
     };
-    let key = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let key = new_api_token(id);
     let hash = token_hash(&key);
     let policy = serde_json::to_value(scope)?;
     let projection = {
@@ -2230,7 +2230,7 @@ pub fn __api_run_an_owner_read_key_observes_its_thread_but_does_not_inherit_raw_
 
 #[cfg(any(test, feature = "test-support"))]
 async fn topic_sync_uses_the_same_selection_for_scoped_http_and_socket_child_rows() -> Proof {
-    use crate::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use crate::middleware::authentication::{new_api_token, token_hash};
     use chrono::Duration as Span;
     use orch_access_contract::key_scope::{
         KeyAction, KeyIdentityKind, KeyOperation, KeyReach, KeyRule, KeyScope, KeyTarget,
@@ -2313,7 +2313,8 @@ async fn topic_sync_uses_the_same_selection_for_scoped_http_and_socket_child_row
             constraints: Vec::new(),
             excluded_places: Vec::new(),
         };
-        let key = new_token(API_TOKEN_PREFIX);
+        let issued_key_id = new_id();
+        let key = new_api_token(issued_key_id);
         let hash = token_hash(&key);
         let policy = serde_json::to_value(scope)?;
         {
@@ -2321,7 +2322,7 @@ async fn topic_sync_uses_the_same_selection_for_scoped_http_and_socket_child_row
             identity::create_api_token_scoped(
                 &mut conn,
                 &identity::NewApiToken {
-                    id: new_id(),
+                    id: issued_key_id,
                     user_id: rig.ada,
                     name: "same topic read selection",
                     token_hash: &hash,
