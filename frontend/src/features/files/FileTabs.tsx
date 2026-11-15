@@ -16,7 +16,6 @@ import { openContent, type ContentHistory } from '@/features/workbench/contentNa
 import type { ViewProps } from '@/features/workbench/views';
 import { useViewShown } from '@/features/workbench/viewOpening';
 import { writeViewChoice } from '@/lib/viewChoices';
-import { useViewportShape } from '@/features/workbench/Narrow';
 import { Button } from '@/ui/Button';
 import { CopyButton } from '@/ui/CopyButton';
 import { EmptyState } from '@/ui/EmptyState';
@@ -185,7 +184,6 @@ export function FileTab({ tab }: ViewProps) {
 function FileBody({ tab, of, userId, access }: { tab: Tab; of: FileTabOf; userId: string | null; access: EnvironmentWorkspaceAccess }) {
   const { t } = useTranslation();
   const shown = useViewShown();
-  const small = useViewportShape() === 'small';
   const queryClient = useQueryClient();
   const { door } = access;
   const { head, error, loading, reload } = useFileHead(door, of.path);
@@ -240,7 +238,7 @@ function FileBody({ tab, of, userId, access }: { tab: Tab; of: FileTabOf; userId
   if (loading || head === undefined || viewer === null) return <SkeletonRows rows={8} />;
 
   const facts = factsOf(head.stat);
-  const reason: ReadOnlyReason | null = small ? { kind: 'small_screen' } : whyReadOnly(access.mayManage, environment, access.environment.name, directory?.asOf ?? null, viewer, head.stat.is_text);
+  const reason = whyReadOnly(access.mayManage, environment, access.environment.name, directory?.asOf ?? null, viewer, head.stat.is_text);
   const props: ViewerProps = { door, path: of.path, head, line: jump?.line ?? null, endLine: fileLine(of.endLine), lineRequest: jump?.nonce, tabId: tab.id, whyReadOnly: reason, thread: access.thread, openAs: setOverride };
   const choices = viewersFor(facts);
   const updatesPaused = capacity !== null || directory?.capacity !== undefined && directory.capacity !== null
