@@ -1,0 +1,8 @@
+fmt
+clippy
+test -p orch-envhost --lib
+test -p orch-envhost --test environment
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test source --test source_uniform
+test -p orch-api-core --test threads_drive
+test -p orch-api-core --test workspace_connector --test workspace_pages
