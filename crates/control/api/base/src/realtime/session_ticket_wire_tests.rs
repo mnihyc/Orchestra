@@ -934,6 +934,96 @@ pub fn __api_run_an_actual_zero_byte_queued_rfb_message_rechecks_manage_after_re
     )
 }
 
+#[cfg(any(test, feature = "test-support"))]
+async fn a_permanently_blocked_rfb_input_still_observes_expiry_view_loss_and_shutdown() -> Proof {
+    for ending in ["expiry", "view", "stop"] {
+        let wire = Wire::new(Surface::Display).await?;
+        let id = wire.make().await?;
+        let key = tickets::legacy(&wire.scene.rig.world, wire.scene.cai.id()).await?;
+        let mut current = actual_input_factory(&wire, id, &key).await?;
+        let prefix = displays_support::key(66, true);
+        let message = displays_support::key(67, true);
+        let (writing, mut reading) = tokio::io::duplex(prefix.len());
+        let (pending, reached) = oneshot::channel();
+        let mut writing = ObservedWriter {
+            inner: writing,
+            pending: None,
+        };
+        assert!(matches!(
+            crate::realtime::publication::write_message(
+                &mut writing,
+                &prefix,
+                wire.app.clock.as_ref(),
+                &mut current
+            )
+            .await?,
+            Some(Ok(()))
+        ));
+        writing.pending = Some(pending);
+        let token = wire.mint(id, &key, true).await?;
+        let send = crate::realtime::displays::ticket_input_write_fixture(
+            wire.app.clone(),
+            id,
+            &token,
+            &mut writing,
+            &message,
+        );
+        let end = async {
+            tokio::time::timeout(browsers_support::WAIT, reached).await??;
+            match ending {
+                "expiry" => {
+                    sqlx::query("UPDATE api_tokens SET expires_at=$2 WHERE id=$1")
+                        .bind(key.id)
+                        .bind(wire.app.clock.now() - chrono::Duration::seconds(1))
+                        .execute(&wire.scene.rig.world.db.pool)
+                        .await?;
+                }
+                "view" => {
+                    tickets::current_scope(
+                        &wire.scene.rig.world,
+                        key.id,
+                        tickets::rules(
+                            "DisplayTicketCreate.control",
+                            wire.scene.on.environment,
+                            true,
+                        ),
+                    )
+                    .await?
+                }
+                _ => wire.app.realtime.inner.stop.cancel(),
+            }
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        };
+        let (sent, ended) =
+            tokio::time::timeout(browsers_support::WAIT, async { tokio::join!(send, end) })
+                .await
+                .map_err(|_| {
+                    format!("{ending} did not close a write while native capacity stayed blocked")
+                })?;
+        ended?;
+        assert!(
+            matches!(sent?, None | Some(Err(_))),
+            "{ending} accepted no byte of the blocked message"
+        );
+        writing.shutdown().await?;
+        let mut accepted = Vec::new();
+        reading.read_to_end(&mut accepted).await?;
+        assert_eq!(
+            accepted, prefix,
+            "only the earlier accepted message reached native input"
+        );
+        wire.finish().await;
+    }
+    Ok(())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn __api_run_a_permanently_blocked_rfb_input_still_observes_expiry_view_loss_and_shutdown()
+-> ::futures::future::LocalBoxFuture<'static, crate::session_ticket_support::Proof> {
+    Box::pin(a_permanently_blocked_rfb_input_still_observes_expiry_view_loss_and_shutdown())
+}
+
 #[path = "../../tests/browsers_support/screen.rs"]
 pub mod browsers_support;
 
