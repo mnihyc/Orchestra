@@ -254,7 +254,6 @@ fn persistence_column(value: &str) -> Option<&'static str> {
         "error",
         "execution_revision",
         "executor",
-        "files_end_manifest",
         "id",
         "import_fidelity",
         "import_report",
@@ -1353,7 +1352,27 @@ impl Job {
                 continue;
             }
             return match ended {
-                Ended::Succeeded(result) => Ok(result),
+                Ended::Succeeded(result) => {
+                    if matches!(
+                        command.kind,
+                        CommandKind::NodeRuntimeCreate | CommandKind::NodeMountsApply
+                    ) {
+                        let mut conn = self
+                            .engine
+                            .db()
+                            .acquire()
+                            .await
+                            .map_err(EngineError::from)?;
+                        crate::resource_facts::applications::inputs::record_command(
+                            &mut conn,
+                            &command,
+                            &result,
+                            self.now(),
+                        )
+                        .await?;
+                    }
+                    Ok(result)
+                }
                 Ended::Failed(error) => Err(Stop::Failed(
                     Failure::new(error.code, error.detail).answered(),
                 )),
@@ -2338,6 +2357,11 @@ impl Engine {
     }
 
     async fn after_job_inner(&self, row: &JobRow) {
+        if row.plan.get("workspace_file_bytes").and_then(Json::as_bool) == Some(true) {
+            if let Err(error) = super::source::workspace_files::release(self, row.id).await {
+                tracing::warn!(%error,job=%row.id,"completed workspace file bytes await release");
+            }
+        }
         self.after_volume_carry(row).await;
         self.after_mount_copies(row).await;
         if row.plan.get("recovery").is_some() {

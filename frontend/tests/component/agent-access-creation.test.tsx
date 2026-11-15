@@ -1,6 +1,7 @@
 /** The new holder's exact agent choice is visible and settled before any work is submitted. */
 import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { EditorView } from '@codemirror/view';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as AccessApi from '@/api/access';
 import type * as SettingsApi from '@/api/settings';
@@ -22,7 +23,7 @@ const state = vi.hoisted(() => {
   const bounds: ShareParts = { documents: 'edit' };
   const preset: AgentAccessChoice = { where: 'topic', parts: { documents: 'edit' } };
   return { topic: null as Topic | null, start: vi.fn<(plan: StartPlan) => void>(),
-  settingsReads: vi.fn(), pageReads: vi.fn(), optionsReads: vi.fn(), nodeReads: vi.fn(), bounds, omitOffer: false, preset };
+  settingsReads: vi.fn(), pageReads: vi.fn(), optionsReads: vi.fn(), nodeReads: vi.fn(), environmentCreate:vi.fn(), environmentStart:vi.fn(), sourcePrepare:vi.fn(), fileWrite:vi.fn(), fresh:false, bounds, omitOffer: false, preset };
 });
 function servedOffer(): AgentAccessAvailability {
   return { preset: state.preset, choices: [
@@ -31,7 +32,7 @@ function servedOffer(): AgentAccessAvailability {
   ] };
 }
 vi.mock('@/api/start', async (load) => ({ ...await load<object>(), startOptionsQuery: () => ({ queryKey: ['agent-creation-options'], queryFn: () => {
-  state.optionsReads(); return Promise.resolve(options(state.omitOffer ? {} : { agent_access: servedOffer() }));
+  state.optionsReads(); return Promise.resolve(options({...(state.omitOffer ? {} : { agent_access: servedOffer() }),...(state.fresh?{environment_default:'fresh',environments:[]}: {})}));
 } }) }));
 vi.mock('@/features/start/start', async (load) => ({ ...await load<object>(), useStart: () => ({ start: state.start, pending: false, error: null, step: null, standing: { topic: null, environment: null } }) }));
 vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(), settingsQuery: (id: string) => ({
@@ -46,10 +47,13 @@ vi.mock('@/api/access', async (load) => ({ ...await load<typeof AccessApi>(),
     return Promise.resolve({ ...page, object: { ...page.object, id: target.id }, gives: { ...page.gives, agents: [], agent_parts: state.bounds } });
   } }),
 }));
-vi.mock('@/api/resources', async (load) => ({ ...await load<object>(), providersQuery: () => ({ queryKey: ['agent-creation-providers'], queryFn: () => Promise.resolve([]) }), machinesQuery: { queryKey: ['agent-creation-machines'], queryFn: () => Promise.resolve([]) } }));
+vi.mock('@/api/resources', async (load) => ({ ...await load<object>(), providersQuery: () => ({ queryKey: ['agent-creation-providers'], queryFn: () => Promise.resolve([]) }), machinesQuery: { queryKey: ['agent-creation-machines'], queryFn: () => Promise.resolve([]) },templatesQuery:()=>({queryKey:['agent-creation-templates'],queryFn:()=>Promise.resolve([])}) }));
+vi.mock('@/api/environments',async(load)=>({...await load<object>(),createEnvironment:state.environmentCreate,startEnvironment:state.environmentStart}));
+vi.mock('@/api/source',async(load)=>({...await load<object>(),prepareSource:state.sourcePrepare}));
+vi.mock('@/api/workspace',async(load)=>({...await load<object>(),writeFile:state.fileWrite}));
 vi.mock('@/api/nodes', async (load) => ({ ...await load<object>(), nodeQuery: (id: string) => ({ queryKey: ['agent-creation-node', id], queryFn: () => { state.nodeReads(id); return Promise.resolve(state.topic); } }) }));
-vi.mock('@/features/resources/harnesses', () => ({ useHarnessTitle: () => () => 'Reported harness' }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/resources/harnesses', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHarnessTitle: () => () => 'Reported harness' }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 function topic() { if (state.topic === null) throw new Error('The current topic is required'); return state.topic; }
 beforeEach(() => {
@@ -58,10 +62,29 @@ beforeEach(() => {
   if (reader === undefined) throw new Error('The ordinary fixture reader is required');
   const node = world.places.node(reader, ACME.fixLogin);
   if (node.kind !== 'topic') throw new Error('The fixture supplies a real topic');
-  state.topic = node; state.bounds = { documents: 'edit' }; state.preset = { where: 'topic', parts: { documents: 'edit' } }; state.omitOffer = false;
+  state.topic = node; state.bounds = { documents: 'edit' }; state.preset = { where: 'topic', parts: { documents: 'edit' } }; state.omitOffer = false; state.fresh=false;
   client.session.setState({ status: 'signed_in', userId: reader.me.id });
 });
 afterEach(async () => { act(() => client.session.setState({ status: 'signed_out', userId: null })); await setLocale('en'); });
+
+it.each(['en','zh-CN'] as const)('keeps a new workspace instruction edit in the creation plan and creates nothing when the dialog closes (%s)',async(locale)=>{
+  await setLocale(locale); state.fresh=true;
+  const close=vi.fn();
+  show(<NewThreadDialog parent={placeOfNode(topic())} open onClose={close}/>);
+  await screen.findByRole('region',{name:i18n.t('agentAccess.title')});
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('start.options.title')}));
+  await userEvent.click(await screen.findByText('AGENTS.md',{exact:true}));
+  const body=await screen.findByRole('textbox',{name:i18n.t('files.code.label',{name:'AGENTS.md'})});
+  const editor=EditorView.findFromDOM(body);
+  if(editor===null)throw new Error('The ordinary file code editor is mounted');
+  act(()=>editor.dispatch({changes:{from:0,to:editor.state.doc.length,insert:'Use the reviewed shared instructions.\n'}}));
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('files.edit.save')}));
+  expect(await screen.findByText(locale==='en'?'Edited':'已编辑')).toBeVisible();
+  expect(state.environmentCreate).not.toHaveBeenCalled(); expect(state.environmentStart).not.toHaveBeenCalled();
+  expect(state.sourcePrepare).not.toHaveBeenCalled(); expect(state.fileWrite).not.toHaveBeenCalled(); expect(state.start).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('common.cancel')}));
+  expect(close).toHaveBeenCalledOnce(); expect(state.start).not.toHaveBeenCalled();
+});
 
 for (const locale of ['en', 'zh-CN'] as const) {
   it(`shows both audience and exact Documents-only agent access before opening advanced setup (${locale})`, async () => {

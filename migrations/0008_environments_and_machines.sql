@@ -98,6 +98,7 @@ CREATE TABLE commands (
     body jsonb NOT NULL,
     serial_key text,
     state text DEFAULT 'queued'::text NOT NULL,
+    key_phase smallint DEFAULT 0 NOT NULL CHECK (key_phase IN (0, 1, 2)),
     result jsonb,
     error jsonb,
     attempts integer DEFAULT 0 NOT NULL,
@@ -727,6 +728,18 @@ CREATE TABLE runtimes (
 );
 
 CREATE INDEX runtimes_custody_waiting_idx ON runtimes USING btree (host_id) INCLUDE (state, remove_at) WHERE ((lost_at IS NULL) AND (state <> 'removed'::text));
+
+-- Applied resource inputs outlive transient command and job history, while their unit is retained.
+CREATE TABLE runtime_resource_inputs (
+    runtime_id uuid PRIMARY KEY REFERENCES runtimes(id) ON DELETE CASCADE,
+    template_fingerprint text,
+    mount_fingerprints jsonb,
+    mount_command_at timestamp with time zone NOT NULL,
+    mount_command_id uuid NOT NULL,
+    recorded_at timestamp with time zone NOT NULL
+);
+
+CREATE INDEX runtime_resource_inputs_mounts_idx ON runtime_resource_inputs USING gin (mount_fingerprints);
 
 CREATE UNIQUE INDEX runtimes_env_key ON runtimes USING btree (environment_id) WHERE ((kind = 'environment'::text) AND (state <> ALL (ARRAY['retired'::text, 'removed'::text])) AND (successor_of IS NULL));
 

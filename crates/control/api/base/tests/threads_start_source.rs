@@ -112,6 +112,158 @@ fn request(s: &Scene, environment: Id, first: bool) -> CreateThread {
     }
 }
 
+fn staged_request(s: &Scene, environment: Id, text: &str) -> CreateThread {
+    let mut body = serde_json::to_value(request(s, environment, true)).unwrap();
+    body["workspace_edits"] = json!([{"path":"AGENTS.md","text":text,"expected_hash":null}]);
+    serde_json::from_value(body)
+        .expect("creation accepts a conditional workspace file edit in its start plan")
+}
+
+#[tokio::test]
+async fn the_first_input_waits_until_its_staged_shared_instructions_have_been_written() {
+    use orch_link_contract::commands::ExpectedHash;
+    let s = Scene::new().await;
+    let environment = new_environment(&s).await;
+    let text = "Use the checked-out workspace and keep these instructions shared.\n";
+    let wanted = orch_types::Hash::of(text.as_bytes());
+    let now = Time::new(s.rig.world.now());
+    s.rig.machine.handler.on(CommandKind::FsWrite,move|command|{
+        let Command::FsWrite(body)=command else{unreachable!()};
+        assert_eq!(body.environment_id,environment); assert_eq!(body.path,"AGENTS.md");
+        assert_eq!(body.blob,wanted); assert_eq!(body.expected_hash,Some(ExpectedHash::Absent));
+        Ok(CommandResult::FsWrite(serde_json::from_value(json!({"name":"AGENTS.md","path":body.path,"type":"file","size":text.len(),"mtime":now,"mode":420,"link_target":null,"cached":false,"hash":wanted,"media_type":"text/markdown","is_text":true})).unwrap()))
+    });
+    s.rig.machine.handler.hold(CommandKind::FsWrite);
+    let made = s
+        .rig
+        .world
+        .app
+        .call(ThreadCreate, &[&s.tree.topic.base.id])
+        .token(&s.ada.token)
+        .body(&staged_request(&s, environment, text))
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    rig::eventually("the start's actual file-write command", || async {
+        !s.rig.seen.of_kind(CommandKind::FsWrite).is_empty()
+    })
+    .await;
+    assert!(
+        s.rig.turn_starts(made.base.id).is_empty(),
+        "the accepted first input stays held while instructions are being written"
+    );
+    s.rig.machine.handler.release();
+    let turn = s.rig.turn_start(made.base.id, 0).await;
+    assert_eq!(turn.thread_id, made.base.id);
+    let source: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT source FROM threads WHERE node_id=$1")
+            .bind(made.base.id)
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+    assert!(
+        source.unwrap().get("workspace_edits").is_none(),
+        "an applied file edit is consumed instead of becoming a permanent thread instruction override"
+    );
+}
+
+#[tokio::test]
+async fn a_conflict_with_instructions_brought_by_the_source_keeps_both_texts_and_never_starts_the_agent()
+ {
+    use orch_link_contract::commands::{CommandError, ErrorCode as NativeError};
+    let s = Scene::new().await;
+    let environment = new_environment(&s).await;
+    let proposed = "The staged instructions the person reviewed.\n";
+    let source_text = std::sync::Arc::new(std::sync::Mutex::new(
+        "The instructions brought by the source.\n".to_owned(),
+    ));
+    let current = source_text.clone();
+    s.rig
+        .machine
+        .handler
+        .on(CommandKind::FsWrite, move |command| {
+            let Command::FsWrite(body) = command else {
+                unreachable!()
+            };
+            assert!(
+                body.expected_hash.is_some(),
+                "an unknown source is never an unconditional overwrite"
+            );
+            let hash = orch_types::Hash::of(current.lock().unwrap().as_bytes());
+            Err(CommandError {
+                details: Some(json!({"current":{"hash":hash}})),
+                ..CommandError::new(
+                    NativeError::Conflict,
+                    "The source brought a different AGENTS.md",
+                )
+            })
+        });
+    let made = s
+        .rig
+        .world
+        .app
+        .call(ThreadCreate, &[&s.tree.topic.base.id])
+        .token(&s.ada.token)
+        .body(&staged_request(&s, environment, proposed))
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    rig::eventually("the conflict in the start's own source state", || async {
+        let value: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT source FROM threads WHERE node_id=$1")
+                .bind(made.base.id)
+                .fetch_one(s.rig.db.pool())
+                .await
+                .unwrap();
+        value.is_some_and(|source| {
+            source["info"]["state"] == "failed"
+                && source["info"]["reason"] == "workspace.source_conflict"
+        })
+    })
+    .await;
+    assert!(s.rig.turn_starts(made.base.id).is_empty());
+    assert_eq!(
+        source_text.lock().unwrap().as_str(),
+        "The instructions brought by the source.\n"
+    );
+    let kept: Option<String> = sqlx::query_scalar(
+        "SELECT source->'workspace_edits'->0->>'text' FROM threads WHERE node_id=$1",
+    )
+    .bind(made.base.id)
+    .fetch_one(s.rig.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(kept.as_deref(), Some(proposed));
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM thread_inputs WHERE thread_id=$1 AND state='pending'",
+    )
+    .bind(made.base.id)
+    .fetch_one(s.rig.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(pending, 1);
+    let shown = s
+        .rig
+        .world
+        .app
+        .call(ThreadSyncGet, &[&made.base.id])
+        .token(&s.ada.token)
+        .query(&ThreadSyncGetQuery::default())
+        .send()
+        .await
+        .ok();
+    assert!(
+        !serde_json::to_string(&shown)
+            .unwrap()
+            .contains(proposed.trim_end()),
+        "the staged file text is read through its file authority, not leaked by conversation metadata"
+    );
+}
+
 #[tokio::test]
 async fn a_new_environment_and_its_source_prepare_before_the_first_message_runs_in_either_creation_flow()
  {

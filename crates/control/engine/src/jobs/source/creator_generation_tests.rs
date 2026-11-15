@@ -125,6 +125,8 @@ impl Fixture {
             token: None,
             creator_origin: Some(origin),
             scheduled_input: None,
+            workspace_edits: Vec::new(),
+            prepared_source: None,
             action: Action::Prepare {
                 directory: "web".into(),
                 source: repository,
