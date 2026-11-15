@@ -1,0 +1,6 @@
+fmt
+test -p orch-envhost --lib
+test -p orch-envhost --test native_process_tree --test processes --test terminal --test unsupported_runtime
+web typecheck
+web lint
+web test -- tests/unit/route-links.test.ts tests/component/router-context.test.tsx tests/component/forms.test.tsx tests/component/icon-button-description.test.tsx tests/component/node-screen-actions.test.tsx tests/component/installation-records.test.tsx tests/component/system-banner-dismissal.test.tsx tests/component/blocked-models.test.tsx tests/unit/waiting-start-steps.test.ts tests/unit/acts.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts

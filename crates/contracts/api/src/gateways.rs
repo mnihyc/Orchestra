@@ -86,6 +86,25 @@ pub struct ConnectorGatewayStatus {
     pub measurements: Vec<GatewayLatency>,
 }
 
+/// Save one primary selection on the enrolled machine without replacing its identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MachineGatewaySetBody {
+    pub selection: ConnectorGatewaySelection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_id: Option<String>,
+}
+
+/// The accepted native choice, without reading the machine's existing configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineGatewaySetReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub machine_id: Id,
+    pub selection: ConnectorGatewaySelection,
+    pub gateway_id: Option<String>,
+    pub changed: bool,
+}
+
 /// Frozen placement beside an unchanged signed tool ticket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -159,6 +178,9 @@ crate::endpoints! {
     /// Reads the machine's primary choice and measured entrance latencies.
     MachineGatewayGet: GET "/machines/{machine_id}/gateway", Rule("machine.view, or host.view on its node facade"), none, none, json ConnectorGatewayStatus, 200,
         operation Op::single(Read, &[Object(K::Machine)], Target::TypedPath { parameter: "machine_id", kind: Object(K::Machine) });
+    /// Saves the primary gateway choice on its actual machine; the native reply is durable before reconnect.
+    MachineGatewaySet: PUT "/machines/{machine_id}/gateway", Rule("machine.manage, or host.manage on its node facade"), none, json MachineGatewaySetBody, json MachineGatewaySetReceipt, 200,
+        operation Op::receipt(&Op::facets(&crate::machine_sources::GATEWAY_FACETS));
     /// Reads the actual tool carrier of the thread's current environment binding.
     ThreadTunnelGatewayGet: GET "/threads/{thread_id}/gateway", Rule("thread.view"), none, none, json ThreadTunnelGatewayStatus, 200,
         operation Op::single(Read, &[Object(K::Thread)], Target::TypedPath { parameter: "thread_id", kind: Object(K::Thread) });

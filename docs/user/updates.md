@@ -80,11 +80,19 @@ hour, including failed lookups. Scheduled notices remain controlled by
 `release.check_days`; opening System reads the same hourly cache. If a lookup
 fails, its reason is shown beside any previously successful, dated result.
 
-The server has no web button that installs its own update. Such a button would
-need authority over the host's files or Docker socket. The operator runs the
-transactional `update.sh` command on that host; it verifies the release, takes
-the database backup and rolls back if the new services fail readiness. The
-operator's upgrades and recovery guide covers backups and rollback.
+A system administrator can choose **Update now** in **Management → System**.
+The server files are updated by a job on the node bundled with this installation,
+using the release’s existing `update.sh` fetch, verification, backup, restart,
+health check and rollback. A second press joins the same running job. The page
+keeps looking during the restart and shows the retained updated or rolled-back
+outcome when the API returns, including after a page reload. Automatic checks
+and notices never install a server release by themselves.
+
+If the bundled node is missing, offline, or has no access to the host’s local
+Docker, the row names that condition and keeps the operator command above.
+The shell command remains the same updater and recovery path; `./update.sh recover`
+resumes an interrupted journal. The API accepts no host command, executable path
+or Docker socket and never replaces its own container.
 
 The web edge stays available while the API updates its database. An open page
 shows the active migration, completed steps, any row counts the database can

@@ -39,7 +39,7 @@ pub(super) fn validate(
     ctx: &Ctx,
     body: &api::HostEnrollmentTokenCreateBody,
 ) -> ApiResult<(orch_config::ServerConfig, Option<String>)> {
-    let installation = super::super::machines::installation_config(ctx);
+    let installation = super::super::machines::installation_config(ctx).await?;
     super::super::machines::require_node_installable(&installation)?;
     let hint = body
         .name_hint
