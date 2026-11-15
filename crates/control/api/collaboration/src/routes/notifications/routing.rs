@@ -186,7 +186,35 @@ async fn orgs_of(conn: &mut orch_db::Conn, ids: Vec<Id>) -> ApiResult<BTreeMap<I
 /// The caller's own routes: one for each channel they changed theirs for, and those kept after
 /// their channel was removed, until they remove them. A removed channel's org is named only
 /// while the caller is still a member of it.
-pub async fn list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<NotificationRoute>> {
+pub async fn list(
+    ctx: Ctx,
+    query: orch_api_contract::notifications::NotificationRouteListQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::common::Page<NotificationRoute>> {
+    let source = format!("personal-routes:{}:{:?}", ctx.user()?.id(), query.retained);
+    let rows = list_snapshot(ctx, (), ()).await?.into_iter().filter(|row| query.retained.is_none_or(|retained| retained == (row.health == orch_api_contract::notifications::NotificationRouteHealth::ChannelRemoved))).collect();
+    crate::collection::snapshot(
+        &query.collection(),
+        &source,
+        rows,
+        |row| (row.channel_id, row.id),
+        |row| {
+            format!(
+                "{} {} {}",
+                row.channel
+                    .as_ref()
+                    .map_or("", |channel| channel.name.as_str()),
+                row.channel
+                    .as_ref()
+                    .map_or("", |channel| channel.kind.as_str()),
+                row.label.as_deref().unwrap_or("")
+            )
+        },
+        false,
+    )
+}
+
+async fn list_snapshot(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<NotificationRoute>> {
     let me = ctx.user()?.id();
     let mut conn = ctx.app.db.acquire().await?;
     let person = people::recipient(&mut conn, me)

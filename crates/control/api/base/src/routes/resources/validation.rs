@@ -7,3 +7,11 @@ orch_api_base::api_family_callback! {
 
     fn setting<'__api>(arg0: &'__api orch_engine::Engine, arg1: &'__api str, arg2: &'__api orch_types::Json) -> orch_api_base::middleware::requests::ApiResult<()>;
 }
+
+orch_api_base::api_family_callback! {
+    bind __api_bind_ef3cd14b55, __api_install_ef3cd14b55, __api_callback_ef3cd14b55;
+    slot __ApiCallbackef3cd14b55, __API_CALLBACK_EF3CD14B55, __api_set_ef3cd14b55;
+    base orch_api_base::routes::resources::validation;
+
+    async fn named_things_exist<'__api>(arg0: &'__api mut orch_db::Conn, arg1: &'__api str, arg2: &'__api orch_types::Json) -> orch_api_base::middleware::requests::ApiResult<()>;
+}

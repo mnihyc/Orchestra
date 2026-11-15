@@ -90,6 +90,7 @@ CREATE TABLE snapshots (
 );
 
 CREATE INDEX snapshots_environment_exports_idx ON snapshots (environment_id, created_at DESC, id DESC) WHERE thread_id IS NULL;
+CREATE INDEX snapshots_label_search_idx ON snapshots USING gin (label gin_trgm_ops);
 
 CREATE TABLE upload_sessions (
     id uuid NOT NULL,
@@ -114,3 +115,7 @@ CREATE TABLE snapshot_blob_refs (
     CONSTRAINT snapshot_blob_refs_blob_fkey FOREIGN KEY (blob) REFERENCES blobs(hash),
     CONSTRAINT snapshot_blob_refs_snapshot_id_fkey FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
 );
+
+-- Personal upload names are selected before custody and reference pages are projected.
+CREATE INDEX completed_uploads_name_search_idx ON completed_uploads USING gin (name gin_trgm_ops) WHERE name IS NOT NULL;
+CREATE INDEX upload_sessions_name_search_idx ON upload_sessions USING gin (name gin_trgm_ops) WHERE cancelled_at IS NULL AND completed_at IS NULL;

@@ -148,6 +148,7 @@ async fn roles_name_all_owners_and_a_viewer_chip_marks_actual_owners_including_n
             .call(PermissionPeopleList, &[&"nodes", &project])
             .token(&t.other.token)
             .query(&PermissionPeopleListQuery {
+                q: None,
                 holder: format!("role:{}:viewer", t.root),
                 limit: Some(1),
                 cursor,
@@ -194,6 +195,7 @@ async fn roles_name_all_owners_and_a_viewer_chip_marks_actual_owners_including_n
         .call(PermissionPeopleList, &[&"nodes", &project])
         .token(&t.other.token)
         .query(&PermissionPeopleListQuery {
+            q: None,
             holder: format!("role:{}:viewer", t.root),
             limit: None,
             cursor: None,
@@ -574,7 +576,8 @@ async fn group_cycles_and_a_sixth_level_are_refused_without_changing_any_members
         .token(&t.owner.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(members.is_empty());
 }
 

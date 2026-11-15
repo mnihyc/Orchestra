@@ -1,0 +1,6 @@
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-api-core --test me --test admin_catalogue
+test -p orch-api-core --test kmounts_files
+test -p orch-api-core --test workspace_snapshots -- snapshot_list::

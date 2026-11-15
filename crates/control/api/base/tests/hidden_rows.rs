@@ -197,3 +197,45 @@ async fn manages_the_page(world: &World, by: &Who, node: Id, who: &Who) {
         .full_permission_page()
         .ok();
 }
+
+#[tokio::test]
+async fn every_private_child_remains_reachable_through_native_continuations() {
+    use orch_api_contract::nodes::{NodeChildList, NodeChildListQuery};
+    let world = World::new().await;
+    let owner = person(&world, "private-owner").await;
+    let reader = person(&world, "private-reader").await;
+    let org = make_org(&world, &owner, "Private directory", "private-directory").await;
+    join(&world, org.base.id, org.base.id, &reader, "viewer", &owner).await;
+    for index in 0..201 {
+        let project =
+            private_project(&world, &owner, org.base.id, &format!("Private {index:03}")).await;
+        manages_the_page(&world, &owner, project.base.id, &reader).await;
+    }
+    let mut cursor = None;
+    let mut found = std::collections::BTreeSet::new();
+    loop {
+        let page = world
+            .app
+            .call(NodeChildList, &[&org.base.id])
+            .token(&reader.token)
+            .query(&NodeChildListQuery {
+                limit: Some(37),
+                cursor,
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        assert!(page.items.len() <= 37);
+        for item in page.items {
+            let serialized = serde_json::to_value(item).unwrap();
+            assert_eq!(serialized["content_hidden"], true);
+            assert!(found.insert(serialized["id"].as_str().unwrap().to_owned()));
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(found.len(), 201);
+}

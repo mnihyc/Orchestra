@@ -188,22 +188,22 @@ function RegisterForm({ invitation, preview, onEnded, termsReady, acceptedTermsH
       })}
     >
       <Input
+        label={t('auth.fields.displayName')}
+        hint={t('auth.fields.displayNameHint')}
+        autoComplete="name"
+        autoFocus
+        {...form.field('display_name')}
+      />
+      <Input
         label={t('auth.fields.username')}
         hint={<>{t('auth.fields.usernameHint')}{nameStatus !== null && <span className="mt-1 block" role="status">{nameStatus}</span>}</>}
         autoComplete="username"
         autoCapitalize="none"
         autoCorrect="off"
         spellCheck={false}
-        autoFocus
         {...username}
         error={nameConflict ? t('auth.register.nameTaken') : username.error}
         onChange={(event) => form.set('username', event.target.value.toLowerCase())}
-      />
-      <Input
-        label={t('auth.fields.displayName')}
-        hint={t('auth.fields.displayNameHint')}
-        autoComplete="name"
-        {...form.field('display_name')}
       />
       <Input
         label={t('auth.fields.email')}

@@ -23,6 +23,7 @@ import { RelativeTime } from '@/ui/RelativeTime';
 import { Select } from '@/ui/Select';
 import { StateLine } from '@/ui/StateLine';
 import { Table, type Column } from '@/ui/Table';
+import { CompleteCollection } from '@/ui/CompleteCollection';
 
 /** The shared table moves these facts under the identity when their columns no longer fit. */
 const CHOICE_COLUMN = 'choice';
@@ -165,6 +166,6 @@ export function MountFates({ mounts, picks, onPick, onPickAll, onCheck, checking
     <Hint id="mount-fates" popover className="self-start" />
     {onPickAll !== undefined && changeable.length > 0 && <Select<MountFate | 'per_mount'> size="sm" label={t('liveWork.allMounts')} value={shared} onValueChange={(value) => onPickAll(value === 'per_mount' ? null : value)}
       options={[{ value: 'per_mount', name: t('liveWork.perMount') }, ...FATES.map((value) => ({ value, name: t(`choiceCatalog.mountFate.${value}.name`), disabled: !changeable.every((row) => row.mount.fates.includes(value)) }))]} />}
-    <Table label={t('mountPlan.fates.label')} columns={columns} rows={rows} rowKey={(row) => row.mount.mount.id} boundedIdentity rowMenu={{ label: (row) => row.mount.mount.name, entries }} />
+    <CompleteCollection label={t('mountPlan.fates.label')} items={rows} textOf={(row) => row.mount.mount.name}>{(page) => <Table virtual label={t('mountPlan.fates.label')} columns={columns} rows={page} rowKey={(row) => row.mount.mount.id} boundedIdentity rowMenu={{ label: (row) => row.mount.mount.name, entries }} />}</CompleteCollection>
   </div>;
 }

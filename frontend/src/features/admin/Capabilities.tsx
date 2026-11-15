@@ -106,8 +106,8 @@ function CapabilityForm({ def, onClose }: { def: CapabilityDef | null; onClose: 
     >
       <form id="admin-capability-form" className="flex flex-col gap-4 py-2" noValidate onSubmit={form.submit((values) => save.mutate(values))}>
         <div className="grid gap-4 sm:grid-cols-2">
-          <Input label={t('admin.capabilities.key')} hint={t('admin.capabilities.keyHint')} autoComplete="off" autoCapitalize="none" mono readOnly={def !== null} {...form.field('key')} />
           <Input label={t('admin.capabilities.label')} autoComplete="off" {...form.field('label')} />
+          <Input label={t('admin.capabilities.key')} hint={t('admin.capabilities.keyHint')} autoComplete="off" autoCapitalize="none" mono readOnly={def !== null} {...form.field('key')} />
         </div>
         <Textarea label={t('admin.capabilities.description')} optional rows={2} {...form.field('description')} />
         <div className="grid gap-4 sm:grid-cols-3">

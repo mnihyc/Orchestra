@@ -1,21 +1,19 @@
 /** A lazily read tree grid: safe paths, aligned optional columns, a sticky header and the tree's keyboard. */
 import { linkTo } from '@/lib/links';
 import { ContainedThreadStateIcon, ThreadStateIcon } from '@/ui/ThreadState';
-import { useInfiniteQuery } from '@tanstack/react-query';
+import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
 import { ArrowDown, ArrowUp, Bot, Box, Boxes, ChevronDown, ChevronRight, Copy, Filter, FolderTree, GraduationCap, HardDrive, LayoutTemplate, LockKeyhole, MessageSquare, MoreHorizontal, Plug, PlugZap, Server } from 'lucide-react';
-import { createContext, Fragment, type CSSProperties, type KeyboardEvent, memo, type ReactNode, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { createContext, Fragment, type CSSProperties, type KeyboardEvent, memo, type ReactNode, useCallback, useContext, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { ApiError } from '@/api/client';
-import { everythingQuery, type EverythingFilter } from '@/api/everything';
+import { type EverythingFilter } from '@/api/everything';
 import { openAccess } from '@/features/access/AccessDialog';
 import { COLUMN_SORT, type Column } from '@/features/everything/columns';
 import { groupedRecents, recentAt, recentGroup } from '@/features/navigation/recent';
 import { showInTree } from '@/features/navigation/showInTree';
 import { useAppearance } from '@/lib/appearance';
 import { useNow } from '@/lib/time';
-import { useListingRetired, useRecentUpdates } from '@/features/navigation/useRecentUpdates';
-import { useViewShown } from '@/features/workbench/viewOpening';
 import type { EverythingRow, UserRef } from '@/generated/api-types';
 import { Button } from '@/ui/Button';
 import { AsAdminMark, adminAccessOf } from '@/ui/AsAdminMark';
@@ -32,13 +30,14 @@ import { SkeletonRows } from '@/ui/Skeleton';
 import { UserChip } from '@/ui/UserChip';
 import { Checkbox } from '@/ui/Checkbox';
 import { copyText } from '@/ui/clipboard';
+import { Tooltip } from '@/ui/Tooltip';
+import { BranchReader } from './BranchReader';
+import { isItem, keyOf, visibleRows, type Branch, type Entry, type Item as VisibleItem } from './rows';
 import './everything-rows.css';
 
 /** Desktop cells share the row-height token; narrow rows grow to show their labelled details. */
 const CELL = 'min-w-0 px-3 py-2 text-start align-middle text-sm wrap-anywhere text-text-muted sm:h-(--table-row-height) sm:border-b sm:border-border sm:py-1 sm:wrap-normal sm:whitespace-nowrap';
 const ICON_CLASS = 'size-4 shrink-0 text-text-subtle';
-// Keep the existing minimum scrolling width; actual Name sizing follows its content.
-const MIN_NAME_SHARE = 0.23;
 // Five rem holds Where and its sort arrow; extra columns widen the table, not their text.
 const PLACE_MIN_REM = 5;
 const ACTION_REM = 2.5;
@@ -64,7 +63,8 @@ const RESOURCE_ICONS = new Map<string, ReactNode>(Object.entries({
 interface TreeState {
   extraColumns: readonly Column[];
   selection?: EverythingSelection | undefined;
-  rememberRow: (key: string, row: EverythingRow | null) => void;
+  rows: readonly VisibleItem[];
+  jump: (position: string) => void;
   reader: string;
   columns: readonly Column[];
   filter: EverythingFilter;
@@ -82,7 +82,6 @@ function useTree(): TreeState {
   if (tree === null) throw new Error('The table needs its tree state.');
   return tree;
 }
-const keyOf = (row: EverythingRow) => `${row.kind}:${row.id}`;
 
 export interface EverythingSelection {
   selected: ReadonlySet<string>;
@@ -139,7 +138,10 @@ function RecordedTime({ column, row }: { column: 'opened' | 'created' | 'last_ac
   return at === null ? '—' : <RelativeTime compact at={at} />;
 }
 
-const Row = memo(function Row({ row, parentKey, depth, first, stale = false }: { row: EverythingRow; parentKey: string | null; depth: number; first: boolean; stale?: boolean }) {
+const Row = memo(function Row({ row, parentKey, parentPosition, position, depth, first, stale = false, index, measure }: {
+  row: EverythingRow; parentKey: string | null; parentPosition: string | null; position: string; depth: number; first: boolean; stale?: boolean;
+  index: number; measure?: ((element: HTMLTableRowElement | null) => void) | undefined;
+}) {
   const { t } = useTranslation();
   const tree = useTree();
   const key = keyOf(row);
@@ -166,9 +168,9 @@ const Row = memo(function Row({ row, parentKey, depth, first, stale = false }: {
   if (row.href !== null && row.path.length > 0 && ['org', 'project', 'topic', 'thread', 'document', 'chat'].includes(row.kind)) actions.push({ id: 'show-in-tree', label: t('navigation.showInTree'), onSelect: () => showInTree(row) });
   const press = (event: KeyboardEvent<HTMLTableRowElement>) => {
     if (event.target !== event.currentTarget) return;
-    const rows = Array.from(event.currentTarget.closest('table')?.querySelectorAll<HTMLTableRowElement>('[data-everything-row]') ?? []);
-    const at = rows.indexOf(event.currentTarget);
-    let target: HTMLTableRowElement | undefined;
+    const rows = tree.rows;
+    const at = rows.findIndex((entry) => entry.position === position);
+    let target: VisibleItem | undefined;
     switch (event.key) {
       case 'ArrowDown': target = rows[at + 1]; break;
       case 'ArrowUp': target = rows[at - 1]; break;
@@ -176,11 +178,11 @@ const Row = memo(function Row({ row, parentKey, depth, first, stale = false }: {
       case 'End': target = rows.at(-1); break;
       case 'ArrowRight':
         if (expandable && !open) tree.toggle(key, true);
-        else if (open && rows[at + 1]?.dataset.parentKey === key) target = rows[at + 1];
+        else if (open && rows[at + 1]?.parentPosition === position) target = rows[at + 1];
         break;
       case 'ArrowLeft':
         if (open) tree.toggle(key, false);
-        else target = rows.find((one) => one.dataset.everythingRow === parentKey);
+        else target = rows.find((one) => one.position === parentPosition);
         break;
       case 'Enter':
         if (row.href !== null) rowRef.current?.querySelector<HTMLAnchorElement>('a[data-open]')?.click();
@@ -193,22 +195,24 @@ const Row = memo(function Row({ row, parentKey, depth, first, stale = false }: {
       default: return;
     }
     event.preventDefault();
-    if (target !== undefined) { tree.focus(target.dataset.everythingRow ?? ''); target.focus(); }
+    if (target !== undefined) tree.jump(target.position);
   };
   return <>
-    <ContextMenu label={t('everything.actions', { name })} entries={actions}><tr ref={(element) => { rowRef.current = element; tree.rememberRow(key, element === null ? null : row); }} role="row" data-everything-row={key} data-parent-key={parentKey ?? ''} aria-level={depth + 1} aria-expanded={expandable ? open : undefined}
+    <ContextMenu label={t('everything.actions', { name })} entries={actions}><tr ref={(element) => { rowRef.current = element; measure?.(element); }} data-index={index} aria-rowindex={index + 2} role="row" data-everything-position={position} data-everything-row={key} data-parent-key={parentKey ?? ''} aria-level={depth + 1} aria-expanded={expandable ? open : undefined}
       aria-selected={tree.selection === undefined ? undefined : tree.selection.selected.has(key)}
-      tabIndex={tree.active === key || (tree.active === null && first) ? 0 : -1} onFocus={() => tree.focus(key)} onKeyDown={press}
+      tabIndex={tree.active === position || (tree.active === null && first) ? 0 : -1} onFocus={() => tree.focus(position)} onKeyDown={press}
       className={`focus-inset ${flat ? 'everything-flat-row' : 'grid grid-cols-2 border-b border-border py-2'} hover:bg-bg-muted sm:table-row sm:border-0 sm:py-0 ${stale ? 'opacity-60' : ''}`} data-selecting={tree.selection !== undefined || undefined}>
       {tree.selection !== undefined && <td role="gridcell" className={`${CELL} ${flat ? 'flat-choice' : 'col-start-1 row-start-1 z-(--layer-sticky) w-fit justify-self-start sm:w-auto'}`}>
         {shareableRow(row) && <Checkbox presentation="compact" label={<span className="sr-only">{t('everything.selectNamed', { name: label })}</span>} checked={tree.selection.selected.has(key)} onCheckedChange={(selected) => tree.selection?.toggle(row, selected)} />}
       </td>}
-      <td role="gridcell" className={`${CELL} ${flat ? 'flat-name' : 'col-span-2 col-start-1 row-start-1 self-start pr-[calc(var(--control-sm)+var(--spacing-3)+var(--spacing-2))] sm:pr-3'}`} style={flat ? undefined : { verticalAlign: 'top', paddingInlineStart: `calc(var(--spacing-4) * ${depth} + var(--spacing-2))` }}>
+      <td role="gridcell" className={`${CELL} ${flat ? 'flat-name' : 'col-span-2 col-start-1 row-start-1 self-start pr-[calc(var(--control-sm)+var(--spacing-3)+var(--spacing-2))] sm:pr-3'}`} style={flat ? undefined : { verticalAlign: 'top', paddingInlineStart: 'calc(min(3rem, var(--spacing-4) * ' + String(depth) + ') + var(--spacing-2))' }}>
         <span className={`flex min-w-0 items-start gap-2 ${!flat && tree.selection !== undefined ? 'pl-8 sm:pl-0' : ''}`}>
           {!flat && (expandable ? <IconButton size="sm" label={t(open ? 'everything.collapse' : 'everything.expand', { name: label })} icon={open ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />} aria-expanded={open} onClick={() => tree.toggle(key, !open)} /> : <span className="size-(--control-sm) shrink-0" aria-hidden />)}
           <span className="flex h-(--control-sm) shrink-0 items-center"><KindIcon row={row} activity={!flat || !tree.columns.includes('state')} /></span>
           <span className={`flex min-w-0 flex-1 flex-col gap-1 ${flat ? '' : 'wrap-anywhere sm:min-w-[12ch] sm:wrap-normal'}`}>
-            {row.href === null ? <span title={name} className={`font-medium leading-(--control-sm) text-text ${flat ? 'truncate' : ''}`}>{name}</span> : <a data-open title={name} aria-label={label} href={row.href} className={`rounded-md font-medium leading-(--control-sm) text-text underline-offset-2 hover:underline ${flat ? 'truncate' : ''}`}>{name}</a>}
+            <Tooltip content={name}>{row.href === null
+              ? <span title={name} tabIndex={0} className="truncate font-medium leading-(--control-sm) text-text">{name}</span>
+              : <a data-open title={name} aria-label={label} href={row.href} className="truncate rounded-md font-medium leading-(--control-sm) text-text underline-offset-2 hover:underline">{name}</a>}</Tooltip>
             {row.place_label !== null && !tree.columns.includes('where') && <RowPlace value={place} />}
           </span>
           {!pathOnly && (row.kind === 'org' || row.kind === 'project' || row.kind === 'topic') && <ContainedThreadStateIcon id={row.id} />}
@@ -228,49 +232,8 @@ const Row = memo(function Row({ row, parentKey, depth, first, stale = false }: {
       </td>)}
       <td role="gridcell" className={`${CELL} ${flat ? 'flat-actions' : 'col-start-2 row-start-1 self-start justify-self-end sm:table-cell'}`} style={flat ? undefined : { verticalAlign: 'top' }}>{actions.length > 0 && !pathOnly && <Menu label={t('everything.actions', { name })} entries={actions} trigger={<IconButton label={t('everything.actions', { name })} size="sm" icon={<MoreHorizontal aria-hidden />} />} />}</td>
     </tr></ContextMenu>
-    {open && <Level parent={row.id} parentKey={key} depth={depth + 1} />}
   </>;
 });
-
-function Level({ parent, parentKey, depth }: { parent: string | null; parentKey: string | null; depth: number }) {
-  const { t } = useTranslation();
-  const tree = useTree();
-  const now = useNow();
-  const timeZone = useAppearance((state) => state.timeZone);
-  const shown = useViewShown();
-  const options = everythingQuery(tree.reader, parent, tree.filter);
-  const level = useInfiniteQuery({ ...options, enabled: shown });
-  const retired = useListingRetired(options.queryKey, level.error);
-  const clearSelection = tree.selection?.clear;
-  useEffect(() => { if (retired) clearSelection?.(); }, [retired, clearSelection]);
-  useRecentUpdates(options.queryKey, shown && (tree.filter.recent !== undefined || tree.filter.sort === 'opened'), tree.filter.recent === 'opened' || tree.filter.sort === 'opened');
-  const received = level.data?.pages.flatMap((page) => page.items) ?? [];
-  const rows = tree.filter.recent === undefined ? received : groupedRecents(received, tree.filter.recent, now, timeZone);
-  const filtering = tree.filter.kinds.length > 0 || tree.filter.owner !== null || tree.filter.createdFrom !== '' || tree.filter.createdTo !== '' || (tree.filter.activeFrom ?? '') !== '' || tree.filter.participating === true || tree.filter.adminAccess !== undefined;
-  const { hasNextPage, isFetching, isError, fetchNextPage } = level;
-  // Expand all includes the pages of each branch; an ordinary expansion keeps its explicit Show more.
-  useEffect(() => {
-    if (shown && tree.all && hasNextPage && !isFetching && !isError) void fetchNextPage();
-  }, [shown, tree.all, hasNextPage, isFetching, isError, fetchNextPage]);
-  const span = tree.columns.length + 1 + (tree.selection === undefined ? 0 : 1);
-  if (level.isPending) return <tr role="row"><td role="gridcell" colSpan={span} className={CELL}><SkeletonRows read={level} rows={3} /></td></tr>;
-  const failure = level.isError ? <tr role="row"><td role="gridcell" colSpan={span} className={CELL}>{level.error instanceof ApiError && level.error.status === 403 ? <><p>{t('everything.refused')}</p><Button size="sm" asChild><a href="/everything">{t('everything.openMine')}</a></Button></> : <><ErrorAlert error={level.error} /><Button size="sm" variant="ghost" onClick={() => void level.refetch()}>{t('everything.retry')}</Button></>}</td></tr> : null;
-  if (level.isError && (rows.length === 0 || retired)) return failure;
-  if (rows.length === 0) return <tr role="row"><td role="gridcell" colSpan={span} className={CELL}>{t(tree.filter.q !== '' ? 'everything.noMatches' : filtering ? 'everything.noResults' : 'everything.empty')}</td></tr>;
-  return <>
-    {failure}
-    {rows.map((row, index) => {
-      const recent = tree.filter.recent;
-      const group = recent === undefined ? null : recentGroup(recentAt(row, recent), now, timeZone);
-      const previous = rows[index - 1];
-      const heading = group !== null && (previous === undefined || recent === undefined || recentGroup(recentAt(previous, recent), now, timeZone) !== group);
-      return <Fragment key={keyOf(row)}>{heading && <tr role="row"><th role="rowheader" colSpan={span} className="bg-bg-subtle px-3 pt-3 pb-2 text-left text-sm font-medium text-text-muted">{t(`navigation.recentGroups.${group}`)}</th></tr>}
-        <Row row={row} parentKey={parentKey} depth={depth} first={depth === 0 && index === 0} stale={level.isError} /></Fragment>;
-    })}
-    {depth === 0 && filtering && rows.every((row) => row.kind === 'group' && !row.has_children) && <tr role="row"><td role="gridcell" colSpan={span} className={CELL}>{t('everything.noResults')}</td></tr>}
-    {level.hasNextPage && <tr role="row"><td role="gridcell" colSpan={span} className={CELL}><Button size="sm" variant="ghost" pending={level.isFetchingNextPage} onClick={() => void level.fetchNextPage()}>{t('everything.more')}</Button></td></tr>}
-  </>;
-}
 
 export interface EverythingTableProps {
   extraColumns?: readonly Column[];
@@ -289,37 +252,130 @@ export function EverythingTable({ reader, filter, columns, extraColumns = [], pa
   const { t } = useTranslation();
   const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
   const [closed, setClosed] = useState<ReadonlySet<string>>(new Set());
-  const displayed = useRef(new Map<string, EverythingRow>());
-  const rememberRow = useCallback((key: string, row: EverythingRow | null) => { if (row === null) displayed.current.delete(key); else displayed.current.set(key, row); }, []);
-  const selection = JSON.stringify(filter);
-  const [focused, setFocused] = useState<{ selection: string; key: string } | null>(null);
-  const active = focused?.selection === selection ? focused.key : null;
-  const focus = (key: string) => setFocused({ selection, key });
+  const scope = JSON.stringify([reader, parent, filter]);
+  const [held, setHeld] = useState<{ scope: string; branches: ReadonlyMap<string | null, Branch> }>({ scope, branches: new Map() });
+  const [focused, setFocused] = useState<{ scope: string; key: string } | null>(null);
+  const [wanted, setWanted] = useState<{ scope: string; key: string } | null>(null);
+  const [table, setTable] = useState<HTMLTableElement | null>(null);
+  const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
+  const [margin, setMargin] = useState(0);
+  if (held.scope !== scope) setHeld({ scope, branches: new Map() });
+  const branches = useMemo(() => held.scope === scope ? held.branches : new Map<string | null, Branch>(), [held, scope]);
+  const publish = useCallback((at: string | null, source: Branch | null) => setHeld((before) => {
+    if (before.scope !== scope || before.branches.get(at) === source || source === null && !before.branches.has(at)) return before;
+    const next = new Map(before.branches);
+    if (source === null) next.delete(at); else next.set(at, source);
+    return { scope, branches: next };
+  }), [scope]);
+  const isOpen = useCallback((row: EverythingRow) => row.has_children && filter.q === '' && filter.recent === undefined
+    && (expansion === 'all' ? !closed.has(keyOf(row)) : opened.has(keyOf(row))), [filter.q, filter.recent, expansion, closed, opened]);
+  const now = useNow();
+  const timeZone = useAppearance((state) => state.timeZone);
+  const recent = filter.recent;
+  const groupingTime = recent === undefined ? 0 : now;
+  const filtering = filter.kinds.length > 0 || filter.owner !== null || filter.createdFrom !== '' || filter.createdTo !== '' || (filter.activeFrom ?? '') !== '' || filter.participating === true || filter.adminAccess !== undefined;
+  const entries = useMemo(() => visibleRows(branches, parent, isOpen, {
+    empty: filter.q !== '' ? 'noMatches' : filtering ? 'noResults' : 'empty', filtering,
+    order: (rows) => recent === undefined ? rows : groupedRecents(rows, recent, groupingTime, timeZone),
+    heading: (row, previous) => {
+      if (recent === undefined) return null;
+      const group = recentGroup(recentAt(row, recent), groupingTime, timeZone);
+      return previous === undefined || recentGroup(recentAt(previous, recent), groupingTime, timeZone) !== group ? group : null;
+    },
+  }), [branches, parent, isOpen, filter.q, filtering, recent, groupingTime, timeZone]);
+  const rows = useMemo(() => entries.filter(isItem), [entries]);
+  const active = focused?.scope === scope && rows.some((row) => row.position === focused.key) ? focused.key : null;
+  const focus = (key: string) => setFocused((before) => before?.scope === scope && before.key === key ? before : { scope, key });
   const toggle = (key: string, open: boolean) => {
     if (expansion === 'all') setClosed((before) => { const next = new Set(before); if (open) next.delete(key); else next.add(key); return next; });
     else setOpened((before) => { const next = new Set(before); if (open) next.add(key); else next.delete(key); return next; });
   };
-  const recent = filter.recent !== undefined;
-  const fixedRem = columns.reduce((sum, column) => sum + (column === 'name' || column === 'where' ? 0 : COLUMN_REM[column]), ACTION_REM + (selecting === undefined ? 0 : CHOICE_REM));
-  const tracks = [
-    ...(selecting === undefined ? [] : [`${CHOICE_REM}rem`]),
-    ...columns.map((column) => column === 'name' ? 'minmax(0, max-content)' : column === 'where' ? `minmax(${PLACE_MIN_REM}rem, 1fr)` : `${COLUMN_REM[column]}rem`),
-    `${ACTION_REM}rem`,
-  ].join(' ');
-  const size = { '--recent-min-width': `${(fixedRem + PLACE_MIN_REM) / (1 - MIN_NAME_SHARE)}rem`, '--recent-columns': tracks } as CSSProperties;
-  return <Tree.Provider value={{ reader, filter, columns, extraColumns, all: expansion === 'all', opened, closed, toggle, active, focus, onOwner, selection: selecting, rememberRow }}>
-    <table role="treegrid" aria-label={t('everything.tree')} className={`block w-full border-separate border-spacing-0 sm:table ${recent ? 'everything-recent-table' : ''}`} style={recent ? size : undefined}>
-      {selecting !== undefined && <caption className="block px-3 py-2 text-left sm:hidden"><Button size="sm" variant="ghost" onClick={() => selecting.all([...displayed.current.values()].filter(shareableRow))}>{t('everything.selectAll')}</Button></caption>}
+  const parents = new Set<string | null>([parent]);
+  for (const entry of rows) if (isOpen(entry.row)) parents.add(entry.row.id);
+  const loaded = [...new Map(rows.filter((entry) => shareableRow(entry.row)).map((entry) => [entry.key, entry.row])).values()];
+  useLayoutEffect(() => {
+    if (table === null) return;
+    const viewport = table.closest<HTMLDivElement>('[data-scroll-allow="table"]');
+    setScroller(viewport);
+    const measure = () => setMargin(table.tHead?.offsetHeight ?? 0);
+    measure();
+    const observer = new ResizeObserver(measure);
+    if (table.tHead !== null) observer.observe(table.tHead);
+    return () => observer.disconnect();
+  }, [table]);
+  const retained = active === null ? -1 : entries.findIndex((entry) => entry.position === active);
+  const windowed = rows.length > 50;
+  // The measured library owns row positions; focus remains mounted outside the viewport too.
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const virtualizer = useVirtualizer({
+    count: entries.length, enabled: windowed, getScrollElement: () => scroller,
+    getItemKey: (index) => entries[index]?.position ?? index,
+    estimateSize: () => 72, overscan: 8, scrollMargin: margin, initialRect: { width: 0, height: 384 },
+    rangeExtractor: (range) => {
+      const visible = defaultRangeExtractor(range);
+      return retained < 0 || visible.includes(retained) ? visible : [...visible, retained].sort((one, other) => one - other);
+    },
+  });
+  const jump = (position: string) => {
+    const index = entries.findIndex((entry) => entry.position === position);
+    if (index < 0) return;
+    focus(position); setWanted({ scope, key: position });
+    if (windowed && scroller !== null) virtualizer.scrollToIndex(index, { align: 'auto' });
+  };
+  useLayoutEffect(() => {
+    if (wanted?.scope !== scope || table === null) return;
+    const target = Array.from(table.querySelectorAll<HTMLTableRowElement>('[data-everything-position]')).find((row) => row.dataset.everythingPosition === wanted.key);
+    if (target !== undefined) { target.focus(); setWanted(null); }
+  }, [wanted, table, entries, retained, scope]);
+  const span = columns.length + 1 + (selecting === undefined ? 0 : 1);
+  const emptyWords = { empty: t('everything.empty'), noMatches: t('everything.noMatches'), noResults: t('everything.noResults') };
+  const line = (entry: Entry, index: number, measure?: (element: HTMLTableRowElement | null) => void): ReactNode => {
+    if (entry.type === 'item') return <Row key={entry.position} row={entry.row} position={entry.position} parentKey={entry.parentKey}
+      parentPosition={entry.parentPosition} depth={entry.depth} stale={entry.stale} first={rows[0]?.position === entry.position} index={index} measure={measure} />;
+    let content: ReactNode;
+    if (entry.type === 'pending') content = <SkeletonRows rows={3} />;
+    else if (entry.type === 'heading') return <tr key={entry.position} ref={measure} data-index={index} role="row" aria-rowindex={index + 2}><th role="rowheader" colSpan={span} className="bg-bg-subtle px-3 pt-3 pb-2 text-left text-sm font-medium text-text-muted">{t('navigation.recentGroups.' + entry.heading)}</th></tr>;
+    else if (entry.type === 'empty') content = emptyWords[entry.message];
+    else if (entry.type === 'more') content = <Button size="sm" variant="ghost" pending={entry.source.loadingMore} onClick={() => entry.source.more()}>{t('everything.more')}</Button>;
+    else content = entry.source.error instanceof ApiError && entry.source.error.status === 403
+      ? <><p>{t('everything.refused')}</p><Button size="sm" asChild><a href="/everything">{t('everything.openMine')}</a></Button></>
+      : <><ErrorAlert error={entry.source.error} /><Button size="sm" variant="ghost" onClick={() => entry.source.retry()}>{t('everything.retry')}</Button></>;
+    return <tr key={entry.position} ref={measure} data-index={index} role="row" aria-rowindex={index + 2}><td role="gridcell" colSpan={span} className={CELL}>{content}</td></tr>;
+  };
+  const body: ReactNode[] = [];
+  if (windowed) {
+    let end = 0;
+    const gap = (height: number, key: string) => height > 0 && <tr key={key} aria-hidden="true"><td colSpan={span} style={{ height, padding: 0, border: 0 }} /></tr>;
+    for (const item of virtualizer.getVirtualItems()) {
+      const entry = entries[item.index];
+      if (entry === undefined) continue;
+      body.push(gap(item.start - margin - end, 'before:' + String(item.index)));
+      body.push(line(entry, item.index, virtualizer.measureElement)); end = item.end - margin;
+    }
+    body.push(gap(virtualizer.getTotalSize() - end, 'after'));
+  } else entries.forEach((entry, index) => body.push(line(entry, index)));
+  const unknownTotal = entries.some((entry) => entry.type === 'more' || entry.type === 'pending');
+  const fixedRem = columns.reduce((sum, column) => sum + (column === 'name' ? 0 : column === 'where' ? PLACE_MIN_REM : COLUMN_REM[column]), ACTION_REM + (selecting === undefined ? 0 : CHOICE_REM));
+  const tracks = [...(selecting === undefined ? [] : [String(CHOICE_REM) + 'rem']),
+    ...columns.map((column) => column === 'name' ? 'minmax(12rem, 1fr)' : column === 'where' ? 'minmax(5rem, 1fr)' : String(COLUMN_REM[column]) + 'rem'), String(ACTION_REM) + 'rem'].join(' ');
+  const size = { '--inventory-min-width': String(fixedRem + 12) + 'rem', '--recent-min-width': String(fixedRem + 12) + 'rem', '--recent-columns': tracks } as CSSProperties;
+  return <Tree.Provider value={{ reader, filter, columns, extraColumns, all: expansion === 'all', opened, closed, toggle, active, focus, jump, rows, onOwner, selection: selecting }}>
+    {[...parents].map((at) => <BranchReader key={scope + ':' + (at ?? 'root')} reader={reader} parent={at} filter={filter} all={expansion === 'all'} publish={publish} clearSelection={selecting?.clear} />)}
+    <table ref={setTable} role="treegrid" aria-label={t('everything.tree')} aria-rowcount={windowed ? unknownTotal ? -1 : entries.length + 1 : undefined}
+      className={'everything-table block w-full border-separate border-spacing-0 sm:table ' + (recent === undefined ? '' : 'everything-recent-table')} style={size}>
+      {recent === undefined && <colgroup className="hidden sm:table-column-group">{selecting !== undefined && <col style={{ width: String(CHOICE_REM) + 'rem' }} />}
+        {columns.map((column) => <col key={column} style={column === 'name' ? undefined : { width: String(column === 'where' ? PLACE_MIN_REM : COLUMN_REM[column]) + 'rem' }} />)}<col style={{ width: String(ACTION_REM) + 'rem' }} /></colgroup>}
+      {selecting !== undefined && <caption className="block px-3 py-2 text-left sm:hidden"><Button size="sm" variant="ghost" onClick={() => selecting.all(loaded)}>{t('everything.selectAll')}</Button></caption>}
       <thead className="sticky top-0 z-(--layer-sticky) hidden bg-surface sm:table-header-group"><tr role="row">
-        {selecting !== undefined && <th role="columnheader" scope="col" className={CELL}><Button size="sm" variant="ghost" onClick={() => selecting.all([...displayed.current.values()].filter(shareableRow))}>{t('navigation.recentAll')}</Button></th>}
+        {selecting !== undefined && <th role="columnheader" scope="col" className={CELL}><Button size="sm" variant="ghost" onClick={() => selecting.all(loaded)}>{t('navigation.recentAll')}</Button></th>}
         {columns.map((column) => <th role="columnheader" key={column} scope="col" className={CELL} aria-sort={column !== 'admin_access' && filter.sort === COLUMN_SORT[column] ? (filter.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
           {column === 'admin_access' ? <span>{t('adminReach.mode.name')}</span> : <button type="button" title={column === 'size' ? t('everything.sizeHint') : undefined} onClick={() => onSort(column)} className="flex items-center gap-2 rounded-md font-medium text-text whitespace-nowrap">
-            {t(filter.recent === 'active' && column === 'last_activity' ? 'navigation.recentOrder.active' : `everything.columns.${column}`)}{filter.sort === COLUMN_SORT[column] && (filter.direction === 'asc' ? <ArrowUp className="size-4" aria-hidden /> : <ArrowDown className="size-4" aria-hidden />)}
+            {t(filter.recent === 'active' && column === 'last_activity' ? 'navigation.recentOrder.active' : 'everything.columns.' + column)}{filter.sort === COLUMN_SORT[column] && (filter.direction === 'asc' ? <ArrowUp className="size-4" aria-hidden /> : <ArrowDown className="size-4" aria-hidden />)}
           </button>}
         </th>)}
         <th role="columnheader" scope="col" className={CELL}><span className="sr-only">{t('everything.rowActions')}</span></th>
       </tr></thead>
-      <tbody className="block sm:table-row-group"><Level parent={parent} parentKey={null} depth={0} /></tbody>
+      <tbody className="block sm:table-row-group">{body}</tbody>
     </table>
   </Tree.Provider>;
 }

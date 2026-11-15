@@ -951,13 +951,16 @@ pub async fn session_inventory(
     now: DateTime<Utc>,
     after: Option<(DateTime<Utc>, Id)>,
     limit: i64,
+    search: &str,
 ) -> Result<Vec<SessionListed>, DbError> {
     let (at, id) = after.map_or((None, None), |(at, id)| (Some(at), Some(id)));
-    Ok(sqlx::query_as("SELECT id,user_id,user_agent,host(ip) AS ip,created_at,last_used_at,expires_at FROM sessions
+    let named = super::search::matching_sql("concat_ws(' ',user_agent,host(ip))", "$6");
+    let patterns = super::search::Query::parse(search).like_patterns();
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT id,user_id,user_agent,host(ip) AS ip,created_at,last_used_at,expires_at FROM sessions
         WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>$2
         AND ($3::timestamptz IS NULL OR created_at<$3 OR (created_at=$3 AND id>$4))
-        ORDER BY created_at DESC,id LIMIT $5")
-        .bind(user).bind(now).bind(at).bind(id).bind(limit).fetch_all(conn).await?)
+        AND ({named}) ORDER BY created_at DESC,id LIMIT $5")))
+        .bind(user).bind(now).bind(at).bind(id).bind(limit).bind(patterns).fetch_all(conn).await?)
 }
 /// Refresh the exact previously emitted live sessions, never a replacement page.
 pub async fn session_inventory_selected(
@@ -1303,19 +1306,23 @@ pub async fn api_token_inventory(
     owner: Option<Id>,
     after: Option<(DateTime<Utc>, Id)>,
     limit: i64,
+    search: &str,
 ) -> Result<Vec<ApiTokenInventory>, DbError> {
     let (at, id) = after.map_or((None, None), |(at, id)| (Some(at), Some(id)));
+    let named = super::search::matching_sql("t.name", "$5");
+    let patterns = super::search::Query::parse(search).like_patterns();
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {API_TOKEN_COLUMNS}, u.kind AS owner_kind, u.service_org_id AS owner_org
          FROM api_tokens t JOIN users u ON u.id=t.user_id LEFT JOIN nodes n ON n.id=t.node_id
          WHERE t.revoked_at IS NULL AND ($1::uuid IS NULL OR t.user_id=$1)
            AND ($2::timestamptz IS NULL OR t.created_at<$2 OR (t.created_at=$2 AND t.id>$3))
-         ORDER BY t.created_at DESC,t.id LIMIT $4"
+         AND ({named}) ORDER BY t.created_at DESC,t.id LIMIT $4"
     )))
     .bind(owner)
     .bind(at)
     .bind(id)
     .bind(limit)
+    .bind(patterns)
     .fetch_all(conn)
     .await?)
 }

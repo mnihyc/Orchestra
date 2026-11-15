@@ -370,6 +370,9 @@ pub mod providers;
 #[path = "resources/read.rs"]
 pub mod read;
 
+#[path = "resources/child_pages.rs"]
+pub(crate) mod child_pages;
+
 #[path = "resources/sealing.rs"]
 pub mod sealing;
 
