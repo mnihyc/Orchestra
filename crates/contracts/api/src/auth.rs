@@ -158,6 +158,17 @@ pub enum OrgCreation {
     Invited,
 }
 
+/// Installation defaults for a person's reading experience.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InterfaceDefaults {
+    /// Extra recently closed views to retain; open views always retain their state.
+    pub kept_closed_tabs: i64,
+    /// Milliseconds before a read shows a loading indication.
+    pub progress_delay_ms: i64,
+    /// Freshness in milliseconds for directory, lookup, report and status reads.
+    pub read_freshness_ms: std::collections::BTreeMap<String, i64>,
+}
+
 /// What a client may know before anybody has signed in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Meta {
@@ -202,6 +213,8 @@ pub struct Meta {
     pub link_endpoints: Vec<MetaLinkEndpoint>,
     /// The sizes the system accepts.
     pub limits: MetaLimits,
+    /// Installation defaults for choices each person may override in Interface.
+    pub interface_defaults: InterfaceDefaults,
 }
 
 /// What a sign-in, a registration or a refresh answers with.

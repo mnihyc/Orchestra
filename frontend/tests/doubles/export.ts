@@ -30,7 +30,7 @@ const KIB = 1024;
 const GIB = 1024 * 1024 * 1024;
 
 /** What a place allows of one archive unless a test says otherwise: the shipped defaults. */
-const SHIPPED_LIMITS: ExportLimits = { max_bytes: 2 * GIB, max_items: 10_000, keep_hours: 24 };
+const SHIPPED_LIMITS: ExportLimits = { max_bytes: 2 * GIB, max_file_bytes: GIB / 4, max_items: 10_000, keep_hours: 24 };
 
 /** How many archives of one person may be written at the same time. */
 const AT_ONCE = 2;
@@ -642,6 +642,11 @@ export class ExportWorld implements Part {
     if ((found = /^GET \/chats\/([^/]+)\/export$/.exec(route))) return this.chat(person, found[1] ?? '', query);
     if ((found = /^GET \/documents\/([^/]+)\/export$/.exec(route))) return this.documentFile(person, found[1] ?? '', query);
     if ((found = /^GET \/topics\/([^/]+)\/sync$/.exec(route))) return this.topicSync(person, found[1] ?? '');
+    if ((found = /^GET \/topics\/([^/]+)\/input-schedules$/.exec(route))) {
+      const topicId = found[1] ?? '';
+      if (this.world.places.node(person, topicId).kind !== 'topic') return refuse(404, 'not_found', 'no such topic');
+      return { status: 200, body: { items: this.world.requestFeeds.topicSchedules(person, topicId).rows, next_cursor: null } };
+    }
     return null;
   }
 
@@ -654,6 +659,7 @@ export class ExportWorld implements Part {
         const held = this.limits.get(place) ?? SHIPPED_LIMITS;
         this.limits.set(place, {
           max_bytes: typeof body.max_bytes === 'number' ? body.max_bytes : held.max_bytes,
+          max_file_bytes: held.max_file_bytes,
           max_items: typeof body.max_items === 'number' ? body.max_items : held.max_items,
           keep_hours: typeof body.keep_hours === 'number' ? body.keep_hours : held.keep_hours,
         });
