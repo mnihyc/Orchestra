@@ -571,6 +571,11 @@ impl Engine {
                         let receipt: super::capability_service::CapabilityResultReceipt =
                             serde_json::from_value(pending)?;
                         self.read_accepted_capability_result(call, &receipt).await?
+                    } else if let Some(recovered) = self
+                        .recover_program_capability_result(call, "image_generation")
+                        .await?
+                    {
+                        recovered
                     } else {
                         let input = {
                             let mut conn = self.db().acquire().await?;
@@ -602,7 +607,9 @@ impl Engine {
                                 &binding,
                                 input.value,
                                 &pixels,
-                                orch_link_contract::version::MAX_FRAME_BYTES as usize,
+                                // Half of what a message may be leaves the other half for the rest of the
+                                // request; the link carries what does not fit a frame in parts.
+                                orch_link_contract::version::MAX_MESSAGE_BYTES as usize / 2,
                             )
                             .map_err(EngineError::unreadable)?;
                             // The verified pixels are now part of neutral JSON itself. No unresolved

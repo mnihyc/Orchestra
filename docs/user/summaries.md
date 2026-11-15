@@ -54,6 +54,23 @@ under shared caps. Size and interval values are defaults, not spending caps;
 locks above the place still apply. Call recovery follows the configured call
 rules for summaries.
 
+To choose the summarizer, press the pencil of **Summarizer** in the place's settings,
+choose **A model**, then a provider you can use and one of its enabled models.
+**Answer tokens** and **Context tokens** show the built-in counts until you set
+your own; **Request options** and **Instructions per field** open only when you need
+them. Orch says beside the field when the provider or the model cannot be used.
+**None here** takes this place's choice away, so the place above applies again, and
+**Edit as JSON** shows the raw value.
+
+The model producer retains one exact backend for automatic and personal work. A supported program backend runs in an ordinary Private helper owned by the execution actor, with its output allowance and current source checks. Its native usage stays on that selected sign-in; an unavailable program never becomes an API invoice. Sharing the helper’s history requires confirmation that it contains copied source material. The prompt inspector continues to check the prompt’s original sources after the job ends.
+
+The saved model choice keeps its execution route and sign-in together. Editing token budgets or instructions preserves that choice; it never picks a different provider.
+
+Each row of **Summary targets** has an **Automatic** switch. While it is on, **When**,
+**At most every**, **Reads up to** and **Writes up to** show their defaults until you set
+your own. **Save** writes the whole value once and **Discard** puts the saved one back;
+pressing another switch or a filter never saves it or takes it off the page.
+
 Without an explicit interval, threads use 120 seconds, topics 900 seconds,
 documents 300 seconds, and chats and chat titles 300 seconds. Topic changes
 aggregate many threads; document edits and chat messages usually arrive in
@@ -63,9 +80,9 @@ effective interval without turning it into a stored document override.
 
 For one document, open **Actions → Summary options**. Save an own choice or
 use **Use place defaults** to inherit again. Saving options controls later
-events; it does not itself request a summary. An API refresh can name a
-permitted model for that one personal request without changing the automatic
-default.
+events; it does not itself request a summary. A refresh request can name an
+allowed backend for that one personal request, including a supported subscription
+program with its placement and options, without changing the automatic default.
 
 **Scheduled** shows the actual minimum-interval or recovery wait and its eligibility time.
 The previous paragraph remains readable and personal refresh stays explicit. Free reads

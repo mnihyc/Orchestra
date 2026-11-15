@@ -49,7 +49,7 @@ function OtherModels({ thread }: { thread: Thread }) {
   });
   const [state, model, family] = last === null ? ['', '', '\u0001'] : last.split('\u0000');
   const waits = state === 'failed' && family !== '\u0001';
-  const parameters = useQuery({ ...parametersQuery(thread.id), enabled: waits });
+  const parameters = useQuery({ ...parametersQuery(thread.id, true), enabled: waits });
   const runs = useRunsWith(thread, true);
   const [open, setOpen] = useState(false);
   const change = useMutation({

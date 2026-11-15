@@ -262,6 +262,10 @@ pub struct Support {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delegated_mode: Option<String>,
 
+    /// Input/result codecs and execution constraints verified by the actual program adapter.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub execution: Vec<ExecutionSupport>,
+
     /// Optional interface restriction.
     pub interfaces: Vec<String>,
     /// Additional actual-fact predicate.
@@ -269,6 +273,36 @@ pub struct Support {
     /// Future declaration fields.
     #[serde(flatten)]
     pub extensions: Extensions,
+}
+
+/// An installed codec and its verified execution facilities, independent of provider names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct ExecutionSupport {
+    /// The exact input codec, including its version where its shape changes.
+    pub input: String,
+    /// The exact result codec; a text answer never proves another result family.
+    pub result: String,
+    /// Native incremental events and durable replay are implemented.
+    pub streaming: bool,
+    /// A source-bound read-tool bridge is implemented.
+    pub read_tools: bool,
+    /// Native tools are actually confined to the consumer's admitted catalogue.
+    pub confined_tools: bool,
+}
+
+impl ExecutionSupport {
+    /// A declared requirement needs both its exact codecs and every requested facility.
+    #[must_use]
+    pub fn satisfies(&self, required: &Self) -> bool {
+        !required.input.is_empty()
+            && !required.result.is_empty()
+            && self.input == required.input
+            && self.result == required.result
+            && (!required.streaming || self.streaming)
+            && (!required.read_tools || self.read_tools)
+            && (!required.confined_tools || self.confined_tools)
+    }
 }
 
 /// One capability declares its one setting, common item and ledger unit for every program.
@@ -453,6 +487,9 @@ pub struct Route {
     pub capabilities: Vec<String>,
     /// Registered execution adapter; absence is permitted for an existing native program path.
     pub executor: Option<String>,
+    /// Required codecs/facilities; only trusted installed support can satisfy these facts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionSupport>,
     /// Requires this program/access's explicit native support.
     pub requires_program_support: bool,
     /// The program and installed transport must carry the current generation interface.
@@ -510,6 +547,70 @@ pub struct BackendRef {
     pub extensions: Extensions,
 }
 
+impl BackendRef {
+    /// A stable selection identity includes placement/options and ignores object member order.
+    pub fn identity(&self) -> Result<String, serde_json::Error> {
+        fn ordered(value: Json) -> Json {
+            match value {
+                Json::Object(members) => {
+                    let sorted: BTreeMap<_, _> = members.into_iter().collect();
+                    Json::Object(
+                        sorted
+                            .into_iter()
+                            .map(|(key, value)| (key, ordered(value)))
+                            .collect(),
+                    )
+                }
+                Json::Array(values) => Json::Array(values.into_iter().map(ordered).collect()),
+                value => value,
+            }
+        }
+        serde_json::to_string(&ordered(serde_json::to_value(self)?))
+    }
+
+    /// Validate identities without making a route, credential or authority from them.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.route.trim().is_empty() {
+            return Err("Choose a capability route.");
+        }
+        if self.offering.as_ref().is_some_and(|offering| {
+            offering.provider.is_nil() || offering.offering.trim().is_empty()
+        }) {
+            return Err("Choose an existing provider and a nonempty model or service.");
+        }
+        Ok(())
+    }
+}
+
+/// Explicit placement for a program consumer that has no native thread environment.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProgramPlacement {
+    /// The actual environment to admit; never a first-online-machine preference.
+    pub environment_id: Option<Id>,
+    /// An existing helper topic, used only when the source has no actual topic.
+    pub helper_topic_id: Option<Id>,
+}
+
+impl ProgramPlacement {
+    /// Placement contains references only; credentials and arbitrary native options do not belong here.
+    pub fn read(value: &Json) -> Result<Self, &'static str> {
+        let placement: Self = if value.is_null() {
+            Self::default()
+        } else {
+            serde_json::from_value(value.clone()).map_err(
+                |_| "Program placement accepts only environment_id and helper_topic_id references.",
+            )?
+        };
+        if placement.environment_id.is_some_and(|id| id.is_nil())
+            || placement.helper_topic_id.is_some_and(|id| id.is_nil())
+        {
+            return Err("Choose existing, nonempty environment and topic references.");
+        }
+        Ok(placement)
+    }
+}
+
 /// Current authorization/allowance facts supplied by the existing account permission path.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -562,6 +663,9 @@ pub struct ThreadContext {
     pub credential_roles: BTreeMap<Id, Vec<String>>,
     /// Execution adapters actually installed in this process.
     pub executors: Vec<String>,
+    /// Actual installed codecs, supplied by trusted execution code rather than serialized claims.
+    #[serde(skip)]
+    pub executor_support: BTreeMap<String, Vec<ExecutionSupport>>,
     /// Interface implementations actually installed, independently of their advertised declarations.
     pub interfaces: Vec<String>,
     /// Safe additional facts for declared eligibility schemas.
@@ -589,6 +693,9 @@ pub struct ResolvedRoute {
     pub kind: String,
     /// Registered executor, where any.
     pub executor: Option<String>,
+    /// Exact consumer requirements retained from the resolved declaration until execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionSupport>,
     /// Exact selected offering, never an inferred provider.
     pub offering: Option<OfferingRef>,
     /// Opaque exact backend selection, where any.
