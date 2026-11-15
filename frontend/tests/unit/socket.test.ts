@@ -337,11 +337,11 @@ describe('the connection', () => {
     last().accept();
     vi.advanceTimersByTime(40);
     last().say({ op: 'ready', connection_id: 'c', user_id: 'u', server_time: '', access_expires_at: '', heartbeat_secs: 25, build: 'b' });
-    expect(socket.status.getState().roundTripMs).toBe(40);
+    expect(socket.status.getState().roundTripMs).toBeNull();
 
-    // Two more: one quick, one that a late packet made slow.
-    for (const late of [20, 900]) {
-      vi.advanceTimersByTime(25_000);
+    // Three actual ping replies: one late packet changes nothing.
+    for (const late of [40, 20, 900]) {
+      vi.advanceTimersToNextTimer();
       const ping = last().of('ping').at(-1);
       vi.advanceTimersByTime(late);
       last().say({ op: 'pong', n: ping?.n });
@@ -609,6 +609,21 @@ describe('a feed that is kept in order', () => {
     expect(last().of('sub')).toHaveLength(sent);
     last().drop();vi.advanceTimersByTime(500);last().ready();
     expect(last().of('sub')).toEqual([]);
+  });
+
+  it('keeps the affected view and a readable capacity reason while its subscription waits', async () => {
+    const { socket, last } = harness(); socket.start(); last().ready();
+    const acme = tree('acme', [node('thread', 1, 'Kept selection')], 1);
+    const failed = vi.fn<(error: unknown) => void>();
+    const follower = followFeed(socket, { ...acme.feed, failed }); await settle();
+    const id = last().of('sub').find((frame) => frame.feed === 'org:acme')?.id;
+    last().say({ op: 'error', id, code: 'too_many_subscriptions', detail: 'opaque native capacity detail' });
+    expect(failed).toHaveBeenCalledOnce();
+    expect(failed.mock.calls[0]?.[0]).toMatchObject({ code: 'too_many_subscriptions' });
+    expect(JSON.stringify(failed.mock.calls[0]?.[0])).toBe('{}');
+    expect(acme.names()).toEqual(['Kept selection']); expect(follower.lastSeq()).toBe(1);
+    expect(acme.loads).toEqual([null]);
+    follower.stop();
   });
 
   it('is loaded over HTTP first and subscribed from the sequence of that answer', async () => {

@@ -124,11 +124,6 @@ const REQUEST_MAX_BYTES: usize = 1024 * 1024;
 
 /// Complete default answers fit the ordinary native result budgets, including their metadata.
 const ANSWER_BYTES_DEFAULT: usize = 20_000;
-/// A complete answer stays below the native saved-file threshold even in ASCII.
-const ANSWER_BYTES_MAX: usize = 40_000;
-/// Leave room for a header, one useful part and a continuation instruction.
-const ANSWER_BYTES_MIN: usize = 1_000;
-
 /// The versions of the protocol the server speaks, newest first. A client asks for one; the server answers with
 /// it if it knows it and with the newest otherwise, and the client goes on or goes away.
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-11-25", "2025-06-18", "2025-03-26"];
@@ -515,6 +510,18 @@ impl OrchCalls {
 pub struct OrchEndpoint {
     hosting: Arc<Hosting>,
     wait: Duration,
+}
+
+fn apply_answer_default(arguments: &mut Json, schema: Option<&Json>) {
+    if let Some(arguments) = arguments.as_object_mut()
+        && !arguments.contains_key("max_bytes")
+        && let Some(bytes) = schema
+            .and_then(|schema| schema.pointer("/properties/max_bytes/default"))
+            .and_then(Json::as_u64)
+            .filter(|bytes| *bytes > 0)
+    {
+        arguments.insert("max_bytes".to_owned(), json!(bytes));
+    }
 }
 
 impl OrchEndpoint {
@@ -1067,8 +1074,7 @@ fn result_of_at(tool: &str, arguments: &Json, outcome: Result<Json, ToolError>, 
                 let budget = arguments["max_bytes"]
                     .as_u64()
                     .and_then(|bytes| usize::try_from(bytes).ok())
-                    .unwrap_or(ANSWER_BYTES_DEFAULT)
-                    .min(ANSWER_BYTES_MAX);
+                    .unwrap_or(ANSWER_BYTES_DEFAULT);
                 let ids = arguments["ids"].as_bool().unwrap_or(false);
                 let text = match tool {
                     "list_shared" => listing_text(&value, arguments, ids, now, budget),
@@ -1216,17 +1222,18 @@ impl OrchEndpoint {
         else {
             return failure(id, INVALID_PARAMS, &format!("unknown tool: {name}"));
         };
-        let arguments = params
+        let mut arguments = params
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        apply_answer_default(&mut arguments, self.listed_of(session).2.get(name));
         if arguments.get("max_bytes").is_some_and(|bytes| {
             !bytes
                 .as_u64()
                 .and_then(|bytes| usize::try_from(bytes).ok())
-                .is_some_and(|bytes| (ANSWER_BYTES_MIN..=ANSWER_BYTES_MAX).contains(&bytes))
+                .is_some_and(|bytes| bytes > 0)
         }) {
-            return json!({"jsonrpc":"2.0","id":id,"result":self.result_of(name,&arguments,Err(ToolError {code:"invalid".to_owned(),message:"max_bytes is an integer from 1000 to 40000; no call was made.".to_owned()}))});
+            return json!({"jsonrpc":"2.0","id":id,"result":self.result_of(name,&arguments,Err(ToolError {code:"invalid".to_owned(),message:"max_bytes is a positive integer; no call was made.".to_owned()}))});
         }
         let thread = session.thread_id;
         let current = self.native_source(session);
@@ -1398,6 +1405,17 @@ mod tests {
             outcome,
             "2026-10-15T12:00:00Z".parse().unwrap(),
         )
+    }
+
+    #[test]
+    fn the_advertised_answer_default_is_used_when_omitted_and_an_explicit_window_wins() {
+        let schema = json!({"properties":{"max_bytes":{"default":80000}}});
+        let mut omitted = json!({"path":"code"});
+        apply_answer_default(&mut omitted, Some(&schema));
+        assert_eq!(omitted["max_bytes"], 80000);
+        let mut explicit = json!({"max_bytes":120000});
+        apply_answer_default(&mut explicit, Some(&schema));
+        assert_eq!(explicit["max_bytes"], 120000);
     }
 
     #[test]
@@ -1688,23 +1706,16 @@ mod tests {
     #[test]
     fn tools_answer_budget_keeps_whole_utf8_lines_and_useful_continuation() {
         let text = "中文🦀\n".repeat(10_000);
-        for budget in [ANSWER_BYTES_MIN, ANSWER_BYTES_DEFAULT, ANSWER_BYTES_MAX] {
+        for budget in [1_000, ANSWER_BYTES_DEFAULT, 80_000] {
             let result = result_of("read_shared", &json!({"max_bytes":budget}), Ok(json!(text)));
             let shown = result["content"][0]["text"].as_str().unwrap();
             assert!(shown.len() <= budget);
             assert!(shown.starts_with("中文🦀\n"));
             assert!(shown.ends_with("or use download_shared for the whole entry."));
         }
-        let text = "x".repeat(ANSWER_BYTES_MAX);
-        let result = result_of(
-            "read_shared",
-            &json!({"max_bytes":ANSWER_BYTES_MAX}),
-            Ok(json!(text)),
-        );
-        assert_eq!(
-            result["content"][0]["text"].as_str().unwrap().len(),
-            ANSWER_BYTES_MAX
-        );
+        let text = "x".repeat(80_000);
+        let result = result_of("read_shared", &json!({"max_bytes":80_000}), Ok(json!(text)));
+        assert_eq!(result["content"][0]["text"].as_str().unwrap().len(), 80_000);
     }
 
     #[test]

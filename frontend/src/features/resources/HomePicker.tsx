@@ -26,9 +26,6 @@ export interface HomeChoice {
   department: boolean;
 }
 
-/** How long the tree of an org read for its departments is good: they change rarely, and a dialog is short. */
-const TREE_FRESH_MS = 60_000;
-
 /**
  * The root org in view in the left bar (or the one this device remembers for the person), when it is
  * a team's: the org the lists of resources are narrowed to for somebody who administers it.
@@ -54,14 +51,13 @@ export function useHomeChoices(selected = ''): { choices: HomeChoice[]; pending:
   const viewed = useSelectedOrg((state) => state.orgId);
   const cachedRoot = [...byOrg].find(([, tree]) => tree.nodes.has(selected))?.[0];
   const unknown = selected !== '' && !roots.some((org) => org.id === selected) && cachedRoot === undefined;
-  const node = useQuery({ ...nodeQuery(selected), enabled: unknown, staleTime: TREE_FRESH_MS });
+  const node = useQuery({ ...nodeQuery(selected), enabled: unknown });
   const rootId = roots.find((org) => org.id === selected)?.id ?? cachedRoot ?? (unknown ? node.data?.org_id : undefined)
     ?? roots.find((org) => org.id === viewed)?.id ?? roots.find((org) => org.org_kind !== 'personal')?.id ?? roots[0]?.id ?? '';
   // Use the live tree when it is already open. Opening this picker never reads every other org.
   const tree = useQuery({
     queryKey: ['tree-places', rootId] as const,
     queryFn: ({ signal }) => fetchTree(rootId, null, signal),
-    staleTime: TREE_FRESH_MS,
     enabled: selected !== '' && (!unknown || node.data !== undefined) && rootId !== '' && roots.find((org) => org.id === rootId)?.org_kind !== 'personal' && byOrg.get(rootId)?.loaded !== true,
   });
   const choices = useMemo(() => {
