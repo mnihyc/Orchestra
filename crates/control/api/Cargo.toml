@@ -108,6 +108,7 @@ zip.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] } # real IO completes while protocol deadlines are held by the case
 orch-api-base = { workspace = true, features = ["test-support"] }
 orch-api-threads = { workspace = true, features = ["test-support"] }
 orch-api-documents = { workspace = true, features = ["test-support"] }
@@ -474,6 +475,10 @@ path = "base/tests/component_updates.rs"
 [[test]]
 name = "connected_program_versions"
 path = "base/tests/connected_program_versions.rs"
+
+[[test]]
+name = "container_units"
+path = "base/tests/container_units.rs"
 
 [[test]]
 name = "content"

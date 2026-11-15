@@ -193,8 +193,8 @@ fn body_of(
         body: body_with_requested_end(
             notification,
             rendering.language,
-            rendering.recipient.map_or(Tz::UTC, |person| {
-                crate::quiet_hours::zone_of(&person.timezone)
+            rendering.recipient.map_or(Some(Tz::UTC), |person| {
+                crate::quiet_hours::zone_of(&person.timezone).ok()
             }),
         ),
         url: absolute(
@@ -212,7 +212,7 @@ fn body_of(
 }
 
 /// A proposed access end is part of the message, in the recipient's time zone and language.
-fn body_with_requested_end(notification: &Snapshot, language: &str, zone: Tz) -> String {
+fn body_with_requested_end(notification: &Snapshot, language: &str, zone: Option<Tz>) -> String {
     if !matches!(
         notification.kind.as_str(),
         "access.requested" | "access.decided"
@@ -233,7 +233,13 @@ fn body_with_requested_end(notification: &Snapshot, language: &str, zone: Tz) ->
         .as_str()
         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
     {
-        let date = instant.with_timezone(&zone).format("%Y-%m-%d %H:%M %Z");
+        let date = match zone {
+            Some(zone) => instant
+                .with_timezone(&zone)
+                .format("%Y-%m-%d %H:%M %Z")
+                .to_string(),
+            None => instant.to_rfc3339(),
+        };
         if chinese {
             format!("申请至 {date}")
         } else {
@@ -260,7 +266,7 @@ fn derived_id(row_id: Id, index: usize) -> Id {
     Id::from_bytes(bytes)
 }
 
-fn item_of(notification: &Snapshot, rendering: &Rendering<'_>, zone: Tz) -> Item {
+fn item_of(notification: &Snapshot, rendering: &Rendering<'_>, zone: Option<Tz>) -> Item {
     let location = notification
         .node_id
         .and_then(|node| rendering.places.iter().find(|place| place.id == node))
@@ -276,12 +282,15 @@ fn item_of(notification: &Snapshot, rendering: &Rendering<'_>, zone: Tz) -> Item
         kind: notification.kind.clone(),
         location,
         actor: actor_of(notification),
-        time: notification
-            .at
-            .get()
-            .with_timezone(&zone)
-            .format("%Y-%m-%d %H:%M")
-            .to_string(),
+        time: match zone {
+            Some(zone) => notification
+                .at
+                .get()
+                .with_timezone(&zone)
+                .format("%Y-%m-%d %H:%M")
+                .to_string(),
+            None => notification.at.get().to_rfc3339(),
+        },
     }
 }
 
@@ -367,8 +376,8 @@ fn render_selected(
             Err(RenderFault::NoText)
         };
     };
-    let zone = rendering.recipient.map_or(Tz::UTC, |person| {
-        crate::quiet_hours::zone_of(&person.timezone)
+    let zone = rendering.recipient.map_or(Some(Tz::UTC), |person| {
+        crate::quiet_hours::zone_of(&person.timezone).ok()
     });
     let values = Values {
         items: rendering
