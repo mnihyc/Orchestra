@@ -55,7 +55,7 @@ section! {
         plugin: Vec<ConnectorPlugin> = Vec::new(),
         /// Named directories for owned data, using the same shape as node storages.
         /// Empty uses the allowed environment roots in their configured order.
-        #[serde(rename="storages",alias="storage")]
+        #[serde(rename="storages")]
         storage: Vec<crate::server::NodeStorage> = Vec::new(),
         /// The node role's unit resource ceilings.
         resources:orch_link_contract::policy::MachineResources=orch_link_contract::policy::MachineResources::default(),
@@ -107,10 +107,6 @@ section! {
         name: String = String::new(),
         /// Local declaration that this machine is dedicated to Orch; never a delegated policy key.
         dedicated:bool = false,
-        /// Whether legacy orch.toml node policy values were imported into this file once.
-        node_policy_imported:bool = false,
-        /// Version of that import; older imports did not include lifecycle hooks.
-        node_policy_import_version:u32 = 0,
         /// The roles it plays: `agent`, `environment`, `provider`, and `node` for the one machine of a
         /// host that makes managed runtimes.
         roles: Vec<String> = vec![s("agent"), s("environment")],
@@ -249,9 +245,9 @@ section! {
 section! {
     /// `[spool]`
     Spool {
-        /// The most bytes it holds.
+        /// Waiting diagnostics give way above this allowance; authoritative events wait for ACK.
         max_bytes: u64 = 268_435_456,
-        /// The oldest event it holds.
+        /// Waiting diagnostics expire at this age; authoritative events wait for ACK.
         max_age_days: u64 = 7,
         /// The size of one of its files.
         segment_bytes: u64 = 8_388_608,
@@ -273,10 +269,6 @@ section! {
         rescan_secs: u64 = 60,
         /// How often a listing is uploaded while files keep changing.
         manifest_interval_secs: u64 = 300,
-        /// Above this many entries a workspace is listed live only.
-        index_max_entries: u64 = 250_000,
-        /// The most seconds a full scan gets before the workspace is listed live.
-        index_scan_max_secs: u64 = 10,
         /// Restarts of a crashing tool server before it is reported failed…
         mcp_restarts: u32 = 3,
         /// …within this time.
@@ -287,10 +279,6 @@ section! {
 section! {
     /// `[adapter]`
     Adapter {
-        /// Command output kept inline with its item.
-        output_inline_bytes: u64 = 16_384,
-        /// The most output kept for one command.
-        output_max_bytes: u64 = 67_108_864,
         /// How many times a harness that died is started again…
         harness_restarts: u32 = 3,
         /// …within this time, before it is reported failed. The figures of the tool servers.
@@ -418,17 +406,8 @@ impl Validate for ConnectorConfig {
         ) {
             return Err(invalid("policy.values", &error.to_string()));
         }
-        if self.spool.segment_bytes == 0 || self.spool.segment_bytes > self.spool.max_bytes {
-            return Err(invalid(
-                "spool.segment_bytes",
-                "must be more than 0 and at most spool.max_bytes",
-            ));
-        }
-        if self.adapter.output_inline_bytes > self.adapter.output_max_bytes {
-            return Err(invalid(
-                "adapter.output_inline_bytes",
-                "must be at most adapter.output_max_bytes",
-            ));
+        if self.spool.segment_bytes == 0 {
+            return Err(invalid("spool.segment_bytes", "must be more than 0"));
         }
         if self.adapter.harness_restart_window_secs == 0 {
             return Err(invalid(
@@ -541,13 +520,53 @@ impl Validate for ConnectorConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn machine_policy_uses_only_current_configuration_names() {
+        for text in [
+            "[[storage]]\nname='data'\npath='/data'\ndefault=true\n",
+            "[connector]\nnode_policy_imported=true\n",
+            "[connector]\nnode_policy_import_version=2\n",
+        ] {
+            assert!(
+                toml::from_str::<super::ConnectorConfig>(text).is_err(),
+                "{text}"
+            );
+        }
+        assert!(
+            toml::from_str::<super::ConnectorConfig>(
+                "[[storages]]\nname='data'\npath='/data'\ndefault=true\n"
+            )
+            .is_ok()
+        );
+        for text in [
+            "[node.hooks]\npre_up='/bin/true'\n",
+            "[[node.storage]]\nname='data'\npath='/data'\ndefault=true\n",
+            "[ports]\nlisten='all'\n",
+            "[node.docker]\nallowed_images=['*']\n",
+            "[node.docker]\nallowed_registries=['*']\n",
+            "[node.docker]\nallowed_capabilities=['*']\n",
+            "[node.docker]\nruntime_classes=['*']\n",
+            "[node.docker]\nallow_privileged=true\n",
+            "[node.docker]\nallow_archives=true\n",
+            "[node.docker]\nbuilds=true\n",
+            "[node.host]\nallowed_templates=['*']\n",
+            "[node.host]\nallowed_accounts=['*']\n",
+            "[node.host]\nallowed_programs=['/bin/task']\n",
+        ] {
+            assert!(
+                toml::from_str::<crate::ServerConfig>(text).is_err(),
+                "{text}"
+            );
+        }
+    }
+
     use super::*;
     use crate::loader::load_text;
 
     #[test]
     fn named_storage_configuration_has_one_default_and_never_treats_a_path_as_a_template_value() {
         let config: ConnectorConfig = load_text(
-            "[[storage]]\nname='fast'\npath='/srv/work'\ndefault=true\n",
+            "[[storages]]\nname='fast'\npath='/srv/work'\ndefault=true\n",
             "test",
             none,
         )
@@ -555,8 +574,8 @@ mod tests {
         assert_eq!(config.storage[0].name, "fast");
         assert_eq!(config.storage[0].path, "/srv/work");
         for text in [
-            "[[storage]]\nname='fast'\npath='relative'\ndefault=true\n",
-            "[[storage]]\nname='fast'\npath='/srv/work'\n",
+            "[[storages]]\nname='fast'\npath='relative'\ndefault=true\n",
+            "[[storages]]\nname='fast'\npath='/srv/work'\n",
         ] {
             assert!(load_text::<ConnectorConfig>(text, "test", none).is_err());
         }
@@ -564,6 +583,18 @@ mod tests {
 
     fn none(_: &str) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn a_diagnostic_spool_budget_does_not_limit_the_authoritative_segment_size() {
+        let config: ConnectorConfig = load_text(
+            "[spool]\nmax_bytes=1\nsegment_bytes=1048576\n",
+            "test",
+            none,
+        )
+        .unwrap();
+        assert_eq!(config.spool.max_bytes, 1);
+        assert_eq!(config.spool.segment_bytes, 1_048_576);
     }
 
     #[test]

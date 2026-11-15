@@ -100,6 +100,8 @@ pub struct Outgoing {
         skip_serializing_if = "Option::is_none"
     )]
     pub authority: Option<CommandAuthority>,
+    /// Content is carried only for this transfer; the marker stays off the native wire.
+    pub content_transit: bool,
 }
 
 /// A saved engine command retains the semantic key kind as well as its value. UUID keys
@@ -142,7 +144,15 @@ impl Outgoing {
                 .map_err(|error| CommandsError::Body(error.to_string()))?,
             deadline: None,
             authority: None,
+            content_transit: false,
         })
+    }
+
+    /// Marks the bytes this command uploads as transit without changing its native body.
+    #[must_use]
+    pub fn for_transfer(mut self) -> Self {
+        self.content_transit = true;
+        self
     }
 
     /// Retains login-origin evidence until the durable link's first-send/retry checkpoint.

@@ -7,9 +7,7 @@ use super::Reader;
 
 use super::Rig;
 
-use crate::middleware::authentication::API_TOKEN_PREFIX;
-
-use crate::middleware::authentication::new_token;
+use crate::middleware::authentication::new_api_token;
 
 use crate::middleware::authentication::token_hash;
 
@@ -65,7 +63,7 @@ fn rule(kind: &str, id: Id, operation: &str, action: &str) -> Value {
 
 async fn key(rig: &Rig, user: Id, rules: Vec<Value>) -> Proof<(Id, String)> {
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     let scope: orch_access_contract::key_scope::KeyScope =
         serde_json::from_value(json!({"rules":rules}))?;
     let mut conn = rig.pool.acquire().await?;

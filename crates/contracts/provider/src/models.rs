@@ -70,6 +70,12 @@ pub fn composed_model_parameters(
     {
         endpoint.insert("native".to_owned(), native.clone());
     }
+    if let Some(common) = protocol
+        .and_then(|protocol| layers.endpoints.get(protocol))
+        .and_then(|options| options.get("common"))
+    {
+        endpoint.insert("common".to_owned(), common.clone());
+    }
     let selected = groups
         .iter()
         .filter_map(|group| layers.groups.get(group))
@@ -458,6 +464,27 @@ impl ModelParameters {
             .as_deref()
             .filter(|start| self.reasoning_modes().iter().any(|mode| mode == *start))
     }
+    /// Whether the model reasons before it answers, as its parameters say: it takes efforts, or a
+    /// reasoning mode starts on. What reasons spends part of the output allowance before any text.
+    #[must_use]
+    pub fn reasons(&self) -> bool {
+        !self.efforts().is_empty() || self.reasoning_mode_start().is_some()
+    }
+    /// Output planning does not infer a lack of reasoning from disabled or unrecorded tuning.
+    /// Reserve room unless the upstream explicitly reports no thinking support; enabled
+    /// reasoning controls still take precedence over a contradictory discovery observation.
+    #[must_use]
+    pub fn needs_reasoning_room(&self) -> bool {
+        self.reasons()
+            || self
+                .offered
+                .as_ref()
+                .and_then(|offered| offered.report.as_ref())
+                .and_then(|report| report.capabilities.get("thinking"))
+                .and_then(|thinking| thinking.get("supported"))
+                .and_then(orch_types::Json::as_bool)
+                != Some(false)
+    }
     /// Service tiers explicitly enabled by a manager.
     #[must_use]
     pub fn service_tiers(&self) -> &[ServiceTier] {
@@ -594,5 +621,98 @@ impl ModelSuggestion {
             listed: true,
             origins: BTreeMap::new(),
         }
+    }
+}
+
+/// Captured policy and the fallback output allowance for a translated call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TranslationOptions {
+    /// Whether this provider's place permits translated pairings.
+    pub allowed: bool,
+    /// Output tokens when neither the request nor the offering supplies an allowance.
+    pub output_tokens: i64,
+}
+
+impl Default for TranslationOptions {
+    fn default() -> Self {
+        Self {
+            allowed: true,
+            output_tokens: 4096,
+        }
+    }
+}
+
+/// What is preserved, approximated or omitted across a chosen model interface.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConversionLosses {
+    /// Facts carried without changing their meaning.
+    #[serde(default)]
+    pub preserved: Vec<String>,
+    /// Facts represented in a near equivalent form.
+    #[serde(default)]
+    pub approximated: Vec<String>,
+    /// Features without an equivalent.
+    #[serde(default)]
+    pub dropped: Vec<String>,
+}
+
+impl ConversionLosses {
+    /// Whether a choice needs to show its conversion limits.
+    #[must_use]
+    pub fn has_losses(&self) -> bool {
+        !self.approximated.is_empty() || !self.dropped.is_empty()
+    }
+}
+
+/// The actual interface route of a translated pairing, without addresses or credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProtocolTranslation {
+    /// The interface requested by the caller or harness.
+    pub from: String,
+    /// The interface spoken by the selected upstream.
+    pub to: String,
+    /// The converter's public name.
+    pub title: String,
+    /// Its declared fidelity.
+    pub losses: ConversionLosses,
+}
+
+/// The explicit model allowlist of a provider's direct API relay.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderRelayOptions {
+    /// Whether direct API calls may be admitted; off by default.
+    pub enabled: bool,
+    /// Exact enabled model names opened to relay callers; empty opens no model.
+    pub models: Vec<String>,
+}
+
+/// Operational limits captured for a model service's native HTTP exchange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UpstreamPolicy {
+    /// Seconds to wait for response headers and a whole, unstreamed reply.
+    pub head_secs: u64,
+    /// Seconds without a response fragment before the stream ends as cut.
+    pub idle_secs: u64,
+    /// Bytes retained for a whole response or an owned generation result.
+    pub whole_bytes: u64,
+}
+
+impl Default for UpstreamPolicy {
+    fn default() -> Self {
+        Self {
+            head_secs: 600,
+            idle_secs: 300,
+            whole_bytes: 16 * 1024 * 1024,
+        }
+    }
+}
+
+impl UpstreamPolicy {
+    /// The addressable in-memory representation is the only upper bound.
+    #[must_use]
+    pub fn whole_limit(self) -> usize {
+        usize::try_from(self.whole_bytes).unwrap_or(usize::MAX)
     }
 }
