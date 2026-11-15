@@ -9,9 +9,16 @@ CREATE TABLE blob_uploads (
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     command_id uuid,
+    idle_retention_secs bigint,
+    retention_default boolean,
+    expires_at timestamp with time zone,
     CONSTRAINT blob_uploads_pkey PRIMARY KEY (hash),
     CONSTRAINT blob_uploads_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)
 );
+
+CREATE INDEX blob_uploads_expiry_idx ON blob_uploads USING btree (expires_at) WHERE expires_at IS NOT NULL;
+
+CREATE INDEX blob_uploads_unreported_idle_idx ON blob_uploads USING btree (updated_at) WHERE expires_at IS NULL;
 
 CREATE INDEX blob_uploads_machine_command_idx ON blob_uploads USING btree (machine_id, command_id, hash) WHERE (command_id IS NOT NULL);
 
@@ -20,6 +27,8 @@ CREATE INDEX blob_uploads_machine_updated_idx ON blob_uploads USING btree (machi
 CREATE TABLE blobs (
     hash bytea NOT NULL,
     size bigint NOT NULL,
+    text_characters bigint,
+    text_ascii_characters bigint,
     stored_at timestamp with time zone DEFAULT now() NOT NULL,
     last_access_at timestamp with time zone DEFAULT now() NOT NULL,
     pin_count integer DEFAULT 0 NOT NULL,
@@ -69,6 +78,7 @@ CREATE TABLE snapshots (
     tree_ref text,
     repository_head text,
     unavailable_reason text,
+    recording_indexing jsonb,
     expires_at timestamp with time zone,
     label text DEFAULT ''::text NOT NULL,
     selection jsonb NOT NULL,

@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-api-core --test karchive_retention --test archive_plan
+test -p orch-engine --test forks -- notes_are_carried_independently_of_workspace_files_and_a_target_that_appears_after_preview_is_kept
+test -p orch-engine --test forks -- a_scripted_snapshot_keeps_selected_files_and_real_notes_under_their_common_physical_root
+test -p orch-engine --test forks -- a_registered_root_alias_forks_its_selected_files_from_cached_and_live_listings
