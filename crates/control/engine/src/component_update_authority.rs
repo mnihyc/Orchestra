@@ -373,14 +373,7 @@ impl Origin {
         let Some((caller, until)) = self.current_source(conn, clock).await? else {
             return Ok(None);
         };
-        let policy = orch_db::queries::environment_facts::machine(conn, self.intent.machine, None)
-            .await?
-            .and_then(|facts| facts.policy)
-            .filter(|value| !value.is_null())
-            .map(serde_json::from_value::<orch_link_contract::policy::LocalPolicy>)
-            .transpose()?;
-        Ok((policy.is_some_and(|policy| policy.update_auto)
-            && caller.key_deadline_allows(clock)
+        Ok((caller.key_deadline_allows(clock)
             && until.is_none_or(|until| until.get() > clock.now()))
         .then_some((caller, until)))
     }
@@ -391,6 +384,7 @@ impl Origin {
             || command.kind != CommandKind::MachineUpdateNow
             || command.key != SerialKey::Machine
             || body.recommended != self.intent.recommended
+            || body.automatic
         {
             return Err(EngineError::unreadable(
                 "the native update command changed its request",

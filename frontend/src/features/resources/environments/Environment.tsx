@@ -9,7 +9,8 @@
  * made, switches it off and removes it, naming it to be sure. Updating, moving and its Tools are not
  * served yet and are not offered.
  */
-import { liveIndexReason } from '@/features/files/indexWords';
+import { RecordingNotice, recordingReason } from '@/features/source/RecordingNotice';
+import { exclusionProblem, indexingProgress, liveIndexReason } from '@/features/files/indexWords';
 import { environmentRuntimeRows, namesRuntime, RuntimePair } from '@/features/resources/isolation/RuntimeInfo';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ENVIRONMENT_TABS, type EnvironmentTab } from '@/features/resources/tabs';
@@ -134,6 +135,10 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
   const timeZone = useAppearance((state) => state.timeZone);
   const now = useNow();
   const context = { locale, timeZone };
+  const indexing = indexingProgress(environment.facts);
+  const idleStop = environment.idle_stop_deferred ? t('inspector.environment.idle.working')
+    : environment.idle_stop_at === null ? null : formatDateTime(environment.idle_stop_at, context, now);
+  const exclusions = exclusionProblem(t, environment.facts);
   return (
     <div className="flex flex-col gap-6">
       {environment.status_detail !== null && environmentRemovalPhase(environment) === undefined && <InlineAlert tone={environment.status === 'failed' ? 'danger' : 'info'}>{environmentStatusDetail(environment, t)}</InlineAlert>}
@@ -157,10 +162,11 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
           </span>
         </InlineAlert>
       )}
-      {environment.index === 'live' && <InlineAlert tone="info" title={t('largeTree.liveTitle')}>
-        <p>{liveIndexReason(t, environment.index_reason, environment.facts)}</p>
-        <p>{t('largeTree.liveCost')}</p>
-      </InlineAlert>}
+      {indexing !== null && <InlineAlert tone="info">{t('largeTree.indexing', { files: new Intl.NumberFormat().format(indexing.total), percent: indexing.percent })}</InlineAlert>}
+      {exclusions !== null && <p role="alert" className="text-xs text-danger-text">{exclusions}</p>}
+      {exclusions === null && environment.index === 'live' && <p className="text-sm text-text-muted">{liveIndexReason(t, environment.index_reason, environment.facts)} · {t('largeTree.openFolders')}</p>}
+      <RecordingNotice environmentId={environment.id} reason={exclusions === null ? recordingReason(environment.facts) ?? (environment.index === 'live' ? 'live_tree' : null) : null} />
+      <p className="text-xs text-text-muted">{t('source.restore.gitignore')}</p>
       <EnvironmentPrograms id={environment.id} generation={environment.generation} />
       <Section id="environment-about" title={t('environments.overview.about')}>
         <Facts compact
@@ -181,7 +187,7 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
             ...(environment.template === null ? [] : [{ name: t('environments.overview.template'), value: <ResourceName subject={{ kind: 'template', template: environment.template }} hint={false} /> }]),
             { name: t('environments.overview.reach'), value: t('environments.overview.reachValue', { count: environment.reach }) },
             ...(environment.last_activity_at === null ? [] : [{ name: t('environments.overview.lastActivity'), value: <RelativeTime at={environment.last_activity_at} /> }]),
-            ...(environment.idle_stop_at === null ? [] : [{ name: t('environments.overview.idleStop'), value: formatDateTime(environment.idle_stop_at, context, now) }]),
+            ...(idleStop === null ? [] : [{ name: t('environments.overview.idleStop'), value: idleStop }]),
             { name: t('environments.overview.may'), value: t(`environments.holding.${holding(environment.access.permissions)}`) },
           ]}
         />
