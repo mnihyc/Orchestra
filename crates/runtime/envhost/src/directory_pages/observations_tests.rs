@@ -445,8 +445,7 @@ async fn an_old_attachments_native_events_and_detach_cannot_invalidate_the_new_a
 }
 
 #[tokio::test]
-async fn a_known_event_before_publication_refuses_the_capture_independently_of_stat_equality()
--> Proof {
+async fn a_known_event_before_publication_uses_a_fresh_live_read_even_when_stat_matches() -> Proof {
     let rig = Rig::new()?;
     let version = rig.files.directory_version(&RelPath::root())?;
     let mut hold = rig.cache.testing.hold_publication();
@@ -460,10 +459,31 @@ async fn a_known_event_before_publication_refuses_the_capture_independently_of_s
     );
     assert_eq!(rig.files.directory_version(&RelPath::root())?, version);
     hold.release()?;
-    assert!(matches!(
-        tokio::time::timeout(PATIENCE, task).await??,
-        Err(HostError::Changed(_))
-    ));
+    let page = tokio::time::timeout(PATIENCE, task).await???;
+    assert_eq!(page.entries.len(), 1);
+    assert!(
+        page.next_cursor.is_some(),
+        "the fresh live reader keeps the other child reachable"
+    );
+    page.validate()?;
+    let next = rig.read(page.next_cursor.as_deref(), 1).await?;
+    assert_eq!(next.entries.len(), 1);
+    assert_eq!(
+        std::collections::BTreeSet::from([
+            page.entries[0].name.clone(),
+            next.entries[0].name.clone()
+        ]),
+        std::collections::BTreeSet::from(["a".to_owned(), "b".to_owned()])
+    );
+    drop(next);
+    assert!(
+        lock(&rig.cache.snapshots).is_empty(),
+        "the invalidated whole capture was not published"
+    );
+    assert_eq!(rig.cache.testing.exited.load(Ordering::Acquire), 1);
+    drop(page);
+    rig.cache
+        .forget_attachment(rig.binding.environment, rig.binding.attachment);
     rig.cache
         .join_attachment(rig.binding.environment, rig.binding.attachment)
         .await?;
