@@ -185,6 +185,7 @@ async fn a_unit_home_store_keeps_its_publication_lease_through_upload_and_refuse
             &request,
             orch_types::new_id(),
             until,
+            until,
             tokio_util::sync::CancellationToken::new(),
         )
         .await?;
@@ -2822,6 +2823,7 @@ async fn a_tool_server_definition_is_kept_by_the_connector_only_and_forgotten_on
     }))
     .unwrap();
     let request = McpImport {
+        profile: None,
         expected_fingerprint: None,
         stored: None,
         transfer: None,

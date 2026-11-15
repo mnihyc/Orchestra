@@ -1,0 +1,8 @@
+test -p orch-connector-core --lib
+test -p orch-connector-core --test mcp_imports --test environment_role
+test -p orch-envhost --lib
+test -p orch-envhost --test environment
+test -p orch-gateway-core --test mcp_import --test mcp_forget
+test -p orch-agent-contract --lib
+test -p orch-link-contract --lib
+test -p orch-link-contract --test largest_messages

@@ -1,8 +1,9 @@
+import { useEnvironmentFeed } from '@/realtime/environmentFeed';
 /** Discoveries are reviewed and imported through their actual environment; private definitions stay on the machine. */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { environmentKey, environmentMcpKey, environmentMcpQuery, environmentsQuery, importEnvironmentMcp } from '@/api/environments';
+import { environmentMcpQuery, environmentsQuery, importEnvironmentMcp } from '@/api/environments';
 import { mcpKey } from '@/api/resource-tools';
 import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
 import type { EnvironmentMcp, EnvironmentRef, McpFound } from '@/generated/api-types';
@@ -20,13 +21,39 @@ import { SkeletonRows } from '@/ui/Skeleton';
 import { Switch } from '@/ui/Switch';
 import { Table, type Column } from '@/ui/Table';
 import { toast } from '@/ui/Toast';
-import { mcpProgram } from './words';
+import { mcpProgram, mcpStateTone } from './words';
+import { StatusDot } from '@/ui/StatusDot';
 import { discoveryKey, validMcpName } from './importValues';
 import { useImportState } from './ImportState';
 export { discoveryKey, validMcpName } from './importValues';
 
 export const NO_ENVIRONMENT = '\u0000choose-mcp-environment';
 export const discoveryProgram = mcpProgram;
+
+interface ProgramMcpRow {
+  key: string;
+  found: McpFound | null;
+  name: string;
+  source: string;
+  directory: string | null;
+  scope: McpFound['scope'] | null;
+  transport: McpFound['transport'] | null;
+  imported: string | null;
+  profile: McpFound['profile'];
+  state: McpFound['state'];
+  using: McpFound['using'];
+}
+
+function programRows(value: EnvironmentMcp): ProgramMcpRow[] {
+  const rows: ProgramMcpRow[] = value.found.map((found) => ({ ...found, key: discoveryKey(found), found }));
+  for (const connection of value.connections ?? []) {
+    const matching = rows.filter((row) => row.name === connection.name && row.source === connection.source);
+    if (matching.length === 0) rows.push({ ...connection, key: JSON.stringify([connection.source, connection.name]), found: null,
+      directory: null, scope: null, transport: null, imported: null, profile: undefined });
+    else for (const row of matching) { row.state = connection.state; row.using = connection.using; }
+  }
+  return rows;
+}
 
 export function ImportMcp({ environment, found, right, onClose, onImported, machineId }: {
   environment: Pick<EnvironmentRef, 'id' | 'name'>; found: McpFound; right: EnvironmentMcp['import']; onClose: () => void; onImported: (id: string) => void; machineId?: string;
@@ -38,7 +65,7 @@ export function ImportMcp({ environment, found, right, onClose, onImported, mach
   const [name, setName] = useState(found.name);
   const [enable, setEnable] = useState(true);
   const wrong = !validMcpName(name.trim());
-  const request = { source: found.source, scope: found.scope, name: found.name, directory: found.directory,
+  const request = { ...(found.origin === undefined || found.origin === null ? {} : { origin: found.origin }), source: found.source, scope: found.scope, name: found.name, directory: found.directory,
     ...(name.trim() === found.name ? {} : { as: name.trim() }), enable };
   const create = useMutation({
     mutationFn: async () => {
@@ -50,8 +77,6 @@ export function ImportMcp({ environment, found, right, onClose, onImported, mach
       if (!sameLibraryReader(reader)) return;
       state.acknowledge(found, made.id);
       if (made.server !== null) cache.setQueryData(mcpKey(made.id), made.server);
-      void cache.invalidateQueries({ queryKey: environmentMcpKey(environment.id) });
-      void cache.invalidateQueries({ queryKey: environmentKey(environment.id), exact: true });
       void cache.invalidateQueries({ queryKey: ['mcp-servers'] });
       toast({ tone: 'success', title: t('mcpImport.imported') });
       onImported(made.id);
@@ -66,7 +91,7 @@ export function ImportMcp({ environment, found, right, onClose, onImported, mach
       <Input label={t('mcpImport.name')} value={name} disabled={create.isPending} error={wrong ? t('mcpImport.nameInvalid') : undefined} onChange={(event) => setName(event.target.value)} />
       <Facts compact rows={[
         { name: t('mcpImport.environment'), value: environment.name },
-        { name: t('mcpImport.program'), value: discoveryProgram(found.source) },
+        { name: t('mcpImport.program'), value: found.profile === undefined || found.profile === null ? discoveryProgram(found.source) : <ResourceChip subject={{ kind: 'agent', agent: found.profile }} hint={false} /> },
         { name: t('mcpImport.scope'), value: t(`mcpImport.scopes.${found.scope}`) },
         { name: t('mcpImport.transport'), value: t(`mcpImport.transports.${found.transport}`) },
         { name: t('mcpImport.keeps'), value: t(`mcpImport.shape.${found.transport}`) },
@@ -79,31 +104,51 @@ export function ImportMcp({ environment, found, right, onClose, onImported, mach
   </Dialog>;
 }
 
-export function FoundMcp({ environment, machineId }: { environment: Pick<EnvironmentRef, 'id' | 'name'>; machineId?: string }) {
-  const { t } = useTranslation();
-  const current = useQuery(environmentMcpQuery(environment.id));
-  const [chosen, setChosen] = useState<McpFound | null>(null);
-  const state = useImportState(environment.id, machineId ?? null);
+export function FoundMcp({ environment, machineId, threadId }: { environment: Pick<EnvironmentRef, 'id' | 'name'>; machineId?: string; threadId?: string }) {
+  useEnvironmentFeed(environment.id);
+  const current = useQuery(environmentMcpQuery(environment.id, threadId));
   if (current.isError) return <ErrorState compact error={current.error} retrying={current.isRefetching} onRetry={() => void current.refetch()} />;
   if (current.data === undefined) return <SkeletonRows rows={3} />;
-  const { found, import: right } = current.data;
-  const reason = right.allowed ? undefined : t(right.reason === 'not_owner' ? 'mcpImport.notOwner' : right.reason === 'policy' ? 'mcpImport.policyOff' : 'mcpImport.unavailable');
-  const imported = (row: McpFound) => row.imported ?? state.accepted[discoveryKey(row)] ?? null;
-  const columns: Column<McpFound>[] = [
-    { id: 'name', header: t('resources.listName'), cell: (row) => {
+  return <FoundMcpRows key={JSON.stringify([environment.id, threadId])} environment={environment} machineId={machineId} value={current.data} />;
+}
+
+/** Native configuration has the same rows in a machine's Tools and a thread's Environment panel. */
+export function FoundMcpRows({ environment, machineId, value }: { environment: Pick<EnvironmentRef, 'id'> & Partial<Pick<EnvironmentRef, 'name'>>; machineId?: string; value: EnvironmentMcp }) {
+  const { t } = useTranslation();
+  const [chosen, setChosen] = useState<McpFound | null>(null);
+  const [search, setSearch] = useState('');
+  const state = useImportState(environment.id, machineId ?? null);
+  const { import: right } = value;
+  const found = programRows(value);
+  const query = search.trim().toLocaleLowerCase();
+  const scopeLabel = (row: ProgramMcpRow) => row.scope === null ? t('mcpImport.notReported') : t(`mcpImport.scopes.${row.scope}`);
+  const rows = found.filter((row) => [row.name, row.profile?.name ?? discoveryProgram(row.source), scopeLabel(row), row.directory ?? ''].some((part) => part.toLocaleLowerCase().includes(query)));
+  const reason = !right.allowed ? t(right.reason === 'not_owner' ? 'mcpImport.notOwner' : right.reason === 'policy' ? 'mcpImport.policyOff' : 'mcpImport.unavailable') : environment.name === undefined ? t('mcpImport.unavailable') : undefined;
+  const imported = (row: ProgramMcpRow) => row.imported ?? (row.found === null ? null : state.accepted[discoveryKey(row.found)]) ?? null;
+  const columns: Column<ProgramMcpRow>[] = [
+    { id: 'name', header: t('resources.listName'), cell: (row, shown) => {
       const id = row.imported;
-      return id === null ? <span className="wrap-anywhere font-medium">{row.name}</span> : <ResourceChip subject={{ kind: 'mcp_server', server: { id, name: row.name } }} hint={false} />;
+      const scopeShown = shown.has('scope');
+      const using = row.using === 'native' ? t('mcpImport.usingNative') : row.using === 'orch' ? t('mcpImport.usingOrch') : row.imported !== null || value.servers.some((server) => server.server.name === row.name) ? t('mcpImport.definitionNotReported') : null;
+      return <div className="flex min-w-0 flex-col gap-1">
+        {id === null ? <span className="wrap-anywhere font-medium">{row.name}</span> : <ResourceChip subject={{ kind: 'mcp_server', server: { id, name: row.name } }} hint={false} />}
+        {!scopeShown && <span className="text-sm text-text-muted">{scopeLabel(row)}</span>}
+        {row.directory !== null && <span className="wrap-anywhere text-sm text-text-muted">{row.directory}</span>}
+        {using !== null && <span className="text-sm text-text-muted">{using}</span>}
+      </div>;
     } },
-    { id: 'program', header: t('mcpImport.program'), cell: (row) => discoveryProgram(row.source) },
-    { id: 'scope', header: t('mcpImport.scope'), from: 'sm', cell: (row) => t(`mcpImport.scopes.${row.scope}`) },
-    { id: 'transport', header: t('mcpImport.transport'), from: 'md', cell: (row) => t(`mcpImport.transports.${row.transport}`) },
-    { id: 'act', header: t('mcpImport.import'), hideHeader: true, align: 'end', cell: (row) => imported(row) !== null ? <span className="text-sm text-text-muted">{t('mcpImport.imported')}</span>
-      : <div className="flex flex-col items-end gap-1"><Button size="sm" blocked={!right.allowed} title={reason} onClick={() => setChosen(row)}>{t('mcpImport.import')}</Button>{reason !== undefined && <span className="text-sm text-text-muted">{reason}</span>}</div> },
+    { id: 'state', header: t('mcpImport.state'), cell: (row) => <StatusDot tone={row.state === undefined || row.state === null ? 'off' : mcpStateTone[row.state]} label={row.state === undefined || row.state === null ? t('mcpImport.notReported') : t(`mcpServers.states.${row.state}`)} showLabel /> },
+    { id: 'program', header: t('mcpImport.program'), cell: (row) => row.profile === undefined || row.profile === null ? discoveryProgram(row.source) : <ResourceChip subject={{ kind: 'agent', agent: row.profile }} hint={false} /> },
+    { id: 'scope', header: t('mcpImport.scope'), from: 'sm', cell: scopeLabel },
+    { id: 'transport', header: t('mcpImport.transport'), from: 'md', cell: (row) => row.transport === null ? t('mcpImport.notReported') : t(`mcpImport.transports.${row.transport}`) },
+    { id: 'act', header: t('mcpImport.import'), hideHeader: true, align: 'end', cell: (row) => row.found === null ? <span className="text-sm text-text-muted">{t('mcpImport.configurationNotReported')}</span> : imported(row) !== null ? <span className="text-sm text-text-muted">{t('mcpImport.imported')}</span>
+      : <div className="flex flex-col items-end gap-1"><Button size="sm" blocked={reason !== undefined} title={reason} onClick={() => setChosen(row.found)}>{t('mcpImport.import')}</Button>{reason !== undefined && <span className="text-sm text-text-muted">{reason}</span>}</div> },
   ];
   return <section className="flex min-w-0 flex-col gap-3" aria-label={t('mcpImport.found')}>
     <h3 className="font-medium">{t('mcpImport.found')}</h3>
-    {found.length === 0 ? <EmptyState compact title={t(right.reason === 'policy' ? 'mcpImport.policyOff' : 'mcpImport.empty')} /> : <Table label={t('mcpImport.found')} columns={columns} rows={found} rowKey={discoveryKey} />}
-    {chosen !== null && <ImportMcp environment={environment} machineId={machineId} found={chosen} right={right} onClose={() => setChosen(null)}
+    {(found.length > 10 || search !== '') && <Input label={t('mcpImport.search')} value={search} onChange={(event) => setSearch(event.target.value)} />}
+    {found.length === 0 ? <EmptyState compact title={t(right.reason === 'policy' ? 'mcpImport.policyOff' : 'mcpImport.empty')} /> : rows.length === 0 ? <EmptyState compact title={t('mcpImport.noMatches')} /> : <Table label={t('mcpImport.found')} columns={columns} rows={rows} rowKey={(row) => row.key} className="max-h-80 overflow-y-auto" />}
+    {chosen !== null && environment.name !== undefined && <ImportMcp environment={{ id: environment.id, name: environment.name }} machineId={machineId} found={chosen} right={right} onClose={() => setChosen(null)}
       onImported={(id) => state.acknowledge(chosen, id)} />}
   </section>;
 }

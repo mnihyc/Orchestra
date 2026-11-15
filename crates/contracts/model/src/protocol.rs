@@ -298,6 +298,16 @@ pub fn model_candidates(
     Ok(names)
 }
 
+/// Why a completion ended before its answer was whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionStop {
+    /// The upstream's own word for it: a Responses `incomplete_details.reason`, a Messages `stop_reason`, a chat
+    /// `finish_reason`.
+    pub reason: String,
+    /// Whether the answer ran into its output allowance, the reasoning the model did before it answered included.
+    pub output_limit: bool,
+}
+
 /// One implementation per wire protocol, used by the provider role.
 pub trait WireProtocol: Send + Sync + 'static {
     /// Its name, such as `openai-responses`.
@@ -454,6 +464,13 @@ pub trait WireProtocol: Send + Sync + 'static {
         Err(WireError::Internal(
             "this protocol cannot read a text completion".to_owned(),
         ))
+    }
+
+    /// Why the upstream stopped a completion before its answer was whole, in the upstream's own word, read
+    /// from a reply that `completion_text` refused. `None` when the reply is not an answer that was cut short.
+    fn completion_stopped(&self, body: &[u8]) -> Option<CompletionStop> {
+        let _ = body;
+        None
     }
 
     /// Tool-capable dialogue generation. Protocols without generation, including

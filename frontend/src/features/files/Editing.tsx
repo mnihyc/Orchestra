@@ -91,8 +91,9 @@ export function countUnsaved(userId: string | null, now: number = Date.now()): n
 // ---------------------------------------------------------------- what the tab says
 
 /** The layout owns the mark until a file is saved or its tab closes, including while its body is paused. */
-export function useUnsavedMark(tabId: string, dirty: boolean): void {
+export function useUnsavedMark(tabId: string | undefined, dirty: boolean): void {
   useEffect(() => {
+    if (tabId === undefined) return;
     useWorkbench.getState().setUnsaved(tabId, dirty);
   }, [tabId, dirty]);
 }
@@ -103,9 +104,6 @@ export function ReadOnlyNote({ reason }: { reason: ReadOnlyReason }) {
   const format = useFormatContext();
   let text: string;
   switch (reason.kind) {
-    case 'small_screen':
-      text = t('craftFiles.readOnly');
-      break;
     case 'permission':
       text = t('files.edit.why.permission', { permission: workspacePermissionLabel(t, 'files.manage') });
       break;
