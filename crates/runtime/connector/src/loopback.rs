@@ -92,6 +92,7 @@ pub struct McpRoutes {
 /// A session as the listener knows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionBinding {
+    exchanges: Arc<Exchanges>,
     /// The key its addresses are under.
     pub session_key: String,
     /// The harness process it belongs to.
@@ -106,6 +107,60 @@ pub struct SessionBinding {
     pub agent_id: Id,
     /// What it may open tunnels with.
     pub tickets: Tickets,
+}
+
+/// Cloned bindings share cancellation, including requests that already hold an older ticket snapshot.
+#[derive(Debug)]
+struct Exchanges {
+    stop: CancellationToken,
+    members: BTreeMap<String, CancellationToken>,
+}
+impl PartialEq for Exchanges {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+impl Eq for Exchanges {}
+impl Exchanges {
+    fn member(&self, member: &str) -> CancellationToken {
+        self.members.get(member).unwrap_or(&self.stop).clone()
+    }
+    fn replace(&mut self, member: &str, present: bool) {
+        if let Some(stop) = self.members.remove(member) {
+            stop.cancel();
+        }
+        if present {
+            self.members.insert(member.into(), self.stop.child_token());
+        }
+    }
+}
+impl SessionBinding {
+    pub(crate) fn exchange_stop(&self, member: &str) -> CancellationToken {
+        self.exchanges.member(member)
+    }
+}
+
+/// Read only an authenticated command's stored ticket metadata to retain an unchanged member.
+/// This does not verify a ticket or grant access; remote opens still ask the live API.
+fn same_member(before: &str, after: &str) -> bool {
+    if before == after {
+        return true;
+    }
+    use orch_link_contract::tunnels::Ticket;
+    let (Ok(before), Ok(after)) = (Ticket::parse(before), Ticket::parse(after)) else {
+        return false;
+    };
+    match (&before.claims().tool_session, &after.claims().tool_session) {
+        (Some(a), Some(b)) => {
+            a.thread_id == b.thread_id
+                && a.segment_id == b.segment_id
+                && a.opening_id == b.opening_id
+                && a.opening_epoch == b.opening_epoch
+                && a.member == b.member
+                && a.nonce == b.nonce
+        }
+        _ => false,
+    }
 }
 
 /// The kinds of route an endpoint can be registered for.
@@ -243,7 +298,14 @@ impl Loopback {
     pub fn revoke(&self, grant: u64) {
         let mut state = self.shared.state();
         state.grants.remove(&grant);
-        state.sessions.retain(|_, session| session.grant != grant);
+        state.sessions.retain(|_, session| {
+            if session.grant == grant {
+                session.exchanges.stop.cancel();
+                false
+            } else {
+                true
+            }
+        });
         let State {
             sessions, reaches, ..
         } = &mut *state;
@@ -262,7 +324,14 @@ impl Loopback {
         tickets: Tickets,
     ) -> Arc<SessionBinding> {
         let session_key = random_hex(SESSION_KEY_BYTES);
+        let stop = self.stop.child_token();
+        let members = ["exec".into(), "llm".into(), "mcp/orch".into()]
+            .into_iter()
+            .chain(tickets.mcp.keys().map(|name| format!("mcp/{name}")))
+            .map(|member| (member, stop.child_token()))
+            .collect();
         let binding = Arc::new(SessionBinding {
+            exchanges: Arc::new(Exchanges { stop, members }),
             session_key: session_key.clone(),
             grant,
             thread_id,
@@ -278,8 +347,7 @@ impl Loopback {
         binding
     }
 
-    /// Forgets a session: its addresses are answered as if they never were.
-    /// Changes only MCP tickets at the same session key; callers in flight keep their previous binding.
+    /// Changes MCP routes at the same key and ends exchanges of withdrawn or replaced members.
     pub fn replace_mcp(
         &self,
         session_key: &str,
@@ -295,7 +363,7 @@ impl Loopback {
         .map(|previous| previous.tickets)
     }
 
-    /// Replace signed tickets and plans together; in-flight callers retain their old binding.
+    /// Replaces signed tickets and plans together, preserving unchanged member exchanges only.
     pub fn replace_mcp_routed(
         &self,
         session_key: &str,
@@ -303,7 +371,31 @@ impl Loopback {
     ) -> Option<McpRoutes> {
         let mut state = self.shared.state();
         let current = state.sessions.get(session_key)?.as_ref().clone();
+        let mut exchanges = Exchanges {
+            stop: current.exchanges.stop.clone(),
+            members: current.exchanges.members.clone(),
+        };
+        for (name, before) in &current.tickets.mcp {
+            if !replacement
+                .tickets
+                .get(name)
+                .is_some_and(|after| same_member(before, after))
+            {
+                exchanges.replace(
+                    &format!("mcp/{name}"),
+                    replacement.tickets.contains_key(name),
+                );
+            }
+        }
+        for name in replacement
+            .tickets
+            .keys()
+            .filter(|name| !current.tickets.mcp.contains_key(*name))
+        {
+            exchanges.replace(&format!("mcp/{name}"), true);
+        }
         let mut changed = current;
+        changed.exchanges = Arc::new(exchanges);
         let previous_tickets = std::mem::replace(&mut changed.tickets.mcp, replacement.tickets);
         let mut previous = McpRoutes {
             tickets: previous_tickets,
@@ -343,10 +435,23 @@ impl Loopback {
     }
 
     /// Rotate the admitted model lease without changing the native process's addresses.
-    /// In-flight calls retain their captured binding until their response finishes.
+    /// A replaced member ends its old calls; an unchanged admitted member keeps its exchanges.
     pub fn replace_llm(&self, session_key: &str, ticket: Option<String>) -> Option<Option<String>> {
         let mut state = self.shared.state();
         let mut changed = state.sessions.get(session_key)?.as_ref().clone();
+        let unchanged = match (&changed.tickets.llm, &ticket) {
+            (None, None) => true,
+            (Some(before), Some(after)) => same_member(before, after),
+            _ => false,
+        };
+        if !unchanged {
+            let mut exchanges = Exchanges {
+                stop: changed.exchanges.stop.clone(),
+                members: changed.exchanges.members.clone(),
+            };
+            exchanges.replace("llm", true);
+            changed.exchanges = Arc::new(exchanges);
+        }
         let previous = std::mem::replace(&mut changed.tickets.llm, ticket);
         state
             .sessions
@@ -357,7 +462,9 @@ impl Loopback {
     /// Forgets a session: its addresses are answered as if they never were.
     pub fn unbind(&self, session_key: &str) {
         let mut state = self.shared.state();
-        state.sessions.remove(session_key);
+        if let Some(session) = state.sessions.remove(session_key) {
+            session.exchanges.stop.cancel();
+        }
         state.reaches.remove(session_key);
     }
 
@@ -479,7 +586,36 @@ async fn handle(shared: &Shared, request: Request<Incoming>) -> Response<Body> {
         return text(StatusCode::NOT_FOUND, "no such address");
     };
     match endpoint {
-        Some(endpoint) => endpoint.serve(request, session, route).await,
+        Some(endpoint) => {
+            let member = match &route {
+                Route::Llm { .. } => "llm".into(),
+                Route::Exec { .. } => "exec".into(),
+                Route::Mcp { server, .. } if server == "exec" => "exec".into(),
+                Route::Mcp { server, .. } => format!("mcp/{server}"),
+            };
+            let stop = session.exchange_stop(&member);
+            let response = tokio::select! {
+                biased;
+                () = stop.cancelled() => return text(StatusCode::GONE, "this session member was withdrawn"),
+                response = endpoint.serve(request, session, route) => response,
+            };
+            if response.status() == StatusCode::SWITCHING_PROTOCOLS {
+                return response;
+            }
+            let (parts, body) = response.into_parts();
+            let stream = futures::stream::unfold(Some((body, stop)), |state| async move {
+                let (mut body, stop) = state?;
+                let frame = tokio::select! {
+                    biased;
+                    () = stop.cancelled() => return Some((Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted, "the session member was withdrawn",
+                    )), None)),
+                    frame = body.frame() => frame,
+                }?;
+                Some((frame, Some((body, stop))))
+            });
+            Response::from_parts(parts, http_body_util::StreamBody::new(stream).boxed())
+        }
         None => text(
             StatusCode::NOT_IMPLEMENTED,
             "nothing serves this address on this connector",
@@ -837,5 +973,171 @@ mod tests {
             Tickets::default(),
         );
         assert_ne!(other.session_key, rig.binding.session_key);
+    }
+
+    struct HeldRequest(Arc<tokio::sync::Notify>);
+    #[async_trait]
+    impl Endpoint for HeldRequest {
+        async fn serve(
+            &self,
+            _: Request<Incoming>,
+            _: Arc<SessionBinding>,
+            _: Route,
+        ) -> Response<Body> {
+            self.0.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    fn held_request(
+        rig: &Rig,
+        server: &str,
+    ) -> (
+        Arc<tokio::sync::Notify>,
+        tokio::task::JoinHandle<(StatusCode, String)>,
+    ) {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        rig.loopback.register(
+            EndpointKind::Mcp(server.into()),
+            Arc::new(HeldRequest(entered.clone())),
+        );
+        let port = rig.loopback.port();
+        let host = host(rig);
+        let token = rig.grant.token.expose().to_owned();
+        let path = format!("/mcp/{}/{server}", rig.binding.session_key);
+        (
+            entered,
+            tokio::spawn(async move { get(port, &host, &path, Some(&token)).await }),
+        )
+    }
+
+    #[tokio::test]
+    async fn retiring_a_session_or_its_process_ends_its_already_waiting_local_request() {
+        for process in [false, true] {
+            let rig = rig().await;
+            let (entered, response) = held_request(&rig, "orch");
+            tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+                .await
+                .unwrap();
+            if process {
+                rig.loopback.revoke(rig.grant.id);
+            } else {
+                rig.loopback.unbind(&rig.binding.session_key);
+            }
+            let (status, _) = tokio::time::timeout(std::time::Duration::from_secs(10), response)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(status, StatusCode::GONE);
+        }
+    }
+
+    #[tokio::test]
+    async fn withdrawing_one_local_tool_ends_its_waiting_request_and_keeps_an_independent_member() {
+        let rig = rig().await;
+        rig.loopback
+            .replace_mcp(
+                &rig.binding.session_key,
+                BTreeMap::from([
+                    ("files".into(), "synthetic-files".into()),
+                    ("notes".into(), "synthetic-notes".into()),
+                ]),
+            )
+            .unwrap();
+        rig.loopback
+            .register(EndpointKind::Mcp("notes".into()), Arc::new(Echo));
+        let (entered, response) = held_request(&rig, "files");
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        rig.loopback
+            .replace_mcp(
+                &rig.binding.session_key,
+                BTreeMap::from([("notes".into(), "synthetic-notes".into())]),
+            )
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), response)
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            StatusCode::GONE
+        );
+        let path = format!("/mcp/{}/notes", rig.binding.session_key);
+        assert_eq!(
+            get(
+                rig.loopback.port(),
+                &host(&rig),
+                &path,
+                Some(rig.grant.token.expose())
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn retiring_a_session_ends_a_local_response_that_has_already_sent_its_headers() {
+        struct Streaming;
+        #[async_trait]
+        impl Endpoint for Streaming {
+            async fn serve(
+                &self,
+                _: Request<Incoming>,
+                _: Arc<SessionBinding>,
+                _: Route,
+            ) -> Response<Body> {
+                use futures::StreamExt;
+                let prefix = futures::stream::once(async {
+                    Ok::<_, std::io::Error>(hyper::body::Frame::data(Bytes::from_static(b"prefix")))
+                });
+                let body = prefix.chain(futures::stream::pending());
+                Response::new(http_body_util::StreamBody::new(body).boxed())
+            }
+        }
+        let rig = rig().await;
+        rig.loopback
+            .register(EndpointKind::Exec, Arc::new(Streaming));
+        let stream = tokio::net::TcpStream::connect(("127.0.0.1", rig.loopback.port()))
+            .await
+            .unwrap();
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .unwrap();
+        tokio::spawn(connection);
+        let request = Request::builder()
+            .uri(format!("/exec/{}", rig.binding.session_key))
+            .header("host", host(&rig))
+            .header(
+                "authorization",
+                format!("Bearer {}", rig.grant.token.expose()),
+            )
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let mut response = sender.send_request(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .body_mut()
+                .frame()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_data()
+                .unwrap(),
+            "prefix"
+        );
+        rig.loopback.unbind(&rig.binding.session_key);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                response.into_body().collect()
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
     }
 }

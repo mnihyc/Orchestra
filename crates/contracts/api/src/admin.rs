@@ -376,6 +376,115 @@ pub struct ReleaseCheck {
     pub command: Option<String>,
 }
 
+/// Whether the bundled node can run this installation's existing updater.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerUpdateAvailability {
+    /// The current bundled node offers the host Docker path.
+    Ready,
+    /// No active node is marked as bundled with this installation.
+    NoBundledNode,
+    /// More than one active node claims the installation bundle.
+    AmbiguousBundledNodes,
+    /// The bundled node has no current connection.
+    NodeOffline,
+    /// The node cannot use the installation's local Docker daemon.
+    DockerUnavailable,
+}
+
+/// One explicit offer selected by a system administrator, never a download URL or a shell command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ServerUpdateStart {
+    /// The exact version from the current validated release offer.
+    pub release: String,
+}
+
+/// The existing updater's durable phase, including what happened after a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerUpdateStage {
+    /// Accepted, before fetching the selected release.
+    Queued,
+    /// Fetching the release's own manifest and assets.
+    Fetching,
+    /// Verifying the manifest's assets.
+    Verifying,
+    /// Preparing the verified payloads.
+    Applying,
+    /// Stopping the application services.
+    Stopping,
+    /// Taking the rollback database snapshot.
+    Dumping,
+    /// Atomically selecting the new payload generations.
+    Activating,
+    /// Starting the application services.
+    Starting,
+    /// Checking the effective public route and running release.
+    Checking,
+    /// Restoring the old payloads and their database snapshot.
+    RollingBack,
+    /// Resuming the original journal after the helper or host restarted.
+    Recovering,
+    /// The selected release passed readiness.
+    Updated,
+    /// The earlier release is running again.
+    RolledBack,
+    /// The updater could not finish; its existing recovery command remains available.
+    Failed,
+}
+impl ServerUpdateStage {
+    /// A terminal observation is retained after its detached helper is removed.
+    #[must_use]
+    pub const fn terminal(self) -> bool {
+        matches!(self, Self::Updated | Self::RolledBack | Self::Failed)
+    }
+}
+
+/// Safe updater reasons; native output and credentials never become a page's failure text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerUpdateFailure {
+    /// The selected release failed browser or service readiness.
+    HealthCheckFailed,
+    /// The update ended before a successful new release or rollback was confirmed.
+    UpdateFailed,
+    /// The original journal remains and needs the existing recovery path.
+    RecoveryRequired,
+}
+
+/// A factual observation from the operation's local updater record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ServerUpdateObservation {
+    /// The phase actually recorded by update.sh.
+    pub stage: ServerUpdateStage,
+    /// Its safe fixed failure reason, if any.
+    pub reason: Option<ServerUpdateFailure>,
+    /// The release being left, once the updater has opened its journal.
+    pub from_version: Option<String>,
+    /// The selected release of this exact operation.
+    pub to_version: String,
+}
+
+/// Management's server update row and the same durable job presentation as other updates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ServerUpdateView {
+    /// The release of the API that is answering now.
+    pub installed_version: String,
+    /// The current validated release offer, if one has been checked.
+    pub offered_version: Option<String>,
+    /// The offered release is newer than the API answering now.
+    pub update_available: bool,
+    /// The real local condition for the page's update act.
+    pub availability: ServerUpdateAvailability,
+    /// The existing operator path, available even when no bundled node can run the act.
+    pub command: String,
+    /// The most recent server update, including its outcome after reload.
+    pub job: Option<crate::workspace::Job>,
+    /// The latest recorded native updater phase and outcome.
+    pub observation: Option<ServerUpdateObservation>,
+}
+
 /// A failed local backup attempt, separate from the last successful completion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BackupFailure {
@@ -1572,6 +1681,12 @@ crate::endpoints! {
     /// Checks only the operator's configured source and installs nothing.
     AdminReleaseCheck: POST "/admin/releases/check", Session, none, none, json ReleaseCheck, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
+    /// Reads the current server release, native update condition and retained job.
+    AdminServerUpdateGet: GET "/admin/server-update", Session, none, none, json ServerUpdateView, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
+    /// Runs the selected release through the bundled node's existing host updater, or joins its open job.
+    AdminServerUpdateStart: POST "/admin/server-update", Session, none, json ServerUpdateStart, json crate::workspace::Job, 202,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Reconciles protected host metadata before returning operational facts.
     AdminInstallationRecordsGet: GET "/admin/installation-records", Session, none, none, json InstallationRecords, 200,
         operation Op::single(Manage, &[Identity(I::System)], Target::System);

@@ -13,7 +13,9 @@ use crate::PkiError;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use orch_link_contract::tunnels::{OpenErrorCode, Service, Ticket, TicketClaims, TicketSource};
+use orch_link_contract::tunnels::{
+    OpenErrorCode, Service, Ticket, TicketClaims, TicketSource, ToolSessionScope,
+};
 use orch_types::{Id, Time, new_id};
 
 /// The bytes of an Ed25519 secret key.
@@ -93,7 +95,7 @@ impl TicketSigner {
 
     /// Makes and signs the ticket that `request` asks for.
     pub fn issue(&self, request: &TicketRequest) -> Result<String, PkiError> {
-        self.issue_with_environment(request, None, None)
+        self.issue_with_environment(request, None, None, None)
     }
 
     /// Signs a tool ticket for one environment on the destination machine.
@@ -109,7 +111,7 @@ impl TicketSigner {
                 "a tool ticket needs an environment and a nonnegative generation".to_owned(),
             ));
         }
-        self.issue_with_environment(request, Some((environment, generation)), None)
+        self.issue_with_environment(request, Some((environment, generation)), None, None)
     }
 
     /// Signs a channel for the exact native executor build admitted by the engine.
@@ -126,7 +128,42 @@ impl TicketSigner {
                 "an executor ticket needs its environment, generation and admitted build".into(),
             ));
         }
-        self.issue_with_environment(request, Some((environment, generation)), Some(version))
+        self.issue_with_environment(
+            request,
+            Some((environment, generation)),
+            Some(version),
+            None,
+        )
+    }
+
+    /// Signs the exact immutable physical session member selected by the native producer.
+    pub fn issue_for_session(
+        &self,
+        request: &TicketRequest,
+        environment: Option<(Id, i64)>,
+        executor_version: Option<&str>,
+        scope: &ToolSessionScope,
+    ) -> Result<String, PkiError> {
+        let valid = request.thread_id == Some(scope.thread_id)
+            && scope.accepts(&request.service)
+            && scope.revision > 0
+            && scope.opening_epoch > 0
+            && match request.service {
+                Service::Exec { .. } | Service::Mcp { .. } => {
+                    environment.is_some_and(|(_, generation)| generation >= 0)
+                }
+                Service::Llm { .. } => environment.is_none() && executor_version.is_none(),
+                _ => false,
+            }
+            && executor_version.is_none_or(|version| {
+                !version.is_empty() && matches!(request.service, Service::Exec { .. })
+            });
+        if !valid {
+            return Err(PkiError::Signature(
+                "the session tool scope does not match its native service binding".into(),
+            ));
+        }
+        self.issue_with_environment(request, environment, executor_version, Some(scope))
     }
 
     fn issue_with_environment(
@@ -134,6 +171,7 @@ impl TicketSigner {
         request: &TicketRequest,
         environment: Option<(Id, i64)>,
         executor_version: Option<&str>,
+        tool_session: Option<&ToolSessionScope>,
     ) -> Result<String, PkiError> {
         let claims = TicketClaims {
             jti: new_id(),
@@ -146,6 +184,7 @@ impl TicketSigner {
             tool_environment_id: environment.map(|(id, _)| id),
             tool_environment_generation: environment.map(|(_, generation)| generation),
             tool_executor_version: executor_version.map(str::to_owned),
+            tool_session: tool_session.cloned(),
             port: None,
             exp: request.expires_at.unix_millis().div_euclid(SECOND_MILLIS),
         };

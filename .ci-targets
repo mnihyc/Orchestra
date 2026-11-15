@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-connector-core --lib
+test -p orch-connector-core --test harness_tools --test tool_servers --test tunnel --test agent_role --test direct_machine_programs
+test -p orch-testkit --lib

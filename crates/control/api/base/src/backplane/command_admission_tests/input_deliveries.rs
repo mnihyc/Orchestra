@@ -629,6 +629,7 @@ pub(super) async fn collide(
             rows::insert_command(
                 &mut *collision.link.inner.db.acquire().await?,
                 &rows::NewCommand {
+                    native_target: None,
                     id: command.id,
                     machine_id: command.machine,
                     kind: command.kind.as_str(),

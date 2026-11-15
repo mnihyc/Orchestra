@@ -247,6 +247,7 @@ pub fn cmd_of(row: &CommandRow) -> Cmd {
         members.remove(KEY_MEMBER);
     }
     Cmd {
+        native_target: None,
         id: row.id,
         kind: row.kind.clone(),
         key,
@@ -535,6 +536,14 @@ impl Dispatcher {
             {
                 return Err(DispatchError::AuthorityMismatch);
             }
+            if command.native_target.is_some() && saved.is_some() {
+                let original =
+                    orch_db::queries::session_dependencies::command_native_target(&mut tx, id)
+                        .await?;
+                if original != command.native_target {
+                    return Err(DispatchError::AuthorityMismatch);
+                }
+            }
             // Entry/provider/parent preparation and retained-command comparison can wait.
             // New native queue work keeps its actual original operation on this transaction.
             let issue_callers = if let Some(authority) = command.authority.as_ref()
@@ -545,6 +554,7 @@ impl Dispatcher {
                     .current_issue_callers(
                         &mut tx,
                         &NewCommand {
+                            native_target: command.native_target.as_ref(),
                             id,
                             machine_id: command.machine,
                             kind: kind.as_str(),
@@ -573,6 +583,7 @@ impl Dispatcher {
             let inserted = queries::insert_command_with_authority(
                 &mut tx,
                 &NewCommand {
+                    native_target: command.native_target.as_ref(),
                     id,
                     machine_id: command.machine,
                     kind: kind.as_str(),
@@ -1500,6 +1511,41 @@ impl Link {
         // Resolve transport policy before the synchronous substitution, with exact reference identities.
         // Every occurrence still receives its own newly signed ticket and frozen plan.
         let mut routed_tickets = std::collections::VecDeque::new();
+        let session_facts = if let Some(facts) = entry.observation_facts(cmd.id) {
+            Some(facts)
+        } else if ticket_requests.is_empty()
+            && orch_link_contract::native_target::session_action(&cmd.kind, &cmd.body).is_none()
+        {
+            None
+        } else {
+            let mut conn = inner
+                .db
+                .acquire()
+                .await
+                .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
+            orch_db::queries::session_dependencies::command_tool_session(&mut conn, cmd.id)
+                .await
+                .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?
+        };
+        if cmd.native_target.is_none()
+            && orch_link_contract::native_target::session_action(&cmd.kind, &cmd.body).is_some()
+        {
+            cmd.native_target = session_facts
+                .as_ref()
+                .and_then(|facts| facts.get("native_target"))
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| {
+                    CommandError::new(ErrorCode::Internal, "the native target cannot be read")
+                })?;
+            if cmd.native_target.is_none() {
+                return Err(CommandError::new(
+                    ErrorCode::SessionNotFound,
+                    "the command has no accepted native session target",
+                ));
+            }
+        }
         for more in ticket_requests {
             let wanted: TicketWanted =
                 serde_json::from_value(Json::Object(more.clone())).map_err(|error| {
@@ -1508,10 +1554,28 @@ impl Link {
                         format!("a ticket cannot be asked for: {error}"),
                     )
                 })?;
-            let ticket = inner
-                .tickets
-                .for_request(&wanted, machine)
+            crate::tickets::Tickets::check_kind(&wanted)
                 .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
+            let session_tool = matches!(
+                wanted.kind,
+                orch_link_contract::tunnels::TunnelKind::Exec
+                    | orch_link_contract::tunnels::TunnelKind::Llm
+                    | orch_link_contract::tunnels::TunnelKind::Mcp
+            ) && wanted.more.get("src").and_then(Json::as_str) != Some("api");
+            let ticket = if session_tool {
+                let facts = session_facts.as_ref().ok_or_else(|| {
+                    CommandError::new(
+                        ErrorCode::SessionNotFound,
+                        "the command has no accepted physical tool session",
+                    )
+                })?;
+                let scope = crate::tickets::Tickets::command_scope(facts, &wanted, machine)
+                    .map_err(|error| CommandError::new(ErrorCode::Conflict, error.to_string()))?;
+                inner.tickets.for_session_request(&wanted, machine, &scope)
+            } else {
+                inner.tickets.for_request(&wanted, machine)
+            }
+            .map_err(|error| CommandError::new(ErrorCode::Internal, error.to_string()))?;
             routed_tickets.push_back((more, self.routed_ticket_value(ticket).await?));
         }
         resolve_reference_values(&mut cmd.body, &mut |reference| match reference {
@@ -1646,7 +1710,7 @@ pub mod tests {
                     platform_os: "linux",
                     platform_arch: "x86_64",
                     connector_version: "0.1.0",
-                    protocol_version: 1,
+                    protocol_version: 2,
                     cert_serial: "01",
                     cert_fingerprint: &hex::decode(certificate.fingerprint()).unwrap(),
                     cert_not_after: certificate.not_after().get(),
@@ -1671,6 +1735,7 @@ pub mod tests {
 
     fn command(body: Json) -> Cmd {
         Cmd {
+            native_target: None,
             id: new_id(),
             kind: "provider.start".to_owned(),
             key: None,
@@ -1731,10 +1796,100 @@ pub mod tests {
     async fn a_ticket_request_in_a_command_is_signed_when_the_command_is_sent() {
         let setup = setup().await;
         let entry = setup.link.entry(setup.machine).await.unwrap();
-        let environment = new_id();
-        let stored = command(json!({
-            "exec": { "ticket": { "$ticket": { "kind": "exec", "service": "exec/codex", "dst": environment, "environment_id": environment, "environment_generation": 3 } } }
+        let (home, project, topic, thread, segment) =
+            (new_id(), new_id(), new_id(), new_id(), new_id());
+        let mut conn = setup.db.acquire().await.unwrap();
+        let owner = testing::insert_user(&mut conn, "ticket-owner")
+            .await
+            .unwrap();
+        for (id, kind, parent) in [
+            (home, "org", None),
+            (project, "project", Some(home)),
+            (topic, "topic", Some(project)),
+        ] {
+            hierarchy::testing::insert_node(&mut conn, id, kind, parent, "Ticket session", owner)
+                .await
+                .unwrap();
+        }
+        orch_db::queries::threads::insert_thread(
+            &mut conn,
+            thread,
+            topic,
+            "Ticket session",
+            owner,
+            setup.clock.now(),
+        )
+        .await
+        .unwrap();
+        let environment = resources::access_fixtures::insert_resource(
+            &mut conn,
+            "environment",
+            Some(owner),
+            Some(home),
+            "Ticket environment",
+        )
+        .await
+        .unwrap();
+        let provider = resources::access_fixtures::insert_resource(
+            &mut conn,
+            "provider",
+            Some(owner),
+            Some(home),
+            "Ticket provider",
+        )
+        .await
+        .unwrap();
+        let agent = resources::access_fixtures::insert_resource(
+            &mut conn,
+            "agent",
+            Some(owner),
+            Some(home),
+            "Ticket agent",
+        )
+        .await
+        .unwrap();
+        orch_db::queries::threads::insert_segment(
+            &mut conn,
+            &orch_db::queries::threads::NewSegment {
+                id: segment,
+                thread_id: thread,
+                agent_id: agent,
+                provider_id: provider,
+                environment_id: environment,
+                env_generation: 3,
+                arrangement: "separated",
+                executor: Some("codex"),
+                tool_set: None,
+                credential_path: "forwarded",
+                native_session_ref: None,
+                started_by: Some(owner),
+                started_at: setup.clock.now(),
+            },
+            1,
+        )
+        .await
+        .unwrap();
+        let mut stored = command(json!({
+            "thread_id":thread, "segment_id":segment,
+            "exec": { "ticket": { "$ticket": { "kind": "exec", "service": "exec/codex", "dst": environment, "thread_id":thread, "environment_id": environment, "environment_generation": 3 } } }
         }));
+        stored.kind = "session.open".into();
+        queries::insert_command(
+            &mut conn,
+            &NewCommand {
+                native_target: None,
+                id: stored.id,
+                machine_id: setup.machine,
+                kind: &stored.kind,
+                body: &stored.body,
+                serial_key: None,
+                deadline_at: stored.deadline.get(),
+            },
+            setup.clock.now(),
+        )
+        .await
+        .unwrap();
+        drop(conn);
         assert!(has_references(&stored.body));
         let sent = setup.link.prepare(&entry, None, stored).await.unwrap();
         assert!(
@@ -1758,6 +1913,9 @@ pub mod tests {
         );
         assert_eq!(claims.tool_environment_id, Some(environment));
         assert_eq!(claims.tool_environment_generation, Some(3));
+        let scope = claims.tool_session.unwrap();
+        assert_eq!((scope.thread_id, scope.segment_id), (thread, segment));
+        assert!(scope.opening_epoch > 0);
     }
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
