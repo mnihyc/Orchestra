@@ -15,12 +15,21 @@ import { threadViewOf, threadWriter } from '@/realtime/stores/thread';
 import { ACME } from '../doubles/fixtures';
 import { agentMessage } from '../doubles/thread-rows';
 import { World } from '../doubles/world';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+import { useLayoutEffect } from 'react';
+import { ViewOpening, showViewOpening, forgetViewOpening } from '@/features/workbench/viewOpening';
+import { ThreadReadProvider } from '@/realtime/threadReadContext';
+import { resultThreadRead } from '@/realtime/threadScope';
+import { useThreadView } from '@/realtime/stores/thread';
+import type { FeedListener } from '@/realtime/socket';
+import { serve, OLDER } from '../unit/thread-read-fixtures';
+import { answer } from '../unit/continuation-fixtures';
+import { captureThreadRead } from '@/api/threadRead';
 
-const calls = vi.hoisted(() => ({ reload: vi.fn() }));
-vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useThreadFeed: () => undefined, useOrgTreeFeed: () => undefined, reloadThread: calls.reload }));
+const calls = vi.hoisted(() => ({ reload: vi.fn(), feed: vi.fn<typeof Live.useThreadFeed>(), native: false }));
+vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useThreadFeed: calls.feed, useOrgTreeFeed: () => undefined, reloadThread: calls.reload }));
 vi.mock('@/shell/screen', async (load) => ({ ...await load<typeof Screen>(), useScreenHeading: () => undefined }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
 vi.mock('@/features/thread/Header', () => ({ ThreadHeader: ({ thread }: { thread: Thread }) => <header><h1>{thread.name}</h1></header> }));
 vi.mock('@/features/composer/Composer', () => ({ Composer: () => <textarea aria-label="Thread draft" /> }));
 vi.mock('@/features/composer/QueueTray', () => ({ QueueTray: () => null }));
@@ -31,13 +40,20 @@ vi.mock('@/features/thread/LockBanner', () => ({ LockBanner: () => null }));
 vi.mock('@/features/source/Preparation', () => ({ SourcePreparation: () => null }));
 vi.mock('@/features/source/Review', () => ({ ReviewTray: () => null }));
 vi.mock('@/features/timeline/FindInConversation', () => ({ FindInConversation: () => null }));
-vi.mock('@/features/timeline/Timeline', () => ({ Timeline: () => <p>The redirect has been checked.</p> }));
+vi.mock('@/features/timeline/Timeline', () => ({ Timeline: () => calls.native ? <RetainedNativeRows /> : <p>The redirect has been checked.</p> }));
+vi.mock('@/features/summaries/ThreadSummaryInspector', () => ({ ThreadSummaryInspector: () => null }));
+vi.mock('@/features/gateways/ThreadGatewayStatus', () => ({ ThreadGatewayStatus: () => null }));
 vi.mock('@/features/ports/LocalAddresses', () => ({ LocalAddresses: ({ children }: { children: ReactNode }) => children }));
 
 let native: Thread;
+function RetainedNativeRows() {
+  const view = useThreadView(native.id);
+  return <>{view.order.map((id) => { const item = view.items.get(id); return item?.kind === 'agent_message' ? <p key={id}>{item.payload.text}</p> : null; })}</>;
+}
 let theme: string | null = null;
 beforeEach(() => {
   calls.reload.mockReset(); theme = document.documentElement.getAttribute('data-theme');
+  calls.native = false; calls.feed.mockReset().mockImplementation(() => undefined);
   const world = new World(); const person = world.people.get('ada');
   const node = world.places.rowOf(ACME.mainThread);
   if (person === undefined || node === undefined) throw new Error('A native thread is required');
@@ -71,6 +87,78 @@ it.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']]
   expect(screen.getByText('The redirect has been checked.')).toBeVisible();
   expect(screen.getByRole('textbox', { name: "Another view's draft" })).toHaveValue('Keep these words');
   expect(calls.reload).toHaveBeenCalledTimes(1);
+});
+
+it.each([{ hiddenFor: 15_000, hold: false }, { hiddenFor: 6 * 60_000, hold: true }])('keeps the actual thread screen and cut after $hiddenFor hidden milliseconds with pending work=$hold', { timeout: 30_000 }, async ({ hiddenFor, hold }) => {
+  skipOverflowFallback();
+  const live = await vi.importActual<typeof Live>('@/realtime/live');
+  live.feeds.clear(); threadWriter.clear(); calls.native = true;
+  calls.feed.mockImplementation(live.useThreadFeed); calls.reload.mockImplementation(live.reloadThread);
+  const server = serve(), owner = 'retained-native-screen', read = resultThreadRead(native.id, owner);
+  const listeners = new Map<string, FeedListener>();
+  const subscribed = vi.spyOn(live.socket, 'subscribe').mockImplementation((feed, listener) => {
+    listeners.set(feed, listener); return { unsubscribe: () => { if (listeners.get(feed) === listener) listeners.delete(feed); } };
+  });
+  const watched = vi.spyOn(live.socket, 'visible');
+  function Slot() { useLayoutEffect(() => showViewOpening(owner, 'native-route'), []); return null; }
+  function Kept({ shown }: { shown: boolean }) { return <ThreadReadProvider read={read}>
+    <ViewOpening view={owner} route="native-route" hold={hold}><ThreadScreen threadId={native.id} item={null} /></ViewOpening>{shown && <Slot />}
+  </ThreadReadProvider>; }
+  vi.useFakeTimers();
+  const view = show(<Kept shown />);
+  try {
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(threadViewOf(read).read?.ready).toBe(true);
+    act(() => threadWriter.older(read, [answer(OLDER, 'Older native history', undefined, 5)], false, captureThreadRead(read)));
+    const before = threadViewOf(read), cut = before.read;
+    const viewport = view.container.querySelector('[data-scroll-area]');
+    if (!(viewport instanceof HTMLElement)) throw new Error('The actual ThreadScreen viewport must be mounted');
+    viewport.scrollTop = 317;
+    const draft = screen.getByRole('textbox', { name: 'Thread draft' });
+    (draft as HTMLTextAreaElement).value = 'Retained local draft';
+    const listener = listeners.get(`thread:${native.id}`);
+    if (listener === undefined) throw new Error('The actual thread must own a native subscription');
+    view.rerender(<Kept shown={false} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(listeners.has(`thread:${native.id}`)).toBe(false);
+    expect(watched).toHaveBeenLastCalledWith(`thread:${native.id}`, false);
+    await act(async () => {
+      listener.onFrame({ op: 'resync', id: 1, feed: `thread:${native.id}`, reload: true });
+      await vi.advanceTimersByTimeAsync(hiddenFor);
+    });
+    expect(server.calls.filter((request) => new URL(request.url).pathname.endsWith('/opening'))).toHaveLength(1);
+    expect(threadViewOf(read).items.has(OLDER)).toBe(true); expect(threadViewOf(read).read?.identity).toBe(cut?.identity);
+    view.rerender(<Kept shown />); await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(listeners.get(`thread:${native.id}`)?.since()).toBe(20);
+    expect(server.calls.filter((request) => new URL(request.url).pathname.endsWith('/opening'))).toHaveLength(1);
+    expect(screen.getByText('Older native history')).toBeVisible();
+    expect(view.container.querySelector('[data-scroll-area]')).toBe(viewport); expect(viewport.scrollTop).toBe(317);
+    expect(screen.getByRole('textbox', { name: 'Thread draft' })).toBe(draft); expect(draft).toHaveValue('Retained local draft');
+    expect(threadViewOf(read).read?.epoch).toBe(cut?.epoch);
+  } finally {
+    view.unmount(); live.feeds.clear(); subscribed.mockRestore(); watched.mockRestore();
+    calls.native = false; calls.feed.mockImplementation(() => undefined); vi.unstubAllGlobals(); vi.useRealTimers(); forgetViewOpening(owner);
+  }
+});
+
+it('pauses an early thread read when its slot hides before its screen mounts', async () => {
+  const live = await vi.importActual<typeof Live>('@/realtime/live');
+  live.feeds.clear(); threadWriter.clear(); const server = serve(), read = resultThreadRead(native.id, 'early-thread-slot');
+  const listeners = new Set<FeedListener>();
+  const subscribed = vi.spyOn(live.socket, 'subscribe').mockImplementation((_feed, listener) => {
+    listeners.add(listener); return { unsubscribe: () => { listeners.delete(listener); } };
+  });
+  vi.useFakeTimers(); const warm = live.warmThread(read, 10 * 60_000);
+  try {
+    await vi.advanceTimersByTimeAsync(0); expect(listeners.size).toBe(1);
+    const before = threadViewOf(read), old = [...listeners][0];
+    warm.shown(false); expect(listeners.size).toBe(0);
+    old?.onFrame({ op: 'resync', id: 1, feed: `thread:${native.id}`, reload: true });
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    expect(threadViewOf(read).read).toBe(before.read); expect(server.calls).toHaveLength(1);
+    warm.shown(true); await vi.advanceTimersByTimeAsync(0);
+    expect(listeners.size).toBe(1); expect([...listeners][0]?.since()).toBe(20); expect(server.calls).toHaveLength(1);
+  } finally { warm(); live.feeds.clear(); subscribed.mockRestore(); vi.unstubAllGlobals(); vi.useRealTimers(); }
 });
 
 it('refuses foreign, incomplete or wrong-thread frames and keeps unknown capabilities distinct from denied or granted', () => {

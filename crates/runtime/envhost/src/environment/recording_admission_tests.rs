@@ -2,7 +2,6 @@ use super::*;
 use crate::blobs::{BlobError, BlobWriter, MemoryBlobs};
 use crate::processes::ScopeKind;
 use crate::snapshot::NoProgress;
-use crate::state_store::StateRoot;
 use orch_link_contract::commands::IndexMode;
 use orch_link_contract::source::{
     EnvironmentDataPart, FsDataExport, FsDataImport, FsRecord, FsRecordRead, RecordKind,
@@ -83,6 +82,8 @@ impl Rig {
         );
         let environment = new_id();
         let attach = EnvAttach {
+            workspace: Default::default(),
+
             resources: None,
             data_generation: None,
             storage: None,
@@ -107,6 +108,7 @@ impl Rig {
             environment_id: environment,
             snapshot_id: new_id(),
             directory: String::new(),
+            wait_for_indexing: true,
             kind: RecordKind::Turn,
             record_days: crate::file_states::DEFAULT_RECORD_DAYS,
             max_bytes: crate::file_states::DEFAULT_RECORD_MAX_BYTES,
@@ -118,7 +120,12 @@ impl Rig {
             .join("roots")
             .join(format!("{}.json", request.snapshot_id));
         let bytes = std::fs::read(&path)?;
-        let root: StateRoot = serde_json::from_slice(&bytes)?;
+        let (root, _) = attached
+            .file_states
+            .as_ref()
+            .ok_or("recording store absent")?
+            .store()
+            .load(request.snapshot_id, host.inner.clock.time())?;
         let mut retained = vec![(path, bytes)];
         for oid in root.objects.values().chain(std::iter::once(&root.tree_ref)) {
             let path = store.join("git/objects").join(&oid[..2]).join(&oid[2..]);
@@ -319,5 +326,43 @@ async fn file_state_import_holds_admission_while_its_source_is_paused_and_releas
             })
             .await?;
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_native_notice_invalidates_recording_before_its_debounced_batch_can_run() -> TestResult {
+    let rig = Rig::new().await?;
+    let environment = rig.host.environment(rig.request.environment_id)?;
+    drop(lock(&environment.watcher).take());
+    let states = environment
+        .file_states
+        .clone()
+        .ok_or("recording store absent")?;
+    let _working = states.begin_work();
+    std::fs::write(
+        environment.files.root().root_path().join("code.bin"),
+        b"new live bytes",
+    )?;
+    environment.admit_directory_change(&Change::Paths(vec![environment.files.parse("code.bin")?]));
+    let now = rig.host.inner.clock.time();
+    let captured = rig
+        .host
+        .fs_record_capture(
+            &FsRecord {
+                snapshot_id: new_id(),
+                ..rig.request.clone()
+            },
+            new_id(),
+            Time::new(now.get() + chrono::Duration::seconds(30)),
+            now,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await?;
+    assert_eq!(
+        captured.result.state,
+        RecordState::Unavailable,
+        "the native notice arrived before capture, even though its batch has not run"
+    );
+    assert_eq!(captured.result.reason.as_deref(), Some("not_ready"));
     Ok(())
 }
