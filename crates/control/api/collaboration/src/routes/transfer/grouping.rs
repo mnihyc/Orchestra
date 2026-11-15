@@ -293,7 +293,7 @@ impl effects::Apply for HomeMove {
     fn apply<'a>(
         ctx: &'a Ctx,
         conn: &'a mut Conn,
-        _: &'a Principal,
+        principal: &'a Principal,
         value: &'a HomeValue,
         before: effects::FirstEffect<'a>,
     ) -> BoxFuture<'a, ApiResult<effects::Outcome<Self::Output>>> {
@@ -309,6 +309,20 @@ impl effects::Apply for HomeMove {
                 changed,
             };
             let deadline = before.deadline();
+            let server_host = if changed {
+                crate::server_host_use::Before::take_intent(
+                    conn,
+                    principal,
+                    root.object,
+                    &contract::ResourceHomeSetBody {
+                        home_id: value.destination.id,
+                        expected_revision: value.expected_revision,
+                    },
+                )
+                .await?
+            } else {
+                None
+            };
             before.check()?;
             if !changed {
                 return Ok(effects::Outcome::Unchanged(receipt));
@@ -322,6 +336,9 @@ impl effects::Apply for HomeMove {
                 ctx.now,
             )
             .await?;
+            if let Some(before) = server_host {
+                before.require(ctx, conn, principal).await?;
+            }
             if root.kind == ResourceKind::Environment {
                 orch_db::queries::resources::mounts::changed(conn, &[root.object.id], ctx.now)
                     .await?;

@@ -155,6 +155,7 @@ pub fn install_interfaces() {
     routes::resources::mcp_readers::__api_install_712f4c3049();
 
     routes::resources::mounts::__api_install_dd4e30c19a();
+    routes::resources::mounts::__api_install_a94d90d474();
 
     routes::resources::mounts::__api_install_66bcfd9efe();
 
@@ -219,6 +220,8 @@ pub fn install_interfaces() {
     routes::resources::templates::__api_install_d83d9b6fff();
 
     routes::resources::validation::__api_install_d2a05682ae();
+
+    routes::resources::validation::__api_install_ef3cd14b55();
 
     routes::resources::view::__api_install_9b9d72ac9f();
 

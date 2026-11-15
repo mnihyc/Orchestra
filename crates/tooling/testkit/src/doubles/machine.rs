@@ -42,10 +42,12 @@ pub struct Execution {
 }
 
 type Script = Box<dyn Fn(&Command) -> Result<CommandResult, CommandError> + Send + Sync>;
+type Observation = Arc<dyn Fn(&Command) + Send + Sync>;
 
 /// What answers the commands of a scripted machine.
 #[derive(Default)]
 pub struct ScriptedHandler {
+    observation: Mutex<Option<Observation>>,
     executions: Mutex<Vec<Execution>>,
     scripts: Mutex<HashMap<CommandKind, Script>>,
     hold: Mutex<Vec<CommandKind>>,
@@ -61,6 +63,10 @@ impl std::fmt::Debug for ScriptedHandler {
 }
 
 impl ScriptedHandler {
+    /// Observes the actual handler after its deliberate waits, independently of its chosen responder.
+    pub fn observe(&self, observation: impl Fn(&Command) + Send + Sync + 'static) {
+        *lock(&self.observation) = Some(Arc::new(observation));
+    }
     /// Answers commands of `kind` with what `script` makes of them.
     pub fn on(
         &self,
@@ -78,6 +84,12 @@ impl ScriptedHandler {
     /// Lets the commands that wait go on.
     pub fn release(&self) {
         lock(&self.hold).clear();
+        self.release.notify_waiters();
+    }
+
+    /// Releases one actual handler kind while retaining the fixture's other deliberate waits.
+    pub fn release_kind(&self, kind: CommandKind) {
+        lock(&self.hold).retain(|held| *held != kind);
         self.release.notify_waiters();
     }
 
@@ -141,6 +153,10 @@ impl CommandHandler for ScriptedHandler {
         let take = *lock(&self.take);
         if !take.is_zero() {
             tokio::time::sleep(take).await;
+        }
+        let observation = lock(&self.observation).clone();
+        if let Some(observation) = observation {
+            observation(&command);
         }
         let scripts = lock(&self.scripts);
         match scripts.get(&kind) {
@@ -314,8 +330,18 @@ impl ScriptedMachine {
 
     /// Publishes an event.
     pub async fn publish(&self, stream: &Stream, event: &Event) {
+        self.publish_from(None, stream, event).await;
+    }
+
+    /// Publishes the physical producer already captured by the fixture's observation source.
+    pub async fn publish_from(
+        &self,
+        native_opening_id: Option<Id>,
+        stream: &Stream,
+        event: &Event,
+    ) {
         self.link
-            .publish(stream, event)
+            .publish_from_now(native_opening_id, stream, event)
             .await
             .unwrap_or_else(|error| panic!("an event could not be published: {error}"));
     }
