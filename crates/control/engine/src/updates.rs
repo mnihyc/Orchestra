@@ -40,10 +40,6 @@ pub const DEFAULT_BATCH_PARALLEL: i64 = 4;
 const DEFAULT_WAIT: i64 = 10;
 /// Two minutes covers a connector and its executor coming online.
 const DEFAULT_VERIFY: i64 = 120;
-/// Verification may be given between ten seconds and one hour.
-const VERIFY_RANGE: std::ops::RangeInclusive<i64> = 10..=3_600;
-/// The shipped release accepts connectors from the first public protocol version.
-pub const CONNECTOR_MINIMUM: &str = "0.1.0";
 
 /// The object whose unit is replaced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,9 +313,9 @@ pub async fn options(
             "options.wait_minutes must be a nonnegative representable duration".to_owned(),
         ));
     }
-    if !VERIFY_RANGE.contains(&verify_timeout_secs) {
+    if verify_timeout_secs < 1 || chrono::Duration::try_seconds(verify_timeout_secs).is_none() {
         return Err(UpdateError::Invalid(
-            "options.verify_timeout_secs is between 10 and 3600".to_owned(),
+            "options.verify_timeout_secs must be a positive representable duration".to_owned(),
         ));
     }
     let keep_previous = match given.and_then(|o| o.keep_previous) {
