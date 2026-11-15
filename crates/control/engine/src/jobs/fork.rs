@@ -2880,6 +2880,7 @@ impl Engine {
             input_id: Id::nil(),
             before_snapshot_id: None,
             files_end_manifest: None,
+            files_changed: None,
             end_manifest_blob: None,
             model: plan.to.model.clone(),
             effort: plan.to.effort.clone(),
@@ -2897,6 +2898,7 @@ impl Engine {
             waiting_since: None,
             waited_ms: 0,
             interrupted_by: None,
+            interrupted_at: None,
             command_cleanup: None,
             started_at: None,
             completed_at: None,
@@ -3003,6 +3005,7 @@ impl Engine {
             .capability_use_preview(
                 conn,
                 &crate::access::ProviderUse {
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person: recipe.by,
                     node: thread_id,
                     provider: provider.id,

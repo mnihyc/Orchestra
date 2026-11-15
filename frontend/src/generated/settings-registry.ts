@@ -169,7 +169,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "ask.max_output_tokens",
     "title": "Ask answer tokens",
-    "description": "The most output tokens per Ask model request, also reserved before fitting conversation context. The lowest system or organization value applies.",
+    "description": "The most output tokens per Ask model request. The request is fitted to the window less this, and an answer takes half of the window at most. The lowest system or organization value applies.",
     "group": "automation",
     "schema": {
       "type": "integer",
@@ -193,7 +193,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "ask.context_tokens",
     "title": "Ask context tokens",
-    "description": "Unset uses the chosen model's context window. When set, the smaller value applies to Ask only; output and tool-result reserves must still fit. The lowest system or organization value applies.",
+    "description": "Unset uses the chosen model's context window; a model that states none is not given a small one. When set, the smaller value applies to Ask only. A window no larger than twice the answer tokens leaves the answer half of it. The lowest system or organization value applies.",
     "group": "automation",
     "schema": {
       "type": "integer",
@@ -239,14 +239,13 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
-    "key": "ask.tool_bytes",
-    "title": "Ask source size",
-    "description": "The most bytes from one read result supplied to the model, with a canonical link to the full source.",
+    "key": "ask.docs_hits",
+    "title": "Ask guide pages per search",
+    "description": "The most guide pages one Ask search of the help gives the model, English and Chinese alternating where both match.",
     "group": "automation",
     "schema": {
       "type": "integer",
-      "minimum": 1,
-      "x-unit": "bytes"
+      "minimum": 1
     },
     "class": "policy",
     "scopes": [
@@ -254,24 +253,23 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "org"
     ],
     "merge": "min",
-    "default": 65536,
-    "example": 65536,
-    "text_key": "day100.builtin.ask.tool_bytes",
+    "default": 5,
+    "example": 8,
+    "text_key": "day100.builtin.ask.docs_hits",
     "keywords": [],
     "display": {
-      "unit": "bytes",
+      "unit": "raw",
       "zero": null
     }
   },
   {
-    "key": "ask.turn_tool_bytes",
-    "title": "Ask sources per turn",
-    "description": "The total read-result bytes supplied while answering one question.",
+    "key": "ask.docs_excerpt_tokens",
+    "title": "Ask guide excerpt size",
+    "description": "The most tokens of one guide page that Ask's help search gives the model; the page's link comes with it.",
     "group": "automation",
     "schema": {
       "type": "integer",
-      "minimum": 1,
-      "x-unit": "bytes"
+      "minimum": 1
     },
     "class": "policy",
     "scopes": [
@@ -279,12 +277,60 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "org"
     ],
     "merge": "min",
-    "default": 262144,
-    "example": 262144,
-    "text_key": "day100.builtin.ask.turn_tool_bytes",
+    "default": 1000,
+    "example": 2000,
+    "text_key": "day100.builtin.ask.docs_excerpt_tokens",
     "keywords": [],
     "display": {
-      "unit": "bytes",
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "ask.max_operations",
+    "title": "Ask operations per search",
+    "description": "The most read operations one Ask search of the read catalogue returns.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "min",
+    "default": 20,
+    "example": 40,
+    "text_key": "day100.builtin.ask.max_operations",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "ask.max_links",
+    "title": "Ask links per source",
+    "description": "The most canonical source links Ask keeps from one read.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "min",
+    "default": 50,
+    "example": 100,
+    "text_key": "day100.builtin.ask.max_links",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
       "zero": null
     }
   },
@@ -678,7 +724,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "merge": "map",
     "default": {},
     "example": {
-      "vision": true
+      "optional.tools": false
     },
     "text_key": "day100.builtin.agent.features",
     "keywords": []
@@ -1022,14 +1068,89 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
+    "key": "agents.web_action_wait_secs",
+    "title": "Web action wait",
+    "description": "Close a native web action that has not reported its end after this many seconds, with its reason. A later result can still update it. Applies when the session opens again.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 120,
+    "example": 240,
+    "text_key": "day100.builtin.agents.web_action_wait_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "agents.native_result_wait_ms",
+    "title": "Native result wait",
+    "description": "How long an agent program may read retained native results before reporting unavailable evidence. Programs that declare this wait use it as their profile default, within the engine's interrupt window. Applies when the program starts again.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "milliseconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 2000,
+    "example": 3000,
+    "text_key": "day100.builtin.agents.native_result_wait_ms",
+    "keywords": [],
+    "display": {
+      "unit": "milliseconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "agents.native_result_buffer_bytes",
+    "title": "Native result buffer",
+    "description": "Pending native input retained for a session while its result evidence is read. When full, the optional read ends as unverified and all input continues. Programs that declare this buffer use it as their profile default. Applies when the program starts again.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 8388608,
+    "example": 16777216,
+    "text_key": "day100.builtin.agents.native_result_buffer_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
     "key": "agents.subagents_at_once",
     "title": "Sub-agents at once",
     "description": "How many sub-agents the harness may run at once; the shortest value along the hierarchy wins. A harness without this control says it does not apply.",
     "group": "agent",
     "schema": {
       "type": "integer",
-      "minimum": 1,
-      "maximum": 64
+      "minimum": 1
     },
     "class": "parameter",
     "scopes": [
@@ -1056,8 +1177,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "group": "agent",
     "schema": {
       "type": "integer",
-      "minimum": 1,
-      "maximum": 5
+      "minimum": 1
     },
     "class": "parameter",
     "scopes": [
@@ -1414,6 +1534,33 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
+    "key": "thread.silent_after_secs",
+    "title": "Silence notice",
+    "description": "How many seconds nothing may arrive from a running agent, with no tool running, before a thread's status line says how long nothing came.",
+    "group": "collaboration",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic"
+    ],
+    "merge": "replace",
+    "default": 120,
+    "example": 300,
+    "text_key": "day100.builtin.thread.silent_after_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
     "key": "thread.goal.max_turns",
     "title": "Goal turns",
     "description": "The most turns a goal may use here; 0 is no limit. A goal may set a stricter own limit; it cannot raise a limit set above it. Reaching a limit stops the goal and says which.",
@@ -1687,6 +1834,30 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "acme.*"
     ],
     "text_key": "day100.builtin.providers.allowed",
+    "keywords": []
+  },
+  {
+    "key": "models.add_switches_on",
+    "title": "Switched on when added",
+    "description": "What a model starts with when it is added from its provider's catalogue: everything it offers (all), only its efforts and context sizes (basic), or only its window and efforts (nothing). A manager can switch on the rest afterwards.",
+    "group": "models",
+    "schema": {
+      "type": "string",
+      "enum": [
+        "all",
+        "basic",
+        "nothing"
+      ]
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "replace",
+    "default": "all",
+    "example": "basic",
+    "text_key": "day100.builtin.models.add_switches_on",
     "keywords": []
   },
   {
@@ -2747,6 +2918,34 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
+    "key": "threads.opening_items",
+    "title": "Thread opening items",
+    "description": "Timeline items in the first screen. Older items remain available by scrolling; a reader may request another window size.",
+    "group": "collaboration",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 40,
+    "example": 60,
+    "text_key": "day100.builtin.threads.opening_items",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
     "key": "threads.offline_deadline",
     "title": "Offline turn deadline",
     "description": "End the active turn after this many offline seconds; none keeps waiting. Each outage retains the setting it began with.",
@@ -2778,6 +2977,145 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": [],
     "display": {
       "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.output_capture_bytes",
+    "title": "Retained command output",
+    "description": "Bytes of each native text output to retain, including its inline tail. Defaults to 64 MiB. Larger outputs keep the exact last bytes and show the missing original interval. Changes apply to the next session.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 67108864,
+    "example": 67108864,
+    "text_key": "day100.builtin.threads.output_capture_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.background_snapshot_seconds",
+    "title": "Roster retention",
+    "description": "Idle seconds to retain a native command snapshot and its reviewed End identities. Active page reads renew it; an expired read restarts transparently before confirmation.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 30,
+    "example": 30,
+    "text_key": "day100.builtin.threads.background_snapshot_seconds",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.background_page_items",
+    "title": "Native roster page",
+    "description": "Preferred commands in one native roster page. Every page is transferred; the complete roster has no row cap.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 200,
+    "example": 200,
+    "text_key": "day100.builtin.threads.background_page_items",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.background_page_bytes",
+    "title": "Native roster page bytes",
+    "description": "Preferred bytes in one native roster page. One command can exceed this target; the negotiated transport allowance still applies.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 131072,
+    "example": 131072,
+    "text_key": "day100.builtin.threads.background_page_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.background_preview_bytes",
+    "title": "Roster command preview",
+    "description": "Command bytes shown in each native roster preview. Longer commands retain an explicit preview-truncated fact; all command identities remain available.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 4096,
+    "example": 4096,
+    "text_key": "day100.builtin.threads.background_preview_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
       "zero": null
     }
   },
@@ -3007,7 +3345,10 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     },
     "class": "parameter",
     "scopes": [
-      "org"
+      "org",
+      "project",
+      "topic",
+      "thread"
     ],
     "merge": "replace",
     "default": null,
@@ -3342,8 +3683,8 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   },
   {
     "key": "threads.let_viewers_in",
-    "title": "Let thread viewers in",
-    "description": "The initial choice to let a new thread's viewers use its environment. The creator confirms the choice; changing this default grants no access by itself.",
+    "title": "Viewers can open the environment",
+    "description": "The initial choice to let a new thread's viewers look at its files, terminal and screens, without Use or permission to change them. The creator confirms the choice; changing this default grants no access by itself.",
     "group": "agent",
     "schema": {
       "type": "boolean"
@@ -3743,6 +4084,33 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
+    "key": "workspace.record_wait_secs",
+    "title": "Wait for turn files",
+    "description": "Seconds a turn waits for the files before it to be recorded; when they are not ready in time the turn starts with per-file undo, and the turn says so.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 30,
+    "example": 30,
+    "text_key": "day100.builtin.workspace.record_wait_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
     "key": "broadcast.delivery",
     "title": "Announcement delivery",
     "description": "How an announcement reaches a thread whose turn is running: it interrupts, steers, or waits for the next turn.",
@@ -4062,15 +4430,14 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
-    "key": "requests.expiry_hours",
+    "key": "requests.expiry_minutes",
     "title": "Pending agent requests",
     "description": "The longest pending boundary decision an agent requests; an earlier requested port-link lapse also ends it.",
     "group": "confinement",
     "schema": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 168,
-      "x-unit": "hours"
+      "x-unit": "minutes"
     },
     "class": "policy",
     "scopes": [
@@ -4080,12 +4447,12 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "topic"
     ],
     "merge": "min",
-    "default": 24,
-    "example": 24,
-    "text_key": "day100.builtin.requests.expiry_hours",
+    "default": 1440,
+    "example": 1440,
+    "text_key": "day100.builtin.requests.expiry_minutes",
     "keywords": [],
     "display": {
-      "unit": "hours",
+      "unit": "minutes",
       "zero": null
     }
   },
@@ -5510,26 +5877,26 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
-    "key": "access.request_expiry_days",
+    "key": "access.request_expiry_minutes",
     "title": "Access request expiry",
-    "description": "After how many days a request for access that nobody decided lapses.",
+    "description": "After how many minutes a request for access that nobody decided lapses.",
     "group": "access",
     "schema": {
       "type": "integer",
       "minimum": 1,
-      "x-unit": "days"
+      "x-unit": "minutes"
     },
     "class": "policy",
     "scopes": [
       "system"
     ],
     "merge": "replace",
-    "default": 14,
-    "example": 14,
-    "text_key": "day100.builtin.access.request_expiry_days",
+    "default": 20160,
+    "example": 20160,
+    "text_key": "day100.builtin.access.request_expiry_minutes",
     "keywords": [],
     "display": {
-      "unit": "days",
+      "unit": "minutes",
       "zero": null
     }
   },
@@ -5960,7 +6327,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "group": "switching",
     "schema": {
       "type": "integer",
-      "minimum": 10,
+      "minimum": 1,
       "x-unit": "seconds"
     },
     "class": "parameter",
@@ -6184,7 +6551,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "auto.summarizer",
     "title": "Summarizer",
-    "description": "Which summarizer is used, and its configuration.",
+    "description": "Summarizer and model token allowances. Target character counts are separate.",
     "group": "automation",
     "schema": {
       "type": "object",
@@ -6525,7 +6892,54 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "thread"
     ],
     "merge": "map",
-    "default": {},
+    "default": {
+      "thread": {
+        "automatic": false,
+        "on": [
+          "turn_completed",
+          "milestone"
+        ],
+        "min_interval_secs": 120,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "topic": {
+        "automatic": false,
+        "on": [
+          "child_changed"
+        ],
+        "min_interval_secs": 900,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "document": {
+        "automatic": false,
+        "on": [
+          "content_changed"
+        ],
+        "min_interval_secs": 300,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "chat": {
+        "automatic": false,
+        "on": [
+          "message_posted"
+        ],
+        "min_interval_secs": 300,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "chat_title": {
+        "automatic": false,
+        "on": [
+          "message_posted"
+        ],
+        "min_interval_secs": 300,
+        "context_tokens": 32000,
+        "output_chars": 80
+      }
+    },
     "example": {
       "thread": {
         "automatic": true,
@@ -6568,6 +6982,34 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": [],
     "display": {
       "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "summary.read_repeats",
+    "title": "Summary read repeats",
+    "description": "Unpaid source rereads and prompt rebuilds before the first model call. A changing read or rebuild loop uses this limit; 0 makes no repeat. A source change after a model call never creates a paid retry.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 3,
+    "example": 5,
+    "text_key": "day100.builtin.summary.read_repeats",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
       "zero": null
     }
   },
@@ -6693,14 +7135,14 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
-    "key": "sharing.external_max_days",
+    "key": "sharing.external_max_minutes",
     "title": "Outside entries end",
     "description": "The longest an entry that names somebody from outside may last after it is written or renewed.",
     "group": "collaboration",
     "schema": {
       "type": "integer",
       "minimum": 1,
-      "x-unit": "days"
+      "x-unit": "minutes"
     },
     "class": "policy",
     "scopes": [
@@ -6711,11 +7153,11 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     ],
     "merge": "min",
     "default": null,
-    "example": 30,
-    "text_key": "day100.builtin.sharing.external_max_days",
+    "example": 43200,
+    "text_key": "day100.builtin.sharing.external_max_minutes",
     "keywords": [],
     "display": {
-      "unit": "days",
+      "unit": "minutes",
       "zero": null
     }
   },
@@ -7553,6 +7995,33 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
+    "key": "documents.readme_blocks",
+    "title": "README preview",
+    "description": "Top-level blocks shown in a place's README preview, with their children. An earlier page break ends the preview; Open document always reaches the whole page.",
+    "group": "chat_documents",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 12,
+    "example": 20,
+    "text_key": "day100.builtin.documents.readme_blocks",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
     "key": "documents.links.shown",
     "title": "Links tabs",
     "description": "The tabs of a document's Links section that its readers see; the document's owner can switch tabs off for one document.",
@@ -7773,6 +8242,29 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
+    "key": "search.text_chars",
+    "title": "Conversation search text",
+    "description": "Characters indexed per conversation item after masking. Changes apply to new text and a search rebuild; raw calls, output, hidden reasoning, side threads and text with unavailable masking inputs are excluded.",
+    "group": "chat_documents",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 20000,
+    "example": 40000,
+    "text_key": "day100.builtin.search.text_chars",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
     "key": "search.word_recent_candidates",
     "title": "Recent word sample",
     "description": "Recent rows sampled before probing the text index.",
@@ -7931,6 +8423,30 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "default": 20,
     "example": 20,
     "text_key": "day100.builtin.search.page_size",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "navigation.tree_page_size",
+    "title": "Hierarchy page size",
+    "description": "Default rows in a hierarchy branch page. An explicit page request may be larger.",
+    "group": "collaboration",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "replace",
+    "default": 50,
+    "example": 50,
+    "text_key": "day100.builtin.navigation.tree_page_size",
     "keywords": [],
     "display": {
       "unit": "raw",
@@ -8642,7 +9158,6 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "schema": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 365,
       "x-unit": "days"
     },
     "class": "policy",
@@ -8863,14 +9378,14 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
-    "key": "invitations.default_hours",
+    "key": "invitations.default_minutes",
     "title": "Invitation life",
-    "description": "For how many hours an invitation is good when its inviter says nothing.",
+    "description": "For how many minutes an invitation is good when its inviter says nothing.",
     "group": "joining",
     "schema": {
       "type": "integer",
       "minimum": 1,
-      "x-unit": "hours"
+      "x-unit": "minutes"
     },
     "class": "policy",
     "scopes": [
@@ -8878,24 +9393,24 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "org"
     ],
     "merge": "replace",
-    "default": 168,
-    "example": 168,
-    "text_key": "day100.builtin.invitations.default_hours",
+    "default": 10080,
+    "example": 10080,
+    "text_key": "day100.builtin.invitations.default_minutes",
     "keywords": [],
     "display": {
-      "unit": "hours",
+      "unit": "minutes",
       "zero": null
     }
   },
   {
-    "key": "invitations.max_hours",
+    "key": "invitations.max_minutes",
     "title": "Longest invitation",
-    "description": "The most hours an invitation may be good for.",
+    "description": "The most minutes an invitation may be good for.",
     "group": "joining",
     "schema": {
       "type": "integer",
       "minimum": 1,
-      "x-unit": "hours"
+      "x-unit": "minutes"
     },
     "class": "policy",
     "scopes": [
@@ -8903,12 +9418,12 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "org"
     ],
     "merge": "min",
-    "default": 720,
-    "example": 720,
-    "text_key": "day100.builtin.invitations.max_hours",
+    "default": 43200,
+    "example": 43200,
+    "text_key": "day100.builtin.invitations.max_minutes",
     "keywords": [],
     "display": {
-      "unit": "hours",
+      "unit": "minutes",
       "zero": null
     }
   },
@@ -8920,7 +9435,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "schema": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 1000
+      "maximum": 2147483647
     },
     "class": "policy",
     "scopes": [
@@ -8978,6 +9493,128 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "unit": "hours",
       "zero": null
     }
+  },
+  {
+    "key": "api.read_repeats",
+    "title": "Repeated reads",
+    "description": "How many times a read is made again, in place of being refused, when what it showed has moved while it was being answered; 0 makes no repeat.",
+    "group": "system",
+    "schema": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 3,
+    "example": 5,
+    "text_key": "day100.builtin.api.read_repeats",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "interface.kept_closed_tabs",
+    "title": "Recently closed tabs",
+    "description": "How many recently closed views keep their local state in this page. Open tabs always keep theirs. Each person may override this default in Interface.",
+    "group": "system",
+    "schema": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 10,
+    "example": 20,
+    "text_key": "day100.builtin.interface.kept_closed_tabs",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "interface.progress_delay_ms",
+    "title": "Loading indication delay",
+    "description": "Milliseconds before a read shows a spinner. Each person may override this default in Interface.",
+    "group": "system",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "milliseconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 200,
+    "example": 300,
+    "text_key": "day100.builtin.interface.progress_delay_ms",
+    "keywords": [],
+    "display": {
+      "unit": "milliseconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "interface.read_freshness_ms",
+    "title": "Read freshness",
+    "description": "Milliseconds before returning readers revalidate directory listings, repeated lookups, reports and live status. Release catalogues stay for the page; ordinary mutable views revalidate when shown.",
+    "group": "system",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "integer",
+          "minimum": 0,
+          "x-unit": "milliseconds"
+        },
+        "lookup": {
+          "type": "integer",
+          "minimum": 0,
+          "x-unit": "milliseconds"
+        },
+        "report": {
+          "type": "integer",
+          "minimum": 0,
+          "x-unit": "milliseconds"
+        },
+        "status": {
+          "type": "integer",
+          "minimum": 0,
+          "x-unit": "milliseconds"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": {
+      "directory": 60000,
+      "lookup": 15000,
+      "report": 60000,
+      "status": 5000
+    },
+    "example": {
+      "directory": 120000,
+      "lookup": 30000,
+      "report": 60000,
+      "status": 2000
+    },
+    "text_key": "day100.builtin.interface.read_freshness_ms",
+    "keywords": []
   },
   {
     "key": "release.check_days",
