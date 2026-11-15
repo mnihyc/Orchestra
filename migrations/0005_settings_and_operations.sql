@@ -159,7 +159,7 @@ CREATE TABLE preflights (
     plan jsonb NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT preflights_kind_check CHECK (((kind = ANY (ARRAY['thread_fork'::text, 'fork_batch'::text, 'chat_duplicate'::text, 'chat_move_out'::text, 'environment_move'::text, 'move_batch'::text, 'environment_update'::text, 'provider_update'::text, 'update_batch'::text, 'workspace_restore'::text, 'thread_move'::text, 'port_opening'::text, 'node_delete'::text, 'node_archive'::text, 'node_move'::text, 'outside_removal'::text])) OR (kind = ANY ('{loss,recover_batch,host_delete}'::text[])) OR (kind = ANY ('{storage_cleanup}'::text[])))),
+    CONSTRAINT preflights_kind_check CHECK (((kind = ANY (ARRAY['thread_fork'::text, 'fork_batch'::text, 'chat_duplicate'::text, 'chat_move_out'::text, 'environment_move'::text, 'move_batch'::text, 'environment_update'::text, 'provider_update'::text, 'update_batch'::text, 'workspace_restore'::text, 'thread_move'::text, 'ask_move_out'::text, 'port_opening'::text, 'node_delete'::text, 'node_archive'::text, 'node_move'::text, 'outside_removal'::text, 'resource_stop'::text])) OR (kind = ANY ('{loss,recover_batch,host_delete}'::text[])) OR (kind = ANY ('{storage_cleanup}'::text[])))),
     CONSTRAINT preflights_pkey PRIMARY KEY (id),
     CONSTRAINT preflights_created_by_fkey FOREIGN KEY (created_by) REFERENCES users(id),
     CONSTRAINT preflights_node_id_fkey FOREIGN KEY (node_id) REFERENCES nodes(id)
