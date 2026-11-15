@@ -59,8 +59,6 @@ export interface ViewerProps {
 
 /** Why a file cannot be edited where it is shown. */
 export type ReadOnlyReason =
-  /** Phone sheets are for reading; editing remains in the wide code view. */
-  | { kind: 'small_screen' }
   /** The reader holds no `files.manage` on the thread. */
   | { kind: 'permission' }
   /** The environment is offline, and this is its copy from a time. */

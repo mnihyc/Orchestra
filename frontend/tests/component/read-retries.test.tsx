@@ -39,8 +39,12 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(own.getByText(i18n.t('common.loading'))).toHaveClass('sr-only');
     await settle();
     expect(read).toHaveBeenCalledTimes(1);
-    expect(own.getByText(i18n.t('ui.read.retrying'))).toBeVisible();
-    expect(pending.queryByText(i18n.t('ui.read.retrying'))).not.toBeInTheDocument();
+    expect(own.getByText(i18n.t('clientFacts.retryEligible'), { exact: false })).toBeVisible();
+    expect(pending.queryByText(i18n.t('clientFacts.retryEligible'), { exact: false })).not.toBeInTheDocument();
+    const scheduled = screen.getByRole('region', { name: 'Own' }).querySelector('time');
+    expect(scheduled).not.toBeNull();
+    expect(Date.parse(scheduled!.dateTime)).toBeGreaterThan(Date.now());
+    expect(Date.parse(scheduled!.dateTime)).toBeLessThanOrEqual(Date.now() + READ_RETRY_PAUSES_MS[0]);
     for (let attempt = 0; attempt < READ_RETRY_PAUSES_MS.length; attempt += 1) {
       await act(async () => { await vi.advanceTimersByTimeAsync(READ_RETRY_PAUSES_MS[attempt]!); });
       await settle();
