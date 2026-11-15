@@ -1,0 +1,5 @@
+fmt
+clippy
+contracts
+test -p orch-api-base --lib -- response_wait::tests::
+test -p orch-api-core --test provider_harness

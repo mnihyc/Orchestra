@@ -139,6 +139,9 @@ pub mod registry;
 #[path = "response_body.rs"]
 pub mod response_body;
 
+#[path = "response_wait.rs"]
+pub mod response_wait;
+
 #[path = "routes/mod.rs"]
 pub mod routes;
 

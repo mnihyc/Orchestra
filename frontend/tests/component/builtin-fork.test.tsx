@@ -44,7 +44,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`opens the Private selected-hi
   const completed = turn('message-fork-turn', { ordinal: 1, inputId: 'message-fork-input', state: 'completed' });
   const item = { ...agentMessage('message-fork-answer', 'Fork this answer.', { turn: completed.id }), thread_id: thread.id, seq_created: 1, seq_updated: 1 };
   threadWriter.reset(thread.id, { thread, turns: [completed], items: [item] }, false);
-  const context: TimelineContext = { threadId: thread.id, threadName: thread.name, meId: thread.owner.id, detail: 'steps', recent: new Set(),
+  const context: TimelineContext = { threadId: thread.id, threadName: thread.name, meId: thread.owner.id, detail: 'normal',
     layout: 'one', setLayout: () => undefined, canInteract: true, canManage: true, live: true, lit: null, selection: NOT_PICKING };
   show(<TimelineContextValue.Provider value={context}><ItemFrame item={item} label={i18n.t('timeline.agent.menu')}><p>Fork this answer.</p></ItemFrame></TimelineContextValue.Provider>);
   await userEvent.click(screen.getByRole('button', { name: i18n.t('timeline.actions.more') }));

@@ -9,6 +9,9 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- A conversation's words are looked up together with its thread in one index (items_search_idx).
 CREATE EXTENSION IF NOT EXISTS btree_gin;
 
+-- Ordered history boundaries combine continuation, turn ordinal and sequence ranges.
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+
 CREATE SEQUENCE document_discussion_subscription_seq
     START WITH 1
     INCREMENT BY 1
@@ -934,6 +937,41 @@ BEGIN
       WHERE source_kind='comment' AND part_id=NEW.id AND source_moment IS DISTINCT FROM NEW.created_at;
   END IF;
   RETURN NEW;
+END
+$$;
+
+-- An index may not yet exist for an admitted imported message; its visible words still come from the source.
+CREATE FUNCTION public.orch_conversation_text(item_kind text, body jsonb, indexed_text text) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+    AS $$
+DECLARE
+  written text;
+  visible text := '';
+  opening integer;
+  closing integer;
+BEGIN
+  IF indexed_text IS NOT NULL THEN
+    written := indexed_text;
+  ELSIF item_kind='user_message' AND body->>'source'='goal' THEN
+    written := COALESCE(body #>> '{goal,condition}','');
+  ELSIF item_kind='user_message' THEN
+    SELECT COALESCE(string_agg(COALESCE(part->>'text',part->>'inline_text',part->>'name',''),E'\n' ORDER BY ordinal),'') INTO written
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(body->'parts')='array' THEN body->'parts' ELSE '[]'::jsonb END) WITH ORDINALITY parts(part,ordinal);
+  ELSIF item_kind='error' THEN
+    written := COALESCE(body->>'message','');
+  ELSE
+    written := COALESCE(body->>'text','');
+  END IF;
+  LOOP
+    opening := strpos(written,'<orch>');
+    EXIT WHEN opening=0;
+    visible := visible || left(written,opening-1);
+    written := substr(written,opening+length('<orch>'));
+    closing := strpos(written,'</orch>');
+    IF closing=0 THEN RETURN visible; END IF;
+    written := substr(written,closing+length('</orch>'));
+  END LOOP;
+  RETURN visible || written;
 END
 $$;
 
@@ -2242,6 +2280,26 @@ BEGIN
 END
 $$;
 
+-- Stable boundary keys are maintained only when structural history ownership changes.
+CREATE FUNCTION public.thread_history_item_edge() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='UPDATE' AND (NEW.thread_id,NEW.continuation_id,NEW.turn_id,NEW.stream,NEW.kind,NEW.seq_created)
+    IS NOT DISTINCT FROM (OLD.thread_id,OLD.continuation_id,OLD.turn_id,OLD.stream,OLD.kind,OLD.seq_created) THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.turn_id IS NULL OR NEW.stream<>'main' OR NEW.kind='reasoning' THEN
+    IF TG_OP='UPDATE' THEN DELETE FROM thread_history_item_edges WHERE item_id=NEW.id; END IF;
+    RETURN NEW;
+  END IF;
+  INSERT INTO thread_history_item_edges AS e(item_id,thread_id,continuation_id,turn_id,ordinal,seq_created)
+    SELECT NEW.id,NEW.thread_id,NEW.continuation_id,NEW.turn_id,t.ordinal,NEW.seq_created FROM turns t WHERE t.id=NEW.turn_id
+    ON CONFLICT(item_id) DO UPDATE SET thread_id=EXCLUDED.thread_id,continuation_id=EXCLUDED.continuation_id,
+      turn_id=EXCLUDED.turn_id,ordinal=EXCLUDED.ordinal,seq_created=EXCLUDED.seq_created
+    WHERE (e.thread_id,e.continuation_id,e.turn_id,e.ordinal,e.seq_created)
+      IS DISTINCT FROM (EXCLUDED.thread_id,EXCLUDED.continuation_id,EXCLUDED.turn_id,EXCLUDED.ordinal,EXCLUDED.seq_created);
+  RETURN NEW;
+END $$;
+
 CREATE FUNCTION public.thread_history_cut_freeze() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -2252,7 +2310,14 @@ BEGIN
   -- keeps the item as it stood, in the cut, with a pin on the bytes it names.
   WITH holding AS (
     SELECT s.cut_id, s.seq_offset FROM thread_history_cut_spans s
-     WHERE s.thread_id=OLD.thread_id AND s.owner_continuation_id=OLD.continuation_id
+      JOIN thread_history_cuts c ON c.id=s.cut_id
+      LEFT JOIN LATERAL (SELECT r.id FROM thread_history_cuts r WHERE r.id=s.cut_id
+        AND c.request_user_id IS NOT NULL AND NOT r.artifacts ? 'request_released'
+        FOR SHARE) request_owner ON true
+     WHERE (c.request_user_id IS NULL OR request_owner.id IS NOT NULL)
+       AND s.thread_id=OLD.thread_id AND s.owner_continuation_id=OLD.continuation_id
+       AND (s.thread_id=c.thread_id OR NOT EXISTS(
+         SELECT 1 FROM thread_history_cut_prefixes p WHERE p.cut_id=s.cut_id))
        AND OLD.seq_created BETWEEN s.first_seq AND s.last_seq AND OLD.seq_updated<=s.frozen_at
        AND ((OLD.turn_id IS NOT NULL AND EXISTS(SELECT 1 FROM thread_history_cut_rows t
                WHERE t.cut_id=s.cut_id AND t.kind='turn' AND t.row_id=OLD.turn_id))
@@ -2278,18 +2343,20 @@ $$;
 CREATE FUNCTION public.thread_history_cut_members(cut uuid) RETURNS TABLE(cut_id uuid, item_id uuid, seq_created bigint, turn_id uuid, stream text, kind text, parent_cut_id uuid, revision_seq bigint, native_alias text, body jsonb)
     LANGUAGE sql STABLE
     AS $_$
-  -- What the cut holds, as rows of thread_history_cut_items read: the items its spans hold, at the revision they
-  -- had when it was made, and the copies it keeps of those changed or removed since.
+  -- A retained prefix reads its original immutable owner. New freezes and pins
+  -- become visible atomically with source edits, without copying a whole prefix.
+  WITH prefix AS MATERIALIZED (SELECT prefix_cut_id FROM thread_history_cut_prefixes WHERE cut_id=$1)
   SELECT s.cut_id,i.id,i.seq_created+s.seq_offset,i.turn_id,i.stream,i.kind,NULL::uuid,
     CASE WHEN i.seq_updated>s.frozen_at THEN (SELECT r.seq_updated FROM thread_item_revisions r
       WHERE r.item_id=i.id AND r.seq_updated<=s.frozen_at ORDER BY r.seq_updated DESC LIMIT 1) END,
-    COALESCE(x.native_alias,a.native_ref),NULL::jsonb
+    COALESCE(x.native_alias,p.native_alias,a.native_ref),NULL::jsonb
     FROM thread_history_cut_spans s
     JOIN items i ON i.thread_id=s.thread_id AND i.continuation_id=s.owner_continuation_id
       AND i.seq_created BETWEEN s.first_seq AND s.last_seq
     LEFT JOIN thread_history_cut_items x ON x.cut_id=s.cut_id AND x.item_id=i.id
+    LEFT JOIN thread_history_cut_items p ON p.cut_id=(SELECT prefix_cut_id FROM prefix) AND p.item_id=i.id
     LEFT JOIN thread_native_item_aliases a ON a.item_id=i.id
-   WHERE s.cut_id=$1 AND x.body IS NULL
+   WHERE s.cut_id=$1 AND x.body IS NULL AND p.body IS NULL
      AND ((i.turn_id IS NOT NULL AND EXISTS(SELECT 1 FROM thread_history_cut_rows t
              WHERE t.cut_id=s.cut_id AND t.kind='turn' AND t.row_id=i.turn_id))
        OR (i.turn_id IS NULL AND ((s.loose_before_orch AND i.before_orch)
@@ -2297,15 +2364,21 @@ CREATE FUNCTION public.thread_history_cut_members(cut uuid) RETURNS TABLE(cut_id
   UNION ALL
   SELECT x.cut_id,x.item_id,x.seq_created,x.turn_id,x.stream,x.kind,x.parent_cut_id,x.revision_seq,x.native_alias,x.body
     FROM thread_history_cut_items x WHERE x.cut_id=$1 AND x.body IS NOT NULL
+  UNION ALL
+  SELECT $1,x.item_id,x.seq_created,x.turn_id,x.stream,x.kind,NULL::uuid,x.revision_seq,
+      COALESCE(own.native_alias,x.native_alias),x.body
+    FROM thread_history_cut_items x
+      LEFT JOIN thread_history_cut_items own ON own.cut_id=$1 AND own.item_id=x.item_id
+    WHERE x.cut_id=(SELECT prefix_cut_id FROM prefix) AND x.body IS NOT NULL AND own.body IS NULL
 $_$;
 
 CREATE FUNCTION public.thread_history_cut_identity() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-  IF (NEW.id,NEW.thread_id,NEW.continuation_id,NEW.job_id,NEW.owner_thread_id,NEW.source_segment_id,
+  IF (NEW.id,NEW.thread_id,NEW.continuation_id,NEW.job_id,NEW.owner_thread_id,NEW.request_user_id,NEW.request_key,NEW.source_segment_id,
       NEW.source_native_ref,NEW.execution_revision,NEW.first_turn,NEW.last_turn,NEW.captured_seq,NEW.captured_at,NEW.head)
-    IS DISTINCT FROM (OLD.id,OLD.thread_id,OLD.continuation_id,OLD.job_id,OLD.owner_thread_id,OLD.source_segment_id,
+    IS DISTINCT FROM (OLD.id,OLD.thread_id,OLD.continuation_id,OLD.job_id,OLD.owner_thread_id,OLD.request_user_id,OLD.request_key,OLD.source_segment_id,
       OLD.source_native_ref,OLD.execution_revision,OLD.first_turn,OLD.last_turn,OLD.captured_seq,OLD.captured_at,OLD.head) THEN
     RAISE EXCEPTION 'a confirmed history cut cannot change its source or boundary' USING ERRCODE='23514';
   END IF;
