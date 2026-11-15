@@ -10,8 +10,9 @@
 //!
 //! The pieces, from the wire upward:
 //!
-//! * [`framing`] and [`session`] are one connection: whole messages, three
-//!   queues in which control goes before events and events before data, the
+//! * [`framing`] and [`session`] are one connection: whole messages, queues
+//!   in which control goes before events and events before data, a message
+//!   larger than a frame sent in parts and put together again, the
 //!   handshake that proves who the machine is, and the liveness that gives a
 //!   silent connection up. [`websocket`] puts a connection on a real socket,
 //!   on either end, and [`outward`] reaches that socket directly or through

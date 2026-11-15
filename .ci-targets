@@ -1,0 +1,4 @@
+test -p orch-api-core --test syncs --test resource_facts --test resource_resume --test mcp_reader_scopes
+test -p orch-api-core --test forks -- moving_routes::
+test -p orch-api-core --test thread_continuation_tokens --test threads_adopt --test workspace_jobs_scopes
+test -p orch-engine --test agent_history --test instruction_sources --test context_fill --test usage_rows
