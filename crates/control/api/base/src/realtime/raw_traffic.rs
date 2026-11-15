@@ -346,6 +346,7 @@ pub(crate) async fn begin(
     st.thread_projection = Some(projection.clone());
     st.raw_after = after;
     let frame = ServerFrame::Subscribed(SubscribedFrame {
+        personal_revision: None,
         raw: Some(RawSubscription {
             segment_id: segment,
             after,

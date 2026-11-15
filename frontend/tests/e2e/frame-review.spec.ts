@@ -1,5 +1,5 @@
 /** The frame says each name once, exposes parents and actions, and keeps its keyboard paths at phone and desktop widths. */
-import { expect, type Locator, type Page, test } from '@playwright/test';
+import { expect, type Locator, type Page, type Request, test } from '@playwright/test';
 import { ACME, changeTree, scenario, signIn, screenAddress } from './support.ts';
 import { showWorkbenchView } from './workbench-support.ts';
 import { RUNS_ON } from '../doubles/fixtures.ts';
@@ -23,6 +23,70 @@ async function minimumTarget(link: Locator) {
 test.beforeEach(async () => { await scenario(); });
 
 for (const width of [400, 1440]) for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
+  test(`startup keeps one baseline and a bare list address at ${width}/${locale}/${theme}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.emulateMedia({ colorScheme: theme });
+    await signIn(page); await language(page, locale);
+    await page.waitForLoadState('networkidle');
+    const delayed = new Set<ReturnType<typeof setTimeout>>();
+    let admissions = 0, reads = 0;
+    interface Read { at: number; status?: number; revision?: unknown; failure?: string }
+    let observed = { started: Date.now(), reads: [] as Read[], frames: [] as Record<string, unknown>[], writes: [] as Record<string, unknown>[] };
+    const requests = new WeakMap<Request, Read>();
+    page.on('request', (request) => {
+      const path = new URL(request.url()).pathname;
+      if (request.method() === 'GET' && path.endsWith('/me/bootstrap')) {
+        reads += 1;
+        const read = { at: Date.now() - observed.started }; requests.set(request, read); observed.reads.push(read);
+      } else if (request.method() !== 'GET' && path.startsWith('/api/v1/')) {
+        observed.writes.push({ at: Date.now() - observed.started, method: request.method(), path });
+      }
+    });
+    page.on('requestfailed', (request) => { const read = requests.get(request); if (read !== undefined) read.failure = request.failure()?.errorText; });
+    page.on('response', (response) => {
+      const read = requests.get(response.request()); if (read === undefined) return;
+      read.status = response.status();
+      void response.json().then((body: unknown) => {
+        if (typeof body === 'object' && body !== null && 'personal_revision' in body) read.revision = body.personal_revision;
+      }).catch(() => undefined);
+    });
+    await page.routeWebSocket(/\/api\/v1\/ws(?:\?|$)/, (route) => {
+      const server = route.connectToServer();
+      server.onMessage((message) => {
+        const frame = JSON.parse(String(message)) as { op?: unknown; feed?: unknown; mode?: unknown; personal_revision?: unknown; data?: { what?: unknown } };
+        if (frame.op === 'ready' || frame.feed === 'user') observed.frames.push({ at: Date.now() - observed.started, op: frame.op, mode: frame.mode, revision: frame.personal_revision, what: frame.data?.what });
+        if (frame.op === 'ready') {
+          // Authentication work exceeds the slow-link threshold without delaying ping replies.
+          const timer = setTimeout(() => { delayed.delete(timer); route.send(message); }, 259);
+          delayed.add(timer);
+        } else {
+          if (frame.op === 'subscribed' && frame.feed === 'user' && frame.mode !== 'reload') admissions += 1;
+          route.send(message);
+        }
+      });
+    });
+    try {
+      for (const reload of [false, true]) {
+        reads = 0; const before = admissions;
+        observed = { started: Date.now(), reads: [], frames: [], writes: [] };
+        if (reload) await page.reload(); else await page.goto('/org/acme');
+        await expect(page.getByRole('heading', { name: 'Acme', exact: true, level: 1 })).toBeVisible();
+        await expect.poll(() => admissions).toBeGreaterThan(before);
+        await expect(page.locator('html')).toHaveAttribute('lang', locale);
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+        // Cover the former 1.5 s background delay and its 1.5 s idle deadline.
+        await page.waitForTimeout(4_000);
+        expect(reads, JSON.stringify({ reload, ...observed })).toBe(1);
+        expect(new URL(page.url()).searchParams.has('list')).toBe(false);
+        expect(new URL(page.url()).searchParams.has('_list')).toBe(false);
+        if (width === 1440) {
+          await expect(page.getByRole('contentinfo')).toContainText(locale === 'en' ? 'Connected' : '已连接');
+          await expect(page.getByRole('contentinfo')).not.toContainText(locale === 'en' ? 'Slow connection' : '连接较慢');
+        }
+      }
+      await page.screenshot({ path: test.info().outputPath('startup.png') });
+    } finally { for (const timer of delayed) clearTimeout(timer); }
+  });
   test(`single chrome names and full parent targets at ${width}/${locale}/${theme}`, async ({ page }) => {
     const words = locale === 'en' ? { navigation: 'Navigation', home: 'Open Acme home', details: 'Details', main: 'Main area', documents: 'Documents', team: 'Team', help: 'Help' }
       : { navigation: '导航', home: '打开Acme主页', details: '详情', main: '主区域', documents: '文档', team: '团队', help: '帮助' };

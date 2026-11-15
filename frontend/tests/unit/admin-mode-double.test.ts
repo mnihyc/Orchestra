@@ -24,6 +24,19 @@ function refused(work: () => unknown, status: number, code: string) {
   }
 }
 
+it.each([false, true])('keeps the shell change cut while native personal-feed rows are captured with administrator mode %s', async (asAdmin) => {
+  const world = new World(), signed = login(world);
+  world.setAdminMode(signed.bearer, { as_admin: asAdmin });
+  const snapshot = await bootstrap(world, world.caller(signed.bearer), signed.bearer);
+  const events: unknown[] = [];
+  const actor = world.browserPerson(signed.bearer);
+  const subscriber = { send: (frame: unknown) => { events.push(frame); }, close: () => undefined };
+  world.users.frame(subscriber, actor, { op: 'sub', id: 7, feed: 'user' });
+  expect(events).toEqual([{ op: 'subscribed', id: 7, feed: 'user', seq: snapshot.personal_revision.inbox, mode: 'delta', personal_revision: snapshot.personal_revision }]);
+  expect((await bootstrap(world, world.caller(signed.bearer), signed.bearer)).personal_revision).toEqual(snapshot.personal_revision);
+  world.users.gone(subscriber);
+});
+
 it('keeps two browser switches independent through refresh and logout while identity and work stay unchanged', async () => {
   const world = new World(), a = login(world), b = login(world);
   const original = structuredClone(world.people.get('ada')!.me);
@@ -102,6 +115,7 @@ it('announces the actual source session ID and revokes only the chosen peer thro
   const actor = world.browserPerson(a.bearer), peer = world.browserPerson(b.bearer);
   const events: unknown[] = [];
   const inboxSeq = world.notifications.seq('ada');
+  const personalRevision = world.users.revision('ada');
   const subscriber = { send: (frame: unknown) => { events.push(frame); }, close: () => undefined };
   world.users.frame(subscriber, actor, { op: 'sub', id: 7, feed: 'user' });
   world.setAdminMode(a.bearer, { as_admin: true });
@@ -111,9 +125,10 @@ it('announces the actual source session ID and revokes only the chosen peer thro
   const other = world.browserSessionRefs(peer)!.find((entry) => entry.current)!;
   expect(current.id).not.toBe(other.id);
   expect(events).toEqual([
-    { op: 'subscribed', id: 7, feed: 'user', seq: inboxSeq, mode: 'delta' },
+    { op: 'subscribed', id: 7, feed: 'user', seq: inboxSeq, mode: 'delta', personal_revision: personalRevision },
     { op: 'event', id: 7, feed: 'user', data: { what: 'admin_mode', session_id: current.id, as_admin: true } },
   ]);
+  expect(world.users.revision('ada').personal).toBe(personalRevision.personal + 1);
   expect(world.settings.handle(actor, 'DELETE', `/me/sessions/${other.id}`, new URLSearchParams(), {})?.status).toBe(204);
   refused(() => world.adminMode(b.bearer), 401, 'auth.invalid_token');
   expect(world.adminMode(a.bearer)).toEqual({ as_admin: true, available: true });
