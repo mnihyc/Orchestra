@@ -404,6 +404,30 @@ impl EnvironmentDriver for DockerDriver {
         Ok(())
     }
 
+    async fn create_work(
+        &self,
+        spec: &orch_driver_contract::work::WorkUnitSpec,
+    ) -> Result<UnitRef, DriverError> {
+        self.create_work_unit(spec).await
+    }
+
+    async fn prepare_work_process(
+        &self,
+        unit: &UnitRef,
+        process: &orch_driver_contract::work::WorkProcessSpec,
+    ) -> Result<Arc<dyn orch_driver_contract::work::WorkProcess>, DriverError> {
+        self.prepare_work_invocation(unit, process).await
+    }
+
+    async fn read_work_file(
+        &self,
+        unit: &UnitRef,
+        path: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, DriverError> {
+        self.read_work_result(unit, path, max_bytes).await
+    }
+
     async fn create(&self, spec: &RuntimeSpec) -> Result<UnitRef, DriverError> {
         self.create_unit(spec).await
     }

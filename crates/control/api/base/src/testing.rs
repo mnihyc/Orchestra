@@ -133,6 +133,28 @@ pub async fn advance_component_updates(app: &App) -> Result<(), crate::dispatch:
     app.link.advance_component_updates().await
 }
 
+/// Drive the production first-wire check of a stored native command without a vendor endpoint.
+pub async fn admit_stored_command(app: &App, id: orch_types::Id) -> Result<bool, String> {
+    let row = orch_db::queries::link::command(
+        &mut *app.db.acquire().await.map_err(|error| error.to_string())?,
+        id,
+    )
+    .await
+    .map_err(|error| error.to_string())?
+    .ok_or("the stored command is absent")?;
+    let entry = app
+        .link
+        .entry(row.machine_id)
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+    let command = crate::dispatch::cmd_of(&row);
+    app.link
+        .admit_wire_command(&entry, &command, command.clone())
+        .await
+        .map(|checked| checked.is_some())
+        .map_err(|error| format!("{error:?}"))
+}
+
 /// Exercise the real certificate/session authorization supplier, including minimum recovery.
 pub async fn authorize_machine(
     app: &App,

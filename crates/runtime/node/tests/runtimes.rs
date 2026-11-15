@@ -1120,3 +1120,54 @@ async fn a_new_unit_uses_its_nodes_verified_address_or_that_nodes_explicit_unit_
         rig.stop().await;
     }
 }
+
+#[tokio::test]
+async fn an_admitted_program_keeps_its_real_parent_and_helper_without_starting_a_unit_from_metadata()
+ {
+    use orch_link_contract::commands::NodeProgramAdmit;
+    use orch_link_contract::program_work::Admission;
+    let mut rig = Rig::new();
+    rig.have_connector();
+    rig.start().await;
+    let parent = rig.spec(RuntimeKind::Provider, "program-parent");
+    rig.made(&parent).await;
+    let work = Admission {
+        work: new_id(),
+        helper: new_id(),
+        peer: new_id(),
+        parent: parent.runtime_id,
+        template: parent.spec.clone(),
+        tools: parent.tools.clone(),
+        endpoints: vec![],
+        deadline: rig.deadline(),
+    };
+    let body = NodeProgramAdmit {
+        runtime_id: work.work,
+        work: work.clone(),
+    };
+    rig.succeed(&SerialKey::Runtime(work.work), &body).await;
+    rig.succeed(&SerialKey::Runtime(work.work), &body).await;
+    let kept = rig.role().ledger().program(work.work).unwrap();
+    assert_eq!(kept.admission, work);
+    assert!(kept.unit.is_none());
+    assert_eq!(
+        rig.driver.list(SYSTEM).await.unwrap().len(),
+        1,
+        "admission metadata is not an execution effect"
+    );
+    let mut changed = body.clone();
+    changed.work.helper = new_id();
+    rig.refused(&SerialKey::Runtime(work.work), &changed).await;
+    assert_eq!(
+        rig.role().ledger().program(work.work).unwrap().admission,
+        work
+    );
+    let mut unknown = body;
+    unknown.runtime_id = new_id();
+    unknown.work.work = unknown.runtime_id;
+    unknown.work.parent = new_id();
+    rig.refused(&SerialKey::Runtime(unknown.runtime_id), &unknown)
+        .await;
+    assert!(rig.role().ledger().program(unknown.runtime_id).is_none());
+    rig.stop().await;
+}

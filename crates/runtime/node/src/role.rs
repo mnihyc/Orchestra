@@ -54,6 +54,7 @@ pub const NODE_KINDS: &[CommandKind] = &[
     CommandKind::NodeResourcesList,
     CommandKind::NodeResourcesRemove,
     CommandKind::NodeRuntimeCreate,
+    CommandKind::NodeProgramAdmit,
     CommandKind::NodeRuntimeStart,
     CommandKind::NodeRuntimeStop,
     CommandKind::NodeRuntimeRemove,
@@ -551,6 +552,33 @@ impl RoleHandler for NodeRole {
                 let made = node.runtimes.create(id, body, cancel).await;
                 node.images.finish(id).await;
                 made.map(CommandResult::NodeRuntimeCreate)
+            }
+            Command::NodeProgramAdmit(body) => {
+                if body.runtime_id != body.work.work
+                    || body.work.work == body.work.helper
+                    || body.work.deadline <= node.clock.time()
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::InvalidSpec,
+                        "the program work has an invalid identity or an ended lifetime",
+                    ));
+                }
+                node.ledger
+                    .retain_program(&body.work)
+                    .map_err(|_| {
+                        CommandError::new(
+                            ErrorCode::Internal,
+                            "the program placement could not be retained",
+                        )
+                    })?
+                    .filter(|work| !work.retired)
+                    .ok_or_else(|| {
+                        CommandError::new(
+                            ErrorCode::Conflict,
+                            "the program placement is unknown, changed or retired",
+                        )
+                    })?;
+                Ok(CommandResult::NodeProgramAdmit(Empty {}))
             }
             Command::NodeRuntimeStart(body) => node
                 .runtimes

@@ -84,6 +84,9 @@ pub struct SummaryRequest {
     pub config: Json,
 }
 
+/// The model ran into its output allowance before completing the summary.
+pub const OUTPUT_CUT: &str = "the model used its output allowance before finishing";
+
 /// Why a summary was not made.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SummarizeError {

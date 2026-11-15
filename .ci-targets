@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --lib
+test -p orch-db --test usage_ledger --test resource_summaries
+test -p orch-summarizer-model --lib --test prompts --test capabilities
+test -p orch-engine --test resource_summaries --test summary_sources --test summary_targets --test summary_options
+test -p orch-engine --test call_recovery -- auxiliary::
+test -p orch-api-core --test summaries --test resource_summaries --test document_summary_options --test kfix_schemas
