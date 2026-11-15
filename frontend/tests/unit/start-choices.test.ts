@@ -19,10 +19,10 @@ describe('a feasible first suggestion', () => {
       expect(resolved.fresh).toBe(false); expect(resolved.environment?.environment.id).toBe('e1');
     }
   });
-  it('keeps feasible New and refuses an impossible explicit New without substituting another location', () => {
+  it('keeps New open to choose another template while submission still needs a host', () => {
     expect(resolve(options({ environment_default: 'fresh' }), NO_PICKS, dialog).fresh).toBe(true);
     const explicit = resolve(options({ environment_default: 'fresh', hosts: [] }), picked({ environment: NEW_ENVIRONMENT }), dialog);
-    expect(explicit.fresh).toBe(false); expect(explicit.environment).toBeNull();
+    expect(explicit.fresh).toBe(true); expect(explicit.environment).toBeNull();
     expect(explicit.missing).toContainEqual({ kind: 'environment' });
     expect(resolve(options({ environment_default: 'fresh' }), picked({ environment: NEW_ENVIRONMENT }), dialog).fresh).toBe(true);
   });
@@ -88,9 +88,9 @@ describe('a new default still needs a usable host', () => {
     }
   });
 
-  it('keeps an explicit new choice unavailable rather than silently using a different environment', () => {
+  it('keeps an explicit new choice open while marking its missing host', () => {
     const resolved = resolve(options({ hosts: [] }), picked({ environment: NEW_ENVIRONMENT }), dialog);
-    expect(resolved.fresh).toBe(false); expect(resolved.environment).toBeNull();
+    expect(resolved.fresh).toBe(true); expect(resolved.environment).toBeNull();
     expect(resolved.missing).toContainEqual({ kind: 'environment' });
   });
 
@@ -105,7 +105,7 @@ describe('a new default still needs a usable host', () => {
 describe('defaults and the person’s last successful setup', () => {
   const quick: Mode = { suggest: true, respectDefaults: true };
   const last = picked({ provider: 'p2', agent: 'a2', model: 'm2', environment: 'e2', arrangement: 'key_separated' });
-  const bare = () => options({ defaults: { provider_id: null, agent_id: null, model_name: null, effort: null, locked: false } });
+  const bare = () => options({ defaults: { provider_id: null, agent_id: null, model_name: null, effort: null, locks: { provider: false, agent: false, model: false, effort: false } } });
 
   it('starts from the valid place defaults before considering the previous setup', () => {
     const answer = resolve(options(), NO_PICKS, quick, last);
@@ -163,7 +163,7 @@ describe('what is chosen where the defaults of the place are whole', () => {
   });
 
   it('takes the effort the place defaults to where the model has it, and otherwise the one the model starts with', () => {
-    const whole = options({ defaults: { provider_id: 'p1', agent_id: 'a1', model_name: 'm1', effort: 'high', locked: false } });
+    const whole = options({ defaults: { provider_id: 'p1', agent_id: 'a1', model_name: 'm1', effort: 'high', locks: { provider: false, agent: false, model: false, effort: false } } });
     expect(resolve(whole, NO_PICKS, starter).effort).toBe('high');
     expect(resolve(options(), NO_PICKS, starter).effort).toBe('low');
     expect(resolve(options(), picked({ model: 'm2' }), starter).effort).toBeNull();
@@ -203,7 +203,7 @@ describe('cached vendor quota does not decide a fresh start', () => {
 });
 
 describe('what the starter asks for and a dialog suggests', () => {
-  const bare = options({ defaults: { provider_id: null, agent_id: null, model_name: null, effort: null, locked: false } });
+  const bare = options({ defaults: { provider_id: null, agent_id: null, model_name: null, effort: null, locks: { provider: false, agent: false, model: false, effort: false } } });
 
   it('asks for the provider first where none is set, and takes nothing the person did not choose', () => {
     const resolved = resolve(bare, NO_PICKS, starter);
@@ -222,7 +222,7 @@ describe('what the starter asks for and a dialog suggests', () => {
 
   it('has nothing to ask where a provider offers one profile and one model', () => {
     const single = options({
-      defaults: { provider_id: null, agent_id: null, model_name: null, effort: null, locked: false },
+      defaults: { provider_id: null, agent_id: null, model_name: null, effort: null, locks: { provider: false, agent: false, model: false, effort: false } },
       providers: [provider('p1', { agents: [agent('only')], models: [model('one')] })],
     });
     const resolved = resolve(single, picked({ provider: 'p1' }), starter);
@@ -278,7 +278,7 @@ describe('a harness that has not reported', () => {
 
   it('is no reason to wait where the place names no profile and the one that has reported is the only one', () => {
     const only = options({
-      defaults: { provider_id: 'p1', agent_id: null, model_name: 'm1', effort: null, locked: false },
+      defaults: { provider_id: 'p1', agent_id: null, model_name: 'm1', effort: null, locks: { provider: false, agent: false, model: false, effort: false } },
       providers: [provider('p1', { agents: [agent('a1', { reason: 'harness_unreported' }), agent('a2')] })],
     });
     const resolved = resolve(only, NO_PICKS, starter);
@@ -383,7 +383,7 @@ describe('the environment', () => {
 
 describe('what is kept as the default of a place', () => {
   it('is what the person chose and the place does not have already', () => {
-    const bare = options({ defaults: { provider_id: null, agent_id: null, model_name: null, effort: null, locked: false } });
+    const bare = options({ defaults: { provider_id: null, agent_id: null, model_name: null, effort: null, locks: { provider: false, agent: false, model: false, effort: false } } });
     const resolved = resolve(bare, picked({ provider: 'p1', agent: 'a2', model: 'm1' }), starter);
     expect(settingsToKeep(bare, resolved)).toEqual([
       { key: 'agent.default_provider_id', value: 'p1' },
@@ -394,7 +394,7 @@ describe('what is kept as the default of a place', () => {
   });
 
   it('is only the model where the place has the rest', () => {
-    const noModel = options({ defaults: { provider_id: 'p1', agent_id: 'a1', model_name: null, effort: null, locked: false } });
+    const noModel = options({ defaults: { provider_id: 'p1', agent_id: 'a1', model_name: null, effort: null, locks: { provider: false, agent: false, model: false, effort: false } } });
     const resolved = resolve(noModel, picked({ model: 'm2' }), starter);
     expect(settingsToKeep(noModel, resolved)).toEqual([{ key: 'agent.model', value: 'm2' }]);
   });
