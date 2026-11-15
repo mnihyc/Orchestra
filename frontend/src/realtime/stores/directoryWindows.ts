@@ -137,8 +137,8 @@ export class DirectoryWindows {
     const page = this.page(dir.head);
     return page === undefined ? dir.state : { ...dir.state, entries: page.listing.entries, source: page.listing.source,
       asOf: page.listing.as_of, observedFrom: page.listing.observed_from ?? null, truncated: page.listing.truncated,
-      revision: page.listing.revision ?? null, nextCursor: dir.state.invalidated === true ? null : page.listing.next_cursor ?? null,
-      expiresAt: dir.state.invalidated === true ? null : page.listing.expires_at ?? null };
+      revision: page.listing.revision ?? null, nextCursor: page.listing.next_cursor ?? null,
+      expiresAt: page.listing.expires_at ?? null };
   }
   private expired(page: Page): boolean {
     const expiry = page.listing.expires_at;
@@ -149,7 +149,7 @@ export class DirectoryWindows {
     if (dir === undefined) return CLOSED;
     const page = this.page(view.selected), expired = page !== undefined && this.expired(page);
     const state = dir.state;
-    const stale = view.stale || expired || dir.state.invalidated === true;
+    const stale = view.stale || expired;
     const back = view.trail.at(-1), checkpoint = back === undefined ? undefined : this.budget.peek(back);
     const previous = checkpoint?.kind === 'checkpoint' ? this.page(checkpoint.page) : undefined;
     const canPrevious = checkpoint?.kind === 'checkpoint' && checkpoint.ordinal === view.ordinal - 1
@@ -161,10 +161,10 @@ export class DirectoryWindows {
       page: page === undefined ? null : { incoming: page.selector.incoming, revision: page.listing.revision ?? null, ordinal: view.ordinal },
       navigation: this.work(dir.work)?.owners.some((owner) => owner.id === view.id) === true ? 'loading' : 'idle',
       canNext: !stale && (page?.listing.next_cursor ?? null) !== null && (page?.listing.revision ?? null) !== null,
-      canPrevious: !stale && canPrevious, restartRequired: stale || view.lost || (view.ordinal > 1 && !canPrevious),
+      canPrevious: !stale && canPrevious, restartRequired: stale || dir.state.invalidated === true || view.lost || (view.ordinal > 1 && !canPrevious),
       capacity: view.capacity ?? (!dir.admitted ? this.capacity('directories') : null),
       expanded: view.expanded,
-      invalidated: stale, watch: stale && dir.state.watch === 'live' ? 'stale' : dir.state.watch };
+      invalidated: stale || dir.state.invalidated === true, watch: stale && dir.state.watch === 'live' ? 'stale' : dir.state.watch };
   }
   private ensure(door: Door, path: string, binding: string, waiting: boolean): Directory | DirectoryCapacity {
     this.budget.expire();
@@ -318,7 +318,7 @@ export class DirectoryWindows {
   }
   private invalidate(dir: Directory): void {
     dir.version = this.id();
-    if (dir.state.invalidated !== true) dir.generation = this.id();
+    dir.generation = this.id();
     const pending = this.work(dir.work); if (pending !== undefined) this.cancel(pending);
     dir.state = { ...dir.state, invalidated: true, nextCursor: null, expiresAt: null, watch: 'stale' };
     for (const view of this.views().filter((view) => view.directory === dir.id)) {
@@ -355,7 +355,13 @@ export class DirectoryWindows {
         this.changed(); return;
       }
       const head = this.page(dir.head);
-      if (data.invalidated === true || (data.reset !== true && (head === undefined || head.listing.truncated || head.listing.source !== 'live'))) {
+      if (data.invalidated === true || (data.reset !== true && (head === undefined || head.listing.truncated && head.listing.source === 'live'))) {
+        // Membership changes make the displayed observation old; they do not revoke its reader.
+        // Keep the first response and continuing pages available while fresh native rows arrive.
+        dir.state = { ...dir.state, invalidated: true, watch: 'stale' }; this.save(dir);
+        this.changed(); return;
+      }
+      if (data.reset !== true && head?.listing.source !== 'live') {
         this.invalidate(dir); this.changed(); return;
       }
       this.invalidate(dir);
@@ -445,8 +451,7 @@ export class DirectoryWindows {
     if (mode === 'next') {
       if (page === undefined || view.stale || this.expired(page)
         || page.listing.next_cursor === null || page.listing.next_cursor === undefined
-        || page.listing.revision === null || page.listing.revision === undefined
-        || dir.state.invalidated === true) return 'restart';
+        || page.listing.revision === null || page.listing.revision === undefined) return 'restart';
       selector = { ...page.selector, door: view.door, incoming: page.listing.next_cursor, source: page.listing.source }; ordinal = view.ordinal + 1;
     }
     if (mode === 'previous') {
@@ -526,7 +531,9 @@ export class DirectoryWindows {
       if (listing.path !== work.path || (work.selector.source !== 'auto' && listing.source !== work.selector.source)
         || (work.selector.incoming !== null && listing.next_cursor === work.selector.incoming)
         || (work.expected !== null && (listing.source !== work.expected.source
-        || listing.revision !== work.expected.revision || listing.as_of !== work.expected.asOf
+        || listing.revision !== work.expected.revision
+        || (listing.source === 'live' && work.expected.from !== null
+          ? Date.parse(listing.as_of) < Date.parse(work.expected.asOf) : listing.as_of !== work.expected.asOf)
         || (listing.observed_from ?? null) !== work.expected.from))) {
         this.invalidate(dir); this.changed(); return 'restart';
       }

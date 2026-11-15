@@ -20,7 +20,7 @@ import { Button } from '@/ui/Button';
 import { IconButton } from '@/ui/IconButton';
 import { show as render } from './support';
 
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   useNavigate: () => vi.fn(),
   useLocation: () => ({ pathname: '/search', search: {}, searchStr: '', hash: '' }),
   useMatches: () => '/search/',
