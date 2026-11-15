@@ -1,0 +1,5 @@
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test delivery --test machine_moves --test environment_moves --test data_directories
+test -p orch-engine --test source --test source_uniform
+test -p orch-engine --test shared_message_files --test shared_references --test shared_write_formats
+test -p orch-engine --test forks --test connected --test measurement_jobs

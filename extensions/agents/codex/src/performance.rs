@@ -246,9 +246,21 @@ impl Requests {
             let source = self
                 .current
                 .get(thread)
-                .or_else(|| self.awaiting_end.get(thread))
-                .or_else(|| self.ended.get(thread).and_then(|ended| ended.back()))
-                .map(|open| open.request.clone());
+                .map(|open| open.request.clone())
+                .or_else(|| {
+                    self.awaiting_end.get(thread).map(|open| {
+                        let mut request = open.request.clone();
+                        request.end = Some(at);
+                        request.finish("done", None, None);
+                        request
+                    })
+                })
+                .or_else(|| {
+                    self.ended
+                        .get(thread)
+                        .and_then(|ended| ended.back())
+                        .map(|open| open.request.clone())
+                });
             if let Some(source) = source
                 && self
                     .tool_requests
@@ -356,6 +368,13 @@ impl Requests {
                 return Vec::new();
             }
             open.request.finish("done", None, None);
+            if let Some(held) = self
+                .tool_requests
+                .get_mut(thread)
+                .filter(|held| held.id == open.request.id)
+            {
+                *held = open.request.clone();
+            }
             return vec![open.request];
         } else if method == "turn/completed" {
             let mut completed = Vec::new();

@@ -10,7 +10,7 @@ use orch_link::spool::SpoolOptions;
 use orch_link_contract::commands::CommandKind;
 use orch_link_contract::events::{Event, ItemCompleted, ItemDelta, RawFrame, SessionTitle};
 use orch_link_contract::session::Role;
-use orch_link_contract::streams::{ResetReason, Stream};
+use orch_link_contract::streams::Stream;
 use orch_link_contract::version::Limits;
 use orch_testkit::doubles::controller::{CommitMode, ScriptedController};
 use orch_testkit::doubles::link::{Direction, Hub, TestPki};
@@ -259,8 +259,7 @@ fn completed(item: &str) -> Event {
 }
 
 #[tokio::test]
-async fn a_full_spool_gives_up_diagnostics_and_then_the_text_a_completed_item_repeats_and_nothing_else()
- {
+async fn a_full_diagnostic_allowance_preserves_all_authoritative_progress() {
     let rig = rig(small_spool(7_000), false);
     // Offline: everything is spooled and nothing is sent.
     for n in 0..30 {
@@ -293,8 +292,8 @@ async fn a_full_spool_gives_up_diagnostics_and_then_the_text_a_completed_item_re
     );
     let deltas = applied.iter().filter(|e| e.kind == "item.delta").count();
     assert!(
-        deltas < 40,
-        "deltas of a completed item were left out: {deltas} of 40 arrived"
+        deltas == 40,
+        "all authoritative progress survived: {deltas} of 40 arrived"
     );
     assert!(
         rig.controller.resets().is_empty(),
@@ -305,8 +304,7 @@ async fn a_full_spool_gives_up_diagnostics_and_then_the_text_a_completed_item_re
 }
 
 #[tokio::test]
-async fn a_spool_that_must_give_up_its_oldest_events_says_so_with_a_reset_and_the_system_asks_for_the_session_again()
- {
+async fn a_spool_over_its_diagnostic_allowance_delivers_all_history_without_a_reset() {
     let rig = rig(small_spool(6_000), false);
     for n in 0..20 {
         rig.machine.publish(&rig.stream, &raw(n)).await;
@@ -329,21 +327,14 @@ async fn a_spool_that_must_give_up_its_oldest_events_says_so_with_a_reset_and_th
         rig.controller.resets(),
         rig.controller.violations()
     );
-    let resets = rig.controller.resets();
-    assert_eq!(resets.len(), 1, "{resets:?}");
-    assert_eq!(resets[0].reason, ResetReason::SpoolOverflow);
-    assert!(
-        resets[0].resync_requested,
-        "a session stream is repaired by asking for the session again"
-    );
+    assert!(rig.controller.resets().is_empty());
     let applied = rig.controller.applied(&rig.name);
-    assert!(
-        applied.iter().all(|e| e.kind == "session.title"),
-        "diagnostics went first"
-    );
-    assert!(applied.len() < 300, "the oldest went");
-    // The numbers continue from where the reset says the stream goes on.
-    assert_eq!(applied[0].seq, resets[0].from);
+    let applied: Vec<_> = applied
+        .iter()
+        .filter(|event| event.kind == "session.title")
+        .collect();
+    assert_eq!(applied.len(), 300, "no authoritative event was given up");
+    assert_eq!(applied[0].seq, 1);
     for pair in applied.windows(2) {
         assert_eq!(pair[1].seq, pair[0].seq + 1);
     }
@@ -352,29 +343,14 @@ async fn a_spool_that_must_give_up_its_oldest_events_says_so_with_a_reset_and_th
         "{:?}",
         rig.controller.violations()
     );
-    // The machine was asked, once, for the session again.
-    let asked = async {
-        while !rig
-            .machine
+    assert!(
+        rig.machine
             .handler
             .executions()
             .iter()
-            .any(|run| run.kind == CommandKind::SessionResync)
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(10), asked)
-        .await
-        .expect("the machine was never asked for the session");
-    let resyncs = rig
-        .machine
-        .handler
-        .executions()
-        .iter()
-        .filter(|run| run.kind == CommandKind::SessionResync)
-        .count();
-    assert_eq!(resyncs, 1);
+            .all(|run| run.kind != CommandKind::SessionResync),
+        "retained history needs no repair read"
+    );
     let _ = rig.thread_id;
 }
 
