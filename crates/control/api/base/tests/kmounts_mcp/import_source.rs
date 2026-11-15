@@ -37,9 +37,7 @@ async fn kept_caller(world: &World, actor: Id, scope: KeyScope) -> Caller {
     assert!(scope.validate().is_empty());
     let id = new_id();
     let expires = world.now() + chrono::Duration::hours(1);
-    let secret = orch_api_core::middleware::authentication::new_token(
-        orch_api_core::middleware::authentication::API_TOKEN_PREFIX,
-    );
+    let secret = orch_api_core::middleware::authentication::new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {

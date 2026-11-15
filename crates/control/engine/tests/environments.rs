@@ -162,7 +162,7 @@ async fn a_unit_is_made_with_the_builds_of_the_harnesses_its_template_lets_run_b
     );
     assert_eq!(
         create.body["roles"],
-        serde_json::json!(["environment", "agent"]),
+        serde_json::json!(["environment", "agent", "provider"]),
         "and its connector hosts harnesses"
     );
 }
@@ -185,7 +185,10 @@ async fn a_unit_whose_template_lets_no_harness_run_there_is_made_with_the_connec
         .find(|call| call.kind == K::NodeRuntimeCreate)
         .unwrap();
     assert_eq!(create.body["tools"], serde_json::json!([]));
-    assert_eq!(create.body["roles"], serde_json::json!(["environment"]));
+    assert_eq!(
+        create.body["roles"],
+        serde_json::json!(["environment", "provider"])
+    );
     assert_eq!(
         host.count(K::NodeToolEnsure),
         1,

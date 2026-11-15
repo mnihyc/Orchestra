@@ -1,5 +1,5 @@
 import type * as RouterModule from '@tanstack/react-router';
-/** R2c: a cold program remains named with a reason, a recovery act, and a compact creation flow. */
+/** A cold program remains named with a reason, a recovery act, and a compact creation flow. */
 import { cleanup, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
@@ -41,7 +41,6 @@ const setup:ProviderSetup={ grouping: [],
     {harness:harnessName('codex'),agent:{...profile,id:'codex',name:'Codex',harness_kind:'codex',harness:harnessName('codex')},reason:'not_reported'},
     {harness:harnessName('claude-code'),agent:null,reason:'profile_needed'},
   ],
-  subscriptions_unreported:[{...profile,id:'codex',name:'Codex',harness_kind:'codex',harness:harnessName('codex')}],
   subscriptions_withheld:[],subscriptions_unshared:[],http_allowed:false,runtime_templates:[],api_arrangements:[],
   presets:[{name:'OpenRouter',note:null,docs_url:null,upstreams:[{protocol:'openai-chat',base_url:'https://openrouter.ai/api/v1',options:{}}]}],
   protocols:[{name:'openai-chat',title:'Chat Completions',agents:[],endpoint_options:[]},

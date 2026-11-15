@@ -251,7 +251,7 @@ async fn loss_confirmation_keeps_the_original_preview_operation_separate_and_cur
             "credential" => {
                 sqlx::query("UPDATE api_tokens SET token_hash=$2 WHERE id=$1")
                     .bind(original.id)
-                    .bind(token_hash(&new_token(API_TOKEN_PREFIX)))
+                    .bind(token_hash(&new_api_token(original.id)))
                     .execute(&s.world.db.pool)
                     .await
                     .unwrap();

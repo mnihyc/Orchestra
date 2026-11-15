@@ -3,7 +3,7 @@ use super::*;
 use futures::StreamExt;
 use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{chats as rows, identity};
 use orch_types::{Hash, Json, new_id};
 use serde_json::json;
@@ -23,8 +23,8 @@ fn rule(operation: &str, action: &str, kind: &str, id: Id) -> Json {
 async fn key(room: &Room, actor: &Who, rules: Vec<Json>) -> Key {
     let policy: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(policy.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *room.world.conn().await,
         &identity::NewApiToken {

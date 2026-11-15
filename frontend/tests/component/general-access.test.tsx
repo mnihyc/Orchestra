@@ -77,7 +77,7 @@ describe('one general access choice', () => {
     await user.click(screen.getByRole('button', { name: 'Options' }));
     const choice = await screen.findByRole('combobox', { name: 'General access' });
     expect(choice).toHaveTextContent('Defaults');
-    expect(screen.getByRole('checkbox', { name: 'Let them into the environment' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Viewers can open the environment' })).toBeChecked();
     await user.click(choice);
     await user.keyboard('{ArrowDown}');
     const viewChoice = await screen.findByRole('option', { name: 'View' });
