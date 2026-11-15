@@ -29,6 +29,7 @@ const wasDark=document.documentElement.classList.contains('dark');
 vi.mock('@/api/access',async(original)=>({ ...await original<typeof AccessApi>(),
   permissionsQuery:{queryKey:['compact-permissions'],queryFn:()=>Promise.resolve(CATALOGUE.reply)},
   defaultsQuery:(id:string)=>({queryKey:['compact-defaults',id],queryFn:()=>Promise.resolve(pageFor('org'))}),
+  rolesPageQuery:(id:string,q:string)=>({queryKey:['fixture-role-pages',id,q],initialPageParam:null,queryFn:()=>Promise.resolve({...{owners:[],own:[],above:[],can_give:[]},items:[],next_cursor:null}),getNextPageParam:()=>null}),
   rolesQuery:(id:string)=>({queryKey:['compact-roles',id],queryFn:():Promise<NodeRoleListReply>=>Promise.resolve({owners:[],own:[],above:[],can_give:[]})}),
   requestAccess:(...args:Parameters<typeof AccessApi.requestAccess>)=>calls.request(...args),
   accessRequestQuery:(batch:string)=>({queryKey:['compact-request',batch],queryFn:()=>Promise.resolve({batch_id:batch,approvals:[],complete:true})}),

@@ -1264,12 +1264,15 @@ pub async fn snapshots_of_environment(
     administrative: bool,
     after: Option<(DateTime<Utc>, Id)>,
     limit: i64,
+    text: &str,
 ) -> Result<Vec<SnapshotRow>, DbError> {
     let (at, id) = after.map_or((None, None), |(at, id)| (Some(at), Some(id)));
+    let named = super::search::matching_sql("label", "$7");
+    let patterns = super::search::Query::parse(text).like_patterns();
     let raw: Vec<RawSnapshot> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {SNAPSHOT_COLUMNS} FROM snapshots WHERE environment_id=$1 AND thread_id IS NULL
           AND (created_by=$2 OR $3) AND ($4::timestamptz IS NULL OR (created_at,id)<($4,$5))
-          ORDER BY created_at DESC,id DESC LIMIT $6"
+          AND ({named}) ORDER BY created_at DESC,id DESC LIMIT $6"
     )))
     .bind(environment)
     .bind(maker)
@@ -1277,6 +1280,7 @@ pub async fn snapshots_of_environment(
     .bind(at)
     .bind(id)
     .bind(limit)
+    .bind(patterns)
     .fetch_all(conn)
     .await?;
     raw.into_iter().map(SnapshotRow::try_from).collect()
@@ -1308,9 +1312,21 @@ pub async fn visible_snapshots_of_thread(
         limit,
         manual,
         recorded_environments,
-        None,
+        SnapshotFilter {
+            origins: None,
+            text: "",
+        },
     )
     .await
+}
+
+/// Exact permitted metadata origins and public label words for one native window.
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotFilter<'a> {
+    /// Current native origin scope; none leaves the original unrestricted selector.
+    pub origins: Option<&'a [Id]>,
+    /// Literal words in the visible snapshot label.
+    pub text: &'a str,
 }
 
 /// The same native selector, optionally bounded by the actual metadata origins before pagination.
@@ -1321,16 +1337,18 @@ pub async fn visible_snapshots_of_thread_from(
     limit: i64,
     manual: bool,
     recorded_environments: &[Id],
-    origins: Option<&[Id]>,
+    filter: SnapshotFilter<'_>,
 ) -> Result<Vec<SnapshotRow>, DbError> {
     let (at, id) = after.map_or((None, None), |(at, id)| (Some(at), Some(id)));
+    let named = super::search::matching_sql("label", "$8");
+    let patterns = super::search::Query::parse(filter.text).like_patterns();
     let raw: Vec<RawSnapshot> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {SNAPSHOT_COLUMNS} FROM snapshots WHERE thread_id = $1
             AND ($2::timestamptz IS NULL OR (created_at, id) < ($2, $3))
             AND ((storage = 'blobs' AND $5) OR (storage = 'environment' AND environment_id = ANY($6)))
             AND ($7::uuid[] IS NULL OR environment_id = ANY($7))
-            ORDER BY created_at DESC, id DESC LIMIT $4"
-    ))).bind(thread).bind(at).bind(id).bind(limit).bind(manual).bind(recorded_environments).bind(origins).fetch_all(conn).await?;
+            AND ({named}) ORDER BY created_at DESC, id DESC LIMIT $4"
+    ))).bind(thread).bind(at).bind(id).bind(limit).bind(manual).bind(recorded_environments).bind(filter.origins).bind(patterns).fetch_all(conn).await?;
     raw.into_iter().map(SnapshotRow::try_from).collect()
 }
 

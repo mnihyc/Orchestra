@@ -941,7 +941,7 @@ async fn host_fleet_environment_and_preflight_agree_on_updates_and_lists_read_to
             .token(&who.token)
             .query(&HostRuntimeListQuery::default());
         let before = Statements::now();
-        let rows = call.send().await.ok();
+        let rows = call.send().await.ok().items;
         (Statements::now() - before, rows)
     }
     let (few, current) = count(&world, &c.boss, host).await;
@@ -988,10 +988,12 @@ async fn host_fleet_environment_and_preflight_agree_on_updates_and_lists_read_to
         .query(&AdminRuntimeListQuery {
             host_id: Some(host),
             kind: None,
+            ..AdminRuntimeListQuery::default()
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         host_rows
             .iter()
@@ -1078,7 +1080,8 @@ async fn environment_and_host_runtime_pages_read_stored_state_without_inspection
         .query(&HostRuntimeListQuery::default())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(runtimes.iter().any(|row| row.id == runtime));
     assert_eq!(
         reads.load(Ordering::SeqCst),
@@ -1204,7 +1207,8 @@ async fn the_provider_page_and_host_and_fleet_count_the_same_runtime_changes() {
         .query(&HostRuntimeListQuery::default())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     let fleet = world
         .app
         .call(AdminRuntimeList, &[])
@@ -1212,10 +1216,12 @@ async fn the_provider_page_and_host_and_fleet_count_the_same_runtime_changes() {
         .query(&AdminRuntimeListQuery {
             host_id: Some(host),
             kind: None,
+            ..AdminRuntimeListQuery::default()
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         host_rows
             .iter()
@@ -2676,3 +2682,48 @@ mod storage_scopes;
 
 #[path = "hosts/enrollment_scopes.rs"]
 mod enrollment_scopes;
+
+#[tokio::test]
+async fn kept_layer_pages_keep_the_latest_marker_beyond_a_searched_first_page() {
+    let world = World::new().await;
+    let c = company(&world).await;
+    let host = a_host(&world, &c.boss, Some(c.acme), "Layer catalogue").await;
+    let environment = orch_types::new_id();
+    let images: Vec<_> = (0..13).map(|generation| json!({"system":"test","environment":environment,"generation":generation,"capture":orch_types::new_id(),"reference":format!("kept-{generation}"),"bytes":4096,"total_bytes":8192,"layers":2})).collect();
+    sqlx::query("UPDATE hosts SET kept_images=$2 WHERE id=$1")
+        .bind(host)
+        .bind(json!({"epoch":7,"images":images}))
+        .execute(&mut *world.conn().await)
+        .await
+        .unwrap();
+    let page = world
+        .app
+        .call(HostGet, &[&host])
+        .token(&c.boss.token)
+        .query(&json!({"collection":"kept_layers","limit":1}))
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.kept_layers.len(), 1);
+    assert_eq!(page.kept_layers[0].generation, 12);
+    assert!(page.kept_layers[0].latest);
+    let next = world
+        .app
+        .call(HostGet, &[&host])
+        .token(&c.boss.token)
+        .query(&json!({"collection":"kept_layers","limit":1,"cursor":page.next_cursor.unwrap()}))
+        .send()
+        .await
+        .ok();
+    assert_eq!(next.kept_layers[0].generation, 11);
+    assert!(!next.kept_layers[0].latest);
+    let empty = world
+        .app
+        .call(HostGet, &[&host])
+        .token(&c.boss.token)
+        .query(&json!({"collection":"kept_layers","q":"undisclosed-name","limit":1}))
+        .send()
+        .await
+        .ok();
+    assert!(empty.kept_layers.is_empty());
+}

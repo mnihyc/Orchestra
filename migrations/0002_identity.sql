@@ -119,6 +119,10 @@ CREATE TABLE api_tokens (
     CONSTRAINT api_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE INDEX api_tokens_name_search_idx ON api_tokens USING gin (name gin_trgm_ops) WHERE revoked_at IS NULL;
+CREATE INDEX api_tokens_inventory_page_idx ON api_tokens (created_at DESC, id) WHERE revoked_at IS NULL;
+CREATE INDEX api_tokens_owner_inventory_page_idx ON api_tokens (user_id, created_at DESC, id) WHERE revoked_at IS NULL;
+
 CREATE TABLE email_tokens (
     id uuid NOT NULL,
     user_id uuid NOT NULL,
@@ -248,6 +252,7 @@ CREATE TABLE sessions (
 );
 
 CREATE INDEX sessions_user_idx ON sessions USING btree (user_id) WHERE (revoked_at IS NULL);
+CREATE INDEX sessions_inventory_page_idx ON sessions (user_id, created_at DESC, id) WHERE revoked_at IS NULL;
 
 CREATE TABLE sign_in_codes (
     user_id uuid NOT NULL,

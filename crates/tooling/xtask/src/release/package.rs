@@ -26,8 +26,7 @@ use crate::release::identity;
 use crate::release::image;
 use crate::release::licences;
 use crate::release::manifest::{
-    self, Asset, AssetNames, CONNECTOR_MINIMUM, LinkProtocol, MANIFEST_FILE, Manifest, PROJECT,
-    SCHEMA_VERSION,
+    self, Asset, AssetNames, LinkProtocol, MANIFEST_FILE, Manifest, PROJECT, SCHEMA_VERSION,
 };
 use crate::release::stock;
 use crate::release::{ReleaseError, capture, run as run_command};
@@ -368,6 +367,7 @@ fn build(root: &Path, args: &PackageArgs) -> Result<(), ReleaseError> {
     }
 
     // The manifest, written from the files as they now are, and read again.
+    let connector_minimum = manifest::connector_minimum(&version);
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
         project: PROJECT.to_owned(),
@@ -378,7 +378,7 @@ fn build(root: &Path, args: &PackageArgs) -> Result<(), ReleaseError> {
             current: PROTOCOL_VERSION,
             minimum: OLDEST_PROTOCOL_VERSION,
         },
-        connector_minimum: CONNECTOR_MINIMUM.to_owned(),
+        connector_minimum,
         assets: manifest::assets_of(out, args.base_url.as_deref())?,
         images,
         harness_builds: harness_builds(root)?,
@@ -626,7 +626,7 @@ fn connector_entries(
             current: PROTOCOL_VERSION,
             minimum: OLDEST_PROTOCOL_VERSION,
         },
-        connector_minimum: CONNECTOR_MINIMUM.to_owned(),
+        connector_minimum: manifest::connector_minimum(version),
         assets,
         images: Vec::new(),
         harness_builds: harness_builds(root)?,
