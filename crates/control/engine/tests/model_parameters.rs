@@ -78,6 +78,11 @@ async fn entry(world: &World, model: &str, parameters: Json) {
 /// Sends an input and returns the turn the machine was asked to start for it.
 async fn turn(world: &World, thread: Id, nth: usize) -> TurnStart {
     declare(world).await;
+    turn_as_declared(world, thread, nth).await
+}
+
+/// The same, for a world whose agent already declared what it publishes.
+async fn turn_as_declared(world: &World, thread: Id, nth: usize) -> TurnStart {
     world
         .engine()
         .submit_input(&Caller::session(world.ada), thread, queued("Go"))
@@ -478,6 +483,53 @@ async fn a_speed_and_a_program_start_where_the_entry_says_and_a_threads_own_choi
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_access_program_a_manager_enabled_for_the_model_is_offered_at_shipped_settings_and_a_place_can_switch_it_off()
+ {
+    // Codex puts its access program behind its own feature, and a model offers a program only once a manager of its provider enabled it.
+    let world = World::observed().await;
+    let mut parameters = declared();
+    parameters[1]["feature"] = json!(orch_adapter_codex::parameters::CYBER_ACCESS_FEATURE);
+    let mut descriptor = common::descriptor();
+    descriptor["features"] = json!({(orch_adapter_codex::parameters::CYBER_ACCESS_FEATURE):true});
+    descriptor["parameters"] = parameters;
+    world.declares(descriptor).await;
+    entry(
+        &world,
+        MODEL,
+        json!({ "access_programs": ["blue"], "default_access_program": "blue" }),
+    )
+    .await;
+    let thread = world.thread("Program").await;
+
+    let shipped = turn_as_declared(&world, thread, 0).await;
+    assert_eq!(
+        sent(&shipped),
+        json!({ "access_program": "blue" }),
+        "nobody switched the feature on, and the program is still offered"
+    );
+    finish(&world, thread, &shipped, 0).await;
+
+    let mut switched_off = serde_json::Map::new();
+    switched_off.insert(
+        orch_adapter_codex::parameters::CYBER_ACCESS_FEATURE.to_owned(),
+        Json::Bool(false),
+    );
+    world
+        .set(
+            world.topic,
+            keys::AGENT_FEATURES,
+            Json::Object(switched_off),
+        )
+        .await;
+    let off = turn_as_declared(&world, thread, 1).await;
+    assert_eq!(
+        sent(&off),
+        json!({}),
+        "a place that switched the feature off offers no program under it"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn what_the_entry_offers_and_no_manager_opened_is_not_shown_and_a_start_that_is_no_longer_enabled_is_not_sent()
  {
     let world = world_with(json!({
@@ -639,4 +691,34 @@ async fn the_speed_of_a_turn_is_recorded_on_it_and_in_the_ledger_and_the_rollups
     .await
     .unwrap();
     assert_eq!(monthly, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn another_programs_feature_ships_on_by_its_declaration_and_a_place_can_override_it() {
+    let world = World::observed().await;
+    let mut descriptor = common::descriptor();
+    let mut parameters = declared();
+    parameters[1]["feature"] = json!("fake.extra_controls");
+    descriptor["parameters"] = parameters;
+    descriptor["features"] = json!({"fake.extra_controls":true});
+    world.declares(descriptor).await;
+    entry(
+        &world,
+        MODEL,
+        json!({"access_programs":["blue"],"default_access_program":"blue"}),
+    )
+    .await;
+    let thread = world.thread("Own feature declaration").await;
+    let on = turn_as_declared(&world, thread, 0).await;
+    assert_eq!(sent(&on), json!({"access_program":"blue"}));
+    finish(&world, thread, &on, 0).await;
+    world
+        .set(
+            world.topic,
+            keys::AGENT_FEATURES,
+            json!({"fake.extra_controls":false}),
+        )
+        .await;
+    let off = turn_as_declared(&world, thread, 1).await;
+    assert_eq!(sent(&off), json!({}));
 }

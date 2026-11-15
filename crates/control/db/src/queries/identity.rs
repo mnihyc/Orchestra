@@ -2167,6 +2167,20 @@ pub async fn email_code_sign_in_set_somewhere(conn: &mut Conn) -> Result<bool, D
 }
 
 /// What the interface of `user` remembers for them on every device, by key.
+pub async fn interface_value(
+    conn: &mut Conn,
+    user: Id,
+    key: &str,
+) -> Result<Option<Json>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT value FROM user_state WHERE user_id=$1 AND key=$2")
+            .bind(user)
+            .bind(key)
+            .fetch_optional(conn)
+            .await?,
+    )
+}
+
 pub async fn interface_state(conn: &mut Conn, user: Id) -> Result<Vec<(String, Json)>, DbError> {
     Ok(
         sqlx::query_as("SELECT key, value FROM user_state WHERE user_id = $1 ORDER BY key")
