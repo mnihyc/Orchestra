@@ -83,6 +83,11 @@ impl Wire {
             .await;
     }
 
+    /// Whether nothing has been sent back to the machine yet.
+    pub(super) fn is_silent(&mut self) -> bool {
+        self.out.try_recv().is_err()
+    }
+
     pub(super) async fn ack(&mut self, stream: &Stream, seq: i64) {
         let outgoing = tokio::time::timeout(ACK_WAIT, self.out.recv())
             .await
@@ -112,6 +117,7 @@ struct Office {
     other: Id,
     thread: Id,
     segment: Id,
+    person: Id,
 }
 
 impl Office {
@@ -197,6 +203,7 @@ impl Office {
             other,
             thread,
             segment,
+            person,
         }
     }
 
@@ -222,6 +229,246 @@ impl Office {
             .get(&self.stream().to_string())
             .copied()
     }
+}
+
+async fn tool_office() -> (Office, Id, Id) {
+    use orch_db::queries::resources::access_fixtures as fixtures;
+    let office = Office::new(true).await;
+    let mut conn = office.db.pool.acquire().await.unwrap();
+    let home: Id = sqlx::query_scalar("SELECT topic_id FROM threads WHERE node_id=$1")
+        .bind(office.thread)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    let environment = fixtures::insert_environment(
+        &mut conn,
+        office.person,
+        Some(home),
+        "Tool environment",
+        "connected",
+    )
+    .await
+    .unwrap();
+    let provider = fixtures::insert_resource(
+        &mut conn,
+        "provider",
+        Some(office.person),
+        Some(home),
+        "Tool provider",
+    )
+    .await
+    .unwrap();
+    let agent = fixtures::insert_resource(
+        &mut conn,
+        "agent",
+        Some(office.person),
+        Some(home),
+        "Tool agent",
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE environments SET machine_id=$2,status='running',generation=1 WHERE id=$1")
+        .bind(environment)
+        .bind(office.owner)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE segments SET environment_id=$2,env_generation=1,provider_id=$3,agent_id=$4 WHERE id=$1").bind(office.segment).bind(environment).bind(provider).bind(agent).execute(&mut *conn).await.unwrap();
+    sqlx::query("UPDATE threads SET environment_id=$2,provider_id=$3,agent_id=$4 WHERE node_id=$1")
+        .bind(office.thread)
+        .bind(environment)
+        .bind(provider)
+        .bind(agent)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    (office, environment, provider)
+}
+
+async fn admitted_tool_question(
+    office: &Office,
+    conn: &mut Conn,
+    body: &Json,
+    wanted: &orch_link_contract::commands::TicketWanted,
+) -> orch_link_contract::tool_sessions::ToolSessionQuery {
+    use orch_db::queries::link::{NewCommand, insert_command};
+    let command = new_id();
+    insert_command(
+        conn,
+        &NewCommand {
+            id: command,
+            machine_id: office.owner,
+            kind: "session.open",
+            body,
+            serial_key: None,
+            deadline_at: office.app.clock.now() + chrono::Duration::minutes(2),
+        },
+        office.app.clock.now(),
+    )
+    .await
+    .unwrap();
+    let facts = orch_db::queries::session_dependencies::command_tool_session(conn, command)
+        .await
+        .unwrap()
+        .unwrap();
+    let scope = Tickets::command_scope(&facts, wanted, office.owner).unwrap();
+    let ticket = office
+        .app
+        .app
+        .link
+        .tickets()
+        .for_session_request(wanted, office.owner, &scope)
+        .unwrap();
+    let claims = orch_link_contract::tunnels::Ticket::parse(&ticket)
+        .unwrap()
+        .claims()
+        .clone();
+    orch_link_contract::tool_sessions::ToolSessionQuery {
+        n: new_id(),
+        ticket,
+        claims: Box::new(claims),
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn a_signed_tool_ticket_ends_with_its_actual_opening_and_cannot_join_a_replacement() {
+    use orch_db::queries::link::{NewCommand, insert_command};
+    use orch_link_contract::{
+        commands::{TicketSlot, TicketWanted},
+        tool_sessions::ToolSessionQuery,
+        tunnels::{Ticket, TunnelKind},
+    };
+    let (office, environment, _provider) = tool_office().await;
+    let link = &office.app.app.link;
+    let mut conn = office.db.pool.acquire().await.unwrap();
+    let wanted=TicketWanted {kind:TunnelKind::Exec,more:json!({"service":"exec/orch","dst":office.owner,"thread_id":office.thread,"environment_id":environment,"environment_generation":1}).as_object().unwrap().clone()};
+    let mut slot = TicketSlot::ask(TunnelKind::Exec);
+    if let TicketSlot::Asked(ask) = &mut slot {
+        ask.ticket = wanted.clone();
+    }
+    let body = json!({"thread_id":office.thread,"segment_id":office.segment,"exec":{"environment_id":environment,"generation":1,"ticket":slot},"mcp":[],"skills":[]});
+    let first = new_id();
+    let next = new_id();
+    let mut original = None;
+    for command in [first, next] {
+        insert_command(
+            &mut conn,
+            &NewCommand {
+                id: command,
+                machine_id: office.owner,
+                kind: "session.open",
+                body: &body,
+                serial_key: None,
+                deadline_at: office.app.clock.now() + chrono::Duration::minutes(2),
+            },
+            office.app.clock.now(),
+        )
+        .await
+        .unwrap();
+        let facts =
+            orch_db::queries::session_dependencies::command_tool_session(&mut conn, command)
+                .await
+                .unwrap()
+                .unwrap();
+        let scope = Tickets::command_scope(&facts, &wanted, office.owner).unwrap();
+        let ticket = link
+            .tickets()
+            .for_session_request(&wanted, office.owner, &scope)
+            .unwrap();
+        let claims = Ticket::parse(&ticket).unwrap().claims().clone();
+        let query = ToolSessionQuery {
+            n: new_id(),
+            ticket,
+            claims: Box::new(claims),
+        };
+        assert!(
+            link.authorize_tool_session(&query).await.allowed,
+            "the valid native session remains usable"
+        );
+        if let Some(old) = &original {
+            assert!(
+                !link.authorize_tool_session(old).await.allowed,
+                "an older ticket cannot join this replacement"
+            );
+        }
+        original = Some(query);
+    }
+    let close = json!({"thread_id":office.thread,"segment_id":office.segment});
+    insert_command(
+        &mut conn,
+        &NewCommand {
+            id: new_id(),
+            machine_id: office.owner,
+            kind: "session.close.fenced",
+            body: &close,
+            serial_key: None,
+            deadline_at: office.app.clock.now() + chrono::Duration::minutes(2),
+        },
+        office.app.clock.now(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !link
+            .authorize_tool_session(original.as_ref().unwrap())
+            .await
+            .allowed,
+        "close refuses the signed ticket before a remote reply"
+    );
+    let mut builtin = wanted.clone();
+    builtin.kind = TunnelKind::Mcp;
+    builtin.more.insert("service".into(), json!("mcp/exec"));
+    let mut slot = TicketSlot::ask(TunnelKind::Mcp);
+    if let TicketSlot::Asked(ask) = &mut slot {
+        ask.ticket = builtin.clone();
+    }
+    let body = json!({"thread_id":office.thread,"segment_id":office.segment,"exec":{"environment_id":environment,"generation":1,"ticket":slot},"mcp":[],"skills":[]});
+    let opening = new_id();
+    insert_command(
+        &mut conn,
+        &NewCommand {
+            id: opening,
+            machine_id: office.owner,
+            kind: "session.open",
+            body: &body,
+            serial_key: None,
+            deadline_at: office.app.clock.now() + chrono::Duration::minutes(2),
+        },
+        office.app.clock.now(),
+    )
+    .await
+    .unwrap();
+    let facts = orch_db::queries::session_dependencies::command_tool_session(&mut conn, opening)
+        .await
+        .unwrap()
+        .unwrap();
+    let scope = Tickets::command_scope(&facts, &builtin, office.owner).unwrap();
+    assert_eq!(scope.member, "exec");
+    let ticket = link
+        .tickets()
+        .for_session_request(&builtin, office.owner, &scope)
+        .unwrap();
+    let claims = Ticket::parse(&ticket).unwrap().claims().clone();
+    assert!(
+        link.authorize_tool_session(&ToolSessionQuery {
+            n: new_id(),
+            ticket,
+            claims: Box::new(claims)
+        })
+        .await
+        .allowed,
+        "the builtin executor stays usable over its native MCP transport without an external server UUID"
+    );
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn __api_run_a_signed_tool_ticket_ends_with_its_actual_opening_and_cannot_join_a_replacement()
+-> futures::future::LocalBoxFuture<'static, ()> {
+    Box::pin(
+        self::a_signed_tool_ticket_ends_with_its_actual_opening_and_cannot_join_a_replacement(),
+    )
 }
 
 fn raw() -> Event {
@@ -361,3 +608,139 @@ pub fn __api_run_a_foreign_session_reset_writes_no_cursor_and_sends_no_resync_wh
 
 #[path = "session_source_tests/port_creation_replays.rs"]
 pub mod port_creation_replays;
+
+#[cfg(any(test, feature = "test-support"))]
+async fn a_tool_ticket_names_the_current_server_and_credential_keeper_even_after_a_stale_command_is_queued()
+ {
+    use orch_link_contract::commands::TicketSlot;
+    use orch_link_contract::tunnels::{Service, TunnelKind};
+    let (office, environment, provider) = tool_office().await;
+    let link = &office.app.app.link;
+    let mut conn = office.db.pool.acquire().await.unwrap();
+    let server = new_id();
+    sqlx::query("UPDATE machines SET facts=jsonb_build_object('policy',jsonb_build_object('mcp.add',true)) WHERE id=$1").bind(office.owner).execute(&mut *conn).await.unwrap();
+    sqlx::query("INSERT INTO mcp_servers(id,org_id,home_id,owner_id,environment_id,name,spec) SELECT $1,org_id,home_node_id,owner_id,id,'files',$3 FROM environments WHERE id=$2")
+        .bind(server).bind(environment).bind(json!({"transport":"stdio","command":["true"]})).execute(&mut *conn).await.unwrap();
+    let mut wanted = crate::tickets::request(
+        TunnelKind::Mcp,
+        &Service::Mcp {
+            server: "files".into(),
+        },
+        office.owner,
+        Some(office.thread),
+    );
+    wanted
+        .more
+        .insert("environment_id".into(), json!(environment));
+    wanted
+        .more
+        .insert("environment_generation".into(), json!(1));
+    let mut slot = TicketSlot::ask(TunnelKind::Mcp);
+    if let TicketSlot::Asked(ask) = &mut slot {
+        ask.ticket = wanted.clone();
+    }
+    let body = json!({"thread_id":office.thread,"segment_id":office.segment,"mcp":[{"server_id":server,"name":"files","ticket":slot}],"skills":[]});
+    let current = admitted_tool_question(&office, &mut conn, &body, &wanted).await;
+    assert!(
+        link.authorize_tool_session(&current).await.allowed,
+        "the current own server is usable"
+    );
+    sqlx::query("UPDATE mcp_servers SET name='other' WHERE id=$1")
+        .bind(server)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let stale = admitted_tool_question(&office, &mut conn, &body, &wanted).await;
+    assert!(
+        !link.authorize_tool_session(&stale).await.allowed,
+        "a command queued after rename cannot borrow the old service name for another server"
+    );
+    sqlx::query("UPDATE mcp_servers SET name='files' WHERE id=$1")
+        .bind(server)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let restored = admitted_tool_question(&office, &mut conn, &body, &wanted).await;
+    assert!(link.authorize_tool_session(&restored).await.allowed);
+    sqlx::query("UPDATE mcp_servers SET name='exec' WHERE id=$1")
+        .bind(server)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let catalogue = orch_engine::mcp::resolve(&mut conn, environment, office.app.clock.time())
+        .await
+        .unwrap();
+    let reserved = catalogue
+        .iter()
+        .find(|candidate| candidate.row.id == server)
+        .unwrap();
+    assert_eq!(
+        reserved.reason_code,
+        Some(orch_api_contract::environment::McpReasonCode::NameConflict),
+        "a colliding discovered definition cannot be shown as a usable builtin executor"
+    );
+    sqlx::query("UPDATE mcp_servers SET name='files' WHERE id=$1")
+        .bind(server)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let lease = new_id();
+    assert!(
+        threads::open_lease(
+            &mut conn,
+            &threads::NewLease {
+                id: lease,
+                provider_id: provider,
+                thread_id: office.thread,
+                mode: "forwarded",
+                form: None,
+                allowed_models: &[],
+                allowance: None,
+                at: office.app.clock.now()
+            }
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    sqlx::query("UPDATE providers SET key_machine_id=$2 WHERE id=$1")
+        .bind(provider)
+        .bind(office.owner)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let wanted = crate::tickets::request(
+        TunnelKind::Llm,
+        &Service::Llm { lease_id: lease },
+        office.owner,
+        Some(office.thread),
+    );
+    let mut slot = TicketSlot::ask(TunnelKind::Llm);
+    if let TicketSlot::Asked(ask) = &mut slot {
+        ask.ticket = wanted.clone();
+    }
+    let body = json!({"thread_id":office.thread,"segment_id":office.segment,"provider":{"path":"forwarded","provider_id":provider,"protocol":"openai-responses","ticket":slot},"mcp":[],"skills":[]});
+    let current = admitted_tool_question(&office, &mut conn, &body, &wanted).await;
+    assert!(
+        link.authorize_tool_session(&current).await.allowed,
+        "the actual credential keeper is usable"
+    );
+    sqlx::query("UPDATE providers SET key_machine_id=$2 WHERE id=$1")
+        .bind(provider)
+        .bind(office.other)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let stale = admitted_tool_question(&office, &mut conn, &body, &wanted).await;
+    assert!(
+        !link.authorize_tool_session(&stale).await.allowed,
+        "a fresh command cannot re-admit a ticket for the previous credential keeper"
+    );
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn __api_run_a_tool_ticket_names_the_current_server_and_credential_keeper_even_after_a_stale_command_is_queued()
+-> ::futures::future::LocalBoxFuture<'static, ()> {
+    Box::pin(a_tool_ticket_names_the_current_server_and_credential_keeper_even_after_a_stale_command_is_queued())
+}

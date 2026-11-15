@@ -417,6 +417,9 @@ pub struct SearchListQuery {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NameSearchListQuery {
+    /// One exact identity, independent of recent visits; the same current visibility checks still apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<Id>,
     /// Only this caller's starred kind/id identities; empty words list them in saved order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub starred: Option<bool>,

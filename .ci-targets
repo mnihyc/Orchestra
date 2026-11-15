@@ -1,0 +1,10 @@
+test -p orch-agent-contract --lib
+test -p orch-adapter-fake --lib
+test -p orch-adapter-claude-code --lib
+test -p orch-adapter-codex --lib
+test -p orch-adapter-acp --lib
+test -p orch-adapter-claude-code --test process_faults --test input_prefix --test sessions
+test -p orch-adapter-codex --test process_faults --test sessions --test recorded_failures
+test -p orch-adapter-acp --test process --test turns
+test -p orch-testkit --test harness_corpus
+test -p orch-engine --test forks

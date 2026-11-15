@@ -108,6 +108,29 @@ enum OpenIntent {
     },
 }
 
+/// A cancelled opening owns only its own local key and physical slot.
+struct OpeningBinding {
+    process: Arc<Process>,
+    loopback: Arc<crate::loopback::Loopback>,
+    binding: Arc<crate::loopback::SessionBinding>,
+    opening_id: orch_types::Id,
+    kept: bool,
+}
+impl OpeningBinding {
+    fn keep(mut self) {
+        self.kept = true;
+    }
+}
+impl Drop for OpeningBinding {
+    fn drop(&mut self) {
+        if !self.kept {
+            self.process
+                .session_closed_if(self.binding.thread_id, self.opening_id);
+            self.loopback.unbind(&self.binding.session_key);
+        }
+    }
+}
+
 struct Opened {
     session: orch_agent_contract::session::SessionOpened,
     prefix: Option<NativeInputPrefix>,
@@ -385,6 +408,7 @@ impl AgentRole {
         let command = call.context.id;
         let fenced =
             !matches!(&intent, OpenIntent::Ordinary) || process.continuation_fenced(body.thread_id);
+        let mut opening_binding = None;
         let outcome = async {
             let archive = match &body.archive {
                 Some(archive) => {
@@ -503,11 +527,19 @@ impl AgentRole {
             let binding = self
                 .hosting
                 .bind(&process, body.thread_id, body.segment_id, tickets);
+            opening_binding = Some(OpeningBinding {
+                process: Arc::clone(&process),
+                loopback: Arc::clone(&self.hosting.services().loopback),
+                binding: Arc::clone(&binding),
+                opening_id: command,
+                kept: false,
+            });
             self.hosting
                 .services()
                 .loopback
                 .set_reach(&binding.session_key, crate::loopback::Reach::of(&body));
             let spec = SessionSpec {
+                opening_id: command,
                 settings,
                 session_key: binding.session_key.clone(),
                 archive,
@@ -522,8 +554,9 @@ impl AgentRole {
                 mcp: body.mcp.iter().map(|server| server.name.clone()).collect(),
                 skills,
             };
-            let opened = process
-                .call(move |adapter| {
+            let generation = process.generation();
+            let opening = process
+                .call_at(generation, move |adapter| {
                     Box::pin(async move {
                         match intent {
                             OpenIntent::Ordinary | OpenIntent::Guarded(_) => {
@@ -552,11 +585,21 @@ impl AgentRole {
                                 }),
                         }
                     })
-                })
-                .await;
+                });
+            tokio::pin!(opening);
+            let opened=tokio::select! {
+                biased;
+                ()=call.context.cancel.cancelled()=>Err(CommandError::new(ErrorCode::Conflict,"the physical session opening was cancelled")),
+                result=&mut opening=>result,
+            };
             match opened {
                 Ok(opened) => {
-                    process.session_opened(&binding, &opened.session.native_session_ref);
+                    process.session_opened(
+                        &binding,
+                        command,
+                        generation,
+                        &opened.session.native_session_ref,
+                    )?;
                     if fenced {
                         process.fence_continuation(body.thread_id);
                     }
@@ -576,6 +619,17 @@ impl AgentRole {
         }
         .await;
         content.finish(command).await;
+        if call.context.cancel.is_cancelled() {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the physical session opening was cancelled",
+            ));
+        }
+        if outcome.is_ok()
+            && let Some(binding) = opening_binding.take()
+        {
+            binding.keep();
+        }
         outcome
     }
 

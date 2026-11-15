@@ -30,6 +30,145 @@ async fn rig_with_session() -> (Rig, Id, Id) {
 }
 
 #[tokio::test]
+async fn cancelling_a_native_opening_retires_its_local_tool_key_and_its_late_loss_cannot_retire_the_next_one()
+ {
+    use orch_agent_contract::adapter::{
+        AdapterError, AgentAdapter, AgentStart, AgentStarted, EventSink,
+    };
+    use orch_agent_contract::descriptor::AgentDescriptor;
+    use orch_agent_contract::session::{SessionOpened, SessionSpec, ThreadId, TurnStart};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    struct Gate {
+        inner: orch_adapter_fake::FakeAdapter,
+        calls: Arc<AtomicUsize>,
+        entered: Arc<tokio::sync::Notify>,
+        specs: Arc<Mutex<Vec<(Id, String)>>>,
+        sink: Arc<Mutex<Option<EventSink>>>,
+    }
+    #[async_trait::async_trait]
+    impl AgentAdapter for Gate {
+        fn kind(&self) -> &'static str {
+            "fake"
+        }
+        async fn start(
+            &mut self,
+            start: AgentStart,
+            sink: EventSink,
+        ) -> Result<AgentStarted, AdapterError> {
+            *self.sink.lock().unwrap() = Some(sink.clone());
+            self.inner.start(start, sink).await
+        }
+        async fn stop(&mut self) -> Result<(), AdapterError> {
+            self.inner.stop().await
+        }
+        async fn probe(&mut self) -> Result<AgentDescriptor, AdapterError> {
+            self.inner.probe().await
+        }
+        async fn open_session(&mut self, spec: SessionSpec) -> Result<SessionOpened, AdapterError> {
+            self.specs
+                .lock()
+                .unwrap()
+                .push((spec.opening_id, spec.session_key.clone()));
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            self.inner.open_session(spec).await
+        }
+        async fn close_session(&mut self, thread: ThreadId) -> Result<(), AdapterError> {
+            self.inner.close_session(thread).await
+        }
+        async fn start_turn(&mut self, turn: TurnStart) -> Result<(), AdapterError> {
+            self.inner.start_turn(turn).await
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let specs = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(Mutex::new(None));
+    let mut registration = common::fake_registration();
+    let (factory_calls, factory_entered, factory_specs, factory_sink) =
+        (calls.clone(), entered.clone(), specs.clone(), sink.clone());
+    registration.factory = Arc::new(move |clock| {
+        Box::new(Gate {
+            inner: orch_adapter_fake::FakeAdapter::new(clock),
+            calls: factory_calls.clone(),
+            entered: factory_entered.clone(),
+            specs: factory_specs.clone(),
+            sink: factory_sink.clone(),
+        })
+    });
+    let mut rig = Rig::new();
+    rig.adapters = orch_connector_core::harnesses::AdapterRegistry::new();
+    rig.adapters.register(registration).unwrap();
+    rig.start().await;
+    rig.agent_start(json!({})).await;
+    let (thread, segment) = (new_id(), new_id());
+    let body: orch_link_contract::commands::SessionOpen =
+        serde_json::from_value(rig.open_body(thread, segment, "/tmp/work")).unwrap();
+    let opening = rig
+        .controller
+        .issue(&SerialKey::Thread(thread), rig.deadline(), &body);
+    tokio::time::timeout(PATIENCE, entered.notified())
+        .await
+        .unwrap();
+    let loopback = rig.connector.as_ref().unwrap().loopback().clone();
+    let (original, key) = specs.lock().unwrap()[0].clone();
+    assert_eq!(
+        original, opening,
+        "the adapter's public opening comes from the real accepted command"
+    );
+    assert!(loopback.session(&key).is_some());
+    rig.controller.link().commands().cancel(opening);
+    assert!(matches!(
+        tokio::time::timeout(PATIENCE, rig.controller.wait_command(opening))
+            .await
+            .unwrap(),
+        Progress::Cancelled
+    ));
+    until("the cancelled opening's local tool key is retired", || {
+        loopback.session(&key).is_none()
+    })
+    .await;
+    rig.open_session(rig.open_body(thread, segment, "/tmp/work"))
+        .await;
+    let (_, current_key) = specs.lock().unwrap()[1].clone();
+    let source = sink.lock().unwrap().clone().unwrap();
+    source
+        .session(
+            thread,
+            segment,
+            orch_agent_contract::events::SessionEvent::SessionLost(
+                orch_agent_contract::events::SessionLost {
+                    expected: false,
+                    opening_id: original,
+                    reason: "the cancelled opening's delayed report".into(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    rig.wait_for(thread, segment, "session.lost", 1).await;
+    assert!(
+        loopback.session(&current_key).is_some(),
+        "a stale physical report cannot unbind its replacement even on the same segment"
+    );
+    assert_eq!(
+        rig.connector
+            .as_ref()
+            .unwrap()
+            .hosting()
+            .unwrap()
+            .process(rig.provider, rig.agent)
+            .unwrap()
+            .sessions_open(),
+        1
+    );
+    rig.connector.unwrap().stop().await;
+}
+
+#[tokio::test]
 async fn retained_command_output_arrives_before_its_item_and_survives_a_cut_upload() {
     let (rig, thread, segment) = rig_with_session().await;
     assert_eq!(rig.roles, vec![Role::Agent]);
@@ -461,6 +600,21 @@ async fn a_connector_killed_in_the_middle_of_a_turn_says_on_its_return_what_beca
         .into_iter()
         .find(|e| e.kind == "session.lost")
         .unwrap();
+    let opened = rig
+        .applied(thread, segment)
+        .into_iter()
+        .find(|event| event.kind == "session.opened")
+        .unwrap();
+    assert_eq!(
+        lost.body["opening_id"], opened.body["opening_id"],
+        "the restarted connector reports the original physical session, never a current-map replacement"
+    );
+    assert!(
+        lost.body["opening_id"]
+            .as_str()
+            .and_then(|text| text.parse::<Id>().ok())
+            .is_some()
+    );
     assert!(
         lost.body["reason"]
             .as_str()
@@ -478,6 +632,47 @@ async fn a_connector_killed_in_the_middle_of_a_turn_says_on_its_return_what_beca
     let last = status.iter().rfind(|e| e.kind == "harness.status").unwrap();
     assert_eq!(last.body["status"], "online");
     assert_eq!(last.body["sessions_open"], 0);
+    rig.connector.unwrap().stop().await;
+}
+
+#[tokio::test]
+async fn an_idle_conversation_retires_its_original_tool_opening_quietly_after_connector_restart() {
+    let (mut rig, thread, segment) = rig_with_session().await;
+    let original = rig
+        .applied(thread, segment)
+        .into_iter()
+        .find(|event| event.kind == "session.opened")
+        .unwrap();
+    rig.kill().await;
+    rig.start().await;
+    rig.wait_for(thread, segment, "session.lost", 1).await;
+    let lost = rig
+        .applied(thread, segment)
+        .into_iter()
+        .find(|event| event.kind == "session.lost")
+        .unwrap();
+    assert_eq!(lost.body["opening_id"], original.body["opening_id"]);
+    assert_eq!(lost.body["expected"], json!(true));
+    assert!(
+        rig.connector
+            .as_ref()
+            .unwrap()
+            .hosting()
+            .unwrap()
+            .process(rig.provider, rig.agent)
+            .unwrap()
+            .session_key(thread)
+            .is_none()
+    );
+    rig.open_session(rig.open_body(thread, segment, "/tmp/work"))
+        .await;
+    let openings = rig
+        .applied(thread, segment)
+        .into_iter()
+        .filter(|event| event.kind == "session.opened")
+        .collect::<Vec<_>>();
+    assert_eq!(openings.len(), 2);
+    assert_ne!(openings[1].body["opening_id"], original.body["opening_id"]);
     rig.connector.unwrap().stop().await;
 }
 

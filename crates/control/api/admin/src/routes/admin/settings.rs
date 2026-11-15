@@ -181,6 +181,7 @@ async fn set(mut ctx: Ctx, (): (), body: AdminSettingSetBody) -> ApiResult<Resol
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     crate::routes::resources::validation::setting(&ctx.app.engine, &key, &body.value)?;
+    crate::routes::resources::validation::named_things_exist(&mut tx, &key, &body.value).await?;
     let written = write(
         &mut tx,
         &Write {
