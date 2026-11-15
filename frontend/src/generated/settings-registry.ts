@@ -4,6 +4,325 @@ import type { SettingDef } from './api-types';
 
 export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
+    "key": "pools.member_priority",
+    "title": "Member priority",
+    "description": "The default priority tier of a pool member; lower tiers are tried first.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "pool"
+    ],
+    "merge": "replace",
+    "default": 0,
+    "example": 0,
+    "text_key": "day100.builtin.pools.member_priority",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "pools.member_weight",
+    "title": "Member weight",
+    "description": "The default positive decimal weight of a pool member; equal weights give equal shares.",
+    "group": "automation",
+    "schema": {
+      "type": "string",
+      "pattern": "^[0-9]+(\\.[0-9]+)?$"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "pool"
+    ],
+    "merge": "replace",
+    "default": "1",
+    "example": "1",
+    "text_key": "day100.builtin.pools.member_weight",
+    "keywords": []
+  },
+  {
+    "key": "pools.max_depth",
+    "title": "Pool depth",
+    "description": "Admitted nested pool depth, counting the outer pool as one; zero disables pool choices without hiding their definitions.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "pool"
+    ],
+    "merge": "replace",
+    "default": 3,
+    "example": 3,
+    "text_key": "day100.builtin.pools.max_depth",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "pools.read_batch_size",
+    "title": "Pool read batch",
+    "description": "Member and candidate rows read together; larger pools continue in further pages.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "pool"
+    ],
+    "merge": "replace",
+    "default": 100,
+    "example": 100,
+    "text_key": "day100.builtin.pools.read_batch_size",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "pools.load_ceiling_percent",
+    "title": "Pool load ceiling",
+    "description": "Measured ratio ceiling for Least loaded; zero is off and this never changes native host capacity policy.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "percent"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "pool"
+    ],
+    "merge": "replace",
+    "default": 90,
+    "example": 90,
+    "text_key": "day100.builtin.pools.load_ceiling_percent",
+    "keywords": [],
+    "display": {
+      "unit": "percent",
+      "zero": null
+    }
+  },
+  {
+    "key": "pools.load_ceiling_count",
+    "title": "Pool count ceiling",
+    "description": "Observed thread or process count ceiling for Least loaded; zero is off, with no invented percentage denominator.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "pool"
+    ],
+    "merge": "replace",
+    "default": 0,
+    "example": 0,
+    "text_key": "day100.builtin.pools.load_ceiling_count",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "pools.cooldown_minutes",
+    "title": "Pool cooldown",
+    "description": "Minutes of suppression after qualifying native evidence; zero adds no timed suppression and never overrides a vendor wait.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "minutes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "pool"
+    ],
+    "merge": "replace",
+    "default": 60,
+    "example": 60,
+    "text_key": "day100.builtin.pools.cooldown_minutes",
+    "keywords": [],
+    "display": {
+      "unit": "minutes",
+      "zero": null
+    }
+  },
+  {
+    "key": "pools.failures_before_cooldown",
+    "title": "Failures before cooldown",
+    "description": "Qualifying failures within the failure window that begin suppression; local permission and policy refusals never count.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "pool"
+    ],
+    "merge": "replace",
+    "default": 1,
+    "example": 1,
+    "text_key": "day100.builtin.pools.failures_before_cooldown",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "pools.failure_window_secs",
+    "title": "Pool failure window",
+    "description": "Seconds grouping qualifying native failures for this pool's threshold.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "pool"
+    ],
+    "merge": "replace",
+    "default": 300,
+    "example": 300,
+    "text_key": "day100.builtin.pools.failure_window_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "pools.recovery_trials",
+    "title": "Pool recovery trials",
+    "description": "Concurrent fenced native trials allowed against one failure scope; a page visit never starts a trial.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "pool"
+    ],
+    "merge": "replace",
+    "default": 1,
+    "example": 1,
+    "text_key": "day100.builtin.pools.recovery_trials",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "pools.attempts",
+    "title": "Pool attempts",
+    "description": "Automatic additional member attempts under call recovery; unset tries each eligible leaf once, zero permits none, and the caller's stricter guard still applies.",
+    "group": "automation",
+    "schema": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "pool"
+    ],
+    "merge": "replace",
+    "default": null,
+    "example": null,
+    "text_key": "day100.builtin.pools.attempts",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "pools.choice_detail_days",
+    "title": "Pool choice details",
+    "description": "Days retaining detailed choice/skip facts; zero keeps them forever, and essential native receipts and active health facts remain.",
+    "group": "retention",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "days"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "pool"
+    ],
+    "merge": "replace",
+    "default": 30,
+    "example": 30,
+    "text_key": "day100.builtin.pools.choice_detail_days",
+    "keywords": [],
+    "display": {
+      "unit": "days",
+      "zero": null
+    }
+  },
+  {
     "key": "ask.models",
     "title": "Ask models",
     "description": "Allowed API model identities for Ask. Child scopes only narrow the list; parent order is retained. The first usable identity is the default. Unset everywhere or empty blocks Ask.",
@@ -169,7 +488,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "ask.max_output_tokens",
     "title": "Ask answer tokens",
-    "description": "The most output tokens per Ask model request, also reserved before fitting conversation context. The lowest system or organization value applies.",
+    "description": "The most output tokens per Ask model request. The request is fitted to the window less this, and an answer takes half of the window at most. The lowest system or organization value applies.",
     "group": "automation",
     "schema": {
       "type": "integer",
@@ -193,7 +512,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "ask.context_tokens",
     "title": "Ask context tokens",
-    "description": "Unset uses the chosen model's context window. When set, the smaller value applies to Ask only; output and tool-result reserves must still fit. The lowest system or organization value applies.",
+    "description": "Unset uses the chosen model's context window; a model that states none is not given a small one. When set, the smaller value applies to Ask only. A window no larger than twice the answer tokens leaves the answer half of it. The lowest system or organization value applies.",
     "group": "automation",
     "schema": {
       "type": "integer",
@@ -239,14 +558,13 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
-    "key": "ask.tool_bytes",
-    "title": "Ask source size",
-    "description": "The most bytes from one read result supplied to the model, with a canonical link to the full source.",
+    "key": "ask.docs_hits",
+    "title": "Ask guide pages per search",
+    "description": "The most guide pages one Ask search of the help gives the model, English and Chinese alternating where both match.",
     "group": "automation",
     "schema": {
       "type": "integer",
-      "minimum": 1,
-      "x-unit": "bytes"
+      "minimum": 1
     },
     "class": "policy",
     "scopes": [
@@ -254,24 +572,23 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "org"
     ],
     "merge": "min",
-    "default": 65536,
-    "example": 65536,
-    "text_key": "day100.builtin.ask.tool_bytes",
+    "default": 5,
+    "example": 8,
+    "text_key": "day100.builtin.ask.docs_hits",
     "keywords": [],
     "display": {
-      "unit": "bytes",
+      "unit": "raw",
       "zero": null
     }
   },
   {
-    "key": "ask.turn_tool_bytes",
-    "title": "Ask sources per turn",
-    "description": "The total read-result bytes supplied while answering one question.",
+    "key": "ask.docs_excerpt_tokens",
+    "title": "Ask guide excerpt size",
+    "description": "The most tokens of one guide page that Ask's help search gives the model; the page's link comes with it.",
     "group": "automation",
     "schema": {
       "type": "integer",
-      "minimum": 1,
-      "x-unit": "bytes"
+      "minimum": 1
     },
     "class": "policy",
     "scopes": [
@@ -279,12 +596,60 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "org"
     ],
     "merge": "min",
-    "default": 262144,
-    "example": 262144,
-    "text_key": "day100.builtin.ask.turn_tool_bytes",
+    "default": 1000,
+    "example": 2000,
+    "text_key": "day100.builtin.ask.docs_excerpt_tokens",
     "keywords": [],
     "display": {
-      "unit": "bytes",
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "ask.max_operations",
+    "title": "Ask operations per search",
+    "description": "The most read operations one Ask search of the read catalogue returns.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "min",
+    "default": 20,
+    "example": 40,
+    "text_key": "day100.builtin.ask.max_operations",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "ask.max_links",
+    "title": "Ask links per source",
+    "description": "The most canonical source links Ask keeps from one read.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "min",
+    "default": 50,
+    "example": 100,
+    "text_key": "day100.builtin.ask.max_links",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
       "zero": null
     }
   },
@@ -678,7 +1043,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "merge": "map",
     "default": {},
     "example": {
-      "vision": true
+      "optional.tools": false
     },
     "text_key": "day100.builtin.agent.features",
     "keywords": []
@@ -1022,14 +1387,89 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
+    "key": "agents.web_action_wait_secs",
+    "title": "Web action wait",
+    "description": "Close a native web action that has not reported its end after this many seconds, with its reason. A later result can still update it. Applies when the session opens again.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 120,
+    "example": 240,
+    "text_key": "day100.builtin.agents.web_action_wait_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "agents.native_result_wait_ms",
+    "title": "Native result wait",
+    "description": "How long an agent program may read retained native results before reporting unavailable evidence. Programs that declare this wait use it as their profile default, within the engine's interrupt window. Applies when the program starts again.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "milliseconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 2000,
+    "example": 3000,
+    "text_key": "day100.builtin.agents.native_result_wait_ms",
+    "keywords": [],
+    "display": {
+      "unit": "milliseconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "agents.native_result_buffer_bytes",
+    "title": "Native result buffer",
+    "description": "Pending native input retained for a session while its result evidence is read. When full, the optional read ends as unverified and all input continues. Programs that declare this buffer use it as their profile default. Applies when the program starts again.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 8388608,
+    "example": 16777216,
+    "text_key": "day100.builtin.agents.native_result_buffer_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
     "key": "agents.subagents_at_once",
     "title": "Sub-agents at once",
     "description": "How many sub-agents the harness may run at once; the shortest value along the hierarchy wins. A harness without this control says it does not apply.",
     "group": "agent",
     "schema": {
       "type": "integer",
-      "minimum": 1,
-      "maximum": 64
+      "minimum": 1
     },
     "class": "parameter",
     "scopes": [
@@ -1056,8 +1496,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "group": "agent",
     "schema": {
       "type": "integer",
-      "minimum": 1,
-      "maximum": 5
+      "minimum": 1
     },
     "class": "parameter",
     "scopes": [
@@ -1414,6 +1853,33 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
+    "key": "thread.silent_after_secs",
+    "title": "Silence notice",
+    "description": "How many seconds nothing may arrive from a running agent, with no tool running, before a thread's status line says how long nothing came.",
+    "group": "collaboration",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic"
+    ],
+    "merge": "replace",
+    "default": 120,
+    "example": 300,
+    "text_key": "day100.builtin.thread.silent_after_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
     "key": "thread.goal.max_turns",
     "title": "Goal turns",
     "description": "The most turns a goal may use here; 0 is no limit. A goal may set a stricter own limit; it cannot raise a limit set above it. Reaching a limit stops the goal and says which.",
@@ -1687,6 +2153,30 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "acme.*"
     ],
     "text_key": "day100.builtin.providers.allowed",
+    "keywords": []
+  },
+  {
+    "key": "models.add_switches_on",
+    "title": "Switched on when added",
+    "description": "Context, speeds and access enables reported context sizes, speeds and access programs. Efforts and context enables context sizes. Only what it states keeps the model's own window and efforts. Other model options are configured separately; larger contexts remain a per-thread choice.",
+    "group": "models",
+    "schema": {
+      "type": "string",
+      "enum": [
+        "all",
+        "basic",
+        "nothing"
+      ]
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "replace",
+    "default": "all",
+    "example": "basic",
+    "text_key": "day100.builtin.models.add_switches_on",
     "keywords": []
   },
   {
@@ -2666,6 +3156,89 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
+    "key": "orch_tools.read_bytes",
+    "title": "Shared read bytes",
+    "description": "Default UTF-8 bytes in a shared read or tool answer; explicit positive byte windows can differ.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 20000,
+    "example": 80000,
+    "text_key": "day100.builtin.orch_tools.read_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "orch_tools.list_depth",
+    "title": "Shared listing depth",
+    "description": "Default levels in a shared listing; continuation retains the remaining entries.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 1,
+    "example": 9,
+    "text_key": "day100.builtin.orch_tools.list_depth",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "orch_tools.list_rows",
+    "title": "Shared listing rows",
+    "description": "Default rows in a shared listing page; explicit positive windows can differ.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 50,
+    "example": 300,
+    "text_key": "day100.builtin.orch_tools.list_rows",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
     "key": "orch_tools.search_query_chars",
     "title": "Shared search query budget",
     "description": "The query character budget advertised to this thread's agent and used by shared search. Defaults to 1000; increase it for longer queries.",
@@ -2747,6 +3320,34 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
+    "key": "threads.opening_items",
+    "title": "Thread opening items",
+    "description": "Timeline items in the first screen. Older items remain available by scrolling; a reader may request another window size.",
+    "group": "collaboration",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 40,
+    "example": 60,
+    "text_key": "day100.builtin.threads.opening_items",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
     "key": "threads.offline_deadline",
     "title": "Offline turn deadline",
     "description": "End the active turn after this many offline seconds; none keeps waiting. Each outage retains the setting it began with.",
@@ -2778,6 +3379,145 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": [],
     "display": {
       "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.output_capture_bytes",
+    "title": "Retained command output",
+    "description": "Bytes of each native text output to retain, including its inline tail. Defaults to 64 MiB. Larger outputs keep the exact last bytes and show the missing original interval. Changes apply to the next session.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 67108864,
+    "example": 67108864,
+    "text_key": "day100.builtin.threads.output_capture_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.background_snapshot_seconds",
+    "title": "Roster retention",
+    "description": "Idle seconds to retain a native command snapshot and its reviewed End identities. Active page reads renew it; an expired read restarts transparently before confirmation.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 30,
+    "example": 30,
+    "text_key": "day100.builtin.threads.background_snapshot_seconds",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.background_page_items",
+    "title": "Native roster page",
+    "description": "Preferred commands in one native roster page. Every page is transferred; the complete roster has no row cap.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 200,
+    "example": 200,
+    "text_key": "day100.builtin.threads.background_page_items",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.background_page_bytes",
+    "title": "Native roster page bytes",
+    "description": "Preferred bytes in one native roster page. One command can exceed this target; the negotiated transport allowance still applies.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 131072,
+    "example": 131072,
+    "text_key": "day100.builtin.threads.background_page_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.background_preview_bytes",
+    "title": "Roster command preview",
+    "description": "Command bytes shown in each native roster preview. Longer commands retain an explicit preview-truncated fact; all command identities remain available.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 4096,
+    "example": 4096,
+    "text_key": "day100.builtin.threads.background_preview_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
       "zero": null
     }
   },
@@ -3557,7 +4297,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "workspace.ignore",
     "title": "Ignored paths",
-    "description": "Patterns, written as in a gitignore file, for what the index of a workspace leaves out.",
+    "description": "Patterns, written as in a gitignore file, for paths to hide in a workspace: they are absent from its file lists, search, listings of the tree and recorded turn files, and cannot be read or written through Orch. It is for what a person wants hidden, never for speed: a large tree needs no list.",
     "group": "workspace",
     "schema": {
       "type": "array",
@@ -3584,7 +4324,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "workspace.index",
     "title": "Index",
-    "description": "Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online.",
+    "description": "Whether the whole tree of a workspace is indexed for use while it is offline, or only listed while its environment is online. An online workspace is listed one directory at a time from its machine either way, however large the tree.",
     "group": "workspace",
     "schema": {
       "type": "string",
@@ -3605,6 +4345,369 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "example": "live",
     "text_key": "day100.builtin.workspace.index",
     "keywords": []
+  },
+  {
+    "key": "workspace.index_entries",
+    "title": "Cached file entries",
+    "description": "Path metadata kept in the incremental working set; larger directories remain browsable and searchable live.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 250000,
+    "example": 250000,
+    "text_key": "day100.builtin.workspace.index_entries",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.index_scan_secs",
+    "title": "Indexing slice",
+    "description": "Seconds of initial indexing before retaining incremental coverage and continuing with live reads.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 10,
+    "example": 10,
+    "text_key": "day100.builtin.workspace.index_scan_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.ignore_max_bytes",
+    "title": "Exclusion parsing",
+    "description": "Bytes allowed when parsing one local exclusion file; a file that cannot be applied reports its source and never exposes an unknown scope.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 1048576,
+    "example": 1048576,
+    "text_key": "day100.builtin.workspace.ignore_max_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.ignore_cache_bytes",
+    "title": "Cached exclusion rules",
+    "description": "Source bytes and record metadata retained for parsed exclusion rules; older parses are read again when needed.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 16777216,
+    "example": 16777216,
+    "text_key": "day100.builtin.workspace.ignore_cache_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.directory_idle_secs",
+    "title": "Folder continuation idle time",
+    "description": "Seconds an unused folder observation is kept before transparent renewal when the folder is unchanged.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 300,
+    "example": 300,
+    "text_key": "day100.builtin.workspace.directory_idle_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.directory_slots",
+    "title": "Folder observations",
+    "description": "Folder observations retained on one machine; unused observations are evicted before admitting another reader.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 256,
+    "example": 256,
+    "text_key": "day100.builtin.workspace.directory_slots",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.directory_cache_bytes",
+    "title": "File read cache",
+    "description": "Shared working bytes for directory metadata and live file-read continuation buffers; existing work stays charged until it ends.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 1073741824,
+    "example": 268435456,
+    "text_key": "day100.builtin.workspace.directory_cache_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.directory_builds",
+    "title": "Folder metadata reads",
+    "description": "Concurrent folder metadata builds on one machine; waiting readers retain their place.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 1,
+    "example": 1,
+    "text_key": "day100.builtin.workspace.directory_builds",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.directory_page_bytes",
+    "title": "Folder page bytes",
+    "description": "Default metadata bytes in one folder page; continuation retains all remaining entries.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 2097152,
+    "example": 2097152,
+    "text_key": "day100.builtin.workspace.directory_page_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.directory_entries",
+    "title": "Folder rows",
+    "description": "Default rows in one page; an explicit window can differ and continuation keeps the rest.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 5000,
+    "example": 10000,
+    "text_key": "day100.builtin.workspace.directory_entries",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.search_results",
+    "title": "File search rows",
+    "description": "Default rows in one page; an explicit window can differ and continuation keeps the rest.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 200,
+    "example": 400,
+    "text_key": "day100.builtin.workspace.search_results",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.archive_results",
+    "title": "Archive rows",
+    "description": "Default rows in one page; an explicit window can differ and continuation keeps the rest.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 1000,
+    "example": 2000,
+    "text_key": "day100.builtin.workspace.archive_results",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.search_slice_secs",
+    "title": "File search slice",
+    "description": "Seconds of work in one file-search page; continuation resumes the remaining search.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 20,
+    "example": 20,
+    "text_key": "day100.builtin.workspace.search_slice_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.git_diff_bytes",
+    "title": "Diff bytes",
+    "description": "Default bytes in one diff read; continuation retains the rest of the selected diff.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 2097152,
+    "example": 2097152,
+    "text_key": "day100.builtin.workspace.git_diff_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
   },
   {
     "key": "source.repository_url",
@@ -3739,6 +4842,33 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": [],
     "display": {
       "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "workspace.record_wait_secs",
+    "title": "Wait for turn files",
+    "description": "Seconds to wait for a whole recording before a turn. The shipped default skips initial indexing; choosing a wait also waits for indexing. Changed files can still be restored individually when whole recording is not ready.",
+    "group": "workspace",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": 5,
+    "example": 5,
+    "text_key": "day100.builtin.workspace.record_wait_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
       "zero": null
     }
   },
@@ -4069,7 +5199,6 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "schema": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 168,
       "x-unit": "hours"
     },
     "class": "policy",
@@ -5276,7 +6405,8 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
           "template",
           "mcp_server",
           "mount",
-          "skill"
+          "skill",
+          "pool"
         ]
       },
       "uniqueItems": true
@@ -5293,7 +6423,8 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "template",
       "mcp_server",
       "mount",
-      "skill"
+      "skill",
+      "pool"
     ],
     "example": [
       "provider",
@@ -5424,7 +6555,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "provider"
     ],
     "merge": "replace",
-    "default": "when_blocking",
+    "default": "never",
     "example": "always",
     "text_key": "day100.builtin.notify.operations",
     "keywords": []
@@ -5960,7 +7091,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "group": "switching",
     "schema": {
       "type": "integer",
-      "minimum": 10,
+      "minimum": 1,
       "x-unit": "seconds"
     },
     "class": "parameter",
@@ -6184,7 +7315,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "auto.summarizer",
     "title": "Summarizer",
-    "description": "Which summarizer is used, and its configuration.",
+    "description": "Summarizer and model token allowances. Target character counts are separate.",
     "group": "automation",
     "schema": {
       "type": "object",
@@ -6525,7 +7656,54 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "thread"
     ],
     "merge": "map",
-    "default": {},
+    "default": {
+      "thread": {
+        "automatic": false,
+        "on": [
+          "turn_completed",
+          "milestone"
+        ],
+        "min_interval_secs": 120,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "topic": {
+        "automatic": false,
+        "on": [
+          "child_changed"
+        ],
+        "min_interval_secs": 900,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "document": {
+        "automatic": false,
+        "on": [
+          "content_changed"
+        ],
+        "min_interval_secs": 300,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "chat": {
+        "automatic": false,
+        "on": [
+          "message_posted"
+        ],
+        "min_interval_secs": 300,
+        "context_tokens": 32000,
+        "output_chars": 600
+      },
+      "chat_title": {
+        "automatic": false,
+        "on": [
+          "message_posted"
+        ],
+        "min_interval_secs": 300,
+        "context_tokens": 32000,
+        "output_chars": 80
+      }
+    },
     "example": {
       "thread": {
         "automatic": true,
@@ -6568,6 +7746,34 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": [],
     "display": {
       "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "summary.read_repeats",
+    "title": "Summary read repeats",
+    "description": "Unpaid source rereads and prompt rebuilds before the first model call. A changing read or rebuild loop uses this limit; 0 makes no repeat. A source change after a model call never creates a paid retry.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 3,
+    "example": 5,
+    "text_key": "day100.builtin.summary.read_repeats",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
       "zero": null
     }
   },
@@ -7553,6 +8759,33 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
+    "key": "documents.readme_blocks",
+    "title": "README preview",
+    "description": "Top-level blocks shown in a place's README preview, with their children. An earlier page break ends the preview; Open document always reaches the whole page.",
+    "group": "chat_documents",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 12,
+    "example": 20,
+    "text_key": "day100.builtin.documents.readme_blocks",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
     "key": "documents.links.shown",
     "title": "Links tabs",
     "description": "The tabs of a document's Links section that its readers see; the document's owner can switch tabs off for one document.",
@@ -7769,6 +9002,29 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": [],
     "display": {
       "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "search.text_chars",
+    "title": "Conversation search text",
+    "description": "Characters indexed per conversation item after masking. Changes apply to new text and a search rebuild; raw calls, output, hidden reasoning, side threads and text with unavailable masking inputs are excluded.",
+    "group": "chat_documents",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 20000,
+    "example": 40000,
+    "text_key": "day100.builtin.search.text_chars",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
       "zero": null
     }
   },
@@ -8642,7 +9898,6 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "schema": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 365,
       "x-unit": "days"
     },
     "class": "policy",
@@ -8920,7 +10175,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "schema": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 1000
+      "maximum": 2147483647
     },
     "class": "policy",
     "scopes": [
@@ -8978,6 +10233,128 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "unit": "hours",
       "zero": null
     }
+  },
+  {
+    "key": "api.read_repeats",
+    "title": "Repeated reads",
+    "description": "How many times a read is made again, in place of being refused, when what it showed has moved while it was being answered; 0 makes no repeat.",
+    "group": "system",
+    "schema": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 3,
+    "example": 5,
+    "text_key": "day100.builtin.api.read_repeats",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "interface.kept_closed_tabs",
+    "title": "Recently closed tabs",
+    "description": "How many recently closed views keep their local state in this page. Open tabs always keep theirs. Each person may override this default in Interface.",
+    "group": "system",
+    "schema": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 10,
+    "example": 20,
+    "text_key": "day100.builtin.interface.kept_closed_tabs",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "interface.progress_delay_ms",
+    "title": "Loading indication delay",
+    "description": "Milliseconds before a read shows a spinner. Each person may override this default in Interface.",
+    "group": "system",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "milliseconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 200,
+    "example": 300,
+    "text_key": "day100.builtin.interface.progress_delay_ms",
+    "keywords": [],
+    "display": {
+      "unit": "milliseconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "interface.read_freshness_ms",
+    "title": "Read freshness",
+    "description": "Milliseconds before returning readers revalidate directory listings, repeated lookups, reports and live status. Release catalogues stay for the page; ordinary mutable views revalidate when shown.",
+    "group": "system",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "integer",
+          "minimum": 0,
+          "x-unit": "milliseconds"
+        },
+        "lookup": {
+          "type": "integer",
+          "minimum": 0,
+          "x-unit": "milliseconds"
+        },
+        "report": {
+          "type": "integer",
+          "minimum": 0,
+          "x-unit": "milliseconds"
+        },
+        "status": {
+          "type": "integer",
+          "minimum": 0,
+          "x-unit": "milliseconds"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": {
+      "directory": 60000,
+      "lookup": 15000,
+      "report": 60000,
+      "status": 5000
+    },
+    "example": {
+      "directory": 120000,
+      "lookup": 30000,
+      "report": 60000,
+      "status": 2000
+    },
+    "text_key": "day100.builtin.interface.read_freshness_ms",
+    "keywords": []
   },
   {
     "key": "release.check_days",

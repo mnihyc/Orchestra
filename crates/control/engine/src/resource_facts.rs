@@ -302,6 +302,7 @@ fn view(kind: ObjectKind) -> Option<Permission> {
         ObjectKind::McpServer => Permission::McpView,
         ObjectKind::Mount => Permission::MountView,
         ObjectKind::Skill => Permission::SkillView,
+        ObjectKind::Pool => Permission::PoolView,
         _ => return None,
     })
 }
@@ -317,6 +318,7 @@ fn manage(kind: ObjectKind) -> Option<Permission> {
         ObjectKind::McpServer => Permission::McpManage,
         ObjectKind::Mount => Permission::MountManage,
         ObjectKind::Skill => Permission::SkillManage,
+        ObjectKind::Pool => Permission::PoolManage,
         _ => return None,
     })
 }
