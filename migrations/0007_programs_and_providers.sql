@@ -203,6 +203,7 @@ CREATE TABLE providers (
     facts_overrides jsonb DEFAULT '{}'::jsonb NOT NULL,
     facts_at timestamp with time zone,
     revision bigint DEFAULT 1 NOT NULL,
+    observation_revision bigint DEFAULT 0 NOT NULL CHECK (observation_revision >= 0),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone,
