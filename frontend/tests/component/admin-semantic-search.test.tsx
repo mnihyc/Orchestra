@@ -30,7 +30,7 @@ vi.mock('@/api/settings', () => ({ settingsKey: (id: string) => ['settings', id]
 vi.mock('@/features/settings/Editor', () => ({ SettingsEditor: () => <div data-testid="settings-editor" /> }));
 
 vi.mock('@/features/resources/providers/AddProvider', () => ({AddProviderDialog: (props: {initialHome: string; initialPreset: string}) => <div role="dialog" aria-label={props.initialPreset}>{props.initialHome}</div>}));
-vi.mock('@/api/resources', () => ({providerQuery: (id: string) => ({queryKey: ['provider', id], queryFn: () => Promise.resolve({runtime_config: calls.templateId === null ? {} : {'runtime.template_id': calls.templateId}})}), templateQuery: (id: string) => ({queryKey: ['template', id], queryFn: () => Promise.resolve({id, name: 'Local embeddings'})})}));
+vi.mock('@/api/resources', async (loadOriginal) => ({ ...await loadOriginal<object>(),providerQuery: (id: string) => ({queryKey: ['provider', id], queryFn: () => Promise.resolve({runtime_config: calls.templateId === null ? {} : {'runtime.template_id': calls.templateId}})}), templateQuery: (id: string) => ({queryKey: ['template', id], queryFn: () => Promise.resolve({id, name: 'Local embeddings'})})}));
 
 afterEach(() => { calls.templateId = null; vi.clearAllMocks(); });
 

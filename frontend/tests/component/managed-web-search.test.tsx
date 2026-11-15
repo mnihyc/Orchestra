@@ -8,7 +8,7 @@ import { i18n, setLocale } from '@/i18n';
 import { me, userRef } from '../doubles/fixtures';
 import { show } from './support';
 
-vi.mock('@/features/resources/harnesses', () => ({ useHarnessTitle: () => () => 'Claude Code' }));
+vi.mock('@/features/resources/harnesses', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHarnessTitle: () => () => 'Claude Code' }));
 afterEach(async () => { await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) it(`selects service explicitly without native modes and retains the higher lock (${locale})`, async () => {

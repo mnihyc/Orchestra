@@ -2,7 +2,7 @@
  * Do not edit; `contracts --check` verifies the complete native catalogue fixture. No permission inference. */
 import type { KeyTargetKind, Operation } from '../../src/generated/api-types';
 
-export const KEY_TARGET_KINDS: readonly KeyTargetKind[] = ["org","project","topic","thread","document","document_container","provider","agent","environment","host","machine","template","mcp_server","mount","skill","chat","group","account","key","session","job","export","import","upload","invitation","approval","schedule","notification","system"];
+export const KEY_TARGET_KINDS: readonly KeyTargetKind[] = ["org","project","topic","thread","document","document_container","provider","agent","environment","host","machine","template","mcp_server","mount","skill","pool","chat","group","account","key","session","job","export","import","upload","invitation","approval","schedule","notification","system"];
 
 export const TOKEN_OPERATIONS: Operation[] = [
   {
@@ -21858,7 +21858,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "template",
               "mcp_server",
               "mount",
-              "skill"
+              "skill",
+              "pool"
             ],
             "target": {
               "kind": "resolved",
@@ -26112,7 +26113,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "operation_id": "MachineUpdateNow",
     "method": "POST",
     "path": "/machines/{id}/update",
-    "title": "Requests a verified physical connector update, drained under its local update.auto policy.",
+    "title": "Requests an explicit verified physical connector update after its active work drains.",
     "delegation": "business",
     "variants": [
       {
@@ -31579,7 +31580,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "template",
               "mcp_server",
               "mount",
-              "skill"
+              "skill",
+              "pool"
             ],
             "target": {
               "kind": "permission_object"
@@ -31794,7 +31796,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "template",
               "mcp_server",
               "mount",
-              "skill"
+              "skill",
+              "pool"
             ],
             "target": {
               "kind": "resolved_collection",
@@ -34490,7 +34493,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "template",
               "mcp_server",
               "mount",
-              "skill"
+              "skill",
+              "pool"
             ],
             "target": {
               "kind": "resolved_collection",
@@ -34542,7 +34546,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "template",
               "mcp_server",
               "mount",
-              "skill"
+              "skill",
+              "pool"
             ],
             "target": {
               "kind": "resolved_collection",
@@ -35278,7 +35283,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "template",
               "mcp_server",
               "mount",
-              "skill"
+              "skill",
+              "pool"
             ],
             "target": {
               "kind": "resolved_collection",
@@ -35936,7 +35942,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "template",
               "mcp_server",
               "mount",
-              "skill"
+              "skill",
+              "pool"
             ],
             "target": {
               "kind": "path",
@@ -35984,7 +35991,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "template",
               "mcp_server",
               "mount",
-              "skill"
+              "skill",
+              "pool"
             ],
             "target": {
               "kind": "path",
@@ -36021,6 +36029,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "mcp_server",
               "mount",
               "skill",
+              "pool",
               "document",
               "document_container"
             ],
@@ -36042,6 +36051,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "mcp_server",
               "mount",
               "skill",
+              "pool",
               "document",
               "document_container"
             ],
@@ -36068,7 +36078,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "template",
               "mcp_server",
               "mount",
-              "skill"
+              "skill",
+              "pool"
             ],
             "target": {
               "kind": "resolved_collection",
@@ -37096,7 +37107,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "template",
               "mcp_server",
               "mount",
-              "skill"
+              "skill",
+              "pool"
             ],
             "target": {
               "kind": "resolved_collection",
@@ -37324,7 +37336,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "template",
               "mcp_server",
               "mount",
-              "skill"
+              "skill",
+              "pool"
             ],
             "target": {
               "kind": "resolved_collection",
@@ -37379,7 +37392,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "template",
               "mcp_server",
               "mount",
-              "skill"
+              "skill",
+              "pool"
             ],
             "target": {
               "kind": "resolved_collection",
@@ -38729,7 +38743,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "template",
               "mcp_server",
               "mount",
-              "skill"
+              "skill",
+              "pool"
             ],
             "target": {
               "kind": "permission_object"
@@ -39494,6 +39509,337 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "title": "Reads the certificate of the system's authority.",
     "delegation": "public",
     "variants": []
+  },
+  {
+    "operation_id": "PoolCreate",
+    "method": "POST",
+    "path": "/pools",
+    "title": "Creates one configured resource pool under the actual native home authority.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "PoolCreate",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "pool"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "pool_home"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "PoolGet",
+    "method": "GET",
+    "path": "/pools/{id}",
+    "title": "Reads one ordinarily visible pool without disclosing hidden member identities.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "PoolGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "pool"
+            ],
+            "target": {
+              "kind": "path",
+              "value": "id"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "group"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "pool_groups"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "org"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "pool_names_orgs"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "project"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "pool_names_projects"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "topic"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "pool_names_topics"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "pool_names_threads"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "PoolLendingPut",
+    "method": "PUT",
+    "path": "/pools/lending/{entry_id}",
+    "title": "Changes one member-side pool consent within its native sharing authority.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "PoolLendingPut.member",
+        "name": "member",
+        "selector": "scope.kind=member",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "provider",
+              "pool",
+              "environment",
+              "host",
+              "template"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "lending_subject"
+            },
+            "usage": "required"
+          }
+        ]
+      },
+      {
+        "legacy_tokens": true,
+        "operation": "PoolLendingPut.defaults",
+        "name": "defaults",
+        "selector": "scope.kind=defaults",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "org",
+              "project",
+              "system"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "lending_home"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "PoolList",
+    "method": "GET",
+    "path": "/pools",
+    "title": "Lists the current caller's ordinary pool resources with native home and name filtering.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "PoolList",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "pool"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "results"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "group"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "pool_groups"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "org"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "pool_names_orgs"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "project"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "pool_names_projects"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "topic"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "pool_names_topics"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "resolved_collection",
+              "value": "pool_names_threads"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "PoolMemberPut",
+    "method": "PUT",
+    "path": "/pools/{id}/members/{member_id}",
+    "title": "Edits one member under the native graph lock and pool revision.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "PoolMemberPut",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "pool"
+            ],
+            "target": {
+              "kind": "path",
+              "value": "id"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "PoolMembersGet",
+    "method": "GET",
+    "path": "/pools/{id}/members",
+    "title": "Reads one written-member page with current target visibility.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "PoolMembersGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "pool"
+            ],
+            "target": {
+              "kind": "path",
+              "value": "id"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "PoolUpdate",
+    "method": "PUT",
+    "path": "/pools/{id}",
+    "title": "Edits the pool metadata while retaining its written members and current owner.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "PoolUpdate",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "pool"
+            ],
+            "target": {
+              "kind": "path",
+              "value": "id"
+            },
+            "usage": "required"
+          }
+        ]
+      }
+    ]
   },
   {
     "operation_id": "PortAssertionKeysGet",
@@ -40617,6 +40963,37 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ProviderFactsModelsGet",
+    "method": "GET",
+    "path": "/providers/{id}/facts/models",
+    "title": "Lists the models the provider's source last listed, as it kept them and not as the provider's own list; discovery suggests them and never adds one. Empty where no list was read; `facts_state.models` says why.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ProviderFactsModelsGet",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "provider"
+            ],
+            "target": {
+              "kind": "typed_path",
+              "value": {
+                "parameter": "id",
+                "kind": "provider"
+              }
+            },
+            "usage": "required"
           }
         ]
       }
@@ -42682,6 +43059,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "mcp_server",
               "mount",
               "skill",
+              "pool",
               "org",
               "project",
               "topic",
@@ -42721,7 +43099,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "template",
               "mcp_server",
               "mount",
-              "skill"
+              "skill",
+              "pool"
             ],
             "target": {
               "kind": "resolved",
@@ -42812,7 +43191,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "template",
               "mcp_server",
               "mount",
-              "skill"
+              "skill",
+              "pool"
             ],
             "target": {
               "kind": "resolved_collection",
@@ -42843,6 +43223,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "mcp_server",
               "mount",
               "skill",
+              "pool",
               "org",
               "project",
               "topic",
@@ -43315,6 +43696,33 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "key_scope_threads"
             },
             "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "SettingParameterFormResolve",
+    "method": "POST",
+    "path": "/settings/parameters/form",
+    "title": "Resolves supplied native declarations with the same model constraints as thread parameter controls; reads no resource or credential.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "SettingParameterFormResolve",
+        "name": "",
+        "selector": "",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "system"
+            ],
+            "target": {
+              "kind": "system"
+            },
+            "usage": "required"
           }
         ]
       }
@@ -50984,7 +51392,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "operation_id": "ThreadInterrupt",
     "method": "POST",
     "path": "/threads/{id}/interrupt",
-    "title": "Stops a running turn, and holds what waits in the queue until somebody resumes it.",
+    "title": "Stops a running turn, or the start of the next one, and holds what waits in the queue until somebody resumes it. The answer is at once: the Stop is recorded, and says that the thread is stopping until the program has stopped.",
     "delegation": "business",
     "variants": [
       {
@@ -51184,6 +51592,51 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "response_content"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "operation_id": "ThreadItemRawGet",
+    "method": "GET",
+    "path": "/threads/{id}/items/{item_id}/raw",
+    "title": "Reads a tool call exactly as its harness made it: its own name for the tool, its arguments and what came back. A thread's items leave this out.",
+    "delegation": "business",
+    "variants": [
+      {
+        "legacy_tokens": true,
+        "operation": "ThreadItemRawGet.read",
+        "name": "read",
+        "selector": "inspect_deleted is not true",
+        "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
+          }
+        ]
+      },
+      {
+        "legacy_tokens": true,
+        "operation": "ThreadItemRawGet.inspect_deleted",
+        "name": "inspect_deleted",
+        "selector": "inspect_deleted is true; apply the stored thread restoration rule",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "permission_object"
+            },
+            "usage": "required"
           }
         ]
       }

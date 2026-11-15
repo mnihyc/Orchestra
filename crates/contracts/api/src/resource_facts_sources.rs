@@ -27,6 +27,7 @@ pub const NAMED_KINDS: &[KeyTargetKind] = &[
     KeyTargetKind::Object(ObjectKind::McpServer),
     KeyTargetKind::Object(ObjectKind::Mount),
     KeyTargetKind::Object(ObjectKind::Skill),
+    KeyTargetKind::Object(ObjectKind::Pool),
     KeyTargetKind::Object(ObjectKind::Org),
     KeyTargetKind::Object(ObjectKind::Project),
     KeyTargetKind::Object(ObjectKind::Topic),

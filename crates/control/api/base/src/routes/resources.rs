@@ -138,3 +138,6 @@ pub mod validation;
 
 #[path = "resources/view.rs"]
 pub mod view;
+
+/// Native pool metadata and name projection.
+pub mod pools;

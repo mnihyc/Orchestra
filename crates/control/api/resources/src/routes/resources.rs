@@ -64,6 +64,7 @@ pub(super) const fn view_permission(kind: ResourceKind) -> Permission {
         ResourceKind::McpServer => Permission::McpView,
         ResourceKind::Mount => Permission::MountView,
         ResourceKind::Skill => Permission::SkillView,
+        ResourceKind::Pool => Permission::PoolView,
     }
 }
 
@@ -145,6 +146,7 @@ orch_api_base::__api_bind_b76d4af877!();
 /// Binds the requests of every kind of resource that has a handler.
 pub fn mount(registry: &mut Registry) {
     library::mount(registry);
+    pools::mount(registry);
     impact::mount(registry);
     machines::mount(registry);
     agents::mount(registry);
@@ -390,3 +392,6 @@ pub mod validation;
 
 #[path = "resources/view.rs"]
 pub mod view;
+
+/// Configured resource pools and their guarded native writers.
+pub mod pools;

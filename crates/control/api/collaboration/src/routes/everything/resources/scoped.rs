@@ -70,6 +70,7 @@ impl Prepared {
             Rendered::Machine(rows) => inventory!(rows, Machine),
             Rendered::Mount(rows) => inventory!(rows, Mount),
             Rendered::Skill(rows) => inventory!(rows, Skill),
+            Rendered::Pool(rows) => inventory!(rows, Pool),
             Rendered::Host(rows) => inventory!(rows, Host),
             Rendered::Environment(rows) => inventory!(rows, Environment),
             Rendered::Mcp(rows) => inventory!(rows, McpServer),
