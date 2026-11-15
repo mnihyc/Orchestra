@@ -19,6 +19,16 @@ fn memberships(body: &Json, field: &str, key: &str) -> Option<Vec<Id>> {
         .collect()
 }
 
+fn named_mcp(body: &Json) -> Option<Vec<Json>> {
+    body.get("mcp")?
+        .as_array()?
+        .iter()
+        .map(|member| {
+            Some(json!({"name":member.get("name")?.as_str()?,"server_id":id(member,"server_id")?}))
+        })
+        .collect()
+}
+
 /// Captures monotone native-lane order when a new durable command is admitted.
 pub async fn admit(conn: &mut Conn, command: Id, kind: &str, body: &Json) -> Result<(), DbError> {
     let scoped = if kind == "session.open.fenced" {
@@ -98,9 +108,18 @@ pub async fn record(
     let Some(segment) = id(session, "segment_id") else {
         return Ok(());
     };
-    let mut values = json!({"mcp":memberships(session,"mcp","server_id")});
+    // Replacing only the model transport does not reconfigure the native program's tools.
+    let transport_only =
+        patch && session.get("transport_only").and_then(Json::as_bool) == Some(true);
+    let mut values = if transport_only {
+        json!({})
+    } else {
+        json!({"mcp":memberships(session,"mcp","server_id"),"mcp_names":named_mcp(session)})
+    };
     if patch {
-        values["skills"] = json!(memberships(session, "skills", "version_id"));
+        if !transport_only {
+            values["skills"] = json!(memberships(session, "skills", "version_id"));
+        }
         values["state"] = json!("open");
     }
     save(conn, segment, command, issued_at, observed_at, values).await
