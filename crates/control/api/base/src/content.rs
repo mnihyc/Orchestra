@@ -352,7 +352,7 @@ impl Asker {
         if listed_hashes(body).contains(hash) {
             return Ok(true);
         }
-        if *kind != CommandKind::FsMaterialize {
+        if !writes_a_tree_down(*kind) {
             return Ok(false);
         }
         let Some(manifest) = body
@@ -369,6 +369,13 @@ impl Asker {
             .map_err(|e| LinkFault::internal(&e))?;
         Ok(files.contains(hash))
     }
+}
+
+/// Whether a command of this kind writes a tree down from a list it names in `manifest_blob`, and
+/// fetches every file of the list by its hash: a copy of a workspace, and the import of a data part
+/// that a machine move carries. Their bodies hold the list alone, so the files are those the list names.
+fn writes_a_tree_down(kind: CommandKind) -> bool {
+    matches!(kind, CommandKind::FsMaterialize | CommandKind::FsDataImport)
 }
 
 fn denied(wants: Wants) -> LinkFault {
