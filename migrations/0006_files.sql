@@ -23,6 +23,7 @@ CREATE TABLE blobs (
     stored_at timestamp with time zone DEFAULT now() NOT NULL,
     last_access_at timestamp with time zone DEFAULT now() NOT NULL,
     pin_count integer DEFAULT 0 NOT NULL,
+    relay_only boolean DEFAULT true NOT NULL,
     CONSTRAINT blobs_pkey PRIMARY KEY (hash)
 );
 
@@ -107,6 +108,26 @@ CREATE TABLE upload_sessions (
     CONSTRAINT upload_sessions_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+-- A target is immutable even when its logical environment is moved or removed.
+-- Native cleanup still needs its original machine/root until the upload session ends.
+CREATE TABLE upload_session_targets (
+    session_id uuid PRIMARY KEY REFERENCES upload_sessions(id) ON DELETE CASCADE,
+    environment_id uuid NOT NULL,
+    machine_id uuid,
+    generation integer NOT NULL,
+    workspace_root text NOT NULL,
+    path text NOT NULL,
+    thread_id uuid,
+    relayed boolean NOT NULL,
+    receiving_command uuid,
+    verifying_command uuid,
+    verified_hash bytea,
+    written_job uuid,
+    CHECK (verified_hash IS NULL OR octet_length(verified_hash) = 32),
+    CHECK (NOT relayed OR machine_id IS NOT NULL)
+);
+
+
 CREATE TABLE snapshot_blob_refs (
     snapshot_id uuid NOT NULL,
     blob bytea NOT NULL,
@@ -114,3 +135,20 @@ CREATE TABLE snapshot_blob_refs (
     CONSTRAINT snapshot_blob_refs_blob_fkey FOREIGN KEY (blob) REFERENCES blobs(hash),
     CONSTRAINT snapshot_blob_refs_snapshot_id_fkey FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
 );
+
+-- Content that the machine of a transfer uploaded, or was told the system holds, for a command of a job: held for
+-- the job until it ends, so that another transfer's release of the same content does not remove what this one needs.
+
+CREATE TABLE command_blob_pins (
+    command_id uuid NOT NULL,
+    blob bytea NOT NULL,
+    job_id uuid NOT NULL,
+    pinned_at timestamp with time zone NOT NULL,
+    CONSTRAINT command_blob_pins_pkey PRIMARY KEY (command_id, blob),
+    CONSTRAINT command_blob_pins_blob_fkey FOREIGN KEY (blob) REFERENCES blobs(hash) ON DELETE CASCADE
+);
+
+CREATE INDEX command_blob_pins_job_idx ON command_blob_pins USING btree (job_id);
+CREATE INDEX command_blob_pins_at_idx ON command_blob_pins USING btree (pinned_at);
+
+COMMENT ON TABLE command_blob_pins IS 'One pin of blobs.pin_count for each blob a job''s command held for the job; released with the job''s end.';

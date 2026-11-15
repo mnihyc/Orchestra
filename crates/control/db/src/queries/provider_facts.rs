@@ -115,7 +115,7 @@ pub async fn read_candidates(
     now: DateTime<Utc>,
 ) -> Result<Vec<super::settings::ProviderRuntimeRow>, DbError> {
     let sql = format!("SELECT p.id,p.home_id,p.runtime_config,p.revision FROM providers p
-        LEFT JOIN machines m ON m.id = p.key_machine_id WHERE {READ_AVAILABLE} AND {SCHEDULED_READ_ALLOWED}
+        LEFT JOIN machines m ON m.id = COALESCE(p.key_machine_id,p.machine_id) WHERE {READ_AVAILABLE} AND {SCHEDULED_READ_ALLOWED}
         AND (p.facts_requested_at IS NULL OR p.facts_requested_at <= $1 - interval '1 minute' OR {RESET_READ_DUE})
         AND {SOURCE_INTERVAL_DUE}");
     // A valid cadence is at least one minute; reset reads keep their independent due time.
@@ -222,7 +222,7 @@ pub async fn due_reads(
     let idle: Vec<i64> = schedules.iter().map(|schedule| schedule.idle).collect();
     let refused: Vec<i64> = schedules.iter().map(|schedule| schedule.refused).collect();
     let sql = format!("SELECT p.id FROM providers p
-         LEFT JOIN machines m ON m.id = p.key_machine_id
+         LEFT JOIN machines m ON m.id = COALESCE(p.key_machine_id,p.machine_id)
          JOIN UNNEST($3::uuid[],$4::bigint[],$5::bigint[],$6::bigint[],$7::bigint[])
            AS cadence(provider_id,recent,active,idle,refused) ON cadence.provider_id = p.id
          WHERE {READ_AVAILABLE} AND {SCHEDULED_READ_ALLOWED}

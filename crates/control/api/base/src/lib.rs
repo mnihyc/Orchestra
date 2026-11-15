@@ -58,6 +58,8 @@ pub mod attachments;
 #[path = "backplane.rs"]
 pub mod backplane;
 
+pub mod relay;
+
 #[path = "blobs.rs"]
 pub mod blobs;
 

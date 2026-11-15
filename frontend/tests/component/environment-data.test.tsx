@@ -24,10 +24,12 @@ it('uses the declared new-directory choice even for a driver named container, an
   const user=userEvent.setup();show(<Form driver="container"/>);
   await waitFor(()=>expect(read).toHaveBeenCalledWith('node'));
   await user.click(screen.getByRole('combobox',{name:'Workspace'}));
-  expect(screen.getByRole('option',{name:i18n.t('choiceCatalog.dataSource.made_by_orch.name')})).toHaveAccessibleDescription('A new directory');
-  const existing=screen.getByRole('option',{name:i18n.t('choiceCatalog.dataSource.existing_directory.name')});
-  expect(existing).toHaveAccessibleDescription(i18n.t('environmentData.allowed'));
-  await user.click(existing);
+  const existing=()=>screen.getByRole('option',{name:i18n.t('choiceCatalog.dataSource.existing_directory.name')});
+  await waitFor(()=>{
+    expect(screen.getByRole('option',{name:i18n.t('choiceCatalog.dataSource.made_by_orch.name')})).toHaveAccessibleDescription('A new directory');
+    expect(existing()).toHaveAccessibleDescription(i18n.t('environmentData.allowed'));
+  });
+  await user.click(existing());
   const path=screen.getByRole('textbox',{name:'Directory on this machine'});
   await user.clear(path);await user.type(path,'/srv/work/project');
   expect(screen.getByLabelText('selection')).toHaveTextContent('"workspace":{"kind":"existing_directory","path":"/srv/work/project"}');
@@ -49,9 +51,12 @@ it('shows a real driver refusal without enabling an existing directory choice',a
   const value=facts();value.direct={made_by_orch:'directory',existing_directory:false,reason:'This driver cannot bind an existing path.'};read.mockResolvedValue(value);
   const user=userEvent.setup();show(<Form/>);
   await waitFor(()=>expect(read).toHaveBeenCalled());await user.click(screen.getByRole('combobox',{name:'Workspace'}));
-  const existing=screen.getByRole('option',{name:i18n.t('choiceCatalog.dataSource.existing_directory.name')});
-  expect(existing).toHaveAttribute('aria-disabled','true');
-  expect(existing).toHaveAccessibleDescription('This driver cannot bind an existing path.');
+  const existing=()=>screen.getByRole('option',{name:i18n.t('choiceCatalog.dataSource.existing_directory.name')});
+  // The refusal is the driver's own answer: the choice says so once it has been applied.
+  await waitFor(()=>{
+    expect(existing()).toHaveAttribute('aria-disabled','true');
+    expect(existing()).toHaveAccessibleDescription('This driver cannot bind an existing path.');
+  });
   expect(screen.getByText('This driver cannot bind an existing path.')).toBeVisible();
 });
 

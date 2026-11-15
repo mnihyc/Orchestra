@@ -570,9 +570,14 @@ impl Phased for Exporting {
                 .and_then(Json::as_str)
                 .and_then(|text| text.parse::<Hash>().ok())
             && let Some(store) = self.engine.blobs()
-            && let Err(error) = store.delete(&hash).await
         {
-            tracing::warn!(%error, "the content an archive was put in could not be removed");
+            // A stopped writer leaves tracked unreferenced staging, never a blind unlink of a hash
+            // another owner could have published while the original request was ending.
+            if let Ok(Some(publication)) = store.existing(&hash).await
+                && let Ok(mut conn) = self.engine.db().acquire().await
+            {
+                let _ = storage::register_blob(&mut conn, &hash, publication.size, job.now()).await;
+            }
         }
         let left_out = job
             .plan()
@@ -2120,7 +2125,9 @@ impl Exporting {
             // It was removed while it was being put away: nothing of it is kept.
             tx.rollback().await.map_err(orch_db::DbError::from)?;
             if stored.created {
-                let _ = store.delete(&hash).await;
+                let mut conn = self.engine.db().acquire().await?;
+                storage::register_blob(&mut conn, &hash, size, self.engine.inner.clock.now())
+                    .await?;
             }
             let _ = std::fs::remove_file(&scratch);
             return Err(Stop::Cancelled);

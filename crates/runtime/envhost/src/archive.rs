@@ -378,9 +378,14 @@ impl Files {
     /// Reads the entry `entry` of the archive at `path`, at most the preview size of it. An entry
     /// that is larger, that asks for a password or is not a file is refused.
     pub fn archive_read(&self, path: &RelPath, entry: &str) -> Result<Vec<u8>> {
+        self.archive_read_bounded(path, entry, self.limits().preview_bytes)
+    }
+
+    /// Keeps the caller's selected preview bound during decoding, before allocating the entry.
+    pub fn archive_read_bounded(&self, path: &RelPath, entry: &str, bound: u64) -> Result<Vec<u8>> {
         let opened = self.open_regular(path)?;
         let file = &opened.file;
-        let limit = self.limits().preview_bytes;
+        let limit = self.limits().preview_bytes.min(bound);
         let wanted = clean(entry);
         match shape_of(file)? {
             Shape::Zip => read_zip(file.as_ref(), wanted, limit),

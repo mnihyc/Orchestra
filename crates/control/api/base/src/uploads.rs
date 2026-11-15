@@ -378,7 +378,8 @@ pub async fn complete(ctx: &Ctx, id: Id) -> ApiResult<UploadedBlob> {
             session.size
         )));
     }
-    app.blobs
+    let _publication = app
+        .blobs
         .put_file(&part, hash, size)
         .await
         .map_err(stored_badly)?;
@@ -388,7 +389,7 @@ pub async fn complete(ctx: &Ctx, id: Id) -> ApiResult<UploadedBlob> {
     check_locked_session(&ctx, &guard, &session)?;
     let now = guard.now().get();
     app.blobs
-        .register(&mut tx, BlobMeta { hash, size }, now)
+        .register(&mut tx, &BlobMeta { hash, size }, now)
         .await?;
     // The rollbackable blob catalogue stage also takes the hash's native writer
     // lock (including a concurrent first insertion). Every custody writer takes
@@ -428,14 +429,14 @@ pub async fn complete(ctx: &Ctx, id: Id) -> ApiResult<UploadedBlob> {
 }
 
 /// Retains a whole upload and its uploader's authority in one guarded action.
-pub async fn register_whole(ctx: &Ctx, meta: BlobMeta) -> ApiResult<()> {
+pub async fn register_whole(ctx: &Ctx, meta: &BlobMeta) -> ApiResult<()> {
     register_named(ctx, meta, None, None).await
 }
 
 /// A complete direct upload retains only its actual supplied safe metadata.
 pub async fn register_named(
     ctx: &Ctx,
-    meta: BlobMeta,
+    meta: &BlobMeta,
     name: Option<&str>,
     media_type: Option<&str>,
 ) -> ApiResult<()> {

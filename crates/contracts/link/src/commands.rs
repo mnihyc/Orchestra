@@ -1084,12 +1084,26 @@ commands! {
     FsStat = "fs.stat": ENVIRONMENT, None, 15, None, FsStat => foreign::FileStat;
     /// Uploads a file's content, unless the system holds it already.
     FsFetch = "fs.fetch": ENVIRONMENT, None, 600, Upload, FsFetch => FsFetchResult;
+    /// Describes a transit file without storing its content.
+    FsRelayDescribe = "fs.relay.describe": ENVIRONMENT, None, 21600, None, FsRelayDescribe => FsFetchResult;
+    /// Sends a selected range through the memory relay, granting no stored-blob access.
+    FsRelaySend = "fs.relay.send": ENVIRONMENT, None, 21600, None, FsRelaySend => Empty;
+    FsRelayArchiveRead = "fs.relay.archive-read": ENVIRONMENT, None, 21600, None, FsRelayArchiveRead => FsArchiveReadResult;
+    /// Receives into a native temporary file while other environment work continues.
+    FsRelayReceive = "fs.relay.receive": ENVIRONMENT, None, 21600, None, FsRelayReceive => FsRelayProgress;
+    /// Prepares an upload beside its final destination without blocking other environment work.
+    FsRelayVerify = "fs.relay.verify": ENVIRONMENT, None, 21600, None, FsRelayVerify => FsFetchResult;
+    FsRelayPrepare = "fs.relay.prepare": ENVIRONMENT, None, 21600, None, FsRelayPrepare => Empty;
+    /// Commits a completely received file after checking the destination's current version.
+    FsRelayCommit = "fs.relay.commit": ENVIRONMENT, Environment, 600, None, FsRelayCommit => foreign::FileStat;
+    /// Removes only the temporary file owned by a cancelled upload.
+    FsRelayAbort = "fs.relay.abort": ENVIRONMENT, None, 600, None, FsRelayAbort => Empty;
     /// Writes a file from stored content.
     FsWrite = "fs.write": ENVIRONMENT, Environment, 600, Download, FsWrite => foreign::FileStat;
     /// Makes a directory.
     FsMkdir = "fs.mkdir": ENVIRONMENT, Environment, 60, None, FsMkdir => foreign::FileStat;
     /// Renames or moves a file or a directory.
-    FsRename = "fs.rename": ENVIRONMENT, Environment, 60, None, FsRename => foreign::FileStat;
+    FsRename = "fs.rename": ENVIRONMENT, Environment, 60, None, FsRename => foreign::FileRenameResult;
     /// Removes a file or a directory.
     FsRemove = "fs.remove": ENVIRONMENT, Environment, 60, None, FsRemove => Empty;
     /// Copies a file, or a directory with what is in it.
@@ -1470,6 +1484,9 @@ pub struct AgentPtyOpenResult {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentRuntime {
+    /// Keep this environment-hosted connection's own home in its persistent home volume.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub environment_home: bool,
     /// Declared runtime resources, enforced where its actual process controls support them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<orch_driver_contract::runtime::Resources>,
@@ -1867,6 +1884,8 @@ pub struct SessionOpen {
     /// Whether owned background completions may wake this session.
     #[serde(default = "orch_agent_contract::session::background_wake_default")]
     pub background_wake: bool,
+    /// Seconds before a native web action without an end is closed with its reason.
+    pub web_action_wait_secs: u64,
     /// A native image-generation override; absent keeps the selected program's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_generation: Option<bool>,
@@ -3487,12 +3506,163 @@ pub struct FsFetch {
 /// The result of `fs.fetch`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsFetchResult {
-    /// The hash of the file's content, which the system now holds.
+    /// The verified content version, whether described at its source or uploaded.
     pub hash: Hash,
     /// Its size in bytes.
     pub size: i64,
     /// When it was last changed, in nanoseconds since 1970.
     pub mtime_ns: i64,
+}
+
+/// A file whose content stays at its source until an explicit ranged reading.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FsRelayDescribe {
+    /// The environment that owns the file.
+    pub environment_id: Id,
+    /// A readable attached mount, or the workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount: Option<String>,
+    /// Its path within that root.
+    pub path: String,
+}
+
+/// A version-checked range of a file, sent through its command's memory rendezvous.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FsRelaySend {
+    /// The environment that owns the file.
+    pub environment_id: Id,
+    /// A readable attached mount, or the workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount: Option<String>,
+    /// Its path within that root.
+    pub path: String,
+    /// The content version the person opened.
+    pub hash: Hash,
+    /// The first byte within that file.
+    pub offset: i64,
+    /// The bytes this response will carry.
+    pub len: i64,
+    /// The command-bound memory rendezvous.
+    pub relay_id: Id,
+    /// The resolved time allowed without progress.
+    pub idle_secs: u64,
+    /// The resolved pause between transient transport failures.
+    pub retry_ms: u64,
+}
+
+/// An archive entry decoded within its preview bound and sent through memory, never blob storage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FsRelayArchiveRead {
+    /// The environment holding the archive.
+    pub environment_id: Id,
+    /// The archive's workspace-relative path.
+    pub path: String,
+    /// The file entry to open, without unpacking it into the workspace.
+    pub entry: String,
+    /// The command-bound memory rendezvous.
+    pub relay_id: Id,
+    /// The resolved progress allowance.
+    pub idle_secs: u64,
+    /// The resolved pause between transient transport failures.
+    pub retry_ms: u64,
+    /// The caller's preview source bound; the native preview bound also applies.
+    pub max_bytes: i64,
+}
+
+/// A resumable upload into the destination machine's own temporary file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FsRelayReceive {
+    /// The environment that owns the destination.
+    pub environment_id: Id,
+    /// The initial destination, beside which the temporary file is kept.
+    pub path: String,
+    /// The person's upload session, stable across reconnections.
+    pub session_id: Id,
+    /// This command's memory rendezvous, renewed for a resumed receive.
+    pub relay_id: Id,
+    /// The complete file size; it does not need server blob storage.
+    pub size: i64,
+    /// The durable prefix requested by this piece; never beyond the full size.
+    pub end: i64,
+    /// The resolved time allowed without progress.
+    pub idle_secs: u64,
+    /// The resolved pause between transient transport failures.
+    pub retry_ms: u64,
+    /// When the upload session and its native temporary file expire.
+    pub expires_at: Time,
+}
+
+/// The native destination's actual durable prefix, without claiming a completed content hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FsRelayProgress {
+    /// Bytes actually flushed at the destination, including a prefix whose response was lost.
+    pub received: i64,
+}
+
+/// Checks a completely received native upload independently of its short browser piece requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FsRelayVerify {
+    /// The environment holding the private temporary file.
+    pub environment_id: Id,
+    /// The destination named when receiving began.
+    pub receive_path: String,
+    /// The upload's native identity.
+    pub session_id: Id,
+}
+
+/// Prepares a received upload beside its final destination before taking the environment serial key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FsRelayPrepare {
+    /// The environment that owns the upload.
+    pub environment_id: Id,
+    /// The original destination of the receive command.
+    pub receive_path: String,
+    /// Its chosen final destination.
+    pub path: String,
+    /// The upload session to prepare.
+    pub session_id: Id,
+}
+
+/// Publishes an upload only after its content and the target's current version are checked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FsRelayCommit {
+    /// The environment that owns the upload.
+    pub environment_id: Id,
+    /// The original destination of the receive command.
+    pub receive_path: String,
+    /// The chosen final path, including a person's Keep both choice.
+    pub path: String,
+    /// The upload session whose temporary file is committed.
+    pub session_id: Id,
+    /// The hash the destination computed after receiving the complete file.
+    pub hash: Hash,
+    /// Its complete size.
+    pub size: i64,
+    /// Permission bits, or the existing destination's mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
+    /// What must still be at the final destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_hash: Option<ExpectedHash>,
+}
+
+/// Removes the hidden temporary file of one cancelled upload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FsRelayAbort {
+    /// The environment that owns it.
+    pub environment_id: Id,
+    /// The original destination of the receive command.
+    pub receive_path: String,
+    /// Its upload session.
+    pub session_id: Id,
 }
 
 /// What has to be at a path for a write to go ahead.
@@ -5099,6 +5269,41 @@ mod tests {
         assert_eq!(FsFetch::KIND.key(), KeyKind::None);
     }
 
+    #[test]
+    fn file_relay_staging_and_reading_leave_other_environment_work_free_and_only_commit_takes_the_key()
+     {
+        assert_eq!(FsRelayDescribe::KIND.key(), KeyKind::None);
+        assert_eq!(FsRelaySend::KIND.key(), KeyKind::None);
+        assert_eq!(FsRelayReceive::KIND.key(), KeyKind::None);
+        assert_eq!(FsRelayAbort::KIND.key(), KeyKind::None);
+        assert_eq!(FsRelayPrepare::KIND.key(), KeyKind::None);
+        assert_eq!(FsRelayCommit::KIND.key(), KeyKind::Environment);
+        for kind in [
+            FsRelaySend::KIND,
+            FsRelayReceive::KIND,
+            FsRelayArchiveRead::KIND,
+        ] {
+            assert_eq!(
+                kind.transfer(),
+                Transfer::None,
+                "relay commands grant no access to the stored blob endpoint"
+            );
+        }
+        let staged: FsRelayReceive = round_trip(json!({
+            "environment_id": ENVIRONMENT_ID, "path": "output/file.txt", "session_id": THREAD,
+            "relay_id": SEGMENT, "size": 19, "end": 7, "idle_secs": 120, "retry_ms": 250,
+            "expires_at": "2026-11-18T01:00:00.000Z"
+        }));
+        assert_eq!((staged.size, staged.end), (19, 7));
+        assert_eq!(FsRelayVerify::KIND.key(), KeyKind::None);
+        let committed: FsRelayCommit = round_trip(json!({
+            "environment_id": ENVIRONMENT_ID, "receive_path": "output/file.txt", "path": "output/file-2.txt",
+            "session_id": THREAD, "hash": Hash::of(b"received"), "size": 8,
+            "expected_hash": "none"
+        }));
+        assert_eq!(committed.expected_hash, Some(ExpectedHash::Absent));
+    }
+
     fn session_open_example() -> Json {
         json!({
             "agent_id": AGENT_ID, "thread_id": THREAD, "segment_id": SEGMENT,
@@ -5114,7 +5319,7 @@ mod tests {
             "sandbox_mode": "workspace",
             "available_models": [], "side_reading": null, "workspace_configuration": null,
             "subagent_limits": {"at_once": 8, "depth": 1},
-            "background_wake": true,
+            "web_action_wait_secs": 120, "background_wake": true,
             "instructions": "You are working inside Orch.",
             "memory": { "directory": "/workspace/web/.orch/memory", "kept_by": "agent" },
             "arrangement": "separated",

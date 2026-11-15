@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-link-contract --lib
+test -p orch-envhost --lib
+test -p orch-envhost --test environment
+test -p orch-connector-core --lib
+test -p orch-connector-core --test file_transfers --test environment_role --test link_cuts
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
