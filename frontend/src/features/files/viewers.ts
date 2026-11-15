@@ -47,6 +47,8 @@ export interface ViewerProps {
   lineRequest?: number | undefined;
   /** The tab that shows it: a viewer that holds unsaved text marks that tab. */
   tabId: string;
+  /** The actual workspace incarnation, when this is a writable native workspace file. */
+  workspaceBinding?: string | null;
   /** Why the file cannot be edited by this person now, or `null` when it can be. */
   whyReadOnly: ReadOnlyReason | null;
   /** The thread the file is read through: the agent that works there is the one who may have changed it. */
@@ -59,8 +61,6 @@ export interface ViewerProps {
 
 /** Why a file cannot be edited where it is shown. */
 export type ReadOnlyReason =
-  /** Phone sheets are for reading; editing remains in the wide code view. */
-  | { kind: 'small_screen' }
   /** The reader holds no `files.manage` on the thread. */
   | { kind: 'permission' }
   /** The environment is offline, and this is its copy from a time. */
