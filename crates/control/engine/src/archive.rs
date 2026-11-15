@@ -664,7 +664,7 @@ impl Engine {
                         Outgoing::new(
                             ids::turn_interrupt(turn.id),
                             machine,
-                            SerialKey::Thread(*id),
+                            SerialKey::None,
                             &TurnInterrupt {
                                 thread_id: *id,
                                 turn_id: turn.id,

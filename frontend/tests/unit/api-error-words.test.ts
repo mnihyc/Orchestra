@@ -31,6 +31,15 @@ beforeAll(async () => { await startI18n('en'); });
 afterAll(async () => { await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`explains a web action's missing end in ${locale}`, async () => {
+    await setLocale(locale);
+    const t = i18n.getFixedT(locale);
+    const result = errorText({ code: 'native_web_no_end', message: diagnostic }, t, { locale });
+    expect(result.message).toBe(t('ui.error.nativeWebNoEnd'));
+    expect(result.message).not.toBe(t('ui.error.nativeWebActionUnproven'));
+    expect(hasErrorCode(result.message)).toBe(false);
+  });
+
   it(`gives workspace attachment refusals a catalogued cause and recovery in ${locale}`, async () => {
     await setLocale(locale);
     const t = i18n.getFixedT(locale);
