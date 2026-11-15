@@ -29,6 +29,7 @@ pub mod locks;
 pub mod merge;
 pub mod provenance;
 pub mod resolver;
+pub mod retention;
 pub mod secrets;
 pub mod supplied;
 pub mod validation;

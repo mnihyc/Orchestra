@@ -634,7 +634,13 @@ pub async fn put_subscription(
     .bind(level)
     .bind(source)
     .bind(at)
-    .execute(conn)
+    .execute(&mut *conn)
+    .await?;
+    crate::sequences::notify_user_event(
+        conn,
+        &[user],
+        &serde_json::json!({"what":"subscription","node_id":node,"level":level,"source":source}),
+    )
     .await?;
     Ok(())
 }
@@ -645,9 +651,18 @@ pub async fn delete_subscription(conn: &mut Conn, user: Id, node: Id) -> Result<
     let done = sqlx::query("DELETE FROM subscriptions WHERE user_id = $1 AND node_id = $2")
         .bind(user)
         .bind(node)
-        .execute(conn)
+        .execute(&mut *conn)
         .await?;
-    Ok(done.rows_affected() == 1)
+    let removed = done.rows_affected() == 1;
+    if removed {
+        crate::sequences::notify_user_event(
+            conn,
+            &[user],
+            &serde_json::json!({"what":"subscription","node_id":node,"level":null,"source":null}),
+        )
+        .await?;
+    }
+    Ok(removed)
 }
 
 // ---- making and changing nodes ----

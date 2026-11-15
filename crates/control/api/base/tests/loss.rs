@@ -197,7 +197,7 @@ async fn a_persons_lost_machine_cannot_renew_or_use_a_previously_issued_reenroll
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".into(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Agent, Role::Environment],
     };
     let enrolled = service
@@ -367,6 +367,15 @@ async fn a_host_manager_recovers_only_their_managed_rows_and_owners_are_notified
         let world = World::new().await;
         let c = resources::company(&world).await;
         let (host, own, other) = mixed_host(&world, &c).await;
+        // Ownership in this root requires current membership; the retained owner entry alone is insufficient.
+        places::join(&world, c.acme, c.acme, &c.stranger, "viewer", &c.boss).await;
+        world
+            .app
+            .call(orch_api_contract::environment::EnvironmentGet, &[&other])
+            .token(&c.stranger.token)
+            .send()
+            .await
+            .ok();
         let plan = world
             .app
             .call(LossPreflight, &[])
@@ -901,5 +910,47 @@ async fn notification_previews_are_caller_bound_and_filter_private_names_and_per
             .problem()
             .code,
         ErrorCode::NotFound
+    );
+}
+
+#[tokio::test]
+async fn a_former_owner_outside_the_root_receives_no_private_operation_details() {
+    let world = World::new().await;
+    let c = resources::company(&world).await;
+    let (host, _, _) = mixed_host(&world, &c).await;
+    let plan = world
+        .app
+        .call(LossPreflight, &[])
+        .token(&c.viewer.token)
+        .body(&LossPreflightBody {
+            target: LossTarget::Host { id: host },
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary loss preview retains its native result");
+    world
+        .app
+        .call(LossDeclare, &[])
+        .token(&c.viewer.token)
+        .body(&LossDeclareBody {
+            notify: true,
+            preflight_id: plan.preflight_id,
+            confirm: plan.name,
+        })
+        .send()
+        .await
+        .ok();
+    let notices: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM notifications WHERE user_id=$1 AND data->>'operation_kind'='lost'",
+    )
+    .bind(c.stranger.id())
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        notices, 0,
+        "a retained owner entry is not current disclosure authority outside the root"
     );
 }
