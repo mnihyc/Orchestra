@@ -1525,3 +1525,29 @@ fn every_request_about_a_document_is_bound() {
         assert!(bound.contains(route.name), "{} is not bound", route.name);
     }
 }
+
+#[tokio::test]
+async fn a_document_name_search_finds_a_late_title_before_the_page_fills() {
+    let desk = Desk::new().await;
+    for index in 0..13 {
+        desk.make(&desk.ada, &format!("Guide {index:02}")).await;
+    }
+    for title in ["Guide 00", "Guide 12"] {
+        let page = desk
+            .world
+            .app
+            .call(NodeDocumentList, &[&desk.topic])
+            .token(&desk.ada.token)
+            .query(&NodeDocumentListQuery {
+                q: Some(title.into()),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].as_visible().unwrap().title, title);
+        assert!(page.next_cursor.is_none());
+    }
+}
