@@ -1,41 +1,62 @@
-/** The composer's real model/effort menu uses full-width, borderless picker rows and explicit activation. */
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+/** The composer's model, effort, speed and access program are separate compact controls; the model's list holds models alone and the effort's list the efforts of the chosen model. */
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient } from '@tanstack/react-query';
 import userEvent from '@testing-library/user-event';
+import { useState } from 'react';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type * as ModelsApi from '@/api/models';
 import type * as SettingsApi from '@/api/settings';
 import type * as ThreadsApi from '@/api/threads';
+import type * as StartApi from '@/api/start';
+import { applyChanges, resourceChanges } from '@/api/acts';
 import { ViewCompactContext } from '@/features/workbench/Narrow';
 import { ModelEffort } from '@/features/composer/ModelEffort';
+import { ThreadAgentChip } from '@/features/composer/ThreadAgent';
+import { useModelCommands, useSlashMenu } from '@/features/composer/SlashMenu';
+import type { ControlName } from '@/features/composer/modelState';
+import { NetworkError } from '@/lib/requests';
 import { effortDisplayName } from '@/features/models/names';
-import type { ModelOption, ResolvedSetting, Thread, ThreadParameters } from '@/generated/api-types';
+import type { BindingOptions, ModelOption, ResolvedSetting, Thread, ThreadParameters } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { threadWriter } from '@/realtime/stores/thread';
 import { ACME } from '../doubles/fixtures';
 import { World } from '../doubles/world';
 import { show } from './support';
 import { MODEL_ESTIMATE } from '../doubles/fixtures';
+import { options as bindingOptions, provider as bindingProvider } from '../unit/start-fixtures';
 
-const server = vi.hoisted(() => ({ settings: new Map<string, ResolvedSetting>(), parameters: new Map<string, ThreadParameters>(), write: vi.fn<typeof ThreadsApi.setThreadSetting>() }));
-vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(), settingsQuery: (id: string) => ({ queryKey: ['settings', id], queryFn: () => Promise.resolve([...server.settings.values()]), staleTime: Infinity }) }));
+const server = vi.hoisted(() => ({ settingsRead: vi.fn(), parametersRead: vi.fn(), settings: new Map<string, ResolvedSetting>(), parameters: new Map<string, ThreadParameters>(), binding: null as BindingOptions | null, bindingRead: vi.fn(), parametersError: null as Error | null, settingsError: null as Error | null, bindingError: null as Error | null, write: vi.fn<typeof ThreadsApi.setThreadSetting>(), choices: vi.fn<typeof ModelsApi.changeThreadChoices>() }));
+vi.mock('@/api/start', async (load) => {
+  const actual = await load<typeof StartApi>();
+  return { ...actual, threadBindingOptionsQuery: (id: string) => ({ ...actual.threadBindingOptionsQuery(id),
+    queryFn: () => { server.bindingRead(); return server.bindingError === null ? Promise.resolve(server.binding) : Promise.reject(server.bindingError); },
+  }) };
+});
+vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(), settingsQuery: (id: string) => ({ queryKey: ['settings', id], queryFn: () => { server.settingsRead(id); return server.settingsError === null ? Promise.resolve([...server.settings.values()]) : Promise.reject(server.settingsError); }, staleTime: Infinity }) }));
+vi.mock('@/api/models', async (load) => ({ ...await load<typeof ModelsApi>(), changeThreadChoices: (...args: Parameters<typeof ModelsApi.changeThreadChoices>) => server.choices(...args) }));
 vi.mock('@/api/threads', async (load) => ({
   ...await load<typeof ThreadsApi>(),
   parametersQuery: (id: string) => ({ queryKey: ['thread-parameters', id], queryFn: () => {
+    if (server.parametersError !== null) return Promise.reject(server.parametersError);
+    server.parametersRead(id);
     const parameters = server.parameters.get(id);
     if (parameters === undefined) throw new Error('The picker needs the native parameters of its thread');
     return Promise.resolve(parameters);
   }, staleTime: Infinity }),
   setThreadSetting: (...args: Parameters<typeof ThreadsApi.setThreadSetting>) => server.write(...args),
 }));
-vi.mock('@/features/usage/PerformancePlaces', () => ({ useChoicePerformance: () => () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
+const SIX = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const options: ModelOption[] = [
-  { ...MODEL_ESTIMATE, model_name: 'alpha-routing', display_name: 'Alpha', allowed: true, reason: null, parameters: { efforts: ['low', 'high'], default_effort: 'high' } },
+  { ...MODEL_ESTIMATE, model_name: 'alpha-routing', display_name: 'Alpha', allowed: true, reason: null, parameters: { efforts: ['low', 'high'], default_effort: 'high', context_window: 400_000 } },
   { ...MODEL_ESTIMATE, model_name: 'bravo-routing', display_name: 'Bravo', allowed: true, reason: null, parameters: {} },
+  { ...MODEL_ESTIMATE, model_name: 'charlie-routing', display_name: 'Charlie', allowed: true, reason: null, parameters: { efforts: ['low', 'high'], default_effort: 'low' } },
 ];
 const setting = (key: string, value: unknown, revision: number): ResolvedSetting => ({ key, value, own: { value, revision, locked: false }, source: { scope: 'thread', node: null }, locked_by: null, writable: true, parts: [] });
+const speedParameter = { key: 'service_tier', title: 'Speed', description: '', options: { from_model: 'service_tiers' } };
 let native: Thread;
 let previousTheme: string | null;
 const styles: HTMLStyleElement[] = [];
@@ -49,17 +70,84 @@ function stylesheet(dark: boolean) {
   document.head.append(style); styles.push(style);
   expect(style.sheet).not.toBeNull(); expect(style.sheet?.cssRules.length).toBeGreaterThan(0);
 }
+/** Presses a row once the list has read what it needs to write with. */
+async function choose(user: ReturnType<typeof userEvent.setup>, name: string): Promise<void> {
+  const row = await screen.findByRole('menuitemradio', { name });
+  await waitFor(() => expect(row).toBeEnabled());
+  await user.click(row);
+}
+function serve(models: ModelOption[], extra: Partial<ThreadParameters> = {}, current = 'alpha-routing', effort: string | null = 'high') {
+  server.parameters.set(native.id, { model: { value: current, options: models, writable: true, source: { scope: 'thread', node: null } },
+    effort: { value: effort, writable: true, supported: true, source: { scope: 'thread', node: null } }, parameters: [], approval_mode: 'on_request', approval_reviewer: null, ...extra });
+}
 
 beforeEach(() => {
   previousTheme = document.documentElement.getAttribute('data-theme');
   const world = new World(), person = world.people.get('ada'), row = world.places.rowOf(ACME.mainThread);
   if (person === undefined || row === undefined) throw new Error('The model picker needs its native thread');
   native = { ...world.threads.thread(person, row), model: 'alpha-routing', model_display: 'Alpha', effort: 'high' };
-  server.parameters.clear(); server.settings.clear(); server.write.mockReset();
-  server.parameters.set(native.id, { model: { value: 'alpha-routing', options, writable: true, source: { scope: 'thread', node: null } },
-    effort: { value: 'high', writable: true, supported: true, source: { scope: 'thread', node: null } }, parameters: [], approval_mode: 'on_request', approval_reviewer: null });
+  server.binding = bindingOptions({ providers: [bindingProvider(native.binding!.provider.id, { models: options })] }); server.bindingRead.mockClear();
+  server.parametersError = null; server.settingsError = null; server.bindingError = null;
+  server.parameters.clear(); server.settings.clear(); server.write.mockReset(); server.choices.mockReset();
+  server.parametersRead.mockClear(); server.settingsRead.mockClear();
+  serve(options);
   for (const one of [setting('agent.model', 'alpha-routing', 3), setting('agent.effort', 'high', 7), setting('agent.params', {}, 1)]) server.settings.set(one.key, one);
   server.write.mockImplementation((_id, key, body) => Promise.resolve(setting(key, body.value, (server.settings.get(key)?.own?.revision ?? 0) + 1)));
+  server.choices.mockResolvedValue(undefined);
+});
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [1440, 400]) for (const single of [true, false]) {
+  it(`keeps model help beside its subject without a lone footer for ${single ? 'one model' : 'several models'} at ${width} in ${locale}/${theme}`, async () => {
+    await setLocale(locale); document.documentElement.setAttribute('data-theme', theme);
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+    try {
+      const models = single ? [{ ...options[0]!, parameters: {} }] : options;
+      serve(models, {}, 'alpha-routing', single ? null : 'high');
+      server.binding = bindingOptions({ providers: [bindingProvider(native.binding!.provider.id, { models })] });
+      const user = userEvent.setup();
+      const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      cache.setQueryData(['thread-parameters', native.id], server.parameters.get(native.id));
+      cache.setQueryData(['settings', native.id], [...server.settings.values()]);
+      show(<ViewCompactContext value={width === 400}><ModelEffort thread={native} /></ViewCompactContext>, cache);
+      await user.click(await screen.findByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.chip'), value: 'Alpha' }) }));
+      const picker = await screen.findByRole('dialog', { name: i18n.t('composer.model.chip') });
+      const menu = await within(picker).findByRole('menu', { name: i18n.t('composer.model.chip') });
+      expect(within(menu).getAllByRole('menuitemradio')).toHaveLength(models.length);
+      expect(within(menu).getByRole('menuitemradio', { name: 'Alpha', checked: true })).toHaveFocus();
+      const help = within(picker).getByRole('button', { name: i18n.t('help.hint.label', { term: i18n.t(single ? 'helpGroups.model' : 'helpGroups.modelAndEffort') }) });
+      const subject = within(picker).getByText(i18n.t('composer.model.chip'), { exact: true });
+      const row = subject.parentElement;
+      if (row === null) throw new Error('The model subject needs its row');
+      expect(row).toContainElement(help);
+      expect(row).toHaveClass('min-w-0');
+      expect(menu.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+      expect(picker.querySelector('span.flex.justify-end')).toBeNull();
+      await user.click(help);
+      expect(await screen.findByText(i18n.t('helpGroups.visibleSettings'))).toBeVisible();
+      await user.keyboard('{Escape}');
+      await waitFor(() => expect(help).toHaveFocus());
+      expect(menu).toBeVisible();
+      expect(server.write).not.toHaveBeenCalled(); expect(server.choices).not.toHaveBeenCalled();
+    } finally { Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth }); }
+  });
+}
+
+it('updates an already open thread model list when another person enables a model', async () => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  server.binding!.providers.push(bindingProvider('other-provider', { models: [] }));
+  const user = userEvent.setup();
+  show(<ModelEffort thread={native} />, cache);
+  await user.click(await screen.findByRole('button', { name: /^Model:/ }));
+  await waitFor(() => expect(server.bindingRead).toHaveBeenCalledTimes(1));
+  expect(screen.queryByRole('menuitemradio', { name: 'New model' })).toBeNull();
+  server.binding = bindingOptions({ providers: [bindingProvider(native.binding!.provider.id, { models: options }), bindingProvider('other-provider', {
+    models: [{ ...options[1]!, model_name: 'new-routing', display_name: 'New model' }],
+  })] });
+  await act(() => applyChanges(resourceChanges('provider', 'other-provider', { row: { id: 'other-provider' } }), cache));
+  expect(await screen.findByRole('menuitemradio', { name: 'New model' })).toBeEnabled();
+  expect(server.bindingRead).toHaveBeenCalledTimes(2);
+  expect(server.write).not.toHaveBeenCalled();
 });
 afterEach(async () => {
   cleanup(); threadWriter.evict(native.id);
@@ -69,115 +157,381 @@ afterEach(async () => {
 });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
-  it(`gives model and effort options full-width picker rows, transparent borders and check marks in ${locale}/${theme}`, async () => {
+  it(`lists the models alone as full-width single rows with one check mark in ${locale}/${theme}`, async () => {
     await setLocale(locale); document.documentElement.setAttribute('data-theme', theme); stylesheet(theme === 'dark');
-    show(<ModelEffort thread={native} variant="composer" open />);
-    const picker = await screen.findByRole('dialog', { name: i18n.t('composer.model.title') });
-    const menu = await within(picker).findByRole('menu', { name: i18n.t('composer.model.list') });
-    const alpha = within(menu).getByRole('menuitemradio', { name: 'Alpha', checked: true });
-    const bravo = within(menu).getByRole('menuitemradio', { name: 'Bravo', checked: false });
-    const efforts = within(menu).getByRole('group', { name: i18n.t('composer.model.efforts', { model: 'Alpha' }) });
-    const low = within(efforts).getByRole('menuitemradio', { name: effortDisplayName('low', i18n.t), checked: false });
-    const high = within(efforts).getByRole('menuitemradio', { name: effortDisplayName('high', i18n.t), checked: true });
-    expect(menu).toHaveAttribute('aria-orientation', 'vertical'); expect(menu).toHaveClass('w-full'); expect(efforts).toHaveClass('w-full');
-    expect(within(menu).getAllByRole('menuitemradio')).toHaveLength(4);
-    for (const option of [alpha, low, high, bravo]) {
+    show(<ModelEffort thread={native} open="model" />);
+    const picker = await screen.findByRole('dialog', { name: i18n.t('composer.model.chip') });
+    const menu = await within(picker).findByRole('menu', { name: i18n.t('composer.model.chip') });
+    const rows = within(menu).getAllByRole('menuitemradio');
+    expect(rows).toHaveLength(3);
+    expect(within(menu).getByRole('menuitemradio', { name: 'Alpha', checked: true })).toBeVisible();
+    expect(within(menu).getByRole('menuitemradio', { name: 'Bravo', checked: false })).toBeVisible();
+    // The efforts are the effort control's, never nested under a model.
+    expect(within(picker).queryByRole('menuitemradio', { name: effortDisplayName('low', i18n.t) })).not.toBeInTheDocument();
+    expect(within(picker).queryByRole('group')).not.toBeInTheDocument();
+    // What a row says beside its name: the provider and the context the model takes.
+    expect(rows[0]?.closest('li')).toHaveTextContent(i18n.t('composer.model.window', { size: '400K' }));
+    expect(menu).toHaveAttribute('aria-orientation', 'vertical'); expect(menu).toHaveClass('overflow-y-auto');
+    for (const option of rows) {
       const choice = option.closest('[data-choice-layout]');
       expect(choice).toHaveAttribute('data-choice-layout', 'picker'); expect(choice).toHaveClass('w-full');
       expect(option).toHaveClass('w-full'); expect(option).not.toHaveAttribute('aria-pressed');
-      expect(getComputedStyle(option).width).not.toBe('max-content');
-      expect(getComputedStyle(option).borderTopColor).toBe('rgba(0, 0, 0, 0)');
       expect(getComputedStyle(option).backgroundColor).toBe('rgba(0, 0, 0, 0)');
       expect(option.querySelectorAll('svg.lucide-check')).toHaveLength(option.getAttribute('aria-checked') === 'true' ? 1 : 0);
     }
-    expect(within(menu).getAllByText('Alpha', { exact: true })).toHaveLength(1);
-    expect(within(menu).getAllByText('Bravo', { exact: true })).toHaveLength(1);
-    expect(alpha.closest('li')).not.toHaveClass('bg-accent-subtle');
+    // Three models need no search.
+    expect(within(picker).queryByRole('textbox')).not.toBeInTheDocument();
     expect(server.write).not.toHaveBeenCalled();
   });
 
-  it(`moves focus without changing a choice and activates an effort with its setting revisions in ${locale}/${theme}`, async () => {
+  it(`lists the efforts of the chosen model alone with its default marked in ${locale}/${theme}`, async () => {
     await setLocale(locale); document.documentElement.setAttribute('data-theme', theme);
-    const user = userEvent.setup(); show(<ModelEffort thread={native} variant="composer" open />);
-    const picker = await screen.findByRole('dialog', { name: i18n.t('composer.model.title') });
-    const menu = await within(picker).findByRole('menu', { name: i18n.t('composer.model.list') });
-    const alpha = within(menu).getByRole('menuitemradio', { name: 'Alpha' }), bravo = within(menu).getByRole('menuitemradio', { name: 'Bravo' });
-    const low = within(menu).getByRole('menuitemradio', { name: effortDisplayName('low', i18n.t) });
-    await waitFor(() => expect(alpha).toBeEnabled());
-    expect(within(menu).getAllByRole('menuitemradio').filter((option) => option.tabIndex === 0)).toEqual([alpha]);
-    await user.click(within(picker).getByRole('textbox', { name: i18n.t('composer.model.find') }));
-    await user.keyboard('{ArrowDown}'); expect(alpha).toHaveFocus();
-    await user.keyboard('{ArrowDown}'); expect(low).toHaveFocus();
-    expect(within(menu).getAllByRole('menuitemradio').filter((option) => option.tabIndex === 0)).toEqual([low]);
-    await user.keyboard('{End}'); expect(bravo).toHaveFocus();
-    await user.keyboard('{ArrowDown}'); expect(alpha).toHaveFocus();
-    await user.keyboard('{ArrowUp}'); expect(bravo).toHaveFocus();
-    await user.keyboard('{Home}{ArrowDown}'); expect(low).toHaveFocus();
-    expect(server.write).not.toHaveBeenCalled();
-    await user.keyboard(' ');
-    await waitFor(() => expect(server.write).toHaveBeenCalledTimes(2));
-    expect(server.write).toHaveBeenNthCalledWith(1, native.id, 'agent.model', { value: 'alpha-routing', expected_revision: 3 });
-    expect(server.write).toHaveBeenNthCalledWith(2, native.id, 'agent.effort', { value: 'low', expected_revision: 7 });
+    show(<ModelEffort thread={native} open="effort" />);
+    const picker = await screen.findByRole('dialog', { name: i18n.t('composer.effort.title') });
+    const menu = await within(picker).findByRole('menu', { name: i18n.t('composer.effort.title') });
+    expect(within(menu).getAllByRole('menuitemradio')).toHaveLength(2);
+    const high = within(menu).getByRole('menuitemradio', { name: effortDisplayName('high', i18n.t), checked: true });
+    expect(high.closest('li')).toHaveTextContent(i18n.t('composer.effort.default'));
+    expect(within(menu).getByRole('menuitemradio', { name: effortDisplayName('low', i18n.t), checked: false }).closest('li')).not.toHaveTextContent(i18n.t('composer.effort.default'));
+    expect(within(picker).queryByRole('menuitemradio', { name: 'Bravo' })).not.toBeInTheDocument();
   });
 }
 
-it('finds a model by either name and moves focus to a filtered row without selecting it', async () => {
-  const user = userEvent.setup(); show(<ModelEffort thread={native} variant="composer" open />);
-  const picker = await screen.findByRole('dialog', { name: i18n.t('composer.model.title') });
-  const search = await within(picker).findByRole('textbox', { name: i18n.t('composer.model.find') });
-  await within(picker).findByRole('menuitemradio', { name: 'Alpha' });
-  await user.type(search, 'bravo-routing');
-  const bravo = within(picker).getByRole('menuitemradio', { name: 'Bravo', checked: false });
-  expect(within(picker).queryByRole('menuitemradio', { name: 'Alpha' })).not.toBeInTheDocument();
-  await user.keyboard('{ArrowDown}'); expect(bravo).toHaveFocus();
-  await user.click(search); await user.clear(search); await user.type(search, 'Alpha');
-  await user.keyboard('{ArrowUp}'); expect(within(picker).getByRole('menuitemradio', { name: effortDisplayName('high', i18n.t) })).toHaveFocus();
-  expect(server.write).not.toHaveBeenCalled();
+it('shows the model, effort, speed and access program as chips that name their value alone', async () => {
+  show(<ModelEffort thread={native} />);
+  const model = await screen.findByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.chip'), value: 'Alpha' }) });
+  expect(model).toHaveTextContent('Alpha'); expect(model).not.toHaveTextContent(effortDisplayName('high', i18n.t));
+  const effort = await screen.findByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.effort.title'), value: effortDisplayName('high', i18n.t) }) });
+  expect(effort).toHaveTextContent(effortDisplayName('high', i18n.t));
+  // A model that lists no effort has no effort control.
+  expect(document.querySelectorAll('[data-composer-chip="speed"]')).toHaveLength(0);
 });
 
-it('keeps every model and effort read-only for a driver who cannot manage the thread', async () => {
+it('renders a hundred models separately from six efforts and searches the model list', async () => {
   const user = userEvent.setup();
-  show(<ModelEffort thread={{ ...native, access: { ...native.access, permissions: native.access.permissions.filter((permission) => permission !== 'thread.manage') } }} variant="composer" open />);
-  const picker = await screen.findByRole('dialog', { name: i18n.t('composer.model.title') });
-  const menu = await within(picker).findByRole('menu', { name: i18n.t('composer.model.list') });
+  const hundred: ModelOption[] = Array.from({ length: 100 }, (_, at) => ({ ...MODEL_ESTIMATE, model_name: `m${at}-routing`, display_name: `Model ${at}`, allowed: true, reason: null, parameters: { efforts: SIX, default_effort: 'medium' } }));
+  serve(hundred, {}, 'm3-routing', 'medium');
+  const view = show(<ModelEffort thread={{ ...native, model: 'm3-routing', model_display: 'Model 3', effort: 'medium' }} open="model" />);
+  const picker = await screen.findByRole('dialog', { name: i18n.t('composer.model.chip') });
+  const menu = await within(picker).findByRole('menu', { name: i18n.t('composer.model.chip') });
+  expect(within(menu).getAllByRole('menuitemradio')).toHaveLength(100);
+  const search = within(picker).getByRole('textbox', { name: i18n.t('composer.model.find') });
+  await user.type(search, 'Model 73');
+  expect(within(menu).getAllByRole('menuitemradio')).toHaveLength(1);
+  view.rerender(<ModelEffort thread={{ ...native, model: 'm3-routing', model_display: 'Model 3', effort: 'medium' }} open="effort" />);
+  const efforts = await screen.findByRole('menu', { name: i18n.t('composer.effort.title') });
+  expect(within(efforts).getAllByRole('menuitemradio')).toHaveLength(6);
+  expect(within(efforts).getByRole('menuitemradio', { name: effortDisplayName('medium', i18n.t), checked: true })).toBeVisible();
+  expect(screen.queryByRole('textbox', { name: i18n.t('composer.model.find') })).not.toBeInTheDocument();
+});
+
+it('writes an explicit effort alone and a model choice as one act without rewriting unchanged effort', async () => {
+  const user = userEvent.setup();
+  const view = show(<ModelEffort thread={native} open="effort" />);
+  await choose(user, effortDisplayName('low', i18n.t));
+  await waitFor(() => expect(server.write).toHaveBeenCalledTimes(1));
+  expect(server.write).toHaveBeenCalledWith(native.id, 'agent.effort', { value: 'low', expected_revision: 7 });
+  server.write.mockClear();
+  view.rerender(<ModelEffort thread={native} open="model" />);
+  // Charlie takes the effort the thread is on, so the thread keeps it.
+  await choose(user, 'Charlie');
+  await waitFor(() => expect(server.write).toHaveBeenCalledExactlyOnceWith(native.id, 'agent.model', { value: 'charlie-routing', expected_revision: 3 }));
+  server.write.mockClear();
+  // Bravo lists none, and gets none.
+  view.rerender(<ModelEffort thread={native} open="model" />);
+  await choose(user, 'Bravo');
+  await waitFor(() => expect(server.write).toHaveBeenCalledTimes(1));
+  expect(server.write).toHaveBeenCalledWith(native.id, 'agent.model', { value: 'bravo-routing', expected_revision: 3, model_choice: { effort: { value: null, expected_revision: 7 } } });
+});
+
+it('lets a person change writable effort when the inherited model is locked', async () => {
+  serve(options, { model: { value: 'alpha-routing', options, writable: false, source: { scope: 'org', node: null } } });
+  const modelSetting = server.settings.get('agent.model')!;
+  server.settings.set('agent.model', { ...modelSetting, writable: false, locked_by: { scope: 'org', node: null } });
+  const user = userEvent.setup();
+  const view = show(<ModelEffort thread={native} open="effort" />);
+  await choose(user, effortDisplayName('low', i18n.t));
+  await waitFor(() => expect(server.write).toHaveBeenCalledExactlyOnceWith(native.id, 'agent.effort', { value: 'low', expected_revision: 7 }));
+  view.rerender(<ModelEffort thread={native} open="model" />);
+  const menu = await screen.findByRole('menu', { name: i18n.t('composer.model.chip') });
+  for (const row of within(menu).getAllByRole('menuitemradio')) expect(row).toBeDisabled();
+});
+
+it('moves focus through the list without choosing, and chooses with the space bar', async () => {
+  const user = userEvent.setup(); show(<ModelEffort thread={native} open="model" />);
+  const picker = await screen.findByRole('dialog', { name: i18n.t('composer.model.chip') });
+  const menu = await within(picker).findByRole('menu', { name: i18n.t('composer.model.chip') });
+  const alpha = within(menu).getByRole('menuitemradio', { name: 'Alpha' }), bravo = within(menu).getByRole('menuitemradio', { name: 'Bravo' });
+  const charlie = within(menu).getByRole('menuitemradio', { name: 'Charlie' });
+  await waitFor(() => expect(alpha).toBeEnabled());
+  expect(within(menu).getAllByRole('menuitemradio').filter((option) => option.tabIndex === 0)).toEqual([alpha]);
+  alpha.focus();
+  await user.keyboard('{ArrowDown}'); expect(bravo).toHaveFocus();
+  await user.keyboard('{End}'); expect(charlie).toHaveFocus();
+  await user.keyboard('{ArrowDown}'); expect(alpha).toHaveFocus();
+  await user.keyboard('{ArrowUp}'); expect(charlie).toHaveFocus();
+  expect(server.write).not.toHaveBeenCalled();
+  await user.keyboard(' ');
+  await waitFor(() => expect(server.write).toHaveBeenCalledExactlyOnceWith(native.id, 'agent.model', { value: 'charlie-routing', expected_revision: 3 }));
+  expect(server.choices).not.toHaveBeenCalled();
+});
+
+it('keeps every model read-only for a driver who cannot manage the thread, and says who can', async () => {
+  const user = userEvent.setup();
+  show(<ModelEffort thread={{ ...native, access: { ...native.access, permissions: native.access.permissions.filter((permission) => permission !== 'thread.manage') } }} open="model" />);
+  const picker = await screen.findByRole('dialog', { name: i18n.t('composer.model.chip') });
+  const menu = await within(picker).findByRole('menu', { name: i18n.t('composer.model.chip') });
   expect(within(picker).getByText(i18n.t('composer.model.readOnly', { who: native.owner.display_name }))).toBeVisible();
-  for (const option of within(menu).getAllByRole('menuitemradio')) { expect(option).toBeDisabled(); expect(option).toHaveAttribute('tabindex', '-1'); await user.click(option); }
+  for (const option of within(menu).getAllByRole('menuitemradio')) { expect(option).toBeDisabled(); await user.click(option); }
   expect(server.write).not.toHaveBeenCalled();
 });
 
+it('disables the controls of a thread that is only watched', async () => {
+  show(<ModelEffort thread={native} readOnly />);
+  expect(await screen.findByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.chip'), value: 'Alpha' }) })).toBeDisabled();
+  expect(server.write).not.toHaveBeenCalled();
+});
 
-for (const locale of ['en', 'zh-CN'] as const) for (const compact of [false, true]) for (const readOnly of [false, true]) {
-  it(`keeps the selected effort visible beside a long model in ${locale}, narrow:${compact}, read-only:${readOnly}`, async () => {
-    await setLocale(locale);
+for (const compact of [false, true]) {
+  it(`keeps the effort beside a long model name instead of folding it into the name in narrow:${compact}`, async () => {
     const name = 'A long actual model display name';
-    const current = { ...native, model_display: name };
-    const view = show(<ViewCompactContext.Provider value={compact}><ModelEffort thread={current} variant="composer" compact readOnly={readOnly} /></ViewCompactContext.Provider>);
+    show(<ViewCompactContext.Provider value={compact}><ModelEffort thread={{ ...native, model_display: name }} /></ViewCompactContext.Provider>);
     const effort = effortDisplayName('high', i18n.t);
-    const control = screen.getByRole('button', { name: i18n.t(readOnly ? 'composer.model.current' : 'composer.model.change', { model: `${name} (${effort})` }) });
-    const options = control.querySelector('[data-model-options]');
-    expect(options).toBeVisible(); expect(options).not.toHaveClass('hidden');
-    expect(options).toHaveTextContent(effort);
-    expect(control.querySelector('[data-model-name]')).toHaveTextContent(name);
-    expect(view.container.querySelector('p')).toBeNull();
-    if (readOnly) expect(control).toBeDisabled();
-    expect(server.write).not.toHaveBeenCalled();
+    expect(await screen.findByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.effort.title'), value: effort }) })).toBeVisible();
+    expect(screen.getByRole('button', { name: new RegExp(i18n.t('composer.model.chip')) })).not.toHaveTextContent(`(${effort})`);
   });
 }
 
-it('does not invent an effort fragment for an actual model use without one', () => {
-  show(<ViewCompactContext.Provider value><ModelEffort thread={{ ...native, effort: null }} variant="composer" compact /></ViewCompactContext.Provider>);
-  expect(document.querySelector('[data-model-options]')).toBeNull();
+it('shows a model that offers exactly two speeds as one chip that says the speed that is on, and flips it', async () => {
+  const user = userEvent.setup();
+  const fast = { ...options[0]!, parameters: { ...options[0]!.parameters, service_tiers: [{ id: 'fast', label: 'Fast' }] } };
+  const view = { apply: 'next_turn' as const, def: speedParameter, key: 'service_tier', locked_by: null, source: { scope: 'default' as const, node: null }, value: null, writable: true };
+  serve([fast, ...options.slice(1)], { parameters: [view] });
+  show(<ModelEffort thread={native} />);
+  const chip = await screen.findByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.speed.title'), value: i18n.t('composer.model.speed.standard') }) });
+  expect(chip).toHaveAttribute('aria-pressed', 'false');
+  await waitFor(() => expect(chip).not.toHaveAttribute('aria-disabled'));
+  await user.click(chip);
+  await waitFor(() => expect(server.choices).toHaveBeenCalledTimes(1));
+  const [thread, change] = server.choices.mock.calls[0] ?? [];
+  expect(thread).toBe(native.id);
+  expect(change?.({})).toEqual({ service_tier: 'fast' });
+});
+
+it('shows no speed control for a model that offers one speed only', async () => {
+  const view = { apply: 'next_turn' as const, def: speedParameter, key: 'service_tier', locked_by: null, source: { scope: 'default' as const, node: null }, value: null, writable: true };
+  serve(options, { parameters: [view] });
+  show(<ModelEffort thread={native} />);
+  await screen.findByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.chip'), value: 'Alpha' }) });
+  expect(document.querySelectorAll('[data-composer-chip="speed"]')).toHaveLength(0);
+});
+
+it('opens the Standard and Fast choices through the real speed slash command and control', async () => {
+  const fast = { ...options[0]!, parameters: { ...options[0]!.parameters, service_tiers: [{ id: 'fast', label: 'Fast' }] } };
+  serve([fast], { parameters: [{ apply: 'next_turn', def: speedParameter, key: 'service_tier', locked_by: null, source: { scope: 'default', node: null }, value: null, writable: true }] });
+  function Composer() {
+    const [text, setText] = useState('');
+    const [open, setOpen] = useState<ControlName | null>(null);
+    const commands = useModelCommands(native, setOpen);
+    const slash = useSlashMenu(text, commands, () => setText(''));
+    return <><textarea aria-label="Message" value={text} onChange={(event) => setText(event.target.value)} onKeyDown={slash.onKeyDown} {...slash.boxProps} />
+      {slash.list}{slash.problem}<ModelEffort thread={native} open={open} onOpenChange={setOpen} /></>;
+  }
+  const user = userEvent.setup();
+  show(<Composer />);
+  await screen.findByRole('button', { name: /^Speed:/ });
+  await user.type(screen.getByRole('textbox', { name: 'Message' }), '/speed{Enter}');
+  const menu = await screen.findByRole('menu', { name: i18n.t('composer.model.speed.title') });
+  expect(within(menu).getByRole('menuitemradio', { name: i18n.t('composer.model.speed.standard'), checked: true })).toBeVisible();
+  await user.click(within(menu).getByRole('menuitemradio', { name: 'Fast' }));
+  await waitFor(() => expect(server.choices).toHaveBeenCalledTimes(1));
+  expect(server.choices.mock.calls[0]?.[1]({})).toEqual({ service_tier: 'fast' });
+});
+
+it('lists more than two speeds in a list of their own', async () => {
+  const user = userEvent.setup();
+  const tiers = [{ id: 'fast', label: 'Fast' }, { id: 'flex', label: 'Flex' }];
+  const many = { ...options[0]!, parameters: { ...options[0]!.parameters, service_tiers: tiers } };
+  const view = { apply: 'next_turn' as const, def: speedParameter, key: 'service_tier', locked_by: null, source: { scope: 'default' as const, node: null }, value: null, writable: true };
+  serve([many, ...options.slice(1)], { parameters: [view] });
+  show(<ModelEffort thread={native} open="speed" />);
+  const menu = await screen.findByRole('menu', { name: i18n.t('composer.model.speed.title') });
+  expect(within(menu).getAllByRole('menuitemradio').map((row) => row.textContent)).toEqual([expect.stringContaining('Standard'), expect.stringContaining('Fast'), expect.stringContaining('Flex')]);
+  await choose(user, 'Flex');
+  await waitFor(() => expect(server.choices).toHaveBeenCalledTimes(1));
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`shows the single access program fixed by the provider with its reason (${locale})`, async () => {
+  await setLocale(locale);
+  const program = 'daybreakBlue';
+  const option = { ...options[0]!, parameters: { ...options[0]!.parameters, access_programs: [program] } };
+  serve([option], { parameters: [{ apply: 'next_turn', key: 'access_program', locked_by: null, source: { scope: 'default', node: null }, value: program, writable: true,
+    def: { key: 'access_program', title: 'Access', description: '', options: { from_model: 'access_programs' },
+      provider_constraint: { const: program }, allows_none: false, resolved_options: [{ value: program, label: 'Blue' }] },
+  }] });
+  const user = userEvent.setup();
+  show(<ModelEffort thread={native} />);
+  const control = await screen.findByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.access.title'), value: i18n.t('composer.model.access.names.daybreakBlue') }) });
+  expect(control).toBeDisabled();
+  expect(control).toHaveAttribute('aria-description', i18n.t('providerOptions.fixedByProvider'));
+  await user.click(control);
+  expect(server.choices).not.toHaveBeenCalled();
+});
+
+it('shows a refused Fast save beside the control while Standard stays in force', async () => {
+  const fast = { ...options[0]!, parameters: { ...options[0]!.parameters, service_tiers: [{ id: 'fast', label: 'Fast' }] } };
+  serve([fast], { parameters: [{ apply: 'next_turn', def: speedParameter, key: 'service_tier', locked_by: null, source: { scope: 'default', node: null }, value: null, writable: true }] });
+  server.choices.mockRejectedValue(new NetworkError('failed'));
+  const user = userEvent.setup();
+  show(<ModelEffort thread={native} />);
+  const standard = await screen.findByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.speed.title'), value: i18n.t('composer.model.speed.standard') }) });
+  await waitFor(() => expect(standard).not.toHaveAttribute('aria-disabled'));
+  await user.click(standard);
+  expect(await screen.findByRole('alert')).toBeVisible();
+  expect(standard).toHaveAttribute('aria-pressed', 'false');
+  expect(server.choices).toHaveBeenCalledTimes(1);
+});
+
+for (const read of ['parametersError', 'settingsError', 'bindingError'] as const) it(`keeps the model controls read failure visible and retries it (${read})`, async () => {
+  server[read] = new NetworkError('failed');
+  const user = userEvent.setup();
+  show(<ModelEffort thread={native} />);
+  if (read !== 'parametersError') await user.click(await screen.findByRole('button', { name: /^Model:/ }));
+  expect(await screen.findByRole('alert')).toBeVisible();
+  if (read !== 'parametersError') await user.keyboard('{Escape}');
+  const retry = screen.getByRole('button', { name: i18n.t('common.tryAgain') });
+  expect(retry).toBeVisible();
+  server[read] = null;
+  await user.click(retry);
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
   expect(server.write).not.toHaveBeenCalled();
 });
 
+it('keeps an agent binding read failure visible after the menu closes and retries it', async () => {
+  server.bindingError = new NetworkError('failed');
+  const user = userEvent.setup();
+  show(<ThreadAgentChip thread={native} canBind reason={undefined} onSetUp={vi.fn()} />);
+  await user.click(await screen.findByRole('button', { name: new RegExp(`^${i18n.t('composer.row.agentName')}:`) }));
+  expect(await screen.findByRole('alert')).toBeVisible();
+  await user.keyboard('{Escape}');
+  server.bindingError = null;
+  await user.click(screen.getByRole('button', { name: i18n.t('common.tryAgain') }));
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  expect(server.bindingRead).toHaveBeenCalledTimes(2);
+});
 
-it('lets a driver inspect the model choices without borrowing model-write authority', async () => {
-  const driver = { ...native, access: { ...native.access, permissions: ['thread.view', 'thread.interact'] } };
-  show(<ModelEffort thread={driver} variant="composer" />);
-  await userEvent.click(screen.getByRole('button', { name: i18n.t('composer.model.change', { model: `Alpha (${effortDisplayName('high', i18n.t)})` }) }));
-  expect(await screen.findByText(i18n.t('composer.model.readOnly', { who: driver.owner.display_name }))).toBeVisible();
-  const choices = await screen.findAllByRole('menuitemradio');
-  for (const choice of choices) expect(choice).toBeDisabled();
-  await userEvent.click(choices[0]!);
+
+it('shows the current compact chips before reading settings and expands choices only when opened', async () => {
+  const full = server.parameters.get(native.id);
+  if (full === undefined) throw new Error('The thread needs native parameters');
+  const first = options[0];
+  if (first === undefined) throw new Error('The current model needs a choice');
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  cache.setQueryData(['thread-parameters', native.id], { ...full, model: { ...full.model, options: [first], options_partial: true } });
+  const view = show(<ModelEffort thread={native} />, cache);
+  try {
+    const label = await screen.findByText('Alpha', { exact: true });
+    expect(server.parametersRead).not.toHaveBeenCalled();
+    expect(server.settingsRead).not.toHaveBeenCalled();
+    await userEvent.click(label);
+    await waitFor(() => {
+      expect(server.parametersRead).toHaveBeenCalledOnce();
+      expect(server.settingsRead).toHaveBeenCalledOnce();
+    });
+    expect(await screen.findByText('Bravo', { exact: true })).toBeVisible();
+  } finally { view.unmount(); cache.clear(); }
+});
+
+it('puts a changed effort and incompatible option cleanup in the same guarded model request', async () => {
+  const user = userEvent.setup();
+  const next = { ...options[2]!, parameters: { efforts: ['low'], default_effort: 'low' } };
+  const fast = { ...options[0]!, parameters: { ...options[0]!.parameters, service_tiers: [{ id: 'fast', label: 'Fast' }] } };
+  serve([fast, next], { parameters: [{ key: 'service_tier', def: speedParameter, apply: 'next_turn', writable: true, locked_by: null,
+    source: { scope: 'thread', node: null }, value: 'fast' }] });
+  server.settings.set('agent.params', setting('agent.params', { service_tier: 'fast' }, 9));
+  show(<ModelEffort thread={native} open="model" />);
+  await choose(user, 'Charlie');
+  await waitFor(() => expect(server.write).toHaveBeenCalledExactlyOnceWith(native.id, 'agent.model', {
+    value: 'charlie-routing', expected_revision: 3, model_choice: {
+      effort: { value: 'low', expected_revision: 7 }, params: { value: {}, expected_revision: 9 },
+    },
+  }));
+  expect(server.choices).not.toHaveBeenCalled();
+});
+
+it('keeps an unchanged independently locked effort when choosing another supported model', async () => {
+  const effort = server.settings.get('agent.effort')!;
+  server.settings.set('agent.effort', { ...effort, writable: false, locked_by: { scope: 'topic', node: null } });
+  const data = server.parameters.get(native.id)!;
+  serve(options, { ...data, effort: { ...data.effort, writable: false } });
+  show(<ModelEffort thread={native} open="model" />);
+  await choose(userEvent.setup(), 'Charlie');
+  await waitFor(() => expect(server.write).toHaveBeenCalledExactlyOnceWith(native.id, 'agent.model', { value: 'charlie-routing', expected_revision: 3 }));
+});
+
+it.each(['en', 'zh-CN'] as const)('keeps the active failover distinct from the configured model and uses only the served return state in %s', async (locale) => {
+  await setLocale(locale);
+  if (native.binding === null) throw new Error('A bound model supplies its admitted route');
+  const route = { configured: { provider_id: native.binding.provider.id, model: 'alpha-routing', display_name: 'Alpha' },
+    original: { provider_id: native.binding.provider.id, model: 'alpha-routing', display_name: 'Alpha' },
+    active_override: { provider_id: native.binding.provider.id, model: 'backup-routing', display_name: 'Backup' },
+    return_policy: 'next_turn', return_state: 'when_ready' as const, observed_at: '2026-11-15T00:00:00Z' };
+  const bound = Object.assign({ ...native.binding }, { call_route: route });
+  const view = show(<ModelEffort thread={{ ...native, binding: bound }} open="model" />);
+  const facts = await waitFor(() => {
+    const value = document.querySelector('[data-fact-group="call-route"]');
+    if (value === null) throw new Error('The existing model picker owns its route facts');
+    return value;
+  });
+  expect(facts).toHaveTextContent('Alpha'); expect(facts).toHaveTextContent('Backup');
+  expect(facts).toHaveTextContent(i18n.t('composer.callRoute.whenReady'));
+  view.rerender(<ModelEffort thread={{ ...native, binding: { ...bound, call_route: { ...route, return_policy: 'stay', return_state: 'stay_on_failover' } } }} open="model" />);
+  expect(facts).toHaveTextContent(i18n.t('composer.callRoute.stay'));
+  expect(facts).not.toHaveTextContent(i18n.t('composer.callRoute.returning'));
+  view.rerender(<ModelEffort thread={{ ...native, binding: { ...bound, call_route: { ...route, configured: null, original: null, return_state: 'unreported' } } }} open="model" />);
+  expect(facts).toHaveTextContent(i18n.t('factDisclosure.notReported'));
   expect(server.write).not.toHaveBeenCalled();
 });
+
+it.each(['en', 'zh-CN'] as const)('shows the paid speed fixed by the provider even without an alternative in %s', async (locale) => {
+  await setLocale(locale);
+  const fast = { ...options[0]!, parameters: { ...options[0]!.parameters, service_tiers: [{ id: 'fast', label: 'Fast' }], default_service_tier: 'fast' } };
+  serve([fast], { parameters: [{ key: 'service_tier', value: 'fast', writable: false, locked_by: null, apply: 'next_turn', source: { scope: 'default', node: null },
+    def: { ...speedParameter, provider_constraint: { const: 'fast' }, resolved_options: [{ value: 'fast', label: 'Fast' }], resolved_default: 'fast', allows_none: false } }] });
+  show(<ModelEffort thread={native} />);
+  const control = await screen.findByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.speed.title'), value: 'Fast' }) });
+  expect(control).toBeVisible(); expect(control).toBeDisabled();
+  expect(control).toHaveAccessibleDescription(i18n.t('providerOptions.fixedByProvider'));
+  await userEvent.click(control);
+  expect(server.choices).not.toHaveBeenCalled(); expect(server.write).not.toHaveBeenCalled();
+});
+
+for (const failed of ['parameters', 'settings'] as const) for (const recovery of ['retry', 'return'] as const) {
+  it(`recovers the real Model control after its ${failed} read fails by ${recovery}`, async () => {
+    const full = server.parameters.get(native.id), first = options[0];
+    if (full === undefined || first === undefined) throw new Error('The compact opening needs its current model');
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    cache.setQueryData(['thread-parameters', native.id], { ...full, model: { ...full.model, options: [first], options_partial: true } });
+    const failedRead = failed === 'parameters' ? server.parametersRead : server.settingsRead;
+    const otherRead = failed === 'parameters' ? server.settingsRead : server.parametersRead;
+    failedRead.mockImplementationOnce(() => { throw new Error('The deferred model read failed'); });
+    const user = userEvent.setup(), view = show(<ModelEffort thread={native} />, cache);
+    try {
+      await user.click(await screen.findByText('Alpha', { exact: true }));
+      const dialog = await screen.findByRole('dialog', { name: i18n.t('composer.model.chip') });
+      await waitFor(() => expect(failedRead).toHaveBeenCalledOnce());
+      await within(dialog).findByRole('alert');
+      if (recovery === 'retry') {
+        await user.click(within(dialog).getByRole('button', { name: i18n.t('common.tryAgain') }));
+      } else {
+        await user.keyboard('{Escape}');
+        await user.click(screen.getByRole('button', { name: i18n.t('composer.chip.value', { what: i18n.t('composer.model.chip'), value: 'Alpha' }) }));
+      }
+      await waitFor(() => expect(failedRead).toHaveBeenCalledTimes(2));
+      expect(otherRead).toHaveBeenCalledOnce();
+      const ready = await screen.findByRole('dialog', { name: i18n.t('composer.model.chip') });
+      await waitFor(() => expect(within(ready).getByRole('menuitemradio', { name: 'Bravo' })).toBeEnabled());
+      expect(within(ready).queryByRole('alert')).not.toBeInTheDocument();
+    } finally { view.unmount(); cache.clear(); }
+  });
+}

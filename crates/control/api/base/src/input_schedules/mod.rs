@@ -32,8 +32,6 @@ use orch_api_contract::input_schedules::*;
 
 use orch_api_contract::threads::ContentPart;
 
-use orch_api_contract::threads::Delivery;
-
 use orch_api_contract::users::UserRef;
 
 use orch_authz::Act;
@@ -339,6 +337,8 @@ async fn present_bounded(
     };
     Ok(InputSchedule {
         id: row.id,
+        plan: row.plan,
+        delivery: decode(json!(&row.delivery))?,
         kind: agent::metadata(&row)?.map(|_| InputScheduleKind::Agent),
         agent: agent::metadata(&row)?,
         topic: refs
@@ -579,6 +579,8 @@ async fn create(
         name: name(body.name.as_deref().unwrap_or("Scheduled input"))?,
         target: encode(&body.target)?,
         content: encode(&body.content)?,
+        plan: body.plan,
+        delivery: orch_engine::inputs::delivery_word(body.delivery).into(),
         native_action: body.native_action.as_ref().map(encode).transpose()?,
         definition_authority: None,
         timing: encode(&body.timing)?,

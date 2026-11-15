@@ -1,7 +1,7 @@
 /** The native approval and sandbox choices share their reader, offered bounds and revision-guarded writer. */
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Check, ChevronDown, Lock } from 'lucide-react';
-import { useId, useState } from 'react';
+import { type ReactNode, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { client } from '@/api/client';
 import { settingsKey } from '@/api/settings';
@@ -12,7 +12,7 @@ import { DisabledBuildFeatures } from '@/features/resources/agents/ProgramBuild'
 import { programNameIn } from '@/features/resources/programNames';
 import { nativeChangeValue } from '@/features/timeline/items/Marker';
 import { useCompactControls } from '@/features/workbench/Narrow';
-import type { ResolvedSetting, Thread, ThreadParameters } from '@/generated/api-types';
+import type { ApprovalChoiceReason, ApprovalChoiceRequirement, ResolvedSetting, Thread, ThreadParameters } from '@/generated/api-types';
 import { offeredChoice } from '@/i18n/choices';
 import { holds } from '@/lib/permissions';
 import { useThreadPart } from '@/realtime/stores/thread';
@@ -20,6 +20,7 @@ import { Button } from '@/ui/Button';
 import { Choice } from '@/ui/Choice';
 import { cx } from '@/ui/cx';
 import { ErrorAlert } from '@/ui/ErrorState';
+import { FactDisclosureBody } from '@/ui/FactDisclosure';
 import { Popover } from '@/ui/Popover';
 import { Tooltip } from '@/ui/Tooltip';
 
@@ -27,15 +28,15 @@ export type NativeApprovalMode = 'ask' | 'on_request' | 'auto' | 'bypass';
 export function isApprovalMode(value: string): value is NativeApprovalMode {
   return value === 'ask' || value === 'on_request' || value === 'auto' || value === 'bypass';
 }
-/** The same approval control in the composer and the Parameters entry point. */
-export function ApprovalModePicker(props: { thread: Thread; readOnly?: boolean }) {
+/** The same approval control in the composer and the Parameters entry point. The sandbox is its second level: one row at the foot of the list that opens the sandbox's own choices. */
+export function ApprovalModePicker(props: { thread: Thread; readOnly?: boolean; sandbox?: ReactNode }) {
   return <NativeModePicker {...props} kind="approval" />;
 }
 export function ConfinementPicker(props: { thread: Thread; readOnly?: boolean }) {
   return <NativeModePicker {...props} kind="sandbox" />;
 }
 
-function NativeModePicker({ thread, readOnly = false, kind }: { thread: Thread; readOnly?: boolean; kind: ModeKind }) {
+function NativeModePicker({ thread, readOnly = false, kind, sandbox }: { thread: Thread; readOnly?: boolean; kind: ModeKind; sandbox?: ReactNode }) {
   const compact = useCompactControls();
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
@@ -53,6 +54,18 @@ function NativeModePicker({ thread, readOnly = false, kind }: { thread: Thread; 
     ?? { name: value, description: t('composer.mode.nativeChoice') };
   const words = mode === undefined ? t('composer.mode.checking') : copy(mode).name;
   const options = kind === 'approval' ? (runs.parameters?.approval_modes ?? setting?.available_values ?? []) : (setting?.available_values ?? []);
+  const choices = kind === 'approval' && runs.parameters?.approval_choices !== undefined && runs.parameters.approval_choices !== null
+    ? runs.parameters.approval_choices : options.map((mode) => ({ mode, available: true, reason: null, requirement: null }));
+  const refusalWords = (reason: ApprovalChoiceReason | null) => {
+    const words = { reviewer_unavailable: 'composer.approvalUnavailable.reviewer', reviewer_access_required: 'composer.approvalUnavailable.reviewerAccess',
+      not_allowed_here: 'composer.approvalUnavailable.policy', required_isolation_unavailable: 'composer.approvalUnavailable.isolation', not_supported_by_build: 'composer.approvalUnavailable.build' } as const;
+    return reason === null ? t('factDisclosure.notReported') : t(words[reason]);
+  };
+  const requirementWords = (requirement: ApprovalChoiceRequirement | null) => {
+    const words = { native_reviewer: 'composer.approvalRequirements.reviewer', reviewer_use: 'composer.approvalRequirements.reviewerUse',
+      policy_allowance: 'composer.approvalRequirements.policy', isolated_environment: 'composer.approvalRequirements.isolation', agent_build: 'composer.approvalRequirements.build' } as const;
+    return requirement === null ? undefined : t(words[requirement]);
+  };
   const locked = setting?.locked_by;
   const inherited = setting !== undefined && setting.source.scope !== 'thread';
   const report = useThreadPart(thread.id, (view) => reportedMode(view, thread.current_segment_id, kind));
@@ -96,20 +109,23 @@ function NativeModePicker({ thread, readOnly = false, kind }: { thread: Thread; 
       <div className="flex max-w-(--container-form) flex-col gap-2" data-approval-mode={kind}>
         {kind === 'approval' && build !== undefined && build !== null && <DisabledBuildFeatures build={build} name={programNameIn(thread.binding?.agent, i18n.resolvedLanguage ?? i18n.language) ?? undefined} />}
         {reason !== null && <p className="flex items-center gap-1 text-xs text-text-muted"><Lock aria-hidden />{reason}</p>}
-        {options.length === 0 && <p className="text-sm text-text-muted">{t(kind === 'approval' ? 'composer.mode.notOffered' : 'composer.confinement.notOffered')}</p>}
+        {choices.length === 0 && <p className="text-sm text-text-muted">{t(kind === 'approval' ? 'composer.mode.notOffered' : 'composer.confinement.notOffered')}</p>}
         <ul className="flex flex-col gap-1">
-          {options.map((option) => <li key={option}><Choice {...copy(option)} id={`${descriptionId}-${option}`} compact>{(content, control) =>
-            <Tooltip content={writable ? copy(option).description : blocked}><button {...control} type="button" disabled={!writable} aria-description={writable ? undefined : blocked} aria-pressed={option === mode}
+          {choices.map((choice) => <li key={choice.mode}><Choice {...copy(choice.mode)} description={choice.available ? copy(choice.mode).description : refusalWords(choice.reason)} id={`${descriptionId}-${choice.mode}`} compact>{(content, control) =>
+            <Tooltip content={!choice.available ? refusalWords(choice.reason) : writable ? copy(choice.mode).description : blocked}><button {...control} type="button" disabled={!writable || !choice.available} aria-description={!choice.available ? refusalWords(choice.reason) : writable ? undefined : blocked} aria-pressed={choice.mode === mode}
               className="flex w-full items-start gap-2 rounded-md px-2 py-1 text-left enabled:hover:bg-bg-muted disabled:cursor-default"
-              onClick={() => { if (option !== mode) choose.mutate(option); }}>
-              <span className="flex size-4 shrink-0 items-center justify-center text-accent-text">{option === mode && <Check aria-hidden />}</span>{content}
-            </button></Tooltip>}</Choice></li>)}
+              onClick={() => { if (choice.available && choice.mode !== mode) choose.mutate(choice.mode); }}>
+              <span className="flex size-4 shrink-0 items-center justify-center text-accent-text">{choice.mode === mode && <Check aria-hidden />}</span>{content}
+            </button></Tooltip>}</Choice>
+            {!choice.available && <FactDisclosureBody groups={[{ key: `approval-${choice.mode}`, facts: [{ key: 'required', label: t('composer.requirements.required'), value: requirementWords(choice.requirement) }] }]} />}
+          </li>)}
         </ul>
         <p className="text-xs text-text-muted">{t('composer.mode.applies')}</p>
         {kind === 'approval' && runs.parameters?.approval_reviewer !== null && runs.parameters?.approval_reviewer !== undefined && <p className="text-xs text-text-muted">{t('inspector.parameters.reviewer', { model: runs.parameters.approval_reviewer.model })}</p>}
         {runs.refusal !== null && <p role="status" className="text-sm text-warning">{runs.refusal.name === null ? t('composer.mode.stale', { mode: words }) : t('composer.mode.changedBy', { name: runs.refusal.name, mode: words })}</p>}
         {choose.error !== null && runs.refusal === null && <ErrorAlert error={choose.error} />}
         {(runs.failed !== null && runs.failed !== undefined) && <ErrorAlert error={runs.failed} action={<Button size="sm" onClick={() => { void Promise.all([queryClient.refetchQueries({ queryKey: settingsKey(thread.id), exact: true }), queryClient.refetchQueries({ queryKey: threadKeys.parameters(thread.id), exact: true })]); }}>{t('common.tryAgain')}</Button>} />}
+        {sandbox !== undefined && <div className="flex border-t border-border pt-2" data-sandbox-level>{sandbox}</div>}
       </div>
     </Popover>
     {divergence !== null && <Tooltip content={t('composer.mode.lastReported', { program: divergence.program, mode: nativeChangeValue(divergence.change, divergence.value, t), time: divergence.reported_at })}>

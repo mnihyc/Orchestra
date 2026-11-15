@@ -642,6 +642,8 @@ impl CommandSource {
             body: command.body.clone(),
             deadline: Some(Time::new(command.deadline_at)),
             authority: None,
+            input_facts: None,
+            session_offer: None,
         };
         if !matches!(self.input.command(&outgoing),Ok(super::http_command_source::CommandEvidence::Skill(expected)) if expected==*self)
         {

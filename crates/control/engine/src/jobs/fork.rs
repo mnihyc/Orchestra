@@ -293,6 +293,9 @@ mod made {
 /// A session the job opened.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Opened {
+    /// The offer frozen with the actual successful native attempt.
+    #[serde(default)]
+    pub orch_tools_offer: Option<crate::tools::catalogue::AcceptedOrchTools>,
     /// The machine of the harness.
     pub machine: Id,
     /// The thread the session is for.
@@ -1721,6 +1724,8 @@ impl Forking {
 /// The command that opens the session of the result, and what it was opened as.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Attempt {
+    #[serde(default)]
+    orch_tools_offer: Option<crate::tools::catalogue::AcceptedOrchTools>,
     method: HistoryMethod,
     mode: SessionMode,
     body: SessionOpen,
@@ -2131,6 +2136,7 @@ impl Forking {
                 )
                 .await?;
             Attempt {
+                orch_tools_offer: Some(snapshot.orch_tools_offer.clone()),
                 method,
                 mode,
                 body,
@@ -2308,6 +2314,10 @@ impl Forking {
             .and_then(|report| serde_json::to_value(report).ok())
             .and_then(|value| serde_json::from_value::<HistoryReport>(value).ok());
         Ok(Ok(Opened {
+            orch_tools_offer: attempt_record.orch_tools_offer.map(|mut receipt| {
+                receipt.summary.accepted_at = engine.inner.clock.time();
+                receipt
+            }),
             machine,
             thread: result_thread,
             native_session_ref: opened.native_session_ref,
@@ -2818,8 +2828,8 @@ impl Engine {
             threads::other_topic_threads_in_environment(conn, thread.topic_id, environment.id)
                 .await?
                 > 0;
-        let tools = self
-            .offered_tools_for_session(
+        let (tools, orch_tools_offer) = self
+            .offered_tools_with_facts(
                 conn,
                 &thread,
                 descriptor.capabilities.orch_tools == OrchToolsSupport::Mcp,
@@ -2879,7 +2889,11 @@ impl Engine {
             state: threads::turn_state::STARTING.to_owned(),
             input_id: Id::nil(),
             before_snapshot_id: None,
-            files_end_manifest: None,
+            files_changed: None,
+            files_changed_paths: None,
+            files_changed_complete: None,
+            recording_notice: None,
+            recording_indexing: None,
             end_manifest_blob: None,
             model: plan.to.model.clone(),
             effort: plan.to.effort.clone(),
@@ -2897,6 +2911,7 @@ impl Engine {
             waiting_since: None,
             waited_ms: 0,
             interrupted_by: None,
+            interrupted_at: None,
             command_cleanup: None,
             started_at: None,
             completed_at: None,
@@ -2905,6 +2920,8 @@ impl Engine {
             plan: false,
         };
         let input = threads::InputRow {
+            delivery_resolution: None,
+            native_image_delivery: None,
             id: Id::nil(),
             thread_id,
             continuation_id: thread.active_continuation_id,
@@ -2982,8 +2999,10 @@ impl Engine {
             author_name: None,
             authors: 0,
             tools,
+            orch_tools_offer,
             capabilities,
             isolation,
+            mounts: crate::mounts::views(conn, environment.id, now).await?,
             browser_line: crate::tools::browser::preamble(conn, environment.id).await?,
             workspace_configuration: crate::trust::answer_for(
                 conn,
@@ -3003,6 +3022,7 @@ impl Engine {
             .capability_use_preview(
                 conn,
                 &crate::access::ProviderUse {
+                    purpose: orch_access_contract::permissions::ProviderPurpose::Turn,
                     person: recipe.by,
                     node: thread_id,
                     provider: provider.id,
@@ -3407,6 +3427,19 @@ impl Forking {
         )
         .await
         .map_err(EngineError::from)?;
+        sqlx::query("UPDATE segments SET orch_tools_offer=$2 WHERE id=$1")
+            .bind(self.recipe.new_segment)
+            .bind(
+                opened
+                    .and_then(|opened| opened.orch_tools_offer.as_ref())
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(EngineError::from)?,
+            )
+            .execute(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)
+            .map_err(EngineError::from)?;
         let report = self.final_report(opened);
         if let Some(opened) = opened {
             orch_db::queries::machine_streams::bind_segment(
@@ -3687,6 +3720,19 @@ impl Forking {
             .await
             .map_err(EngineError::from)?;
         }
+        sqlx::query("UPDATE segments SET orch_tools_offer=$2 WHERE id=$1")
+            .bind(segment)
+            .bind(
+                opened
+                    .and_then(|opened| opened.orch_tools_offer.as_ref())
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(EngineError::from)?,
+            )
+            .execute(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)
+            .map_err(EngineError::from)?;
         let mut report = self.final_report(opened);
         let keep_side = if source.side_of.is_some() {
             let queued:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM thread_inputs WHERE thread_id=$1 AND state IN ('pending','delivering'))")

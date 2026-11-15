@@ -15,9 +15,9 @@ import { i18n, setLocale } from '@/i18n';
 import { me, org, personalHomeOf, userRef } from '../doubles/fixtures';
 
 const world = vi.hoisted(() => ({ href: '/project/private', navigate: vi.fn(), read: vi.fn<(path: string, options: unknown) => Promise<{ response: { ok: boolean } }>>(), acts: new Set<(act: Act) => void | Promise<void>>() }));
-vi.mock('@tanstack/react-router', () => {
+vi.mock('@tanstack/react-router', async (loadOriginal) => {
   const router = { get state() { return { location: { href: world.href } }; }, navigate: world.navigate };
-  return { useRouter: () => router, useRouterState: () => world.href };
+  return { ...await loadOriginal<object>(), useRouter: () => router, useRouterState: () => world.href };
 });
 vi.mock('@/api/client', async (original) => {
   const actual = await original<typeof ClientModule>();

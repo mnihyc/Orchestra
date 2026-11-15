@@ -42,6 +42,7 @@ async fn only_a_system_admin_reads_where_search_by_meaning_stands_and_an_org_is_
         .call(NodeSettingSet, &[&c.acme, &"search.semantic.enabled"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(true),
             locked: None,
             expected_revision: None,
@@ -325,6 +326,7 @@ async fn keeping_the_current_model_restores_its_prompts_and_chunk_size_together_
         .call(NodeSettingSet, &[&c.acme, &"search.semantic.embeddings"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: named.clone(),
             locked: None,
             expected_revision: None,
@@ -385,6 +387,7 @@ async fn keeping_the_current_model_restores_its_prompts_and_chunk_size_together_
         .call(NodeSettingSet, &[&c.acme, &"search.semantic.embeddings"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: named.clone(),
             locked: None,
             expected_revision: None,
