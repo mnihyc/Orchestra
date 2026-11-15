@@ -16,7 +16,6 @@ use orch_api_contract::threads::ThreadInputReceipt;
 
 use orch_api_contract::threads::ThreadInterruptBody;
 
-use orch_api_contract::threads::Turn;
 /// Temporary conversations keep personal governance; permanent threads use their native page.
 pub(super) async fn opening(
     ctx: &Ctx,
@@ -164,12 +163,15 @@ pub async fn retry_in(
     })
 }
 
-pub async fn interrupt(ctx: Ctx, body: ThreadInterruptBody) -> ApiResult<Turn> {
+pub async fn interrupt(
+    ctx: Ctx,
+    body: ThreadInterruptBody,
+) -> ApiResult<orch_api_contract::threads::ThreadStop> {
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     let row = opening(&ctx, &mut tx, guard.principal(), ctx.id("id")?, true).await?;
     let turn = row
         .turn
-        .filter(|turn| body.turn_id == *turn)
+        .filter(|turn| body.turn_id == Some(*turn))
         .ok_or_else(|| {
             ApiError::new(ErrorCode::ThreadNotRunning, "That turn is not running")
                 .with("current_turn_id", row.turn)
@@ -199,7 +201,11 @@ pub async fn interrupt(ctx: Ctx, body: ThreadInterruptBody) -> ApiResult<Turn> {
         .cancel_ask_calls(&calls)
         .await
         .map_err(ApiError::engine)?;
-    Ok(projected)
+    Ok(orch_api_contract::threads::ThreadStop {
+        state: orch_api_contract::threads::StopState::Stopped,
+        requested_at: orch_types::Time::new(ctx.now),
+        turn: Some(projected),
+    })
 }
 
 #[path = "program/input_reply.rs"]

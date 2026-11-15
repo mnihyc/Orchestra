@@ -110,11 +110,15 @@ pub fn health_view(word: &str) -> NotificationRouteHealth {
     serde_json::from_value(Json::String(word.to_owned())).unwrap_or(NotificationRouteHealth::Never)
 }
 
-/// Why a route fails, while it is in a failure episode.
+/// Why a route is waiting on an invalid zone or remains in a delivery failure episode.
 #[must_use]
 pub fn failure_view(route: &RouteRow) -> Option<NotificationRouteFailure> {
-    route.failure_episode?;
     let kept = route.last_error.as_ref()?;
+    if route.failure_episode.is_none()
+        && kept.get("code").and_then(Json::as_str) != Some("invalid_timezone")
+    {
+        return None;
+    }
     Some(NotificationRouteFailure {
         code: kept
             .get("code")

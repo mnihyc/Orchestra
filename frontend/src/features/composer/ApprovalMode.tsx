@@ -1,7 +1,7 @@
 /** The native approval and sandbox choices share their reader, offered bounds and revision-guarded writer. */
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Check, ChevronDown, Lock } from 'lucide-react';
-import { useId, useState } from 'react';
+import { type ReactNode, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { client } from '@/api/client';
 import { settingsKey } from '@/api/settings';
@@ -20,6 +20,7 @@ import { Button } from '@/ui/Button';
 import { Choice } from '@/ui/Choice';
 import { cx } from '@/ui/cx';
 import { ErrorAlert } from '@/ui/ErrorState';
+import { ReadFeedback } from '@/ui/ReadFeedback';
 import { Popover } from '@/ui/Popover';
 import { Tooltip } from '@/ui/Tooltip';
 
@@ -27,23 +28,23 @@ export type NativeApprovalMode = 'ask' | 'on_request' | 'auto' | 'bypass';
 export function isApprovalMode(value: string): value is NativeApprovalMode {
   return value === 'ask' || value === 'on_request' || value === 'auto' || value === 'bypass';
 }
-/** The same approval control in the composer and the Parameters entry point. */
-export function ApprovalModePicker(props: { thread: Thread; readOnly?: boolean }) {
+/** The same approval control in the composer and the Parameters entry point. The sandbox is its second level: one row at the foot of the list that opens the sandbox's own choices. */
+export function ApprovalModePicker(props: { thread: Thread; readOnly?: boolean; sandbox?: ReactNode }) {
   return <NativeModePicker {...props} kind="approval" />;
 }
 export function ConfinementPicker(props: { thread: Thread; readOnly?: boolean }) {
   return <NativeModePicker {...props} kind="sandbox" />;
 }
 
-function NativeModePicker({ thread, readOnly = false, kind }: { thread: Thread; readOnly?: boolean; kind: ModeKind }) {
+function NativeModePicker({ thread, readOnly = false, kind, sandbox }: { thread: Thread; readOnly?: boolean; kind: ModeKind; sandbox?: ReactNode }) {
   const compact = useCompactControls();
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const descriptionId = useId();
   const [open, setOpen] = useState(false);
   const manages = !readOnly && !thread.archived && thread.side_of === null && holds(thread.access, 'thread.manage');
-  // Thread opening and the composer already supply these exact cache entries. No new reader.
-  const runs = useRunsWith(thread, true);
+  // The closed chip uses its compact opening facts; the list reads its own writable choices.
+  const runs = useRunsWith(thread, open);
   const settingKey = kind === 'approval' ? 'approval.mode' : 'sandbox.mode';
   const setting = runs.settings?.find((entry) => entry.key === settingKey);
   const raw = kind === 'approval' ? runs.parameters?.approval_mode : setting?.value;
@@ -109,7 +110,8 @@ function NativeModePicker({ thread, readOnly = false, kind }: { thread: Thread; 
         {kind === 'approval' && runs.parameters?.approval_reviewer !== null && runs.parameters?.approval_reviewer !== undefined && <p className="text-xs text-text-muted">{t('inspector.parameters.reviewer', { model: runs.parameters.approval_reviewer.model })}</p>}
         {runs.refusal !== null && <p role="status" className="text-sm text-warning">{runs.refusal.name === null ? t('composer.mode.stale', { mode: words }) : t('composer.mode.changedBy', { name: runs.refusal.name, mode: words })}</p>}
         {choose.error !== null && runs.refusal === null && <ErrorAlert error={choose.error} />}
-        {(runs.failed !== null && runs.failed !== undefined) && <ErrorAlert error={runs.failed} action={<Button size="sm" onClick={() => { void Promise.all([queryClient.refetchQueries({ queryKey: settingsKey(thread.id), exact: true }), queryClient.refetchQueries({ queryKey: threadKeys.parameters(thread.id), exact: true })]); }}>{t('common.tryAgain')}</Button>} />}
+        <ReadFeedback reads={runs.reads} pending={runs.pending} />
+        {sandbox !== undefined && <div className="flex border-t border-border pt-2" data-sandbox-level>{sandbox}</div>}
       </div>
     </Popover>
     {divergence !== null && <Tooltip content={t('composer.mode.lastReported', { program: divergence.program, mode: nativeChangeValue(divergence.change, divergence.value, t), time: divergence.reported_at })}>
