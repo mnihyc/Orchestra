@@ -1,0 +1,5 @@
+fmt
+test -p orch-link --lib
+test -p orch-link --test spool --test streams --test raw_spool_restart --test commands --test slow_link
+test -p orch-connector-core --lib --test agent_role
+test -p orch-testkit --lib

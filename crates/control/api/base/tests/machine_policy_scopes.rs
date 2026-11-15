@@ -5,6 +5,8 @@
     reason = "tests fail by panicking"
 )]
 
+#[path = "container_units/fixture.rs"]
+mod container_units;
 mod places;
 mod support;
 
@@ -180,6 +182,161 @@ async fn waited(
             tokio::task::yield_now().await;
         }
     }).await.expect("the actual native SQL lock must block this request");
+}
+
+async fn a_units_policy_is_saved_on_its_host(kind: &str) {
+    let world = World::new().await;
+    let owner = places::person(&world, "owner").await;
+    let stranger = places::person(&world, "stranger").await;
+    let home = places::make_org(&world, &owner, "Policy home", "policy-home").await;
+    let (host, unit, physical) = {
+        let mut conn = world.conn().await;
+        let (host, template) = container_units::host_and_template(
+            &mut conn,
+            owner.id(),
+            home.base.id,
+            "Policy",
+            world.now(),
+        )
+        .await;
+        let resource = fixtures::insert_resource(
+            &mut conn,
+            kind,
+            Some(owner.id()),
+            Some(home.base.id),
+            "Hosted work",
+        )
+        .await
+        .unwrap();
+        let unit = if kind == "provider" {
+            container_units::provider_unit(&mut conn, host, template, resource, world.now()).await
+        } else {
+            container_units::environment_unit(&mut conn, host, template, resource, world.now())
+                .await
+        };
+        let physical: Id = sqlx::query_scalar("SELECT machine_id FROM hosts WHERE id=$1")
+            .bind(host)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        let policy = LocalPolicy {
+            roles: Some(vec![orch_link_contract::session::Role::Node]),
+            policy_delegated: vec!["update.auto".into()],
+            ..LocalPolicy::default()
+        };
+        sqlx::query("UPDATE machines SET facts=jsonb_build_object('policy',$2::jsonb),online=true WHERE id=$1")
+            .bind(physical).bind(policy.reported()).execute(&mut *conn).await.unwrap();
+        set_presence(&mut conn, unit, true, None, world.now())
+            .await
+            .unwrap();
+        (host, unit, physical)
+    };
+    let changes: MachinePolicyUpdateBody =
+        serde_json::from_value(json!({"update.auto":false})).unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(MachinePolicyUpdate, &[&unit])
+            .token(&stranger.token)
+            .body(&changes)
+            .send_bytes()
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    let request = world
+        .app
+        .call(MachinePolicyUpdate, &[&unit])
+        .token(&owner.token)
+        .body(&changes);
+    let request = request.send_bytes();
+    let machine = async {
+        let (command, destination): (Id, Id) = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            async {
+                loop {
+                    let command = sqlx::query_as("SELECT id,machine_id FROM commands WHERE kind='machine.policy.set' ORDER BY created_at,id LIMIT 1")
+                        .fetch_optional(&world.db.pool).await.unwrap();
+                    if let Some(command) = command { break command; }
+                    tokio::task::yield_now().await;
+                }
+            },
+        ).await.expect("a delegated policy save reaches the command queue");
+        assert_eq!(
+            destination, physical,
+            "the node owns the policy; a managed unit has none to change"
+        );
+        let kept = link::command_with_authority(&mut *world.conn().await, command)
+            .await
+            .unwrap()
+            .unwrap();
+        let authority = kept.authority.unwrap();
+        assert_eq!(
+            authority["authority"]["physical"]["machine"],
+            json!(physical)
+        );
+        assert_eq!(authority["authority"]["physical"]["facade"], json!(host));
+        let after = LocalPolicy {
+            roles: Some(vec![orch_link_contract::session::Role::Node]),
+            policy_delegated: vec!["update.auto".into()],
+            update_auto: false,
+            ..LocalPolicy::default()
+        };
+        sqlx::query("UPDATE commands SET state='succeeded',result=$2 WHERE id=$1")
+            .bind(command)
+            .bind(json!({"applied":["update.auto"],"refused":[],"policy":after}))
+            .execute(&world.db.pool)
+            .await
+            .unwrap();
+    };
+    let (reply, ()) = tokio::join!(request, machine);
+    let reply = accepted(reply);
+    assert_eq!(reply["machine"]["id"], json!(unit));
+    assert_eq!(reply["machine_view"]["id"], json!(unit));
+    assert_eq!(
+        reply["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|key| key["key"] == "update.auto")
+            .unwrap()["value"],
+        json!(false)
+    );
+    assert_eq!(
+        stored(&world, physical).await.0["policy"]["update.auto"],
+        false
+    );
+    assert!(
+        stored(&world, unit).await.0.get("policy").is_none(),
+        "readback is saved only on its physical supplier"
+    );
+    let reread = world
+        .app
+        .call(orch_api_contract::resources::MachinePolicyGet, &[&unit])
+        .token(&owner.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(reread.machine.id, unit);
+    assert_eq!(
+        reread
+            .keys
+            .iter()
+            .find(|key| key.key == "update.auto")
+            .unwrap()
+            .value,
+        json!(false)
+    );
+}
+
+#[tokio::test]
+async fn a_provider_units_delegated_policy_is_saved_on_its_host_and_read_back_on_the_unit() {
+    a_units_policy_is_saved_on_its_host("provider").await;
+}
+
+#[tokio::test]
+async fn an_environment_units_delegated_policy_is_saved_on_its_host_and_read_back_on_the_unit() {
+    a_units_policy_is_saved_on_its_host("environment").await;
 }
 
 #[tokio::test]
