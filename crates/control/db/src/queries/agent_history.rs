@@ -308,6 +308,29 @@ pub async fn measured(
     Ok(())
 }
 
+/// Records the same policy assessment used by the native retention decision; no reader resolves it again.
+pub async fn record_policy(
+    conn: &mut Conn,
+    segment: Id,
+    native: &str,
+    policy: &Json,
+) -> Result<(), DbError> {
+    let thread: Option<Id> = sqlx::query_scalar("UPDATE segments SET agent_history_policy=$3 WHERE id=$1 AND native_session_ref=$2 RETURNING thread_id")
+        .bind(segment).bind(native).bind(policy).fetch_optional(&mut *conn).await?;
+    if let Some(thread) = thread
+        && let Some(seq) = crate::sequences::next(conn, thread).await?
+    {
+        sqlx::query("UPDATE segments SET seq_updated=$2 WHERE id=$1")
+            .bind(segment)
+            .bind(seq)
+            .execute(&mut *conn)
+            .await?;
+        crate::queries::threads::set_seq_state(conn, thread, seq).await?;
+        crate::sequences::notify(conn, thread, seq).await?;
+    }
+    Ok(())
+}
+
 /// One observation from a bounded native command, including the captured close counter.
 #[derive(serde::Serialize)]
 pub struct Observation {
@@ -334,7 +357,26 @@ pub async fn measured_batch(
     if observations.is_empty() {
         return Ok(());
     }
-    sqlx::query("WITH observations AS (
+    // Capture physical aliases before locking threads; later associations do not borrow this observation.
+    let aliases: Vec<(Id,Id)> = sqlx::query_as("WITH o AS (SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(segment uuid,native text))
+        SELECT DISTINCT s.id,s.thread_id FROM o JOIN segments requested ON requested.id=o.segment AND requested.native_session_ref=o.native
+        JOIN segments s ON s.provider_id=requested.provider_id AND s.agent_id=requested.agent_id AND s.native_session_ref=requested.native_session_ref
+            AND s.machine_id IS NOT DISTINCT FROM requested.machine_id ORDER BY s.thread_id,s.id")
+        .bind(sqlx::types::Json(observations)).fetch_all(&mut *conn).await?;
+    let ids: Vec<Id> = aliases.iter().map(|(id, _)| *id).collect();
+    let threads: Vec<Id> = aliases
+        .iter()
+        .map(|(_, thread)| *thread)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let _: Vec<Id> = sqlx::query_scalar(
+        "SELECT node_id FROM threads WHERE node_id=ANY($1::uuid[]) ORDER BY node_id FOR UPDATE",
+    )
+    .bind(&threads)
+    .fetch_all(&mut *conn)
+    .await?;
+    let changed: Vec<(Id,Id)> = sqlx::query_as("WITH observations AS (
         SELECT requested.machine_id,requested.provider_id,requested.agent_id,o.*
         FROM jsonb_to_recordset($1::jsonb) AS o(segment uuid,native text,bytes bigint,removed boolean,error text,revision bigint)
         JOIN segments requested ON requested.id=o.segment AND requested.native_session_ref=o.native)
@@ -345,8 +387,26 @@ pub async fn measured_batch(
         agent_history_measured_revision=GREATEST(s.agent_history_measured_revision,COALESCE(o.revision,s.agent_history_measured_revision)),
         agent_history_error=o.error FROM observations o
         WHERE s.provider_id=o.provider_id AND s.agent_id=o.agent_id AND s.native_session_ref=o.native
-          AND s.machine_id IS NOT DISTINCT FROM o.machine_id")
-        .bind(sqlx::types::Json(observations)).bind(at).execute(conn).await?;
+          AND s.machine_id IS NOT DISTINCT FROM o.machine_id AND s.id=ANY($3::uuid[]) RETURNING s.id,s.thread_id")
+        .bind(sqlx::types::Json(observations)).bind(at).bind(&ids).fetch_all(&mut *conn).await?;
+    for thread in threads {
+        let ids = changed
+            .iter()
+            .filter_map(|(id, owner)| (*owner == thread).then_some(*id))
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            continue;
+        }
+        if let Some(seq) = crate::sequences::next(conn, thread).await? {
+            sqlx::query("UPDATE segments SET seq_updated=$2 WHERE id=ANY($1::uuid[])")
+                .bind(&ids)
+                .bind(seq)
+                .execute(&mut *conn)
+                .await?;
+            crate::queries::threads::set_seq_state(conn, thread, seq).await?;
+            crate::sequences::notify(conn, thread, seq).await?;
+        }
+    }
     Ok(())
 }
 

@@ -107,6 +107,7 @@ async fn a_background_count_is_readable_to_its_resource_reader_and_its_maker_can
             &orch_link_contract::commands::SerialKey::Environment(site.environment),
             &orch_link_contract::commands::FsSnapshot {
                 work: Some(orch_link_contract::commands::WorkReport {
+                    timeout_policy: None,
                     job_id: id,
                     phase: "measure".into(),
                     timeout_secs: 86400,
