@@ -1,0 +1,2 @@
+# b43u-c: the trial assembly without the Stop head (af4c7c29d with tabs 0bda15aa2 and the large-directory repair 2521f5040) at f1825d7d1
+test -p orch-api-core --test container_units --test everything_resources --test realtime_diagnostics --test kfix_binding --test settings --test threads_settings --test model_entries --test provider_models --test ask --test binding_options --test binding_readiness 
