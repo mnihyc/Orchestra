@@ -20,7 +20,7 @@ import { ErrorAlert } from '@/ui/ErrorState';
 import { Select } from '@/ui/Select';
 import { openChange } from '@/features/change/target';
 import type { Thread } from '@/generated/api-types';
-import { isAgentHistoryRemoving, isMachineProgramVersionMismatch, waitingWords } from '@/features/timeline/waiting';
+import { isAgentHistoryRemoving, isMachineProgramVersionMismatch, isProviderRemoved, waitingWords } from '@/features/timeline/waiting';
 import { SandboxActions } from '@/features/resources/SandboxReadiness';
 import { holds } from '@/lib/permissions';
 import { Banner } from '@/ui/Banner';
@@ -157,7 +157,7 @@ export function BlockedBanner({ thread, onProceed }: { thread: Thread; onProceed
     {blocked.sandbox!==null && blocked.sandbox!==undefined && <SandboxActions value={blocked.sandbox} />}
     {blocked.reason === 'provider_exhausted' && manages && <OtherModels thread={thread} />}
     {blocked.reason === 'provider_exhausted' && permitted && <ProviderReset provider={provider.data} />}
-    {blocked.reason === 'provider_unavailable' && providerId !== '' && thread.binding?.provider.status !== 'disabled' && <Link to="/resources/providers/$id" params={{ id:providerId }} search={{ tab:'key' }} className="text-sm text-accent underline">{t('providerPlan.recovery.signin')}</Link>}
+    {blocked.reason === 'provider_unavailable' && !isProviderRemoved(thread) && providerId !== '' && thread.binding?.provider.status !== 'disabled' && <Link to="/resources/providers/$id" params={{ id:providerId }} search={{ tab:'key' }} className="text-sm text-accent underline">{t('providerPlan.recovery.signin')}</Link>}
     </div>
   );
 }

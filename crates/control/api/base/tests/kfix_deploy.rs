@@ -125,6 +125,14 @@ async fn anonymous_known_and_chunked_oversized_json_reaches_the_client_as_413_an
             &format!("        listen 127.0.0.1:{PORT_NAMES_PORT};\n"),
         )
         .replace("https://api:8443", &format!("https://127.0.0.1:{API_PORT}"))
+        .replace(
+            "server api:8443 resolve;",
+            &format!("server 127.0.0.1:{API_PORT};"),
+        )
+        .replace(
+            "server gateway:9444 resolve;",
+            &format!("server 127.0.0.1:{API_PORT};"),
+        )
         .replace("/tmp/frontend-https.conf", "/fixture/frontend-https.conf")
         .replace("/tmp/ports-https.conf", "/fixture/ports-https.conf")
         .replace("/etc/orch/secrets/orch_ca_cert.pem", "/fixture/ca.pem");

@@ -564,8 +564,12 @@ crate::endpoints! {
     /// Changes a mount.
     MountUpdate: PATCH "/mounts/{id}", Permission("mount.manage"), none, json MountUpdateBody, json Mount, 200,
         operation Op::returning(Manage, &[Object(K::Mount)], Target::PermissionObject);
-    /// Deletes a mount that no scope enables.
-    MountDelete: DELETE "/mounts/{id}", Permission("mount.manage"), none, none, none, 204;
+    /// Previews removal of the definition, its next-start consequences and the fates of owned data.
+    MountDeletePreflight: POST "/mounts/{id}/delete-plan", Permission("mount.manage"), none, none, json crate::storage::CleanupPlanResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::storage_sources::CLEANUP_FACETS));
+    /// Deletes the definition through the common cleanup job, keeping data unless its displayed fate is confirmed.
+    MountDelete: DELETE "/mounts/{id}", Permission("mount.manage"), none, json crate::storage::CleanupStart, json crate::storage::CleanupJobResponse, 202,
+        operation Op::receipt(&Op::facets(&crate::storage_sources::CLEANUP_FACETS));
     /// Sets where a mount is on a machine: a path, or a volume on a host's storage.
     MountLocationSet: PUT "/mounts/{id}/locations/{machine_id}", Rule("management of the machine and mount.use; environment.roots bounds existing paths on every machine; owned data requires the machine's declared data-making support"), none, json MountLocationSetBody, json MountLocationSetResponse, 200,
         operation Op::receipt(&Op::facets(&crate::mount_location_sources::SET_FACETS));

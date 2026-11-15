@@ -92,6 +92,12 @@ pub struct McpRoutes {
 /// A session as the listener knows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionBinding {
+    exchanges: Arc<Exchanges>,
+    physical: Option<orch_link_contract::native_target::SessionTarget>,
+    tool_revision: i64,
+    tool_current: bool,
+    tool_round: Option<Id>,
+    admitted_members: Option<Vec<orch_link_contract::tool_sessions::ToolSessionMember>>,
     /// The key its addresses are under.
     pub session_key: String,
     /// The harness process it belongs to.
@@ -106,6 +112,133 @@ pub struct SessionBinding {
     pub agent_id: Id,
     /// What it may open tunnels with.
     pub tickets: Tickets,
+}
+
+/// Cloned bindings share cancellation, including requests that already hold an older ticket snapshot.
+#[derive(Debug)]
+struct Exchanges {
+    stop: CancellationToken,
+    members: BTreeMap<String, CancellationToken>,
+}
+impl PartialEq for Exchanges {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+impl Eq for Exchanges {}
+impl Exchanges {
+    fn member(&self, member: &str) -> CancellationToken {
+        self.members.get(member).unwrap_or(&self.stop).clone()
+    }
+    fn replace(&mut self, member: &str, present: bool) {
+        if let Some(stop) = self.members.remove(member) {
+            stop.cancel();
+        }
+        if present {
+            self.members.insert(member.into(), self.stop.child_token());
+        }
+    }
+}
+impl SessionBinding {
+    fn remote_member(&self, member: &str) -> bool {
+        let ticket = match member {
+            "exec" => self.tickets.exec.as_deref(),
+            "llm" => self.tickets.llm.as_deref(),
+            key => key
+                .strip_prefix("mcp/")
+                .and_then(|name| self.tickets.mcp.get(name))
+                .map(String::as_str),
+        };
+        ticket.and_then(|ticket|orch_link_contract::tunnels::Ticket::parse(ticket).ok()).is_some_and(|ticket| {
+            matches!(ticket.claims().src,orch_link_contract::tunnels::TicketSource::Machine(source) if source!=ticket.claims().dst)
+        })
+    }
+    pub(crate) fn exchange_stop(&self, member: &str) -> CancellationToken {
+        if self.physical.is_some() && !self.exchanges.members.contains_key(member) {
+            let stop = CancellationToken::new();
+            stop.cancel();
+            return stop;
+        }
+        self.exchanges.member(member)
+    }
+
+    fn member_scope(&self, member: &str) -> Option<(String, Id, i64)> {
+        let ticket = match member {
+            "exec" => self.tickets.exec.as_deref(),
+            "llm" => self.tickets.llm.as_deref(),
+            name => name
+                .strip_prefix("mcp/")
+                .and_then(|name| self.tickets.mcp.get(name))
+                .map(String::as_str),
+        };
+        if let Some(ticket) = ticket {
+            let parsed = orch_link_contract::tunnels::Ticket::parse(ticket).ok()?;
+            let scope = parsed.claims().tool_session.as_ref()?;
+            // This only identifies an existing member to withdraw or retain under the separately
+            // matched physical target. It never installs a route or verifies a remote ticket.
+            return Some((scope.member.clone(), scope.nonce, scope.revision));
+        }
+        if matches!(member, "exec" | "llm") {
+            return Some((member.into(), self.physical.as_ref()?.opening_id?, 0));
+        }
+        None
+    }
+}
+
+/// Read only an authenticated command's stored ticket metadata to retain an unchanged member.
+/// This does not verify a ticket or grant access; remote opens still ask the live API.
+fn same_member(before: &str, after: &str) -> bool {
+    if before == after {
+        return true;
+    }
+    use orch_link_contract::tunnels::Ticket;
+    let (Ok(before), Ok(after)) = (Ticket::parse(before), Ticket::parse(after)) else {
+        return false;
+    };
+    match (&before.claims().tool_session, &after.claims().tool_session) {
+        (Some(a), Some(b)) => {
+            a.thread_id == b.thread_id
+                && a.segment_id == b.segment_id
+                && a.opening_id == b.opening_id
+                && a.opening_epoch == b.opening_epoch
+                && a.member == b.member
+                && a.nonce == b.nonce
+        }
+        _ => false,
+    }
+}
+
+fn configuration_matches(
+    binding: &SessionBinding,
+    action: orch_link_contract::native_target::SessionAction,
+    expected: &[orch_link_contract::tool_sessions::ToolSessionMember],
+) -> bool {
+    use orch_link_contract::native_target::SessionAction;
+    if !matches!(action, SessionAction::Model | SessionAction::Mcp) {
+        return false;
+    }
+    let Some(current) = &binding.admitted_members else {
+        return false;
+    };
+    let selected = |members: &[orch_link_contract::tool_sessions::ToolSessionMember]| {
+        let mut result = BTreeMap::new();
+        for member in members.iter().filter(|member| match action {
+            SessionAction::Mcp => member.member.starts_with("mcp:"),
+            SessionAction::Model => member.member == "llm",
+            _ => false,
+        }) {
+            if result.insert(member.member.clone(), member.nonce).is_some() {
+                return None;
+            }
+        }
+        Some(result)
+    };
+    match (selected(current), selected(expected)) {
+        (Some(current), Some(expected)) => {
+            current == expected && (action != SessionAction::Model || current.len() == 1)
+        }
+        _ => false,
+    }
 }
 
 /// The kinds of route an endpoint can be registered for.
@@ -144,6 +277,9 @@ pub struct Grant {
 
 #[derive(Default)]
 struct State {
+    native_fences: Option<Arc<orch_link::native_fences::NativeFences>>,
+    suspended: bool,
+    hard_suspended: bool,
     next_grant: u64,
     grants: HashMap<u64, Secret>,
     sessions: HashMap<String, Arc<SessionBinding>>,
@@ -243,7 +379,14 @@ impl Loopback {
     pub fn revoke(&self, grant: u64) {
         let mut state = self.shared.state();
         state.grants.remove(&grant);
-        state.sessions.retain(|_, session| session.grant != grant);
+        state.sessions.retain(|_, session| {
+            if session.grant == grant {
+                session.exchanges.stop.cancel();
+                false
+            } else {
+                true
+            }
+        });
         let State {
             sessions, reaches, ..
         } = &mut *state;
@@ -262,7 +405,19 @@ impl Loopback {
         tickets: Tickets,
     ) -> Arc<SessionBinding> {
         let session_key = random_hex(SESSION_KEY_BYTES);
+        let stop = self.stop.child_token();
+        let members = ["exec".into(), "llm".into(), "mcp/orch".into()]
+            .into_iter()
+            .chain(tickets.mcp.keys().map(|name| format!("mcp/{name}")))
+            .map(|member| (member, stop.child_token()))
+            .collect();
         let binding = Arc::new(SessionBinding {
+            physical: None,
+            tool_revision: 0,
+            tool_current: true,
+            tool_round: None,
+            admitted_members: None,
+            exchanges: Arc::new(Exchanges { stop, members }),
             session_key: session_key.clone(),
             grant,
             thread_id,
@@ -278,8 +433,240 @@ impl Loopback {
         binding
     }
 
-    /// Forgets a session: its addresses are answered as if they never were.
-    /// Changes only MCP tickets at the same session key; callers in flight keep their previous binding.
+    /// The binding of one admitted physical opening, separate from the private local key.
+    pub fn bind_native(
+        &self,
+        grant: u64,
+        provider: Id,
+        agent: Id,
+        target: &orch_link_contract::native_target::SessionTarget,
+        tickets: Tickets,
+    ) -> Option<Arc<SessionBinding>> {
+        if !target.coherent() || target.opening_id.is_none() {
+            return None;
+        }
+        let binding = self.bind(
+            grant,
+            target.thread_id,
+            target.segment_id?,
+            provider,
+            agent,
+            tickets,
+        );
+        let mut physical = binding.as_ref().clone();
+        physical.physical = Some(target.clone());
+        let mut state = self.shared.state();
+        physical.tool_current = !state.suspended;
+        physical.tool_round = state
+            .native_fences
+            .as_ref()
+            .map(|fences| fences.tool_control().0);
+        let physical = Arc::new(physical);
+        state
+            .sessions
+            .insert(binding.session_key.clone(), Arc::clone(&physical));
+        Some(physical)
+    }
+
+    /// Notices only withdraw existing members; installing a changed route still requires its native command.
+    pub fn apply_tool_update(&self, update: &orch_link_contract::tool_sessions::ToolSessionUpdate) {
+        self.change_tool_update(update, true, None);
+    }
+    /// A stored snapshot still restricts a queued command but cannot revalidate a lost control connection.
+    pub fn restrict_tool_update(
+        &self,
+        update: &orch_link_contract::tool_sessions::ToolSessionUpdate,
+    ) {
+        self.change_tool_update(update, false, None);
+    }
+    pub fn revalidate_tool_update(
+        &self,
+        update: &orch_link_contract::tool_sessions::ToolSessionUpdate,
+        round: Id,
+    ) {
+        self.change_tool_update(update, true, Some(round));
+    }
+    pub fn native_fences(&self, fences: Arc<orch_link::native_fences::NativeFences>) {
+        self.shared.state().native_fences = Some(fences);
+    }
+    fn change_tool_update(
+        &self,
+        update: &orch_link_contract::tool_sessions::ToolSessionUpdate,
+        fresh: bool,
+        expected_round: Option<Id>,
+    ) {
+        let mut state = self.shared.state();
+        let control = state
+            .native_fences
+            .as_ref()
+            .map(|fences| fences.tool_control());
+        if let Some(expected) = expected_round
+            && control != Some((expected, true))
+        {
+            return;
+        }
+        let keys = state
+            .sessions
+            .iter()
+            .filter(|(_, binding)| binding.thread_id == update.thread_id)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            let Some(current) = state.sessions.get(&key).cloned() else {
+                continue;
+            };
+            let Some(physical) = &current.physical else {
+                continue;
+            };
+            let Some(epoch) = physical.opening_epoch else {
+                continue;
+            };
+            if epoch > update.opening_epoch
+                || epoch == update.opening_epoch && current.tool_revision > update.revision
+            {
+                continue;
+            }
+            if epoch < update.opening_epoch
+                || !update.live
+                || physical.opening_id != update.opening_id
+                || physical.segment_id != Some(update.segment_id)
+            {
+                current.exchanges.stop.cancel();
+                state.sessions.remove(&key);
+                state.reaches.remove(&key);
+                continue;
+            }
+            let mut changed = current.as_ref().clone();
+            let mut admitted = update.members.clone();
+            if current.tool_revision == update.revision
+                && let Some(previous) = &current.admitted_members
+            {
+                admitted.retain(|member| previous.contains(member));
+            }
+            changed.admitted_members = Some(admitted.clone());
+            let mut exchanges = Exchanges {
+                stop: current.exchanges.stop.clone(),
+                members: current.exchanges.members.clone(),
+            };
+            for member in current
+                .exchanges
+                .members
+                .keys()
+                .filter(|key| key.as_str() != "mcp/orch")
+            {
+                let keep = current
+                    .member_scope(member)
+                    .is_some_and(|(name, nonce, revision)| {
+                        revision > update.revision
+                            || admitted
+                                .iter()
+                                .any(|member| member.member == name && member.nonce == nonce)
+                    });
+                if keep {
+                    if fresh && !state.suspended && exchanges.member(member).is_cancelled() {
+                        exchanges.replace(member, true);
+                    }
+                    continue;
+                }
+                exchanges.replace(member, false);
+                match member.as_str() {
+                    "exec" => {
+                        changed.tickets.exec = None;
+                    }
+                    "llm" => {
+                        changed.tickets.llm = None;
+                    }
+                    name => {
+                        if let Some(name) = name.strip_prefix("mcp/") {
+                            changed.tickets.mcp.remove(name);
+                        }
+                    }
+                }
+                changed.tickets.routes.remove(member);
+                changed.tickets.route_leases.remove(member);
+            }
+            changed.tool_revision = update.revision;
+            changed.tool_current |= fresh;
+            if fresh {
+                changed.tool_round = control.map(|control| control.0);
+            }
+            changed.exchanges = Arc::new(exchanges);
+            state.sessions.insert(key, Arc::new(changed));
+        }
+    }
+
+    /// Pause local exchanges while retaining the native conversation and unchanged route facts.
+    pub fn tool_control(&self, available: bool) {
+        let mut state = self.shared.state();
+        if available && !state.suspended || !available && state.hard_suspended {
+            return;
+        }
+        state.suspended = !available;
+        state.hard_suspended = !available;
+        let round = state
+            .native_fences
+            .as_ref()
+            .map(|fences| fences.tool_control().0);
+        for binding in state.sessions.values_mut() {
+            if !available {
+                for stop in binding.exchanges.members.values() {
+                    stop.cancel();
+                }
+                if binding.physical.is_some() {
+                    let mut changed = binding.as_ref().clone();
+                    changed.tool_current = false;
+                    *binding = Arc::new(changed);
+                }
+            } else {
+                if !binding.tool_current
+                    || binding.physical.is_some() && binding.tool_round != round
+                {
+                    continue;
+                }
+                let mut changed = binding.as_ref().clone();
+                changed.exchanges = Arc::new(Exchanges {
+                    stop: binding.exchanges.stop.clone(),
+                    members: binding
+                        .exchanges
+                        .members
+                        .keys()
+                        .map(|member| {
+                            let previous = binding.exchanges.member(member);
+                            (
+                                member.clone(),
+                                if previous.is_cancelled() {
+                                    binding.exchanges.stop.child_token()
+                                } else {
+                                    previous
+                                },
+                            )
+                        })
+                        .collect(),
+                });
+                *binding = Arc::new(changed);
+            }
+        }
+    }
+
+    /// A primary loss pauses local work; independent remote carriers retain their own live admission.
+    pub fn refresh_tool_control(&self) {
+        let mut state = self.shared.state();
+        state.suspended = true;
+        for binding in state.sessions.values_mut() {
+            for (member, stop) in &binding.exchanges.members {
+                if !binding.remote_member(member) {
+                    stop.cancel();
+                }
+            }
+            if binding.physical.is_some() {
+                let mut changed = binding.as_ref().clone();
+                changed.tool_current = false;
+                *binding = Arc::new(changed);
+            }
+        }
+    }
+
+    /// Changes MCP routes at the same key and ends exchanges of withdrawn or replaced members.
     pub fn replace_mcp(
         &self,
         session_key: &str,
@@ -295,15 +682,64 @@ impl Loopback {
         .map(|previous| previous.tickets)
     }
 
-    /// Replace signed tickets and plans together; in-flight callers retain their old binding.
+    /// Replaces signed tickets and plans together, preserving unchanged member exchanges only.
     pub fn replace_mcp_routed(
         &self,
         session_key: &str,
         replacement: McpRoutes,
     ) -> Option<McpRoutes> {
+        self.replace_mcp_inner(session_key, replacement, None)
+    }
+    pub fn replace_mcp_admitted(
+        &self,
+        session_key: &str,
+        replacement: McpRoutes,
+        members: &[orch_link_contract::tool_sessions::ToolSessionMember],
+    ) -> Option<McpRoutes> {
+        self.replace_mcp_inner(session_key, replacement, Some(members))
+    }
+    fn replace_mcp_inner(
+        &self,
+        session_key: &str,
+        replacement: McpRoutes,
+        expected: Option<&[orch_link_contract::tool_sessions::ToolSessionMember]>,
+    ) -> Option<McpRoutes> {
         let mut state = self.shared.state();
         let current = state.sessions.get(session_key)?.as_ref().clone();
+        if expected.is_some_and(|expected| {
+            !configuration_matches(
+                &current,
+                orch_link_contract::native_target::SessionAction::Mcp,
+                expected,
+            )
+        }) {
+            return None;
+        }
+        let mut exchanges = Exchanges {
+            stop: current.exchanges.stop.clone(),
+            members: current.exchanges.members.clone(),
+        };
+        for (name, before) in &current.tickets.mcp {
+            if !replacement
+                .tickets
+                .get(name)
+                .is_some_and(|after| same_member(before, after))
+            {
+                exchanges.replace(
+                    &format!("mcp/{name}"),
+                    replacement.tickets.contains_key(name),
+                );
+            }
+        }
+        for name in replacement
+            .tickets
+            .keys()
+            .filter(|name| !current.tickets.mcp.contains_key(*name))
+        {
+            exchanges.replace(&format!("mcp/{name}"), true);
+        }
         let mut changed = current;
+        changed.exchanges = Arc::new(exchanges);
         let previous_tickets = std::mem::replace(&mut changed.tickets.mcp, replacement.tickets);
         let mut previous = McpRoutes {
             tickets: previous_tickets,
@@ -343,10 +779,48 @@ impl Loopback {
     }
 
     /// Rotate the admitted model lease without changing the native process's addresses.
-    /// In-flight calls retain their captured binding until their response finishes.
+    /// A replaced member ends its old calls; an unchanged admitted member keeps its exchanges.
     pub fn replace_llm(&self, session_key: &str, ticket: Option<String>) -> Option<Option<String>> {
+        self.replace_llm_inner(session_key, ticket, None)
+    }
+    pub fn replace_llm_admitted(
+        &self,
+        session_key: &str,
+        ticket: Option<String>,
+        members: &[orch_link_contract::tool_sessions::ToolSessionMember],
+    ) -> Option<Option<String>> {
+        self.replace_llm_inner(session_key, ticket, Some(members))
+    }
+    fn replace_llm_inner(
+        &self,
+        session_key: &str,
+        ticket: Option<String>,
+        expected: Option<&[orch_link_contract::tool_sessions::ToolSessionMember]>,
+    ) -> Option<Option<String>> {
         let mut state = self.shared.state();
         let mut changed = state.sessions.get(session_key)?.as_ref().clone();
+        if expected.is_some_and(|expected| {
+            !configuration_matches(
+                &changed,
+                orch_link_contract::native_target::SessionAction::Model,
+                expected,
+            )
+        }) {
+            return None;
+        }
+        let unchanged = match (&changed.tickets.llm, &ticket) {
+            (None, None) => true,
+            (Some(before), Some(after)) => same_member(before, after),
+            _ => false,
+        };
+        if !unchanged {
+            let mut exchanges = Exchanges {
+                stop: changed.exchanges.stop.clone(),
+                members: changed.exchanges.members.clone(),
+            };
+            exchanges.replace("llm", true);
+            changed.exchanges = Arc::new(exchanges);
+        }
         let previous = std::mem::replace(&mut changed.tickets.llm, ticket);
         state
             .sessions
@@ -354,10 +828,25 @@ impl Loopback {
         Some(previous)
     }
 
+    pub fn configuration_current(
+        &self,
+        session_key: &str,
+        action: orch_link_contract::native_target::SessionAction,
+        expected: &[orch_link_contract::tool_sessions::ToolSessionMember],
+    ) -> bool {
+        self.shared
+            .state()
+            .sessions
+            .get(session_key)
+            .is_some_and(|binding| configuration_matches(binding, action, expected))
+    }
+
     /// Forgets a session: its addresses are answered as if they never were.
     pub fn unbind(&self, session_key: &str) {
         let mut state = self.shared.state();
-        state.sessions.remove(session_key);
+        if let Some(session) = state.sessions.remove(session_key) {
+            session.exchanges.stop.cancel();
+        }
         state.reaches.remove(session_key);
     }
 
@@ -458,11 +947,28 @@ async fn handle(shared: &Shared, request: Request<Incoming>) -> Response<Body> {
     };
     let (session, endpoint) = {
         let state = shared.state();
+        if state.suspended {
+            return text(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "current tool session control is unavailable",
+            );
+        }
         let session = state
             .sessions
             .get(&key)
             .filter(|session| session.grant == grant)
             .cloned();
+        if let Some(session) = &session
+            && session.physical.is_some()
+            && state.native_fences.as_ref().is_some_and(|fences| {
+                fences.tool_control() != (session.tool_round.unwrap_or(Id::nil()), true)
+            })
+        {
+            return text(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the current native scope is being checked",
+            );
+        }
         let kind = match &route {
             Route::Llm { .. } => EndpointKind::Llm,
             Route::Exec { .. } => EndpointKind::Exec,
@@ -478,8 +984,57 @@ async fn handle(shared: &Shared, request: Request<Incoming>) -> Response<Body> {
     let Some(session) = session else {
         return text(StatusCode::NOT_FOUND, "no such address");
     };
+    if !session.tool_current {
+        return text(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the current native scope is being checked",
+        );
+    }
     match endpoint {
-        Some(endpoint) => endpoint.serve(request, session, route).await,
+        Some(endpoint) => {
+            let member = match &route {
+                Route::Llm { .. } => "llm".into(),
+                Route::Exec { .. } => "exec".into(),
+                Route::Mcp { server, .. } if server == "exec" => "exec".into(),
+                Route::Mcp { server, .. } => format!("mcp/{server}"),
+            };
+            let stop = session.exchange_stop(&member);
+            if session.physical.is_some()
+                && member != "mcp/orch"
+                && session.admitted_members.as_ref().is_some_and(|admitted| {
+                    !session
+                        .member_scope(&member)
+                        .is_some_and(|(name, nonce, _)| {
+                            admitted
+                                .iter()
+                                .any(|member| member.member == name && member.nonce == nonce)
+                        })
+                })
+            {
+                return text(StatusCode::GONE, "this session member was withdrawn");
+            }
+            let response = tokio::select! {
+                biased;
+                () = stop.cancelled() => return text(StatusCode::GONE, "this session member was withdrawn"),
+                response = endpoint.serve(request, session, route) => response,
+            };
+            if response.status() == StatusCode::SWITCHING_PROTOCOLS {
+                return response;
+            }
+            let (parts, body) = response.into_parts();
+            let stream = futures::stream::unfold(Some((body, stop)), |state| async move {
+                let (mut body, stop) = state?;
+                let frame = tokio::select! {
+                    biased;
+                    () = stop.cancelled() => return Some((Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted, "the session member was withdrawn",
+                    )), None)),
+                    frame = body.frame() => frame,
+                }?;
+                Some((frame, Some((body, stop))))
+            });
+            Response::from_parts(parts, http_body_util::StreamBody::new(stream).boxed())
+        }
         None => text(
             StatusCode::NOT_IMPLEMENTED,
             "nothing serves this address on this connector",
@@ -837,5 +1392,293 @@ mod tests {
             Tickets::default(),
         );
         assert_ne!(other.session_key, rig.binding.session_key);
+    }
+
+    struct HeldRequest(Arc<tokio::sync::Notify>);
+    #[async_trait]
+    impl Endpoint for HeldRequest {
+        async fn serve(
+            &self,
+            _: Request<Incoming>,
+            _: Arc<SessionBinding>,
+            _: Route,
+        ) -> Response<Body> {
+            self.0.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    fn held_request(
+        rig: &Rig,
+        server: &str,
+    ) -> (
+        Arc<tokio::sync::Notify>,
+        tokio::task::JoinHandle<(StatusCode, String)>,
+    ) {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        rig.loopback.register(
+            EndpointKind::Mcp(server.into()),
+            Arc::new(HeldRequest(entered.clone())),
+        );
+        let port = rig.loopback.port();
+        let host = host(rig);
+        let token = rig.grant.token.expose().to_owned();
+        let path = format!("/mcp/{}/{server}", rig.binding.session_key);
+        (
+            entered,
+            tokio::spawn(async move { get(port, &host, &path, Some(&token)).await }),
+        )
+    }
+
+    #[tokio::test]
+    async fn retiring_a_session_or_its_process_ends_its_already_waiting_local_request() {
+        for process in [false, true] {
+            let rig = rig().await;
+            let (entered, response) = held_request(&rig, "orch");
+            tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+                .await
+                .unwrap();
+            if process {
+                rig.loopback.revoke(rig.grant.id);
+            } else {
+                rig.loopback.unbind(&rig.binding.session_key);
+            }
+            let (status, _) = tokio::time::timeout(std::time::Duration::from_secs(10), response)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(status, StatusCode::GONE);
+        }
+    }
+
+    #[tokio::test]
+    async fn losing_live_tool_control_ends_local_work_without_forgetting_the_native_binding() {
+        let rig = rig().await;
+        let (entered, response) = held_request(&rig, "orch");
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        rig.loopback.tool_control(false);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), response)
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            StatusCode::GONE
+        );
+        assert!(rig.loopback.session(&rig.binding.session_key).is_some());
+        rig.loopback
+            .register(EndpointKind::Mcp("orch".into()), Arc::new(Echo));
+        let path = format!("/mcp/{}/orch", rig.binding.session_key);
+        assert_eq!(
+            get(
+                rig.loopback.port(),
+                &host(&rig),
+                &path,
+                Some(rig.grant.token.expose())
+            )
+            .await
+            .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        rig.loopback.tool_control(true);
+        assert_eq!(
+            get(
+                rig.loopback.port(),
+                &host(&rig),
+                &path,
+                Some(rig.grant.token.expose())
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn a_committed_member_withdrawal_ends_local_exec_before_its_native_reload_and_keeps_the_conversation()
+     {
+        use orch_link_contract::native_target::SessionTarget;
+        use orch_link_contract::tool_sessions::ToolSessionUpdate;
+        let mut rig = rig().await;
+        let target = SessionTarget {
+            thread_id: rig.binding.thread_id,
+            segment_id: Some(rig.binding.segment_id),
+            opening_id: Some(new_id()),
+            opening_epoch: Some(1),
+        };
+        rig.binding = rig
+            .loopback
+            .bind_native(
+                rig.grant.id,
+                rig.binding.provider_id,
+                rig.binding.agent_id,
+                &target,
+                Tickets::default(),
+            )
+            .unwrap();
+        let (entered, response) = held_request(&rig, "exec");
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        rig.loopback.apply_tool_update(&ToolSessionUpdate {
+            machine_id: new_id(),
+            thread_id: target.thread_id,
+            segment_id: target.segment_id.unwrap(),
+            opening_id: target.opening_id,
+            opening_epoch: 1,
+            revision: 2,
+            live: true,
+            members: vec![],
+        });
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), response)
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            StatusCode::GONE
+        );
+        assert!(rig.loopback.session(&rig.binding.session_key).is_some());
+        rig.loopback
+            .register(EndpointKind::Mcp("exec".into()), Arc::new(Echo));
+        let path = format!("/mcp/{}/exec", rig.binding.session_key);
+        assert_eq!(
+            get(
+                rig.loopback.port(),
+                &host(&rig),
+                &path,
+                Some(rig.grant.token.expose())
+            )
+            .await
+            .0,
+            StatusCode::GONE
+        );
+        rig.loopback
+            .register(EndpointKind::Mcp("orch".into()), Arc::new(Echo));
+        let independent = format!("/mcp/{}/orch", rig.binding.session_key);
+        assert_eq!(
+            get(
+                rig.loopback.port(),
+                &host(&rig),
+                &independent,
+                Some(rig.grant.token.expose())
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn withdrawing_one_local_tool_ends_its_waiting_request_and_keeps_an_independent_member() {
+        let rig = rig().await;
+        rig.loopback
+            .replace_mcp(
+                &rig.binding.session_key,
+                BTreeMap::from([
+                    ("files".into(), "synthetic-files".into()),
+                    ("notes".into(), "synthetic-notes".into()),
+                ]),
+            )
+            .unwrap();
+        rig.loopback
+            .register(EndpointKind::Mcp("notes".into()), Arc::new(Echo));
+        let (entered, response) = held_request(&rig, "files");
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        rig.loopback
+            .replace_mcp(
+                &rig.binding.session_key,
+                BTreeMap::from([("notes".into(), "synthetic-notes".into())]),
+            )
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), response)
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            StatusCode::GONE
+        );
+        let path = format!("/mcp/{}/notes", rig.binding.session_key);
+        assert_eq!(
+            get(
+                rig.loopback.port(),
+                &host(&rig),
+                &path,
+                Some(rig.grant.token.expose())
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn retiring_a_session_ends_a_local_response_that_has_already_sent_its_headers() {
+        struct Streaming;
+        #[async_trait]
+        impl Endpoint for Streaming {
+            async fn serve(
+                &self,
+                _: Request<Incoming>,
+                _: Arc<SessionBinding>,
+                _: Route,
+            ) -> Response<Body> {
+                use futures::StreamExt;
+                let prefix = futures::stream::once(async {
+                    Ok::<_, std::io::Error>(hyper::body::Frame::data(Bytes::from_static(b"prefix")))
+                });
+                let body = prefix.chain(futures::stream::pending());
+                Response::new(http_body_util::BodyExt::boxed(
+                    http_body_util::StreamBody::new(body),
+                ))
+            }
+        }
+        let rig = rig().await;
+        rig.loopback
+            .register(EndpointKind::Exec, Arc::new(Streaming));
+        let stream = tokio::net::TcpStream::connect(("127.0.0.1", rig.loopback.port()))
+            .await
+            .unwrap();
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .unwrap();
+        tokio::spawn(connection);
+        let request = Request::builder()
+            .uri(format!("/exec/{}", rig.binding.session_key))
+            .header("host", host(&rig))
+            .header(
+                "authorization",
+                format!("Bearer {}", rig.grant.token.expose()),
+            )
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let mut response = sender.send_request(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .body_mut()
+                .frame()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_data()
+                .unwrap(),
+            "prefix"
+        );
+        rig.loopback.unbind(&rig.binding.session_key);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                response.into_body().collect()
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
     }
 }
