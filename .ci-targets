@@ -1,0 +1,6 @@
+test -p orch-adapter-acp --lib
+test -p orch-adapter-fake --lib
+test -p orch-connector-core --lib
+test -p orch-plugin --test adapter
+test -p orch-api-core --test thread_continuation_tokens --test threads_adopt --test workspace_jobs_scopes
+test -p orch-engine --test agent_history --test instruction_sources

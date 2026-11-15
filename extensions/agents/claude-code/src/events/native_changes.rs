@@ -1,10 +1,13 @@
 //! Safe native observations use the same marker and actual idle/current-turn ownership as other adapters.
 use super::*;
 use orch_agent_contract::events::{MarkerHarnessChanged, UsageMeasurement};
+use orch_types::Id;
 
 #[derive(Debug, Default, Clone)]
 pub(super) struct NativeChanges {
     pub(super) values: BTreeMap<String, Json>,
+    definitions: BTreeMap<String, &'static str>,
+    epoch: Option<Id>,
     last: BTreeMap<String, (String, Json)>,
     serial: u64,
     hooks: BTreeMap<String, hooks::HookRun>,
@@ -47,6 +50,37 @@ pub(super) struct ObservationScope {
     pub(super) turn: Option<Option<TurnId>>,
 }
 impl EventMapper {
+    /// Keeps definition sources separate from the native server's reported connection state.
+    pub fn set_mcp_definitions(
+        &mut self,
+        native: std::collections::BTreeSet<String>,
+        supplied: &[String],
+    ) {
+        self.native_changes.definitions =
+            supplied.iter().map(|name| (name.clone(), "orch")).collect();
+        self.native_changes
+            .definitions
+            .extend(native.into_iter().map(|name| (name, "native")));
+    }
+
+    /// A real process opening replaces the prior connection evidence, including an empty MCP set.
+    pub fn configure_mcp(
+        &mut self,
+        definitions: BTreeMap<String, &'static str>,
+        opening_command: Option<Id>,
+    ) -> Vec<SessionEvent> {
+        let epoch = orch_types::new_id();
+        self.native_changes.epoch = Some(epoch);
+        self.native_changes.definitions = definitions;
+        let frame = Frame::from_value(
+            json!({"type":"system","subtype":"mcp_configuration","uuid":epoch.to_string()}),
+        );
+        let value = json!({"epoch":epoch,"opening_command":opening_command,"servers":self.native_changes.definitions.iter().map(|(name, source)|json!({"name":name,"definition_source":source})).collect::<Vec<_>>()});
+        let mut out = Vec::new();
+        self.native_marker(&frame, "mcp_configuration", None, value, false, &mut out);
+        out
+    }
+
     /// Unknown stream methods are passive diagnostics, never evidence of model progress or a new wake.
     pub(crate) fn unknown_stream_event_name(frame: &Frame) -> Option<String> {
         if frame.kind() != FrameKind::StreamEvent {
@@ -328,11 +362,7 @@ impl EventMapper {
                     .into_iter()
                     .flatten()
                 {
-                    if let (Some(name), Some(value)) = (text(server, "name"), mcp_value(server)) {
-                        self.native_changes
-                            .values
-                            .insert(format!("mcp_startup:{name}:main"), value);
-                    }
+                    self.mcp_observation(frame, server, out);
                 }
             }
             return;
@@ -430,9 +460,17 @@ impl EventMapper {
         else {
             return false;
         };
-        let Some(value) = mcp_value(server) else {
+        let Some(mut value) = mcp_value(server) else {
             return false;
         };
+        value["definition_source"] = json!(
+            self.native_changes
+                .definitions
+                .get(&name)
+                .copied()
+                .unwrap_or("native")
+        );
+        value["epoch"] = json!(self.native_changes.epoch);
         let failed = value["status"] == "failed";
         let before = out.len();
         self.native_marker(

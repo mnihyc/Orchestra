@@ -29,8 +29,8 @@ vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), us
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
 vi.mock('@/features/resources/agents/acts', () => ({ useAgentActs: () => ({ page: () => ({ primary: null, edit: null, menu: [] }), dialogs: null }) }));
 vi.mock('@/features/resources/templates/acts', () => ({ useTemplateActs: () => ({ page: () => ({ primary: null, edit: null, menu: [] }), dialogs: null }) }));
-vi.mock('@/features/resources/ResourceCreation', () => ({ ResourceCreateButton: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/resources/ResourceCreation', async (loadOriginal) => ({ ...await loadOriginal<object>(), ResourceCreateButton: () => null }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/TemplateGuideLink', () => ({ TemplateGuideLink: () => null }));
 vi.mock('@/features/help/GuideLink', () => ({ GuideLink: () => null }));
 // These cases exercise the real tabs and forms; routing and title-bar registration are tested by the browser walks.
