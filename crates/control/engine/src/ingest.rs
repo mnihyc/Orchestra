@@ -21,8 +21,9 @@
 //! The streams of providers are applied in `providers` (a provider's status
 //! and facts, the requests a lease counted, the requests it refused).
 //!
-//! **Not done here.** Text is not masked for secrets (redaction is a later
-//! part's); `raw.frame` is kept for diagnosis, masked, by `raw_events`; `usage.updated` records the turn's and the
+//! Native presentation is masked before storage or live delivery. Private observations keep
+//! their original operands. `raw.frame` is kept for diagnosis, masked, by `raw_events`;
+//! `usage.updated` records the turn's and the
 //! thread's figures (the turn's never below what the forwarder counted for it)
 //! and writes no row of the usage ledger, since on the path `forwarded` the
 //! forwarder is the meter; once a delivery has been applied, the usage caps of
@@ -42,6 +43,7 @@ use crate::providers;
 use crate::turns::{InputAfter, TurnEnd, error_json, turn_error_json};
 use crate::unit::Unit;
 use crate::views;
+use orch_chat::redaction::Redactor;
 use orch_db::Conn;
 use orch_db::queries::resources::thread_engine as resources;
 use orch_db::queries::threads::{
@@ -59,6 +61,7 @@ use orch_link_contract::events::{
 use orch_link_contract::streams::{ResetReason, Stream};
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
+use std::sync::Arc;
 
 /// How much of the end of a command's output an item keeps in its row: the
 /// last 16 KiB, which a screen shows at a glance. The whole is kept as a
@@ -122,6 +125,14 @@ pub async fn add_item(
     unit: &mut Unit<'_>,
     spec: &ItemSpec<'_>,
 ) -> Result<Option<ItemRow>, EngineError> {
+    add_captured_item(unit, spec, None).await
+}
+
+async fn add_captured_item(
+    unit: &mut Unit<'_>,
+    spec: &ItemSpec<'_>,
+    capture: Option<(&Engine, &Redactor)>,
+) -> Result<Option<ItemRow>, EngineError> {
     // An item that is there already costs nothing: no number is spent.
     if let Some(native_ref) = spec.native_ref
         && threads::item_by_native_ref(&mut *unit.conn, spec.segment, native_ref)
@@ -130,19 +141,46 @@ pub async fn add_item(
     {
         return Ok(None);
     }
+    let payload = spec.payload;
+    let id = new_id();
+    let presented = match capture {
+        Some((engine, masker)) => {
+            engine
+                .native_payload(
+                    unit.conn,
+                    id,
+                    spec.kind,
+                    masker,
+                    payload,
+                    spec.status == "in_progress",
+                )
+                .await?
+        }
+        None => crate::redaction::NativePayload {
+            payload: payload.clone(),
+            private: None,
+        },
+    };
     let observed = if spec.kind == "error" {
-        observations::rerouted(unit, spec.thread, spec.segment, spec.turn, spec.payload).await?
+        observations::rerouted(
+            unit,
+            spec.thread,
+            spec.segment,
+            spec.turn,
+            &presented.payload,
+        )
+        .await?
     } else {
         None
     };
-    let payload = observed.as_ref().unwrap_or(spec.payload);
+    let stored = observed.unwrap_or(presented.payload);
     let seq = unit.stamp(spec.thread).await?;
     let now = unit.now();
-    let search = indexed_text(&mut *unit.conn, spec.thread, spec.kind, payload).await?;
+    let search = indexed_text(&mut *unit.conn, spec.thread, spec.kind, &stored).await?;
     let row = threads::insert_item(
         &mut *unit.conn,
         &NewItem {
-            id: new_id(),
+            id,
             thread_id: spec.thread,
             segment_id: spec.segment,
             turn_id: spec.turn,
@@ -151,7 +189,7 @@ pub async fn add_item(
             kind: spec.kind,
             status: spec.status,
             author_id: spec.author,
-            payload,
+            payload: &stored,
             native_ref: spec.native_ref,
             search_text: search.as_deref(),
             at: now,
@@ -160,10 +198,25 @@ pub async fn add_item(
     )
     .await?;
     if let Some(row) = &row {
+        if presented.private.is_some() {
+            crate::redaction::presentation::keep_originals(
+                unit.conn,
+                row.id,
+                presented.private.as_deref(),
+            )
+            .await?;
+        }
+        if let Some((_, masker)) = capture {
+            let masker = crate::redaction::remember(unit.conn, row.id, masker).await?;
+            if spec.status == "in_progress" {
+                crate::redaction::seed(unit.conn, row.id, spec.segment, payload, &masker, None)
+                    .await?;
+            }
+        }
         if spec.status == "completed" {
-            observations::completed_item(unit, row, payload, None).await?;
+            observations::completed_item(unit, row, &stored, None).await?;
         } else {
-            observations::observed_item(unit, row, payload, None).await?;
+            observations::observed_item(unit, row, &stored, None).await?;
         }
     }
     if spec.kind == "tool_call"
@@ -615,8 +668,11 @@ impl Engine {
                             .await?;
                         }
                         Ok(_) => {}
-                        Err(error) => {
-                            tracing::warn!(%error, event = %describe(event), "an event of a harness does not read")
+                        Err(_) => {
+                            tracing::warn!(
+                                sequence = event.seq,
+                                "an event of a harness could not be read"
+                            )
                         }
                     }
                 }
@@ -691,19 +747,21 @@ impl Engine {
         {
             self.restore_in(unit, &thread).await?;
         }
+        let masker = Arc::new(
+            crate::redaction::load(unit.conn, &thread, Some(segment.environment_id)).await?,
+        );
         let mut batch = Batch {
             machine,
             thread_id,
             frames: crate::raw_events::Keeper::new(&thread, segment.id),
             segment,
+            masking: Some(masker),
         };
         let mut decoded = Vec::with_capacity(events.len());
         for event in events {
             match Event::decode(&event.kind, event.body.clone()) {
                 Ok(event_of) => decoded.push((event, event_of)),
-                Err(error) => {
-                    tracing::warn!(%error, event = %describe(event), "an event of a session does not read");
-                }
+                Err(_) => crate::redaction::presentation::unreadable_event(thread_id, event.seq),
             }
         }
         // Whatever else the session says reads its items with all the text they were told.
@@ -717,6 +775,10 @@ impl Engine {
             }
             self.apply_one(unit, &mut batch, event, decoded).await?;
         }
+        if crate::redaction::has_closed(unit.conn, thread_id).await? {
+            self.write_held_of(unit, thread_id).await?;
+            crate::redaction::finish_closed(unit, thread_id).await?;
+        }
         Ok(())
     }
 
@@ -727,14 +789,41 @@ impl Engine {
         raw: &DeliveredEvent,
         event: Event,
     ) -> Result<(), EngineError> {
+        let event = crate::redaction::presentation::event(&event, batch.masker()?)?;
         match event {
             Event::SessionOpened(opened) => self.on_session_opened(unit, batch, &opened).await,
+            Event::SessionSandbox(report) => {
+                let value = serde_json::to_value(&report.resolution)?;
+                if let Some(turn) = report.turn_id {
+                    if let Some(turn) = self.turn_of(unit, batch, turn).await?
+                        && turn.sandbox_resolution.is_none()
+                    {
+                        let seq = unit.stamp(batch.thread_id).await?;
+                        sqlx::query("UPDATE turns SET sandbox_resolution=$2,seq_updated=$3 WHERE id=$1 AND sandbox_resolution IS NULL")
+                            .bind(turn.id).bind(value).bind(seq).execute(&mut *unit.conn).await
+                            .map_err(orch_db::DbError::from)?;
+                    }
+                } else {
+                    let seq = unit.stamp(batch.thread_id).await?;
+                    sqlx::query(
+                        "UPDATE segments SET sandbox_resolution=$2,seq_updated=$3 WHERE id=$1",
+                    )
+                    .bind(batch.segment.id)
+                    .bind(value)
+                    .bind(seq)
+                    .execute(&mut *unit.conn)
+                    .await
+                    .map_err(orch_db::DbError::from)?;
+                }
+                Ok(())
+            }
             Event::InstructionSources(sources) => {
                 self.record_instruction_sources(
                     unit,
                     batch.thread_id,
                     batch.segment.id,
                     &sources.sources,
+                    batch.masker()?,
                 )
                 .await
             }
@@ -759,8 +848,8 @@ impl Engine {
                     unit,
                     batch.thread_id,
                     batch.segment.id,
-                    batch.machine,
                     &requested,
+                    batch.masker()?,
                 )
                 .await
             }
@@ -775,7 +864,8 @@ impl Engine {
             }
             Event::ModelRequest(report) => {
                 if let Err(error) = report.request.check() {
-                    tracing::warn!(%error,"an invalid model request observation was not counted");
+                    let _ = error;
+                    tracing::warn!("an invalid native model request observation was not counted");
                     return Ok(());
                 }
                 if let Some(turn) = self.turn_of(unit, batch, report.turn_id).await? {
@@ -920,7 +1010,8 @@ impl Engine {
         if mode.as_deref() != Some("harness") {
             return Ok(());
         }
-        let name: String = title.title.trim().chars().take(TITLE_MAX_CHARS).collect();
+        let title = batch.masker()?.mask_native(title.title.trim(), false);
+        let name: String = title.chars().take(TITLE_MAX_CHARS).collect();
         if name.is_empty() {
             return Ok(());
         }
@@ -938,10 +1029,39 @@ impl Engine {
         batch: &Batch,
         lost: &SessionLost,
     ) -> Result<(), EngineError> {
+        let reason = batch.masker()?.mask_native(&lost.reason, false);
+        if lost.uncertain {
+            lock(&self.inner.sessions).closed(batch.segment.id);
+            sqlx::query("UPDATE harnesses SET last_error_at=$4,last_error_detail=$5,updated_at=$4 WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3")
+                .bind(batch.segment.provider_id).bind(batch.segment.agent_id).bind(batch.machine).bind(unit.now()).bind(&reason)
+                .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+            let thread = self.thread_row(unit, batch.thread_id).await?;
+            if thread.current_segment_id == Some(batch.segment.id)
+                && threads::active_turn(unit.conn, batch.thread_id)
+                    .await?
+                    .is_some_and(|turn| turn.segment_id == batch.segment.id)
+            {
+                let seq = unit.stamp(batch.thread_id).await?;
+                crate::notifications::set_state(
+                    unit,
+                    batch.thread_id,
+                    &[
+                        thread_state::STARTING,
+                        thread_state::RUNNING,
+                        thread_state::WAITING_APPROVAL,
+                        thread_state::BLOCKED,
+                    ],
+                    &threads::StateChange::blocked("error", Some(&reason)),
+                    seq,
+                )
+                .await?;
+            }
+            return Ok(());
+        }
         crate::background_wake::lost(unit, batch.thread_id, batch.segment.id).await?;
         // A per-conversation CLI can end while its adapter remains able to serve other conversations.
         sqlx::query("UPDATE harnesses SET last_error_at=$4,last_error_detail=$5,updated_at=$4 WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3")
-            .bind(batch.segment.provider_id).bind(batch.segment.agent_id).bind(batch.machine).bind(unit.now()).bind(&lost.reason)
+            .bind(batch.segment.provider_id).bind(batch.segment.agent_id).bind(batch.machine).bind(unit.now()).bind(&reason)
             .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
         lock(&self.inner.sessions).closed(batch.segment.id);
         let thread = self.thread_row(unit, batch.thread_id).await?;
@@ -953,7 +1073,7 @@ impl Engine {
                     batch.segment.id,
                     None,
                     "session_lost",
-                    &format!("The harness lost the session: {}", lost.reason),
+                    &format!("The harness lost the session: {}", reason),
                     true,
                 )
                 .await?;
@@ -963,7 +1083,7 @@ impl Engine {
         if turn.segment_id != batch.segment.id {
             return Ok(());
         }
-        let message = format!("The harness lost the session: {}", lost.reason);
+        let message = format!("The harness lost the session: {}", reason);
         let mut failure = error_json("session_lost", &message, true);
         // An unconfirmed start keeps its existing manual decision: the native process
         // may already have taken that prompt. A confirmed turn uses ordinary recovery.
@@ -1126,33 +1246,39 @@ impl Engine {
             return Ok(());
         };
         if turn.is_active() {
-            return self
-                .begin_turn(
-                    unit,
-                    batch.thread_id,
-                    &turn,
-                    started.native_turn_ref.as_deref(),
-                )
-                .await;
+            self.begin_turn(
+                unit,
+                batch.thread_id,
+                &turn,
+                started.native_turn_ref.as_deref(),
+            )
+            .await?;
+            if turn.interrupted_by.is_some() {
+                self.stop_stray(batch, turn.id, started.native_turn_ref.as_deref());
+            }
+            return Ok(());
         }
         // The engine gave this turn up (it was not accepted in time, or it
         // was interrupted before it began), and the harness runs it after all:
         // ask it to stop.
         tracing::warn!(thread = %batch.thread_id, turn = %turn.id, "a harness began a turn that is over; it is asked to stop");
-        self.stop_stray(batch, turn.id);
+        self.stop_stray(batch, turn.id, started.native_turn_ref.as_deref());
         Ok(())
     }
 
     /// Asks the harness to stop a turn it began after the engine gave it up. The command is a row written
     /// on a pooled connection: it is issued on a task of its own, never inside the transaction of the
     /// delivery that heard of the turn, which must wait for no other connection. The delivery does not
-    /// await this task. Its identifier is the turn's, so a second ask is the same
-    /// command, and one whose delivery was undone stops a turn that is over all the same.
-    fn stop_stray(&self, batch: &Batch, turn: Id) {
+    /// await this task. This native start has an identity distinct from an interrupt answered before the
+    /// program had a native turn to stop. Replayed reports reuse it, even if their delivery was undone.
+    fn stop_stray(&self, batch: &Batch, turn: Id, native: Option<&str>) {
         let command = crate::commands::Outgoing::new(
-            crate::ids::turn_interrupt(turn),
+            crate::ids::derived(
+                "turn.interrupt.after-start",
+                &[turn.as_bytes(), native.unwrap_or_default().as_bytes()],
+            ),
             batch.machine,
-            SerialKey::Thread(batch.thread_id),
+            SerialKey::None,
             &orch_link_contract::commands::TurnInterrupt {
                 thread_id: batch.thread_id,
                 turn_id: turn,
@@ -1464,6 +1590,9 @@ impl Engine {
                 )),
             ),
         };
+        if let Some(value) = error.as_mut() {
+            *value = crate::redaction::presentation::error(value, batch.masker()?)?;
+        }
         if let Some(failure) = completed.error.as_ref()
             && completed.status == TurnOutcome::Failed
         {
@@ -1597,7 +1726,7 @@ impl Engine {
         } else {
             "in_progress"
         };
-        add_item(
+        add_captured_item(
             unit,
             &ItemSpec {
                 thread: batch.thread_id,
@@ -1611,43 +1740,71 @@ impl Engine {
                 payload: &payload,
                 native_ref: Some(&started.native_ref),
             },
+            Some((self, batch.masker()?)),
         )
         .await?;
         Ok(())
     }
 
-    /// A piece of an item's text: held, and handed to whoever has the thread open, until it is written to the
-    /// item ([`crate::streaming`]); with no interval to hold it for, written to the item at once.
+    /// A streamed stretch is retained in this cursor transaction before being handed to live readers.
+    /// Full item rows are coalesced later; zero interval writes the item immediately.
     async fn on_item_delta(
         &self,
         unit: &mut Unit<'_>,
         batch: &Batch,
         delta: &ItemDelta,
     ) -> Result<(), EngineError> {
+        if delta.offset < 0 || delta.len <= 0 || delta.offset.checked_add(delta.len).is_none() {
+            return Ok(());
+        }
         if self.inner.config.stream_flush.is_zero() {
-            return self.write_delta(unit, batch, delta).await;
+            self.write_held_of(unit, batch.thread_id).await?;
         }
-        let key = (batch.segment.id, delta.native_ref.clone());
-        if self.inner.growing.expects(&key, delta.field).is_none() {
-            let Some(item) = self.item_of(unit, batch, &delta.native_ref).await? else {
-                return Ok(());
-            };
-            if item.status != "in_progress" {
-                return Ok(());
-            }
-            let base = crate::streaming::length_of(&item.payload, delta.field);
-            self.inner.growing.begin(&key, &item, delta.field, base);
-        }
-        // A stretch that was taken in already is skipped; one that skips ahead waits for the completed item, which
-        // carries the whole.
-        let Some(held) = self.inner.growing.add(&key, delta) else {
+        let Some(item) = threads::stream_item(
+            unit.conn,
+            batch.segment.id,
+            &delta.native_ref,
+            crate::streaming::field_name(delta.field),
+        )
+        .await?
+        else {
             return Ok(());
         };
+        if item.status != "in_progress" {
+            return Ok(());
+        }
+        let masker = crate::redaction::remember(unit.conn, item.id, batch.masker()?).await?;
+        let Some(delta) = crate::redaction::delta(
+            unit.conn,
+            item.id,
+            batch.segment.id,
+            item.visible_len,
+            delta,
+            &masker,
+        )
+        .await?
+        else {
+            return Ok(());
+        };
+        if self.inner.config.stream_flush.is_zero() {
+            return self.write_delta(unit, batch, &delta).await;
+        }
+        if !crate::streaming::hold(
+            unit.conn,
+            item.id,
+            batch.segment.id,
+            item.visible_len,
+            &delta,
+        )
+        .await?
+        {
+            return Ok(());
+        }
         self.inner.live.delta(&LiveDelta {
             thread_id: batch.thread_id,
-            item_id: held.item,
-            turn_id: held.turn,
-            stream: held.stream,
+            item_id: item.id,
+            turn_id: item.turn_id,
+            stream: item.stream,
             field: delta.field,
             offset: delta.offset,
             len: delta.len,
@@ -1706,12 +1863,13 @@ impl Engine {
                     .and_then(Json::as_str)
                     .unwrap_or_default();
                 let joined = format!("{inline}{}", delta.data);
-                let kept = tail_of(&joined, OUTPUT_INLINE_MAX_BYTES).to_owned();
+                let kept =
+                    tail_of(&joined, crate::streaming::output_inline_bytes(&output)).to_owned();
                 let new_total = total + delta.len;
                 let blob = output.get("blob").cloned().unwrap_or(Json::Null);
                 let whole = i64::try_from(kept.len()).unwrap_or(i64::MAX) >= new_total;
                 payload["tool"]["output"] = json!({
-                    "inline": kept, "total_len": new_total, "truncated": !whole, "blob": blob,
+                    "inline": kept, "total_len": new_total, "truncated": !whole, "blob": blob, "retained":output.get("retained"), "inline_limit":output.get("inline_limit"),
                 });
                 true
             }
@@ -1770,9 +1928,38 @@ impl Engine {
         {
             return Ok(());
         }
-        let mut payload = item.payload.clone();
+        let mut payload =
+            crate::redaction::presentation::originals(unit.conn, item.id, &item.payload).await?;
         merge(&mut payload, &updated.payload);
-        let payload = normalized(&item.kind, &payload);
+        let original = normalized(&item.kind, &payload);
+        let masker = crate::redaction::remember(unit.conn, item.id, batch.masker()?).await?;
+        let presented = self
+            .native_payload(
+                unit.conn,
+                item.id,
+                &item.kind,
+                &masker,
+                &original,
+                item.status == "in_progress",
+            )
+            .await?;
+        crate::redaction::presentation::keep_originals(
+            unit.conn,
+            item.id,
+            presented.private.as_deref(),
+        )
+        .await?;
+        let payload = presented.payload;
+        crate::redaction::seed(
+            unit.conn,
+            item.id,
+            batch.segment.id,
+            &original,
+            &masker,
+            Some(&updated.payload),
+        )
+        .await?;
+        observations::observed_item(unit, &item, &payload, Some(&item.payload)).await?;
         if payload == item.payload {
             return Ok(());
         }
@@ -1790,7 +1977,6 @@ impl Engine {
             seq,
         )
         .await?;
-        observations::observed_item(unit, &item, &payload, Some(&item.payload)).await?;
         self.subagent_moved(unit, batch, &item, &payload).await
     }
 
@@ -1830,9 +2016,6 @@ impl Engine {
         };
         let complete_payload = serde_json::to_value(&completed.payload)?;
         // The completed item carries its whole text: what is held of it is written by this.
-        self.inner
-            .growing
-            .forget(&(batch.segment.id, completed.native_ref.clone()));
         let existing = self.item_of(unit, batch, &completed.native_ref).await?;
         let Some(kind) = existing
             .as_ref()
@@ -1934,13 +2117,8 @@ impl Engine {
             )
             .await?;
         }
-        if let Some(blob) = &completed.output_blob
-            && payload.pointer("/tool/output").is_some()
-        {
-            payload["tool"]["output"]["blob"] = json!(blob.hash);
-            payload["tool"]["output"]["truncated"] = json!(true);
-        }
         if kind == "error" {
+            payload = crate::redaction::presentation::item(&kind, &payload, batch.masker()?)?.value;
             let turn = existing.as_ref().and_then(|item| item.turn_id);
             if let Some(observed) =
                 observations::rerouted(unit, batch.thread_id, batch.segment.id, turn, &payload)
@@ -1981,7 +2159,7 @@ impl Engine {
                 } else {
                     None
                 };
-                add_item(
+                add_captured_item(
                     unit,
                     &ItemSpec {
                         thread: batch.thread_id,
@@ -1995,11 +2173,26 @@ impl Engine {
                         payload: &payload,
                         native_ref: Some(&completed.native_ref),
                     },
+                    Some((self, batch.masker()?)),
                 )
                 .await?;
                 Ok(())
             }
             Some(item) => {
+                let original = payload;
+                let masker =
+                    crate::redaction::remember(unit.conn, item.id, batch.masker()?).await?;
+                let presented = self
+                    .native_payload(unit.conn, item.id, &kind, &masker, &original, false)
+                    .await?;
+                crate::redaction::presentation::keep_originals(
+                    unit.conn,
+                    item.id,
+                    presented.private.as_deref(),
+                )
+                .await?;
+                let payload = presented.payload;
+                crate::redaction::clear(unit.conn, item.id).await?;
                 if item.status != "in_progress" && item.payload == payload {
                     return Ok(());
                 }
@@ -2065,6 +2258,14 @@ struct Batch {
     segment: SegmentRow,
     /// Keeps the frames of the harness's own protocol that the delivery holds.
     frames: crate::raw_events::Keeper,
+    masking: Option<Arc<Redactor>>,
+}
+impl Batch {
+    fn masker(&self) -> Result<&Redactor, EngineError> {
+        self.masking
+            .as_deref()
+            .ok_or_else(|| EngineError::unreadable("native masking inputs have not been loaded"))
+    }
 }
 
 #[cfg(test)]
