@@ -8,7 +8,7 @@ import { i18n, setLocale } from '@/i18n';
 import { planProvider } from '../unit/provider-plan-fixtures';
 import { show } from './support';
 
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 afterEach(async () => { cleanup(); await setLocale('en'); });
 
 function consent(type: ArrangementType, allowed: boolean, available: boolean): ArrangementConsent {

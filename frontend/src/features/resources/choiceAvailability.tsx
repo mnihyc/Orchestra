@@ -1,6 +1,6 @@
 /** Readable choices keep their native refusal beside the same resource preview. */
 import type { TFunction } from 'i18next';
-import type { Host, Template } from '@/generated/api-types';
+import type { Agent, Environment, Host, Template } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
 
@@ -26,4 +26,22 @@ export function templateChoice(template: Template, t: TFunction) {
 
 export function hostChoice(host: Host, t: TFunction, kind: 'environment' | 'provider', driver?: string) {
   return { value: host.id, name: host.name, ...explained(resourceChoice({ kind: 'host', host }), hostUnavailable(host, t, kind, driver)) };
+}
+
+/** A setting can name an environment only where its person manages it: the new threads join it, and it is that person's to start, stop and change. */
+export function environmentUnavailable(environment: Environment, t: TFunction): string | null {
+  return holds(environment.access, 'environment.manage') ? null : t('settingsEditors.thing.needsManage');
+}
+
+export function environmentChoice(environment: Environment, t: TFunction) {
+  return { value: environment.id, name: environment.name, ...explained(resourceChoice({ kind: 'environment', environment }), environmentUnavailable(environment, t)) };
+}
+
+/** An agent profile is named by a setting only by whoever may use it. */
+export function agentUnavailable(agent: Agent, t: TFunction): string | null {
+  return holds(agent.access, 'agent.use') ? null : t('settingsEditors.thing.needsUse', { kind: t('settingsEditors.thing.kinds.agent') });
+}
+
+export function agentChoice(agent: Agent, t: TFunction) {
+  return { value: agent.id, name: agent.name, ...explained(resourceChoice({ kind: 'agent', agent }), agentUnavailable(agent, t)) };
 }
