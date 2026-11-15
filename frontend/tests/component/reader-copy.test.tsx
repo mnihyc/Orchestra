@@ -57,7 +57,7 @@ vi.mock('@/shell/admission', async (original) => ({
   admissionMetaQuery: (await import('@/api/auth')).metaQuery,
 }));
 
-vi.mock('@/api/shared', () => ({ sharedPageQuery: (cursor: string | null) => ({ queryKey: ['reader-shared', cursor], queryFn: () => Promise.resolve({ items: calls.emptyShared ? [] : [home()], next_cursor: null, partial: false }) }) }));
+vi.mock('@/api/shared', () => ({ sharedPageQuery: (cursor: string | null, q = '', kind?: string) => ({ queryKey: ['reader-shared', cursor, q, kind], queryFn: () => Promise.resolve({ items: calls.emptyShared || kind !== undefined && kind !== 'org' || q !== '' && !home().name.includes(q) ? [] : [home()], next_cursor: null, partial: false }) }) }));
 vi.mock('@/api/usage', async (original) => ({ ...await original<typeof UsageApi>(),
   usageQuery: (params: UsageParams) => ({ queryKey: ['reader-usage', params], queryFn: (): Promise<UsageAnalytics> => {
     // The populated breakdown needs real activity; a zero-use board correctly omits that picker.

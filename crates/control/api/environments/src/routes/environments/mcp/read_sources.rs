@@ -68,7 +68,7 @@ fn selected(
 
 impl native::Selected for Servers {
     type Source = Source;
-    type Query = ();
+    type Query = api::EnvironmentMcpListQuery;
     type Value = PreparedGet;
     type Reply = EnvironmentMcp;
     const DECLARATION: &'static Declaration<Source> = &sources::MCP_GET;
