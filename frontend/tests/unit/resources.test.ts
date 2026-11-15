@@ -1,6 +1,7 @@
 /** What the screens of resources read out of what the server says, and write back into it: the facts a machine reports, a harness's own declaration, a template's recipe, the endpoints of a provider, a host's figures, and the words of an address that narrows a list. */
 import type { TFunction } from 'i18next';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { QueryClient } from '@tanstack/react-query';
 
 import { humanize, phrase, readDescriptor, versionPin } from '@/features/resources/agents/descriptor';
 import { declaredShare, usedShare } from '@/features/resources/hosts/words';
@@ -15,6 +16,49 @@ import { settingValue } from '@/features/resources/SettingsTable';
 import { amountsOf, confinementOf, execOffers, hasAmounts, imageSource, readSpec, schemaFields, specSchema, specText, starterSpec } from '@/features/resources/templates/spec';
 import type { EnrollmentToken, ProviderSetupProtocol } from '@/generated/api-types';
 import { initialValues, missingFields, textValues } from '@/ui/FieldForm';
+import { readAllPages } from '@/api/collection';
+import { ApiError, api, client } from '@/api/client';
+import { harnessSessionsPageQuery } from '@/api/adoption';
+import { providerThreadsQuery, RESOURCE_PAGE_SIZE } from '@/api/resources';
+import { environmentThreadsPageQuery } from '@/api/environments';
+import { keptEnvironmentsQuery, TRAIL_PAGE_SIZE } from '@/api/trace';
+
+it('retires an expired native catalogue read without retrying its obsolete continuation', async () => {
+  const expired = vi.fn(), refused = vi.fn(), captured = vi.fn();
+  const failure = new ApiError({ type: 'orch:error:request.invalid', code: 'request.invalid', title: '', status: 400, detail: '', request_id: 'capture', errors: [{ path: 'source', message: 'expired' }] }, null);
+  const request = vi.spyOn(api, 'GET').mockRejectedValue(failure);
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  try {
+    await expect(cache.infiniteQuery(harnessSessionsPageQuery('provider', 'profile', 'Late name', {
+      view: 'view', generation: 0, source: 'captured', expired, refused, captured,
+    }))).rejects.toHaveProperty('silent', true);
+    expect(expired).toHaveBeenCalledOnce(); expect(refused).not.toHaveBeenCalled(); expect(captured).not.toHaveBeenCalled(); expect(request).toHaveBeenCalledOnce();
+  } finally { request.mockRestore(); cache.clear(); }
+});
+
+describe('complete metadata reads', () => {
+  it('keeps every page without crossing a change of reader', async () => {
+    const before = client.session.getState();
+    try {
+      const cursors: (string | null)[] = [];
+      expect(await readAllPages((cursor) => {
+        cursors.push(cursor);
+        return Promise.resolve(cursor === null ? { items: [1], next_cursor: 'second' } : { items: [2], next_cursor: null });
+      }, new AbortController().signal)).toEqual([1, 2]);
+      expect(cursors).toEqual([null, 'second']);
+      await expect(readAllPages(() => {
+        client.session.setState({ readerVersion: (before.readerVersion ?? 0) + 1 });
+        return Promise.resolve({ items: [3], next_cursor: 'next' });
+      }, new AbortController().signal)).rejects.toHaveProperty('name', 'AbortError');
+    } finally { client.session.setState(before); }
+  });
+
+  it('ends a cancelled read and rejects a repeated continuation', async () => {
+    const cancelled = new AbortController(); cancelled.abort();
+    await expect(readAllPages(() => Promise.resolve({ items: [1], next_cursor: null }), cancelled.signal)).rejects.toHaveProperty('name', 'AbortError');
+    await expect(readAllPages(() => Promise.resolve({ items: [1], next_cursor: 'same' }), new AbortController().signal)).rejects.toThrow('repeated a cursor');
+  });
+});
 
 /** What a harness's adapter says of itself, cut down to what the screens read. */
 const declared = {
@@ -345,4 +389,39 @@ describe('the fields a driver declares', () => {
     expect(missingFields(fields, values)).toEqual([]);
     expect(textValues(fields, values)).toEqual({ dockerfile: 'FROM scratch', tag: 'latest', squash: 'true', args: '{"A":"1"}' });
   });
+});
+
+it('sends visible name searches to provider and retained workspace pages', async () => {
+  const request = vi.spyOn(api, 'GET').mockRejectedValue(new Error('captured request'));
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  try {
+    await expect(cache.infiniteQuery(providerThreadsQuery('provider', 'late name'))).rejects.toThrow('captured request');
+    expect(request).toHaveBeenLastCalledWith('/providers/{id}/threads', expect.objectContaining({ params: { path: { id: 'provider' }, query: { q: 'late name', limit: RESOURCE_PAGE_SIZE } } }));
+    await expect(cache.infiniteQuery(keptEnvironmentsQuery('home', 'kept name'))).rejects.toThrow('captured request');
+    expect(request).toHaveBeenLastCalledWith('/nodes/{id}/environments/deleted', expect.objectContaining({ params: { path: { id: 'home' }, query: { under: true, q: 'kept name', limit: TRAIL_PAGE_SIZE } } }));
+  } finally { request.mockRestore(); cache.clear(); }
+});
+
+it('searches bound workspace threads through the same native environment read', async () => {
+  const request = vi.spyOn(api, 'GET').mockRejectedValue(new Error('captured bound-thread request'));
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  try {
+    await expect(cache.infiniteQuery(environmentThreadsPageQuery('workspace', 'older thread'))).rejects.toThrow('captured bound-thread request');
+    expect(request).toHaveBeenLastCalledWith('/environments/{id}', expect.objectContaining({ params: { path: { id: 'workspace' }, query: { threads_q: 'older thread', threads_limit: 50 } } }));
+  } finally { request.mockRestore(); cache.clear(); }
+});
+
+it('searches each resource child under its actual parent read', async () => {
+  const { machineChildrenQuery, hostChildrenQuery } = await import('@/api/resources');
+  const { mountChildrenQuery } = await import('@/api/resource-tools');
+  const request = vi.spyOn(api, 'GET').mockRejectedValue(new Error('captured child read'));
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  try {
+    await expect(cache.infiniteQuery(machineChildrenQuery('machine', 'agents', 'late profile'))).rejects.toThrow('captured child read');
+    expect(request).toHaveBeenLastCalledWith('/machines/{id}', expect.objectContaining({ params: { path: { id: 'machine' }, query: { collection: 'agents', q: 'late profile', limit: 50 } } }));
+    await expect(cache.infiniteQuery(hostChildrenQuery('host', 'kept_layers', 'late workspace'))).rejects.toThrow('captured child read');
+    expect(request).toHaveBeenLastCalledWith('/hosts/{id}', expect.objectContaining({ params: { path: { id: 'host' }, query: { collection: 'kept_layers', q: 'late workspace', limit: 50 } } }));
+    await expect(cache.infiniteQuery(mountChildrenQuery('mount', 'locations', 'late machine'))).rejects.toThrow('captured child read');
+    expect(request).toHaveBeenLastCalledWith('/mounts/{id}', expect.objectContaining({ params: { path: { id: 'mount' }, query: { collection: 'locations', q: 'late machine', limit: 50 } } }));
+  } finally { request.mockRestore(); cache.clear(); }
 });

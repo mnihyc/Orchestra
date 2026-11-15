@@ -1,0 +1,7 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --lib
+test -p orch-api-core --test machine_get_scopes --test kmounts_files
+test -p orch-api-core --test hosts
+test -p orch-api-core --test credential_collections

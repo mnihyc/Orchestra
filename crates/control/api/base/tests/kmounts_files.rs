@@ -1343,3 +1343,138 @@ async fn data_a_copy_displaced_is_listed_until_whoever_may_remove_that_location_
 
 #[path = "kmounts_files/location_scopes.rs"]
 mod location_scopes;
+
+#[tokio::test]
+async fn mount_locations_and_additions_each_search_before_their_own_page() {
+    use orch_db::queries::resources::{access_fixtures as fixtures, mounts as rows};
+    let world = World::new().await;
+    let c = company(&world).await;
+    let machine =
+        fixtures::insert_persons_machine(&mut *world.conn().await, c.viewer.id(), "Paging laptop")
+            .await
+            .unwrap();
+    for index in 0..13 {
+        let mount = named_mount(&world, &c.viewer, c.acme, &format!("located-{index:02}")).await;
+        let mut conn = world.conn().await;
+        rows::set_location(
+            &mut conn,
+            &rows::LocationRow {
+                mount_id: mount.base.id,
+                machine_id: machine,
+                host_id: None,
+                host_name: None,
+                kind: "path".into(),
+                source: format!("/srv/{index}"),
+                storage: None,
+                data_kind: None,
+                created_by: c.viewer.id(),
+                created_at: world.now(),
+            },
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        named_mount(&world, &c.viewer, c.acme, &format!("available-{index:02}")).await;
+    }
+    for collection in [
+        MachineMountCollection::Locations,
+        MachineMountCollection::Available,
+    ] {
+        let q = if collection == MachineMountCollection::Locations {
+            "located-12"
+        } else {
+            "available-12"
+        };
+        let result = world
+            .app
+            .call(MachineMountList, &[&machine])
+            .token(&c.viewer.token)
+            .query(&MachineMountListQuery {
+                collection: Some(collection),
+                q: Some(q.into()),
+                limit: Some(3),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        if collection == MachineMountCollection::Locations {
+            assert_eq!(result.locations[0].mount.name, q);
+            assert_eq!(result.locations.len(), 1);
+        } else {
+            assert_eq!(result.available[0].mount.name, q);
+            assert_eq!(result.available.len(), 1);
+        }
+        let mut cursor = None;
+        let mut count = 0;
+        loop {
+            let page = world
+                .app
+                .call(MachineMountList, &[&machine])
+                .token(&c.viewer.token)
+                .query(&MachineMountListQuery {
+                    collection: Some(collection),
+                    limit: Some(3),
+                    cursor,
+                    ..Default::default()
+                })
+                .send()
+                .await
+                .ok();
+            count += if collection == MachineMountCollection::Locations {
+                page.locations.len()
+            } else {
+                page.available.len()
+            };
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(count, 13);
+    }
+}
+
+#[tokio::test]
+async fn a_mounts_later_location_is_found_by_its_visible_machine_before_paging() {
+    use orch_db::queries::resources::{access_fixtures as fixtures, mounts as rows};
+    let world = World::new().await;
+    let c = company(&world).await;
+    let mount = named_mount(&world, &c.viewer, c.acme, "Location catalogue").await;
+    for index in 0..13 {
+        let machine = fixtures::insert_persons_machine(
+            &mut *world.conn().await,
+            c.viewer.id(),
+            &format!("Destination {index:02}"),
+        )
+        .await
+        .unwrap();
+        rows::set_location(
+            &mut *world.conn().await,
+            &rows::LocationRow {
+                mount_id: mount.base.id,
+                machine_id: machine,
+                host_id: None,
+                host_name: None,
+                kind: "path".into(),
+                source: format!("/srv/{index}"),
+                storage: None,
+                data_kind: None,
+                created_by: c.viewer.id(),
+                created_at: world.now(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let page = world
+        .app
+        .call(MountGet, &[&mount.base.id])
+        .token(&c.viewer.token)
+        .query(&json!({"collection":"locations","q":"Destination 12","limit":1}))
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.locations.len(), 1);
+    assert_eq!(page.locations[0].machine.name, "Destination 12");
+}

@@ -78,6 +78,82 @@ async fn invite(
         .full_invitation()
 }
 
+#[tokio::test]
+async fn pending_invitations_are_searched_before_paging_and_expired_links_do_not_hide_them() {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    for index in 0..13 {
+        invite(
+            &world,
+            &s.boss,
+            &InvitationCreateBody {
+                note: Some(format!("Invitation {index:02}")),
+                ..org_invitation(s.acme)
+            },
+        )
+        .await
+        .ok();
+    }
+    let expired = invite(
+        &world,
+        &s.boss,
+        &InvitationCreateBody {
+            note: Some("Newest expired".into()),
+            ..org_invitation(s.acme)
+        },
+    )
+    .await
+    .ok();
+    sqlx::query("UPDATE invitations SET expires_at=$2 WHERE id=$1")
+        .bind(expired.invitation.id)
+        .bind(world.now() - Duration::minutes(1))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let last = world
+        .app
+        .call(InvitationList, &[])
+        .token(&s.boss.token)
+        .query(&InvitationListQuery {
+            org_id: Some(s.acme),
+            active: Some(true),
+            q: Some("Invitation 12".into()),
+            limit: Some(3),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(last.items.len(), 1);
+    assert_eq!(last.items[0].note, "Invitation 12");
+    let mut cursor = None;
+    let mut ids = std::collections::HashSet::new();
+    loop {
+        let page = world
+            .app
+            .call(InvitationList, &[])
+            .token(&s.boss.token)
+            .query(&InvitationListQuery {
+                org_id: Some(s.acme),
+                active: Some(true),
+                limit: Some(3),
+                cursor,
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        for row in page.items {
+            assert!(ids.insert(row.id));
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(ids.len(), 13);
+}
+
 async fn accept(
     world: &World,
     who: &Who,
@@ -571,10 +647,13 @@ async fn invitations_are_listed_for_whoever_manages_them_and_taken_back() {
             .app
             .call(InvitationList, &[])
             .token(&who.token)
-            .query(&InvitationListQuery { org_id: org })
+            .query(&InvitationListQuery {
+                org_id: org,
+                ..Default::default()
+            })
             .send()
     };
-    let listed = list(&s.boss, Some(s.acme)).await.ok();
+    let listed = list(&s.boss, Some(s.acme)).await.ok().items;
     assert_eq!(
         listed.iter().map(|each| each.id).collect::<Vec<_>>(),
         vec![second.invitation.id, first.invitation.id],
@@ -585,8 +664,8 @@ async fn invitations_are_listed_for_whoever_manages_them_and_taken_back() {
         "members.manage"
     );
     // Without an org, what the caller made.
-    assert_eq!(list(&s.boss, None).await.ok().len(), 2);
-    assert!(list(&s.dan, None).await.ok().is_empty());
+    assert_eq!(list(&s.boss, None).await.ok().items.len(), 2);
+    assert!(list(&s.dan, None).await.ok().items.is_empty());
     // Taken back: it is marked, and no longer serves.
     let gone = world
         .app
@@ -595,7 +674,7 @@ async fn invitations_are_listed_for_whoever_manages_them_and_taken_back() {
         .send()
         .await;
     assert_eq!(gone.status, 204);
-    let listed = list(&s.boss, Some(s.acme)).await.ok();
+    let listed = list(&s.boss, Some(s.acme)).await.ok().items;
     assert!(
         listed
             .iter()

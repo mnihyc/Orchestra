@@ -5,7 +5,7 @@ import { FoundMcp, NO_ENVIRONMENT } from '@/features/resources/mcp/Import';
 import type { Machine } from '@/generated/api-types';
 import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
-import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
 
 export function MachineTools({ machine }: { machine: Pick<Machine, 'id' | 'name' | 'environments'> }) {
   const { t } = useTranslation();
@@ -14,7 +14,7 @@ export function MachineTools({ machine }: { machine: Pick<Machine, 'id' | 'name'
   return <div className="flex min-w-0 flex-col gap-4">
     {machine.environments.length === 0 ? <EmptyState compact title={t('mcpImport.noEnvironment')}
       action={<Button asChild><a href="/resources/environments">{t('mcpImport.environments')}</a></Button>} /> : <>
-      <Select label={t('mcpImport.environment')} value={selected?.id ?? NO_ENVIRONMENT} onValueChange={setChoice}
+      <ResourcePicker pickerKey="machine-tools.environment" label={t('mcpImport.environment')} value={selected?.id ?? NO_ENVIRONMENT} onValueChange={setChoice}
         options={[{ value: NO_ENVIRONMENT, label: t('mcpImport.chooseEnvironment'), disabled: true }, ...machine.environments.map((environment) => ({ value: environment.id, label: environment.name }))]} />
       {selected !== undefined && <FoundMcp key={selected.id} environment={selected} machineId={machine.id} />}
     </>}

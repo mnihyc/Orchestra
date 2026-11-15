@@ -111,7 +111,7 @@ function NewImport({ target, onClose }: { target: Extract<ImportTarget, { kind: 
       if (!owns()) return;
       cache.setQueryData(exportKeys.job(job.id), job);
       watchImport(job, destination.place?.id ?? null, notify);
-      void cache.invalidateQueries({ queryKey: importKeys.mine(), exact: true });
+      void cache.invalidateQueries({ queryKey: importKeys.mine() });
       setJobId(job.id);
       setStep('run');
     },

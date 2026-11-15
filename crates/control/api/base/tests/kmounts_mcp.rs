@@ -1216,3 +1216,61 @@ async fn selecting_a_different_found_definition_needs_both_server_management_and
     let audit:Json=sqlx::query_scalar("SELECT details FROM audit_log WHERE action='mcp.imported' AND object_id=$1 ORDER BY at DESC,id DESC LIMIT 1").bind(selected.id).fetch_one(&world.db.pool).await.unwrap();
     assert_eq!(audit["definition_after"], json!(different));
 }
+
+#[tokio::test]
+async fn every_discovered_server_is_searchable_and_continuable_in_its_environment() {
+    let world = World::new().await;
+    let c = company(&world).await;
+    let (env, machine) = environment(&world, &c, true).await;
+    sqlx::query(
+        "UPDATE machines SET facts=jsonb_set(facts,'{policy,mcp_import}','true') WHERE id=$1",
+    )
+    .bind(machine)
+    .execute(&world.db.pool)
+    .await
+    .unwrap();
+    let found: Vec<_> = (0..1001).map(|index| json!({"source":"codex","scope":"project","name":format!("tool-{index:04}"),"directory":"/workspace","transport":"stdio"})).collect();
+    sqlx::query("UPDATE environments SET facts=jsonb_set(facts,'{mcp_found}',$2) WHERE id=$1")
+        .bind(env)
+        .bind(json!(found))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let query = |q: Option<&str>, cursor: Option<String>| EnvironmentMcpListQuery {
+        collection: Some(EnvironmentMcpCollection::Found),
+        q: q.map(str::to_owned),
+        limit: Some(137),
+        cursor,
+    };
+    let last = world
+        .app
+        .call(EnvironmentMcpGet, &[&env])
+        .token(&c.admin.token)
+        .query(&query(Some("tool-1000"), None))
+        .send()
+        .await
+        .ok();
+    assert_eq!(last.found.len(), 1);
+    assert_eq!(last.found[0].name, "tool-1000");
+    let mut cursor = None;
+    let mut names = std::collections::BTreeSet::new();
+    loop {
+        let page = world
+            .app
+            .call(EnvironmentMcpGet, &[&env])
+            .token(&c.admin.token)
+            .query(&query(None, cursor))
+            .send()
+            .await
+            .ok();
+        assert!(page.found.len() <= 137);
+        for row in page.found {
+            assert!(names.insert(row.name));
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(names.len(), 1001);
+}

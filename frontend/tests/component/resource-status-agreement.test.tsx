@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import type { AnchorHTMLAttributes, ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as AdoptionApi from '@/api/adoption';
-import { harnessSessionsQuery } from '@/api/adoption';
+import { harnessSessionsKey } from '@/api/adoption';
 import type * as ResourcesApi from '@/api/resources';
 import { providerKey } from '@/api/resources';
 import { ApiError } from '@/api/client';
@@ -26,7 +26,10 @@ vi.mock('@/api/resources', async (load) => { const actual = await load<typeof Re
   providerQuery: (id: string) => ({ queryKey: actual.providerKey(id), queryFn: calls.read, staleTime: Infinity }),
   hostQuery: (id: string) => ({ queryKey: actual.hostKey(id), queryFn: () => { calls.host(id); return Promise.resolve({ ...detailHost, id, name: provider.runtime?.host?.name ?? detailHost.name }); }, staleTime: Infinity }) }; });
 vi.mock('@/api/adoption', async (load) => { const actual = await load<typeof AdoptionApi>(); return { ...actual,
-  harnessSessionsQuery: (provider: string, agent: string) => ({ ...actual.harnessSessionsQuery(provider, agent), queryFn: () => calls.sessions(provider, agent) }) }; });
+  harnessSessionsPageQuery: (...args: Parameters<typeof actual.harnessSessionsPageQuery>) => {
+    const [provider, agent, , read] = args;
+    return { ...actual.harnessSessionsPageQuery(...args), queryFn: async () => { const items = await calls.sessions(provider, agent); read.captured('catalogue'); return { items, source: 'catalogue', next_cursor: null }; } };
+  } }; });
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useNavigate: () => vi.fn(),
   Link: ({ to, params, children, ...attributes }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; params?: Record<string, string> }) => <a {...attributes} href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
@@ -56,14 +59,16 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await screen.findByRole('heading', { name: provider.name, level: 1 });
     expect(await screen.findByText(i18n.t('adopt.historyUnavailable'), { exact: true })).toBeVisible();
     expect(screen.queryByText(i18n.t('providers.phrase.ready'), { exact: true })).not.toBeInTheDocument();
-    expect(screen.getAllByRole('alert')).toHaveLength(2); expect(calls.sessions).toHaveBeenCalledTimes(2);
+    expect(screen.getAllByRole('alert')).toHaveLength(1); expect(calls.sessions).toHaveBeenCalledTimes(1);
+    const choose = async (name: string) => { await user.click(screen.getByRole('combobox', { name: i18n.t('adopt.profile') })); await user.click(screen.getByRole('option', { name })); };
+    await choose(other.name); await waitFor(() => expect(calls.sessions).toHaveBeenCalledTimes(2));
+    await choose(detailAgent.name);
     expect(view.cache.getQueryData<Provider>(providerKey(provider.id))?.status).toBe('ready');
-    const heading = screen.getByRole('heading', { name: detailAgent.name });
-    const section = heading.closest('section'); if (section === null) throw new Error('Each session reader needs its own section');
+    const section = screen.getByRole('region', { name: i18n.t('adopt.title') });
     calls.sessions.mockResolvedValue([]); await user.click(within(section).getByRole('button', { name: i18n.t('common.tryAgain') }));
     await waitFor(() => expect(calls.sessions).toHaveBeenCalledTimes(3));
-    expect(await screen.findByText(i18n.t('adopt.historyPartial'), { exact: true })).toBeVisible(); expect(screen.getAllByRole('alert')).toHaveLength(1);
-    act(() => { view.cache.setQueryData(harnessSessionsQuery(provider.id, other.id).queryKey, []); });
+    expect(await screen.findByText(i18n.t('adopt.historyPartial'), { exact: true })).toBeVisible(); expect(screen.queryByRole('alert')).toBeNull();
+    act(() => { view.cache.setQueryData(harnessSessionsKey(provider.id, other.id), []); });
     expect(await screen.findByText(i18n.t('adopt.historyAvailable'), { exact: true })).toBeVisible(); expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(calls.read).toHaveBeenCalledTimes(1); expect(calls.sessions).toHaveBeenCalledTimes(3);
   });
@@ -82,7 +87,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
 }
 
 it('does not read a hidden session list merely to compute a header', async () => {
-  draw(<ProviderActivityStatus harnesses={[{ providerId: provider.id, providerName: provider.name, agent: detailAgent }]} />);
+  draw(<ProviderActivityStatus harnesses={[{ providerId: provider.id, providerName: provider.name, agents: [detailAgent] }]} />);
   await act(async () => { await Promise.resolve(); }); expect(calls.sessions).not.toHaveBeenCalled();
   expect(screen.queryByText(i18n.t('adopt.historyAvailable'))).not.toBeInTheDocument();
 });
