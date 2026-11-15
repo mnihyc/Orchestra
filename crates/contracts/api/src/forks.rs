@@ -68,6 +68,9 @@ pub struct ReportDropped {
 /// What was kept, converted and dropped when a history travelled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HistoryReport {
+    /// Actual bounded handoff observations, independent of estimated history and transcript coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<crate::summary_facts::HandoffResult>,
     /// How well it was kept.
     pub fidelity: Fidelity,
     /// How many items there were.

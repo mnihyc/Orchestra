@@ -23,6 +23,7 @@ import { useScrolls } from '@/ui/useScrolls';
 import { handReturnTargetToPrompt, useTransientLayer } from '@/ui/PromptScope';
 import { isInspectionTarget } from '@/ui/inspection';
 import { Tooltip } from '@/ui/Tooltip';
+import { FactDisclosureBody, type FactDisclosureBodyProps } from '@/ui/FactDisclosure';
 
 export type MenuEntry =
   | (ChoiceName<string> & ChoiceDetails & {
@@ -44,6 +45,7 @@ export type MenuEntry =
     })
   | { type: 'separator'; id: string }
   | { type: 'label'; id: string; label: string }
+  | { type: 'facts'; id: string; label: string; body: FactDisclosureBodyProps }
   | { type: 'sub'; action?: ActionId; id: string; label: string; icon?: ReactNode; entries: readonly MenuEntry[] }
   | {
       type: 'radio';
@@ -111,6 +113,8 @@ export function MenuEntries({ parts, entries }: { parts: MenuParts; entries: rea
     <>
       {entries.map((entry) => {
         switch (entry.type) {
+          case 'facts':
+            return <parts.Item key={entry.id} asChild onSelect={(event) => event.preventDefault()}><FactDisclosureBody {...entry.body} aria-label={entry.label} /></parts.Item>;
           case 'separator':
             return <parts.Separator key={entry.id} className="-mx-1 my-1 h-px bg-border" />;
           case 'label':
