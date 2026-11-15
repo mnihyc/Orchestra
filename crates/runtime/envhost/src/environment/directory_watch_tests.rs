@@ -55,6 +55,8 @@ impl Rig {
         let environment = new_id();
         host.env_attach(
             &EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: None,
                 storage: None,

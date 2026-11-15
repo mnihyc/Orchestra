@@ -1,0 +1,7 @@
+fmt
+clippy
+contracts
+test -p orch-access-contract --lib
+test -p orch-authz --lib
+test -p orch-api-core --lib -- --skip realtime::background_read_tests::
+test -p orch-api-core --test nodes_lists --test hierarchy_native_scopes --test binding_options --test ask --test realtime_feeds --test document_entry_metadata
