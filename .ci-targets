@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-engine --lib -- jobs::provider_provision::creator_authority::tests::
+test -p orch-engine --test provider_runtime --test call_recovery
+test -p orch-api-core --lib

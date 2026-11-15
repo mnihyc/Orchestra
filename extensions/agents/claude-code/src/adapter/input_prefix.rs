@@ -21,6 +21,25 @@ fn refused(words: &str) -> AdapterError {
     }
 }
 
+/// What a person is told when a conversation holds a message written by a build older than the oldest one whose exact
+/// input checkpoint is proven. The whole conversation is meant: every checkpoint of it carries the earlier messages, so
+/// no message after the old one makes a checkpoint readable. The version is the transcript's own word, shown only when it
+/// is a version.
+fn older_writer(version: &str) -> String {
+    let floor = crate::config::OLDEST_PROVEN_BUILD;
+    let cause = match semver::Version::parse(version) {
+        Ok(version) if version.to_string().len() <= 32 => format!(
+            "This conversation has messages written by Claude Code {version}, which is older than {floor}"
+        ),
+        _ => format!(
+            "This conversation has messages whose Claude Code build cannot be read as a version, so they are not known to come from {floor} or later"
+        ),
+    };
+    format!(
+        "{cause}, the first build whose exact input checkpoint Orch can read. Its messages cannot be edited and it cannot be continued from an earlier version. A conversation begun on Claude Code {floor} or later can."
+    )
+}
+
 fn user_prompt(row: &Json) -> bool {
     row["type"] == "user"
         && row["isSidechain"] != true
@@ -79,9 +98,7 @@ fn checkpoint(
         if let Some(version) = row.get("version").and_then(Json::as_str)
             && !crate::config::input_prefix_supported(version)
         {
-            return Err(AdapterError::Unsupported(
-                "The source transcript was written by a different Claude Code version.".into(),
-            ));
+            return Err(AdapterError::Unsupported(older_writer(version)));
         }
         if row["type"] == "attachment"
             && row["attachment"]["type"] == "queued_command"
@@ -478,10 +495,31 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let mut entries = rows();
         entries[0]["version"] = json!("2.1.318");
+        let Err(AdapterError::Unsupported(words)) =
+            checkpoint(transcript(&entries)?.path(), source(), FIRST)
+        else {
+            panic!("a message written by 2.1.318 is not readable");
+        };
+        assert_eq!(
+            words,
+            "This conversation has messages written by Claude Code 2.1.318, which is older than 2.1.319, the first build whose exact input checkpoint Orch can read. Its messages cannot be edited and it cannot be continued from an earlier version. A conversation begun on Claude Code 2.1.319 or later can."
+        );
+        // A later message of the same conversation does not make an earlier old one readable.
+        let mut later = rows();
+        later[0]["version"] = json!("2.1.318");
         assert!(matches!(
-            checkpoint(transcript(&entries)?.path(), source(), FIRST),
+            checkpoint(transcript(&later)?.path(), source(), SECOND),
             Err(AdapterError::Unsupported(_))
         ));
+        // The transcript's own word is shown only as a version.
+        let mut unreadable = rows();
+        unreadable[0]["version"] = json!("<b>soon</b>");
+        let Err(AdapterError::Unsupported(words)) =
+            checkpoint(transcript(&unreadable)?.path(), source(), FIRST)
+        else {
+            panic!("a message of an unreadable build is not readable");
+        };
+        assert!(words.contains("cannot be read as a version") && !words.contains("soon"));
         for later in ["2.1.319", "2.1.323", "2.2.0"] {
             let mut entries = rows();
             entries[0]["version"] = json!(later);

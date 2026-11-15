@@ -1,6 +1,6 @@
 /** Quiet resource hints and lazy cards, shared by chooser rows, named chips and status items. */
 import { cloneElement, isValidElement, type ReactNode } from 'react';
-import { Box, Bot, Cpu, GraduationCap, Plug, PlugZap, Server } from 'lucide-react';
+import { Box, Bot, Cpu, GraduationCap, Layers3, Plug, PlugZap, Server } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { useFormatContext } from '@/lib/appearance';
@@ -10,10 +10,11 @@ import { DetailCard, type CardPreview } from '@/ui/DetailCard';
 import { Meter } from '@/ui/Meter';
 import { StatusDot } from '@/ui/StatusDot';
 import type { PlaceHost } from '@/generated/api-types';
-import { type ResourceSubject, resourceHint, resourceName } from './facts';
+import { formatBytes } from '@/lib/format';
+import { MEMORY_BYTES_PER_MB, type ResourceSubject, resourceHint, resourceName } from './facts';
 import ResourceCard from './ResourceCard';
 
-const GLYPHS = { provider: PlugZap, model: Cpu, host: Server, environment: Box, mount: Box, mcp_server: Plug, template: Cpu, agent: Bot, skill: GraduationCap };
+const GLYPHS = { provider: PlugZap, model: Cpu, host: Server, environment: Box, mount: Box, mcp_server: Plug, template: Cpu, agent: Bot, skill: GraduationCap, pool: Layers3 };
 const chipClasses = 'resource-chip inline-flex min-w-0 max-w-full gap-1 rounded-md border bg-surface px-1.5 py-0.5 text-sm';
 
 export function ResourceGlyph({ kind }: { kind: ResourceSubject['kind'] }) {
@@ -21,15 +22,17 @@ export function ResourceGlyph({ kind }: { kind: ResourceSubject['kind'] }) {
   return <Icon aria-hidden className="size-4 shrink-0 text-text-muted" />;
 }
 
-/** The places list has always used binary gigabytes for its declared-capacity caption. */
-const MEMORY_MB_PER_GIB = 1024;
-
-/** A refused destination keeps its already supplied capacity visible before it can be chosen. */
+/** A refused destination keeps what it has free visible before it can be chosen: what it measured, never what its environments declare. */
 export function HostCapacity({ place }: { place: PlaceHost }) {
   const { t } = useTranslation();
-  if (place.capacity.memory_mb <= 0) return null;
-  const label = t('change.where.declared', { declared: Math.round(place.declared.memory_mb / MEMORY_MB_PER_GIB), capacity: Math.round(place.capacity.memory_mb / MEMORY_MB_PER_GIB) });
-  return <span className="flex min-w-0 flex-col gap-1"><Meter neutral showActual look="compact" value={place.declared.memory_mb / place.capacity.memory_mb * 100} label={label} /><span className="text-sm text-text-muted">{label}</span></span>;
+  const { locale } = useFormatContext();
+  const used = place.used.memory_mb;
+  if (place.capacity.memory_mb <= 0 || used === null) return null;
+  const label = t('resourceFacts.memoryFree', {
+    free: formatBytes(Math.max(0, place.capacity.memory_mb - used) * MEMORY_BYTES_PER_MB, locale),
+    total: formatBytes(place.capacity.memory_mb * MEMORY_BYTES_PER_MB, locale),
+  });
+  return <span className="flex min-w-0 flex-col gap-1"><Meter neutral showActual look="compact" value={used / place.capacity.memory_mb * 100} label={label} /><span className="text-sm text-text-muted">{label}</span></span>;
 }
 
 export function ResourceHint({ subject, className, wrap = false }: { subject: ResourceSubject; className?: string; wrap?: boolean }) {
@@ -50,6 +53,7 @@ function previewResource(subject: ResourceSubject): CardPreview['resource'] {
     case 'mount': return {kind:subject.kind,id:subject.mount.id,data:subject.mount};
     case 'mcp_server': return {kind:subject.kind,id:subject.server.id,data:subject.server};
     case 'template': return {kind:subject.kind,id:subject.template.id,data:subject.template};
+    case 'pool': return {kind:subject.kind,id:subject.pool.id,data:subject.pool};
     case 'skill': return {kind:subject.kind,id:subject.skill.id,data:subject.skill};
     case 'model': return undefined;
   }

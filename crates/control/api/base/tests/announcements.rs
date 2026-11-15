@@ -607,7 +607,7 @@ async fn a_request_for_a_capability_is_listed_for_the_people_of_its_scope_and_de
         .await
         .ok();
     let mut config = environment.config;
-    config["env.host_id"] = json!(host);
+    config["env.host_id"] = json!(orch_provider_contract::pools::Target::host(host));
     s.rig
         .world
         .app

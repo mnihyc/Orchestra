@@ -4,13 +4,14 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import type * as EnvironmentsApi from '@/api/environments';
+import type * as PoolsApi from '@/api/pools';
 import type * as ResourcesApi from '@/api/resources';
 import { EntryOptions } from '@/features/access/EntryOptions';
 import { askedOptions } from '@/features/access/model';
 import { EntryOptionFacts } from '@/features/access/ShareConsequences';
 import { MissingAccessList } from '@/ui/ErrorState';
 import type { Changes } from '@/features/access/changes';
-import type { Environment, Host, Machine, PermissionPage, PermissionRow, WhereName } from '@/generated/api-types';
+import type { Environment, Host, Machine, PermissionDef, PermissionPage, PermissionRow, WhereName } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { offeredChoice } from '@/i18n/choices';
 import { ADA, CATALOGUE, named, pageFor } from '../unit/general-access-fixtures';
@@ -22,7 +23,7 @@ const STAGING = id(0xa1, 2);
 const GONE = id(0xa1, 9);
 const EDGE = id(0xa2, 1);
 const LAPTOP = id(0xa3, 1);
-const rows = vi.hoisted(() => ({ environments: [] as unknown[], hosts: [] as unknown[], machines: [] as unknown[] }));
+const rows = vi.hoisted(() => ({ environments: [] as unknown[], hosts: [] as unknown[], machines: [] as unknown[], pools: [] as unknown[] }));
 
 vi.mock('@/api/environments', async (original) => ({ ...await original<typeof EnvironmentsApi>(),
   environmentsQuery: () => ({ queryKey: ['where-environments'], queryFn: () => Promise.resolve(rows.environments) }),
@@ -31,6 +32,8 @@ vi.mock('@/api/resources', async (original) => ({ ...await original<typeof Resou
   hostsQuery: () => ({ queryKey: ['where-hosts'], queryFn: () => Promise.resolve(rows.hosts) }),
   machinesQuery: { queryKey: ['where-machines'], queryFn: () => Promise.resolve(rows.machines) },
 }));
+
+vi.mock('@/api/pools', async (original) => ({ ...await original<typeof PoolsApi>(), poolsQuery: () => ({ queryKey: ['where-pools'], queryFn: () => Promise.resolve(rows.pools) }) }));
 
 const def = CATALOGUE.of('provider').find((each) => each.name === 'provider.use')!;
 const page: PermissionPage = pageFor('provider');
@@ -42,13 +45,13 @@ function rowWith(options: unknown): PermissionRow {
 }
 
 /** Opens the entry's options and answers the change the save would make. */
-function open(options: unknown) {
+function open(options: unknown, definition: PermissionDef = def) {
   const written: unknown[] = [];
   const changes: Changes = {
     run: (request) => { written.push((request as { make: (page: PermissionPage) => unknown }).make(page)); return Promise.resolve(true); },
     busy: false, doing: null, error: null, stale: null, again: () => Promise.resolve(true), forget: () => undefined,
   };
-  show(<EntryOptions open onClose={() => undefined} def={def} row={rowWith(options)} entryId={ENTRY_ID} holder="Ada" changes={changes} />);
+  show(<EntryOptions open onClose={() => undefined} def={definition} row={rowWith(options)} entryId={ENTRY_ID} holder="Ada" changes={changes} />);
   return written;
 }
 
@@ -58,6 +61,7 @@ const saved = (written: unknown[]): Record<string, unknown> | undefined => {
 };
 
 beforeEach(() => {
+  rows.pools = [];
   rows.environments = [{ id: BUILD, name: 'Build box' }, { id: STAGING, name: 'Staging' }] satisfies Pick<Environment, 'id' | 'name'>[];
   rows.hosts = [{ id: EDGE, name: 'Edge host' }] satisfies Pick<Host, 'id' | 'name'>[];
   rows.machines = [{ id: LAPTOP, name: 'Ada laptop' }] satisfies Pick<Machine, 'id' | 'name'>[];
@@ -68,6 +72,57 @@ afterEach(async () => {
 });
 
 const where = () => within(screen.getByRole('group', { name: i18n.t('access.options.where') }));
+
+it.each(['en', 'zh-CN'] as const)('keeps the model limit while granting Ask alone in %s', async (locale) => {
+  await setLocale(locale);
+  const definition = { ...def, options_schema: { type: 'object', properties: {
+    models: { type: 'array', items: { type: 'string' } },
+    purposes: { type: ['array', 'null'], items: { type: 'string', oneOf: [{ const: 'ask', 'x-default-selected': true }, { const: 'work', 'x-default-selected': true }] } },
+  } } };
+  const user = userEvent.setup();
+  const written = open({ models: ['shared-routing-model'] }, definition);
+  await user.click(screen.getByRole('checkbox', { name: i18n.t('access.options.purposeNames.work') }));
+  await user.click(screen.getByRole('button', { name: i18n.t('access.options.save') }));
+  await waitFor(() => expect(saved(written)).toEqual({ models: ['shared-routing-model'], purposes: ['ask'] }));
+});
+
+const withPurposes: PermissionDef = { ...def, options_schema: {
+  type: 'object', properties: { purposes: { type: ['array', 'null'], items: { oneOf: [
+    { const: 'ask', 'x-default-selected': true }, { const: 'work', 'x-default-selected': true },
+  ] } } },
+} };
+
+it.each(['en', 'zh-CN'] as const)('shares a provider for Ask alone through compact choices in %s', async (locale) => {
+  await setLocale(locale);
+  const user = userEvent.setup();
+  const written = open({}, withPurposes);
+  const ask = screen.getByRole('checkbox', { name: 'Ask' });
+  const other = screen.getByRole('checkbox', { name: locale === 'en' ? 'Other work' : '其他工作' });
+  expect(ask).toBeChecked();
+  expect(other).toBeChecked();
+  expect(ask).not.toHaveAccessibleDescription();
+  expect(other).not.toHaveAccessibleDescription();
+  await user.click(other);
+  await user.click(screen.getByRole('button', { name: i18n.t('access.options.save') }));
+  await waitFor(() => expect(written).toHaveLength(1));
+  expect(saved(written)).toEqual({ purposes: ['ask'] });
+});
+
+it('keeps an explicitly empty set of provider uses when an entry is saved', async () => {
+  const written = open({ purposes: [] }, withPurposes);
+  expect(screen.getByRole('checkbox', { name: 'Ask' })).not.toBeChecked();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('access.options.save') }));
+  await waitFor(() => expect(written).toHaveLength(1));
+  expect(saved(written)).toEqual({ purposes: [] });
+});
+
+it.each(['en', 'zh-CN'] as const)('names the provider uses in the share preview in %s', async (locale) => {
+  await setLocale(locale);
+  show(<EntryOptionFacts options={{ purposes: ['ask', 'work'], models: ['sample'] }} word={(text) => text} />);
+  expect(screen.getByText(locale === 'en' ? 'Uses' : '用途')).toBeVisible();
+  expect(document.body).toHaveTextContent(locale === 'en' ? 'Ask, Other work' : 'Ask, 其他工作');
+  expect(document.body).toHaveTextContent('sample');
+});
 
 async function add(user: ReturnType<typeof userEvent.setup>, name: string) {
   await user.click(screen.getByRole('combobox', { name: i18n.t('access.options.whereAdd', { what: i18n.t('access.options.where') }) }));
@@ -216,4 +271,13 @@ it('has the sentences about what leaves in both languages', async () => {
     for (const key of ['credential_shared', 'handed_over']) expect(consent(key), `${key} in ${locale}`).not.toContain('access.options');
     expect(i18n.t('access.options.leavesOther')).not.toBe('access.options.leavesOther');
   }
+});
+
+it('keeps a disabled environment pool available as a live Where set', async () => {
+  rows.pools=[{id:BUILD,name:'Workspace pool',kind:'environment',enabled:false}];
+  const written=open({where:[{kind:'environment_pool',id:BUILD}]});
+  expect(await screen.findByText('Workspace pool')).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('access.options.save')}));
+  await waitFor(()=>expect(written).toHaveLength(1));
+  expect(saved(written)).toEqual({where:[{kind:'environment_pool',id:BUILD}]});
 });

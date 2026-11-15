@@ -7,7 +7,7 @@ CREATE TABLE favorites (
     "position" numeric NOT NULL,
     view jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT favorites_kind_check CHECK ((kind = ANY (ARRAY['org'::text, 'project'::text, 'topic'::text, 'thread'::text, 'document'::text, 'document_container'::text, 'chat'::text, 'tag'::text, 'user'::text, 'group'::text, 'provider'::text, 'agent'::text, 'environment'::text, 'host'::text, 'template'::text, 'mcp_server'::text, 'mount'::text, 'machine'::text, 'skill'::text]))),
+    CONSTRAINT favorites_kind_check CHECK ((kind = ANY (ARRAY['org'::text, 'project'::text, 'topic'::text, 'thread'::text, 'document'::text, 'document_container'::text, 'chat'::text, 'tag'::text, 'user'::text, 'group'::text, 'provider'::text, 'agent'::text, 'environment'::text, 'host'::text, 'template'::text, 'mcp_server'::text, 'mount'::text, 'machine'::text, 'skill'::text, 'pool'::text]))),
     CONSTRAINT favorites_pkey PRIMARY KEY (user_id, kind, id),
     CONSTRAINT favorites_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
@@ -203,7 +203,7 @@ CREATE TABLE recents (
     id uuid NOT NULL,
     visit_count double precision DEFAULT 1 NOT NULL,
     visited_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT recents_kind_check CHECK ((kind = ANY (ARRAY['org'::text, 'project'::text, 'topic'::text, 'thread'::text, 'document'::text, 'document_container'::text, 'chat'::text, 'tag'::text, 'user'::text, 'group'::text, 'provider'::text, 'agent'::text, 'environment'::text, 'host'::text, 'template'::text, 'mcp_server'::text, 'mount'::text, 'machine'::text, 'skill'::text]))),
+    CONSTRAINT recents_kind_check CHECK ((kind = ANY (ARRAY['org'::text, 'project'::text, 'topic'::text, 'thread'::text, 'document'::text, 'document_container'::text, 'chat'::text, 'tag'::text, 'user'::text, 'group'::text, 'provider'::text, 'agent'::text, 'environment'::text, 'host'::text, 'template'::text, 'mcp_server'::text, 'mount'::text, 'machine'::text, 'skill'::text, 'pool'::text]))),
     CONSTRAINT recents_visit_count_check CHECK (((visit_count >= (0)::double precision) AND (visit_count < 'Infinity'::double precision))),
     CONSTRAINT recents_pkey PRIMARY KEY (user_id, kind, id),
     CONSTRAINT recents_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE

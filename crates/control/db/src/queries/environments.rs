@@ -156,6 +156,17 @@ pub async fn lock_environment_entries(conn: &mut Conn, entries: &[Id]) -> Result
             constraint: "environment_capacity_requires_transaction".into(),
         });
     }
+    let mut audiences = entries.to_vec();
+    audiences.sort_unstable();
+    audiences.dedup();
+    for entry in audiences {
+        // Lending rows and permission rows share the same count fence. Locking in
+        // identity order also serializes requests whose bounded audiences overlap.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))")
+            .bind(entry)
+            .execute(&mut *conn)
+            .await?;
+    }
     let _: Vec<Id> = sqlx::query_scalar(
         "SELECT id FROM permission_entries WHERE id=ANY($1) ORDER BY id FOR NO KEY UPDATE",
     )
@@ -179,13 +190,48 @@ pub async fn other_environments_made_through(
     existing: Option<Id>,
 ) -> Result<i64, DbError> {
     Ok(sqlx::query_scalar(
-        "SELECT count(*) FROM environments WHERE host_entry_id = ANY($1) AND deleted_at IS NULL
-         AND ($2::uuid IS NULL OR id <> $2)",
+        "SELECT count(*) FROM (
+           SELECT id FROM environments WHERE host_entry_id=ANY($1) AND deleted_at IS NULL
+           UNION SELECT e.id FROM environment_creation_entries a
+             JOIN environments e ON e.id=a.environment_id
+             WHERE a.entry_id=ANY($1) AND e.deleted_at IS NULL
+           UNION SELECT p.id FROM provider_creation_entries a
+             JOIN providers p ON p.id=a.provider_id
+             WHERE a.entry_id=ANY($1) AND p.deleted_at IS NULL
+         ) audience WHERE $2::uuid IS NULL OR id<>$2",
     )
     .bind(entries)
     .bind(existing)
     .fetch_one(conn)
     .await?)
+}
+
+/// Persist all actual pool and lending audiences in the same transaction as registration.
+pub async fn record_creation_entries(
+    conn: &mut Conn,
+    environment: Id,
+    entries: &[Id],
+) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO environment_creation_entries(environment_id,entry_id)
+        SELECT $1,unnest($2::uuid[]) ON CONFLICT DO NOTHING",
+    )
+    .bind(environment)
+    .bind(entries)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Provider units reserve the same real Host/Pool audiences at their native placement admission.
+pub async fn record_provider_creation_entries(
+    conn: &mut Conn,
+    provider: Id,
+    entries: &[Id],
+) -> Result<(), DbError> {
+    sqlx::query("INSERT INTO provider_creation_entries(provider_id,entry_id) SELECT $1,unnest($2::uuid[]) ON CONFLICT DO NOTHING")
+        .bind(provider).bind(entries).execute(conn).await?;
+    Ok(())
 }
 
 /// A machine that holds a location of a mount, with whose it is and which host it is.
@@ -1077,8 +1123,8 @@ pub mod workspace {
         pub change: Json,
     }
 
-    /// The latest change to each path that the file-change tool calls of the threads in an
-    /// environment reported: those of one thread, of one turn, or of every thread there.
+    /// The latest reported change per path, using a turn's diff snapshot where one is available.
+    /// An exact item still returns that item's historical file changes.
     pub async fn latest_changes(
         conn: &mut Conn,
         environment: Id,
@@ -1090,14 +1136,28 @@ pub mod workspace {
             "SELECT DISTINCT ON (c.change ->> 'path') i.id, i.thread_id, i.updated_at, c.change
                FROM items i
                JOIN threads t ON t.node_id = i.thread_id
-              CROSS JOIN LATERAL jsonb_array_elements(i.payload #> '{tool,changes}') WITH ORDINALITY AS c(change, n)
+              CROSS JOIN LATERAL jsonb_array_elements(CASE
+                WHEN i.kind='marker' AND i.payload#>>'{data,change}'='turn_diff'
+                  AND jsonb_typeof(i.payload#>'{data,value,changes}')='array'
+                  THEN i.payload#>'{data,value,changes}'
+                WHEN jsonb_typeof(i.payload#>'{tool,changes}')='array' THEN i.payload#>'{tool,changes}'
+                ELSE '[]'::jsonb END) WITH ORDINALITY AS c(change, n)
               WHERE t.environment_id = $1
-                AND i.kind = 'tool_call' AND i.payload #>> '{tool,kind}' = 'file_change'
-                AND jsonb_typeof(i.payload #> '{tool,changes}') = 'array'
+                AND ((i.kind='marker' AND i.payload->>'marker'='harness_changed'
+                      AND i.payload#>>'{data,change}'='turn_diff'
+                      AND jsonb_typeof(i.payload#>'{data,value,changes}')='array')
+                  OR (i.kind='tool_call' AND i.payload#>>'{tool,kind}'='file_change'
+                      AND jsonb_typeof(i.payload#>'{tool,changes}')='array'
+                      AND ($4::uuid IS NOT NULL OR NOT EXISTS (
+                        SELECT 1 FROM items snapshot WHERE snapshot.turn_id=i.turn_id
+                          AND snapshot.segment_id=i.segment_id AND snapshot.stream=i.stream
+                          AND snapshot.kind='marker' AND snapshot.payload->>'marker'='harness_changed'
+                          AND snapshot.payload#>>'{data,change}'='turn_diff'
+                          AND jsonb_typeof(snapshot.payload#>'{data,value,changes}')='array'))))
                 AND ($2::uuid IS NULL OR i.thread_id = $2)
                 AND ($3::uuid IS NULL OR i.turn_id = $3)
                 AND ($4::uuid IS NULL OR i.id = $4)
-              ORDER BY c.change ->> 'path', i.seq_created DESC, c.n DESC",
+              ORDER BY c.change ->> 'path', i.updated_at DESC, i.seq_updated DESC, c.n DESC",
         )
         .bind(environment)
         .bind(thread)
@@ -2666,7 +2726,7 @@ pub mod changes {
         keep: bool,
         now: DateTime<Utc>,
     ) -> Result<(), DbError> {
-        sqlx::query("UPDATE environments SET config = jsonb_set(config,'{env.host_id}',COALESCE(to_jsonb($2::uuid),'null'::jsonb)),updated_at = $3 WHERE id = $1")
+        sqlx::query("UPDATE environments SET config = jsonb_set(config,'{env.host_id}',CASE WHEN $2::uuid IS NULL THEN 'null'::jsonb ELSE jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$2::uuid)) END),updated_at = $3 WHERE id = $1")
             .bind(environment).bind(host).bind(now).execute(&mut *conn).await?;
         if keep {
             sqlx::query("UPDATE runtimes SET remove_at = NULL WHERE id = $1")

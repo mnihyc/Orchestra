@@ -51,6 +51,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 mod creator_authority;
+mod placement_pool;
 pub use creator_authority::CreatorCommand;
 pub use creator_authority::copy_checkpoint as copied_creator_checkpoint;
 pub use creator_authority::creator_principal;
@@ -65,6 +66,8 @@ pub use creator_authority::{
     command_authorized as creator_command_authorized,
     command_current_callers as creator_command_current_callers,
 };
+pub use placement_pool::Command as PlacementCommand;
+pub(super) use placement_pool::decorate as decorate_placement;
 
 /// How many hex digits of the runtime's identifier a unit's name holds: the last ones, since the first
 /// twelve of an identifier are the moment it was made in and two runtimes made together share them.
@@ -338,9 +341,47 @@ async fn candidates_for(
     named: Option<Id>,
     principal: &Principal,
 ) -> Result<Vec<Candidate>, EngineError> {
-    let (may_use, template_allowed) = if principal.caller().admitted_operation()
-        == Some("ProviderCreate")
-    {
+    candidates_scoped(conn, provider, template, named, principal, None).await
+}
+
+async fn candidates_scoped(
+    conn: &mut orch_db::Conn,
+    provider: &State,
+    template: &TemplateState,
+    named: Option<Id>,
+    principal: &Principal,
+    pool: Option<orch_authz::pools::Selection<'_>>,
+) -> Result<Vec<Candidate>, EngineError> {
+    let (may_use, template_allowed) = if let Some(pool) = pool {
+        let hosts = match pool.leaf {
+            orch_provider_contract::pools::Leaf::Host { id } => vec![*id],
+            _ => vec![],
+        };
+        let template_allowed = if matches!(
+            principal.caller().admitted_operation(),
+            Some("ProviderCreate" | "ProviderDuplicate" | "ProviderMoveOut")
+        ) {
+            resources::provider_creation_template_use(conn, principal, provider.id, template.id)
+                .await?
+        } else {
+            resources::check(
+                conn,
+                principal,
+                ObjectRef {
+                    kind: ResourceKind::Template.into(),
+                    id: template.id,
+                },
+                Permission::TemplateUse,
+                Policy::default(),
+            )
+            .await?
+            .is_allowed()
+        };
+        (hosts, template_allowed)
+    } else if matches!(
+        principal.caller().admitted_operation(),
+        Some("ProviderCreate" | "ProviderDuplicate" | "ProviderMoveOut")
+    ) {
         (
             resources::provider_creation_hosts(conn, principal, provider.id, HOSTS_MAX).await?,
             resources::provider_creation_template_use(conn, principal, provider.id, template.id)
@@ -508,6 +549,71 @@ async fn candidates_for(
             .then_with(|| a.host.id.cmp(&b.host.id))
     });
     Ok(found)
+}
+
+async fn placement_bounds(
+    conn: &mut orch_db::Conn,
+    principal: &Principal,
+    provider: &State,
+    template: &TemplateState,
+    host: Id,
+    pool: Option<orch_authz::pools::Selection<'_>>,
+) -> Result<Option<orch_authz::environments::Created>, EngineError> {
+    let own: Option<Json> = setting(
+        conn,
+        SettingsPlace::Provider(provider.id),
+        keys::RUNTIME_RESOURCES,
+    )
+    .await?;
+    let limits = crate::places::limits_of(&template.spec, own.as_ref());
+    let storage: Option<Json> = setting(
+        conn,
+        SettingsPlace::Provider(provider.id),
+        keys::RUNTIME_STORAGE,
+    )
+    .await?;
+    let wants = orch_authz::environments::Wants {
+        resources: orch_access_contract::permissions::ResourceLimits {
+            cpu_millis: limits.get("cpu_millis").and_then(Json::as_i64),
+            memory_mb: limits.get("memory_mb").and_then(Json::as_i64),
+            pids: limits.get("pids").and_then(Json::as_i64),
+            disk_gb: limits.get("disk_gb").and_then(Json::as_i64),
+        },
+        capabilities: texts(template.spec.get("base_capabilities")),
+        source: Some(crate::places::source_of(&template.spec).into()),
+        storage: storage
+            .as_ref()
+            .and_then(|value| value.get(STATE_VOLUME))
+            .and_then(Json::as_str)
+            .map(str::to_owned),
+    };
+    let path = pool.map_or(&[][..], |pool| pool.path);
+    let policies =
+        crate::access::resource_policies_for_choice(conn, &[host, template.id], path).await?;
+    let ask = orch_authz::environments::NewEnvironment {
+        home: provider.home_id,
+        place: orch_authz::environments::Place::Host {
+            host,
+            template: template.id,
+            wants,
+        },
+        mounts: vec![],
+    };
+    Ok(
+        match orch_authz::environments::provider_host_creation(
+            conn,
+            principal,
+            provider.id,
+            &ask,
+            &policies,
+            pool,
+        )
+        .await?
+        {
+            orch_authz::environments::Creating::Allowed(created) => Some(*created),
+            _ => None,
+        },
+    )
 }
 
 /// Chooses the host: the one named, which must be usable, else the usable one that has room before
@@ -709,43 +815,77 @@ impl ProviderProvision {
         if let Some(recipe) = &recovery {
             template.spec = recipe.definition.clone();
         }
-        let mut named: Option<Id> = setting(
+        let target: Option<orch_provider_contract::pools::Target> = setting(
             &mut tx,
             SettingsPlace::Provider(provider.id),
             keys::RUNTIME_HOST_ID,
         )
         .await
         .map_err(EngineError::from)?;
+        let mut named = target
+            .as_ref()
+            .and_then(orch_provider_contract::pools::Target::single_host);
         if let Some(recipe) = &recovery {
             named = Some(recipe.host);
         }
         let owner = orch_db::queries::jobs::job(&mut tx, job.id())
             .await?
             .ok_or_else(|| failed("provider_gone", "the provider job disappeared"))?;
-        let listed = if crate::jobs::lifecycle_commands::environment::present(&owner) {
-            let checked = crate::jobs::lifecycle_commands::environment::current(
-                &mut tx,
-                &owner,
-                self.engine.inner.clock.as_ref(),
-                self.engine.inner.access.as_ref(),
-                named,
+        let lifecycle = if crate::jobs::lifecycle_commands::environment::present(&owner) {
+            Some(
+                crate::jobs::lifecycle_commands::environment::current(
+                    &mut tx,
+                    &owner,
+                    self.engine.inner.clock.as_ref(),
+                    self.engine.inner.access.as_ref(),
+                    named,
+                )
+                .await?,
             )
-            .await?;
-            let listed =
-                candidates_for(&mut tx, &provider, &template, named, &checked.principal).await?;
-            checked.check(self.engine.inner.clock.as_ref())?;
-            listed
+        } else {
+            None
+        };
+        let principal = if let Some(checked) = &lifecycle {
+            checked.principal.clone()
         } else {
             match creator_authority::principal(&mut tx, &owner, self.engine.inner.clock.as_ref())
                 .await
                 .map_err(creator_authority::stop)?
             {
-                Some(principal) => {
-                    candidates_for(&mut tx, &provider, &template, named, &principal).await?
+                Some(principal) => principal,
+                None => {
+                    Principal::load(&mut tx, Caller::session(provider.owner_id), Time::new(now))
+                        .await
+                        .map_err(EngineError::from)?
                 }
-                None => candidates(&mut tx, &provider, &template, named, now).await?,
             }
         };
+        let selected = if recovery.is_none()
+            && let Some(target @ orch_provider_contract::pools::Target::Pool { .. }) = &target
+        {
+            Some(
+                placement_pool::select(
+                    &mut tx,
+                    &principal,
+                    &provider,
+                    &template,
+                    &owner,
+                    target,
+                    previous.as_ref().map(|runtime| runtime.host_id),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let listed = if let Some(selected) = &selected {
+            vec![selected.candidate.clone()]
+        } else {
+            candidates_for(&mut tx, &provider, &template, named, &principal).await?
+        };
+        if let Some(checked) = &lifecycle {
+            checked.check(self.engine.inner.clock.as_ref())?;
+        }
         let (host, warnings): (HostState, Vec<&str>) = match &previous {
             Some(old) => {
                 let candidate = listed
@@ -764,6 +904,45 @@ impl ProviderProvision {
                 (chosen.host.clone(), warnings_of(chosen))
             }
         };
+        let created = match selected {
+            Some(selected) => Some(selected.created),
+            None if previous.is_none() => {
+                placement_bounds(&mut tx, &principal, &provider, &template, host.id, None).await?
+            }
+            None => None,
+        };
+        if previous.is_none() && created.is_none() {
+            return Err(failed(
+                "no_host",
+                "the current host/template allowances do not admit this provider unit",
+            ));
+        }
+        if let Some(created) = &created {
+            if !orch_authz::environments::reserve_capacity(&mut tx, created)
+                .await
+                .map_err(EngineError::from)?
+            {
+                return Err(failed(
+                    "no_capacity",
+                    "the selected host or pool entry has no remaining unit capacity",
+                ));
+            }
+            let mut entries = created.pool_entries.clone();
+            entries.extend(created.host.as_ref().and_then(|(entry, _)| *entry));
+            orch_db::queries::environments::record_provider_creation_entries(
+                &mut tx,
+                provider.id,
+                &entries,
+            )
+            .await?;
+        }
+        if matches!(
+            target,
+            Some(orch_provider_contract::pools::Target::Pool { .. })
+        ) && recovery.is_none()
+        {
+            orch_db::queries::jobs::merge_plan(&mut tx,owner.id,&json!({"pool_choice":owner.id,"retained_host":previous.as_ref().map(|runtime|runtime.host_id)}),now).await?;
+        }
         // A unit that failed is taken away before its successor is made, so that two never run at once.
         let fresh = previous.is_none();
         if let Some(old) = &previous {
