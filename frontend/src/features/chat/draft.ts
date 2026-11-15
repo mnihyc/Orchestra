@@ -5,6 +5,7 @@
  * draft that was changed on another device replaces this one when this one has not been touched
  * since it was last saved, and never when the person has typed something here that is not saved.
  */
+import { READ_NOW } from '@/api/freshness';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { create } from 'zustand';
@@ -178,7 +179,7 @@ export function useDraft(chatId: string, writable: boolean, reading = true): Dra
           }
         };
         // A durable event retains stable targets; their names are projected for the reader by GET.
-        if (draft?.parts.some((part) => part.type === 'mention') === true && (draft.mention_names?.length ?? 0) === 0) void cache.query({ queryKey: draftKey(chatId), queryFn: () => fetchDraft(chatId), staleTime: 0 }).then(accept).catch(() => undefined);
+        if (draft?.parts.some((part) => part.type === 'mention') === true && (draft.mention_names?.length ?? 0) === 0) void cache.query({ queryKey: draftKey(chatId), queryFn: () => fetchDraft(chatId), ...READ_NOW }).then(accept).catch(() => undefined);
         else accept(draft);
       });
     },

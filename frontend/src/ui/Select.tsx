@@ -17,6 +17,7 @@ import { placeStyle, useLayerRoom } from '@/ui/layerRoom';
 import { cardClasses, floatingAttachment, floatingClasses } from '@/ui/Popover';
 import { useTransientLayer } from '@/ui/PromptScope';
 import { isInspectionTarget } from '@/ui/inspection';
+import { InheritedChoiceLabel, type ChoiceInheritance } from '@/ui/InheritedChoice';
 
 export type SelectOption<Value extends string> = ChoiceName & ChoiceDetails & {
   /** The actual resource, when this is a resource option without an inspection preview. */
@@ -33,6 +34,7 @@ export type SelectOption<Value extends string> = ChoiceName & ChoiceDetails & {
 };
 
 export interface SelectProps<Value extends string> extends FieldSlots {
+  inheritance?: ChoiceInheritance | undefined;
   value: Value;
   onValueChange: (value: Value) => void;
   options: readonly SelectOption<Value>[];
@@ -52,9 +54,19 @@ export interface SelectProps<Value extends string> extends FieldSlots {
   /** Classes of the frame round label, field and messages. */
   fieldClassName?: string;
   className?: string;
+  /** Authorized facts for the current choice, inside this opening instead of another popup. */
+  footer?: ReactNode;
 }
 
-export function Select<Value extends string>({
+export function Select<Value extends string>({ inheritance, ...props }: SelectProps<Value>) {
+  if (inheritance === undefined) return <SelectField {...props} />;
+  return <SelectField<string> {...props} value={inheritance.selected ? 'inherit' : `value:${props.value}`}
+    valueLabel={inheritance.selected ? <InheritedChoiceLabel choice={inheritance} /> : props.valueLabel}
+    options={[{ value: 'inherit', name: <InheritedChoiceLabel choice={inheritance} /> }, ...props.options.map((option) => ({ ...option, value: `value:${option.value}` }))]}
+    onValueChange={(next) => { if (next === 'inherit') inheritance.onSelect(); else { const option = props.options.find((option) => `value:${option.value}` === next); if (option !== undefined) props.onValueChange(option.value); } }} />;
+}
+
+function SelectField<Value extends string>({
   value,
   onValueChange,
   options,
@@ -75,6 +87,7 @@ export function Select<Value extends string>({
   id,
   fieldClassName,
   className,
+  footer,
 }: SelectProps<Value>) {
   const [shown, setShown, covered] = useTransientLayer(open, onOpenChange);
   // The list takes the room it has for the options it has now, not those it opened with.
@@ -84,7 +97,7 @@ export function Select<Value extends string>({
   const [highlighted, setHighlighted] = useState(value);
   const lastItem = useRef<HTMLElement | null>(null);
   const hasGuides = options.some((option) => option.help !== undefined);
-  const hasControls = hasGuides || options.some((option) => option.accessory !== undefined || option.preview !== undefined);
+  const hasControls = footer !== undefined || hasGuides || options.some((option) => option.accessory !== undefined || option.preview !== undefined);
   const selected = options.find((option) => option.value === value);
   const active = options.find((option) => option.value === highlighted) ?? selected;
   const sections: { group: string | undefined; options: SelectOption<Value>[] }[] = [];
@@ -205,7 +218,7 @@ export function Select<Value extends string>({
                 if (!hasControls) return;
                 if (event.key === 'F1' && activeHelp !== undefined) { event.preventDefault(); openGuide(); }
                 if (event.key === 'Tab') {
-                  const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[data-choice-help], [data-choice-inspect], [data-choice-accessory] button'));
+                  const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[data-choice-help], [data-choice-inspect], [data-choice-accessory] button, [data-select-footer] a[href], [data-select-footer] button'));
                   if (buttons.length === 0) return;
                   const current = buttons.findIndex((button) => button === event.target);
                   const next = current < 0 ? event.shiftKey ? buttons.at(-1) : buttons[0] : buttons[current + (event.shiftKey ? -1 : 1)];
@@ -228,6 +241,7 @@ export function Select<Value extends string>({
                   help={{ ...guide, onOpen: () => { changeOpen(false); guide.onOpen(); } }} compact />)}
               </div>}
               {active?.accessory !== undefined && <div data-choice-accessory className="flex min-w-0 items-center border-t border-border p-2">{active.accessory}</div>}
+              {footer !== undefined && <div data-select-footer className="min-w-0 border-t border-border p-2">{footer}</div>}
               </ChoiceInspection>
             </Primitive.Content>
           </Primitive.Portal>

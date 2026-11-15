@@ -1,5 +1,5 @@
 /** D438-8: all resource kinds expose the same selection, identity and visible main action. */
-import { cleanup, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Box } from 'lucide-react';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -15,12 +15,12 @@ import { show } from './support';
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: vi.fn(), rememberList: vi.fn() }));
 vi.mock('@/features/resources/ResourceNav', () => ({ ResourceNav: () => null }));
 
-const kinds: readonly ResourceKind[] = ['providers', 'agents', 'machines', 'environments', 'templates', 'hosts', 'mcp', 'mounts'];
+const kinds: readonly ResourceKind[] = ['providers', 'agents', 'machines', 'environments', 'templates', 'hosts', 'mcp', 'mounts', 'skills'];
 const modes = [['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const;
 const appearance = useAppearance.getState();
-afterEach(async () => { cleanup(); useAppearance.setState(appearance); await setLocale('en'); });
+afterEach(async () => { cleanup(); vi.restoreAllMocks(); useAppearance.setState(appearance); await setLocale('en'); });
 
-it('keeps the visible main act out of its row menu while preserving the other action', async () => {
+it('keeps the visible main act named in its row menu beside the other action', async () => {
   const user = userEvent.setup(); const open = vi.fn(); const copy = vi.fn();
   const primary = { id: 'open', label: i18n.t('resources.act.open'), run: open };
   const secondary = { id: 'copy-link', label: i18n.t('resources.act.copyLink'), run: copy };
@@ -28,14 +28,14 @@ it('keeps the visible main act out of its row menu while preserving the other ac
   show(<><RowPrimaryCell name="Build tools" acts={acts} /><RowMenuCell name="Build tools" acts={acts} working={false} /></>);
   await user.click(screen.getByRole('button', { name: i18n.t('resources.act.menuOf', { name: 'Build tools' }) }));
   const menu = screen.getByRole('menu');
-  expect(within(menu).queryByRole('menuitem', { name: primary.label })).not.toBeInTheDocument();
-  expect(within(menu).queryByRole('separator')).not.toBeInTheDocument();
+  expect(within(menu).getByRole('menuitem', { name: primary.label })).toBeVisible();
+  expect(within(menu).getAllByRole('separator')).toHaveLength(1);
   await user.click(within(menu).getByRole('menuitem', { name: secondary.label }));
   expect(copy).toHaveBeenCalledTimes(1); expect(open).not.toHaveBeenCalled();
 });
 
 // Draws every row and types through it as a person would: 4 to 15 s on a busy machine, so 30 s as the suite's other long cases.
-for (const [locale, theme] of modes) it(`keeps the eight list layouts and reader selection alike in ${locale}/${theme}`, { timeout: 30_000 }, async () => {
+for (const [locale, theme] of modes) it(`keeps the resource list layouts and reader selection alike in ${locale}/${theme}`, { timeout: 30_000 }, async () => {
   await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
   const user = userEvent.setup();
   for (const kind of kinds) {
@@ -65,4 +65,28 @@ for (const [locale, theme] of modes) it(`keeps the eight list layouts and reader
     expect(screen.queryByRole('toolbar', { name: i18n.t('resources.bulk.label') })).not.toBeInTheDocument();
     view.unmount();
   }
+});
+
+
+it.each(kinds)('keeps a thousand loaded %s reachable without mounting every row or losing selection', (kind) => {
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) { return this.tagName === 'TR' ? 72 : 384; });
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(600);
+  const rows = Array.from({ length: 1_200 }, (_, index) => ({ id: `resource-${index}`, name: `Resource ${index}`, owner: null }));
+  const primary = { id: 'open', label: i18n.t('resources.act.open'), run: () => undefined };
+  show(<ResourceListFrame kind={kind} search={{}} title={i18n.t(`screens.${kind}.title`)} icon={Box} lead={null} label="Long resource list"
+    load={{ isPending: false, isError: false, error: null, isRefetching: false, refetch: vi.fn() }} all={rows} rows={rows}
+    columns={[{ id: 'name', header: 'Name', cell: (row) => row.name }]} rowKey={(row) => row.id}
+    text="" onText={vi.fn()} searchLabel="Find resources" searchPlaceholder="" empty={{ icon: <Box />, title: '' }} noMatch=""
+    acts={{ name: (row) => row.name, of: () => ({ primary, busy: false, entries: [], keys: {} }) }} />);
+  const table = screen.getByRole('table', { name: 'Long resource list' });
+  expect(Number(table.getAttribute('aria-rowcount'))).toBeGreaterThanOrEqual(rows.length + 1);
+  expect(within(table).getAllByRole('row').length).toBeLessThan(30);
+  const choice = within(table).getByRole('checkbox', { name: i18n.t('resources.bulk.select', { name: 'Resource 0' }) });
+  fireEvent.click(choice);
+  const selected = screen.getByRole('toolbar', { name: i18n.t('resources.bulk.label') });
+  expect(selected).toHaveTextContent(i18n.t('resources.bulk.count', { count: 1 }));
+  fireEvent.scroll(screen.getByRole('region', { name: 'Long resource list' }), { target: { scrollTop: (rows.length - 3) * 72 } });
+  expect(within(table).getByText('Resource 1199')).toBeVisible();
+  expect(within(table).getAllByRole('row').length).toBeLessThan(30);
+  expect(selected).toHaveTextContent(i18n.t('resources.bulk.count', { count: 1 }));
 });

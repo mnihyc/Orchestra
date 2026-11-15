@@ -3,6 +3,7 @@ import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
+import { SettingSummary } from '@/features/settings/SettingSummary';
 import { SettingChoiceContext } from '@/features/settings/choiceCopy';
 import { shapeOf } from '@/features/settings/settingsModel';
 import { ValueControl } from '@/features/settings/ValueControl';
@@ -57,4 +58,20 @@ describe('catalogued choices in the common setting editor', () => {
     const values = screen.getAllByRole<HTMLInputElement>('combobox').map((control) => control.value);
     expect(values).toEqual(expect.arrayContaining(['Allow', 'Environment']));
   });
+});
+
+it.each([['en', 'Auto · names after another contributor'], ['zh-CN', '自动 · 有其他贡献者后署名']] as const)('says when automatic attribution begins in its current setting value (%s)', async (locale, words) => {
+  await setLocale(locale);
+  const view = show(<SettingSummary def={{ key: 'collab.attribution' }} value="auto" />);
+  try {
+    expect(screen.getByText(words, { exact: true })).toBeVisible();
+    view.rerender(<SettingSummary def={{ key: 'collab.attribution' }} value="never" />);
+    expect(screen.getByText(i18n.t('choiceCatalog.attribution.never.name'))).toBeVisible();
+  } finally { view.unmount(); await setLocale('en'); }
+});
+it.each(['en', 'zh-CN'] as const)('names wake permission as a policy rather than a promise that the next send wakes (%s)', async (locale) => {
+  await setLocale(locale);
+  const view = show(<SettingSummary def={{ key: 'broadcast.wake_idle' }} value={true} />);
+  try { expect(screen.getByText(locale === 'en' ? 'Wake allowed' : '允许唤醒')).toBeVisible(); }
+  finally { view.unmount(); await setLocale('en'); }
 });
