@@ -60,7 +60,7 @@ const REGISTRY: readonly Key[] = [
   key('switch.batch_threads', 'Threads per batch', 'Threads in one reviewed switch batch.', 'switching', 'policy', ['system'], {type:'integer',minimum:1}, 200, 'replace', {unit:'raw',zero:null}, 500),
   key('cleanup.unused_keep_days', 'Clean unused caches', 'Remove unused images and tool versions after this many days. Zero switches automatic cleanup off.', 'retention', 'policy', ['system', 'host'], {type:'integer',minimum:0,'x-unit':'days'}, 7, 'replace', {unit:'days',zero:'off'}, 14),
   key('cleanup.release_keep_count', 'Keep unused releases', 'Unused releases kept in addition to current and previous. Zero switches pruning off and keeps all.', 'retention', 'policy', ['system'], {type:'integer',minimum:0}, 3, 'replace', {unit:'raw',zero:'off'}, 5),
-  ...SETTINGS_REGISTRY.filter((def) => def.key.startsWith('calls.') || def.key.startsWith('agents.') && def.key.endsWith('_backend') || def.key === 'sharing.agent_messages' || def.key === 'sharing.on_link' || def.key === 'env.host_id' || def.key === 'org.terms' || def.key === 'collab.attribution' || def.key === 'thread.side_max' || def.key === 'summary.targets').map((def): Key => {
+  ...SETTINGS_REGISTRY.filter((def) => def.key.startsWith('calls.') || def.key.startsWith('agents.') && def.key.endsWith('_backend') || def.key === 'sharing.agent_messages' || def.key === 'sharing.on_link' || def.key === 'env.host_id' || def.key === 'org.terms' || def.key === 'collab.attribution' || def.key === 'thread.side_max' || def.key === 'summary.targets' || ['composer.paste_inline_context_share', 'thread.plan_first', 'thread.silent_after_secs', 'thread.plan_answered_by', 'orch_tools.owner_reads', 'threads.opening_items'].includes(def.key)).map((def): Key => {
     if (typeof def.group !== 'string') throw new Error('A served policy has its declared settings group');
     return { def: { ...def, group: def.group, ...(def.key === 'calls.repeat_limit' ? { display: { unit: 'raw', zero: 'off' } as const } : {}) }, at: def.scopes };
   }),
@@ -194,7 +194,7 @@ export const AUTHENTICATOR_CODE = '135790';
 const AUTHENTICATOR_SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
 
 /** The keys the interface may keep for a person: the nine the server admits. */
-const STATE_KEYS = ['help', 'layouts', 'viewers', 'timeline', 'sidebar', 'project_views', 'keys', 'reactions', 'inbox'] as const;
+const STATE_KEYS = ['help', 'layouts', 'viewers', 'timeline', 'interface', 'sidebar', 'project_views', 'keys', 'reactions', 'inbox', 'thread_setup'] as const;
 
 /** A person's keys in the shape the server keeps them: the switch, and for each action its keys as text or none. */
 function keysFault(body: Record<string, unknown>): string | null {
@@ -241,6 +241,8 @@ export class Settings implements Part {
   private tokens = new Map<string, TokenHeld[]>();
   private mintedTokens = new Map<string, { at: number; info: ApiTokenInfo; asked: string }>();
   private state = new Map<string, Record<string, unknown>>();
+  private modelRecents = new Map<string, { provider_id: string; model_name: string }[]>();
+  private modelRecentActs = new Map<string, string>();
   /** Who has asked for the secret of an authenticator app and not switched it on yet. */
   private pendingSecret = new Set<string>();
   /** Who is held out of which org: org identifier, then username. */
@@ -1230,6 +1232,23 @@ export class Settings implements Part {
         return this.makeToken(person, body, actKey);
       case 'GET /me/state':
         return { status: 200, body: this.stateOf(person) };
+      case 'GET /me/model-recents': {
+        const count = SETTINGS_REGISTRY.find((def) => def.key === 'interface.recent_models')?.default;
+        return { status: 200, body: { recent: structuredClone(this.modelRecents.get(person.me.username) ?? []), recent_count: typeof count === 'number' ? count : 0 } };
+      }
+      case 'POST /me/model-recents': {
+        if (typeof body.provider_id !== 'string' || typeof body.model_name !== 'string' || body.model_name.trim() === '') this.invalid('model_name', 'must name a model');
+        const model = { provider_id: body.provider_id as string, model_name: body.model_name as string };
+        const request = JSON.stringify(model), key = actKey === undefined ? null : `${person.me.username}:${actKey}`;
+        if (key !== null && this.modelRecentActs.has(key)) {
+          if (this.modelRecentActs.get(key) !== request) throw new Refusal(409, 'conflict.exists', 'the selection key was already used');
+          return { status: 204 };
+        }
+        this.modelRecents.set(person.me.username, [model, ...(this.modelRecents.get(person.me.username) ?? []).filter((held) => held.provider_id !== model.provider_id || held.model_name !== model.model_name)]);
+        if (key !== null) this.modelRecentActs.set(key, request);
+        this.world.users.tell(person.me.username, { what: 'model_recents' });
+        return { status: 204 };
+      }
       default:
     }
     if ((found = /^GET \/nodes\/([^/]+)\/audit$/.exec(route))) {

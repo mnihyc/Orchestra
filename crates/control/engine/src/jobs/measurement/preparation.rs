@@ -759,6 +759,8 @@ pub(crate) fn build_command(
     };
     Ok(Outgoing {
         authority: None,
+        input_facts: None,
+        session_offer: None,
         id,
         machine,
         kind,
@@ -915,6 +917,8 @@ impl CommandEvidence {
             body: command.body.clone(),
             deadline: Some(Time::new(command.deadline_at)),
             authority: None,
+            input_facts: None,
+            session_offer: None,
         };
         if command.serial_key.is_some() {
             return Ok(None);
@@ -949,6 +953,8 @@ impl CommandEvidence {
             body: command.body.clone(),
             deadline: Some(Time::new(command.deadline_at)),
             authority: None,
+            input_facts: None,
+            session_offer: None,
         };
         if command.serial_key().is_some() {
             return Ok(None);

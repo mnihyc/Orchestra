@@ -2,7 +2,7 @@
 //!
 //! Everything here acts on the caller and on nobody else. A favorite or a
 //! recent is a kind/id the caller may view; one they lost the right to is no
-//! longer listed. The interface state is kept under nine keys and no
+//! longer listed. The interface state is kept under its declared keys and no
 //! others, whole, and no value is larger than the limit; the last view of a
 //! project is also kept one project at a time, beside the others. Drafts and the
 //! chat states belong to the threads and the chats, and the read position
@@ -71,6 +71,9 @@ use orch_api_contract::personal::MeSubscriptionList;
 use orch_api_contract::personal::MeSubscriptionListQuery;
 
 use orch_api_contract::personal::MeVisitCreate;
+use orch_api_contract::personal::{
+    MeModelRecentCreate, MeModelRecentList, ModelRecent, ModelRecents,
+};
 
 use orch_api_contract::personal::PERSONAL_STATE_MAX_BYTES;
 
@@ -110,6 +113,7 @@ pub fn mount(registry: &mut Registry) {
     registry
         .creation(MeRecentCreate, creation_ack::<MeRecentCreateBody>())
         .creation(MeVisitCreate, creation_ack::<PersonalTarget>())
+        .creation(MeModelRecentCreate, creation_ack::<ModelRecent>())
         .on_snapshot_read_with_optional_operation(
             MeFavoriteList,
             crate::key_operations::native::selected::<native::Favorites>,
@@ -133,6 +137,8 @@ pub fn mount(registry: &mut Registry) {
         )
         .on(MeStateGet, state_get)
         .on(MeStateSet, state_set)
+        .on(MeModelRecentList, model_recent_list)
+        .on(MeModelRecentCreate, model_recent_create)
         .on(MeProjectViewSet, project_view_set)
         .on(MeProjectViewDelete, project_view_delete);
 }
@@ -373,6 +379,55 @@ async fn state_get(ctx: Ctx, (): (), (): ()) -> ApiResult<PersonalState> {
         .collect())
 }
 
+async fn model_recent_list(ctx: Ctx, (): (), (): ()) -> ApiResult<ModelRecents> {
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    let recent_count = orch_settings::get::<i64>(
+        &mut conn,
+        orch_settings::Place::System,
+        orch_settings_contract::registry::keys::INTERFACE_RECENT_MODELS,
+    )
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(|| ApiError::internal("the recent model default is missing"))?;
+    let recent = identity::recent_models(&mut conn, principal.user())
+        .await?
+        .into_iter()
+        .map(|(provider_id, model_name)| ModelRecent {
+            provider_id,
+            model_name,
+        })
+        .collect();
+    Ok(ModelRecents {
+        recent,
+        recent_count,
+    })
+}
+
+async fn model_recent_create(ctx: Ctx, (): (), body: ModelRecent) -> ApiResult<()> {
+    if body.model_name.trim().is_empty() {
+        return Err(invalid("model_name", "must name a model"));
+    }
+    let (mut conn, guard) = transaction_guard::begin(&ctx).await?;
+    let person = guard.principal().user();
+    identity::note_model_choice(
+        &mut conn,
+        person,
+        body.provider_id,
+        &body.model_name,
+        guard.now().get(),
+    )
+    .await?;
+    orch_db::sequences::notify_user_event(
+        &mut conn,
+        &[person],
+        &serde_json::json!({"what":"model_recents"}),
+    )
+    .await?;
+    conn.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(())
+}
+
 /// Replaces the whole value of one key of that state.
 async fn state_set(ctx: Ctx, (): (), mut value: Json) -> ApiResult<()> {
     let key = ctx.param("key")?;
@@ -380,8 +435,24 @@ async fn state_set(ctx: Ctx, (): (), mut value: Json) -> ApiResult<()> {
     if known.is_none() {
         return Err(invalid(
             "key",
-            "is none of help, layouts, viewers, timeline, sidebar, project_views, keys, reactions and inbox",
+            "is none of help, layouts, viewers, timeline, interface, sidebar, project_views, keys, reactions, inbox and thread_setup",
         ));
+    }
+    if known == Some(PersonalStateKey::Interface) {
+        use orch_settings_contract::registry::{self, keys};
+        let choices = value
+            .as_object()
+            .ok_or_else(|| invalid("interface", "must be an object"))?;
+        for (field, setting) in [
+            ("kept_closed_tabs", keys::INTERFACE_KEPT_CLOSED_TABS),
+            ("progress_delay_ms", keys::INTERFACE_PROGRESS_DELAY_MS),
+            ("read_freshness_ms", keys::INTERFACE_READ_FRESHNESS_MS),
+        ] {
+            if let Some(choice) = choices.get(field) {
+                registry::validate(setting, choice)
+                    .map_err(|error| invalid(&format!("interface.{field}"), &error.to_string()))?;
+            }
+        }
     }
     // A person's keys are kept only as keys of actions there are, none of them meeting another's.
     if known == Some(PersonalStateKey::Keys) {

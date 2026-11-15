@@ -2176,6 +2176,26 @@ pub async fn interface_state(conn: &mut Conn, user: Id) -> Result<Vec<(String, J
     )
 }
 
+/// The caller's own model choices, newest first; no other person's history is joined.
+pub async fn recent_models(conn: &mut Conn, user: Id) -> Result<Vec<(Id, String)>, DbError> {
+    Ok(sqlx::query_as("SELECT provider_id, model_name FROM user_model_recents WHERE user_id=$1 ORDER BY position DESC")
+        .bind(user).fetch_all(conn).await?)
+}
+
+/// Each selection updates only its own identity; concurrent devices retain both choices.
+pub async fn note_model_choice(
+    conn: &mut Conn,
+    user: Id,
+    provider: Id,
+    model: &str,
+    at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query("INSERT INTO user_model_recents(user_id,provider_id,model_name,used_at) VALUES($1,$2,$3,$4)
+        ON CONFLICT(user_id,provider_id,model_name) DO UPDATE SET position=DEFAULT,used_at=EXCLUDED.used_at")
+        .bind(user).bind(provider).bind(model).bind(at).execute(conn).await?;
+    Ok(())
+}
+
 /// A served page carries its last-place fields without overwriting concurrent sidebar choices.
 pub async fn note_opened_place(
     conn: &mut Conn,

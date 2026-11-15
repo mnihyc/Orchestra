@@ -1,0 +1,9 @@
+fmt
+clippy
+contracts
+test -p orch-provider-contract -p orch-agent-contract -p orch-realtime-contract -p orch-protocol-openai-responses -p orch-protocol-google-interactions --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test model_entries --test provider_models --test binding_options --test personal --test semantic_admin
+test -p orch-api-core --test ask -- a_native_ask_default_use_is_recent_for_its_person_without_opening_a_model_picker
+test -p orch-api-core --test ask -- an_embedding_entry_never_becomes_the_default_ask_model_because_its_provider_also_serves_chat

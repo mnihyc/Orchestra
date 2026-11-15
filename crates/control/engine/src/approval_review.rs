@@ -39,13 +39,66 @@ impl Engine {
         models: &[String],
         binding: Option<(orch_agent_contract::credentials::CredentialPath, &str)>,
     ) -> Result<Vec<ApprovalMode>, EngineError> {
+        let choices = self
+            .approval_choices_with_binding(conn, environment, descriptor, allowed, models, binding)
+            .await?;
+        Ok(descriptor
+            .approval_modes
+            .iter()
+            .copied()
+            .filter(|mode| {
+                let name = serde_json::to_value(mode).ok();
+                choices.iter().any(|choice| {
+                    choice.available
+                        && name.as_ref().and_then(Json::as_str) == Some(choice.mode.as_str())
+                })
+            })
+            .fold(Vec::new(), |mut modes, mode| {
+                if !modes.contains(&mode) {
+                    modes.push(mode);
+                }
+                modes
+            }))
+    }
+
+    /// Current facts from the same gates used by admission, retaining only declared modes.
+    pub async fn approval_choices_with_binding(
+        &self,
+        conn: &mut Conn,
+        environment: Option<Id>,
+        descriptor: &AgentDescriptor,
+        allowed: &[ApprovalMode],
+        models: &[String],
+        binding: Option<(orch_agent_contract::credentials::CredentialPath, &str)>,
+    ) -> Result<Vec<orch_api_contract::settings::ApprovalModeChoice>, EngineError> {
+        use orch_api_contract::settings::{
+            ApprovalChoiceReason as Reason, ApprovalChoiceRequirement as Requirement,
+            ApprovalModeChoice,
+        };
         let mut modes = Vec::new();
         for mode in &descriptor.approval_modes {
-            if !allowed.contains(mode) {
+            let name = serde_json::to_value(mode)?
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            if modes
+                .iter()
+                .any(|choice: &ApprovalModeChoice| choice.mode == name)
+            {
                 continue;
             }
-            // Auto exists only where the descriptor of the build says so (it keeps the mode only for a build whose
-            // check proved it) and declares the reviewer, and only for someone who may use that reviewer's model.
+            if !allowed.contains(mode) {
+                modes.push(ApprovalModeChoice {
+                    mode: name,
+                    available: false,
+                    reason: Some(Reason::NotAllowedHere),
+                    requirement: Some(Requirement::PolicyAllowance),
+                });
+                continue;
+            }
+            // Auto exists only where the descriptor of the build says so (it keeps the mode for a program that has the
+            // trial of it, unless a check of this build ran the trial and it failed) and declares the reviewer, and
+            // only for someone who may use that reviewer's model.
             let reviewer = match binding {
                 Some((path, model)) => {
                     reviewer_allowed_for(*mode, Some(descriptor), models, path, model)
@@ -53,10 +106,31 @@ impl Engine {
                 None => reviewer_allowed(*mode, Some(descriptor), models),
             };
             if *mode == ApprovalMode::Auto && reviewer.is_err() {
+                let missing = descriptor.capabilities.approval_reviewer.is_none();
+                modes.push(ApprovalModeChoice {
+                    mode: name,
+                    available: false,
+                    reason: Some(if missing {
+                        Reason::ReviewerUnavailable
+                    } else {
+                        Reason::ReviewerAccessRequired
+                    }),
+                    requirement: Some(if missing {
+                        Requirement::NativeReviewer
+                    } else {
+                        Requirement::ReviewerUse
+                    }),
+                });
                 continue;
             }
             if *mode == ApprovalMode::Bypass {
                 let Some(environment) = environment else {
+                    modes.push(ApprovalModeChoice {
+                        mode: name,
+                        available: false,
+                        reason: Some(Reason::RequiredIsolationUnavailable),
+                        requirement: Some(Requirement::IsolatedEnvironment),
+                    });
                     continue;
                 };
                 if self
@@ -64,12 +138,21 @@ impl Engine {
                     .await?
                     .is_some()
                 {
+                    modes.push(ApprovalModeChoice {
+                        mode: name,
+                        available: false,
+                        reason: Some(Reason::RequiredIsolationUnavailable),
+                        requirement: Some(Requirement::IsolatedEnvironment),
+                    });
                     continue;
                 }
             }
-            if !modes.contains(mode) {
-                modes.push(*mode);
-            }
+            modes.push(ApprovalModeChoice {
+                mode: name,
+                available: true,
+                reason: None,
+                requirement: None,
+            });
         }
         Ok(modes)
     }
@@ -98,6 +181,7 @@ impl Engine {
                 .provider_use(
                     conn,
                     &ProviderUse {
+                        purpose: orch_access_contract::permissions::ProviderPurpose::Review,
                         person: person.unwrap_or(thread.owner_id),
                         node: thread.node_id,
                         provider,

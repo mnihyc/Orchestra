@@ -36,6 +36,7 @@ import type {
   ThreadInputUpdateReply,
   ThreadLimits,
   ThreadSync,
+  ThreadScreenFacts,
   TreeNode,
   Turn,
 } from '../../src/generated/api-types.ts';
@@ -678,6 +679,10 @@ export class ThreadWorld implements Part {
     const route = `${method} ${path}`;
     let found: RegExpExecArray | null;
 
+    if ((found = /^GET \/threads\/([^/]+)\/screen-facts$/.exec(route))) {
+      return { status: 200, body: this.screenFacts(person, found[1] ?? '') };
+    }
+
     if ((found = /^GET \/threads\/([^/]+)\/gateway$/.exec(route))) {
       const id = found[1] ?? '';
       this.world.change.threadOf(person, id);
@@ -706,6 +711,12 @@ export class ThreadWorld implements Part {
       const item = this.held(found[1] ?? '').items.get(found[2] ?? '');
       if (item === undefined) throw new Refusal(404, 'not_found', 'there is no such item');
       return { status: 200, body: this.itemFor(person, found[1] ?? '', item) };
+    }
+    if ((found = /^GET \/threads\/([^/]+)\/items\/([^/]+)\/raw$/.exec(route))) {
+      this.places.need(person, found[1] ?? '', 'thread.view');
+      const item = this.held(found[1] ?? '').items.get(found[2] ?? '');
+      if (item?.kind !== 'tool_call' || item.payload.raw === undefined || item.payload.raw === null) throw new Refusal(404, 'not_found', 'there is no such call');
+      return { status: 200, body: item.payload.raw };
     }
     if ((found = /^GET \/threads\/([^/]+)\/items\/([^/]+)\/output$/.exec(route))) {
       this.places.need(person, found[1] ?? '', 'thread.view');
@@ -871,6 +882,14 @@ export class ThreadWorld implements Part {
   /** The whole output of commands whose output is longer than what is held inline, by item. */
   wholeOutput = new Map<string, string>();
 
+  screenFacts(person: Person, threadId: string): ThreadScreenFacts {
+    this.world.change.threadOf(person, threadId);
+    const silent = this.world.settings.valueAt(threadId, 'thread.silent_after_secs').value;
+    const answered = this.world.settings.valueAt(threadId, 'thread.plan_answered_by').value;
+    if (typeof silent !== 'number' || (answered !== 'writers' && answered !== 'managers')) throw new Error('The screen facts need their registered effective values');
+    return { silent_after_secs: silent, plan_answered_by: answered };
+  }
+
   settingsOf(nodeId: string): ResolvedSetting[] {
     const held = this.held(nodeId);
     const setting = (key: string, value: unknown): ResolvedSetting => ({ key, value, source: { scope: 'default', node: null }, own: null, locked_by: null, writable: true, parts: [] });
@@ -943,7 +962,13 @@ export class ThreadWorld implements Part {
     // What the person said at once waits as the first input of the thread.
     const first = body.first_input as { content?: unknown; client_id?: string } | undefined;
     if (first?.content !== undefined) this.queue(person, row.id, { content: first.content, delivery: 'queue', client_id: first.client_id });
-    return this.thread(person, this.rowOf(row.id));
+    const thread = this.thread(person, this.rowOf(row.id));
+    this.world.settings.handle(person, 'PUT', '/me/state/thread_setup', new URLSearchParams(), {
+      place: topicId, picks: { provider: providerId, agent: binding?.agent_id ?? null, model, effort: thread.effort,
+        environment: environmentId, arrangement },
+    });
+    if (model !== null) this.world.settings.handle(person, 'POST', '/me/model-recents', new URLSearchParams(), { provider_id: providerId, model_name: model });
+    return thread;
   }
 
   private history(person: Person, threadId: string, turns: boolean, query: URLSearchParams): unknown {
@@ -998,7 +1023,7 @@ export class ThreadWorld implements Part {
     const row = this.rowOf(threadId);
     const thread = this.thread(person, row);
     const providerId = thread.binding?.provider.id ?? '';
-    const options = this.world.resources.modelsOf(providerId).map((entry) => ({ ...MODEL_ESTIMATE, allowed: entry.enabled, display_name: entry.display_name, model_name: entry.model_name, ...(entry.groups.length === 0 ? {} : { groups: entry.groups }), parameters: entry.parameters, reason: entry.enabled ? null : 'disabled' }));
+    const options = this.world.resources.modelsOf(providerId).map((entry) => ({ ...MODEL_ESTIMATE, ...(entry.purpose === undefined ? {} : { purpose: entry.purpose }), allowed: entry.enabled, display_name: entry.display_name, model_name: entry.model_name, ...(entry.groups.length === 0 ? {} : { groups: entry.groups }), parameters: entry.parameters, reason: entry.enabled ? null : 'disabled' }));
     const writable = this.places.access(person, threadId).permissions.includes('thread.manage');
     const source = { scope: 'default', node: null };
     const held = this.held(threadId);
@@ -1016,7 +1041,15 @@ export class ThreadWorld implements Part {
           writable: writable && (held.lockedBy === null || held.lockedBy === undefined) }];
       });
     return {
-      provider: providerId === '' ? undefined : this.world.resources.providerForFacts(person, providerId),
+      composer: {
+        default_delivery: this.world.settings.valueAt(threadId, 'collab.default_delivery').value,
+        paste_inline_context_share: this.world.settings.valueAt(threadId, 'composer.paste_inline_context_share').value,
+        plan_first: this.world.settings.valueAt(threadId, 'thread.plan_first').value,
+        owner_reads: this.world.settings.valueAt(threadId, 'orch_tools.owner_reads').value,
+      },
+      agent: thread.binding === null ? undefined : { agent: thread.binding.agent, parameters: this.world.resources.declaredBy(thread.binding.agent.id) },
+      environment: thread.environment === null || !thread.environment_permissions.includes('files.view') ? undefined : this.world.resources.workspaceRow(thread.environment.id),
+      provider: providerId === '' ? undefined : this.world.resources.providerForThread(person, providerId),
       effort: { source, supported: true, value: thread.effort, writable },
       model: { options, source, value: thread.model, writable },
       parameters: [...parameters, ...this.parameterViewsOf(person, threadId, thread.model)],
@@ -1139,13 +1172,13 @@ export class ThreadWorld implements Part {
     return publish(next);
   }
 
-  private interrupt(person: Person, threadId: string, body: Record<string, unknown>): Turn {
+  private interrupt(person: Person, threadId: string, body: Record<string, unknown>): { state: 'stopped'; requested_at: string; turn: Turn } {
     this.places.need(person, threadId, 'thread.interact');
     const held = this.held(threadId);
     const turn = held.turns.get(typeof body.turn_id === 'string' ? body.turn_id : '');
     if (turn === undefined || (turn.state !== 'running' && turn.state !== 'starting')) throw new Refusal(409, 'thread.not_running', 'that turn is not running');
     this.emit(threadId, { turns: [{ ...turn, state: 'interrupted', completed_at: new Date().toISOString(), phase: null, interrupted_by: userRef(person.me) }], thread: { state: 'idle', current_turn_id: null } });
-    return must(held.turns.get(turn.id), 'turn');
+    return { state: 'stopped', requested_at: new Date().toISOString(), turn: must(held.turns.get(turn.id), 'turn') };
   }
 
   private retry(person: Person, threadId: string, turnId: string, body: Record<string, unknown>): { input: ThreadInput; seq: number } {
@@ -1163,6 +1196,8 @@ export class ThreadWorld implements Part {
 
   /** Timeline snapshots belong to the current reader and are never kept in the shared item map. */
   private itemFor(person: Person, threadId: string, item: Item): Item {
+    // A thread's items leave out the call as its harness made it; it is read apart.
+    if (item.kind === 'tool_call') return { ...item, payload: { ...item.payload, raw: undefined } };
     if (item.kind !== 'approval') return item;
     const approval = this.approvals.get(item.payload.approval_id);
     return { ...item, payload: { approval_id: item.payload.approval_id,
