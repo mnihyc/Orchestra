@@ -40,6 +40,7 @@ use orch_settings::{Place, get as setting};
 use orch_settings_contract::registry::keys;
 use orch_types::{Id, Json, Time};
 use std::sync::OnceLock;
+mod continuity;
 
 /// The most bytes of text of one frame that are kept whole: a frame can carry a file, and a
 /// diagnostic is for reading what was asked and answered, not for keeping what was sent. A page of
@@ -100,7 +101,7 @@ pub fn install_master_key(key: MasterKey) -> bool {
     MASTER_KEY.set(key).is_ok()
 }
 
-fn master_key() -> Result<&'static MasterKey, String> {
+pub(crate) fn master_key() -> Result<&'static MasterKey, String> {
     MASTER_KEY
         .get()
         .ok_or_else(|| "the key that opens secrets is not installed".to_owned())
@@ -175,9 +176,15 @@ impl Keeper {
             tracing::warn!(thread = %self.thread, "a frame of a harness was dropped: what masks it could not be made");
             return Ok(());
         };
-        let (direction, payload) = packed(frame, redactor);
+        let redactor = redactor.clone();
+        if frame.n <= rows::last_number(conn, self.segment).await? {
+            return Ok(());
+        }
+        let mut public = frame.clone();
+        public.payload = continuity::prepare(conn, self.segment, frame, &redactor).await?;
+        let (direction, payload) = packed(&public, &redactor);
         rows::append(
-            conn,
+            &mut *conn,
             &NewRawEvent {
                 segment: self.segment,
                 n: frame.n,
@@ -188,6 +195,7 @@ impl Keeper {
             },
         )
         .await?;
+        continuity::finish(conn, self.segment).await?;
         Ok(())
     }
 }
@@ -416,7 +424,7 @@ fn is_secret_pair(members: &serde_json::Map<String, Json>) -> bool {
 /// Masks every text of a JSON value, every name of a member, the value of every member that is
 /// named like a secret, the value of a pair whose name says it is one, and the value of every
 /// `NAME=value` in a text whose name says so.
-fn mask_value(value: &mut Json, redactor: &Redactor) {
+pub(crate) fn mask_value(value: &mut Json, redactor: &Redactor) {
     match value {
         Json::String(text) => *text = mask_assignments(&redactor.mask(text)),
         Json::Array(items) => {
@@ -487,13 +495,21 @@ fn head_of(text: &str, bytes: usize) -> &str {
 fn packed(frame: &RawFrame, redactor: &Redactor) -> (&'static str, Vec<u8>) {
     let (direction, foreign) = direction_of(&frame.direction);
     let mut payload = frame.payload.clone();
+    let state = payload.get("_orch_capture").cloned();
     mask_value(&mut payload, redactor);
+    if let Some(state) = state {
+        payload["_orch_capture"] = state;
+    }
     if foreign {
         payload = serde_json::json!({
             "direction": redactor.mask(&frame.direction),
             "frame": payload,
         });
     }
+    (direction, compress(&payload))
+}
+
+fn compress(payload: &Json) -> Vec<u8> {
     let mut text = payload.to_string();
     if text.len() > FRAME_MAX_BYTES {
         text = serde_json::json!({
@@ -506,7 +522,7 @@ fn packed(frame: &RawFrame, redactor: &Redactor) -> (&'static str, Vec<u8>) {
     // Compressing text in memory does not fail; a frame that would not compress is kept as it is.
     let compressed = zstd::encode_all(text.as_bytes(), COMPRESSION_LEVEL)
         .unwrap_or_else(|_| text.clone().into_bytes());
-    (direction, compressed)
+    compressed
 }
 
 /// The JSON a stored frame holds.
@@ -542,6 +558,32 @@ pub async fn page(
         Some(oldest) => rows::older_than(conn, segment, oldest.n).await?,
         None => false,
     };
+    let events = present_rows(conn, thread, found).await?;
+    Ok(RawPage { events, has_older })
+}
+
+/// Newly captured or completed diagnostic text, bounded to one source publication batch.
+pub async fn changed(
+    conn: &mut Conn,
+    thread: &ThreadRow,
+    segment: Id,
+    after: i64,
+    through: i64,
+    limit: u32,
+) -> Result<Vec<(i64, RawEvent)>, EngineError> {
+    let found = rows::changed(conn, segment, after, through, i64::from(limit)).await?;
+    let revisions: Vec<_> = found.iter().map(|row| row.change_id).collect();
+    Ok(revisions
+        .into_iter()
+        .zip(present_rows(conn, thread, found).await?)
+        .collect())
+}
+
+async fn present_rows(
+    conn: &mut Conn,
+    thread: &ThreadRow,
+    found: Vec<rows::RawEventRow>,
+) -> Result<Vec<RawEvent>, EngineError> {
     let masking = if found.is_empty() {
         None
     } else {
@@ -550,10 +592,15 @@ pub async fn page(
     let mut events = Vec::with_capacity(found.len());
     for row in found {
         let mut payload = unpacked(&row.payload)?;
+        let masking_state = payload
+            .as_object_mut()
+            .and_then(|value| value.remove("_orch_capture"))
+            .and_then(|value| serde_json::from_value(value).ok());
         if let Some(Masking::Ready(redactor)) = &masking {
             mask_value(&mut payload, redactor);
         }
         events.push(RawEvent {
+            masking: masking_state,
             n: row.n,
             at: Time::new(row.at),
             direction: if row.direction == TO_HARNESS {
@@ -564,7 +611,7 @@ pub async fn page(
             payload,
         });
     }
-    Ok(RawPage { events, has_older })
+    Ok(events)
 }
 
 #[cfg(test)]
@@ -686,6 +733,8 @@ mod tests {
         assert_eq!(direction_of("connector"), (FROM_HARNESS, true));
         let (direction, bytes) = packed(
             &RawFrame {
+                text: Vec::new(),
+                text_complete: true,
                 n: 1,
                 direction: "connector".to_owned(),
                 payload: json!({ "policy": "x" }),
@@ -704,6 +753,8 @@ mod tests {
         let big = "é".repeat(FRAME_MAX_BYTES);
         let (_, bytes) = packed(
             &RawFrame {
+                text: Vec::new(),
+                text_complete: true,
                 n: 1,
                 direction: "out".to_owned(),
                 payload: json!({ "file": big }),
@@ -722,6 +773,8 @@ mod tests {
         let payload = json!({ "a": [1, 2, { "b": null }], "c": "text" });
         let (_, bytes) = packed(
             &RawFrame {
+                text: Vec::new(),
+                text_complete: true,
                 n: 1,
                 direction: "in".to_owned(),
                 payload: payload.clone(),

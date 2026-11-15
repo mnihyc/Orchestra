@@ -114,6 +114,8 @@ pub struct NewSourceApproval<'a> {
     pub requester: Option<Id>,
     /// The request as reviewed.
     pub request: &'a Json,
+    /// Encrypted native operands, never part of an approval reader.
+    pub native_request: Option<&'a [u8]>,
     /// Its deciding permission.
     pub permission: &'a str,
     /// Its short title.
@@ -209,7 +211,6 @@ async fn warn_of_a_reference_from_another_turn(
             thread_id = %new.thread_id,
             turn_id = %new.turn_id,
             earlier_turn_id = ?turn,
-            native_ref = new.native_ref,
             "a request of the harness has the reference of one from another turn of the thread and was dropped: nobody is asked"
         );
     }
@@ -227,8 +228,8 @@ pub async fn insert_harness_approval(
 ) -> Result<Option<ApprovalRow>, DbError> {
     let made: Option<Id> = sqlx::query_scalar(
         "INSERT INTO approvals (id, kind, state, node_id, thread_id, turn_id, title, request, required_permission,
-                                native_ref, created_at, updated_at)
-         SELECT $1, 'harness', 'pending', $2, $2, $3, $4, $5, $6, $7, $8, $8
+                                native_ref, created_at, updated_at, native_request)
+         SELECT $1, 'harness', 'pending', $2, $2, $3, $4, $5, $6, $7, $8, $8, $9
           WHERE NOT EXISTS (SELECT 1 FROM approvals WHERE thread_id = $2 AND kind = 'harness' AND native_ref = $7)
          RETURNING id",
     )
@@ -240,6 +241,7 @@ pub async fn insert_harness_approval(
         .bind(HARNESS_REQUIRED_PERMISSION)
         .bind(new.native_ref)
         .bind(new.at)
+        .bind(new.native_request)
         .fetch_optional(&mut *conn)
         .await?;
     match made {
@@ -350,6 +352,76 @@ pub async fn decide(
         super::notifications::inbox::settle_approval(conn, id, at).await?;
     }
     Ok(done.rows_affected() == 1)
+}
+
+/// Records a person's harness decision without taking the thread or recipients' rows.
+/// The saved binding also makes the remaining thread effects discoverable after a restart.
+pub async fn record_harness_decision(
+    conn: &mut Conn,
+    id: Id,
+    state: &str,
+    by: Id,
+    decision: &Json,
+    binding: &Json,
+    at: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query(
+        "UPDATE approvals SET state=$2, decided_by=$3, decision=$4, decision_settlement=$5,
+                              decided_at=$6, updated_at=$6
+          WHERE id=$1 AND kind='harness' AND state='pending'",
+    )
+    .bind(id)
+    .bind(state)
+    .bind(by)
+    .bind(decision)
+    .bind(binding)
+    .bind(at)
+    .execute(conn)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+/// Threads with recorded decisions whose thread effects have not committed yet.
+pub async fn unsettled_threads(conn: &mut Conn, limit: i64) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT thread_id FROM approvals WHERE decision_settlement IS NOT NULL
+          AND thread_id IS NOT NULL GROUP BY thread_id ORDER BY min(decided_at),thread_id LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// Recorded decisions of one thread, including a decision the harness could not receive.
+pub async fn unsettled_of_thread(conn: &mut Conn, thread: Id) -> Result<Vec<ApprovalRow>, DbError> {
+    let sql = format!(
+        "{APPROVAL_SELECT} WHERE thread_id=$1 AND decision_settlement IS NOT NULL ORDER BY decided_at,id"
+    );
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(thread)
+        .fetch_all(conn)
+        .await?)
+}
+
+/// The binding saved with a decision; none once its remaining effects committed.
+pub async fn decision_settlement(conn: &mut Conn, id: Id) -> Result<Option<Json>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT decision_settlement FROM approvals WHERE id=$1")
+            .bind(id)
+            .fetch_optional(conn)
+            .await?
+            .flatten(),
+    )
+}
+
+/// Marks the thread effects complete in the same transaction as those effects.
+pub async fn finish_decision_settlement(conn: &mut Conn, id: Id) -> Result<(), DbError> {
+    sqlx::query("UPDATE approvals SET decision_settlement=NULL WHERE id=$1")
+        .bind(id)
+        .execute(conn)
+        .await?;
+    Ok(())
 }
 
 /// Cancels an approval that is pending (the harness withdrew it, or its turn
