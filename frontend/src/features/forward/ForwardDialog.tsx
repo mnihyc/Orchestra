@@ -108,7 +108,7 @@ function ForwardForm({ source, onClose, onForwarded, initialDestinations }: { so
   const actKey = useActKey();
   const [query, setQuery] = useState('');
   const [chosen, setChosen] = useState<Destination[]>(() => [...initialDestinations]);
-  const threadChecks = useQueries({ queries: chosen.flatMap((target) => target.kind === 'thread' ? [{ ...nodeQuery(target.threadId), retry:false, staleTime:0 }] : []) });
+  const threadChecks = useQueries({ queries: chosen.flatMap((target) => target.kind === 'thread' ? [{ ...nodeQuery(target.threadId), retry:false }] : []) });
   const threadInteract = 'thread.interact';
   const mayAsk = threadChecks.every((read) => read.isSuccess && !read.isFetching && read.data.kind === 'thread' && holds(read.data.access, threadInteract) && !read.data.archived);
   const [comment, setComment] = useState('');

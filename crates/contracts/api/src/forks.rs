@@ -521,10 +521,28 @@ pub struct FilesMissing {
 /// The home directory that goes along.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Measurement {
+    /// This reference's native cache assessment and observer grace, when captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<MeasurementTiming>,
     /// The background job counting this data; its ordinary live feed carries the counts.
     pub job_id: Id,
     /// When the complete count was taken; null while counting.
     pub measured_at: Option<Time>,
+}
+
+/// A native assessment of one count's reuse and actual observer-cancellation wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MeasurementTiming {
+    /// Reuse boundary under the policy actually assessed; pending and inapplicable remain distinct.
+    pub cache_valid_until: crate::workspace::JobWaitTime,
+    /// The actual retained grace while work is active; completion makes it inapplicable.
+    pub observer_grace_until: crate::workspace::JobWaitTime,
+    /// When the native supplier made this assessment.
+    pub assessed_at: Time,
+    /// The captured cache policy and revision.
+    pub cache_policy: Option<crate::workspace::JobWorkPolicy>,
+    /// The captured observer-grace policy and revision.
+    pub observer_policy: Option<crate::workspace::JobWorkPolicy>,
 }
 
 /// The home directory that goes along.
@@ -813,12 +831,69 @@ pub struct PlanMcpServer {
 /// Whether the agent's notes travel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ForkPlanMemory {
-    /// Whether they go along.
+    /// The conditional reviewed rule, rather than proof of a copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<MemoryProposal>,
+    /// Whether they are asked to go along.
     pub carried: bool,
-    /// How many files.
-    pub files: i64,
-    /// How many bytes.
-    pub bytes: i64,
+    /// How many source files were actually measured; null when not measured.
+    pub files: Option<i64>,
+    /// How many source bytes were actually measured; null when not measured.
+    pub bytes: Option<i64>,
+}
+
+/// What a reviewed change proposes for the source's agent notes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryProposedFate {
+    /// The same environment and directory remain shared.
+    Shared,
+    /// A native conditional copy keeps any target that appears meanwhile.
+    CopyIfAbsent,
+    /// The requested history/notes choice leaves source notes behind.
+    NotCarried,
+    /// The source has agent memory switched off; files follow the ordinary file selection.
+    Off,
+}
+
+/// Directory facts from the already admitted original file plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryProposal {
+    /// Source-relative note directory, or null when its name is withheld.
+    pub source_directory: Option<String>,
+    /// Target-relative note directory, or null when its name is withheld.
+    pub target_directory: Option<String>,
+    /// The reviewed conditional fate.
+    pub proposed_fate: MemoryProposedFate,
+    /// The metadata revision actually observed, never a claim that the physical directory is absent.
+    pub observed_target_revision: Option<orch_types::Revision>,
+}
+
+/// The actual native notes decision, independent of a later preview or setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryFate {
+    /// The selected directory stays shared.
+    Shared,
+    /// The complete notes directory was published.
+    Copied,
+    /// The native target directory won and was kept unchanged.
+    TargetKept,
+    /// Source notes were not copied.
+    NotCarried,
+    /// Source memory was off; the ordinary file rule applied.
+    Off,
+}
+
+/// A retained outcome, captured by the native decision rather than the current plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryOutcome {
+    /// What actually happened.
+    pub fate: MemoryFate,
+    /// When that decision was recorded.
+    pub at: Time,
+    /// Uncertain work in a private stage was preserved instead of being deleted.
+    pub cleanup_pending: bool,
 }
 
 /// The actual execution program of the source, with only resources it really binds.
@@ -948,6 +1023,12 @@ pub struct HistorySummaryEstimate {
 /// How the history travels in a plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ForkPlanHistory {
+    /// Native ordinal bounds selected by this proposal, never a loaded-page index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_range: Option<HistoryTurnRange>,
+    /// The actual computed allowance basis used by the proposed transport.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_allowance: Option<HistoryContextAllowance>,
     /// The target build whose check disabled native import; Carry uses the remaining method.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_import_unavailable: Option<crate::admin::RunningHarnessBuild>,
@@ -966,6 +1047,100 @@ pub struct ForkPlanHistory {
     /// For a summary: what it will send to the summary model and cost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<HistorySummaryEstimate>,
+}
+
+/// Inclusive ordinals in the source conversation's native view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HistoryTurnRange {
+    /// The first selected ordinal.
+    pub from: i64,
+    /// The last selected ordinal.
+    pub through: i64,
+}
+
+/// The actual input used to calculate the carried context, independent of the transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryAllowanceSource {
+    /// The target model's declared window and the resolved carry share.
+    DeclaredModelWindow,
+    /// The target model did not declare a window; the existing brief fallback applies.
+    UnknownModelWindow,
+    /// A native session owns its own context management.
+    NativeSession,
+    /// A real summary, rather than literal carried turns.
+    Summary,
+    /// No summary was produced; brief turns accompany the transcript.
+    SummaryFallback,
+    /// No history is requested.
+    Nothing,
+}
+
+/// A proposal or captured attempt's context allowance, not its measured token usage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HistoryContextAllowance {
+    /// The resolved percentage actually used; null where no model-window share applies.
+    pub share: Option<i64>,
+    /// The resulting token allowance; null when the window is unknown or the transport does not use it.
+    pub tokens: Option<i64>,
+    /// The native calculation or fallback that supplied this allowance.
+    pub source: HistoryAllowanceSource,
+    /// The captured policy layer, when a carry-share setting was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setting_scope: Option<crate::settings::SettingScope>,
+}
+
+/// How source turns are represented in the new agent's context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryContextForm {
+    /// The harness receives native session history.
+    Native,
+    /// Literal recorded text is carried.
+    Verbatim,
+    /// The selected turns are carried in brief.
+    Brief,
+    /// A model's fallible summary is carried instead of literal turns.
+    Summary,
+    /// No source history is carried.
+    Nothing,
+}
+
+/// The separate transcript file's actual delivery, never inferred from context coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryTranscriptCoverage {
+    /// The complete selected transcript was delivered.
+    Complete,
+    /// Only part of the selected transcript was delivered.
+    Partial,
+    /// This transport needs no separate transcript file; the readable conversation remains retained.
+    NotApplicable,
+    /// No delivery coverage was captured.
+    Unreported,
+}
+
+/// A history transport's actual outcome, retained with its opened session rather than today's policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HistoryCoverage {
+    /// The transport that actually succeeded.
+    pub method: HistoryMethod,
+    /// The confirmed native selection bounds.
+    pub selected_range: Option<HistoryTurnRange>,
+    /// Exact ordinals represented in context; summary form has no literal turn ranges.
+    pub actual_ranges: Vec<HistoryTurnRange>,
+    /// A carried turn cut by the actual byte budget, when any.
+    pub partial_turn: Option<i64>,
+    /// Selected turns before this ordinal were not included in context.
+    pub omitted_prefix: Option<i64>,
+    /// Native, literal, brief, derived or absent context.
+    pub context_form: HistoryContextForm,
+    /// What happened to the separate transcript file.
+    pub transcript_coverage: HistoryTranscriptCoverage,
+    /// The actual allowance in force for this transport.
+    pub context_allowance: HistoryContextAllowance,
+    /// When the successful transport was recorded.
+    pub at: Time,
 }
 
 /// A permission whose holders differ on the result.

@@ -88,7 +88,7 @@ export function useStart(onStarted: (thread: Thread) => void): Starting {
         ...(asked.agentAccess === undefined ? {} : { agentAccess: { ...asked.agentAccess, parts: { ...asked.agentAccess.parts } } }) };
       const inputId = firstInput.current;
       const { place, resolved } = plan;
-      if (resolved.provider === null || resolved.agent === null || resolved.model === null || resolved.arrangement === null) {
+      if (resolved.missing.length > 0 || resolved.provider === null || resolved.agent === null || resolved.model === null || resolved.arrangement === null) {
         throw new Error('the choices are not whole');
       }
       // Freeze the values named by the visible line before topic/environment requests can update caches.

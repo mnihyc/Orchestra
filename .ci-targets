@@ -1,0 +1,12 @@
+fmt
+clippy
+test -p orch-envhost --lib -- exact_materialize::tests::
+test -p orch-engine --test forks -- notes_are_carried_independently_of_workspace_files_and_a_target_that_appears_after_preview_is_kept
+test -p orch-engine --test measurement_jobs
+test -p orch-api-core --test machine_policy_scopes --test machines -- policy
+test -p orch-api-core --test binding_options -- a_thread_created_without_model_or_approval_choices_uses_the_only_model_and_an_offered_mode
+test -p orch-api-core --test binding_options -- an_omitted_model_keeps_the_places_choice_and_does_not_replace_an_explicit_or_disallowed_choice
+test -p orch-engine --test program_approval_defaults
+web typecheck
+web lint
+web test -- tests/component/notes-outcome.test.tsx tests/component/native-history-facts.test.tsx tests/component/thread-first-minutes.test.tsx tests/component/thread-change-review.test.tsx tests/component/waiting-start-steps.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

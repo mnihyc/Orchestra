@@ -265,7 +265,11 @@ export function changesOf(plan: ForkPlan, context: PlanContext, t: TFunction): L
     lines.push({
       id: 'memory',
       tone: 'plain',
-      text: t(plan.memory.carried ? 'change.plan.memoryAlong' : 'change.plan.memoryLeft', { count: plan.memory.files, size: formatBytes(plan.memory.bytes, context.locale) }),
+      text: plan.memory.proposal !== null && plan.memory.proposal !== undefined
+        ? t('placeFacts.notesPreview', { fate: t(`placeFacts.notesFates.${plan.memory.proposal.proposed_fate}`) })
+        : plan.memory.files !== null && plan.memory.bytes !== null
+          ? t(plan.memory.carried ? 'change.plan.memoryAlong' : 'change.plan.memoryLeft', { count: plan.memory.files, size: formatBytes(plan.memory.bytes, context.locale) })
+          : t('factDisclosure.notReported'),
     });
   }
   lines.push(...addedResourcesOf(plan, t));
