@@ -75,7 +75,7 @@ async fn queued(
         world.clock.time(),
     )
     .await?;
-    sqlx::query("UPDATE providers SET runtime_config=runtime_config||jsonb_build_object('runtime.host_id',$2::uuid::text,'runtime.template_id',$3::uuid::text) WHERE id=$1")
+    sqlx::query("UPDATE providers SET runtime_config=runtime_config||jsonb_build_object('runtime.host_id',jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$2::uuid::text)),'runtime.template_id',$3::uuid::text) WHERE id=$1")
         .bind(world.provider).bind(target).bind(template).execute(&mut *tx).await?;
     identity::create_api_token_scoped(
         &mut tx,

@@ -1,0 +1,2 @@
+test -p orch-api-core --test hosted_environments --test standalone_creation --test environment_duplicates --test forks --test thread_creator_initial_files_scopes --test thread_creator_deep_operation_scopes --test thread_creator_discovery_scopes --test provider_recovery
+test -p orch-engine --test environments --test provider_runtime --test measurement_jobs --test mount_plans --test volume_carry

@@ -342,6 +342,8 @@ pub struct FsRecord {
     pub record_days: i64,
     /// The frozen included-byte bound.
     pub max_bytes: i64,
+    /// A chosen wait or an explicit whole-file action waits for initial indexing too.
+    pub wait_for_indexing: bool,
 }
 
 /// Whether a recording can be used as a whole directory.
@@ -357,6 +359,8 @@ pub enum RecordState {
 /// A recorded state's safe metadata; raw objects stay with the environment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsRecordResult {
+    /// Initial indexing progress when the turn starts with per-file restore instead.
+    pub indexing: Option<crate::events::IndexingProgress>,
     /// Whether a whole state was kept.
     pub state: RecordState,
     /// Its immutable store tree identifier, not an API BLAKE3 identifier.
@@ -502,15 +506,19 @@ pub struct WorkspaceObserve {
     pub thread_id: Id,
     /// The ended turn, when one exists.
     pub turn_id: Option<Id>,
+    /// The recording whose starting watcher cursor belongs to this turn.
+    pub before_snapshot_id: Option<Id>,
     /// The workspace-relative directory.
     pub directory: String,
 }
 
-/// Complete end hashes, or unknown coverage on a live or not-ready tree.
+/// Complete end hashes and journal paths have independent coverage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceObserveResult {
     /// The uploaded common end manifest, or null when it cannot be complete.
     pub end_manifest_blob: Option<Hash>,
+    /// Distinct directory-relative paths since the before recording, or unknown after lost notices.
+    pub changed_paths: Option<Vec<String>>,
 }
 
 /// The prepared source's safe metadata.

@@ -254,7 +254,6 @@ fn persistence_column(value: &str) -> Option<&'static str> {
         "error",
         "execution_revision",
         "executor",
-        "files_end_manifest",
         "id",
         "import_fidelity",
         "import_report",
@@ -1571,6 +1570,7 @@ impl Job {
             Some(crate::commands::CommandAuthority::UpdateJob(_))
         )
         .then(|| command.clone());
+        super::provider_provision::decorate_placement(self, &mut command, respect_cancel).await?;
         let issued = match update_boundary {
             Some(before) => commands.issue_before(command, before).await,
             None => commands.issue(command).await,

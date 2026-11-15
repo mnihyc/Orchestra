@@ -28,11 +28,15 @@ An empty rules list leaves failures for a person.
 
 ## Choose candidates
 
-Add **Fail over** to a rule and choose a provider, model and, when needed, agent profile.
+Add **Fail over** to a rule and choose a provider, model or matching pool in the same field and, when needed, an agent profile.
 The choices use the same usage and load cards as other model choices.
 Only a candidate in the rule can run. Orch does not choose an unlisted provider.
 The person whose work is being recovered must still be allowed to use the candidate when it runs.
 An unavailable or disallowed candidate is skipped with a reason.
+
+A pool chooses an exact untried member through its own policy, then retains that choice across replay and restart. A provider pool keeps the original request's model or service requirement. A pool never chooses a destination outside its live membership. Its attempt budget and the caller's repeat guard both apply; exhaustion waits for a person.
+
+Enabling a model or provider pool also reviews its ordinary **next member before effects** default. Call recovery owns this step: it needs a definite terminal native receipt with no visible effects. Authored recovery rules take precedence, including an empty rules list. An unacknowledged start stays with its original native command until reconciled. Merely inspecting a pool starts no trial or paid request. **Try again now** on the pool releases only that pool's suppression and keeps shared failure evidence.
 
 **Parameters** is an object of the model or agent's supported options. It cannot grant access or
 enable a feature that the place forbids. A candidate for embeddings must keep the same model and
